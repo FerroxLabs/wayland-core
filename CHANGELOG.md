@@ -1,5 +1,116 @@
 # Changelog
 
+## [0.13.1](https://github.com/FerroxLabs/wayland-core/compare/v0.13.0...v0.13.1) (2026-08-18)
+
+**Release highlights.** A fast follow-up to v0.13.0, and most of it is Windows.
+The command-execution cluster that users have been reporting since 0.12 —
+"Bash not working", "echo times out", "sandbox child timed out" — turned out to
+be two separate defects with one shared symptom. One is fixed and measured; the
+other is fixed but has not yet been witnessed failing on Windows hardware, and
+is called out as such below. Windows binaries are also Authenticode-signed for
+the first time. No breaking changes, and no barrier to rolling back.
+
+**Windows commands stop timing out.** Every `Bash` invocation computed an
+OS-level read-deny list by walking the entire workspace with no pruning, and the
+default Windows backend then discarded the result. The cost was paid on every
+command and scaled with the size of the tree: measured on a real profile, one
+`echo` took **39,278 ms cold; it now takes 349 ms**. A clean temp directory hid
+it completely, which is why it survived so long — the reproduction only appears
+against a real checkout. The deny list is now computed only for a backend that
+actually enforces it, read off the same backend handle that runs the command, so
+it fails safe. Re-measured live on real Windows hardware: the walk itself costs
+15,418 ms on a large real tree and 0 ms once skipped. Note the corollary — on a
+repo-sized checkout the same walk costs about 79 ms, so if you re-test this in a
+small tree or a temp directory you will correctly see no difference at all.
+This is a latency fix, not a containment fix: `sandbox status` on
+the Windows default still reports that it does not confine the filesystem, which
+is accurate. Addresses FerroxLabs/wayland#892, #912, #918 and the core half of
+#921.
+
+**Windows stops corrupting command output.** `cmd /c` was invoked without `/S`,
+so it took the quote-preserving branch and a nested `cmd /c echo …` came back
+with a stray trailing double-quote — a single wrong byte on stdout that the
+model then reasons over. `/S` is now passed from one shared prefix helper.
+This is now confirmed against a running `cmd.exe` on Windows 11 build 26200,
+not just reasoned from `cmd /?`: driving the same production code path with and
+without `/S`, the payload `cmd /c echo NESTED` returns the bytes
+`4e 45 53 54 45 44 0d 0a` with the fix and `4e 45 53 54 45 44 22 0d 0a` without
+it. The stray `0x22` is real, and `/S` is what removes it. Payloads with no
+nested `cmd` are byte-identical in both arms, so this is the switch and not an
+output trim.
+
+**Windows binaries are now signed.** This project has never shipped an
+Authenticode signature. The signed release manifest and Sigstore provenance are
+both real, but Windows reads neither — SmartScreen warned on every
+`wayland-core.exe` we have published, and Smart App Control blocked it outright.
+Release builds on both Windows targets are now Authenticode-signed through OIDC
+federation, with no long-lived signing credential stored in the repository.
+
+**Approval prompts fail closed.** An EOF on the approval prompt — Ctrl-D, a
+closed stdin, an ended pipe — was read as approval, because the empty-string arm
+meant yes. It is now a denial. Approval tokens are scrubbed centrally rather
+than travelling on the tool-result wire, and an `Always` egress grant on the ACP
+bridge no longer collapses to a single use. In the TUI, `[a] always for this
+tool` is written when you grant it and replayed at launch, so it survives a
+restart; the `[a] always for <prefix>` shell form and the desktop-host path are
+deliberately unchanged.
+
+**Credentials.** Multiple named accounts per provider already worked — secure
+storage of them did not. One provider mapped to one credential slot, and an
+alias with no key of its own inherited the builtin's, so a second account was
+silently billed to the first account's key. Every non-builtin selection now gets
+its own slot, resolved above the inline config value, and `auth add/list/remove`
+take an account id. Single-account resolution is byte-for-byte unchanged. The
+`${cred:KEY}` rail now also covers MCP stdio server environments, so a stdio
+server can be given a secret by reference instead of by value.
+
+**Browser.** Denial messages name the config paths the loader actually resolves,
+instead of a setting that never existed, and loopback denials carry remediation
+at all. The message no longer claims DNS-rebinding protection the code does not
+implement — that enforcement is still missing and is tracked separately; the
+honest message shipped without waiting for it. A project config that sets only a
+loopback grant no longer has that grant silently dropped by the config merge,
+and a project that sets an origin list no longer drops the operator's grant.
+Opt-in Camoufox binary provisioning is wired: off by default, and it refuses to
+fetch without an operator-pinned SHA-256.
+
+**Providers.** A 5xx whose body names a permanent error — auth, billing, model
+not found — is no longer retried through the full backoff ladder. 503 and 529
+are never overridden, and a body naming a transient condition stays retryable.
+One predicate governs both the failover classifier and the retry decision, so
+they cannot disagree about the same response.
+
+**Web search.** A DuckDuckGo anti-bot challenge answers HTTP 202 with no result
+markup, which read as success and produced an empty parse — reported to users as
+a change in their HTML format. Results are now parsed first and the challenge
+consulted only when nothing was served, anchored to attributes the echoed query
+cannot forge.
+
+**Matrix.** A 403 refusal of a single redaction by an under-privileged bot was
+classified as a dead credential and latched, marking the channel permanently
+unauthenticated while every later send kept succeeding. 401 and 403 are now
+separate questions, and an expired access token renews instead of killing the
+adapter.
+
+**macOS.** Establishing process-tree containment no longer fails when the child
+has already exited. Darwin reports ESRCH for a process that is gone, so a
+subprocess that ran to completion — routine for a fast `git config` on a loaded
+machine — surfaced as `failed to establish process-tree containment: No such
+process`. A root that is gone and took its process group with it is now
+correctly treated as nothing to contain; a corpse that left a descendant behind
+still gets a real sentinel, and the recycled-pid refusal is unchanged.
+Screen-Recording and Accessibility permissions can now be requested up front
+with the new `--request-permissions` flag, which is the only path allowed to
+raise a consent dialog — ordinary agent runs still only probe, so a permission
+sheet can never surprise you mid-task.
+
+**MCP.** Skills and hooks provided by deferred-config MCP servers are late-bound
+instead of missed.
+
+**Host contract.** `schema_digest` is unchanged — no capability, event or
+wire-shape moved. `source_inputs_digest` and `fixture_digest` both changed;
+hosts that pin those two must re-pin.
+
 ## [0.13.0](https://github.com/FerroxLabs/wayland-core/compare/v0.12.26...v0.13.0) (2026-08-13)
 
 **Release highlights.** 255 commits (3 `feat`, 140 `fix`, 64 `test`, 20 `docs`)
