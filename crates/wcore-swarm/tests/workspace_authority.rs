@@ -50,21 +50,35 @@ async fn independent_cli_processes_cannot_overbook_shared_capacity() {
         .iter()
         .map(|path| std::fs::read_to_string(path).unwrap())
         .collect::<Vec<_>>();
+    // Both verdict forms must be PRESENT, not merely counted independently.
+    // "exactly one ok" plus "exactly one refusal" reads like two halves of one
+    // fact and is not: when the admitted process dies during materialization,
+    // its `TransactionCleanup` retracts the reservation on the way out, the
+    // peer is then admitted against an empty aggregate, and the pair becomes
+    // `["<some io failure>", "ok"]` — one process admitted, NOBODY refused, and
+    // the contention this test exists to observe never happened. That is the
+    // macOS shape in wayland#1025. It has to read as "this run proved nothing",
+    // naming the verdict that was not a refusal, rather than as a count
+    // mismatch on an assertion whose message says the loser "must fail".
+    //
+    // Whole-verdict equality, never `contains`: a longer error that merely
+    // quotes the budget phrase is a different failure and must not be scored as
+    // the admission refusal.
+    const REFUSAL: &str = "dispatch admission refused: aggregate workspace budget exhausted";
+    let admitted = results
+        .iter()
+        .filter(|result| result.as_str() == "ok")
+        .count();
+    let refused = results
+        .iter()
+        .filter(|result| result.as_str() == REFUSAL)
+        .count();
     assert_eq!(
-        results
-            .iter()
-            .filter(|result| result.as_str() == "ok")
-            .count(),
-        1,
-        "exactly one process must own the aggregate reservation: {results:?}"
-    );
-    assert_eq!(
-        results
-            .iter()
-            .filter(|result| result.contains("aggregate workspace budget exhausted"))
-            .count(),
-        1,
-        "losing process must fail admission: {results:?}"
+        (admitted, refused),
+        (1, 1),
+        "the run must partition into exactly one admitted process and one \
+         process refused for the aggregate budget; any other pair means the \
+         overbooking invariant was never exercised: {results:?}"
     );
 
     std::fs::write(coordination.path().join("release"), b"release").unwrap();
