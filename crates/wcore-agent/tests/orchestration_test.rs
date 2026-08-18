@@ -172,7 +172,7 @@ async fn concurrent_confirmation_preserves_original_result_order() {
             is_error,
         } => {
             assert_eq!(tool_use_id, "id-denied");
-            assert_eq!(content, "Tool execution denied by user");
+            assert_eq!(content, "Tool execution denied: approval was not granted");
             assert!(*is_error);
         }
         other => panic!("expected ToolResult, got {other:?}"),

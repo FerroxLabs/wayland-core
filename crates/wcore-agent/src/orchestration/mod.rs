@@ -877,7 +877,11 @@ fn confirm_call(
         ConfirmResult::Approved => Ok(ConfirmedCall::Execute { approval_bound }),
         ConfirmResult::Denied => Ok(ConfirmedCall::Denied(ContentBlock::ToolResult {
             tool_use_id: id.clone(),
-            content: "Tool execution denied by user".to_string(),
+            // Not "denied by user": `ToolConfirmer` also denies when there
+            // is no interactive terminal to ask, and on EOF at the prompt.
+            // The message must not assert a human decision that never
+            // happened — it reports the outcome, approval was not granted.
+            content: "Tool execution denied: approval was not granted".to_string(),
             is_error: true,
         })),
         ConfirmResult::Quit => Err(ExecutionControl::Quit),
