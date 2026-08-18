@@ -74,6 +74,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 
 use regex::Regex;
 use wcore_config::config::ConfigFile;
@@ -1199,11 +1200,25 @@ fn real_tool_names() -> BTreeSet<String> {
 /// [`advertised_tool_names_resolve_to_a_real_tool`]; the shape of this pattern
 /// is a measurement, not a guess.
 fn advertised_tool_mentions(text: &str) -> Vec<String> {
-    let via = Regex::new(r"\bvia\s+`?([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`?").unwrap();
-    let ticked =
-        Regex::new(r"\b(?:use|using|run|invoke|call)\s+`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`").unwrap();
-    via.captures_iter(text)
-        .chain(ticked.captures_iter(text))
+    // Compiled ONCE, not per call.
+    //
+    // This function runs once per string literal, and
+    // `advertised_tool_names_resolve_to_a_real_tool` sweeps every string
+    // literal in all ~1224 production sources. Building these two regexes on
+    // each call put a full regex compilation on every literal in the workspace.
+    //
+    // Measured on an idle box before this change: `real_tool_names()` 227ms,
+    // source discovery 6ms, and the scan loop **68.67s** of a 68.90s test —
+    // i.e. essentially the whole runtime, and it was regex CONSTRUCTION rather
+    // than matching. That put the test over nextest's 60s terminate budget, so
+    // its CI outcome was decided by runner speed rather than by the code.
+    static VIA: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\bvia\s+`?([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`?").unwrap());
+    static TICKED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b(?:use|using|run|invoke|call)\s+`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`").unwrap()
+    });
+    VIA.captures_iter(text)
+        .chain(TICKED.captures_iter(text))
         .map(|c| c[1].to_string())
         .collect()
 }
