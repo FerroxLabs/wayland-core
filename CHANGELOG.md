@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.13.2](https://github.com/FerroxLabs/wayland-core/compare/v0.13.1...v0.13.2) (2026-08-18)
+
+**Release highlights.** Web search has not actually worked since June, and this
+release is mostly about things that were failing silently. A shipped default that
+could never reach the network, a config typo that sent your API key to the vendor
+you were trying to avoid, a command that produced 20 MB and handed back 129 bytes,
+and a host integration that answered malformed input with nothing at all. Plus a
+security bump for a dependency advisory published the day before. No breaking
+changes.
+
+**Web search reaches the network again.** Three of the six built-in search
+backends — including the **keyless default** — called hosts that were not on the
+product's own egress allowlist, so every request was refused before it left the
+process. On a default install the primary backend could never succeed, and
+`EXA_API_KEY` and `FIRECRAWL_API_KEY` were inert no matter what you set. Because
+the chain degraded silently, you saw only the DuckDuckGo outcome and were advised
+to set a Brave key — for a backend that was never involved. The hosts are now
+allowlisted, and a result served by the fallback carries a `degraded_from` note
+naming the backend that was skipped and why.
+
+**A misplaced `base_url` no longer sends your key to the vendor.** Unknown and
+misnested config keys were detected correctly — that has worked since 0.12 — but
+the warning went to `tracing::warn!`, and with `RUST_LOG` unset that reaches a log
+file rather than your terminal. So a top-level `base_url` (the correct spelling is
+`[providers.anthropic] base_url`) was silently ignored while your prompt and real
+credentials went to the real endpoint, which is the precise outcome you were
+configuring to prevent. Unrecognised keys are now named on stderr, with a targeted
+hint for `base_url`.
+
+**Large command output is truncated, not discarded.** Exceeding the 8 MiB buffered
+output cap returned an error and dropped everything already read: 20 MB in, 129
+bytes out. You now keep the first 8 MiB plus a marker stating that the command was
+stopped and did not run to completion. Worth knowing why it is the head and not the
+tail: crossing the cap is also the trip wire that terminates the child, so a child
+stopped at the cap has no tail — its last bytes are where reading stopped, not where
+the command ended.
+
+**The host protocol answers instead of going quiet.** A malformed command over the
+JSON stream produced no wire response at all, which is indistinguishable from a hang;
+each refused line now emits one `error` frame naming the offending type and the
+reason. Separately, closing the host's stdin while a tool approval was parked left it
+waiting out a 300-second timeout plus a sweep — about 330 seconds. It now resolves in
+about a millisecond, failing closed, with a reason distinct from a genuine timeout.
+
+**Swarm dispatch no longer deadlocks against its own lock.** A cleanup dropped inside
+the registration critical section re-acquired a lock the same thread already held —
+`flock` ownership is per open file description, so a second acquisition from one
+process blocks exactly like a foreign one. That was a hang rather than an error.
+
+**Security.** `h2` moves to 0.4.16 for RUSTSEC-2026-0258 (unbounded empty DATA
+frames), published 2026-08-17. `h2` sits under hyper/reqwest and therefore on the
+path of every outbound provider request.
+
+**Also.** Every CI job backing a required status check now declares a timeout; one of
+them previously inherited a six-hour default and blocked the repository twice in a
+day. Materialization failures in swarm admission now name the probe and the path
+instead of a bare `No such file or directory`.
+
+**Known issue.** The macOS-only workspace-admission flake (`#1025`) is **not fixed**
+in this release. It is now diagnosable — the failure names its site rather than
+surfacing as a bare ENOENT — and the reproduction has been narrowed on hosted macOS
+runners, but the cause is still open. The invariant it guards holds: capacity is
+never overbooked.
+
 ## [0.13.1](https://github.com/FerroxLabs/wayland-core/compare/v0.13.0...v0.13.1) (2026-08-18)
 
 **Release highlights.** A fast follow-up to v0.13.0, and most of it is Windows.
