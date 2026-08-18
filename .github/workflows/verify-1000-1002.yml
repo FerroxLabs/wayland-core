@@ -1,0 +1,325 @@
+name: verify-1000-1002
+
+# Does v0.13.1 actually fix the Windows command-execution cluster reported in
+# FerroxLabs/wayland#1000 and #1002?
+#
+# Both reporters ran ENGINE wayland-core 0.13.0 on Windows 10.0.26200 and saw
+# tool commands TIME OUT. v0.13.1 carries two independent fixes for that
+# cluster. Confirmed at source level between the two tags:
+#
+#   #272  crates/wcore-config/src/shell.rs
+#         v0.13.0: vec!["cmd", "/C"]          <- no /S
+#         v0.13.1: vec!["cmd", "/S", "/C"]
+#   #278  crates/wcore-tools/src/bash.rs
+#         v0.13.0: secret_deny_paths_dynamic()                    <- always walks
+#         v0.13.1: secret_deny_paths_for_backend(backend_enforces_read_deny)
+#
+# METHOD. Both arms are the PUBLISHED release artifacts, downloaded from the
+# GitHub release and checksum-verified against each release's own
+# wayland-core-checksums.txt. Nothing is built here. The red arm is v0.13.0 —
+# the exact version both reporters named — so the control is the defect itself
+# rather than a model of it, and it is verified to CONTAIN the surface under
+# test (`sandbox exec` exists in both, and in both it dispatches through
+# wcore_tools::bash::BashTool::execute_with_ctx, the real agent shell path).
+#
+# The red arm is deliberately handicapped: on every tree the GREEN binary runs
+# FIRST and the RED binary runs second, so the red arm always measures against
+# a warmer NTFS cache. If it still goes red under that handicap, the finding is
+# not a cache artefact.
+#
+# LIMIT, stated up front: this drives the production shell path directly. It
+# does not put an LLM in the loop, so it cannot reproduce the reporters' UI
+# symptom end to end — only the execution cost and the emitted bytes underneath
+# it.
+
+on:
+  push:
+    branches:
+      - 'verify/1000-1002-0131'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-1000-1002
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: '#1000/#1002 vs published 0.13.0 and 0.13.1'
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - msvc
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      BASE: 'D:\wl-verify1000'
+      RED_TAG: 'v0.13.0'
+      GREEN_TAG: 'v0.13.1'
+      ASSET_RED: 'wayland-core-v0.13.0-x86_64-pc-windows-msvc.zip'
+      ASSET_GREEN: 'wayland-core-v0.13.1-x86_64-pc-windows-msvc.zip'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trust the checkout for git
+        shell: pwsh
+        run: git config --global --add safe.directory '*'
+
+      - name: Host provenance
+        shell: pwsh
+        run: |
+          Write-Host "runner_name = $env:RUNNER_NAME"
+          $os = Get-CimInstance Win32_OperatingSystem
+          $os | Select-Object Caption, Version, BuildNumber, OSArchitecture | Format-List
+          Write-Host "reporters ran 10.0.26200; this box is $($os.Version) build $($os.BuildNumber)"
+          if ($os.BuildNumber -ne '26200') {
+            Write-Host "NOTE: build differs from the reporters' 26200 — record this beside every number below."
+          }
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} | Format-Table -AutoSize
+
+      - name: Download and checksum-verify BOTH published artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = $env:BASE
+          if (Test-Path $base) { Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue }
+          New-Item -ItemType Directory -Force -Path $base | Out-Null
+          $dl = Join-Path $base 'dl'
+          New-Item -ItemType Directory -Force -Path $dl | Out-Null
+
+          function Get-Asset {
+            param([string]$Tag, [string]$Name, [string]$Dest)
+            $api = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$Tag"
+            $rel = & curl.exe -sS -H "Authorization: Bearer $env:GH_TOKEN" `
+                                 -H "Accept: application/vnd.github+json" $api | ConvertFrom-Json
+            $asset = $rel.assets | Where-Object { $_.name -eq $Name }
+            if (-not $asset) { throw "asset $Name not present on release $Tag" }
+            # curl does NOT forward the Authorization header across the redirect
+            # to blob storage unless --location-trusted is given, which is what
+            # we want: the signed redirect carries its own credential.
+            & curl.exe -sSL -H "Authorization: Bearer $env:GH_TOKEN" `
+                            -H "Accept: application/octet-stream" `
+                            -o $Dest "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($asset.id)"
+            if (-not (Test-Path $Dest)) { throw "download produced no file for $Name" }
+            Write-Host "  downloaded $Name -> $((Get-Item $Dest).Length) bytes"
+            return $rel
+          }
+
+          function Get-PublishedSum {
+            param($Rel, [string]$Name, [string]$Tag)
+            $sumAsset = $Rel.assets | Where-Object { $_.name -eq 'wayland-core-checksums.txt' }
+            if (-not $sumAsset) { throw "release $Tag has no wayland-core-checksums.txt" }
+            $txt = & curl.exe -sSL -H "Authorization: Bearer $env:GH_TOKEN" `
+                                   -H "Accept: application/octet-stream" `
+                                   "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($sumAsset.id)"
+            Write-Host "--- $Tag published checksums ---"
+            Write-Host $txt
+            $line = ($txt -split "`n") | Where-Object { $_ -match [regex]::Escape($Name) }
+            if (-not $line) { throw "no checksum line for $Name in $Tag" }
+            if ($line -notmatch '([0-9a-fA-F]{64})') { throw "no sha256 token on line: $line" }
+            return $Matches[1].ToLower()
+          }
+
+          foreach ($arm in @(
+            @{ Tag = $env:RED_TAG;   Name = $env:ASSET_RED;   Key = 'red'   },
+            @{ Tag = $env:GREEN_TAG; Name = $env:ASSET_GREEN; Key = 'green' }
+          )) {
+            Write-Host ""
+            Write-Host "########## $($arm.Key) arm: $($arm.Tag) ##########"
+            $zip = Join-Path $dl $arm.Name
+            $rel = Get-Asset -Tag $arm.Tag -Name $arm.Name -Dest $zip
+            $want = Get-PublishedSum -Rel $rel -Name $arm.Name -Tag $arm.Tag
+            $got  = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+            Write-Host "  published sha256 = $want"
+            Write-Host "  downloaded sha256 = $got"
+            if ($want -ne $got) { throw "CHECKSUM MISMATCH for $($arm.Name) — refusing to measure an unverified artifact" }
+            Write-Host "  OK: artifact matches the published checksum"
+            $out = Join-Path $base $arm.Key
+            New-Item -ItemType Directory -Force -Path $out | Out-Null
+            Expand-Archive -Path $zip -DestinationPath $out -Force
+            $exe = Get-ChildItem -Path $out -Recurse -Filter 'wayland-core.exe' | Select-Object -First 1
+            if (-not $exe) { throw "no wayland-core.exe inside $($arm.Name)" }
+            Write-Host "  exe = $($exe.FullName)"
+            "EXE_$($arm.Key.ToUpper())=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
+      - name: Arm identity — version, signature, and shared surface
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # A pass only counts if each arm is the binary it claims to be, and if
+          # the CONTROL actually carries the surface under test.
+          foreach ($arm in @(
+            @{ Key = 'red';   Exe = $env:EXE_RED;   Want = '0.13.0' },
+            @{ Key = 'green'; Exe = $env:EXE_GREEN; Want = '0.13.1' }
+          )) {
+            Write-Host ""
+            Write-Host "########## $($arm.Key) = $($arm.Exe) ##########"
+            Write-Host "sha256 = $((Get-FileHash $arm.Exe -Algorithm SHA256).Hash)"
+            $v = (& $arm.Exe --version 2>&1 | Out-String).Trim()
+            Write-Host "--version -> $v"
+            if ($v -notmatch [regex]::Escape($arm.Want)) {
+              throw "IDENTITY FAILURE: $($arm.Key) arm reports '$v', expected $($arm.Want)"
+            }
+            $sig = Get-AuthenticodeSignature $arm.Exe
+            Write-Host "authenticode = $($sig.Status)  signer = $($sig.SignerCertificate.Subject)"
+            # Control-contains-the-surface gate.
+            & $arm.Exe sandbox exec --help *> $null
+            if ($LASTEXITCODE -ne 0) {
+              throw "SURFACE MISSING: $($arm.Key) arm has no usable 'sandbox exec' (exit $LASTEXITCODE) — it cannot serve as an arm"
+            }
+            Write-Host "sandbox exec surface: present"
+          }
+          Write-Host ""
+          Write-Host "Both arms are the published binaries they claim to be and both carry 'sandbox exec'."
+
+      - name: Build the workspace trees
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = $env:BASE
+          $empty = Join-Path $base ('empty-' + $env:GITHUB_RUN_ID)
+          $repo  = Join-Path $base ('repo-'  + $env:GITHUB_RUN_ID)
+          $big   = Join-Path $base ('big-'   + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Force -Path $empty | Out-Null
+          New-Item -ItemType Directory -Force -Path $big   | Out-Null
+          git clone --quiet --no-hardlinks "$env:GITHUB_WORKSPACE" $repo
+          if (-not (Test-Path (Join-Path $repo 'Cargo.toml'))) { throw "repo tree did not land at $repo" }
+          # Inflate entry count into something workspace-shaped. The reported
+          # symptom is driven by how many entries the per-exec walk enumerates,
+          # and a bare checkout is far smaller than a working project dir.
+          foreach ($i in 1..8) {
+            Copy-Item -Recurse -Force -Path (Join-Path $repo 'crates') -Destination (Join-Path $big "copy$i")
+          }
+          "WS_EMPTY=$empty" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WS_REPO=$repo"   | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WS_BIG=$big"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "empty = $empty"
+          Write-Host "repo  = $repo"
+          Write-Host "big   = $big"
+          Write-Host "(entry counts are taken AFTER the measurements — counting them now would warm the very cache under test)"
+
+      - name: CLAIM A — emitted bytes, both arms
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $dumps = Join-Path $env:BASE 'dumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          $payloads = @(
+            @{ tag = 'nested';  cmd = 'cmd /c echo NESTED' },
+            @{ tag = 'plain';   cmd = 'echo PLAIN' }
+          )
+          foreach ($p in $payloads) {
+            foreach ($arm in @(
+              @{ Key = 'green'; Exe = $env:EXE_GREEN },
+              @{ Key = 'red';   Exe = $env:EXE_RED }
+            )) {
+              $o = Join-Path $dumps ("$($p.tag)-$($arm.Key).out")
+              $e = "$o.err"
+              Write-Host ""
+              Write-Host "########## $($arm.Key) :: sandbox exec -- $($p.cmd) ##########"
+              $argline = 'sandbox exec --workspace "{0}" "{1}"' -f $env:WS_EMPTY, $p.cmd
+              $proc = Start-Process -FilePath $arm.Exe -NoNewWindow -Wait -PassThru `
+                -ArgumentList $argline -RedirectStandardOutput $o -RedirectStandardError $e
+              Write-Host "exit = $($proc.ExitCode)"
+              Write-Host "--- stdout bytes ---"
+              Format-Hex -Path $o | Out-String -Width 200 | Write-Host
+              $errText = (Get-Content -Raw -Path $e -ErrorAction SilentlyContinue)
+              if ($errText) { Write-Host "--- stderr ---"; Write-Host $errText }
+            }
+          }
+          Write-Host ""
+          Write-Host "EXPECTED: 'NESTED' ends 44 0d 0a on green and 44 22 0d 0a on red (the stray 0x22)."
+
+      - name: CLAIM B — per-command cost, interleaved, green first
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $dumps = Join-Path $env:BASE 'dumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          $results = @()
+          function Measure-One {
+            param([string]$Exe, [string]$Key, [string]$Ws, [string]$Label, [int]$Iter)
+            $o = Join-Path $dumps ("m-$Label-$Key-$Iter.out")
+            $argline = 'sandbox exec --workspace "{0}" "echo probe"' -f $Ws
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $proc = Start-Process -FilePath $Exe -NoNewWindow -Wait -PassThru `
+              -ArgumentList $argline -RedirectStandardOutput $o -RedirectStandardError ($o + '.err')
+            $sw.Stop()
+            $body = (Get-Content -Raw -Path $o -ErrorAction SilentlyContinue)
+            $errb = (Get-Content -Raw -Path ($o + '.err') -ErrorAction SilentlyContinue)
+            $ok = ($body -match 'probe')
+            $timedOut = (("$body$errb") -match 'timed out')
+            Write-Host ("  {0,-9} {1,-5} iter {2}  {3,8} ms  exit={4}  output={5}  timed_out={6}" -f $Label, $Key, $Iter, $sw.ElapsedMilliseconds, $proc.ExitCode, $ok, $timedOut)
+            if (-not $ok) { Write-Host "    !! NO 'probe' IN OUTPUT — a failed measurement, not a fast one. body: $body $errb" }
+            return [pscustomobject]@{ Tree=$Label; Arm=$Key; Iter=$Iter; Ms=$sw.ElapsedMilliseconds; Ok=$ok; TimedOut=$timedOut }
+          }
+          # GREEN runs first on every tree so the RED arm always inherits the
+          # warmer cache. A red result under that handicap cannot be a cache
+          # artefact.
+          foreach ($iter in 1..3) {
+            foreach ($t in @(
+              @{ L='empty'; W=$env:WS_EMPTY },
+              @{ L='repo';  W=$env:WS_REPO },
+              @{ L='big';   W=$env:WS_BIG }
+            )) {
+              $results += Measure-One -Exe $env:EXE_GREEN -Key 'green' -Ws $t.W -Label $t.L -Iter $iter
+              $results += Measure-One -Exe $env:EXE_RED   -Key 'red'   -Ws $t.W -Label $t.L -Iter $iter
+            }
+          }
+          Write-Host ""
+          Write-Host "=== per-command cost of one 'echo probe' (ms) ==="
+          Write-Host ("{0,-8} {1,-6} {2,10} {3,10} {4,10}" -f 'tree','arm','iter1','min','max')
+          foreach ($t in @('empty','repo','big')) {
+            foreach ($k in @('green','red')) {
+              $rows = $results | Where-Object { $_.Tree -eq $t -and $_.Arm -eq $k }
+              $ms = $rows | ForEach-Object { $_.Ms }
+              Write-Host ("{0,-8} {1,-6} {2,10} {3,10} {4,10}" -f $t, $k, ($rows | Where-Object {$_.Iter -eq 1}).Ms, ($ms | Measure-Object -Minimum).Minimum, ($ms | Measure-Object -Maximum).Maximum)
+            }
+          }
+          $bad = $results | Where-Object { -not $_.Ok }
+          if ($bad) {
+            Write-Host ""
+            Write-Host "!! $($bad.Count) measurement(s) produced no output and are NOT valid timings:"
+            $bad | ForEach-Object { Write-Host ("   {0} {1} iter {2} exit-path" -f $_.Tree, $_.Arm, $_.Iter) }
+          }
+          $results | Export-Csv -NoTypeInformation -Path (Join-Path $dumps 'timings.csv')
+          Write-Host ""
+          Write-Host "default BashTool timeout is 120000 ms — that is the line #1000 reported crossing."
+
+      - name: Tree sizes (last, so counting cannot warm the measurement)
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($t in @(
+            @{ L='empty'; W=$env:WS_EMPTY }, @{ L='repo'; W=$env:WS_REPO }, @{ L='big'; W=$env:WS_BIG }
+          )) {
+            if ($t.W -and (Test-Path $t.W)) {
+              $n = (Get-ChildItem -Recurse -Force -ErrorAction SilentlyContinue $t.W | Measure-Object).Count
+              Write-Host ("{0,-6} entries = {1}" -f $t.L, $n)
+            }
+          }
+
+      - name: Collect evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-1000-1002-evidence
+          path: 'D:\wl-verify1000\dumps'
+          if-no-files-found: warn
+
+      - name: Clean up
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:BASE -and (Test-Path $env:BASE)) {
+            Remove-Item -Recurse -Force $env:BASE -ErrorAction SilentlyContinue
+          }
+          Write-Host "cleanup done"
