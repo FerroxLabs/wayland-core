@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// gh#1025 INSTRUMENTATION (temporary, lane-only). Tags a step so an ENOENT
+/// stops arriving through the catch-all with no site attached.
+fn tag(step: &'static str, e: SwarmError) -> SwarmError {
+    SwarmError::WorktreeIo(format!("gh1025 step[{step}]: {e}"))
+}
+
 impl WorktreeManager {
     /// Construct a new manager for `repo_root`. Creates the
     /// `.swarm-worktrees/` directory if it does not exist.
@@ -882,9 +888,6 @@ impl WorktreeManager {
         // repository the peer worker is using at the same instant. The macOS
         // ENOENT reaches the caller through the catch-all rather than any named
         // site, so tag each step to find out which one produces it.
-        fn tag(step: &'static str, e: SwarmError) -> SwarmError {
-            SwarmError::WorktreeIo(format!("gh1025 step[{step}]: {e}"))
-        }
         self.validate_repo_authority()
             .map_err(|e| tag("validate_repo_authority", e))?;
         self.reject_executable_checkout_config()
@@ -940,7 +943,7 @@ impl WorktreeManager {
                         capacity.available_bytes,
                     )));
                 }
-                ensure_absent_destination(&transaction_root)?;
+                ensure_absent_destination(&transaction_root).map_err(|e| tag("ensure_absent_destination", e))?;
                 std::fs::create_dir(&transaction_root).map_err(|error| {
                     io_at("creation of the transaction root", &transaction_root, error)
                 })?;
@@ -958,7 +961,7 @@ impl WorktreeManager {
                     // a path from this same derivation, which is what makes
                     // RetainedWorkspaceAuthority::new's parent-equality proof hold.
                     let transaction_root = normalized_root(&transaction_root)?;
-                    let root_authority = DirectoryAuthority::open(&transaction_root)?;
+                    let root_authority = DirectoryAuthority::open(&transaction_root).map_err(|e| tag("open_transaction_root", e))?;
                     let reservation_authority = Arc::new(
                         root_authority
                             .to_sandbox()
@@ -982,9 +985,9 @@ impl WorktreeManager {
                     // lease file is gone because the lease handle now creates it.
                     // The loan is still accounted against this root's counter, so
                     // `remove_open_dir_all` keeps refusing while the lease is held.
-                    let lease = ActiveLease::acquire(transaction_lease_handle(&root_authority)?)?;
-                    let swarm_authority = DirectoryAuthority::open(&self.swarm_root)?;
-                    let quarantine_authority = DirectoryAuthority::open(&self.control_root)?;
+                    let lease = ActiveLease::acquire(transaction_lease_handle(&root_authority).map_err(|e| tag("transaction_lease_handle", e))?).map_err(|e| tag("lease_acquire", e))?;
+                    let swarm_authority = DirectoryAuthority::open(&self.swarm_root).map_err(|e| tag("open_swarm_root", e))?;
+                    let quarantine_authority = DirectoryAuthority::open(&self.control_root).map_err(|e| tag("open_control_root", e))?;
                     let root_identity = root_authority.identity_token();
                     let reservation_receipt = Arc::clone(&reservation_authority);
                     // The registry lock is taken BEFORE the cleanup exists, and
@@ -1144,7 +1147,7 @@ impl WorktreeManager {
         )
         .await?;
         let checkout = normalized_root(&checkout)?;
-        let scratch = normalized_root(&scratch)?;
+        let scratch = normalized_root(&scratch).map_err(|e| tag("normalized_root_scratch", e))?;
         let transaction_root = normalized_root(&transaction_root)?;
         if !checkout.starts_with(&transaction_root)
             || !scratch.starts_with(&transaction_root)
@@ -1307,7 +1310,7 @@ impl WorktreeManager {
                         capacity.available_bytes,
                     )));
                 }
-                ensure_absent_destination(&transaction_root)?;
+                ensure_absent_destination(&transaction_root).map_err(|e| tag("ensure_absent_destination", e))?;
                 std::fs::create_dir(&transaction_root).map_err(|error| {
                     io_at("creation of the transaction root", &transaction_root, error)
                 })?;
@@ -1325,7 +1328,7 @@ impl WorktreeManager {
                     // a path from this same derivation, which is what makes
                     // RetainedWorkspaceAuthority::new's parent-equality proof hold.
                     let transaction_root = normalized_root(&transaction_root)?;
-                    let root_authority = DirectoryAuthority::open(&transaction_root)?;
+                    let root_authority = DirectoryAuthority::open(&transaction_root).map_err(|e| tag("open_transaction_root", e))?;
                     let reservation_authority = Arc::new(
                         root_authority
                             .to_sandbox()
@@ -1349,9 +1352,9 @@ impl WorktreeManager {
                     // lease file is gone because the lease handle now creates it.
                     // The loan is still accounted against this root's counter, so
                     // `remove_open_dir_all` keeps refusing while the lease is held.
-                    let lease = ActiveLease::acquire(transaction_lease_handle(&root_authority)?)?;
-                    let swarm_authority = DirectoryAuthority::open(&self.swarm_root)?;
-                    let quarantine_authority = DirectoryAuthority::open(&self.control_root)?;
+                    let lease = ActiveLease::acquire(transaction_lease_handle(&root_authority).map_err(|e| tag("transaction_lease_handle", e))?).map_err(|e| tag("lease_acquire", e))?;
+                    let swarm_authority = DirectoryAuthority::open(&self.swarm_root).map_err(|e| tag("open_swarm_root", e))?;
+                    let quarantine_authority = DirectoryAuthority::open(&self.control_root).map_err(|e| tag("open_control_root", e))?;
                     let root_identity = root_authority.identity_token();
                     let reservation_receipt = Arc::clone(&reservation_authority);
                     // The registry lock is taken BEFORE the cleanup exists, and
@@ -1537,7 +1540,7 @@ impl WorktreeManager {
         )
         .await?;
         let checkout = normalized_root(&checkout)?;
-        let scratch = normalized_root(&scratch)?;
+        let scratch = normalized_root(&scratch).map_err(|e| tag("normalized_root_scratch", e))?;
         let transaction_root = normalized_root(&transaction_root)?;
         if !checkout.starts_with(&transaction_root)
             || !scratch.starts_with(&transaction_root)
