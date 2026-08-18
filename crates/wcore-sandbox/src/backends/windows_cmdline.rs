@@ -100,6 +100,16 @@ pub(crate) fn cmd_payload_index(argv: &[String]) -> Option<usize> {
 /// `cmd` strips exactly the outer pair and executes the remainder as written.
 /// Deliberately NOT the CRT `\"` escaping `std::process::Command` applies —
 /// see the module docs for the measured corruption that produces.
+///
+/// PRECONDITION: the invocation must carry `/S`. Without it `cmd` has a second,
+/// quote-PRESERVING branch for its tail and takes it whenever the tail holds
+/// exactly two quotes, no `&<>()@^|` between them, whitespace between them, and
+/// text between them that names an executable file — which an ordinary
+/// `<program> <args>` payload inside this pair satisfies. The pair then survives
+/// into the executed text and its closing `"` reaches the child as data
+/// (measured: `cmd /c echo NESTED` printed `NESTED"`, FerroxLabs/wayland#943).
+/// Build the argv from `wcore_config::shell::windows_cmd_payload_prefix`, which
+/// supplies the switch.
 pub(crate) fn quote_cmd_payload(payload: &str) -> String {
     let mut out = String::with_capacity(payload.len() + 2);
     out.push('"');
@@ -169,10 +179,13 @@ mod tests {
     fn payload_index_is_found_only_for_a_cmd_invocation_that_has_one() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
-            cmd_payload_index(&argv(&["cmd", "/C", "echo hi"])),
-            Some(2),
-            "the default BashTool argv on Windows"
+            cmd_payload_index(&argv(&["cmd", "/S", "/C", "echo hi"])),
+            Some(3),
+            "the default BashTool argv on Windows — the `/S` that makes cmd \
+             strip this payload's outer pair must not hide the payload from \
+             the rule that adds it (#943)"
         );
+        assert_eq!(cmd_payload_index(&argv(&["cmd", "/C", "echo hi"])), Some(2));
         assert_eq!(cmd_payload_index(&argv(&["cmd", "/d", "/c", "x"])), Some(3));
         assert_eq!(cmd_payload_index(&argv(&["cmd", "/K", "x"])), Some(2));
         // Not a cmd invocation: `/c` here is the child program's own flag and

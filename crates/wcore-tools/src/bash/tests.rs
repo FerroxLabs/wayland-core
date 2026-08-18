@@ -830,7 +830,9 @@ fn downgrade_powershell_swaps_to_cmd_when_blocked() {
         "echo hello".to_string(),
     ];
     downgrade_powershell_for_sandbox(&mut argv, true);
-    assert_eq!(argv, vec!["cmd", "/C", "echo hello"]);
+    // `/S` comes with the prefix: the payload is quoted as one outer pair on the
+    // spawn path, and only `/S` makes cmd strip exactly that pair (#943).
+    assert_eq!(argv, vec!["cmd", "/S", "/C", "echo hello"]);
 }
 
 #[test]
@@ -842,7 +844,7 @@ fn downgrade_powershell_handles_pwsh_and_exe_suffix() {
         "ls -la".to_string(),
     ];
     downgrade_powershell_for_sandbox(&mut argv, true);
-    assert_eq!(argv, vec!["cmd", "/C", "ls -la"]);
+    assert_eq!(argv, vec!["cmd", "/S", "/C", "ls -la"]);
 }
 
 #[test]
@@ -863,7 +865,8 @@ fn downgrade_powershell_noop_when_sandbox_allows_powershell() {
 
 #[test]
 fn downgrade_powershell_noop_for_cmd_prefix() {
-    let mut argv = vec!["cmd".to_string(), "/C".to_string(), "echo hi".to_string()];
+    let mut argv = wcore_config::shell::windows_cmd_payload_prefix();
+    argv.push("echo hi".to_string());
     let before = argv.clone();
     downgrade_powershell_for_sandbox(&mut argv, true);
     assert_eq!(argv, before, "cmd prefix is already sandbox-compatible");

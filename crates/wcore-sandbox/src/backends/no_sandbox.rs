@@ -229,7 +229,7 @@ impl SandboxBackend for NoSandboxBackend {
 
 #[cfg(all(test, windows))]
 mod windows_cmd_delivery_tests {
-    //! The Windows Bash surface runs `["cmd", "/C", <command>]` (see
+    //! The Windows Bash surface runs `["cmd", "/S", "/C", <command>]` (see
     //! `wcore_config::shell::bash_shell_argv_prefix`), and this backend is what
     //! the relaxed Windows default and `WAYLAND_SANDBOX=none` both spawn
     //! through. These are LIVE tests: they run a real `cmd.exe` and grade the
@@ -237,8 +237,13 @@ mod windows_cmd_delivery_tests {
 
     use super::*;
 
-    /// `["cmd", "/C", payload]` with the minimum env `cmd.exe` needs to start.
-    /// The env is still scrubbed — only these two names are injected.
+    /// The production Windows Bash argv with the minimum env `cmd.exe` needs to
+    /// start, so these live tests measure the shape the agent actually spawns.
+    /// The prefix is owned by `wcore_config::shell::windows_cmd_payload_prefix`
+    /// (this crate does not depend on `wcore-config`, so it is mirrored here);
+    /// `/S` is what makes cmd strip the outer pair `quote_cmd_payload` adds
+    /// instead of leaving it in the executed text (#943). The env is still
+    /// scrubbed — only these two names are injected.
     fn cmd_job(payload: &str) -> (SandboxManifest, SandboxCommand) {
         let mut manifest = SandboxManifest::default();
         for key in ["PATH", "SYSTEMROOT"] {
@@ -251,7 +256,7 @@ mod windows_cmd_delivery_tests {
         (
             manifest,
             SandboxCommand {
-                argv: vec!["cmd".into(), "/C".into(), payload.into()],
+                argv: vec!["cmd".into(), "/S".into(), "/C".into(), payload.into()],
                 cwd: None,
             },
         )
@@ -358,6 +363,51 @@ mod windows_cmd_delivery_tests {
             std::fs::read_dir(dir.path())
                 .map(|entries| entries.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
                 .unwrap_or_default()
+        );
+    }
+
+    /// **#943.** A payload that is itself a `cmd /c ...` must arrive whole.
+    ///
+    /// MEASURED on Windows 11 build 26200 against the shipped v0.13.0 binary
+    /// (and identically on 0.12.26-rc.2): `cmd /c echo NESTED` printed
+    /// `4e 45 53 54 45 44 22` — `NESTED` plus one `"` the operator never wrote.
+    /// `cmd.exe` had taken the quote-PRESERVING branch for its tail, so the
+    /// pair `quote_cmd_payload` adds survived into the executed text and its
+    /// closing quote reached the child as data. The argv now carries `/S`,
+    /// which leaves cmd only the stripping branch.
+    ///
+    /// The two shapes that measured CLEAN are asserted beside it, because they
+    /// are what bounds the fix: `echo NOQUOTE` never took the preserving branch
+    /// (`echo` is internal, so nothing on disk answers its executable test) and
+    /// neither did the chained form (`&` disqualifies it). A fix that trimmed
+    /// trailing quotes instead of correcting the switch would move these.
+    #[tokio::test]
+    async fn a_nested_cmd_payload_arrives_without_a_stray_quote() {
+        for (payload, expected) in [
+            ("cmd /c echo NESTED", "NESTED"),
+            ("cmd /c echo SHELL_CMD", "SHELL_CMD"),
+            ("echo NOQUOTE", "NOQUOTE"),
+        ] {
+            let output = run(payload).await;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(
+                stdout.trim_end(),
+                expected,
+                "{payload:?} produced {:x?}; a trailing 0x22 is #943 — the \
+                 wrapper's own quote executed as part of the command",
+                output.stdout
+            );
+        }
+        // cmd's `echo` emits the space that precedes `&&`, so grade each line
+        // trimmed: what is under test is the absence of a stray quote, not
+        // cmd's trailing whitespace.
+        let chained = run("cmd /c echo A && cmd /c echo B").await;
+        let text = String::from_utf8_lossy(&chained.stdout);
+        let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+        assert_eq!(
+            lines,
+            vec!["A", "B"],
+            "the chained nested form was clean before the fix and must stay so"
         );
     }
 

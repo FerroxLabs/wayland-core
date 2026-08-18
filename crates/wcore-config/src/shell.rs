@@ -73,11 +73,12 @@ pub fn shell_info() -> ShellInfo {
 /// Windows PowerShell override.
 ///
 /// Returns the program + flag(s) that precede the command string in the
-/// BashTool argv: `["sh", "-c"]` on Unix and `["cmd", "/C"]` on Windows by
-/// default. On Windows ONLY, the interpreter can be switched to `powershell` →
+/// BashTool argv: `["sh", "-c"]` on Unix and `["cmd", "/S", "/C"]` on Windows
+/// by default (see [`windows_cmd_payload_prefix`] for why `/S`). On Windows
+/// ONLY, the interpreter can be switched to `powershell` →
 /// `["powershell", "-NoProfile", "-Command"]` (Windows PowerShell 5.1, always
 /// present) or `pwsh` → the same with `pwsh` (PowerShell 7+, if installed). Any
-/// other value falls back to `cmd /C`.
+/// other value falls back to `cmd /S /C`.
 ///
 /// The choice resolves with precedence **`WAYLAND_BASH_SHELL` env (runtime
 /// override) > `[tools] windows_shell` config > default `cmd`**. The config key
@@ -114,8 +115,36 @@ fn bash_shell_prefix_for(is_windows: bool, win_shell: Option<&str>) -> Vec<Strin
             "-NoProfile".to_string(),
             "-Command".to_string(),
         ],
-        _ => vec!["cmd".to_string(), "/C".to_string()],
+        _ => windows_cmd_payload_prefix(),
     }
+}
+
+/// The Windows `cmd.exe` prefix for an argv whose payload will be delivered
+/// with the ONE-OUTER-PAIR quoting — [`push_cmd_payload`] here, and
+/// `wcore_sandbox::backends::windows_cmdline::quote_cmd_payload` on the sandbox
+/// spawn path. Anything that builds such an argv must build it from here.
+///
+/// `/S` IS LOAD-BEARING. Documented in `cmd /?`: cmd reads the tail after `/C`
+/// with two branches, and takes the quote-PRESERVING one when there is no `/S`,
+/// the tail holds exactly two quotes, none of `&<>()@^|` sit between them,
+/// whitespace does, and the text between them names an executable file. The
+/// wrapper's own pair satisfies the first four for any ordinary command, so the
+/// last one — a question about the operator's machine, invisible to the quoting
+/// layer — decided whether the pair was stripped. When it was not, cmd resolved
+/// the leading token as the program and passed the rest of the line, still
+/// carrying the unmatched closing `"`, to the child.
+///
+/// Measured on Windows 11 build 26200 against the shipped v0.13.0 binary
+/// (FerroxLabs/wayland#943, and the surviving half of #929): `cmd /c echo
+/// NESTED` printed `NESTED"` — one stray `0x22`. `echo NOQUOTE` was clean
+/// (`echo` is an internal command, so nothing on disk answers the executable
+/// test) and so was `cmd /c echo A && cmd /c echo B` (the `&` disqualifies the
+/// preserving branch); both already reached the stripping branch, and `/S`
+/// leaves them byte-identical. With `/S` that branch is the ONLY branch: the
+/// outer pair is always stripped and the remainder always runs verbatim, so
+/// delivery no longer depends on what the operator happened to type.
+pub fn windows_cmd_payload_prefix() -> Vec<String> {
+    vec!["cmd".to_string(), "/S".to_string(), "/C".to_string()]
 }
 
 /// Normalize a `WAYLAND_BASH_SHELL` / `[tools] windows_shell` value to its
@@ -388,16 +417,32 @@ fn push_cmd_payload(cmd: &mut Command, payload: &str) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let mut quoted = String::with_capacity(payload.len() + 2);
-        quoted.push('"');
-        quoted.push_str(payload);
-        quoted.push('"');
-        cmd.as_std_mut().raw_arg(quoted);
+        cmd.as_std_mut().raw_arg(wrap_cmd_payload(payload));
     }
     #[cfg(not(windows))]
     {
         cmd.arg(payload);
     }
+}
+
+/// The one-outer-pair spelling itself, split out of [`push_cmd_payload`] so the
+/// exact text handed to `cmd.exe` is assertable on any host. The payload's own
+/// bytes are passed through untouched — nothing inside the pair may be added,
+/// removed or escaped, because that text is the command the operator wrote.
+///
+/// Mirrors `wcore_sandbox::backends::windows_cmdline::quote_cmd_payload`, which
+/// applies the same rule on the sandbox spawn path.
+///
+/// Only Windows spawns through it; off Windows it exists for the tests, which
+/// are the only thing that can catch a regression in this rule from a Linux or
+/// macOS job.
+#[cfg(any(windows, test))]
+fn wrap_cmd_payload(payload: &str) -> String {
+    let mut out = String::with_capacity(payload.len() + 2);
+    out.push('"');
+    out.push_str(payload);
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -466,6 +511,148 @@ mod tests {
         assert_ne!(idx, 0);
     }
 
+    /// `cmd.exe`'s DOCUMENTED handling of the tail after `/C` (`cmd /?`),
+    /// expressed as a predicate: `true` when cmd takes branch **1** and
+    /// PRESERVES the quote pair instead of stripping it.
+    ///
+    /// Branch 1 fires only when ALL of these hold: no `/S` switch; exactly two
+    /// quote characters; none of `&<>()@^|` between them; at least one
+    /// whitespace character between them; and the text between them names an
+    /// executable file. That last condition is a question about the host
+    /// filesystem rather than about the string, so each case states it —
+    /// `cmd` answers it with the same space-delimited prefix search that makes
+    /// an unquoted `C:\Program Files\x` try `C:\Program.exe` first, so a
+    /// payload whose FIRST token is a real program on disk satisfies it and a
+    /// payload that starts with an *internal* command (`echo`) does not.
+    ///
+    /// When branch 1 fires, the pair [`wrap_cmd_payload`] added survives into
+    /// the executed text: cmd resolves the leading token as the program and
+    /// hands the rest of the line — still carrying the now-unmatched closing
+    /// `"` — to the child. Branch 2 is the behaviour the wrapper is written
+    /// against: strip exactly the outer pair, run the remainder verbatim.
+    fn cmd_preserves_the_outer_pair(
+        prefix: &[String],
+        payload: &str,
+        names_an_executable_file: bool,
+    ) -> bool {
+        if prefix.iter().any(|a| a.eq_ignore_ascii_case("/s")) {
+            return false;
+        }
+        let tail = wrap_cmd_payload(payload);
+        if tail.matches('"').count() != 2 {
+            return false;
+        }
+        let between = &tail[1..tail.len() - 1];
+        if between.contains(['&', '<', '>', '(', ')', '@', '^', '|']) {
+            return false;
+        }
+        if !between.contains(char::is_whitespace) {
+            return false;
+        }
+        names_an_executable_file
+    }
+
+    /// #943 — MEASURED on real Windows 11 build 26200 against the shipped
+    /// v0.13.0 binary: `wayland-core sandbox exec "cmd /c echo NESTED"` printed
+    /// `NESTED"` (`4e 45 53 54 45 44 22`), one stray `0x22` the operator never
+    /// wrote. Identical bytes on 0.12.26-rc.2, so the release did not close it.
+    ///
+    /// The wrapper is correct and the payload is correct; what was missing is
+    /// the switch that makes cmd's handling of the wrapper DETERMINISTIC.
+    /// Without `/S`, whether the outer pair is stripped depends on the quote
+    /// count, on which metacharacters the payload happens to contain, and on
+    /// whether its first token happens to name a program on that machine —
+    /// three properties of the operator's command, none of which the quoting
+    /// layer can see.
+    #[test]
+    fn a_wrapped_payload_beginning_with_a_program_name_is_not_left_quoted() {
+        let prefix = bash_shell_prefix_for(true, None);
+        assert!(
+            !cmd_preserves_the_outer_pair(&prefix, "cmd /c echo NESTED", true),
+            "cmd.exe keeps the wrapper's quotes for this payload, so the child \
+             receives the trailing `\"` as part of its last argument and echoes \
+             it (#943). The prefix {prefix:?} must carry /S so the outer pair is \
+             always stripped."
+        );
+        // The same shape reported under #929, whose empty-output half IS fixed.
+        assert!(!cmd_preserves_the_outer_pair(
+            &prefix,
+            "cmd /c echo SHELL_CMD",
+            true
+        ));
+    }
+
+    /// The two shapes that measured CLEAN on the same box bound the fix: both
+    /// already reach branch 2 today, so neither may move. Asserted against the
+    /// pre-fix prefix as well as the current one — a change that altered these
+    /// would be a regression no matter which branch it came from.
+    #[test]
+    fn the_two_measured_clean_shapes_are_unchanged() {
+        let before: Vec<String> = vec!["cmd".into(), "/C".into()];
+        let after = bash_shell_prefix_for(true, None);
+        for (payload, names_an_executable_file, why) in [
+            (
+                "echo NOQUOTE",
+                false,
+                "`echo` is an internal cmd command, not a file on disk, so \
+                 branch 1's executable test already fails",
+            ),
+            (
+                "cmd /c echo A && cmd /c echo B",
+                true,
+                "`&` between the quotes already disqualifies branch 1",
+            ),
+        ] {
+            assert!(
+                !cmd_preserves_the_outer_pair(&before, payload, names_an_executable_file),
+                "{payload:?} was measured clean BEFORE the fix: {why}"
+            );
+            assert!(
+                !cmd_preserves_the_outer_pair(&after, payload, names_an_executable_file),
+                "{payload:?} must stay byte-identical AFTER the fix: {why}"
+            );
+        }
+    }
+
+    /// The fix must NOT be in the payload text. A wrapper that "helpfully"
+    /// trimmed a trailing quote would satisfy the symptom and corrupt every
+    /// command that legitimately ends in one — so the bytes between the pair
+    /// stay exactly the caller's, for the defect shape and both controls.
+    #[test]
+    fn the_wrapper_adds_one_pair_and_touches_nothing_inside_it() {
+        assert_eq!(
+            wrap_cmd_payload("cmd /c echo NESTED"),
+            r#""cmd /c echo NESTED""#
+        );
+        assert_eq!(wrap_cmd_payload("echo NOQUOTE"), r#""echo NOQUOTE""#);
+        assert_eq!(
+            wrap_cmd_payload("cmd /c echo A && cmd /c echo B"),
+            r#""cmd /c echo A && cmd /c echo B""#
+        );
+        // A payload that already ends in a quote keeps it.
+        assert_eq!(wrap_cmd_payload(r#"echo "a""#), r#""echo "a"""#);
+        // No CRT escaping may appear: cmd does not undo `\"`.
+        assert!(!wrap_cmd_payload(r#"echo "a""#).contains(r#"\""#));
+    }
+
+    /// The extra switch must not hide the payload from the rule that quotes
+    /// it: `/S` sits before `/C`, and the payload is still the entry after the
+    /// flag.
+    #[test]
+    fn the_payload_is_still_located_with_the_extra_switch_in_front() {
+        assert_eq!(cmd_payload_index("cmd", &["/S", "/C", "echo hi"]), Some(2));
+        assert_eq!(cmd_payload_index("cmd", &["/s", "/c", "echo hi"]), Some(2));
+        let prefix = bash_shell_prefix_for(true, None);
+        let flag = prefix
+            .iter()
+            .position(|a| a.eq_ignore_ascii_case("/c"))
+            .expect("the cmd prefix must carry /C");
+        assert!(
+            prefix[..flag].iter().any(|a| a.eq_ignore_ascii_case("/s")),
+            "/S is only a switch when it PRECEDES the /C tail: {prefix:?}"
+        );
+    }
+
     #[test]
     fn shell_info_returns_platform_appropriate_values() {
         let info = shell_info();
@@ -490,9 +677,12 @@ mod tests {
 
     #[test]
     fn bash_prefix_windows_defaults_to_cmd() {
-        assert_eq!(bash_shell_prefix_for(true, None), vec!["cmd", "/C"]);
+        assert_eq!(bash_shell_prefix_for(true, None), vec!["cmd", "/S", "/C"]);
         // An unrecognized value falls back to cmd, never an empty/invalid argv.
-        assert_eq!(bash_shell_prefix_for(true, Some("bash")), vec!["cmd", "/C"]);
+        assert_eq!(
+            bash_shell_prefix_for(true, Some("bash")),
+            vec!["cmd", "/S", "/C"]
+        );
     }
 
     #[test]
@@ -546,16 +736,32 @@ mod tests {
         // are sandbox-supported selectors).
         assert_eq!(
             bash_shell_prefix_for(true, Some(r"C:\Program Files\Git\bin\bash.exe")),
-            vec!["cmd", "/C"]
+            vec!["cmd", "/S", "/C"]
         );
     }
 
+    /// Guard against drift between the prefix defaults and `shell_info()`:
+    /// same interpreter, same trailing flag.
+    ///
+    /// The prefix carries ONE extra switch on Windows and `shell_info()` must
+    /// NOT grow it. `shell_info()` feeds [`shell_command_builder`] and
+    /// [`mcp_stdio_command_builder`], which append their line RAW with no outer
+    /// pair of their own; an MCP transport line such as `"C:\Program
+    /// Files\nodejs\node.exe" server.js` is exactly the shape cmd's
+    /// quote-PRESERVING branch exists to serve, and `/S` would strip the quotes
+    /// off that program path and break the launch. The switch belongs only
+    /// where the payload is wrapped — see [`windows_cmd_payload_prefix`].
     #[test]
     fn bash_prefix_default_branches_match_shell_info() {
-        // Guard against drift between the prefix defaults and shell_info().
         let info = shell_info();
-        let expected = vec![info.program.to_string(), info.flag.to_string()];
-        assert_eq!(bash_shell_prefix_for(cfg!(windows), None), expected);
+        let prefix = bash_shell_prefix_for(cfg!(windows), None);
+        assert_eq!(prefix.first().map(String::as_str), Some(info.program));
+        assert_eq!(prefix.last().map(String::as_str), Some(info.flag));
+        let extra: Vec<&str> = prefix[1..prefix.len() - 1]
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(extra, if cfg!(windows) { vec!["/S"] } else { vec![] });
     }
 
     #[tokio::test]

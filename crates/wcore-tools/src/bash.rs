@@ -201,7 +201,10 @@ fn downgrade_powershell_for_sandbox(argv: &mut Vec<String>, blocks_powershell: b
         return;
     }
     // The powershell/pwsh prefix is `[shell, "-NoProfile", "-Command", <command>]`;
-    // the user's command is the last element. Replace the whole prefix with `cmd /C`.
+    // the user's command is the last element. Replace the whole prefix with the
+    // canonical cmd one — taken from `wcore_config::shell` rather than spelled
+    // out here, because that prefix carries the `/S` the payload quoting on the
+    // spawn path depends on (#943) and a second copy would silently drift.
     let command = argv.last().cloned().unwrap_or_default();
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
@@ -212,7 +215,8 @@ fn downgrade_powershell_for_sandbox(argv: &mut Vec<String>, blocks_powershell: b
              Set `[tools] windows_shell = cmd` (or WAYLAND_BASH_SHELL=cmd) to silence this."
         );
     });
-    *argv = vec!["cmd".to_string(), "/C".to_string(), command];
+    *argv = wcore_config::shell::windows_cmd_payload_prefix();
+    argv.push(command);
 }
 
 /// Whether a freshly selected legacy platform backend enforces
