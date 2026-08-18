@@ -3,7 +3,9 @@
 //! ## Hard-coded blocks (always-on, regardless of allow / deny lists)
 //!
 //!   * RFC 1918 private ranges (10/8, 172.16/12, 192.168/16).
-//!   * Loopback (127/8, `localhost`, `*.localhost`, `::1`).
+//!   * Loopback (127/8, `localhost`, `*.localhost`, `::1`) — the ONE
+//!     hard block with a recoverable escape hatch; see
+//!     [`LoopbackCapability`] and the "Loopback capability" section below.
 //!   * Cloud metadata endpoint (169.254.169.254 — AWS / GCP / Azure /
 //!     OpenStack share this address).
 //!   * Link-local IPv4 (169.254/16) and IPv6 (`fe80::/10`).
@@ -33,6 +35,26 @@
 //!   * `Allow` — explicit-block list still applies; everything else passes.
 //!   * `Ask` — unknown origins route to `Suspend` so the orchestration
 //!     layer can request HITL approval (S4 suspend pattern).
+//!
+//! ## Loopback capability (gh#911)
+//!
+//! Loopback was previously a dead end: `http://localhost:3000` was refused
+//! with no recovery path at all, so an operator wanting to drive a local dev
+//! server had nothing to turn on. [`LoopbackCapability`] is the recoverable,
+//! versioned, scope-bearing grant that reopens exactly that door and nothing
+//! else. It is deliberately NOT a sandbox disable:
+//!
+//!   * It fails closed on absent, version-mismatched, unscoped or portless
+//!     grant data — every validation failure keeps loopback blocked.
+//!   * It authorizes only the ports the operator enumerated. A grant for
+//!     `3000` does not reach the Camoufox sidecar on `9377`.
+//!   * It relaxes ONLY loopback (`localhost`, `*.localhost`, 127/8, `::1`,
+//!     IPv4-mapped loopback). RFC 1918, link-local, cloud metadata, IPv6 ULA
+//!     and `0.0.0.0/8` all stay refused with a grant in hand — including at
+//!     the granted port, so a grant cannot be spent across categories.
+//!   * It never relaxes [`check_resolved_host`]. A public hostname that
+//!     resolves to 127.0.0.1 is still a rebinding attack, grant or no grant.
+//!   * `denied_origins` still wins over an authorized grant.
 //!
 //! ## DNS rebinding (TOFU cache)
 //!
@@ -97,6 +119,86 @@ pub enum PolicyOutcome {
 /// at the gate. The list is intentionally minimal: HTTP + HTTPS only.
 const ALLOWED_SCHEMES: &[&str] = &["http", "https"];
 
+/// Schema version of the loopback capability grant. A grant carrying any
+/// other value — including the `0` a missing field deserializes to — is
+/// refused, so unknown producer data fails closed rather than being
+/// interpreted under the wrong schema (gh#911 acceptance: "Unknown or
+/// malformed capability data fails closed").
+pub const LOOPBACK_CAPABILITY_VERSION: u32 = 1;
+
+/// Explicit, scoped, human-granted authority to reach loopback.
+///
+/// Every field is required to be affirmatively set: [`Default`] is the
+/// no-authority value and each validation gate below refuses rather than
+/// assumes. See the crate-level "Loopback capability" section for the
+/// threat model this shape is answering.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LoopbackCapability {
+    /// Master switch. `false` (default) keeps loopback hard-blocked.
+    pub enabled: bool,
+    /// Must equal [`LOOPBACK_CAPABILITY_VERSION`].
+    pub schema_version: u32,
+    /// The session / profile this grant was issued for. Carried into the
+    /// decision text so a consumer can report which target authorized the
+    /// access. Empty is refused: an unattributable grant is not explicit
+    /// human authority.
+    pub session_scope: String,
+    /// Ports this grant authorizes on loopback. Empty is refused — there is
+    /// deliberately no "all ports" spelling, because that is the broad
+    /// sandbox disable gh#911 rules out.
+    pub ports: Vec<u16>,
+}
+
+impl LoopbackCapability {
+    /// `Ok(scope)` when this grant authorizes `port`; `Err(why)` naming the
+    /// specific gate that refused otherwise. The `Err` text is operator-facing
+    /// — it is what a stuck operator reads to find out what is wrong with the
+    /// grant they just wrote.
+    pub fn authorize(&self, port: Option<u16>) -> Result<&str, String> {
+        if !self.enabled {
+            return Err(
+                "no loopback capability granted (browser.policy.loopback.enabled is false)".into(),
+            );
+        }
+        if self.schema_version != LOOPBACK_CAPABILITY_VERSION {
+            return Err(format!(
+                "loopback capability refused: schema_version {} is not the supported \
+                 version {LOOPBACK_CAPABILITY_VERSION}",
+                self.schema_version
+            ));
+        }
+        if self.session_scope.trim().is_empty() {
+            return Err(
+                "loopback capability refused: session_scope is empty, so the grant names no \
+                 session or profile to attribute the access to"
+                    .into(),
+            );
+        }
+        if self.ports.is_empty() {
+            return Err(
+                "loopback capability refused: ports is empty, and there is no \
+                 all-ports spelling — enumerate the local ports the grant covers"
+                    .into(),
+            );
+        }
+        let Some(port) = port else {
+            return Err(
+                "loopback capability refused: URL has no port and no known default \
+                 for its scheme, so it cannot be matched against the granted ports"
+                    .into(),
+            );
+        };
+        if !self.ports.contains(&port) {
+            return Err(format!(
+                "loopback capability refused: port {port} is not in the granted ports {:?}",
+                self.ports
+            ));
+        }
+        Ok(self.session_scope.trim())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserPolicy {
     /// What to do when no rule matches. Default `Deny` (fail-closed) as
@@ -114,6 +216,10 @@ pub struct BrowserPolicy {
     /// DNS-rebinding TOFU cache. Pinned hostname → first-seen IP. On
     /// subsequent resolution of the same hostname, if the IP differs the
     /// request is refused. Cleared when the policy is dropped.
+    /// Recoverable local-only loopback grant (gh#911). Absent / malformed
+    /// grant data leaves loopback hard-blocked.
+    #[serde(default)]
+    pub loopback: LoopbackCapability,
     #[serde(skip)]
     dns_cache: Arc<Mutex<HashMap<String, IpAddr>>>,
 }
@@ -127,6 +233,7 @@ impl Default for BrowserPolicy {
             default_action: PolicyAction::Deny,
             allowed_origins: Vec::new(),
             denied_origins: Vec::new(),
+            loopback: LoopbackCapability::default(),
             dns_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -137,6 +244,7 @@ impl PartialEq for BrowserPolicy {
         self.default_action == other.default_action
             && self.allowed_origins == other.allowed_origins
             && self.denied_origins == other.denied_origins
+            && self.loopback == other.loopback
     }
 }
 
@@ -152,8 +260,17 @@ impl BrowserPolicy {
             default_action,
             allowed_origins,
             denied_origins,
+            loopback: LoopbackCapability::default(),
             dns_cache: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Attach a loopback grant. Separate from [`new`](Self::new) so that
+    /// every existing construction site keeps the no-authority default and
+    /// granting loopback is always a visible, deliberate call.
+    pub fn with_loopback(mut self, loopback: LoopbackCapability) -> Self {
+        self.loopback = loopback;
+        self
     }
 
     /// Check a URL. Convenience wrapper returning `Result<(), PolicyError>`
@@ -193,17 +310,49 @@ impl BrowserPolicy {
         // 2. Hostname checks (IP literals + loopback names + legacy IPv4
         //    encodings + IPv4-mapped IPv6).
         if let Some(host) = parsed.host_str() {
-            if let Some(reason) = blocked_host_reason(host) {
-                return PolicyOutcome::Deny { reason };
-            }
+            let hard_block = blocked_host_reason(host);
 
-            // 3. Denied origins (suffix glob).
+            // 2a. The loopback capability (gh#911) is the ONE recoverable
+            //     hard block. It is consulted only for canonical loopback
+            //     spellings, so a grant cannot be spent on RFC 1918,
+            //     link-local, metadata, ULA, `0.0.0.0/8`, or an obfuscated
+            //     legacy encoding of 127.0.0.1 — those return below with
+            //     their original reason regardless of what was granted.
+            let loopback_scope = if hard_block.is_some() && is_canonical_loopback_host(host) {
+                match self.loopback.authorize(parsed.port_or_known_default()) {
+                    Ok(scope) => Some(scope.to_string()),
+                    Err(why) => {
+                        return PolicyOutcome::Deny {
+                            reason: format!(
+                                "{}; {why}",
+                                hard_block.unwrap_or_else(|| "loopback blocked".into())
+                            ),
+                        };
+                    }
+                }
+            } else {
+                if let Some(reason) = hard_block {
+                    return PolicyOutcome::Deny { reason };
+                }
+                None
+            };
+
+            // 3. Denied origins (suffix glob). Still wins over an authorized
+            //    loopback grant — the deny list is unconditional.
             for pat in &self.denied_origins {
                 if origin_matches(host, pat) {
                     return PolicyOutcome::Deny {
                         reason: format!("origin {host} matches denied pattern {pat}"),
                     };
                 }
+            }
+
+            // An authorized grant IS the explicit allow decision for this
+            // host and port. Requiring the operator to ALSO allow-list
+            // `localhost` would mean the recovery path Desktop offers still
+            // does not work on its own, which is the gh#911 defect.
+            if loopback_scope.is_some() {
+                return PolicyOutcome::Allow;
             }
 
             // 4. Allowed origins gate (if non-empty, must match).
@@ -296,6 +445,7 @@ impl BrowserPolicy {
             default_action: self.default_action,
             allowed_origins: self.allowed_origins.clone(),
             denied_origins: self.denied_origins.clone(),
+            loopback: self.loopback.clone(),
             dns_cache: Arc::clone(&self.dns_cache),
         };
         reqwest::redirect::Policy::custom(move |attempt| {
@@ -353,6 +503,44 @@ fn blocked_host_reason(host: &str) -> Option<String> {
     }
 
     None
+}
+
+/// `true` only for hosts that unambiguously ARE loopback and can therefore be
+/// reopened by a [`LoopbackCapability`].
+///
+/// Polarity matters here: this is an ALLOW-relaxation predicate, so every
+/// uncertain input must answer `false`. Deliberately excluded:
+///
+///   * `0.0.0.0` and the rest of `0.0.0.0/8`, which many stacks route to the
+///     local host but which is not a loopback address,
+///   * every non-loopback category — `blocked_host_reason` keeps refusing
+///     those with their own reason even at a granted port.
+///
+/// On the legacy IPv4 encodings (`0177.0.0.1`, `2130706433`, `127.1`, ...):
+/// measured, `Url::parse` canonicalizes every one of them to `127.0.0.1`
+/// before `evaluate` reads `host_str()`, so they never arrive here in their
+/// obfuscated form. Strict-parsing (rather than consulting
+/// `parse_ipv4_loose`) is therefore not a filter against them — it is the
+/// guarantee that the address this predicate judges is byte-for-byte the
+/// address the request will actually reach. Obfuscation cannot widen a grant
+/// because it cannot change the destination.
+fn is_canonical_loopback_host(host: &str) -> bool {
+    let host_lc = host.to_ascii_lowercase();
+    if host_lc == "localhost" || host_lc.ends_with(".localhost") {
+        return true;
+    }
+    let ip_str = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    // STRICT parse only — `parse_ipv4_loose` is intentionally not consulted.
+    match IpAddr::from_str(ip_str) {
+        Ok(IpAddr::V4(v4)) => v4.is_loopback(),
+        Ok(IpAddr::V6(v6)) => {
+            v6.is_loopback() || ipv4_mapped(v6).is_some_and(|v4| v4.is_loopback())
+        }
+        Err(_) => false,
+    }
 }
 
 /// Reusable IP-literal block-list check. Split out from

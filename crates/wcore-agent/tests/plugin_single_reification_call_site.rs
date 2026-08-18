@@ -80,6 +80,7 @@ fn fixture_browser_spec(ns: &str) -> BrowserToolSpec {
             default_action: "allow".into(),
             allowed_origins: vec!["*.example.com".into()],
             denied_origins: vec![],
+            loopback: Default::default(),
         },
         allow_cloud: false,
     }
