@@ -166,6 +166,85 @@ jobs:
           Invoke-Smoke -Label 'wayland-core sandbox status'        -Argv @('sandbox','status')
           Invoke-Smoke -Label 'wayland-core sandbox status --json' -Argv @('sandbox','status','--json')
 
+      # The most end-to-end form of CLAIM A available without an LLM: the
+      # SHIPPED binary, through `sandbox exec`, which calls the agent's own
+      # `BashTool::execute_with_ctx` with the contained production profile.
+      # stdout is redirected to a FILE and hex-dumped, because a PowerShell
+      # pipeline decodes text and would hide the byte in question.
+      - name: CLAIM A — shipped binary through `sandbox exec` (byte dump)
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:CARGO_TARGET_DIR 'release\wayland-core.exe'
+          $ws  = $env:UAT_REAL_TREE
+          $dumps = Join-Path $env:UAT_BASE 'dumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          $payloads = @(
+            @{ tag = 'nested';  cmd = 'cmd /c echo NESTED' },
+            @{ tag = 'noquote'; cmd = 'echo NOQUOTE' },
+            @{ tag = 'chained'; cmd = 'cmd /c echo A && cmd /c echo B' }
+          )
+          foreach ($p in $payloads) {
+            $o = Join-Path $dumps ($p.tag + '.out')
+            $e = Join-Path $dumps ($p.tag + '.err')
+            Write-Host ""
+            Write-Host "########## sandbox exec -- $($p.cmd) ##########"
+            # ONE pre-quoted argument string, not an array: PowerShell's
+            # array-to-command-line joining is version dependent, and these
+            # payloads contain spaces and `&&`. The payloads contain no `"` of
+            # their own, so a plain outer pair is exact.
+            $argline = 'sandbox exec --workspace "{0}" "{1}"' -f $ws, $p.cmd
+            Write-Host "argline = $argline"
+            $proc = Start-Process -FilePath $exe -NoNewWindow -Wait -PassThru `
+              -ArgumentList $argline `
+              -RedirectStandardOutput $o -RedirectStandardError $e
+            Write-Host "exit = $($proc.ExitCode)"
+            Write-Host "--- stdout, verbatim bytes ---"
+            Format-Hex -Path $o | Out-String -Width 200 | Write-Host
+            Write-Host "--- stdout, decoded ---"
+            Get-Content -Raw -Path $o | Write-Host
+            $errText = (Get-Content -Raw -Path $e)
+            if ($errText) { Write-Host "--- stderr ---"; Write-Host $errText }
+          }
+
+      # CLAIM B with the SAME driver PR #278 used, so the numbers are directly
+      # comparable to the ones in that PR. Arms interleaved (real, empty, real,
+      # empty) rather than blocked: NTFS cache state drifts, and a block layout
+      # hands the second arm a free win. Iteration 1 of each is the closest
+      # thing to "cold" this job can produce and is labelled as such.
+      - name: CLAIM B — `sandbox exec` echo timings, interleaved
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:CARGO_TARGET_DIR 'release\wayland-core.exe'
+          $dumps = Join-Path $env:UAT_BASE 'dumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          function Measure-Exec {
+            param([string]$Ws, [string]$Label, [int]$Iter)
+            $o = Join-Path $dumps ("t-$Label-$Iter.out")
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $argline = 'sandbox exec --workspace "{0}" "echo probe"' -f $Ws
+            $proc = Start-Process -FilePath $exe -NoNewWindow -Wait -PassThru `
+              -ArgumentList $argline `
+              -RedirectStandardOutput $o -RedirectStandardError ($o + '.err')
+            $sw.Stop()
+            $ms = $sw.ElapsedMilliseconds
+            $body = (Get-Content -Raw -Path $o)
+            $ok = $body -match 'probe'
+            Write-Host ("  {0,-12} iter {1}  {2,8} ms  exit={3}  produced_output={4}" -f $Label, $Iter, $ms, $proc.ExitCode, $ok)
+            if (-not $ok) { Write-Host "    !! NO OUTPUT — this is a failed measurement, not a fast one. body: $body" }
+            return $ms
+          }
+          $real = @(); $empty = @()
+          foreach ($i in 1..4) {
+            $real  += (Measure-Exec -Ws $env:UAT_REAL_TREE -Label 'real-tree' -Iter $i)
+            $empty += (Measure-Exec -Ws $env:UAT_EMPTY_DIR -Label 'empty-dir' -Iter $i)
+          }
+          Write-Host ""
+          Write-Host "=== CLAIM B, sandbox exec `"echo probe`" (ms) ==="
+          Write-Host ("real-tree cold (iter 1) = {0}" -f $real[0])
+          Write-Host ("real-tree warm (min 2-4) = {0}   samples {1}" -f (($real[1..3]) | Measure-Object -Minimum).Minimum, ($real -join ', '))
+          Write-Host ("empty-dir cold (iter 1) = {0}" -f $empty[0])
+          Write-Host ("empty-dir warm (min 2-4) = {0}   samples {1}" -f (($empty[1..3]) | Measure-Object -Minimum).Minimum, ($empty -join ', '))
+
       - name: CLAIM A + CLAIM B — live evidence
         shell: pwsh
         env:
@@ -173,6 +252,17 @@ jobs:
         run: |
           $env:WAYLAND_UAT_REAL_TREE = $env:UAT_REAL_TREE
           $env:WAYLAND_UAT_EMPTY_DIR = $env:UAT_EMPTY_DIR
+          # Optional corroboration against a genuinely large real tree, if this
+          # box has one. READ ONLY — the harness walks it and prints the entry
+          # COUNT and the elapsed time, never a path, and never writes.
+          foreach ($cand in @('D:\lanes', 'D:\Wayland')) {
+            if (Test-Path $cand) { $env:WAYLAND_UAT_BIG_TREE = $cand; break }
+          }
+          if ($env:WAYLAND_UAT_BIG_TREE) {
+            Write-Host "WAYLAND_UAT_BIG_TREE  = $env:WAYLAND_UAT_BIG_TREE"
+          } else {
+            Write-Host "WAYLAND_UAT_BIG_TREE  = (none of the candidates exist on this box)"
+          }
           Write-Host "WAYLAND_UAT_REAL_TREE = $env:WAYLAND_UAT_REAL_TREE"
           Write-Host "WAYLAND_UAT_EMPTY_DIR = $env:WAYLAND_UAT_EMPTY_DIR"
           cargo test --release -p wcore-tools --test live_uat_0131 -- --nocapture --test-threads=1

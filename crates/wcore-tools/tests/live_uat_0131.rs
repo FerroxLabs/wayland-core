@@ -370,6 +370,31 @@ fn claim_b_read_deny_walk_timing() {
     let empty_skip = t.elapsed().as_millis();
     println!("  empty-dir SKIP (shipping, job object) {empty_skip:>8} ms  entries={}", e_skipped.len());
 
+    // ---- OPTIONAL: the same read-only walk against a genuinely large real
+    // tree on this box, if the operator named one. #278 measured 39,278 ms
+    // against `D:\lanes` COLD; a CI job cannot re-enter a cold cache, so this
+    // arm reports the WARM cost of the same walk. Read-only: it canonicalizes
+    // and walks, and only the COUNT is printed — never a path.
+    if let Ok(big) = std::env::var("WAYLAND_UAT_BIG_TREE") {
+        let big = PathBuf::from(big);
+        if big.is_dir() {
+            println!("\n-- big real tree: {}", big.display());
+            let big_policy = shipping_policy(&big);
+            let t = Instant::now();
+            let entries = big_policy.secret_deny_paths_for_backend(true).len();
+            let big_walk = t.elapsed().as_millis();
+            let t = Instant::now();
+            let skipped_entries = big_policy.secret_deny_paths_for_backend(false).len();
+            let big_skip = t.elapsed().as_millis();
+            println!("  big-tree WALK (pre-fix, enforcing)    {big_walk:>8} ms  entries={entries}");
+            println!("  big-tree SKIP (shipping, job object)  {big_skip:>8} ms  entries={skipped_entries}");
+        } else {
+            println!("\nWAYLAND_UAT_BIG_TREE={} does not exist — arm skipped", big.display());
+        }
+    } else {
+        println!("\nWAYLAND_UAT_BIG_TREE unset — no large-real-tree arm");
+    }
+
     // ---- size of the tree, measured LAST so the walk above was not warmed by
     // this enumeration.
     let (files, bytes) = count_tree(&real_root);
