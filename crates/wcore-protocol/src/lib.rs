@@ -683,6 +683,41 @@ impl ToolApprovalManager {
             auto.insert(category.to_string());
         }
     }
+
+    /// Register a specific tool NAME for always-allow without a pending
+    /// approval to resolve.
+    ///
+    /// #693 — `auto_approved_tool_names` is in-memory and therefore
+    /// session-scoped, so an `ApprovalScope::Always` grant the user made in an
+    /// earlier session is gone at process exit. This is the restore side: the
+    /// host reads the durable learned policy at launch and replays each grant
+    /// through here.
+    ///
+    /// #141 audit Gap A: `send_message` stays ineligible exactly as in
+    /// [`approve`](Self::approve) / [`resolve_host`](Self::resolve_host), so a
+    /// restored file can never be a side door around the
+    /// per-recipient-effect carve-out.
+    pub fn add_auto_approve_tool_name(&self, tool_name: &str) {
+        if Self::always_scope_ineligible(tool_name) {
+            return;
+        }
+        if let Ok(mut names) = self.auto_approved_tool_names.lock() {
+            names.insert(tool_name.to_string());
+        }
+    }
+
+    /// The tool NAME of a still-pending approval, or `None` when `call_id` is
+    /// unknown / already resolved.
+    ///
+    /// #693 — the durable write side needs the tool name, and
+    /// [`approve`](Self::approve) consumes the pending entry (and with it the
+    /// name), so the caller must read it BEFORE resolving.
+    pub fn pending_tool_name(&self, call_id: &str) -> Option<String> {
+        self.pending
+            .lock()
+            .ok()
+            .and_then(|pending| pending.get(call_id).map(|p| p.tool_name.clone()))
+    }
 }
 
 impl Default for ToolApprovalManager {
@@ -1171,6 +1206,63 @@ mod tests {
         assert!(
             !m.is_tool_name_auto_approved("Bash"),
             "AlwaysPrefix must not populate the tool-name auto-approve set"
+        );
+    }
+
+    // --- #693: durable always-allow restore + the write side's name lookup ---
+
+    /// The restore side of #693: replaying a grant read back from disk must
+    /// make the tool auto-approved WITHOUT a pending approval to resolve, and
+    /// must keep the Gap A carve-out closed.
+    #[test]
+    fn add_auto_approve_tool_name_restores_a_grant_but_not_for_send_message() {
+        let m = ToolApprovalManager::new();
+        assert!(
+            !m.is_tool_name_auto_approved("Write"),
+            "a fresh manager must not auto-approve anything"
+        );
+
+        m.add_auto_approve_tool_name("Write");
+        assert!(
+            m.is_tool_name_auto_approved("Write"),
+            "a restored Always grant must auto-approve that tool"
+        );
+
+        // Control: the restore path is scoped to the tool it names.
+        assert!(
+            !m.is_tool_name_auto_approved("Bash"),
+            "restoring Write must not auto-approve Bash"
+        );
+
+        // #141 audit Gap A: an on-disk file must not be a side door.
+        m.add_auto_approve_tool_name("send_message");
+        assert!(
+            !m.is_tool_name_auto_approved("send_message"),
+            "send_message must stay Always-ineligible on the restore path"
+        );
+    }
+
+    /// The write side of #693 needs the tool name, and `approve` consumes the
+    /// pending entry — so the lookup must answer before the resolve and stop
+    /// answering after it.
+    #[test]
+    fn pending_tool_name_answers_only_while_the_call_is_pending() {
+        let m = ToolApprovalManager::new();
+        assert_eq!(m.pending_tool_name("c-693"), None, "nothing pending yet");
+
+        let _rx = m.request_approval("c-693", &ToolCategory::Edit, "Write");
+        assert_eq!(m.pending_tool_name("c-693").as_deref(), Some("Write"));
+        assert_eq!(
+            m.pending_tool_name("c-other"),
+            None,
+            "an unknown call_id must not borrow another call's tool name"
+        );
+
+        m.approve("c-693", ApprovalScope::Once, None);
+        assert_eq!(
+            m.pending_tool_name("c-693"),
+            None,
+            "approve consumes the pending entry"
         );
     }
 }

@@ -8,7 +8,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::tui::permission::{PermissionComponent, PermissionContext};
+use crate::tui::permission::{EGRESS_CARD_TOOL_NAME, PermissionComponent, PermissionContext};
 
 /// Generic projection for any tool without a bespoke component.
 pub struct FallbackComponent;
@@ -68,10 +68,22 @@ impl PermissionComponent for FallbackComponent {
         } else {
             "[ctrl+f] expand"
         };
+        // #693 — the synthesized egress-consent card lands here (it has no
+        // dispatch arm), and its `[a]` never reaches the learned policy:
+        // `TuiEngine::approve` sees the `egress:` call_id and returns to the
+        // egress bridge first. What that grant actually does is
+        // `AgentEgressPolicy::resolve_ask` adding the registrable DOMAIN to
+        // the live in-memory allowlist, which dies with the process. So the
+        // workspace wording is wrong on this card in both directions — it
+        // names a scope the grant has no concept of, and implies a durability
+        // it does not have. Say what it grants.
+        let always = if ctx.card.tool_name == EGRESS_CARD_TOOL_NAME {
+            "[a] always this session"
+        } else {
+            "[a] always in this workspace"
+        };
         Line::from(Span::styled(
-            format!(
-                "[enter/y] approve   [a] always for this tool   [n] deny   [esc] cancel   {expand}"
-            ),
+            format!("[enter/y] approve   {always}   [n] deny   [esc] cancel   {expand}"),
             Style::default(),
         ))
     }

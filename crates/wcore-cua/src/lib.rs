@@ -30,6 +30,7 @@ pub mod backends;
 pub mod error;
 pub mod liveness;
 pub mod op;
+pub mod permissions;
 pub mod policy;
 pub mod redact;
 pub mod tool;
@@ -41,5 +42,6 @@ pub use backend::{
 };
 pub use error::{CuaError, CuaResult};
 pub use op::{CUA_OP_LOCKED_VARIANT_COUNT, CuaOp, CuaOpResult};
+pub use permissions::{TccCapability, TccStatus, permission_gate, prime, probe};
 pub use policy::{CuaPolicy, CuaPolicyOutcome};
 pub use tool::CuaTool;
