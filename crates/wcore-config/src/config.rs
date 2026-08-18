@@ -5322,19 +5322,58 @@ fn merge_config_files_with_trust(
         global.inbound_webhook
     };
 
-    // FleetDispatcher-class fix (audit 2026-05-24 §3) — browser section:
-    // project overrides global if any policy field differs from
-    // `BrowserPolicyConfig::default()`. Mirrors the memory/budget strategy
-    // above; conservative — preserves the deny-all default when neither
-    // block exists.
+    // FleetDispatcher-class fix (audit 2026-05-24 §3) — browser section.
+    //
+    // Merged FIELD-WISE, the same shape as the `[anvil]` block below, and for
+    // the same reason: a project config travels with a cloned repo, so a
+    // setting it never mentions must not disappear because of one it did.
+    //
+    // The whole-block form this replaces resolved `[browser]` as a single
+    // all-or-nothing choice. `[browser.camoufox_download]` then became a
+    // trigger for that choice, so a project configuring ONLY a download — a
+    // network-fetch-and-execute surface — replaced the operator's
+    // `[browser.policy]` with `BrowserPolicyConfig::default()`, silently
+    // dropping the origin allowlist that bounds where the browser may go.
+    // Enabling a download must not be able to drop the operator's policy.
+    // Locked by `tests/browser_merge_trust_test.rs`.
+    //
+    // Every field keeps the presence-over-default resolution it had before, so
+    // the only behaviour that changes is the cross-field clobbering. `policy`
+    // is resolved as a UNIT under exactly its previous predicate rather than
+    // split per field: `default_action` and the two origin lists are one
+    // decision — an allowlist only means anything alongside the action it
+    // qualifies — and merging them separately would synthesise a
+    // project-denies/operator-allows pairing that neither layer wrote.
     let default_browser_policy = crate::browser::BrowserPolicyConfig::default();
-    let browser = if project.browser.policy.default_action != default_browser_policy.default_action
-        || !project.browser.policy.allowed_origins.is_empty()
-        || !project.browser.policy.denied_origins.is_empty()
-    {
-        project.browser
-    } else {
-        global.browser
+    let browser = crate::browser::BrowserConfig {
+        policy: if project.browser.policy.default_action != default_browser_policy.default_action
+            || !project.browser.policy.allowed_origins.is_empty()
+            || !project.browser.policy.denied_origins.is_empty()
+        {
+            project.browser.policy
+        } else {
+            global.browser.policy
+        },
+        stealth: crate::browser::StealthConfig {
+            preferred_provider: if project.browser.stealth.preferred_provider
+                != crate::browser::BrowserProvider::default()
+            {
+                project.browser.stealth.preferred_provider
+            } else {
+                global.browser.stealth.preferred_provider
+            },
+            allow_cloud_fallback: project.browser.stealth.allow_cloud_fallback
+                || global.browser.stealth.allow_cloud_fallback,
+        },
+        download_dir: project.browser.download_dir.or(global.browser.download_dir),
+        persist_profile: project.browser.persist_profile || global.browser.persist_profile,
+        camoufox_download: if project.browser.camoufox_download
+            != crate::browser::CamoufoxDownloadConfig::default()
+        {
+            project.browser.camoufox_download
+        } else {
+            global.browser.camoufox_download
+        },
     };
 
     // Crucible: project overrides global when it set a non-default council
