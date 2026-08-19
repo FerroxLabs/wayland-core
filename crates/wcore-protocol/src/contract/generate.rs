@@ -28,8 +28,8 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // 13 -> 14: `call_announced` added. Additive only - no field on an existing
 // event changed shape, and `major` therefore holds at 1. Hosts that pin the
 // descriptor must re-pin; hosts that ignore unknown types are unaffected.
-pub const CONTRACT_MINOR: u64 = 14;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/14";
+pub const CONTRACT_MINOR: u64 = 15;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/15";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -1260,6 +1260,24 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
             "host_delegated_delivery".into(),
             ContractCapabilityStatus::Available,
         ),
+        // The feature-detect for `ApprovalScope::AlwaysPath` — "always allow
+        // this folder" on a `tool_approve`.
+        //
+        // A host MUST check this before sending the scope, and the reason is
+        // sharper than the usual additive-field case. `scope` carries
+        // `#[serde(default)]`, so an ABSENT scope is harmless on any Core; but
+        // an unknown VARIANT is not a missing field, it fails the whole
+        // `tool_approve` frame. On an older Core the approval is then never
+        // resolved and the pending call sits until the TTL reaper denies it —
+        // the host sees a hang, not a rejection. Undeclared therefore means
+        // "send `once` or `always` only", never "try it and see".
+        //
+        // Available, not ShapeOnly: an approved grant is honoured end to end
+        // by the same Core that declares this — `readable_roots()` for the OS
+        // sandbox and `SandboxedFs` for the in-process file tools. What is NOT
+        // promised is that anything raises the prompt; a host still has to
+        // attach the scope to an approval it already has.
+        ("path_grants_v1".into(), ContractCapabilityStatus::Available),
         ("plugin_events".into(), ContractCapabilityStatus::ShapeOnly),
         (
             "semantic_failover_receipts".into(),
