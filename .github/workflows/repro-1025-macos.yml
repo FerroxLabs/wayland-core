@@ -1,22 +1,23 @@
 name: repro-1025-macos
 
-# gh#1025 hunt. The admission flake is macOS-only and has never been caught with
-# a usable error: it surfaces as a bare `io: No such file or directory (os error
-# 2)` with no path and no probe, which is why it has survived several release
-# trains unmeasured.
+# gh#1025, final hunt. Everything except one region is eliminated; the
+# io::Error funnel in wcore-swarm/src/error.rs now prints a full backtrace, so
+# ONE reproduction names the line.
 #
-# This branch carries the diagnostics from integration/0.13.2, which name the
-# probe and the object at every filesystem site on the admission and
-# materialization paths. So the job here is not to fix anything — it is to make
-# the flake fire on a GitHub-hosted macOS runner and READ WHAT IT NAMES.
-#
-# Hosted runner deliberately: the self-hosted macOS runner is the owner's own
-# machine, and a 60-iteration loop has no business occupying it.
+# Runs on the SELF-HOSTED macOS runner, deliberately:
+#   * the GitHub-hosted macOS pool stopped creating runs entirely for this
+#     workflow (two consecutive pushes produced zero runs) while a release
+#     occupied it, and
+#   * this is the owner's own machine, so the job is written to get off it as
+#     fast as possible: it STOPS AT THE FIRST FAILURE rather than completing a
+#     fixed loop, and caps at 30 minutes.
+# Observed failure rate is ~37% (22/60), so 25 attempts is >99.9% likely to
+# catch one and will usually stop within the first handful.
 
 on:
   push:
     branches:
-      - 'verify/1025-macos'
+      - 'verify/1025-instr'
 
 permissions:
   contents: read
@@ -27,81 +28,80 @@ concurrency:
 
 jobs:
   repro:
-    name: 'gh#1025 macOS repro loop'
-    runs-on: macos-latest
-    timeout-minutes: 60
+    name: 'gh#1025 backtrace hunt (self-hosted macOS)'
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+    timeout-minutes: 30
     env:
-      # Turn on the io::Error funnel trace and give it symbols.
       WCORE_GH1025_TRACE: '1'
       RUST_BACKTRACE: 'full'
+      CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
 
-      - name: Environment provenance
+      - name: Trust the checkout for git
+        run: git config --global --add safe.directory '*'
+
+      - name: Use the runner's installed Rust toolchain
         run: |
+          for d in "$CARGO_HOME/bin" "$HOME/.cargo/bin" /usr/local/bin /opt/homebrew/bin; do
+            if [ -x "$d/cargo" ]; then echo "$d" >> "$GITHUB_PATH"; echo "cargo at $d"; break; fi
+          done
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo -V && rustc -vV | head -3
           sw_vers
-          uname -a
-          echo "TMPDIR=$TMPDIR"
-          # macOS puts the per-user temp dir under /var/folders, and /var is a
-          # symlink to /private/var. Any code that compares a canonicalized path
-          # against a non-canonicalized one differs HERE and nowhere on Linux,
-          # which is the shape a macOS-only ENOENT tends to have.
-          echo "--- symlink check ---"
-          ls -ld /var /tmp || true
-          python3 -c "import os,sys; t=os.environ.get('TMPDIR','/tmp'); print('TMPDIR       :',t); print('realpath     :',os.path.realpath(t)); print('differs      :',os.path.realpath(t)!=t.rstrip('/'))"
-          df -h /
+          echo "load: $(uptime)"
 
-      - name: Build the test binary once
+      - name: Build the test binary
         run: |
-          cargo test -p wcore-swarm --test workspace_authority --no-run 2>&1 | tail -5
+          export PATH="$HOME/.cargo/bin:$PATH"
+          # -j4 on a 10-core machine that belongs to a person, not to CI.
+          cargo test -p wcore-swarm --test workspace_authority --no-run -j 4 2>&1 | tail -4
 
-      - name: Repro loop — 60 iterations, record every failure verbatim
-        id: loop
+      - name: Hunt — stop at the FIRST reproduction
         run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
           set +e
-          PASS=0; FAIL=0
-          mkdir -p /tmp/r1025
-          for i in $(seq 1 60); do
-            LOG=/tmp/r1025/iter-$i.log
+          mkdir -p /tmp/gh1025
+          CAUGHT=0
+          for i in $(seq 1 25); do
+            LOG=/tmp/gh1025/iter-$i.log
             cargo test -p wcore-swarm --test workspace_authority \
               independent_cli_processes_cannot_overbook_shared_capacity \
               -- --exact --nocapture > "$LOG" 2>&1
-            if [ $? -eq 0 ]; then
-              PASS=$((PASS+1))
-              printf "."
-            else
-              FAIL=$((FAIL+1))
+            if [ $? -ne 0 ]; then
+              CAUGHT=1
+              echo "########## REPRODUCED on iteration $i ##########"
+              echo "--- verdict ---"
+              grep -E "assertion|panicked" "$LOG" | head -5
               echo ""
-              echo "########## ITERATION $i FAILED ##########"
-              # The assertion prints the verdict vector; that is the payload.
-              grep -E "panicked|assertion|verdict|results|worktree io|io:|No such file|exhausted" "$LOG" | head -60
-              echo "########## end iteration $i ##########"
+              echo "--- THE BACKTRACE (this is the whole point) ---"
+              # Print the funnel trace plus a generous window after it: the
+              # first wcore_swarm frame below the From impl is the culprit.
+              grep -A 60 "gh1025 bare-io" "$LOG" | head -90
+              echo ""
+              echo "--- wcore_swarm frames only ---"
+              grep -A 60 "gh1025 bare-io" "$LOG" | grep -E "wcore_swarm|worktree" | head -25
+              break
             fi
+            printf "."
           done
           echo ""
-          echo "=== RESULT: $PASS passed, $FAIL failed out of 60 ==="
-          echo "fail_count=$FAIL" >> "$GITHUB_OUTPUT"
-          # Never fail the job on a reproduced flake — a red here would say
-          # nothing that the count does not already say, and the artifact upload
-          # below is the point of the run.
+          if [ "$CAUGHT" = "0" ]; then
+            echo "!! 25 iterations, no reproduction — the rate dropped or the machine is too fast/slow to hit the window"
+          fi
           exit 0
 
-      - name: Aggregate what the failures actually named
-        if: always()
-        run: |
-          set +e
-          echo "=== distinct error lines across all failing iterations ==="
-          grep -h -E "worktree io|io: |No such file" /tmp/r1025/*.log 2>/dev/null | sed 's/^[[:space:]]*//' | sort | uniq -c | sort -rn | head -30
-          echo ""
-          echo "=== distinct verdict vectors ==="
-          grep -h -E "results|verdict" /tmp/r1025/*.log 2>/dev/null | sed 's/^[[:space:]]*//' | sort | uniq -c | sort -rn | head -20
-
-      - name: Upload every log
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: repro-1025-logs
-          path: /tmp/r1025
+          name: gh1025-backtrace
+          path: /tmp/gh1025
           if-no-files-found: warn
 
-# retrigger: backtrace funnel run
+      - name: Leave the machine clean
+        if: always()
+        run: rm -rf /tmp/gh1025 || true
