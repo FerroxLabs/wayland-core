@@ -66,9 +66,28 @@ impl DirectoryAuthority {
         &self,
         name: &str,
     ) -> Result<wcore_sandbox::DirectoryHandleLoan> {
+        // NOT `lock_file_error`. That helper deliberately preserves the raw
+        // `io::Error` so the PROBE path above can tell "no lock file, so nobody
+        // holds the lease" from a real failure — see its doc comment. This is
+        // the ACQUIRE path, where nobody handles `NotFound` and there is no
+        // benign reading of it: open-or-create only fails that way when the
+        // directory that should contain the lock is gone.
+        //
+        // wayland#1025. Sharing the helper let that ENOENT escape as a bare
+        // `SwarmError::Io`, which renders as `io: No such file or directory
+        // (os error 2)` with no path and no probe. It bypassed every named
+        // site in this crate because it is minted in the sandbox layer, which
+        // is why the macOS admission flake stayed unmeasurable across several
+        // release trains: its CI output contained nothing to look at.
         self.0
             .open_or_create_child_lock_file(name)
-            .map_err(lock_file_error)
+            .map_err(|error| match error {
+                wcore_sandbox::SandboxError::Io(error) => SwarmError::WorktreeIo(format!(
+                    "open-or-create of the advisory lock file {name:?} \
+                     (its parent directory is missing or unusable): {error}"
+                )),
+                other => SwarmError::DispatchAdmission(other.to_string()),
+            })
     }
 
     pub(super) fn has_outstanding_loans(&self) -> bool {
@@ -130,6 +149,12 @@ impl DirectoryAuthority {
 /// an absent lock file can still distinguish "not found" (nobody holds it) from
 /// a real failure. Every other sandbox refusal keeps the admission shape the
 /// sibling accessors use.
+///
+/// **Only the open-EXISTING probe may use this.** Preserving a bare
+/// `SwarmError::Io` is safe exactly where a caller matches on
+/// `ErrorKind::NotFound`; anywhere else it escapes as `io: <errno>` with no
+/// path and no probe, defeating the naming discipline the rest of this crate
+/// maintains through `io_at`. wayland#1025 was that leak on the acquire path.
 fn lock_file_error(error: wcore_sandbox::SandboxError) -> SwarmError {
     match error {
         wcore_sandbox::SandboxError::Io(error) => SwarmError::Io(error),
@@ -331,4 +356,70 @@ pub(super) fn write_empty_private_config(path: &Path) -> std::io::Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod lock_file_error_tests {
+    use super::*;
+
+    /// wayland#1025. The acquire path must never hand back a bare
+    /// `SwarmError::Io`. That renders as `io: No such file or directory
+    /// (os error 2)` with no path and no probe, and because it is minted in
+    /// the sandbox layer it bypasses every `io_at` site in this crate — which
+    /// is exactly why the macOS admission flake survived several release
+    /// trains with nothing in its CI output to look at.
+    #[test]
+    fn acquire_on_a_vanished_directory_names_itself_instead_of_leaking_io() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let authority = DirectoryAuthority::open(dir.path()).expect("open authority");
+        // Remove the directory out from under the retained authority: this is
+        // the shape the race produces, a lock target whose parent is gone.
+        std::fs::remove_dir_all(dir.path()).expect("remove dir");
+
+        let error = authority
+            .open_or_create_child_lock_file("some.lock")
+            .expect_err("acquiring a lock under a removed directory must fail");
+
+        assert!(
+            !matches!(error, SwarmError::Io(_)),
+            "acquire must not leak a bare Io — that is the whole defect: {error:?}"
+        );
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("some.lock"),
+            "the error must name the lock file it could not acquire: {rendered}"
+        );
+        assert!(
+            rendered.contains("parent directory"),
+            "the error must say why, not merely which: {rendered}"
+        );
+    }
+
+    /// THE CONTROL, and the reason the two paths cannot simply share a helper.
+    /// `transaction_is_active` probes for an ABSENT lease file and reads
+    /// `Io(NotFound)` as "nobody holds the lease". If the fix above were
+    /// applied to the probe too, every transaction would read as inactive and
+    /// capacity accounting would silently stop counting active reservations —
+    /// a far worse bug than the one being fixed.
+    #[test]
+    fn the_probe_path_still_reports_notfound_as_a_bare_io() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let authority = DirectoryAuthority::open(dir.path()).expect("open authority");
+
+        let error = authority
+            .open_child_lock_file("absent.lock")
+            .expect_err("opening a non-existent lock file must fail");
+
+        match error {
+            SwarmError::Io(io) => assert_eq!(
+                io.kind(),
+                std::io::ErrorKind::NotFound,
+                "the probe path's NotFound signal must survive"
+            ),
+            other => panic!(
+                "probe path must keep returning a bare Io so callers can match \
+                 NotFound; got {other:?}"
+            ),
+        }
+    }
 }
