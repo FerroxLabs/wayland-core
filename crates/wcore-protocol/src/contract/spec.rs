@@ -1002,6 +1002,8 @@ pub const PRODUCER_COMMAND_TYPES: &[&str] = &[
     "add_mcp_server",
     "remove_mcp_server",
     "grant_workspace_capability",
+    "grant_path",
+    "revoke_path",
     "approval_resume",
     "host_send_message_result",
     // F22-C1 host Goal control.

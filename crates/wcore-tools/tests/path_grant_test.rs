@@ -318,3 +318,163 @@ fn the_sink_reports_refusal_rather_than_swallowing_it() {
          act the user approved still happens, the standing grant does not"
     );
 }
+
+// ---------------------------------------------------------------------------
+// REQUEST 3 from the Desktop lane, in writing: the credential/secret denies
+// must WIN over a user-granted root. "A grant on `~` that overrode the
+// credential deny is strictly worse than no feature."
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_secret_inside_a_granted_folder_is_still_refused() {
+    let ws = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+
+    // An ordinary folder a user would plausibly grant — that happens to have
+    // something sensitive in it. This is NOT a credential store, so the
+    // grant-time refusal does not catch it; the use-time rule must.
+    let ordinary = outside.path().join("Downloads");
+    std::fs::create_dir(&ordinary).unwrap();
+    let report = ordinary.join("report.pdf");
+    std::fs::write(&report, b"fine").unwrap();
+    let key = ordinary.join("id_rsa");
+    std::fs::write(&key, b"PRIVATE KEY").unwrap();
+    let dotenv = ordinary.join(".env");
+    std::fs::write(&dotenv, b"TOKEN=1").unwrap();
+    let pem = ordinary.join("server.pem");
+    std::fs::write(&pem, b"CERT").unwrap();
+
+    let policy = Arc::new(local_policy(ws.path()));
+    let jail = SandboxedFs::new(RealFs, ws.path().to_path_buf())
+        .with_read_grants(policy.session_read_grant_handle());
+    policy.grant_session_read_root(&ordinary, false).unwrap();
+
+    // The grant works for the thing it was for.
+    assert_eq!(jail.read(&report).await.unwrap(), b"fine".to_vec());
+
+    // And not for anything the secret rules cover.
+    for secret in [&key, &dotenv, &pem] {
+        assert!(
+            matches!(jail.read(secret).await, Err(VfsError::SecretDenied { .. })),
+            "{} must stay refused inside a granted folder — a grant says \
+             WHERE the agent may look, never WHAT it may read",
+            secret.display()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_benign_name_symlinked_to_a_secret_inside_a_grant_is_refused() {
+    let ws = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("id_rsa");
+    std::fs::write(&secret, b"PRIVATE KEY").unwrap();
+    let decoy = outside.path().join("notes.txt");
+    std::os::unix::fs::symlink(&secret, &decoy).unwrap();
+
+    let policy = Arc::new(local_policy(ws.path()));
+    let jail = SandboxedFs::new(RealFs, ws.path().to_path_buf())
+        .with_read_grants(policy.session_read_grant_handle());
+    policy
+        .grant_session_read_root(outside.path(), false)
+        .unwrap();
+
+    // The check runs on the CANONICAL path, so renaming a secret does not
+    // launder it.
+    assert!(
+        matches!(jail.read(&decoy).await, Err(VfsError::SecretDenied { .. })),
+        "a benign filename pointing at a secret must not launder it"
+    );
+}
+
+#[test]
+fn a_secret_in_a_granted_folder_reaches_the_os_read_deny_list() {
+    // The sibling of the two tests above, for the OS sandbox rather than the
+    // in-process tools. If only the VFS refused, `Bash cat` would read what
+    // `Read` refused, and the two layers would disagree.
+    let ws = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let key = outside.path().join("id_rsa");
+    std::fs::write(&key, b"PRIVATE KEY").unwrap();
+    let key = std::fs::canonicalize(&key).unwrap();
+
+    // `contained` requires OS read-deny enforcement, which is the posture the
+    // dynamic walk is gated on.
+    let policy = WorkspacePolicy::contained(ws.path()).with_local_operator_principal();
+    assert!(policy.secret_read_deny_required());
+    assert!(
+        !policy.secret_deny_paths_dynamic().contains(&key),
+        "nothing outside the workspace is denied before the grant, because \
+         nothing outside it is reachable"
+    );
+
+    policy
+        .grant_session_read_root(outside.path(), false)
+        .unwrap();
+    assert!(
+        policy.secret_deny_paths_dynamic().contains(&key),
+        "granting the folder must also extend the read-deny walk into it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Revocation and expiry — the `grant_path` / `revoke_path` command surface.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_revoked_grant_stops_working_immediately() {
+    let ws = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let file = outside.path().join("x.txt");
+    std::fs::write(&file, b"x").unwrap();
+
+    let policy = Arc::new(local_policy(ws.path()));
+    let jail = SandboxedFs::new(RealFs, ws.path().to_path_buf())
+        .with_read_grants(policy.session_read_grant_handle());
+
+    policy
+        .grant_session_read_root_full(outside.path(), false, Some("g1".into()), None)
+        .unwrap();
+    assert!(jail.read(&file).await.is_ok());
+
+    assert!(policy.revoke_session_read_root("g1").is_some());
+    assert!(
+        matches!(jail.read(&file).await, Err(VfsError::OutsideSandbox { .. })),
+        "revocation must take effect on the next call, not the next session"
+    );
+    assert!(
+        policy.revoke_session_read_root("g1").is_none(),
+        "revoking twice is a no-op, so a host that crashed mid-flow can still \
+         clean up without knowing what landed"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_grant_stops_working_without_anyone_sweeping() {
+    let ws = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let file = outside.path().join("x.txt");
+    std::fs::write(&file, b"x").unwrap();
+
+    let policy = Arc::new(local_policy(ws.path()));
+    let jail = SandboxedFs::new(RealFs, ws.path().to_path_buf())
+        .with_read_grants(policy.session_read_grant_handle());
+
+    // Already in the past: expiry is evaluated at USE time, so a grant cannot
+    // outlive its deadline by racing whatever would otherwise reap it.
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    policy
+        .grant_session_read_root_full(outside.path(), false, Some("g2".into()), Some(past))
+        .unwrap();
+
+    assert!(
+        matches!(jail.read(&file).await, Err(VfsError::OutsideSandbox { .. })),
+        "an expired grant grants nothing"
+    );
+    assert!(
+        policy.session_read_grant_roots().is_empty(),
+        "and it is not reported as a live root either"
+    );
+    assert!(!policy.is_session_read_granted(&file));
+}

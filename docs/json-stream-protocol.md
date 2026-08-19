@@ -753,6 +753,61 @@ Because of (6), the honest UI is a prompt that says what will happen for *this*
 file, with "always allow this folder" as a convenience — not a setup step the
 user is told has succeeded.
 
+#### 2.3.3 `grant_path` / `revoke_path` — the flow with no pending call
+
+`always_path` rides an approval, so it only serves the **agent-initiated** case:
+the agent wanted something outside the workspace and a card was raised.
+
+The **user-initiated** case has no pending `call_id` at all — the operator picked a
+folder in a native picker, unprompted — so it gets its own command rather than a
+scope on an approval that does not exist. Both land in the same grant store, so
+there is exactly one mechanism to audit.
+
+```json
+{ "type": "grant_path",
+  "grant_id": "3f2a…",
+  "root": "/Users/me/Downloads/Mortgage",
+  "access": "read",
+  "expires_at_ms": 1755640000000 }
+```
+
+```json
+{ "type": "revoke_path", "grant_id": "3f2a…" }
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `grant_id` | yes | Host-chosen. Echo it to `revoke_path` to withdraw this exact grant |
+| `root` | yes | Folder to grant. May be a file — the containing directory is granted |
+| `access` | no | `read` (default) or `write`. `write` is **refused**, never downgraded |
+| `expires_at_ms` | no | Unix ms deadline. Absent = process lifetime |
+
+Every rule in §2.3.2 applies unchanged. In addition:
+
+- **Launch opt-in required.** Core refuses unless started with
+  `--allow-host-path-grants` (which itself requires `--json-stream`). It is a flag
+  and not an environment variable on purpose: an env var set once per spawn cannot
+  express "this session may, that one may not". Absent, the refusal is legible on
+  the wire, not silent.
+- **`revoke_path` is NOT gated.** Taking authority away is always permitted —
+  requiring the opt-in to revoke would leave a host unable to clean up a grant it
+  somehow held. An unknown `grant_id` is a no-op, so revoking is idempotent and a
+  host that crashed mid-flow can clean up without knowing what landed.
+- **Expiry is evaluated at use time**, not by a sweep, so a grant cannot outlive
+  its deadline by racing whatever would otherwise reap it. This is what makes an
+  unattended overnight run safe to grant to.
+- **The deny-list wins.** A grant says *where* the agent may look, never *what* it
+  may read. A secret inside a granted folder — `id_rsa`, `.env`, `*.pem` — stays
+  refused, in the in-process file tools and in the OS sandbox's read-deny list
+  alike. Checked lexically on the canonicalized path, so renaming a secret to
+  `notes.txt` does not launder it, and a secret created after the grant is still
+  caught.
+
+After any `grant_path` or `revoke_path`, Core re-emits
+[`workspace_policy`](#1n-workspace_policy) with the updated `readable_roots`. That
+event is the authoritative answer to "what can this chat actually reach" — prefer
+it over tracking grants host-side.
+
 ### 2.4 `tool_deny`
 
 Deny a pending tool execution.

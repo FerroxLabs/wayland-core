@@ -311,6 +311,27 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
                     },
                     "required": ["always_prefix"],
                     "type": "object"
+                },
+                // The published schema has to ADMIT `always_path`, or a host
+                // that validates its own outgoing commands against this file
+                // (Desktop does, and fails closed) could never send the scope
+                // that `path_grants_v1: available` tells it is supported. A
+                // capability the schema forbids is not a capability.
+                {
+                    "additionalProperties": false,
+                    "properties": {
+                        "always_path": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "root": {"type": "string"},
+                                "write": {"type": "boolean"}
+                            },
+                            "required": ["root"],
+                            "type": "object"
+                        }
+                    },
+                    "required": ["always_path"],
+                    "type": "object"
                 }
             ]
         }),

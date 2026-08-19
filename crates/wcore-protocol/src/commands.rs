@@ -366,6 +366,34 @@ pub enum ProtocolCommand {
     GrantWorkspaceCapability {
         executable: String,
     },
+    /// Grant this session standing READ access to a folder outside the
+    /// workspace ("always allow this folder").
+    ///
+    /// A sibling of [`ProtocolCommand::GrantWorkspaceCapability`], not of
+    /// `ToolApprove`, and deliberately so: the user-initiated flow — the
+    /// operator picks a folder in a native picker — has NO pending tool call
+    /// to attach a scope to. Routing both flows through one grant command also
+    /// means there is exactly one mechanism to audit.
+    ///
+    /// Gated on the launcher opt-in (`--allow-host-path-grants`) and on a
+    /// trusted-local workspace, exactly as the capability grant is. It never
+    /// widens writes and never disables containment, and it is subordinate to
+    /// the credential deny-list: a granted root cannot un-deny a secret.
+    GrantPath {
+        /// Host-chosen id, echoed so the host can revoke this exact grant.
+        grant_id: String,
+        root: String,
+        #[serde(default)]
+        access: PathGrantAccess,
+        /// Wall-clock expiry in unix milliseconds. Absent = process lifetime.
+        #[serde(default)]
+        expires_at_ms: Option<u64>,
+    },
+    /// Withdraw a grant previously made by [`ProtocolCommand::GrantPath`].
+    /// Unknown ids are a no-op, so a host may revoke idempotently.
+    RevokePath {
+        grant_id: String,
+    },
     /// W7 S4: resume a session that emitted `ApprovalRequired`. The
     /// host echoes the `resume_token` from the corresponding event so
     /// the engine can route the decision to the right pending bridge.
@@ -511,6 +539,20 @@ fn valid_evidence_digest(value: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     })
+}
+
+/// Access level requested by [`ProtocolCommand::GrantPath`].
+///
+/// `Write` is accepted on the wire and REFUSED by the engine, rather than
+/// being absent or silently downgraded. A host that can express the request
+/// gets a legible refusal; a host that cannot express it might ship a button
+/// promising more than it delivers.
+#[derive(Debug, Deserialize, Default, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum PathGrantAccess {
+    #[default]
+    Read,
+    Write,
 }
 
 #[derive(Debug, Deserialize, Default, PartialEq, Eq, Clone)]

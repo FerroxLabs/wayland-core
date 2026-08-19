@@ -1343,7 +1343,7 @@ pub struct SandboxedFs<F: VirtualFs> {
     /// root-only check: a granted folder is somewhere the agent may LOOK, and
     /// widening a read into a write is exactly the escalation this feature is
     /// supposed to make unnecessary.
-    read_grants: Arc<RwLock<Vec<PathBuf>>>,
+    read_grants: Arc<RwLock<Vec<crate::workspace_policy::SessionReadGrant>>>,
 }
 
 impl<F: VirtualFs> SandboxedFs<F> {
@@ -1371,7 +1371,10 @@ impl<F: VirtualFs> SandboxedFs<F> {
     /// because the OS sandbox and the in-process file tools would be reading
     /// two different answers to the same question.
     #[must_use]
-    pub fn with_read_grants(mut self, grants: Arc<RwLock<Vec<PathBuf>>>) -> Self {
+    pub fn with_read_grants(
+        mut self,
+        grants: Arc<RwLock<Vec<crate::workspace_policy::SessionReadGrant>>>,
+    ) -> Self {
         self.read_grants = grants;
         self
     }
@@ -1454,7 +1457,17 @@ impl<F: VirtualFs> SandboxedFs<F> {
         else {
             return Err(refusal);
         };
-        let grants = self.read_grants.read().clone();
+        // Expiry is evaluated HERE, at use time, not when the grant was made:
+        // a long-running turn must lose access the moment the deadline passes,
+        // not at whatever later point something happens to rebuild a sandbox.
+        let now = std::time::SystemTime::now();
+        let grants: Vec<PathBuf> = self
+            .read_grants
+            .read()
+            .iter()
+            .filter(|grant| grant.expires_at.is_none_or(|deadline| now < deadline))
+            .map(|grant| grant.root.clone())
+            .collect();
         if grants.is_empty() {
             return Err(refusal);
         }
@@ -1463,6 +1476,21 @@ impl<F: VirtualFs> SandboxedFs<F> {
         };
         if !grants.iter().any(|root| canon_prefix.starts_with(root)) {
             return Err(refusal);
+        }
+        // A grant widens WHERE we may look, never WHAT. The secret rules are
+        // not a property of the workspace, they are a property of the file, so
+        // an `id_rsa` or a `.env` sitting inside an otherwise perfectly
+        // reasonable granted folder stays refused. Checked lexically on the
+        // canonical path, so a benign-named symlink to a secret is caught and
+        // a secret created after the grant is caught too — there is no walk to
+        // go stale.
+        let target = if suffix.as_os_str().is_empty() {
+            canon_prefix.clone()
+        } else {
+            canon_prefix.join(&suffix)
+        };
+        if crate::workspace_policy::is_secret_path_static(&target) {
+            return Err(VfsError::SecretDenied { path: target });
         }
         if suffix.as_os_str().is_empty() {
             Ok(canon_prefix)
