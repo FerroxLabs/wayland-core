@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.13.3](https://github.com/FerroxLabs/wayland-core/compare/v0.13.2...v0.13.3) (2026-08-19)
+
+**Release highlights.** Two fixes, both about the product telling the truth. A
+privacy notice that was being written somewhere nobody reads, and an error that
+had been hiding its own cause well enough to survive several release trains. No
+breaking changes.
+
+**You are now told when your searches leave for a third party.** The keyless
+default web-search backend sends queries to `parallel.ai`, and the notice saying
+so was emitted into the log file rather than to your terminal, because with
+`RUST_LOG` unset only errors reach stderr. You had never seen it. That mattered
+more from 0.13.2 onward, since that release is what made the keyless default
+actually reach the network for the first time — before it, every request was
+refused by the egress policy and quietly served by DuckDuckGo instead. The notice
+now prints where you are, once, and every failure path errs towards showing it
+rather than skipping it.
+
+**The workspace admission error stops hiding where it came from.** A lock-file
+`ENOENT` was deliberately passed through as a raw OS error so one caller could
+read "no lock file" as "nobody holds the lease". A second caller shared that
+path, where the condition is neither expected nor handled, so it escaped as
+`io: No such file or directory (os error 2)` with no path and no probe — and
+because it originates in the sandbox layer, it slipped past every site in the
+swarm layer that names itself. That is the whole reason this defect stayed
+unmeasurable: its CI output contained nothing to look at. The acquiring path now
+names the lock file it could not take and says its parent directory is missing.
+The probing path is deliberately untouched, and a test pins that: changing it too
+would make every transaction read as inactive and stop capacity accounting
+counting reservations at all, which is a considerably worse bug than the one
+being fixed.
+
 ## [0.13.2](https://github.com/FerroxLabs/wayland-core/compare/v0.13.1...v0.13.2) (2026-08-18)
 
 **Release highlights.** Web search has not actually worked since June, and this
