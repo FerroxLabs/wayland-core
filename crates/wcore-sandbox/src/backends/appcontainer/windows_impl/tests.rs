@@ -581,7 +581,10 @@ async fn output_past_the_cap_is_truncated_not_discarded_live() {
     let elapsed = started.elapsed();
 
     let kept = out.stdout.len();
-    eprintln!("MEASURED kept={kept} bytes elapsed={elapsed:?} exit={}", out.exit_code);
+    eprintln!(
+        "MEASURED kept={kept} bytes elapsed={elapsed:?} exit={}",
+        out.exit_code
+    );
 
     // THE DEFECT: this whole buffer used to be thrown away.
     assert!(
