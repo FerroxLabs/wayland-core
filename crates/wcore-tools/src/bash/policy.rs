@@ -220,26 +220,103 @@ fn is_path_token(token: &str) -> bool {
 
 /// Pull the path-shaped tokens out of a tool result body. Deliberately crude:
 /// the caller only trusts a token once it matches the manifest.
-fn candidate_paths(body: &str) -> Vec<&str> {
-    body.split(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == '`')
-        .map(|token| token.trim_end_matches([':', ',', '.', ';', ')', ']']))
-        .filter(|token| is_path_token(token))
-        .collect()
+fn candidate_paths(body: &str, scope: &SandboxScope) -> Vec<String> {
+    let raw: Vec<&str> = body
+        .split(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == '`')
+        .collect();
+
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        // Greedily prefer the LONGEST run of space-joined tokens that names
+        // something real. `~/Library/Application Support/...` is one path, not
+        // two, and every macOS desktop workspace lives under it — splitting it
+        // produced two fragments that each looked ungranted, so the advisory
+        // stated a falsehood about a file that was never out of reach.
+        //
+        // The filesystem is the arbiter, which is sound HERE specifically:
+        // this runs in the parent process, outside the child's sandbox, so a
+        // path that resolves for us really does exist.
+        let mut best: Option<(usize, String)> = None;
+        let limit = raw.len().min(i + MAX_SPACE_JOINED_TOKENS);
+        for j in i..limit {
+            let joined = trim_trailing_punctuation(&raw[i..=j].join(" "));
+            if joined.is_empty() || !is_path_token(&joined) {
+                continue;
+            }
+            if resolve_candidate(scope, &joined).is_some_and(|p| !is_definitely_absent(&p)) {
+                best = Some((j, joined));
+            }
+        }
+        match best {
+            Some((j, joined)) => {
+                out.push(joined);
+                i = j + 1;
+            }
+            None => {
+                // Nothing real here. Keep the bare token so a genuinely denied
+                // path that no longer exists on disk can still match the
+                // deny-list, and let `classify` decide.
+                let token = trim_trailing_punctuation(raw[i]);
+                if is_path_token(&token) {
+                    out.push(token);
+                }
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Longest run of whitespace-separated tokens considered as one path.
+///
+/// Real directory names contain a space or two (`Application Support`,
+/// `My Documents`); prose does not stop being prose for eight words running.
+/// The bound also keeps this quadratic scan cheap on a large tool output.
+const MAX_SPACE_JOINED_TOKENS: usize = 6;
+
+fn trim_trailing_punctuation(token: &str) -> String {
+    token
+        .trim_end_matches([':', ',', '.', ';', ')', ']'])
+        .to_string()
+}
+
+/// True only when the filesystem positively reports that nothing is there.
+///
+/// Deliberately NOT `!path.exists()`. `exists()` collapses "no such file" and
+/// "I was not allowed to look" into the same `false`, and the second case is
+/// one this annotation must keep reporting: a path denied through a directory
+/// the agent process itself cannot traverse is exactly the kind of genuine
+/// denial worth naming. Only a hard `NotFound` is evidence of absence.
+fn is_definitely_absent(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => false,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Resolve a token the way [`classify`] does — absolute as written, relative
+/// against the child's cwd. Shared by the tokenizer so the two cannot drift
+/// into disagreeing about what a token even names.
+fn resolve_candidate(scope: &SandboxScope, token: &str) -> Option<PathBuf> {
+    let raw = Path::new(token);
+    if raw.is_absolute() {
+        Some(raw.to_path_buf())
+    } else {
+        Some(
+            scope
+                .cwd
+                .as_ref()?
+                .join(raw.strip_prefix("./").unwrap_or(raw)),
+        )
+    }
 }
 
 /// Classify one path token against the scope. `None` means "no evidence this
 /// path was blocked by the sandbox" — the default, so an unrelated failure is
 /// never given a fabricated cause.
 fn classify(scope: &SandboxScope, token: &str) -> Option<(PathBuf, DeniedBecause)> {
-    let raw = Path::new(token);
-    let joined = if raw.is_absolute() {
-        raw.to_path_buf()
-    } else {
-        scope
-            .cwd
-            .as_ref()?
-            .join(raw.strip_prefix("./").unwrap_or(raw))
-    };
+    let joined = resolve_candidate(scope, token)?;
     // Manifest roots are canonicalized by `WorkspacePolicy`, but a child names
     // whatever spelling it was given. On macOS the granted scratch root is
     // `/private/tmp/...` while the shell reports `/tmp/...`, so a prefix match on
@@ -288,8 +365,8 @@ pub(super) fn annotate_sandbox_denial(scope: &SandboxScope, mut result: ToolResu
         return result;
     }
     let mut denied: Vec<(PathBuf, DeniedBecause)> = Vec::new();
-    for token in candidate_paths(&result.content) {
-        if let Some(hit) = classify(scope, token)
+    for token in candidate_paths(&result.content, scope) {
+        if let Some(hit) = classify(scope, &token)
             && !denied.iter().any(|(seen, _)| *seen == hit.0)
         {
             denied.push(hit);
