@@ -1011,6 +1011,40 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    /// #1098: this sink IS a json-stream host connection, so it is the one
+    /// sink that can put a rendered artifact in front of a user.
+    fn render_artifact_supported(&self) -> bool {
+        true
+    }
+
+    /// #1098: emit `ProtocolEvent::RenderArtifact`.
+    ///
+    /// THE truncation chokepoint. Every render passes through here, so the
+    /// cap cannot be routed around by a future caller that forgot it. Over the
+    /// cap the content is truncated with an in-band marker and `truncated` is
+    /// set — never dropped (wayland#1071), and never sent whole: an over-limit
+    /// frame does not merely fail to display, it sets the output pump's sticky
+    /// failure and takes the session's entire stdout with it.
+    fn emit_render_artifact(
+        &self,
+        call_id: &str,
+        title: &str,
+        mime: wcore_protocol::events::RenderMime,
+        content: &str,
+    ) {
+        let msg_id = self.current_msg_id.read().clone();
+        let (content, truncated) = wcore_protocol::events::truncate_render_content(content);
+        let _ = self.writer.emit(&ProtocolEvent::RenderArtifact {
+            msg_id,
+            call_id: call_id.to_string(),
+            title: wcore_protocol::events::truncate_render_title(title),
+            mime,
+            content,
+            truncated,
+            critical: wcore_protocol::events::NonCritical,
+        });
+    }
+
     /// W7 S4: emit `ProtocolEvent::ApprovalResume`. Gated by hitl_suspend.
     fn emit_approval_resume(&self, resume_token: &str, approved: bool) {
         if !self.hitl_suspend_enabled {
@@ -1606,6 +1640,19 @@ mod tests {
         let compat = ProviderCompat::anthropic_defaults();
         let caps = sink.build_capabilities(&compat, false, "default", false, &advertised);
         assert!(!caps.sub_agent_traces);
+    }
+
+    /// #1098: only a json-stream connection is a render surface. The terminal
+    /// and null sinks must report false, or `RenderArtifactTool` would be
+    /// registered under a sink that discards the event and the model would
+    /// believe it had shown the user something.
+    #[test]
+    fn only_the_protocol_sink_reports_render_support() {
+        let sink = ProtocolSink::new(Arc::new(ProtocolWriter::new()));
+        assert!(OutputSink::render_artifact_supported(&sink));
+        assert!(!OutputSink::render_artifact_supported(
+            &crate::output::null_sink::NullSink
+        ));
     }
 
     /// W7 F4: streaming_tools_advertised reflects the builder flag.

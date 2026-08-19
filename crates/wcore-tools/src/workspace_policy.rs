@@ -20,6 +20,7 @@
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 use thiserror::Error;
 use wcore_protocol::PathGrantSink;
 use wcore_sandbox::manifest::NetworkPolicy;
@@ -177,7 +178,7 @@ pub struct WorkspacePolicy {
     /// Read-only roots approved by the local desktop host for this process
     /// lifetime. This is interior-mutable so an already-running Bash tool sees
     /// the grant on its next call without replacing the session sandbox.
-    session_read_grants: Arc<RwLock<Vec<PathBuf>>>,
+    session_read_grants: Arc<RwLock<Vec<SessionReadGrant>>>,
 }
 
 #[derive(Debug, Error)]
@@ -190,6 +191,28 @@ pub enum WorkspaceCapabilityGrantError {
     CredentialPath(PathBuf),
     #[error("capability path could not be resolved: {0}")]
     Resolve(#[from] std::io::Error),
+}
+
+/// One standing read grant held by a session.
+///
+/// Capability-derived roots (`grant_session_capability`) and host path grants
+/// (`grant_session_read_root`) share ONE store, because they answer the same
+/// question — what may this session read — and two stores would be two answers.
+/// They differ only in whether they carry an id to revoke by.
+#[derive(Debug, Clone)]
+pub struct SessionReadGrant {
+    pub root: PathBuf,
+    /// Host-supplied id, for revocation. `None` for capability-derived roots,
+    /// which are withdrawn only by ending the session.
+    pub id: Option<String>,
+    /// Wall-clock expiry. `None` means process lifetime.
+    pub expires_at: Option<SystemTime>,
+}
+
+impl SessionReadGrant {
+    fn is_live(&self, now: SystemTime) -> bool {
+        self.expires_at.is_none_or(|deadline| now < deadline)
+    }
 }
 
 /// Why a standing folder grant (`ApprovalScope::AlwaysPath`) was refused.
@@ -483,7 +506,17 @@ impl WorkspacePolicy {
         if !matches!(self.network, NetworkPolicy::Deny) {
             v.extend(self.network_scoped_readable.iter().cloned());
         }
-        v.extend(self.session_read_grants.read().iter().cloned());
+        // Expired grants are filtered here rather than reaped on a timer:
+        // this is the one place that decides what a session may read, so a
+        // grant cannot outlive its deadline by racing a sweep.
+        let now = SystemTime::now();
+        v.extend(
+            self.session_read_grants
+                .read()
+                .iter()
+                .filter(|grant| grant.is_live(now))
+                .map(|grant| grant.root.clone()),
+        );
         v.sort();
         v.dedup();
         v
@@ -775,6 +808,16 @@ impl WorkspacePolicy {
         if self.secret_read_deny_required {
             out.extend(project_committed_secrets(&self.root, &readable_canon));
             out.extend(git_content_stores(&self.root));
+            // A granted folder is a mounted root the child can reach, so it
+            // needs the same secret walk the workspace gets. Without this the
+            // in-process file tools would refuse `<granted>/id_rsa` while
+            // `Bash cat` read it happily, and the two layers would disagree
+            // about what is readable — which is how a boundary quietly stops
+            // being one.
+            for granted in self.session_read_grant_roots() {
+                let scope = vec![granted.clone()];
+                out.extend(project_committed_secrets(&granted, &scope));
+            }
         }
         out.extend(self.authority_read_deny.iter().cloned());
         out.sort();
@@ -869,9 +912,15 @@ impl WorkspacePolicy {
         roots.dedup();
         {
             let mut grants = self.session_read_grants.write();
-            grants.extend(roots.iter().cloned());
-            grants.sort();
-            grants.dedup();
+            for root in &roots {
+                if !grants.iter().any(|existing| existing.root == *root) {
+                    grants.push(SessionReadGrant {
+                        root: root.clone(),
+                        id: None,
+                        expires_at: None,
+                    });
+                }
+            }
         }
         let capability = DeveloperCapability {
             name: executable
@@ -895,9 +944,27 @@ impl WorkspacePolicy {
         Ok(capability)
     }
 
-    /// Standing read grants held by this session.
+    /// Standing read grants held by this session that have not expired.
     pub fn session_read_grant_roots(&self) -> Vec<PathBuf> {
-        self.session_read_grants.read().clone()
+        let now = SystemTime::now();
+        self.session_read_grants
+            .read()
+            .iter()
+            .filter(|grant| grant.is_live(now))
+            .map(|grant| grant.root.clone())
+            .collect()
+    }
+
+    /// Withdraw the grant carrying `grant_id`. Returns the root that was
+    /// withdrawn, or `None` if no such grant is held — an unknown id is a
+    /// no-op so a host can revoke idempotently (a host that crashed mid-flow
+    /// should be able to clean up without having to know what landed).
+    pub fn revoke_session_read_root(&self, grant_id: &str) -> Option<PathBuf> {
+        let mut grants = self.session_read_grants.write();
+        let index = grants
+            .iter()
+            .position(|grant| grant.id.as_deref() == Some(grant_id))?;
+        Some(grants.remove(index).root)
     }
 
     /// Shared handle to the standing read grants, for the in-process file
@@ -908,17 +975,19 @@ impl WorkspacePolicy {
     /// keep refusing a granted path — the user would approve the folder and
     /// `Read` would still say no. Handing out the same `Arc` (never a copy)
     /// is what makes a grant take effect on the very next call.
-    pub fn session_read_grant_handle(&self) -> Arc<RwLock<Vec<PathBuf>>> {
+    pub fn session_read_grant_handle(&self) -> Arc<RwLock<Vec<SessionReadGrant>>> {
         Arc::clone(&self.session_read_grants)
     }
 
     /// True when `path` is inside a standing read grant.
     pub fn is_session_read_granted(&self, path: &Path) -> bool {
         let canon = canon_for_scope(path);
+        let now = SystemTime::now();
         self.session_read_grants
             .read()
             .iter()
-            .any(|root| canon.starts_with(root))
+            .filter(|grant| grant.is_live(now))
+            .any(|grant| canon.starts_with(&grant.root))
     }
 
     /// Add a standing READ grant for a folder outside the workspace, minted by
@@ -947,6 +1016,19 @@ impl WorkspacePolicy {
         &self,
         root: impl AsRef<Path>,
         write: bool,
+    ) -> Result<PathBuf, PathGrantError> {
+        self.grant_session_read_root_full(root, write, None, None)
+    }
+
+    /// [`grant_session_read_root`](Self::grant_session_read_root) with the
+    /// host-supplied revocation id and expiry carried by the `grant_path`
+    /// protocol command.
+    pub fn grant_session_read_root_full(
+        &self,
+        root: impl AsRef<Path>,
+        write: bool,
+        grant_id: Option<String>,
+        expires_at: Option<SystemTime>,
     ) -> Result<PathBuf, PathGrantError> {
         if write {
             return Err(PathGrantError::WriteNotGrantable);
@@ -986,17 +1068,25 @@ impl WorkspacePolicy {
             return Err(PathGrantError::SecretPath(dir));
         }
 
+        let now = SystemTime::now();
         let mut grants = self.session_read_grants.write();
-        // Re-approving a folder already covered is a no-op, not a second entry.
-        if grants.iter().any(|existing| dir.starts_with(existing)) {
+        // Re-approving a folder already covered by a LIVE grant is a no-op,
+        // not a second entry. An expired grant does not count as cover, or a
+        // deadline could be silently extended by re-asking.
+        if grants
+            .iter()
+            .any(|existing| existing.is_live(now) && dir.starts_with(&existing.root))
+        {
             return Ok(dir);
         }
-        if grants.len() >= MAX_SESSION_READ_GRANTS {
+        if grants.iter().filter(|g| g.is_live(now)).count() >= MAX_SESSION_READ_GRANTS {
             return Err(PathGrantError::CapReached(MAX_SESSION_READ_GRANTS));
         }
-        grants.push(dir.clone());
-        grants.sort();
-        grants.dedup();
+        grants.push(SessionReadGrant {
+            root: dir.clone(),
+            id: grant_id,
+            expires_at,
+        });
         Ok(dir)
     }
 }

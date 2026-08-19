@@ -1314,6 +1314,23 @@ impl AgentBootstrap {
                 wcore_tools::send_message::SendMessageTool::default(),
             ));
         }
+        // #1098: RenderArtifactTool — "show this to the user" as a protocol
+        // render event instead of an OS `open`. Registered unconditionally,
+        // but `is_available()` reads the bound sink's liveness, so
+        // `ToolRegistry::register` keeps it ONLY when `self.output` is a
+        // json-stream `ProtocolSink`. Under the TUI, a terminal sink, or any
+        // sub-agent's relay sink the tool is dropped and the model never sees
+        // a display whose output nothing would render.
+        //
+        // SECURITY: no filesystem or process authority leaves the sandbox
+        // here. The content the event carries is read through `ctx.vfs` —
+        // literally the same call `ReadTool` makes — so a file the agent may
+        // not read is a file it may not render.
+        registry.register(Box::new(wcore_tools::render::RenderArtifactTool::new(
+            std::sync::Arc::new(crate::render_sink::ProtocolRenderSink::new(
+                self.output.clone(),
+            )),
+        )));
         // W6 A1: GitTool — typed wrapper over git ops. Read-only ops route
         // through the concurrency-safe path automatically via
         // `is_concurrency_safe(input)`. Mutating ops (add/commit/checkout/stash)

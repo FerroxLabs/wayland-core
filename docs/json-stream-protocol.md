@@ -753,6 +753,61 @@ Because of (6), the honest UI is a prompt that says what will happen for *this*
 file, with "always allow this folder" as a convenience — not a setup step the
 user is told has succeeded.
 
+#### 2.3.3 `grant_path` / `revoke_path` — the flow with no pending call
+
+`always_path` rides an approval, so it only serves the **agent-initiated** case:
+the agent wanted something outside the workspace and a card was raised.
+
+The **user-initiated** case has no pending `call_id` at all — the operator picked a
+folder in a native picker, unprompted — so it gets its own command rather than a
+scope on an approval that does not exist. Both land in the same grant store, so
+there is exactly one mechanism to audit.
+
+```json
+{ "type": "grant_path",
+  "grant_id": "3f2a…",
+  "root": "/Users/me/Downloads/Mortgage",
+  "access": "read",
+  "expires_at_ms": 1755640000000 }
+```
+
+```json
+{ "type": "revoke_path", "grant_id": "3f2a…" }
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `grant_id` | yes | Host-chosen. Echo it to `revoke_path` to withdraw this exact grant |
+| `root` | yes | Folder to grant. May be a file — the containing directory is granted |
+| `access` | no | `read` (default) or `write`. `write` is **refused**, never downgraded |
+| `expires_at_ms` | no | Unix ms deadline. Absent = process lifetime |
+
+Every rule in §2.3.2 applies unchanged. In addition:
+
+- **Launch opt-in required.** Core refuses unless started with
+  `--allow-host-path-grants` (which itself requires `--json-stream`). It is a flag
+  and not an environment variable on purpose: an env var set once per spawn cannot
+  express "this session may, that one may not". Absent, the refusal is legible on
+  the wire, not silent.
+- **`revoke_path` is NOT gated.** Taking authority away is always permitted —
+  requiring the opt-in to revoke would leave a host unable to clean up a grant it
+  somehow held. An unknown `grant_id` is a no-op, so revoking is idempotent and a
+  host that crashed mid-flow can clean up without knowing what landed.
+- **Expiry is evaluated at use time**, not by a sweep, so a grant cannot outlive
+  its deadline by racing whatever would otherwise reap it. This is what makes an
+  unattended overnight run safe to grant to.
+- **The deny-list wins.** A grant says *where* the agent may look, never *what* it
+  may read. A secret inside a granted folder — `id_rsa`, `.env`, `*.pem` — stays
+  refused, in the in-process file tools and in the OS sandbox's read-deny list
+  alike. Checked lexically on the canonicalized path, so renaming a secret to
+  `notes.txt` does not launder it, and a secret created after the grant is still
+  caught.
+
+After any `grant_path` or `revoke_path`, Core re-emits
+[`workspace_policy`](#1n-workspace_policy) with the updated `readable_roots`. That
+event is the authoritative answer to "what can this chat actually reach" — prefer
+it over tracking grants host-side.
+
 ### 2.4 `tool_deny`
 
 Deny a pending tool execution.
@@ -1444,6 +1499,11 @@ strings. A host that wants to render any of these adds the listed
 | `plugins` | W2.5/W8 | `plugin_event` (plus plugin-registered tools appear in `tool_request`/`tool_result`) |
 | `gepa_enabled` | W10B | `evolution_event` |
 
+`render_artifact` (§1.N+13) is gated by a CONTRACT capability
+(`render_artifact_v1` in `ready.contract.capabilities`), not by a
+`Capabilities.*` flag — it landed after contract negotiation existed, and the
+contract descriptor is where a host now feature-detects.
+
 #### Host-tolerated additive variants
 
 Some event variants ship without a dedicated `Capabilities.*` flag.
@@ -2082,6 +2142,107 @@ would drop it silently per W0).
 | `body` | string | yes | The message text. |
 | `subject` | string | no | Subject line. The current `send_message` schema has no subject input, so the engine omits it today; part of the wire contract for forward-compat. |
 | `conversation_id` | string | no | Session id of the emitting engine, when known. |
+
+### 1.N+13 `render_artifact` (#1098)
+
+"Show this to the user" as a **render capability**, not an OS `open`. The
+engine hands the host **content**; the host displays it. No path crosses the
+boundary, so displaying something costs the host zero filesystem authority,
+works headless and over SSH, and behaves identically on macOS, Linux and
+Windows.
+
+**Feature-detect on `render_artifact_v1` in `ready.contract.capabilities`**
+(contract v1.16). A host that never learns the type drops the frame safely —
+this event carries `"critical": false` explicitly, which is the only thing that
+makes an unknown type droppable under the W0 rules above.
+
+```json
+{
+  "type": "render_artifact",
+  "msg_id": "msg-001",
+  "call_id": "call-render-001",
+  "title": "Quarterly summary",
+  "mime": "text/markdown",
+  "content": "# Quarterly summary\n\nRevenue held.\n",
+  "truncated": false,
+  "critical": false
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `msg_id` | string | yes | Turn the artifact belongs to. Empty string when no turn is active. |
+| `call_id` | string | yes | The `render_artifact` tool call that produced it. |
+| `title` | string | yes | Short label for the surface. At most 256 bytes; longer titles are shortened, never refused. |
+| `mime` | string | yes | Closed vocabulary — see the table below. |
+| `content` | string | yes | The text to display. At most 1 MiB (plus the truncation marker). |
+| `truncated` | boolean | yes | `true` when `content` is a prefix and carries the in-band marker. |
+| `critical` | boolean | yes | Always the literal `false`. |
+
+Contract, in the order a host needs it:
+
+1. **`mime` is a CLOSED vocabulary.** Reject anything outside it rather than
+   guessing — a value you have never heard of is one you cannot render, and
+   rendering it as something else is worse than not rendering it. Widening the
+   vocabulary is an announced contract event (a minor bump plus a schema
+   change), never a silent new value.
+
+   | `mime` | Render as |
+   |---|---|
+   | `text/plain` | Preformatted text. No markup interpretation. |
+   | `text/markdown` | Markdown. The engine's default when the tool call omits `mime`. |
+   | `text/html` | An HTML document fragment. See (2) — this one has an obligation attached. |
+
+2. **`content` is UNTRUSTED, and `text/html` is the sharp edge.** The bytes are
+   either model-authored or read out of a workspace file, so they are exactly
+   the reach a prompt-injected turn would like. A host that renders
+   `text/html` MUST do it in a sandboxed renderer with no bridge to the host
+   process — in Electron terms: `sandbox: true`, `nodeIntegration: false`,
+   `contextIsolation: true`, no preload that exposes IPC, and a CSP that
+   forbids remote loads. Core cannot enforce this; it is the host's half of
+   #1098. If you are not prepared to do that, render `text/html` as
+   `text/plain` and say so in your UI.
+
+3. **The engine never asks you to open a path, and you should never accept
+   one.** That is the entire point. On macOS our seatbelt profile is
+   `(deny default)` and does not grant the SBPL `lsopen` operation, so `open`
+   fails with `-54` (#1102) — and granting it would let a sandboxed shell ask
+   launchd to start any installed app OUTSIDE the profile. A render event needs
+   none of that authority.
+
+4. **What the engine may render is exactly what it may read.** The
+   `render_artifact` tool obtains file content through the same vfs and policy
+   path as an ordinary `read`: workspace containment, standing path grants, and
+   the secret deny-list all apply unchanged. A file the agent may not read is a
+   file it may not render, so this event never widens the agent's reach — it
+   only changes how what it already read reaches the user.
+
+5. **`truncated: true` means you are looking at a prefix.** Content over 1 MiB
+   is cut on a UTF-8 character boundary and an in-band
+   `[wcore: CONTENT TRUNCATED …]` marker is appended, so a reader looking at the
+   rendered surface (rather than at the frame) is still told. Badge it in your
+   chrome as well. The cap is not decoration: an over-limit frame trips the
+   output pump's sticky failure and would take the session's entire stdout with
+   it, so it is enforced at the single emission chokepoint and can never be
+   raised per-call.
+
+6. **A file too large to render is refused at the tool, not truncated.** The
+   size is knowable before the read, and the model has a first-class way to
+   pick a part (`read` with offset/limit, then render the result inline), so
+   the engine returns an actionable tool error instead of silently showing the
+   first megabyte of a 2 GB file. Truncation is the backstop for content that
+   is already in hand.
+
+7. **No reply is expected.** Unlike `host_send_message_request` (§1.N+12), this
+   is fire-and-forget: there is no correlated result command, the tool call
+   completes immediately, and nothing in the engine waits on a render. That is
+   what keeps it free of authority — there is no outcome for a host to lie
+   about.
+
+8. **The event only reaches json-stream hosts.** The tool is registered only
+   when the session's output sink is a protocol sink, so a TUI session and
+   every sub-agent (which run under a null or relay sink) never expose it to
+   the model. The model is never offered a display nothing would render.
 
 ### 2.11 `host_send_message_result` (#537/#141)
 

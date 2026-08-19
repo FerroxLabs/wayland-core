@@ -315,6 +315,36 @@ pub trait OutputSink: Send + Sync {
     ) {
     }
 
+    /// #1098: whether this sink can actually put a rendered artifact in front
+    /// of a user. Only the json-stream `ProtocolSink` can — a terminal, null,
+    /// or relay sink has no render surface.
+    ///
+    /// `RenderArtifactTool::is_available()` reads this through
+    /// `ProtocolRenderSink`, so under any other sink the tool is never
+    /// registered and the model is never offered a display nothing would show.
+    fn render_artifact_supported(&self) -> bool {
+        false
+    }
+
+    /// #1098: emit `render_artifact` — hand the host CONTENT to display.
+    ///
+    /// `msg_id` is filled by the sink from the turn it is inside; the caller
+    /// supplies only what it knows. The content cap and truncation marker are
+    /// applied by the implementation, NOT by the caller, so there is exactly
+    /// one chokepoint and no emitter can route around it.
+    ///
+    /// Default no-op for non-protocol sinks, which is unreachable in practice:
+    /// the tool that calls this is not registered unless
+    /// [`Self::render_artifact_supported`] is true.
+    fn emit_render_artifact(
+        &self,
+        _call_id: &str,
+        _title: &str,
+        _mime: wcore_protocol::events::RenderMime,
+        _content: &str,
+    ) {
+    }
+
     /// W8a A.7: emit `budget_exceeded` (singular per session, fires
     /// once when the first ExecutionBudget cap trips). Always-emitted
     /// host-tolerated additive variant per audit F5 — no capability

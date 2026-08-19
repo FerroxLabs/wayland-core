@@ -28,8 +28,11 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // 13 -> 14: `call_announced` added. Additive only - no field on an existing
 // event changed shape, and `major` therefore holds at 1. Hosts that pin the
 // descriptor must re-pin; hosts that ignore unknown types are unaffected.
-pub const CONTRACT_MINOR: u64 = 15;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/15";
+// 15 -> 16: `render_artifact` added (#1098). Additive only — no field on an
+// existing event changed shape, so `major` holds at 1. The event vocabulary a
+// host can validate got strictly wider, which is what a minor bump is for.
+pub const CONTRACT_MINOR: u64 = 16;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/16";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -230,6 +233,25 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
             ],
             "type": "string"
         }),
+        // CLOSED, for exactly the reason `ready.session_persistence` above is:
+        // a future value must not arrive as free text and be accepted by a
+        // host that has never heard of it and cannot render it. The enum is
+        // generated from `RenderMime::all()` so the schema can never drift
+        // from the type that produces the frames.
+        ("render_artifact", "mime") => json!({
+            "enum": crate::events::RenderMime::all(),
+            "type": "string"
+        }),
+        // The classification is the whole forward-compat mechanism: a host
+        // that does not know `render_artifact` drops it BECAUSE the frame says
+        // false. Pinning the const means a producer that ever emitted `true`
+        // would fail its own published schema instead of silently costing a
+        // host its connection.
+        ("render_artifact", "critical") => json!({"const": false, "type": "boolean"}),
+        ("render_artifact", "title") => json!({
+            "maxLength": crate::events::RENDER_ARTIFACT_TITLE_LIMIT_BYTES,
+            "type": "string"
+        }),
         ("continue_with_budget" | "budget_grant_result", "request_id") => json!({
             "minLength": 1,
             "maxLength": BUDGET_GRANT_REQUEST_ID_MAX_BYTES,
@@ -310,6 +332,27 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
                         }
                     },
                     "required": ["always_prefix"],
+                    "type": "object"
+                },
+                // The published schema has to ADMIT `always_path`, or a host
+                // that validates its own outgoing commands against this file
+                // (Desktop does, and fails closed) could never send the scope
+                // that `path_grants_v1: available` tells it is supported. A
+                // capability the schema forbids is not a capability.
+                {
+                    "additionalProperties": false,
+                    "properties": {
+                        "always_path": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "root": {"type": "string"},
+                                "write": {"type": "boolean"}
+                            },
+                            "required": ["root"],
+                            "type": "object"
+                        }
+                    },
+                    "required": ["always_path"],
                     "type": "object"
                 }
             ]
@@ -1278,6 +1321,21 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         // promised is that anything raises the prompt; a host still has to
         // attach the scope to an approval it already has.
         ("path_grants_v1".into(), ContractCapabilityStatus::Available),
+        // #1098 — the feature-detect for `render_artifact`: the engine can
+        // hand the host CONTENT to display instead of asking the OS to open a
+        // path. A host that declares a render surface gets one; a host that
+        // does not simply never sees the event (it is droppable by
+        // construction — see the `critical` const above).
+        //
+        // Available, not ShapeOnly: the event is emitted by a real registered
+        // tool whose content comes through the same vfs/policy path as an
+        // ordinary `read`, and the payload is capped and truncation-marked
+        // before it reaches the wire. What is NOT promised is that any host
+        // renders it — that is the host's half of #1098.
+        (
+            "render_artifact_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
         ("plugin_events".into(), ContractCapabilityStatus::ShapeOnly),
         (
             "semantic_failover_receipts".into(),
