@@ -127,9 +127,12 @@ async fn trusted_session_cannot_write_the_repository_control_surface() {
         "git config reaches execution through core.fsmonitor / filter.* and must not be writable"
     );
     assert!(
-        vfs.write(&root.join(".wayland-core/skills/demo/SKILL.md"), b"# owned\n")
-            .await
-            .is_err(),
+        vfs.write(
+            &root.join(".wayland-core/skills/demo/SKILL.md"),
+            b"# owned\n"
+        )
+        .await
+        .is_err(),
         "a project skill is the executable surface the trust fingerprint binds; it must not be \
          writable by the tool that the fingerprint is supposed to certify"
     );
@@ -170,9 +173,12 @@ async fn contained_session_cannot_write_the_repository_control_surface() {
     let vfs = tool_vfs_for(minimal_config(), &root).await;
 
     assert!(
-        vfs.write(&root.join(".wayland-core/skills/demo/SKILL.md"), b"# owned\n")
-            .await
-            .is_err(),
+        vfs.write(
+            &root.join(".wayland-core/skills/demo/SKILL.md"),
+            b"# owned\n"
+        )
+        .await
+        .is_err(),
         "a project skill must not be writable in the strict profile either"
     );
     assert!(
@@ -257,7 +263,9 @@ async fn unversioned_workspace_downgrades_and_announces_when_required() {
     );
     let infos = sink.infos();
     assert!(
-        infos.iter().any(|m| m.contains("not under version control")),
+        infos
+            .iter()
+            .any(|m| m.contains("not under version control")),
         "the downgrade must be announced on the user-visible channel; got {infos:?}"
     );
 }
