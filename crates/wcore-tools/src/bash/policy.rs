@@ -244,7 +244,7 @@ fn candidate_paths(body: &str, scope: &SandboxScope) -> Vec<String> {
             if joined.is_empty() || !is_path_token(&joined) {
                 continue;
             }
-            if resolve_candidate(scope, &joined).is_some_and(|p| !is_definitely_absent(&p)) {
+            if resolve_candidate(scope, &joined).is_some_and(|p| path_exists(&p)) {
                 best = Some((j, joined));
             }
         }
@@ -281,18 +281,20 @@ fn trim_trailing_punctuation(token: &str) -> String {
         .to_string()
 }
 
-/// True only when the filesystem positively reports that nothing is there.
+/// True only when the filesystem positively reports that something IS there.
 ///
-/// Deliberately NOT `!path.exists()`. `exists()` collapses "no such file" and
-/// "I was not allowed to look" into the same `false`, and the second case is
-/// one this annotation must keep reporting: a path denied through a directory
-/// the agent process itself cannot traverse is exactly the kind of genuine
-/// denial worth naming. Only a hard `NotFound` is evidence of absence.
-fn is_definitely_absent(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => false,
-        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-    }
+/// The polarity matters, and an earlier version of this had it backwards. The
+/// reassembly below needs POSITIVE evidence that a joined run of tokens names
+/// a real path, not merely the absence of evidence that it does not. Those are
+/// the same test only on a platform where every stat failure is `NotFound`.
+/// Windows returns `InvalidInput` for a path containing characters no path may
+/// contain, so a "not definitely absent" check accepted
+/// `C:\w\repo\ STDERR: LoadLibrary failed for …` as an existing path and
+/// glued half a log line into one fabricated token.
+///
+/// A stat that fails for ANY reason is not a path worth joining on.
+fn path_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
 }
 
 /// Resolve a token the way [`classify`] does — absolute as written, relative
@@ -886,7 +888,33 @@ pub fn check_denylist(command: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_always_granted, is_path_token};
+    use super::{is_always_granted, is_path_token, path_exists};
+
+    /// The reassembly oracle must require POSITIVE evidence that a path
+    /// exists. Asking "is it definitely absent?" instead looks identical on a
+    /// platform where every stat failure is `NotFound`, and is wrong wherever
+    /// one is not — which is how a Windows-only regression got past a green
+    /// Linux gate.
+    ///
+    /// A file used as a directory component fails with `NotADirectory` on
+    /// Unix and an equivalent non-`NotFound` error on Windows, which is
+    /// exactly the shape that slipped through.
+    #[test]
+    fn the_existence_oracle_requires_a_positive_answer() {
+        let file = std::env::current_exe().expect("the test binary exists");
+        assert!(path_exists(&file), "positive control: the binary is there");
+
+        assert!(
+            !path_exists(&file.join("not-a-directory")),
+            "a stat that fails for ANY reason is not a path worth joining on; \
+             treating only NotFound as absence accepts this one"
+        );
+
+        assert!(
+            !path_exists(std::path::Path::new("/definitely/not/here/xyzzy")),
+            "and a plainly absent path is still absent"
+        );
+    }
 
     /// The verbatim spelling is the one `canonicalize` actually returns on
     /// Windows, and it is a plain string here, so this runs on every host
