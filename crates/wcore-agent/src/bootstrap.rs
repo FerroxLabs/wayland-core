@@ -3095,10 +3095,48 @@ impl AgentBootstrap {
         // the Contained profile; repository content cannot select this branch.
         let is_channel_remote = self.channel_tool_posture.is_some();
         if registry.workspace_policy().is_none() {
-            let strict_workspace = is_channel_remote
-                || self.config.execution_policy.is_managed()
-                || !self.config.workspace_trust.is_trusted();
             let workspace = std::path::PathBuf::from(&self.workspace);
+            let trusted_by_grant = !is_channel_remote
+                && !self.config.execution_policy.is_managed()
+                && self.config.workspace_trust.is_trusted();
+            // `[security] require_vcs_for_writes` (OFF by default): a workspace
+            // with no version control has no undo, so a wrong write is
+            // unrecoverable rather than a `git checkout` away. When the operator
+            // opts in, such a workspace keeps the strict profile even with a
+            // current trust grant. Probed with the SAME
+            // `nearest_workspace_git_root` walk the trust fingerprint already
+            // uses for its executable-project boundary, so "is this a repo"
+            // cannot mean two different things in one session — and it looks at
+            // ancestors, so a subdirectory of a repository still counts.
+            //
+            // Evaluated only for a session that WOULD have been trusted: an
+            // already-strict session is unaffected, which is what keeps the
+            // default-off switch from being the only thing standing between an
+            // untrusted workspace and the trusted profile.
+            let unversioned_downgrade = trusted_by_grant
+                && self.config.security.require_vcs_for_writes
+                && wcore_config::workspace_trust::nearest_workspace_git_root(&workspace).is_none();
+            let strict_workspace = !trusted_by_grant || unversioned_downgrade;
+            if unversioned_downgrade {
+                // A user-visible notice, not a `warn!`: with `RUST_LOG` unset
+                // only ERROR reaches stderr, so a log line could never tell the
+                // operator why their profile changed. `emit_info` is the same
+                // channel the local-shell activation notice below uses.
+                let notice = format!(
+                    "Workspace {} is not under version control, so this session uses the \
+                     strict (contained) profile — an unrecoverable write has no `git \
+                     checkout` to undo it. Run `git init`, or set `[security] \
+                     require_vcs_for_writes = false` in the global config, to restore the \
+                     trusted-local profile.",
+                    workspace.display()
+                );
+                self.output.emit_info(&notice);
+                tracing::warn!(
+                    target: "wcore_agent::bootstrap",
+                    workspace = %workspace.display(),
+                    "{notice}"
+                );
+            }
             let policy = if strict_workspace {
                 // SEC-13 — the sandboxed shell's egress is decided by the
                 // OPERATOR's trusted `[security] allow_sandboxed_shell_network`,
@@ -3136,15 +3174,32 @@ impl AgentBootstrap {
                     .with_network(wcore_tools::workspace_policy::local_bash_network(false))
             };
             let policy = std::sync::Arc::new(policy);
+            // The repository-control write guard is installed for BOTH profiles.
+            // The strict profile gets it inside the existing jail; the trusted
+            // profile — which installs no VFS wrapper at all, and is therefore
+            // the one everyday local session that could `Write` its own
+            // `.git/hooks/pre-commit` or `.wayland-core/skills/**` — gets it
+            // over a bare `RealFs`. It denies writes only, so a trusted session
+            // that could previously read those paths still can.
             if strict_workspace {
                 let jail = wcore_tools::vfs::SandboxedFs::new(
-                    wcore_tools::vfs::SecretDenyFs::new(
-                        wcore_tools::vfs::RealFs,
+                    wcore_tools::vfs::RepoControlDenyFs::new(
+                        wcore_tools::vfs::SecretDenyFs::new(
+                            wcore_tools::vfs::RealFs,
+                            std::sync::Arc::clone(&policy),
+                        ),
                         std::sync::Arc::clone(&policy),
                     ),
                     workspace,
                 );
                 registry.set_tool_vfs(std::sync::Arc::new(jail));
+            } else {
+                registry.set_tool_vfs(std::sync::Arc::new(
+                    wcore_tools::vfs::RepoControlDenyFs::new(
+                        wcore_tools::vfs::RealFs,
+                        std::sync::Arc::clone(&policy),
+                    ),
+                ));
             }
             registry.set_workspace_policy(policy);
         }
