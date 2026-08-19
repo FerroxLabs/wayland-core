@@ -1106,6 +1106,18 @@ impl TurnEngine for EngineTurnEngine {
                     );
                     "once"
                 }
+                // A folder grant is filesystem authority, not network
+                // authority. It narrows to `once` for exactly the reason
+                // `AlwaysPrefix` does: the bridge field means "may this host
+                // be reached again", and a path grant says nothing about that.
+                wcore_protocol::commands::ApprovalScope::AlwaysPath { root, .. } => {
+                    tracing::warn!(
+                        target: "wcore_cli::acp",
+                        %root,
+                        "path-scoped approval has no bridge equivalent; narrowing to once"
+                    );
+                    "once"
+                }
             });
             let outcome = wcore_agent::approval::ApprovalOutcome {
                 approved: decision.approved,

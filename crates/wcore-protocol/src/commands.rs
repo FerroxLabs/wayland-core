@@ -527,6 +527,26 @@ pub enum ApprovalScope {
     AlwaysPrefix {
         prefix: String,
     },
+    /// Path-scoped always-allow. Grants the session standing access to a
+    /// filesystem ROOT that is outside the workspace, so a later tool call
+    /// touching anything under `root` no longer needs a prompt. Serializes
+    /// as `{"always_path":{"root":"/Users/me/reports"}}`; `write` defaults
+    /// to `false`, so the bare object grants READ only. Old clients never
+    /// emit it, so the `Once`/`Always` bare-string wire form is unchanged.
+    ///
+    /// SECURITY: unlike `Always`/`AlwaysPrefix`, which scope an existing
+    /// authority to fewer commands, this variant EXPANDS the session's
+    /// filesystem authority beyond the sandbox root. It is therefore gated
+    /// exactly like `SessionMode::Force` (GHSA-8r7g): a wire peer may
+    /// REQUEST it, but without the local-operator opt-in it is downgraded
+    /// to [`ApprovalScope::Once`] — the single approved act still happens,
+    /// only the standing grant is withheld. See
+    /// `ToolApprovalManager::set_allow_wire_path_grant`.
+    AlwaysPath {
+        root: String,
+        #[serde(default)]
+        write: bool,
+    },
 }
 
 /// Host-selected action for an interrupted turn.
@@ -940,6 +960,40 @@ mod tests {
             ApprovalScope::AlwaysPrefix {
                 prefix: "cargo ".to_string()
             }
+        );
+    }
+
+    // A path grant rides the same externally-tagged object shape as
+    // `AlwaysPrefix`, and `write` is additive: a host that only knows how to
+    // say "always allow this folder" omits it and gets a READ-only grant.
+    #[test]
+    fn approval_scope_always_path_wire_format() {
+        let read_only: ApprovalScope =
+            serde_json::from_str("{\"always_path\":{\"root\":\"/srv/reports\"}}").unwrap();
+        assert_eq!(
+            read_only,
+            ApprovalScope::AlwaysPath {
+                root: "/srv/reports".to_string(),
+                write: false,
+            }
+        );
+
+        let writable: ApprovalScope =
+            serde_json::from_str("{\"always_path\":{\"root\":\"/srv/out\",\"write\":true}}")
+                .unwrap();
+        assert_eq!(
+            writable,
+            ApprovalScope::AlwaysPath {
+                root: "/srv/out".to_string(),
+                write: true,
+            }
+        );
+
+        // The bare-string forms must still parse — a path-grant-unaware host
+        // is unaffected by this variant existing.
+        assert_eq!(
+            serde_json::from_str::<ApprovalScope>("\"once\"").unwrap(),
+            ApprovalScope::Once
         );
     }
 

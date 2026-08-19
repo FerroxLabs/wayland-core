@@ -1334,6 +1334,16 @@ impl InMemoryFile {
 pub struct SandboxedFs<F: VirtualFs> {
     inner: F,
     root: PathBuf,
+    /// Standing READ grants ("always allow this folder"), shared live with the
+    /// session's `WorkspacePolicy` rather than copied — a grant must take
+    /// effect on the very next call, not on the next session.
+    ///
+    /// READ ONLY, and only on the pure-read operations. `write`,
+    /// `remove_file`, `observe_file` and `compare_exchange_file` keep the
+    /// root-only check: a granted folder is somewhere the agent may LOOK, and
+    /// widening a read into a write is exactly the escalation this feature is
+    /// supposed to make unnecessary.
+    read_grants: Arc<RwLock<Vec<PathBuf>>>,
 }
 
 impl<F: VirtualFs> SandboxedFs<F> {
@@ -1345,7 +1355,25 @@ impl<F: VirtualFs> SandboxedFs<F> {
     pub fn new(inner: F, root: impl Into<PathBuf>) -> Self {
         let raw = root.into();
         let root = fs::canonicalize(&raw).unwrap_or(raw);
-        Self { inner, root }
+        Self {
+            inner,
+            root,
+            read_grants: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    /// Share the session's standing read grants with this jail.
+    ///
+    /// Takes the `Arc` from
+    /// `WorkspacePolicy::session_read_grant_handle` — the same allocation, so
+    /// a grant approved mid-session is visible here immediately. Without this
+    /// the user approves "always allow this folder" and `Read` keeps refusing,
+    /// because the OS sandbox and the in-process file tools would be reading
+    /// two different answers to the same question.
+    #[must_use]
+    pub fn with_read_grants(mut self, grants: Arc<RwLock<Vec<PathBuf>>>) -> Self {
+        self.read_grants = grants;
+        self
     }
 
     /// Returns Ok when `path` resolves inside `self.root`, Err
@@ -1397,6 +1425,45 @@ impl<F: VirtualFs> SandboxedFs<F> {
         // canonical prefix IS the read target; `PathBuf::join("")` would
         // leave a stray trailing separator on some platforms (turns a
         // file lookup into a dir lookup → ENOTDIR), so short-circuit.
+        if suffix.as_os_str().is_empty() {
+            Ok(canon_prefix)
+        } else {
+            Ok(canon_prefix.join(suffix))
+        }
+    }
+
+    /// Containment for the pure-READ operations: inside the sandbox root, OR
+    /// inside a folder the user explicitly granted.
+    ///
+    /// Falls through to [`contain`](Self::contain) first so the ordinary
+    /// in-workspace path is byte-for-byte unchanged, and so a session with no
+    /// grants behaves exactly as it did before this existed. The grant check
+    /// runs on the CANONICALIZED path for the same reason `contain` does:
+    /// otherwise `<granted>/link -> /etc/shadow` would pass.
+    async fn contain_read(&self, path: &Path) -> Result<PathBuf, VfsError> {
+        let refusal = match self.contain(path).await {
+            Ok(contained) => return Ok(contained),
+            Err(refusal) => refusal,
+        };
+        // Only an out-of-root refusal is a candidate for a grant. A secret
+        // denial or an I/O error is not something "always allow this folder"
+        // is entitled to override.
+        let VfsError::OutsideSandbox {
+            path: attempted, ..
+        } = &refusal
+        else {
+            return Err(refusal);
+        };
+        let grants = self.read_grants.read().clone();
+        if grants.is_empty() {
+            return Err(refusal);
+        }
+        let Some((canon_prefix, suffix)) = canonicalize_existing_prefix(attempted).await else {
+            return Err(refusal);
+        };
+        if !grants.iter().any(|root| canon_prefix.starts_with(root)) {
+            return Err(refusal);
+        }
         if suffix.as_os_str().is_empty() {
             Ok(canon_prefix)
         } else {
@@ -1501,7 +1568,7 @@ fn lex_normalize(path: &Path, base: &Path) -> PathBuf {
 #[async_trait]
 impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
     async fn read(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
-        let p = self.contain(path).await?;
+        let p = self.contain_read(path).await?;
         self.inner.read(&p).await
     }
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError> {
@@ -1509,11 +1576,11 @@ impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
         self.inner.write(&p, contents).await
     }
     async fn exists(&self, path: &Path) -> Result<bool, VfsError> {
-        let p = self.contain(path).await?;
+        let p = self.contain_read(path).await?;
         self.inner.exists(&p).await
     }
     async fn list(&self, dir: &Path) -> Result<Vec<PathBuf>, VfsError> {
-        let p = self.contain(dir).await?;
+        let p = self.contain_read(dir).await?;
         self.inner.list(&p).await
     }
     async fn remove_file(&self, path: &Path) -> Result<(), VfsError> {
@@ -1521,7 +1588,7 @@ impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
         self.inner.remove_file(&p).await
     }
     async fn metadata(&self, path: &Path) -> Result<VfsMetadata, VfsError> {
-        let p = self.contain(path).await?;
+        let p = self.contain_read(path).await?;
         self.inner.metadata(&p).await
     }
     async fn observe_file(&self, path: &Path) -> Result<IdentifiedFileObservation, VfsError> {

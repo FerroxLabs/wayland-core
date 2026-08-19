@@ -21,8 +21,15 @@ use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+use wcore_protocol::PathGrantSink;
 use wcore_sandbox::manifest::NetworkPolicy;
 use wcore_types::workspace_trust::DeveloperCapability;
+
+/// Upper bound on standing read grants in one session. A grant is minted by a
+/// person clicking "always allow this folder", so a healthy session mints a
+/// handful. The cap exists so a looping agent that keeps re-asking cannot grow
+/// the reachable set without bound.
+const MAX_SESSION_READ_GRANTS: usize = 64;
 
 const SECRET_SUFFIXES: &[&str] = &[
     "/.env",
@@ -183,6 +190,33 @@ pub enum WorkspaceCapabilityGrantError {
     CredentialPath(PathBuf),
     #[error("capability path could not be resolved: {0}")]
     Resolve(#[from] std::io::Error),
+}
+
+/// Why a standing folder grant (`ApprovalScope::AlwaysPath`) was refused.
+///
+/// Every variant is shown to the user verbatim: a grant that is dropped
+/// silently looks to them like the "always allow this folder" button did not
+/// work, and they will click it again.
+#[derive(Debug, Error)]
+pub enum PathGrantError {
+    #[error("folder grants require a local session at your own keyboard")]
+    RequiresLocalOperator,
+    #[error("folder access could not be resolved: {0}")]
+    Resolve(#[from] std::io::Error),
+    #[error("{0} has no parent directory")]
+    NoParent(PathBuf),
+    #[error("the filesystem root cannot be granted")]
+    FilesystemRoot,
+    #[error("{0} contains your home directory — grant the specific folder instead")]
+    TooBroad(PathBuf),
+    #[error("{0} overlaps a credential store")]
+    CredentialPath(PathBuf),
+    #[error("{0} is a protected secret path")]
+    SecretPath(PathBuf),
+    #[error("write access to a folder outside the workspace is not grantable")]
+    WriteNotGrantable,
+    #[error("this session already holds the maximum of {0} folder grants")]
+    CapReached(usize),
 }
 
 #[derive(Debug, Error)]
@@ -860,6 +894,145 @@ impl WorkspacePolicy {
         }
         Ok(capability)
     }
+
+    /// Standing read grants held by this session.
+    pub fn session_read_grant_roots(&self) -> Vec<PathBuf> {
+        self.session_read_grants.read().clone()
+    }
+
+    /// Shared handle to the standing read grants, for the in-process file
+    /// tools.
+    ///
+    /// `readable_roots()` already folds these in for the Bash OS sandbox, but
+    /// `SandboxedFs` is constructed with a single root and would otherwise
+    /// keep refusing a granted path — the user would approve the folder and
+    /// `Read` would still say no. Handing out the same `Arc` (never a copy)
+    /// is what makes a grant take effect on the very next call.
+    pub fn session_read_grant_handle(&self) -> Arc<RwLock<Vec<PathBuf>>> {
+        Arc::clone(&self.session_read_grants)
+    }
+
+    /// True when `path` is inside a standing read grant.
+    pub fn is_session_read_granted(&self, path: &Path) -> bool {
+        let canon = canon_for_scope(path);
+        self.session_read_grants
+            .read()
+            .iter()
+            .any(|root| canon.starts_with(root))
+    }
+
+    /// Add a standing READ grant for a folder outside the workspace, minted by
+    /// an approved `ApprovalScope::AlwaysPath`.
+    ///
+    /// This is the "always allow this folder" answer to an escalation prompt.
+    /// It is deliberately the narrowest thing that resolves the dead end: the
+    /// sandbox stays in place and the workspace root is unchanged; one extra
+    /// root becomes readable for the rest of the process lifetime.
+    ///
+    /// GATE: a grant is only ever minted for a genuinely-local session
+    /// (`local_operator_principal`). A path grant expands filesystem authority
+    /// past the sandbox root, which is precisely what an untrusted wire peer
+    /// would like to arrange, so it gets the same treatment as
+    /// `SessionMode::Force` (GHSA-8r7g) — a peer may ask, only a local
+    /// operator may permit. The flag is fail-safe `false` in every constructor,
+    /// so a future construction path cannot acquire this by omission.
+    ///
+    /// WRITE is not grantable. A read grant answers "let me show you this
+    /// file"; write authority outside the workspace is a materially larger
+    /// thing and would need its own store, its own prompt wording, and its own
+    /// review. Refusing it explicitly (rather than silently ignoring the flag)
+    /// keeps the host from shipping a button whose label overstates what it
+    /// does.
+    pub fn grant_session_read_root(
+        &self,
+        root: impl AsRef<Path>,
+        write: bool,
+    ) -> Result<PathBuf, PathGrantError> {
+        if write {
+            return Err(PathGrantError::WriteNotGrantable);
+        }
+        if !self.local_operator_principal {
+            return Err(PathGrantError::RequiresLocalOperator);
+        }
+
+        let canon = std::fs::canonicalize(root.as_ref())?;
+        // A grant names a FOLDER. If the host sent the file the user was
+        // looking at, grant the directory that contains it — that is what the
+        // person answering "always allow this folder" believes they said.
+        let dir = if canon.is_dir() {
+            canon
+        } else {
+            canon
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| PathGrantError::NoParent(canon.clone()))?
+        };
+
+        if dir.parent().is_none() {
+            return Err(PathGrantError::FilesystemRoot);
+        }
+        if let Some(home) = dirs::home_dir() {
+            let home = canon_for_scope(&home);
+            // `$HOME` itself, and anything containing it, reach everything the
+            // sandbox exists to stand between the agent and.
+            if home.starts_with(&dir) {
+                return Err(PathGrantError::TooBroad(dir));
+            }
+        }
+        if path_is_in_credential_store(&dir) || credential_store_is_under(&dir) {
+            return Err(PathGrantError::CredentialPath(dir));
+        }
+        if is_secret_path_static(&dir) {
+            return Err(PathGrantError::SecretPath(dir));
+        }
+
+        let mut grants = self.session_read_grants.write();
+        // Re-approving a folder already covered is a no-op, not a second entry.
+        if grants.iter().any(|existing| dir.starts_with(existing)) {
+            return Ok(dir);
+        }
+        if grants.len() >= MAX_SESSION_READ_GRANTS {
+            return Err(PathGrantError::CapReached(MAX_SESSION_READ_GRANTS));
+        }
+        grants.push(dir.clone());
+        grants.sort();
+        grants.dedup();
+        Ok(dir)
+    }
+}
+
+impl PathGrantSink for WorkspacePolicy {
+    fn grant_path(&self, root: &Path, write: bool) -> bool {
+        match self.grant_session_read_root(root, write) {
+            Ok(dir) => {
+                tracing::info!(root = %dir.display(), "session read grant recorded");
+                true
+            }
+            Err(error) => {
+                // Deliberately not `warn!`: with `RUST_LOG` unset only ERROR
+                // reaches stderr, so a warning here would reach nobody. The
+                // person just clicked a button and is owed the reason it did
+                // not take.
+                eprintln!("wayland: folder access not granted - {error}");
+                false
+            }
+        }
+    }
+}
+
+/// True when granting `dir` would hand over a credential store that lives
+/// beneath it. The sibling of [`path_is_in_credential_store`], which only
+/// catches the store-or-below direction: granting `~/Projects` is fine, but
+/// granting a directory that CONTAINS `~/.ssh` is the same disclosure as
+/// granting `~/.ssh` itself.
+fn credential_store_is_under(dir: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let home = canon_for_scope(&home);
+    CREDENTIAL_STORES
+        .iter()
+        .any(|relative| home.join(relative).starts_with(dir))
 }
 
 fn path_is_in_credential_store(path: &Path) -> bool {

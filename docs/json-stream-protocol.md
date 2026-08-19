@@ -697,6 +697,62 @@ Approve a pending tool execution.
 
 When `scope = "always"`, the agent adds the tool's category to the session allow-list, so future calls of the same category skip approval.
 
+#### 2.3.1 Scoped grants
+
+`scope` also accepts two object forms. Both are additive: a host that only ever
+sends `"once"` / `"always"` is unaffected by their existence, and neither
+changes the bare-string wire shape.
+
+| Form | Meaning |
+|---|---|
+| `{"always_prefix": {"prefix": "cargo "}}` | Auto-approve later commands in the same category whose normalized head matches `prefix`. |
+| `{"always_path": {"root": "/Users/me/reports", "write": false}}` | Grant the session standing READ access to a folder outside the workspace. `write` defaults to `false`. |
+
+#### 2.3.2 `always_path` — "always allow this folder"
+
+This is the answer to an approval prompt raised because a path sits outside the
+session workspace. It exists so that case has a third option beside "do it this
+once" and "refuse", without ever turning the sandbox off.
+
+```json
+{
+  "type": "tool_approve",
+  "call_id": "tool-call-001",
+  "scope": { "always_path": { "root": "/Users/me/reports" } }
+}
+```
+
+Contract, in the order a host needs it:
+
+1. **`root` may be a file.** The host may send the exact path the user was
+   looking at; the agent grants the directory that contains it. That is what a
+   person answering "always allow this folder" believes they said. The prompt
+   SHOULD name the folder that will actually be granted, not the file.
+2. **The grant is READ-only.** `write: true` is refused outright rather than
+   silently downgraded, so a host cannot ship a button whose label promises
+   more than it delivers. Write authority outside the workspace is a separate,
+   larger thing and is not grantable through this field.
+3. **A grant lasts for the process lifetime** and is not persisted across
+   restarts. A host that wants a durable allow-list must re-send its grants on
+   each launch; the agent will not remember them for you.
+4. **It only applies to a genuinely local session.** A channel, remote or
+   managed engine refuses every path grant. A wire peer may ASK — this is the
+   same rule as `SessionMode::Force` (GHSA-8r7g), because a standing path grant
+   expands filesystem authority past the sandbox root and is therefore
+   precisely what a prompt-injected turn would like to arrange.
+5. **Some roots are always refused**, whatever the user clicks: the filesystem
+   root, `$HOME`, any directory that is or contains a credential store
+   (`~/.ssh`, `~/.aws`, `~/.config/gh`, …), and any path matching the secret
+   rules. A session holds at most 64 grants.
+6. **A refused grant does not fail the call.** The action the user approved
+   still runs — the approval degrades to `once`. The reason for the refusal is
+   written to stderr. A host SHOULD NOT treat "approved" as proof that the
+   standing grant was recorded.
+
+Because of (6), the honest UI is a prompt that says what will happen for *this*
+file, with "always allow this folder" as a convenience — not a setup step the
+user is told has succeeded.
+
 ### 2.4 `tool_deny`
 
 Deny a pending tool execution.

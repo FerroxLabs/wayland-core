@@ -3143,8 +3143,23 @@ impl AgentBootstrap {
                         std::sync::Arc::clone(&policy),
                     ),
                     workspace,
-                );
+                )
+                // Share the LIVE grant list, not a copy: a folder the user
+                // approves mid-session has to be readable on the very next
+                // `Read`, and the OS sandbox (via `readable_roots`) and the
+                // in-process file tools must never hold two different answers
+                // to "what may this session look at".
+                .with_read_grants(policy.session_read_grant_handle());
                 registry.set_tool_vfs(std::sync::Arc::new(jail));
+            }
+            // An approved `ApprovalScope::AlwaysPath` has to land somewhere.
+            // The policy is that somewhere — it owns filesystem authority, and
+            // it is the thing that can refuse a root the approval manager has
+            // no business judging (credential store, `$HOME`, a non-local
+            // session).
+            if let Some(manager) = self.approval_manager.as_ref() {
+                let sink: std::sync::Arc<dyn wcore_protocol::PathGrantSink> = policy.clone();
+                manager.set_path_grant_sink(sink);
             }
             registry.set_workspace_policy(policy);
         }
