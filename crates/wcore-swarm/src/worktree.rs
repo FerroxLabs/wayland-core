@@ -409,9 +409,43 @@ impl std::fmt::Debug for TransactionWorkspace {
 /// directory present, so an open-only form would fail cleanup for a reason
 /// unrelated to locking.
 fn swarm_lock_handle(authority: &DirectoryAuthority) -> Result<DirectoryHandleLoan> {
-    authority
-        .open_or_create_child_directory(CONTROL_DIR)?
-        .open_or_create_child_lock_file(SWARM_LOCK_FILE)
+    // wayland#1025. These are TWO open-or-create steps and they are not atomic
+    // together: a peer's cleanup can remove the control directory in the window
+    // between opening it and creating the lock file inside it, so the second
+    // call fails NotFound on a directory the first call just proved present.
+    //
+    // Both steps are idempotent by construction, so the correct response to
+    // losing that race is to run them again rather than to fail admission. One
+    // retry is sufficient and is deliberately bounded: a second NotFound is no
+    // longer a race, it means the root itself is unusable, and looping would
+    // turn that into a hang instead of an error.
+    //
+    // This is the defect behind the macOS admission flake. It presented as
+    // `io: No such file or directory (os error 2)` with no path until the
+    // acquire path stopped leaking a bare io error.
+    for attempt in 0..2 {
+        match authority
+            .open_or_create_child_directory(CONTROL_DIR)
+            .and_then(|control| control.open_or_create_child_lock_file(SWARM_LOCK_FILE))
+        {
+            Ok(loan) => return Ok(loan),
+            Err(error) if attempt == 0 && control_dir_vanished(&error) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the loop returns on both the success and the final-failure paths")
+}
+
+/// Did this failure look like the control directory being removed underneath
+/// us, rather than a real refusal?
+///
+/// Matched on the rendered message because the acquire path deliberately no
+/// longer yields a bare `SwarmError::Io` — that leak was the thing that made
+/// wayland#1025 unmeasurable, so re-introducing a match on it to detect this
+/// would undo the fix that exposed it.
+fn control_dir_vanished(error: &SwarmError) -> bool {
+    matches!(error, SwarmError::Io(io) if io.kind() == ErrorKind::NotFound)
+        || error.to_string().contains("parent directory is missing")
 }
 
 /// The ONE derivation of a transaction's lease target.
