@@ -29,11 +29,15 @@ concurrency:
 jobs:
   repro:
     name: 'gh#1025 backtrace hunt (self-hosted macOS)'
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-    timeout-minutes: 30
+    # HOSTED, not self-hosted. Measured reproduction matrix:
+    #   GitHub-hosted macOS      22/60 fail (37%)
+    #   self-hosted Mac (10-core) 0/25
+    #   Linux pinned to 2 CPUs    0/40
+    #   Linux unconstrained       0/60
+    # It fires ONLY here, so this is the only host where a green means anything
+    # and the only one that can produce the backtrace.
+    runs-on: macos-latest
+    timeout-minutes: 60
     env:
       WCORE_GH1025_TRACE: '1'
       RUST_BACKTRACE: 'full'
@@ -58,7 +62,7 @@ jobs:
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           # -j4 on a 10-core machine that belongs to a person, not to CI.
-          cargo test -p wcore-swarm --test workspace_authority --no-run -j 4 2>&1 | tail -4
+          cargo test -p wcore-swarm --test workspace_authority --no-run 2>&1 | tail -4
 
       - name: Hunt — stop at the FIRST reproduction
         run: |
@@ -66,7 +70,7 @@ jobs:
           set +e
           mkdir -p /tmp/gh1025
           CAUGHT=0
-          for i in $(seq 1 25); do
+          for i in $(seq 1 60); do
             LOG=/tmp/gh1025/iter-$i.log
             cargo test -p wcore-swarm --test workspace_authority \
               independent_cli_processes_cannot_overbook_shared_capacity \
