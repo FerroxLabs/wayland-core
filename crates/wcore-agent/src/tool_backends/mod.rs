@@ -203,15 +203,45 @@ fn resolve_backend_choice(raw: Option<&str>) -> WebBackendChoice {
 
 /// One-time privacy disclosure for the anonymous Parallel default — emitted
 /// the first time the keyless/`parallel` path is selected, not on every search.
+const PARALLEL_DISCLOSURE: &str = "web search: using Parallel.ai free search (anonymous). Your search queries are sent \
+     to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, \
+     =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / \
+     SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.";
+
+/// Marker recording that the disclosure has been shown to this user once.
+const PARALLEL_DISCLOSURE_MARKER: &str = ".parallel-disclosure-shown";
+
 fn disclose_parallel_once() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        tracing::info!(
-            "web search: using Parallel.ai free search (anonymous). Your search queries are sent \
-             to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, \
-             =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / \
-             SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider."
-        );
+        // The structured record always happens; it is what a support bundle
+        // reads back.
+        tracing::info!("{PARALLEL_DISCLOSURE}");
+
+        // gh#1080. The record alone is not a disclosure. With `RUST_LOG` unset
+        // the tracing layer routes INFO to `$WAYLAND_HOME/logs/wayland-core.log`
+        // and sends ONLY errors to stderr, so telling the user their search
+        // queries leave for a third party had been going somewhere they have no
+        // reason to look. This is the keyless DEFAULT backend, selected without
+        // the user choosing it, so the notice has to reach the terminal.
+        //
+        // Shown once PER USER, not once per process: this is a CLI people run
+        // constantly, and a privacy notice repeated on every invocation is
+        // noise that gets filtered out — which is the same failure as not
+        // showing it. A marker file in the config directory is the state.
+        //
+        // Every failure here degrades to showing the notice rather than
+        // swallowing it: an unwritable or unreadable config dir must never be
+        // the reason a disclosure is skipped.
+        let marker = wcore_config::config::wayland_config_dir().join(PARALLEL_DISCLOSURE_MARKER);
+        if marker.exists() {
+            return;
+        }
+        eprintln!("{PARALLEL_DISCLOSURE}");
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&marker, b"1");
     });
 }
 
@@ -697,6 +727,61 @@ pub struct ApiToolBackends {
     pub gitlab: Arc<dyn GitLabBackend>,
     pub linear: Arc<dyn LinearBackend>,
     pub notion: Arc<dyn NotionBackend>,
+}
+
+#[cfg(test)]
+mod parallel_disclosure_tests {
+    use super::*;
+
+    /// gh#1080. The notice must name the host, the consequence, and a way out.
+    /// Asserting on the CONTENT rather than merely that a string exists: a
+    /// disclosure that omits where the queries go is not a disclosure.
+    #[test]
+    fn the_disclosure_names_the_destination_and_an_opt_out() {
+        assert!(
+            PARALLEL_DISCLOSURE.contains("parallel.ai"),
+            "must name the third party receiving the queries"
+        );
+        assert!(
+            PARALLEL_DISCLOSURE.contains("search queries are sent"),
+            "must state what leaves, not merely which backend is active"
+        );
+        assert!(
+            PARALLEL_DISCLOSURE.contains("WAYLAND_WEB_BACKEND=duckduckgo")
+                && PARALLEL_DISCLOSURE.contains("=off"),
+            "must give the user a way to stop it"
+        );
+    }
+
+    /// The control for the test above: a message that merely mentions the
+    /// backend would satisfy a naive "is it non-empty" check, so pin the
+    /// property that actually matters — this is not a generic status line.
+    #[test]
+    fn the_disclosure_is_not_a_bare_status_line() {
+        assert!(
+            PARALLEL_DISCLOSURE.len() > 120,
+            "a one-line 'using Parallel' status is not a privacy disclosure"
+        );
+        assert_ne!(
+            PARALLEL_DISCLOSURE.trim(),
+            "web search: using Parallel.ai free search (anonymous).",
+            "the consequence and the opt-out must survive any future edit"
+        );
+    }
+
+    /// The marker is what makes this once-per-user instead of once-per-process.
+    /// If the name ever collides with a real config file the notice would be
+    /// suppressed on a fresh install, which is the one outcome that must not
+    /// happen silently.
+    #[test]
+    fn the_marker_is_a_dotfile_that_cannot_collide_with_config() {
+        assert!(PARALLEL_DISCLOSURE_MARKER.starts_with('.'));
+        assert!(PARALLEL_DISCLOSURE_MARKER.contains("disclosure"));
+        assert!(
+            !PARALLEL_DISCLOSURE_MARKER.ends_with(".toml"),
+            "must not look like a config file the loader might rewrite"
+        );
+    }
 }
 
 #[cfg(test)]
