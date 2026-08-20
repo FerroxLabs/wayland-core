@@ -178,8 +178,13 @@ pub fn apply_posture(
         ));
         // SecretDenyFs INNER so it inspects the canonical path SandboxedFs
         // produces (catches symlinks-to-secrets resolving inside the root).
+        // RepoControlDenyFs sits between them for the same reason, and refuses
+        // WRITES into `.git` / `.wayland-core` while leaving reads alone.
         let jail = wcore_tools::vfs::SandboxedFs::new(
-            wcore_tools::vfs::SecretDenyFs::new(wcore_tools::vfs::RealFs, Arc::clone(&policy)),
+            wcore_tools::vfs::RepoControlDenyFs::new(
+                wcore_tools::vfs::SecretDenyFs::new(wcore_tools::vfs::RealFs, Arc::clone(&policy)),
+                Arc::clone(&policy),
+            ),
             scope.workspace_root.clone(),
         );
         registry.set_tool_vfs(Arc::new(jail));

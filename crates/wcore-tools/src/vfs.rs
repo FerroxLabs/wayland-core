@@ -65,6 +65,12 @@ pub enum VfsError {
     /// changed underneath it.
     #[error("refused: {path:?} did not resolve to the approved object: {reason}")]
     PathRaced { path: PathBuf, reason: String },
+    #[error(
+        "refused: {path:?} is inside the workspace's repository-control surface \
+         (.git / .wayland-core), which the file tools may read but never write. \
+         Use the Bash tool and a git command if this write is genuinely intended."
+    )]
+    RepoControlDenied { path: PathBuf },
 }
 
 /// Strong content identity used by conditional filesystem mutations.
@@ -1807,6 +1813,85 @@ impl<F: VirtualFs + 'static> VirtualFs for SecretDenyFs<F> {
     ) -> Result<FileMutationOutcome, VfsError> {
         self.guard(path)?;
         self.inner.compare_exchange_file(path, mutation).await
+    }
+}
+
+/// Wraps a `VirtualFs` and refuses any MUTATION whose path is inside the
+/// workspace's repository-control surface, per
+/// [`WorkspacePolicy::is_repo_control_path`](crate::workspace_policy::WorkspacePolicy::is_repo_control_path).
+///
+/// Deliberately asymmetric with [`SecretDenyFs`], which guards every method: a
+/// secret must not be READ, whereas `.git` and `.wayland-core` must not be
+/// WRITTEN. Reading them is ordinary work — the skill loader reads
+/// `.wayland-core/skills/**` on every boot, and `Read`ing `.git/HEAD` is a
+/// perfectly normal thing for the model to do — so `read` / `exists` / `list` /
+/// `metadata` / `observe_file` pass straight through and only `write`,
+/// `remove_file` and `compare_exchange_file` are gated.
+///
+/// Installed for EVERY session, trusted and contained alike. That is the point:
+/// the strict profile already denies `.git/config` and `.git/hooks/` through
+/// `SecretDenyFs`'s secret-suffix list, but the trusted local profile installs
+/// no VFS wrapper at all, so it is precisely the everyday local session that
+/// could `Write` its own `.git/hooks/pre-commit`.
+///
+/// Layered INSIDE `SandboxedFs` where a jail exists, for the same reason
+/// `SecretDenyFs` is: the jail hands down the canonicalized path. The guard
+/// canonicalizes independently as well (`is_repo_control_path` does), so the
+/// unjailed trusted deployment is equally symlink-safe.
+pub struct RepoControlDenyFs<F: VirtualFs> {
+    inner: F,
+    policy: std::sync::Arc<crate::workspace_policy::WorkspacePolicy>,
+}
+
+impl<F: VirtualFs> RepoControlDenyFs<F> {
+    pub fn new(inner: F, policy: std::sync::Arc<crate::workspace_policy::WorkspacePolicy>) -> Self {
+        Self { inner, policy }
+    }
+    fn guard(&self, path: &Path) -> Result<(), VfsError> {
+        if self.policy.is_repo_control_path(path) {
+            return Err(VfsError::RepoControlDenied {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<F: VirtualFs + 'static> VirtualFs for RepoControlDenyFs<F> {
+    async fn read(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
+        self.inner.read(path).await
+    }
+    async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError> {
+        self.guard(path)?;
+        self.inner.write(path, contents).await
+    }
+    async fn exists(&self, path: &Path) -> Result<bool, VfsError> {
+        self.inner.exists(path).await
+    }
+    async fn list(&self, dir: &Path) -> Result<Vec<PathBuf>, VfsError> {
+        self.inner.list(dir).await
+    }
+    async fn remove_file(&self, path: &Path) -> Result<(), VfsError> {
+        self.guard(path)?;
+        self.inner.remove_file(path).await
+    }
+    async fn metadata(&self, path: &Path) -> Result<VfsMetadata, VfsError> {
+        self.inner.metadata(path).await
+    }
+    async fn observe_file(&self, path: &Path) -> Result<IdentifiedFileObservation, VfsError> {
+        self.inner.observe_file(path).await
+    }
+    async fn compare_exchange_file(
+        &self,
+        path: &Path,
+        mutation: &IntendedFileMutation,
+    ) -> Result<FileMutationOutcome, VfsError> {
+        self.guard(path)?;
+        self.inner.compare_exchange_file(path, mutation).await
+    }
+    fn root(&self) -> Option<&Path> {
+        self.inner.root()
     }
 }
 
