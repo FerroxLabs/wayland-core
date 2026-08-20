@@ -562,6 +562,19 @@ impl Tool for TranscribeAudioTool {
 
 #[cfg(test)]
 mod tests {
+    // Audio-URL fixtures use a literal public IP, never a hostname.
+    //
+    // `validate_audio_url` -> `url_safety::is_safe_url` performs a REAL DNS
+    // resolution and fails closed when it returns no addresses. With a
+    // hostname these tests therefore require working DNS on the runner, and
+    // six of them went red together on a macOS CI runner whose resolver
+    // hiccuped. A literal IP takes the `parse::<IpAddr>()` fast path and skips
+    // resolution entirely, so the tests exercise the tool rather than the
+    // network. Hostname resolution is covered hermetically in `url_safety`'s
+    // own tests via `is_safe_url_with(.., fake_resolver)`.
+    //
+    // The one surviving `example.com` below is deliberate: it is the `ftp://`
+    // case, rejected on scheme before any resolution is attempted.
     use super::*;
     use std::fs;
     use tempfile::tempdir;
@@ -627,8 +640,8 @@ mod tests {
 
     #[test]
     fn validate_audio_url_accepts_http_and_https() {
-        assert!(validate_audio_url("http://example.com/a.mp3").is_ok());
-        assert!(validate_audio_url("https://example.com/a.ogg").is_ok());
+        assert!(validate_audio_url("http://93.184.216.34/a.mp3").is_ok());
+        assert!(validate_audio_url("https://93.184.216.34/a.ogg").is_ok());
     }
 
     #[test]
@@ -663,7 +676,7 @@ mod tests {
         let result = must_exec(
             &tool,
             json!({
-                "audio_url": "https://example.com/voice.ogg",
+                "audio_url": "https://93.184.216.34/voice.ogg",
                 "language": "en",
             }),
         );
@@ -710,7 +723,7 @@ mod tests {
             Arc::new(NullTranscriptionBackend),
             Arc::new(StaticAudioFetcher::new(ogg_bytes())),
         );
-        let r = must_exec(&tool, json!({ "audio_url": "https://example.com/a.ogg" }));
+        let r = must_exec(&tool, json!({ "audio_url": "https://93.184.216.34/a.ogg" }));
         assert!(r.is_error);
         assert!(
             r.content.contains("No transcription backend configured"),
@@ -722,7 +735,7 @@ mod tests {
     #[test]
     fn null_fetcher_fails_loudly_on_url() {
         let tool = TranscribeAudioTool::default();
-        let r = must_exec(&tool, json!({ "audio_url": "https://example.com/a.ogg" }));
+        let r = must_exec(&tool, json!({ "audio_url": "https://93.184.216.34/a.ogg" }));
         assert!(r.is_error);
         assert!(
             r.content.contains("No audio fetcher configured"),
@@ -746,7 +759,7 @@ mod tests {
             &tool,
             json!({
                 "audio_path": "/tmp/x.mp3",
-                "audio_url": "https://example.com/x.mp3",
+                "audio_url": "https://93.184.216.34/x.mp3",
             }),
         );
         assert!(r.is_error);
@@ -765,7 +778,7 @@ mod tests {
         let tool = TranscribeAudioTool::new(backend.clone(), fetcher);
         let r = must_exec(
             &tool,
-            json!({ "audio_url": "https://example.com/page.html" }),
+            json!({ "audio_url": "https://93.184.216.34/page.html" }),
         );
         assert!(r.is_error);
         assert!(r.content.contains("Unsupported audio format"));
@@ -801,7 +814,7 @@ mod tests {
         let tool = TranscribeAudioTool::new(backend.clone(), fetcher);
         let r = must_exec(
             &tool,
-            json!({ "audio_url": "https://example.com/huge.ogg" }),
+            json!({ "audio_url": "https://93.184.216.34/huge.ogg" }),
         );
         assert!(r.is_error);
         assert!(r.content.contains("too large"), "got: {}", r.content);
