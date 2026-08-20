@@ -1315,12 +1315,16 @@ impl AgentBootstrap {
             ));
         }
         // #1098: RenderArtifactTool — "show this to the user" as a protocol
-        // render event instead of an OS `open`. Registered unconditionally,
-        // but `is_available()` reads the bound sink's liveness, so
-        // `ToolRegistry::register` keeps it ONLY when `self.output` is a
-        // json-stream `ProtocolSink`. Under the TUI, a terminal sink, or any
-        // sub-agent's relay sink the tool is dropped and the model never sees
-        // a display whose output nothing would render.
+        // render event instead of an OS `open`. Registered UNCONDITIONALLY,
+        // with a fail-loud null sink, exactly like `SendMessageTool` above:
+        // under a TUI, terminal, or sub-agent relay sink the tool exists but
+        // every call returns "this session has no display surface".
+        //
+        // Gating registration on the sink instead was tried and is wrong:
+        // `tool_inventory` is inside the recovery authority digest, so a tool
+        // set that moves with the output surface makes a session seeded under
+        // a `NullSink` unresumable under a `ProtocolSink`
+        // (`wcore-cli/tests/f14_sigkill_recovery.rs` catches it).
         //
         // SECURITY: no filesystem or process authority leaves the sandbox
         // here. The content the event carries is read through `ctx.vfs` —

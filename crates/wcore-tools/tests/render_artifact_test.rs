@@ -279,26 +279,53 @@ async fn a_file_over_the_cap_is_refused_before_it_is_read() {
     assert!(sink.snapshot().is_empty());
 }
 
-/// The honesty gate. A tool whose sink cannot render must never be advertised
-/// to the model — otherwise the model believes it showed something and the
-/// user saw nothing.
+/// The honesty gate. A tool whose sink cannot render must SAY so — otherwise
+/// the model finishes the turn believing it showed the user something.
 ///
-/// GUARD: the `is_available()` override.
-#[test]
-fn a_tool_with_no_render_surface_is_not_registered() {
-    let mut registry = wcore_tools::registry::ToolRegistry::new();
-    registry.register(Box::new(RenderArtifactTool::default()));
-    assert!(
-        registry.get("render_artifact").is_none(),
-        "a null render sink must keep the tool out of the model's tool list"
-    );
+/// GUARD: the `self.sink.is_live()` check at the top of `execute_with_ctx`.
+/// Delete it and the render silently succeeds into a sink that discards it.
+#[tokio::test]
+async fn a_session_with_no_display_surface_refuses_loudly() {
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("report.md"), b"# inside\n").unwrap();
+    let tool = RenderArtifactTool::default();
+    let ctx = ctx_with(Arc::new(SandboxedFs::new(RealFs, ws.path())));
 
-    let mut live = wcore_tools::registry::ToolRegistry::new();
-    live.register(Box::new(RenderArtifactTool::new(Arc::new(
-        CapturingRenderSink::new(),
-    ))));
+    let result = tool
+        .execute_with_ctx(
+            json!({"title": "Report", "file_path": ws.path().join("report.md")}),
+            &ctx,
+        )
+        .await;
     assert!(
-        live.get("render_artifact").is_some(),
-        "with a live sink it must be registered — otherwise the check above is vacuous"
+        result.is_error,
+        "a render with nowhere to go must not succeed"
     );
+    assert!(
+        result.content.contains("no display surface"),
+        "the refusal must tell the model what to do instead: {}",
+        result.content
+    );
+}
+
+/// Registration is UNCONDITIONAL, and that is load-bearing rather than
+/// incidental: `tool_inventory` is inside the recovery authority digest, so a
+/// tool set that moved with the output sink would make a session seeded under a
+/// `NullSink` unresumable under a `ProtocolSink`
+/// (`wcore-cli/tests/f14_sigkill_recovery.rs`).
+///
+/// GUARD: the absence of an `is_available()` override on `RenderArtifactTool`.
+#[test]
+fn the_tool_set_does_not_move_with_the_render_surface() {
+    for tool in [
+        RenderArtifactTool::default(),
+        RenderArtifactTool::new(Arc::new(CapturingRenderSink::new())),
+    ] {
+        let mut registry = wcore_tools::registry::ToolRegistry::new();
+        registry.register(Box::new(tool));
+        assert!(
+            registry.get("render_artifact").is_some(),
+            "render_artifact must be registered whether or not a display is attached"
+        );
+    }
 }

@@ -2239,10 +2239,13 @@ Contract, in the order a host needs it:
    what keeps it free of authority — there is no outcome for a host to lie
    about.
 
-8. **The event only reaches json-stream hosts.** The tool is registered only
-   when the session's output sink is a protocol sink, so a TUI session and
-   every sub-agent (which run under a null or relay sink) never expose it to
-   the model. The model is never offered a display nothing would render.
+8. **The event only reaches json-stream hosts.** The `render_artifact` tool is
+   always in the tool list — the tool set must not move with the output
+   surface, because `tool_inventory` is inside the recovery authority digest —
+   but a session with no protocol sink (a TUI run, or any sub-agent, which run
+   under a null or relay sink) refuses every call loudly rather than
+   discarding. The model is told there is nowhere to display and puts the
+   content in its reply instead.
 
 ### 2.11 `host_send_message_result` (#537/#141)
 

@@ -19,9 +19,13 @@
 //! every tool a `NullToolOutputSink` (`orchestration/mod.rs`), so anything
 //! routed through it is a guaranteed no-op for the main agent. The precedent
 //! that DOES fit is `SendMessageTool`: a host-supplied boundary trait injected
-//! at construction (`MessageTransport`), with a fail-loud null default and an
-//! `is_available()` honesty gate. This module mirrors that exactly rather than
-//! inventing a third mechanism.
+//! at construction (`MessageTransport`) with a fail-loud null default. This
+//! module mirrors that exactly rather than inventing a third mechanism —
+//! including the part where the tool is registered unconditionally and a
+//! missing backend is a loud error, not a missing tool. Registration must not
+//! depend on the output sink: `tool_inventory` is inside the recovery authority
+//! digest, so a tool set that moves with the sink makes a session unresumable
+//! across a seed-under-NullSink / resume-under-ProtocolSink boundary.
 //!
 //! ## Authority
 //!
@@ -72,16 +76,14 @@ pub trait RenderSink: Send + Sync {
     /// is precisely what makes it free of authority.
     fn render(&self, artifact: RenderedArtifact);
 
-    /// Whether a host is actually listening. `false` makes
-    /// [`RenderArtifactTool::is_available`] false, so `ToolRegistry::register`
-    /// skips the tool and the model never sees a surface whose output nothing
-    /// renders — the "the model believes it showed something, the user saw
-    /// nothing" failure.
+    /// Whether a host is actually listening. `false` makes every call fail
+    /// LOUDLY rather than silently discarding, so the model never finishes a
+    /// turn believing it showed the user something nothing rendered.
     fn is_live(&self) -> bool;
 }
 
-/// Default sink when nothing is wired: no host, so the tool is never
-/// registered. Deliberately not a silent discard that still advertises itself.
+/// Default sink when nothing is wired: every render fails loudly. Mirrors
+/// `NullMessageTransport` — a stub that succeeds is worse than no tool.
 pub struct NullRenderSink;
 
 impl RenderSink for NullRenderSink {
@@ -266,12 +268,6 @@ impl Tool for RenderArtifactTool {
         true
     }
 
-    /// The honesty gate. With no live host sink the registry drops this tool
-    /// rather than advertising a display the user would never see.
-    fn is_available(&self) -> bool {
-        self.sink.is_live()
-    }
-
     /// No `ToolContext` means no vfs, and a render without a vfs would have to
     /// read through an unconfined `RealFs` — an out-of-sandbox read reachable
     /// from a tool the model calls. Refuse instead (SECURITY MAJOR #14).
@@ -283,6 +279,30 @@ impl Tool for RenderArtifactTool {
     }
 
     async fn execute_with_ctx(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        // The honesty gate. Fail LOUDLY when there is no display, exactly as
+        // `NullMessageTransport` does for an unwired `send_message` — the model
+        // learns inside the same turn and can put the content in its reply
+        // instead. A silent discard would leave it believing it had shown the
+        // user something.
+        //
+        // Deliberately NOT an `is_available()` override, which would have kept
+        // the tool out of the registry entirely. `is_available()` is for tools
+        // whose backend is fixed by process configuration; liveness here is a
+        // property of the SINK, and the sink differs between a session that
+        // writes a recovery checkpoint and the one that resumes it. Gating
+        // registration on it made `tool_inventory` — which the recovery
+        // authority digest covers — depend on the sink, and a resume across the
+        // two was refused with "tool authority changed"
+        // (`wcore-cli/tests/f14_sigkill_recovery.rs` caught it). The tool set
+        // must not move with the output surface.
+        if !self.sink.is_live() {
+            return error(
+                "This session has no display surface (no connected host UI), so \
+                 render_artifact cannot show anything. Put the content in your \
+                 reply instead.",
+            );
+        }
+
         let (title, mime, source) = match Self::parse(&input) {
             Ok(parsed) => parsed,
             Err(refusal) => return refusal,
@@ -367,10 +387,24 @@ mod tests {
         futures::executor::block_on(tool.execute_with_ctx(input, ctx))
     }
 
+    /// A tool that cannot display anything must SAY so. Registration is
+    /// deliberately unconditional (see the `is_live` gate's comment), so the
+    /// loud error is the only thing standing between the model and a silent
+    /// discard.
     #[test]
-    fn a_null_sink_makes_the_tool_unavailable() {
-        assert!(!RenderArtifactTool::default().is_available());
-        assert!(RenderArtifactTool::new(Arc::new(CapturingRenderSink::new())).is_available());
+    fn a_session_with_no_display_fails_loudly_instead_of_discarding() {
+        let tool = RenderArtifactTool::default();
+        let ctx = ToolContext::test_default();
+        let result = call(&tool, json!({"title": "R", "content": "x"}), &ctx);
+        assert!(
+            result.is_error,
+            "a render with nowhere to go must not succeed"
+        );
+        assert!(
+            result.content.contains("no display surface"),
+            "{}",
+            result.content
+        );
     }
 
     #[test]

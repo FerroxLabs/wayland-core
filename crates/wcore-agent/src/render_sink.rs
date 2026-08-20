@@ -36,8 +36,10 @@ impl RenderSink for ProtocolRenderSink {
     /// The honesty gate: live only when the bound sink actually has a render
     /// surface. A terminal, null or relay sink (every sub-agent gets one of
     /// those — `spawner.rs` gives children a `NullSink` or a `ChannelSink`,
-    /// never the `ProtocolSink`) reports false, so `ToolRegistry::register`
-    /// drops `render_artifact` and the model is never offered it.
+    /// never the `ProtocolSink`) reports false, and `render_artifact` then
+    /// fails loudly instead of discarding. It stays REGISTERED either way:
+    /// `tool_inventory` is inside the recovery authority digest, so the tool
+    /// set must not move with the output surface.
     fn is_live(&self) -> bool {
         self.output.render_artifact_supported()
     }
