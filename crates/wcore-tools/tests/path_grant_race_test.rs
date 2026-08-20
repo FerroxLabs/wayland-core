@@ -20,17 +20,16 @@
 //! for a read-only folder the user picked.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-use wcore_tools::vfs::{RealFs, SandboxedFs, VfsError, VfsMetadata, VirtualFs};
-use wcore_tools::workspace_policy::WorkspacePolicy;
+use wcore_tools::vfs::{SandboxedFs, VfsError, VfsMetadata, VirtualFs};
 
+#[cfg(unix)]
 const BENIGN: &[u8] = b"<html>morning brief</html>";
+#[cfg(unix)]
 const SENTINEL: &[u8] = b"SENTINEL-OUTSIDE-THE-GRANT-0dd7f1";
 
-fn local_policy(root: &Path) -> WorkspacePolicy {
-    WorkspacePolicy::contained(root).with_local_operator_principal()
+#[cfg(unix)]
+fn local_policy(root: &Path) -> wcore_tools::workspace_policy::WorkspacePolicy {
+    wcore_tools::workspace_policy::WorkspacePolicy::contained(root).with_local_operator_principal()
 }
 
 /// THE REPRODUCTION.
@@ -50,6 +49,11 @@ fn local_policy(root: &Path) -> WorkspacePolicy {
 #[cfg(unix)]
 #[test]
 fn a_leaf_swapped_for_a_symlink_between_the_check_and_the_open_is_refused() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    use wcore_tools::vfs::RealFs;
+
     let ws = tempfile::tempdir().unwrap();
     let granted = tempfile::tempdir().unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
