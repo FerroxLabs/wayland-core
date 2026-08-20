@@ -198,33 +198,59 @@ async fn grep_with_ripgrep_on_path_never_returns_dot_env_contents() {
 /// Naming the secret file outright must be refused, not served. Grep returns
 /// matched line CONTENT, so an explicit `.env` target is the shortest exfil
 /// path there is.
+///
+/// The CASE VARIANTS are the point of the second and third rows. Grep resolves
+/// its target with `validate_search_root`, which normalizes LEXICALLY and does
+/// NOT `canonicalize`, so the spelling the caller typed is the spelling the
+/// denylist sees. On macOS and Windows the filesystem is case-insensitive, so
+/// `.ENV` opens the same bytes as `.env` while a case-SENSITIVE denylist waves
+/// it through — an agent that picks the spelling gets the secret with no grant
+/// and no card. The lowercase row is the known-positive control: if it ever
+/// stops refusing, this test is broken rather than the product.
 #[tokio::test]
 #[serial]
 async fn grep_refuses_an_explicitly_named_secret_file() {
     let dir = seed_workspace();
+    // On a case-insensitive filesystem these are all the same file; on Linux
+    // they are three, each seeded with the canary so a leak is visible either
+    // way. The body is deliberately NOT `KEY=value` shaped: when this was
+    // first run against the unfixed guard, `.ENV` WAS searched and the only
+    // reason the canary did not appear verbatim was the engine's downstream
+    // `SECRET_ASSIGNMENT` redactor. That second layer catches one shape; a PEM
+    // body or a bare token in a `.PEM`/`ID_RSA` spelled the same way is not an
+    // assignment and comes back whole. Seeding a plain line puts the refusal
+    // itself under test instead of its backstop.
+    for spelling in [".ENV", ".Env"] {
+        std::fs::write(dir.path().join(spelling), format!("plain line {CANARY}\n"))
+            .expect("write case variant");
+    }
     let _path = PathGuard::set(&path_without_ripgrep());
 
-    let ctx = ToolContext::test_default();
-    let result = GrepTool
-        .execute_with_ctx(
-            json!({
-                "pattern": "ZORVAX",
-                "path": dir.path().join(".env").to_string_lossy(),
-            }),
-            &ctx,
-        )
-        .await;
+    for spelling in [".env", ".ENV", ".Env"] {
+        let ctx = ToolContext::test_default();
+        let result = GrepTool
+            .execute_with_ctx(
+                json!({
+                    "pattern": "ZORVAX",
+                    "path": dir.path().join(spelling).to_string_lossy(),
+                }),
+                &ctx,
+            )
+            .await;
 
-    assert!(
-        !result.content.contains(CANARY),
-        "an explicitly named .env must never return its contents, got: {}",
-        result.content
-    );
-    assert!(
-        result.is_error,
-        "an explicitly named secret file must be refused loudly, got: {}",
-        result.content
-    );
+        assert!(
+            !result.content.contains(CANARY),
+            "an explicitly named {spelling} must never return its contents, \
+             got: {}",
+            result.content
+        );
+        assert!(
+            result.is_error,
+            "an explicitly named secret file ({spelling}) must be refused \
+             loudly, got: {}",
+            result.content
+        );
+    }
 }
 
 /// The second mechanism: a secret in an ORDINARY file. The engine's central

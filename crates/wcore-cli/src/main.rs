@@ -387,6 +387,20 @@ struct Cli {
     #[arg(long, requires = "json_stream")]
     allow_host_workspace_grants: bool,
 
+    /// Permit this JSON-stream host to grant read-only access to folders
+    /// outside the workspace ("always allow this folder").
+    ///
+    /// A separate opt-in from `--allow-host-workspace-grants` because it
+    /// answers a different question: that one widens what the session may
+    /// RUN, this one widens what it may READ. A launcher entitled to one is
+    /// not automatically entitled to the other.
+    ///
+    /// Deliberately a launch flag and not an environment variable. An env var
+    /// set once on every spawn cannot express "this session may, that one may
+    /// not"; a flag can, and it fails closed when absent.
+    #[arg(long, requires = "json_stream")]
+    allow_host_path_grants: bool,
+
     /// Permit this local JSON-stream host to grant additional provider spend
     /// after Core has emitted a budget-exceeded receipt. Default-deny; managed
     /// sessions still refuse grants.
@@ -2167,6 +2181,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             execution,
             cli.assistant.clone(),
             cli.allow_host_workspace_grants,
+            cli.allow_host_path_grants,
             cli.allow_host_budget_grants,
             runtime_engine_mode(cli.runtime_engine_mode),
             runtime_workspace_kind(cli.runtime_workspace_kind),
@@ -4033,6 +4048,95 @@ impl ProtocolEmitter for GatingProtocolWriter {
     }
 }
 
+/// The host's `grant_path` request, as received.
+struct PathGrantRequest {
+    grant_id: String,
+    root: String,
+    access: wcore_protocol::commands::PathGrantAccess,
+    expires_at_ms: Option<u64>,
+}
+
+fn emit_path_grant(
+    launch_authorized: bool,
+    policy: &wcore_tools::workspace_policy::WorkspacePolicy,
+    receipt: &mut wcore_types::workspace_trust::WorkspacePolicyReceipt,
+    request: PathGrantRequest,
+    writer: &ProtocolWriter,
+) {
+    let PathGrantRequest {
+        grant_id,
+        root,
+        access,
+        expires_at_ms,
+    } = request;
+    if !launch_authorized {
+        let _ = writer.emit(&ProtocolEvent::Info {
+            msg_id: String::new(),
+            message: "path grant refused: the local launcher did not opt in with --allow-host-path-grants".to_string(),
+        });
+        return;
+    }
+    let write = matches!(access, wcore_protocol::commands::PathGrantAccess::Write);
+    let expires_at =
+        expires_at_ms.map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
+    match policy.grant_session_read_root_full(&root, write, Some(grant_id), expires_at) {
+        Ok(granted) => {
+            emit_workspace_policy_receipt(policy, receipt, writer);
+            let _ = writer.emit(&ProtocolEvent::Info {
+                msg_id: String::new(),
+                message: format!(
+                    "folder granted for this session: {} (read-only; sandbox remains active)",
+                    granted.display()
+                ),
+            });
+        }
+        Err(error) => {
+            let _ = writer.emit(&ProtocolEvent::Info {
+                msg_id: String::new(),
+                message: format!("path grant refused: {error}"),
+            });
+        }
+    }
+}
+
+fn emit_path_revoke(
+    policy: &wcore_tools::workspace_policy::WorkspacePolicy,
+    receipt: &mut wcore_types::workspace_trust::WorkspacePolicyReceipt,
+    grant_id: &str,
+    writer: &ProtocolWriter,
+) {
+    // Deliberately NOT gated on the launcher opt-in. Taking authority away is
+    // always allowed; requiring permission to revoke would mean a host that
+    // launched without the flag could not clean up a grant it somehow held.
+    let message = match policy.revoke_session_read_root(grant_id) {
+        Some(root) => format!("folder access withdrawn: {}", root.display()),
+        None => format!("no folder grant with id {grant_id} is held by this session"),
+    };
+    emit_workspace_policy_receipt(policy, receipt, writer);
+    let _ = writer.emit(&ProtocolEvent::Info {
+        msg_id: String::new(),
+        message,
+    });
+}
+
+/// Re-publish the policy receipt so a host's "what can this chat reach" view
+/// is authoritative after every change to it, rather than only at startup.
+fn emit_workspace_policy_receipt(
+    policy: &wcore_tools::workspace_policy::WorkspacePolicy,
+    receipt: &mut wcore_types::workspace_trust::WorkspacePolicyReceipt,
+    writer: &ProtocolWriter,
+) {
+    receipt.readable_roots = policy
+        .readable_roots()
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    receipt.capabilities = policy.developer_capabilities();
+    let _ = writer.emit(&ProtocolEvent::WorkspacePolicy {
+        policy: receipt.clone(),
+    });
+}
+
 fn emit_workspace_capability_grant(
     launch_authorized: bool,
     policy: &wcore_tools::workspace_policy::WorkspacePolicy,
@@ -4741,6 +4845,7 @@ async fn run_json_stream_mode(
     execution: LocalExecutionSelection,
     assistant: Option<String>,
     allow_host_workspace_grants: bool,
+    allow_host_path_grants: bool,
     allow_host_budget_grants: bool,
     runtime_engine_mode: wcore_protocol::diagnostics::RuntimeEngineMode,
     runtime_workspace_kind: wcore_protocol::diagnostics::RuntimeWorkspaceKind,
@@ -5739,6 +5844,33 @@ async fn run_json_stream_mode(
                                             &writer,
                                         );
                                     }
+                                    ProtocolCommand::GrantPath {
+                                        grant_id,
+                                        root,
+                                        access,
+                                        expires_at_ms,
+                                    } => {
+                                        emit_path_grant(
+                                            allow_host_path_grants,
+                                            &workspace_policy,
+                                            &mut workspace_policy_receipt,
+                                            PathGrantRequest {
+                                                grant_id,
+                                                root,
+                                                access,
+                                                expires_at_ms,
+                                            },
+                                            &writer,
+                                        );
+                                    }
+                                    ProtocolCommand::RevokePath { grant_id } => {
+                                        emit_path_revoke(
+                                            &workspace_policy,
+                                            &mut workspace_policy_receipt,
+                                            &grant_id,
+                                            &writer,
+                                        );
+                                    }
                                     ProtocolCommand::SessionResync(command) => {
                                         let reason = if command.recovery_version
                                             != RECOVERY_PROTOCOL_VERSION
@@ -6225,6 +6357,33 @@ async fn run_json_stream_mode(
                     &workspace_policy,
                     &mut workspace_policy_receipt,
                     &executable,
+                    &writer,
+                );
+            }
+            ProtocolCommand::GrantPath {
+                grant_id,
+                root,
+                access,
+                expires_at_ms,
+            } => {
+                emit_path_grant(
+                    allow_host_path_grants,
+                    &workspace_policy,
+                    &mut workspace_policy_receipt,
+                    PathGrantRequest {
+                        grant_id,
+                        root,
+                        access,
+                        expires_at_ms,
+                    },
+                    &writer,
+                );
+            }
+            ProtocolCommand::RevokePath { grant_id } => {
+                emit_path_revoke(
+                    &workspace_policy,
+                    &mut workspace_policy_receipt,
+                    &grant_id,
                     &writer,
                 );
             }
@@ -8958,6 +9117,7 @@ mod tests {
                         category: ToolCategory::Edit,
                         args: json!({}),
                         description: String::new(),
+                        escalation: None,
                     },
                 })
                 .unwrap();
@@ -9016,6 +9176,7 @@ mod tests {
                         category: ToolCategory::Exec,
                         args: json!({}),
                         description: String::new(),
+                        escalation: None,
                     },
                 })
                 .unwrap();

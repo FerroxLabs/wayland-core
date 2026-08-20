@@ -1106,6 +1106,18 @@ impl TurnEngine for EngineTurnEngine {
                     );
                     "once"
                 }
+                // A folder grant is filesystem authority, not network
+                // authority. It narrows to `once` for exactly the reason
+                // `AlwaysPrefix` does: the bridge field means "may this host
+                // be reached again", and a path grant says nothing about that.
+                wcore_protocol::commands::ApprovalScope::AlwaysPath { root, .. } => {
+                    tracing::warn!(
+                        target: "wcore_cli::acp",
+                        %root,
+                        "path-scoped approval has no bridge equivalent; narrowing to once"
+                    );
+                    "once"
+                }
             });
             let outcome = wcore_agent::approval::ApprovalOutcome {
                 approved: decision.approved,
@@ -1279,6 +1291,7 @@ mod tests {
             category: wcore_protocol::events::ToolCategory::Info,
             args: serde_json::json!({"path": "x"}),
             description: "desc".to_string(),
+            escalation: None,
         }
     }
 
@@ -1436,6 +1449,7 @@ mod tests {
                     category: wcore_protocol::events::ToolCategory::Exec,
                     args: serde_json::json!({"name": "demo"}),
                     description: "run a forgeflow".into(),
+                    escalation: None,
                 },
             })
             .unwrap();
@@ -1519,6 +1533,7 @@ mod tests {
                     category: wcore_protocol::events::ToolCategory::Exec,
                     args: serde_json::json!({}),
                     description: "council approval".into(),
+                    escalation: None,
                 },
             })
             .unwrap();
@@ -1567,6 +1582,7 @@ mod tests {
                     category: wcore_protocol::events::ToolCategory::Exec,
                     args: serde_json::json!({"command": "ls"}),
                     description: "run".into(),
+                    escalation: None,
                 },
             })
             .unwrap();

@@ -14341,6 +14341,7 @@ impl AgentEngine {
                 category: ToolCategory::Exec,
                 args,
                 description: plan.meta.description.clone(),
+                escalation: None,
             },
         });
         let _ = writer.emit(&ProtocolEvent::ApprovalRequired {
@@ -14673,6 +14674,7 @@ impl AgentEngine {
                 category: ToolCategory::Exec,
                 args: serde_json::json!({ "task": task, "plan": plan_arg }),
                 description: "Convene a cross-vendor council".to_string(),
+                escalation: None,
             },
         });
 

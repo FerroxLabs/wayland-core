@@ -20,9 +20,17 @@
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 use thiserror::Error;
+use wcore_protocol::PathGrantSink;
 use wcore_sandbox::manifest::NetworkPolicy;
 use wcore_types::workspace_trust::DeveloperCapability;
+
+/// Upper bound on standing read grants in one session. A grant is minted by a
+/// person clicking "always allow this folder", so a healthy session mints a
+/// handful. The cap exists so a looping agent that keeps re-asking cannot grow
+/// the reachable set without bound.
+const MAX_SESSION_READ_GRANTS: usize = 64;
 
 const SECRET_SUFFIXES: &[&str] = &[
     "/.env",
@@ -170,7 +178,7 @@ pub struct WorkspacePolicy {
     /// Read-only roots approved by the local desktop host for this process
     /// lifetime. This is interior-mutable so an already-running Bash tool sees
     /// the grant on its next call without replacing the session sandbox.
-    session_read_grants: Arc<RwLock<Vec<PathBuf>>>,
+    session_read_grants: Arc<RwLock<Vec<SessionReadGrant>>>,
 }
 
 #[derive(Debug, Error)]
@@ -183,6 +191,55 @@ pub enum WorkspaceCapabilityGrantError {
     CredentialPath(PathBuf),
     #[error("capability path could not be resolved: {0}")]
     Resolve(#[from] std::io::Error),
+}
+
+/// One standing read grant held by a session.
+///
+/// Capability-derived roots (`grant_session_capability`) and host path grants
+/// (`grant_session_read_root`) share ONE store, because they answer the same
+/// question — what may this session read — and two stores would be two answers.
+/// They differ only in whether they carry an id to revoke by.
+#[derive(Debug, Clone)]
+pub struct SessionReadGrant {
+    pub root: PathBuf,
+    /// Host-supplied id, for revocation. `None` for capability-derived roots,
+    /// which are withdrawn only by ending the session.
+    pub id: Option<String>,
+    /// Wall-clock expiry. `None` means process lifetime.
+    pub expires_at: Option<SystemTime>,
+}
+
+impl SessionReadGrant {
+    fn is_live(&self, now: SystemTime) -> bool {
+        self.expires_at.is_none_or(|deadline| now < deadline)
+    }
+}
+
+/// Why a standing folder grant (`ApprovalScope::AlwaysPath`) was refused.
+///
+/// Every variant is shown to the user verbatim: a grant that is dropped
+/// silently looks to them like the "always allow this folder" button did not
+/// work, and they will click it again.
+#[derive(Debug, Error)]
+pub enum PathGrantError {
+    #[error("folder grants require a local session at your own keyboard")]
+    RequiresLocalOperator,
+    #[error("folder access could not be resolved: {0}")]
+    Resolve(#[from] std::io::Error),
+    #[error("{0} has no parent directory")]
+    NoParent(PathBuf),
+    #[error("the filesystem root cannot be granted")]
+    FilesystemRoot,
+    #[error("{0} contains your home directory — grant the specific folder instead")]
+    TooBroad(PathBuf),
+    #[error("{0} overlaps a credential store")]
+    CredentialPath(PathBuf),
+    #[error("{0} is a protected secret path")]
+    SecretPath(PathBuf),
+    #[error("write access to a folder outside the workspace is not grantable")]
+    WriteNotGrantable,
+    #[error("this session already holds the maximum of {0} folder grants")]
+    CapReached(usize),
 }
 
 #[derive(Debug, Error)]
@@ -449,7 +506,17 @@ impl WorkspacePolicy {
         if !matches!(self.network, NetworkPolicy::Deny) {
             v.extend(self.network_scoped_readable.iter().cloned());
         }
-        v.extend(self.session_read_grants.read().iter().cloned());
+        // Expired grants are filtered here rather than reaped on a timer:
+        // this is the one place that decides what a session may read, so a
+        // grant cannot outlive its deadline by racing a sweep.
+        let now = SystemTime::now();
+        v.extend(
+            self.session_read_grants
+                .read()
+                .iter()
+                .filter(|grant| grant.is_live(now))
+                .map(|grant| grant.root.clone()),
+        );
         v.sort();
         v.dedup();
         v
@@ -741,6 +808,16 @@ impl WorkspacePolicy {
         if self.secret_read_deny_required {
             out.extend(project_committed_secrets(&self.root, &readable_canon));
             out.extend(git_content_stores(&self.root));
+            // A granted folder is a mounted root the child can reach, so it
+            // needs the same secret walk the workspace gets. Without this the
+            // in-process file tools would refuse `<granted>/id_rsa` while
+            // `Bash cat` read it happily, and the two layers would disagree
+            // about what is readable — which is how a boundary quietly stops
+            // being one.
+            for granted in self.session_read_grant_roots() {
+                let scope = vec![granted.clone()];
+                out.extend(project_committed_secrets(&granted, &scope));
+            }
         }
         out.extend(self.authority_read_deny.iter().cloned());
         out.sort();
@@ -835,9 +912,15 @@ impl WorkspacePolicy {
         roots.dedup();
         {
             let mut grants = self.session_read_grants.write();
-            grants.extend(roots.iter().cloned());
-            grants.sort();
-            grants.dedup();
+            for root in &roots {
+                if !grants.iter().any(|existing| existing.root == *root) {
+                    grants.push(SessionReadGrant {
+                        root: root.clone(),
+                        id: None,
+                        expires_at: None,
+                    });
+                }
+            }
         }
         let capability = DeveloperCapability {
             name: executable
@@ -860,6 +943,245 @@ impl WorkspacePolicy {
         }
         Ok(capability)
     }
+
+    /// Standing read grants held by this session that have not expired.
+    pub fn session_read_grant_roots(&self) -> Vec<PathBuf> {
+        let now = SystemTime::now();
+        self.session_read_grants
+            .read()
+            .iter()
+            .filter(|grant| grant.is_live(now))
+            .map(|grant| grant.root.clone())
+            .collect()
+    }
+
+    /// Withdraw the grant carrying `grant_id`. Returns the root that was
+    /// withdrawn, or `None` if no such grant is held — an unknown id is a
+    /// no-op so a host can revoke idempotently (a host that crashed mid-flow
+    /// should be able to clean up without having to know what landed).
+    pub fn revoke_session_read_root(&self, grant_id: &str) -> Option<PathBuf> {
+        let mut grants = self.session_read_grants.write();
+        let index = grants
+            .iter()
+            .position(|grant| grant.id.as_deref() == Some(grant_id))?;
+        Some(grants.remove(index).root)
+    }
+
+    /// Shared handle to the standing read grants, for the in-process file
+    /// tools.
+    ///
+    /// `readable_roots()` already folds these in for the Bash OS sandbox, but
+    /// `SandboxedFs` is constructed with a single root and would otherwise
+    /// keep refusing a granted path — the user would approve the folder and
+    /// `Read` would still say no. Handing out the same `Arc` (never a copy)
+    /// is what makes a grant take effect on the very next call.
+    pub fn session_read_grant_handle(&self) -> Arc<RwLock<Vec<SessionReadGrant>>> {
+        Arc::clone(&self.session_read_grants)
+    }
+
+    /// True when the in-process file tools can already READ `path`.
+    ///
+    /// Deliberately mirrors [`crate::vfs::SandboxedFs::contain_read`] — the
+    /// jail root plus the live standing grants — and NOT `readable_roots()`,
+    /// which is the wider set the OS shell sandbox mounts. The two lists
+    /// answer different questions, and the escalation prompt must be keyed to
+    /// the layer that will actually do the refusing: a prompt keyed to the
+    /// wider list would stay silent for a path the tool then refuses anyway.
+    pub fn is_read_reachable(&self, path: &Path) -> bool {
+        let canon = canon_for_scope(path);
+        canon.starts_with(&self.root) || self.is_session_read_granted(&canon)
+    }
+
+    /// True when `path` is inside a standing read grant.
+    pub fn is_session_read_granted(&self, path: &Path) -> bool {
+        let canon = canon_for_scope(path);
+        let now = SystemTime::now();
+        self.session_read_grants
+            .read()
+            .iter()
+            .filter(|grant| grant.is_live(now))
+            .any(|grant| canon.starts_with(&grant.root))
+    }
+
+    /// Add a standing READ grant for a folder outside the workspace, minted by
+    /// an approved `ApprovalScope::AlwaysPath`.
+    ///
+    /// This is the "always allow this folder" answer to an escalation prompt.
+    /// It is deliberately the narrowest thing that resolves the dead end: the
+    /// sandbox stays in place and the workspace root is unchanged; one extra
+    /// root becomes readable for the rest of the process lifetime.
+    ///
+    /// GATE: a grant is only ever minted for a genuinely-local session
+    /// (`local_operator_principal`). A path grant expands filesystem authority
+    /// past the sandbox root, which is precisely what an untrusted wire peer
+    /// would like to arrange, so it gets the same treatment as
+    /// `SessionMode::Force` (GHSA-8r7g) — a peer may ask, only a local
+    /// operator may permit. The flag is fail-safe `false` in every constructor,
+    /// so a future construction path cannot acquire this by omission.
+    ///
+    /// WRITE is not grantable. A read grant answers "let me show you this
+    /// file"; write authority outside the workspace is a materially larger
+    /// thing and would need its own store, its own prompt wording, and its own
+    /// review. Refusing it explicitly (rather than silently ignoring the flag)
+    /// keeps the host from shipping a button whose label overstates what it
+    /// does.
+    pub fn grant_session_read_root(
+        &self,
+        root: impl AsRef<Path>,
+        write: bool,
+    ) -> Result<PathBuf, PathGrantError> {
+        self.grant_session_read_root_full(root, write, None, None)
+    }
+
+    /// [`grant_session_read_root`](Self::grant_session_read_root) with the
+    /// host-supplied revocation id and expiry carried by the `grant_path`
+    /// protocol command.
+    pub fn grant_session_read_root_full(
+        &self,
+        root: impl AsRef<Path>,
+        write: bool,
+        grant_id: Option<String>,
+        expires_at: Option<SystemTime>,
+    ) -> Result<PathBuf, PathGrantError> {
+        let dir = self.grantable_read_root(root, write)?;
+
+        let now = SystemTime::now();
+        let mut grants = self.session_read_grants.write();
+        // Re-checked under the WRITE lock, because the dry run above took only
+        // a read lock and a concurrent grant may have landed since.
+        if grant_capacity(&grants, &dir, now)? {
+            return Ok(dir);
+        }
+        grants.push(SessionReadGrant {
+            root: dir.clone(),
+            id: grant_id,
+            expires_at,
+        });
+        Ok(dir)
+    }
+
+    /// Dry-run half of [`grant_session_read_root_full`](Self::grant_session_read_root_full):
+    /// every check, no mutation, returning the folder that WOULD be granted.
+    ///
+    /// This exists so the pre-flight escalation prompt (#1099) can promise
+    /// something. Core only shows a host an "always allow this folder" button
+    /// after this returns `Ok`, so the button cannot be one that silently
+    /// fails — the alternative is a card the user answers, a grant the policy
+    /// refuses, and a re-prompt on the very next sibling file.
+    pub fn grantable_read_root(
+        &self,
+        root: impl AsRef<Path>,
+        write: bool,
+    ) -> Result<PathBuf, PathGrantError> {
+        let dir = self.grantable_read_root_shape(root, write)?;
+        let now = SystemTime::now();
+        let grants = self.session_read_grants.read();
+        grant_capacity(&grants, &dir, now)?;
+        Ok(dir)
+    }
+
+    /// The path-shape half: is this a folder we are willing to open at all?
+    fn grantable_read_root_shape(
+        &self,
+        root: impl AsRef<Path>,
+        write: bool,
+    ) -> Result<PathBuf, PathGrantError> {
+        if write {
+            return Err(PathGrantError::WriteNotGrantable);
+        }
+        if !self.local_operator_principal {
+            return Err(PathGrantError::RequiresLocalOperator);
+        }
+
+        let canon = std::fs::canonicalize(root.as_ref())?;
+        // A grant names a FOLDER. If the host sent the file the user was
+        // looking at, grant the directory that contains it — that is what the
+        // person answering "always allow this folder" believes they said.
+        let dir = if canon.is_dir() {
+            canon
+        } else {
+            canon
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| PathGrantError::NoParent(canon.clone()))?
+        };
+
+        if dir.parent().is_none() {
+            return Err(PathGrantError::FilesystemRoot);
+        }
+        if let Some(home) = dirs::home_dir() {
+            let home = canon_for_scope(&home);
+            // `$HOME` itself, and anything containing it, reach everything the
+            // sandbox exists to stand between the agent and.
+            if home.starts_with(&dir) {
+                return Err(PathGrantError::TooBroad(dir));
+            }
+        }
+        if path_is_in_credential_store(&dir) || credential_store_is_under(&dir) {
+            return Err(PathGrantError::CredentialPath(dir));
+        }
+        if is_secret_path_static(&dir) {
+            return Err(PathGrantError::SecretPath(dir));
+        }
+        Ok(dir)
+    }
+}
+
+/// Is there room for a grant on `dir`?
+///
+/// `Ok(true)` — a LIVE grant already covers it, so recording a second entry
+/// would be a duplicate. An expired grant does not count as cover, or a
+/// deadline could be silently extended by re-asking.
+/// `Ok(false)` — not covered, and under the cap.
+fn grant_capacity(
+    grants: &[SessionReadGrant],
+    dir: &Path,
+    now: SystemTime,
+) -> Result<bool, PathGrantError> {
+    if grants
+        .iter()
+        .any(|existing| existing.is_live(now) && dir.starts_with(&existing.root))
+    {
+        return Ok(true);
+    }
+    if grants.iter().filter(|g| g.is_live(now)).count() >= MAX_SESSION_READ_GRANTS {
+        return Err(PathGrantError::CapReached(MAX_SESSION_READ_GRANTS));
+    }
+    Ok(false)
+}
+
+impl PathGrantSink for WorkspacePolicy {
+    fn grant_path(&self, root: &Path, write: bool) -> bool {
+        match self.grant_session_read_root(root, write) {
+            Ok(dir) => {
+                tracing::info!(root = %dir.display(), "session read grant recorded");
+                true
+            }
+            Err(error) => {
+                // Deliberately not `warn!`: with `RUST_LOG` unset only ERROR
+                // reaches stderr, so a warning here would reach nobody. The
+                // person just clicked a button and is owed the reason it did
+                // not take.
+                eprintln!("wayland: folder access not granted - {error}");
+                false
+            }
+        }
+    }
+}
+
+/// True when granting `dir` would hand over a credential store that lives
+/// beneath it. The sibling of [`path_is_in_credential_store`], which only
+/// catches the store-or-below direction: granting `~/Projects` is fine, but
+/// granting a directory that CONTAINS `~/.ssh` is the same disclosure as
+/// granting `~/.ssh` itself.
+fn credential_store_is_under(dir: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let home = canon_for_scope(&home);
+    CREDENTIAL_STORES
+        .iter()
+        .any(|relative| home.join(relative).starts_with(dir))
 }
 
 fn path_is_in_credential_store(path: &Path) -> bool {
@@ -885,29 +1207,105 @@ fn path_is_in_credential_store(path: &Path) -> bool {
 /// it directly, because Grep has no policy instance and must not grow a second,
 /// divergent copy of this list.
 pub(crate) fn is_secret_path_static(path: &Path) -> bool {
-    let s = path.to_string_lossy().replace('\\', "/");
+    // ASCII case is folded on EVERY rule, on EVERY platform — not just on the
+    // extension, which is how this was written and how `.ENV` escaped while
+    // `server.KEY` did not.
+    //
+    // On macOS and Windows (the two hosts the desktop app ships on) the
+    // filesystem is case-INSENSITIVE, so `.ENV` and `.env` are the SAME FILE
+    // and a case-sensitive denylist is simply bypassable by spelling.
+    //
+    // On LINUX the filesystem IS case-sensitive, so `.ENV` is genuinely a
+    // different file and folding case here can over-deny. That is the right
+    // trade anyway, and it is taken deliberately rather than by omission:
+    //
+    //   * This is a DENY list. Over-denying refuses a read — visible,
+    //     recoverable, the operator picks another path. Under-denying hands a
+    //     credential to the model — silent and irreversible. The asymmetry is
+    //     not close.
+    //   * One predicate feeds `Read`, `Grep`, `SecretDenyFs` AND the OS-sandbox
+    //     deny-set computation. A `cfg(unix)`-split answer would make the
+    //     sandbox's deny list disagree with the in-process check on the same
+    //     path — exactly the seam holes appear in — and would make a Linux CI
+    //     run stop grading the macOS/Windows behaviour.
+    //   * The cost is bounded by the lists themselves: nothing in
+    //     SECRET_BASENAMES / SEGMENTS / SUFFIXES / EXTENSIONS has a legitimate
+    //     upper-case homonym a user would be blocked from reading. `ID_RSA` on
+    //     Linux is an SSH key that shouted, not a source file.
+    //   * `SECRET_EXTENSIONS` has folded case on Linux since it was written,
+    //     and `wcore-cli`'s `@`-attach guard folds case on every rule. Folding
+    //     here makes the codebase consistent instead of splitting it.
+    //
+    // Allocation: one `String` for the whole path (down from two — the old
+    // `replace` plus a per-call `to_ascii_lowercase` of the extension). The
+    // file-name rules match through `*_ci` helpers, which allocate nothing.
+    // This runs on every tool call.
+    let raw = path.to_string_lossy();
+    let mut s = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        // ASCII lower-casing never changes a char's UTF-8 length, so the
+        // capacity above is exact and `s` stays byte-aligned with `raw`.
+        s.push(if c == '\\' {
+            '/'
+        } else {
+            c.to_ascii_lowercase()
+        });
+    }
+    // Trailing spaces/dots come off the WHOLE path too, not just the derived
+    // file name below. The suffix rules (`/.env`, `/.npmrc`, `/.aws/credentials`)
+    // match against this string, so without this `.env ` fails every one of
+    // them while `.env` matches — which is the bypass, just relocated.
+    // Trailing bytes of the path ARE the trailing bytes of its final
+    // component, so trimming the end is exactly the right scope.
+    let s = s.trim_end_matches([' ', '.']);
 
-    if let Some(ext) = path.extension().and_then(|e| e.to_str())
-        && SECRET_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+    // Win32 STRIPS trailing spaces and dots from the final path component
+    // before opening it, so `.env `, `.env.` and `.env. ` all open `.env`.
+    // A denylist that matches the literal name is therefore bypassable by
+    // typing a space, exactly as it was bypassable by typing a capital before
+    // the case fold above. Same deny-list asymmetry, same answer: strip them
+    // on every platform. On Linux `.env ` is genuinely a distinct file, so
+    // this can over-deny by one pathological name — which refuses a read,
+    // against under-denying which hands over a credential.
+    //
+    // `trim_end_matches` returns a borrowed slice, so this allocates nothing.
+    let effective_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.trim_end_matches([' ', '.']))
+        .filter(|n| !n.is_empty());
+
+    // The extension is re-derived from the EFFECTIVE name rather than taken
+    // from `path.extension()`: for `foo.key ` the real extension is `key `,
+    // which matches nothing in SECRET_EXTENSIONS.
+    if let Some(ext) = effective_name
+        .and_then(|n| n.rsplit_once('.'))
+        .map(|(_, ext)| ext)
+        && SECRET_EXTENSIONS
+            .iter()
+            .any(|e| ext.eq_ignore_ascii_case(e))
     {
         return true;
     }
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if SECRET_BASENAMES.contains(&name) {
+    if let Some(name) = effective_name {
+        if SECRET_BASENAMES
+            .iter()
+            .any(|b| name.eq_ignore_ascii_case(b))
+        {
             return true;
         }
         // service-account*.json, bare key.json, and separator-bounded *-key.json / *_key.json.
         // Does NOT match monkey.json, turnkey.json, hotkey.json (no false positives).
-        if name.ends_with(".json")
-            && (name.starts_with("service-account")
-                || name == "key.json"
-                || name.ends_with("-key.json")
-                || name.ends_with("_key.json"))
+        if ends_with_ci(name, ".json")
+            && (starts_with_ci(name, "service-account")
+                || name.eq_ignore_ascii_case("key.json")
+                || ends_with_ci(name, "-key.json")
+                || ends_with_ci(name, "_key.json"))
         {
             return true;
         }
         // terraform.tfstate and terraform.tfstate.backup (compound extension)
-        if name.contains(".tfstate") {
+        if contains_ci(name, ".tfstate") {
             return true;
         }
     }
@@ -924,6 +1322,29 @@ pub(crate) fn is_secret_path_static(path: &Path) -> bool {
             false
         }
     })
+}
+
+// ASCII-case-insensitive `starts_with` / `ends_with` / `contains` for the final
+// path component in `is_secret_path_static`. Byte-wise, so a multi-byte
+// character can never land the comparison on a UTF-8 boundary and panic, and
+// allocation-free — the predicate runs on every tool call. Every `needle` here
+// is a lower-case ASCII literal from the denylists above.
+fn starts_with_ci(hay: &str, needle: &str) -> bool {
+    hay.len() >= needle.len()
+        && hay.as_bytes()[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())
+}
+
+fn ends_with_ci(hay: &str, needle: &str) -> bool {
+    hay.len() >= needle.len()
+        && hay.as_bytes()[hay.len() - needle.len()..].eq_ignore_ascii_case(needle.as_bytes())
+}
+
+fn contains_ci(hay: &str, needle: &str) -> bool {
+    hay.len() >= needle.len()
+        && hay
+            .as_bytes()
+            .windows(needle.len())
+            .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 /// Compute the set of paths that must be denied for reading in the OS sandbox.
@@ -1107,7 +1528,7 @@ fn git_content_stores(root: &Path) -> Vec<PathBuf> {
 /// itself does not exist (e.g. a `Write` to a not-yet-created `.env`), so the
 /// `/var` → `/private/var` normalization still lands and the prefix match
 /// against the canonical root holds.
-fn canon_for_scope(path: &Path) -> PathBuf {
+pub(crate) fn canon_for_scope(path: &Path) -> PathBuf {
     if let Ok(c) = std::fs::canonicalize(path) {
         return c;
     }

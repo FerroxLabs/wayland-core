@@ -1011,6 +1011,82 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    /// #1098: this sink IS a json-stream host connection, so it is the one
+    /// sink that can put a rendered artifact in front of a user.
+    fn render_artifact_supported(&self) -> bool {
+        true
+    }
+
+    /// #1098: emit `ProtocolEvent::RenderArtifact`.
+    ///
+    /// THE truncation and redaction chokepoint. Every render passes through
+    /// here, so neither can be routed around by a future caller that forgot
+    /// them. Over the cap the content is truncated with an in-band marker and
+    /// `truncated` is set — never dropped (wayland#1071).
+    ///
+    /// The render cap (`RENDER_ARTIFACT_CONTENT_LIMIT_BYTES`, 1 MiB) is NOT the
+    /// output pump's threshold — that is `MAX_QUEUED_BYTES`, 8 MiB. An earlier
+    /// version of this comment conflated the two, and a test written against it
+    /// asserted the emitted string fits inside the render cap. It does not:
+    /// `truncate_render_content` returns the kept prefix PLUS the in-band
+    /// marker, so an over-cap render is deliberately cap+marker bytes long. The
+    /// pump is unaffected at that size; keep the two limits distinct.
+    fn emit_render_artifact(
+        &self,
+        call_id: &str,
+        title: &str,
+        mime: wcore_protocol::events::RenderMime,
+        content: &str,
+    ) {
+        let msg_id = self.current_msg_id.read().clone();
+        // Wave SC SECURITY MAJOR / #584 — scrub in-flight approval correlation
+        // ids before emission, exactly as `emit_tool_result`, `emit_info`,
+        // `emit_tool_panicked` and `emit_stream_chunk` do. This carries up to
+        // a megabyte of model-authored text or workspace file bytes, so it is
+        // the same snooping surface those emitters close; being the one
+        // tool-text emitter that skipped it made it the cheapest way to lift a
+        // live token.
+        //
+        // Redaction runs BEFORE truncation, and the order is load-bearing.
+        // The scrub matches WHOLE tokens, so truncating first would cut a token
+        // straddling the cap in half and leave its prefix in the emitted frame,
+        // where no whole-token scrub can ever match it again — half an
+        // `apr-<uuid>` is still half a live credential. Redacting first removes
+        // the token before a cut position even exists.
+        //
+        // The order is NOT about the byte cap: `truncate_render_content`
+        // deliberately appends its in-band marker AFTER the cut, so the value it
+        // returns is already `RENDER_ARTIFACT_CONTENT_LIMIT_BYTES` plus the
+        // marker. The cap that actually protects the output pump is the 8 MiB
+        // frame limit, which 1 MiB of content cannot approach in either order.
+        // Like `emit_tool_panicked`, and NOT like the older `self.token_redactor`
+        // call sites: the process-wide set is a strict superset of any one
+        // handle's, so a token minted on another bridge — a sub-agent, a second
+        // session, any sink that never saw the minting bridge — is scrubbed
+        // here too. A per-handle redactor would pass a same-sink test and still
+        // leak across bridges, which is the gap #584 exists to close.
+        let redacted = crate::output_redaction::redact_active_tokens(content);
+        let (content, truncated) = wcore_protocol::events::truncate_render_content(&redacted);
+        let _ = self.writer.emit(&ProtocolEvent::RenderArtifact {
+            msg_id,
+            call_id: call_id.to_string(),
+            // The title is scrubbed on the same terms as the content. It is
+            // model-authored (`input["title"]`) and never file-derived, so a
+            // token here is one the model already holds — a materially weaker
+            // vector than `content`. It is closed anyway: "pre-existing" is not
+            // a disposition, and leaving one field of a frame unscrubbed at a
+            // chokepoint whose whole job is scrubbing invites the next reader
+            // to assume the frame is clean.
+            title: wcore_protocol::events::truncate_render_title(
+                &crate::output_redaction::redact_active_tokens(title),
+            ),
+            mime,
+            content,
+            truncated,
+            critical: wcore_protocol::events::NonCritical,
+        });
+    }
+
     /// W7 S4: emit `ProtocolEvent::ApprovalResume`. Gated by hitl_suspend.
     fn emit_approval_resume(&self, resume_token: &str, approved: bool) {
         if !self.hitl_suspend_enabled {
@@ -1608,6 +1684,19 @@ mod tests {
         assert!(!caps.sub_agent_traces);
     }
 
+    /// #1098: only a json-stream connection is a render surface. The terminal
+    /// and null sinks must report false, or `RenderArtifactTool` would be
+    /// registered under a sink that discards the event and the model would
+    /// believe it had shown the user something.
+    #[test]
+    fn only_the_protocol_sink_reports_render_support() {
+        let sink = ProtocolSink::new(Arc::new(ProtocolWriter::new()));
+        assert!(OutputSink::render_artifact_supported(&sink));
+        assert!(!OutputSink::render_artifact_supported(
+            &crate::output::null_sink::NullSink
+        ));
+    }
+
     /// W7 F4: streaming_tools_advertised reflects the builder flag.
     #[test]
     fn protocol_sink_streaming_tools_advertised_tracks_builder() {
@@ -1805,6 +1894,204 @@ mod tests {
             "tool_panicked leaked an approval token minted on another bridge: {panic_message}"
         );
         drop(sink_a);
+    }
+
+    /// Pull the `content` and the `truncated` flag off the one
+    /// `RenderArtifact` frame an emitter recorded, failing loudly if no frame
+    /// was written at all.
+    fn recorded_render_frame(emitter: &RecordingEmitter) -> (String, bool) {
+        emitter
+            .events
+            .lock()
+            .iter()
+            .find_map(|e| match e {
+                ProtocolEvent::RenderArtifact {
+                    content, truncated, ..
+                } => Some((content.clone(), *truncated)),
+                _ => None,
+            })
+            .expect("emit_render_artifact must write a frame")
+    }
+
+    /// #1098 + #584 — `render_artifact` carries up to a megabyte of
+    /// model-authored text or workspace file bytes, which is the same snooping
+    /// surface `emit_tool_panicked` closes. It shipped as the one tool-text
+    /// emitter on this struct that did not scrub, making it the cheapest way to
+    /// lift a live approval token.
+    ///
+    /// Cross-bridge shape, for the same reason the panic test uses it: a
+    /// per-handle redactor passes a same-sink test and still leaks here.
+    #[test]
+    fn render_artifact_scrubs_a_token_minted_on_another_sink() {
+        let token = "apr-22222222-3333-4444-5555-666666666666".to_string();
+
+        let emitter_a = Arc::new(RecordingEmitter::default());
+        let sink_a = ProtocolSink::with_emitter(emitter_a.clone());
+        sink_a.token_redactor().set(vec![token.clone()]);
+
+        let emitter_b = Arc::new(RecordingEmitter::default());
+        let sink_b = ProtocolSink::with_emitter(emitter_b.clone());
+        // CONTROL: the two sinks really do have independent token sets.
+        assert!(
+            sink_b.token_redactor().snapshot().is_empty(),
+            "control failed: sink B already knows the token, so this proves nothing"
+        );
+
+        sink_b.emit_render_artifact(
+            "c1",
+            "report",
+            wcore_protocol::events::RenderMime::Plain,
+            &format!("the token is {token} !"),
+        );
+
+        let (content, _) = recorded_render_frame(&emitter_b);
+        // CONTROL: the payload really rode the frame.
+        assert!(
+            content.contains("the token is"),
+            "control failed: the frame lost the content: {content}"
+        );
+        assert!(
+            !content.contains(&token),
+            "render_artifact leaked an approval token minted on another bridge: {content}"
+        );
+        drop(sink_a);
+    }
+
+    /// The same-bridge case must hold too.
+    #[test]
+    fn render_artifact_scrubs_an_active_approval_token() {
+        let emitter = Arc::new(RecordingEmitter::default());
+        let sink = ProtocolSink::with_emitter(emitter.clone());
+        let token = "apr-77777777-6666-5555-4444-333333333333".to_string();
+        sink.token_redactor().set(vec![token.clone()]);
+
+        sink.emit_render_artifact(
+            "c1",
+            "report",
+            wcore_protocol::events::RenderMime::Plain,
+            &format!("the token is {token} !"),
+        );
+
+        let (content, _) = recorded_render_frame(&emitter);
+        // CONTROL: the payload really rode the frame.
+        assert!(
+            content.contains("the token is"),
+            "control failed: the frame lost the content: {content}"
+        );
+        assert!(
+            !content.contains(&token),
+            "render_artifact leaked the live approval token: {content}"
+        );
+    }
+
+    /// Redaction runs BEFORE truncation, and this is the test that pins it.
+    ///
+    /// `redact_active_tokens` matches WHOLE tokens. Truncating first cuts a
+    /// token that straddles the cap in half and leaves the prefix in the emitted
+    /// frame, where no later whole-token scrub can ever match it — half an
+    /// `apr-<uuid>` is still half a live credential. So the payload carries two
+    /// tokens: one wholly inside the kept prefix, which fails if the scrub is
+    /// missing altogether, and one positioned to straddle the cut, which fails
+    /// only if the scrub runs AFTER truncation instead of before.
+    ///
+    /// Note what this deliberately does NOT assert: that the frame is at most
+    /// `RENDER_ARTIFACT_CONTENT_LIMIT_BYTES`. `truncate_render_content` appends
+    /// its in-band marker after the cut, so an over-cap render is always the cap
+    /// plus that marker — by design. The limit that protects the output pump is
+    /// the 8 MiB frame cap, which neither order can approach here.
+    #[test]
+    fn render_artifact_redacts_before_truncating_over_cap_content() {
+        let emitter = Arc::new(RecordingEmitter::default());
+        let sink = ProtocolSink::with_emitter(emitter.clone());
+        let head_token = "apr-11111111-1111-1111-1111-111111111111".to_string();
+        let edge_token = "apr-eeeeeeee-2222-3333-4444-555555555555".to_string();
+        sink.token_redactor()
+            .set(vec![head_token.clone(), edge_token.clone()]);
+
+        let limit = wcore_protocol::events::RENDER_ARTIFACT_CONTENT_LIMIT_BYTES;
+        let half = edge_token.len() / 2;
+        // Place `edge_token` so it starts `half` bytes before the cap in the RAW
+        // payload: an unredacted truncation then lands through its middle.
+        let filler = limit - half - head_token.len();
+        let payload = format!(
+            "{head_token}{}{edge_token}{}",
+            "x".repeat(filler),
+            "y".repeat(limit)
+        );
+        let straddling_half = &edge_token[..half];
+
+        // CONTROL: the payload is over the cap, so truncation actually runs.
+        assert!(
+            payload.len() > limit,
+            "control failed: payload is not over the cap, so truncation never runs"
+        );
+        // CONTROL: the cut really does fall through the middle of `edge_token`.
+        // Without this the test cannot tell redact-then-truncate from
+        // truncate-then-redact, and would pass under both.
+        assert!(
+            payload[..limit].ends_with(straddling_half),
+            "control failed: the cut does not straddle the edge token"
+        );
+
+        sink.emit_render_artifact(
+            "c1",
+            "big",
+            wcore_protocol::events::RenderMime::Plain,
+            &payload,
+        );
+
+        let (content, truncated) = recorded_render_frame(&emitter);
+        // CONTROL: this frame really was truncated.
+        assert!(
+            truncated,
+            "control failed: the frame was not truncated, so the cut never happened"
+        );
+        assert!(
+            !content.contains(&head_token),
+            "render_artifact leaked a whole token from over-cap content"
+        );
+        assert!(
+            !content.contains(straddling_half),
+            "render_artifact truncated BEFORE redacting: {half} bytes of a live \
+             token survived the cut, where a whole-token scrub can never match it"
+        );
+    }
+
+    /// The title rides the same frame and is scrubbed on the same terms.
+    /// Weaker vector than `content` (model-authored, never file-derived), but a
+    /// chokepoint that scrubs one field and not the other is worse than either.
+    #[test]
+    fn render_artifact_scrubs_the_title_too() {
+        let emitter = Arc::new(RecordingEmitter::default());
+        let sink = ProtocolSink::with_emitter(emitter.clone());
+        let token = "apr-44444444-5555-6666-7777-888888888888".to_string();
+        sink.token_redactor().set(vec![token.clone()]);
+
+        sink.emit_render_artifact(
+            "c1",
+            &format!("report {token} summary"),
+            wcore_protocol::events::RenderMime::Plain,
+            "body",
+        );
+
+        let title = emitter
+            .events
+            .lock()
+            .iter()
+            .find_map(|e| match e {
+                ProtocolEvent::RenderArtifact { title, .. } => Some(title.clone()),
+                _ => None,
+            })
+            .expect("emit_render_artifact must write a frame");
+        // CONTROL: the title really rode the frame.
+        assert!(
+            title.contains("report"),
+            "control failed: the frame lost the title: {title}"
+        );
+        assert!(
+            !title.contains(&token),
+            "render_artifact leaked an approval token in the title: {title}"
+        );
     }
 
     /// The same-bridge case still has to hold — the cross-bridge fix must not

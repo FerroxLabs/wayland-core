@@ -16,6 +16,7 @@ pub mod writer;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -180,6 +181,27 @@ struct PendingApproval {
 /// unanswered or cancelled approval wedged or leaked forever. The
 /// manager is shared as `Arc<ToolApprovalManager>`, so the reaper holds
 /// an `Arc` and observes the same `pending` map.
+/// Receiver for a path grant minted by an approved
+/// [`ApprovalScope::AlwaysPath`].
+///
+/// `ToolApprovalManager` deliberately does NOT keep its own list of granted
+/// roots. Filesystem containment has a single source of truth — the session's
+/// `WorkspacePolicy` — and a second store here would be a second answer to
+/// "what can this session reach", which is exactly how a sandbox develops a
+/// hole. The manager decides WHETHER a grant is permitted; the sink decides
+/// whether the root itself is acceptable and is free to refuse.
+pub trait PathGrantSink: Send + Sync {
+    /// Add `root` to the session's reachable roots, read-only unless `write`.
+    ///
+    /// Returns `false` when the implementation refuses the root (it does not
+    /// exist, it is a credential store, it is `$HOME` or the filesystem root,
+    /// the grant cap is reached, …). A refusal is not an error to propagate —
+    /// the approved action still proceeds under the `Once` semantics — but it
+    /// SHOULD be surfaced to the user, because a silently-withheld grant looks
+    /// to them like the "always allow" button did not work.
+    fn grant_path(&self, root: &Path, write: bool) -> bool;
+}
+
 pub struct ToolApprovalManager {
     pending: Mutex<HashMap<String, PendingApproval>>,
     /// Category-wide always-allow set. Used by `add_auto_approve` (direct
@@ -210,6 +232,12 @@ pub struct ToolApprovalManager {
     /// unless a local operator opted in at launch. Local, in-process surfaces
     /// (the interactive TUI) call [`set_mode`] directly and are unaffected.
     allow_wire_force: AtomicBool,
+    /// Installed by the layer that owns the session's filesystem containment
+    /// (`WorkspacePolicy`, in `wcore-tools`). `None` until installed, in which
+    /// case an `AlwaysPath` approval degrades to `Once` — this manager stores
+    /// no filesystem authority of its own, so there is exactly one source of
+    /// truth for which roots are reachable.
+    path_grant_sink: Mutex<Option<Arc<dyn PathGrantSink>>>,
     /// Per-request TTL. Defaults to [`DEFAULT_APPROVAL_TTL`]; tests use
     /// a sub-second TTL via [`ToolApprovalManager::with_ttl`].
     ttl: Duration,
@@ -231,6 +259,7 @@ impl ToolApprovalManager {
             session_mode: Mutex::new(SessionMode::Default),
             managed_floor: Mutex::new(None),
             allow_wire_force: AtomicBool::new(false),
+            path_grant_sink: Mutex::new(None),
             ttl,
         }
     }
@@ -392,6 +421,9 @@ impl ToolApprovalManager {
                             .push(prefix);
                     }
                 }
+                ApprovalScope::AlwaysPath { root, write } => {
+                    self.apply_path_grant(&root, write);
+                }
                 ApprovalScope::Once => {}
             }
             let _ = pending.tx.send(ToolApprovalResult::Approved { answer });
@@ -461,6 +493,9 @@ impl ToolApprovalManager {
                             .or_default()
                             .push(prefix);
                     }
+                }
+                ApprovalScope::AlwaysPath { root, write } => {
+                    self.apply_path_grant(&root, write);
                 }
                 ApprovalScope::Once => {}
             }
@@ -639,6 +674,39 @@ impl ToolApprovalManager {
     /// env), never from wire data.
     pub fn set_allow_wire_force(&self, allow: bool) {
         self.allow_wire_force.store(allow, Ordering::Relaxed);
+    }
+
+    /// Install the receiver for approved path grants. Called once at bootstrap
+    /// by the layer that owns the session's `WorkspacePolicy`.
+    pub fn set_path_grant_sink(&self, sink: Arc<dyn PathGrantSink>) {
+        if let Ok(mut slot) = self.path_grant_sink.lock() {
+            *slot = Some(sink);
+        }
+    }
+
+    /// Apply an approved [`ApprovalScope::AlwaysPath`].
+    ///
+    /// Returns `true` only when the standing grant was actually recorded. It
+    /// returns `false` — and the approval degrades to `Once`, so the act the
+    /// user approved still happens — when no sink is installed, or when the
+    /// sink refuses the root.
+    ///
+    /// There is deliberately NO second gate flag here. Whether a real local
+    /// operator is driving this session is a question the `WorkspacePolicy`
+    /// already answers authoritatively and fail-safe (a remote/contained
+    /// session cannot be granted at all), and a duplicate flag on this side
+    /// would be one more thing to keep in sync — which is how a gate quietly
+    /// becomes permanently open. One gate, owned by the layer that owns
+    /// filesystem authority.
+    fn apply_path_grant(&self, root: &str, write: bool) -> bool {
+        let sink = match self.path_grant_sink.lock() {
+            Ok(slot) => slot.clone(),
+            Err(_) => None,
+        };
+        match sink {
+            Some(sink) => sink.grant_path(Path::new(root), write),
+            None => false,
+        }
     }
 
     /// Apply a session mode requested over the PROTOCOL (an untrusted wire

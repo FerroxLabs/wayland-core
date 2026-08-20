@@ -4,7 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-const MAX_QUEUED_BYTES: usize = 8 * 1024 * 1024;
+// `pub(crate)` so the `render_artifact` content cap can be asserted to fit
+// inside the real pump limit rather than against a copied literal that could
+// drift away from it (events.rs).
+pub(crate) const MAX_QUEUED_BYTES: usize = 8 * 1024 * 1024;
 const MAX_QUEUED_FRAMES: usize = 4096;
 const OUTPUT_DRAIN_BUDGET: Duration = Duration::from_millis(100);
 

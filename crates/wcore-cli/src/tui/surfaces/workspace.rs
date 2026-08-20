@@ -667,8 +667,17 @@ impl Surface for WorkspaceSurface {
             // a yes/no — the handler needs the raw args to read the choice
             // list off `input_pretty` (same source the component renders).
             let input_pretty = card.input_pretty.clone();
-            let action =
-                self.handle_approval_key(key, call_id, &tool_name, &command, &input_pretty);
+            // #1099: the folder an "always" answer should grant, present only
+            // on a card raised by the pre-flight path-boundary check.
+            let path_grant_root = card.path_grant_root.clone();
+            let action = self.handle_approval_key(
+                key,
+                call_id,
+                &tool_name,
+                &command,
+                &input_pretty,
+                path_grant_root.as_deref(),
+            );
             // Once a card is resolved (approved/denied), reset the expand
             // toggle so the next pending card starts collapsed.
             if matches!(
@@ -1185,6 +1194,7 @@ impl WorkspaceSurface {
         tool_name: &str,
         command: &str,
         input_pretty: &str,
+        path_grant_root: Option<&str>,
     ) -> SurfaceAction {
         use wcore_protocol::commands::ApprovalScope;
 
@@ -1305,8 +1315,25 @@ impl WorkspaceSurface {
             },
             // a (lowercase) → on a shell tool, ENTER prefix-edit mode
             // (SPEC §2 Bash); otherwise Approve { Always } for this tool.
+            //
+            // #1099: on a card raised by the pre-flight path-boundary check,
+            // `a` grants the FOLDER instead. A bare `Always` there registers
+            // the tool name and nothing else, and the boundary check forces
+            // the gate past a tool-name grant — so the old behaviour re-asked
+            // on every subsequent call and never once succeeded.
+            // `write: false`: the escalation is only ever raised for a read,
+            // and write authority outside the workspace is not grantable.
             KeyCode::Char('a') => {
-                if is_shell_tool(tool_name) {
+                if let Some(root) = path_grant_root {
+                    SurfaceAction::Approve {
+                        call_id,
+                        scope: ApprovalScope::AlwaysPath {
+                            root: root.to_string(),
+                            write: false,
+                        },
+                        answer: None,
+                    }
+                } else if is_shell_tool(tool_name) {
                     let prefix = infer_shell_prefix(command);
                     self.prefix_edit = Some(PrefixEdit {
                         call_id,
@@ -1324,10 +1351,26 @@ impl WorkspaceSurface {
             // A (capital) → Approve ALL pending (drain queue).
             KeyCode::Char('A') => {
                 self.approval_batch = Some(ApprovalBatch::ApproveAll);
-                SurfaceAction::Approve {
-                    call_id,
-                    scope: ApprovalScope::Once,
-                    answer: None,
+                // Same reason `a` grants the folder: `Once` on a path-boundary
+                // card is an answer that cannot work. The read is refused for
+                // being outside the sandbox, so approving it "just this once"
+                // buys the user an interruption and then the identical failure.
+                // Approve-ALL must not be the one key that silently reverts to
+                // the broken behaviour the boundary card exists to fix.
+                match path_grant_root {
+                    Some(root) => SurfaceAction::Approve {
+                        call_id,
+                        scope: ApprovalScope::AlwaysPath {
+                            root: root.to_string(),
+                            write: false,
+                        },
+                        answer: None,
+                    },
+                    None => SurfaceAction::Approve {
+                        call_id,
+                        scope: ApprovalScope::Once,
+                        answer: None,
+                    },
                 }
             }
             // n / Esc → Deny.
@@ -1387,13 +1430,24 @@ impl WorkspaceSurface {
             .tool_cards
             .iter()
             .find(|c| c.status == ToolCardStatus::AwaitingApproval)
-            .map(|c| c.call_id.clone());
+            .map(|c| (c.call_id.clone(), c.path_grant_root.clone()));
         match next {
-            Some(call_id) => match batch {
-                ApprovalBatch::ApproveAll => SurfaceAction::Approve {
-                    call_id,
-                    scope: ApprovalScope::Once,
-                    answer: None,
+            Some((call_id, path_grant_root)) => match batch {
+                // A drained card gets the same treatment as the one the user
+                // pressed `A` on. Without this, "approve all" works for the
+                // first boundary card and silently fails for every one after
+                // it, which is worse than failing consistently.
+                ApprovalBatch::ApproveAll => match path_grant_root {
+                    Some(root) => SurfaceAction::Approve {
+                        call_id,
+                        scope: ApprovalScope::AlwaysPath { root, write: false },
+                        answer: None,
+                    },
+                    None => SurfaceAction::Approve {
+                        call_id,
+                        scope: ApprovalScope::Once,
+                        answer: None,
+                    },
                 },
                 ApprovalBatch::DenyAll => SurfaceAction::Deny {
                     call_id,
@@ -4452,6 +4506,92 @@ mod tests {
     }
 
     #[test]
+    fn path_boundary_a_grants_the_suggested_folder_not_the_tool() {
+        // #1099: on a card raised by the pre-flight path-boundary check,
+        // `a` must answer `AlwaysPath { root: suggested_root, write: false }`.
+        //
+        // This is the ONLY answer that makes the read succeed. Bare `Always`
+        // registers the tool name, which the boundary check overrides on
+        // every subsequent call — so before this the card could only produce
+        // an endless re-prompt (`a`) or a call that still died on
+        // `VfsError::OutsideSandbox` (`y`).
+        use wcore_protocol::commands::ApprovalScope;
+        let mut app = app_with_shell_approval("Read", "/tmp/outside/notes.md");
+        app.session.tool_cards[0].path_grant_root = Some("/tmp/outside".to_string());
+        let mut surface = WorkspaceSurface::new();
+        let action = surface.handle_key(key(KeyCode::Char('a')), &mut app);
+        match action {
+            SurfaceAction::Approve {
+                call_id,
+                scope,
+                answer,
+            } => {
+                assert_eq!(call_id, "shell-1");
+                assert_eq!(
+                    scope,
+                    ApprovalScope::AlwaysPath {
+                        root: "/tmp/outside".to_string(),
+                        // Read-only: write authority outside the workspace is
+                        // not grantable, so a `true` here would be a grant the
+                        // policy refuses.
+                        write: false,
+                    },
+                    "`a` on a boundary card must grant the folder, not the tool"
+                );
+                assert!(answer.is_none());
+            }
+            _ => panic!("expected Approve with AlwaysPath; got {action:?}"),
+        }
+    }
+
+    #[test]
+    fn path_boundary_capital_a_also_grants_the_folder() {
+        // Approve-ALL must not be the one key that reverts to the broken
+        // answer. `Once` on a boundary card cannot work — the read is refused
+        // for being outside the sandbox — so a user who reaches for `A`
+        // (the fastest key on the card) would otherwise get an interruption
+        // followed by the identical failure the card exists to remove.
+        use wcore_protocol::commands::ApprovalScope;
+        let mut app = app_with_shell_approval("Read", "/tmp/outside/notes.md");
+        app.session.tool_cards[0].path_grant_root = Some("/tmp/outside".to_string());
+        let mut surface = WorkspaceSurface::new();
+        let action = surface.handle_key(key(KeyCode::Char('A')), &mut app);
+        match action {
+            SurfaceAction::Approve { scope, .. } => assert_eq!(
+                scope,
+                ApprovalScope::AlwaysPath {
+                    root: "/tmp/outside".to_string(),
+                    write: false,
+                },
+                "`A` on a boundary card must grant the folder, not answer Once"
+            ),
+            _ => panic!("expected Approve with AlwaysPath; got {action:?}"),
+        }
+        // CONTROL: the batch drain is still armed — fixing the scope must not
+        // cost the approve-all behaviour itself.
+        assert!(
+            surface.approval_batch.is_some(),
+            "control failed: capital A no longer arms the batch drain"
+        );
+    }
+
+    #[test]
+    fn read_without_a_boundary_keeps_the_bare_always_grant() {
+        // Known-positive control for the test above: the SAME tool with no
+        // `path_grant_root` must keep the pre-#1099 behaviour, so the new arm
+        // cannot be silently widening every Read card into a folder grant.
+        use wcore_protocol::commands::ApprovalScope;
+        let mut app = app_with_shell_approval("Read", "src/lib.rs");
+        assert!(app.session.tool_cards[0].path_grant_root.is_none());
+        let mut surface = WorkspaceSurface::new();
+        let action = surface.handle_key(key(KeyCode::Char('a')), &mut app);
+        match action {
+            SurfaceAction::Approve { scope, .. } => assert_eq!(scope, ApprovalScope::Always),
+            _ => panic!("expected Approve with Always; got {action:?}"),
+        }
+    }
+
+    #[test]
     fn batch_a_keypress_then_two_ticks_processes_three_cards() {
         // v0.9.1 W2 cycle-2 HIGH 1: simulate a 3-card pending-approval
         // batch. Pressing capital `A` approves the first card AND arms
@@ -4979,6 +5119,7 @@ mod tests {
             approval_reason: "test".into(),
             plan_body: None,
             crucible_plan: None,
+            path_grant_root: None,
         });
     }
 
@@ -5001,6 +5142,7 @@ mod tests {
             approval_reason: String::new(),
             plan_body: None,
             crucible_plan: None,
+            path_grant_root: None,
         };
 
         tool_card_cache_clear();
@@ -6101,6 +6243,7 @@ mod tests {
             approval_reason: String::new(),
             plan_body: None,
             crucible_plan: None,
+            path_grant_root: None,
         };
         let theme = Theme::hearth();
         let mut app = App::new();
@@ -6235,6 +6378,7 @@ mod tests {
             approval_reason: String::new(),
             plan_body: None,
             crucible_plan: None,
+            path_grant_root: None,
         };
         let mut ok_lines: Vec<Line<'static>> = Vec::new();
         push_tool_card_lines(
@@ -6648,6 +6792,7 @@ mod tests {
                     category: ToolCategory::Exec,
                     args: json!({"command": "ls"}),
                     description: "List dir".into(),
+                    escalation: None,
                 },
             },
             ProtocolEvent::ApprovalRequired {
@@ -6684,6 +6829,7 @@ mod tests {
                     category: ToolCategory::Edit,
                     args: json!({"file_path": "/tmp/x.txt", "content": "y"}),
                     description: "Write file".into(),
+                    escalation: None,
                 },
             },
             ProtocolEvent::ApprovalRequired {
@@ -6781,6 +6927,7 @@ mod tests {
                     category: ToolCategory::Exec,
                     args: json!({"command": "ls"}),
                     description: "ls".into(),
+                    escalation: None,
                 },
             },
         );
@@ -6821,6 +6968,7 @@ mod tests {
                     category: ToolCategory::Edit,
                     args: json!({"file_path": "/tmp/x", "content": "y"}),
                     description: "write".into(),
+                    escalation: None,
                 },
             },
         );
@@ -7162,6 +7310,7 @@ mod tests {
             status: ToolCardStatus::Running,
             plan_body: None,
             crucible_plan: None,
+            path_grant_root: None,
         };
         push_tool_card_lines(&mut lines, &card, &theme, true, &app, 80, None, 0, false);
         // The spinner glyph is one of `◐◓◑◒`; find whichever frame
@@ -7608,6 +7757,7 @@ mod tests {
             approval_reason: String::new(),
             plan_body: None,
             crucible_plan: None,
+            path_grant_root: None,
         });
     }
 
@@ -8337,6 +8487,7 @@ mod tests {
                         "new_string": "fn main() {\n    run();\n}",
                     }),
                     description: "Edit crates/wcore-cli/src/main.rs".into(),
+                    escalation: None,
                 },
             },
             ProtocolEvent::ToolResult {
@@ -8426,6 +8577,7 @@ mod tests {
                     category: ToolCategory::Info,
                     args: serde_json::json!({ "pattern": "needle" }),
                     description: "Grep for needle".into(),
+                    escalation: None,
                 },
             },
         );
@@ -8506,6 +8658,7 @@ mod tests {
             approval_reason: String::new(),
             plan_body: None,
             crucible_plan: None,
+            path_grant_root: None,
         }];
         let fp_running = tool_cards_fingerprint(&cards);
 

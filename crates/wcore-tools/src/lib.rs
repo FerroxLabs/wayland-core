@@ -114,6 +114,9 @@ pub mod office_runtime;
 // T3-3.8.4: OSV malware advisory check before launching MCP package-runner
 // shims (`npx` / `uvx`) — ported from the prior Wayland Python engine (sub-wave 8).
 pub mod osv_check;
+// #1099: classify a tool call that names a path outside every reachable root,
+// so the orchestrator can ask BEFORE the call instead of explaining after it.
+pub mod path_boundary;
 // Wave SD: path validation for legacy `execute()` entry points (closes
 // SECURITY MAJOR #14 — top-level Read/Write/Edit without sandbox).
 pub mod path_validation;
@@ -148,6 +151,10 @@ pub mod symbol_slice;
 // Memory write tool: log a meaningful event into P2 episodic memory.
 pub mod record_episode;
 pub mod registry;
+// #1098: `render_artifact` — hand the host CONTENT to display instead of
+// asking the OS to `open` a path. Zero filesystem/process authority leaves the
+// sandbox; content comes through the same vfs/policy path as an ordinary read.
+pub mod render;
 pub mod repomap;
 // T3-3.3.2: HELPER — broad JSON-Schema sanitizer for llama.cpp / strict
 // backend compat (port of the prior Wayland Python engine). Distinct from
@@ -207,6 +214,11 @@ pub mod url_safety;
 pub mod unsaved_work;
 // W8a A.3: VirtualFs trait + RealFs / InMemoryFs / SandboxedFs (X2).
 pub mod vfs;
+// #1105: the platform half of `VirtualFs::read_pinned` — a read whose leaf is
+// resolved exactly once, relative to a retained parent-directory handle, so
+// the object the jail approved is the object the bytes come from. Crate-
+// internal: `RealFs::read_pinned` is the only supported way in.
+pub(crate) mod vfs_pinned;
 // T3-3.5 (sub-wave 5): video_analyze tool — AI video analysis via a
 // pluggable VideoAnalysisBackend (NullVideoBackend fails loud).
 pub mod video_analyze_tool;

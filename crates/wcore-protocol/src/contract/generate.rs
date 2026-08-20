@@ -28,8 +28,18 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // 13 -> 14: `call_announced` added. Additive only - no field on an existing
 // event changed shape, and `major` therefore holds at 1. Hosts that pin the
 // descriptor must re-pin; hosts that ignore unknown types are unaffected.
-pub const CONTRACT_MINOR: u64 = 14;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/14";
+// 15 -> 16: two additive capabilities land together.
+//
+// `path_boundary_prompt_v1` (#1099): `tool_request.tool` may now carry an
+// optional `escalation` object. The field is skipped when absent and `tool`
+// already published `additionalProperties: true`, so a host that has never
+// heard of it validates and renders exactly as before.
+//
+// `render_artifact_v1` (#1098): a new event. No field on an existing event
+// changed shape, so `major` holds at 1 — the vocabulary a host can validate
+// got strictly wider, which is what a minor bump is for.
+pub const CONTRACT_MINOR: u64 = 16;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/16";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -230,6 +240,25 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
             ],
             "type": "string"
         }),
+        // CLOSED, for exactly the reason `ready.session_persistence` above is:
+        // a future value must not arrive as free text and be accepted by a
+        // host that has never heard of it and cannot render it. The enum is
+        // generated from `RenderMime::all()` so the schema can never drift
+        // from the type that produces the frames.
+        ("render_artifact", "mime") => json!({
+            "enum": crate::events::RenderMime::all(),
+            "type": "string"
+        }),
+        // The classification is the whole forward-compat mechanism: a host
+        // that does not know `render_artifact` drops it BECAUSE the frame says
+        // false. Pinning the const means a producer that ever emitted `true`
+        // would fail its own published schema instead of silently costing a
+        // host its connection.
+        ("render_artifact", "critical") => json!({"const": false, "type": "boolean"}),
+        ("render_artifact", "title") => json!({
+            "maxLength": crate::events::RENDER_ARTIFACT_TITLE_LIMIT_BYTES,
+            "type": "string"
+        }),
         ("continue_with_budget" | "budget_grant_result", "request_id") => json!({
             "minLength": 1,
             "maxLength": BUDGET_GRANT_REQUEST_ID_MAX_BYTES,
@@ -310,6 +339,27 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
                         }
                     },
                     "required": ["always_prefix"],
+                    "type": "object"
+                },
+                // The published schema has to ADMIT `always_path`, or a host
+                // that validates its own outgoing commands against this file
+                // (Desktop does, and fails closed) could never send the scope
+                // that `path_grants_v1: available` tells it is supported. A
+                // capability the schema forbids is not a capability.
+                {
+                    "additionalProperties": false,
+                    "properties": {
+                        "always_path": {
+                            "additionalProperties": false,
+                            "properties": {
+                                "root": {"type": "string"},
+                                "write": {"type": "boolean"}
+                            },
+                            "required": ["root"],
+                            "type": "object"
+                        }
+                    },
+                    "required": ["always_path"],
                     "type": "object"
                 }
             ]
@@ -1258,6 +1308,60 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         ),
         (
             "host_delegated_delivery".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        // The feature-detect for `ApprovalScope::AlwaysPath` — "always allow
+        // this folder" on a `tool_approve`.
+        //
+        // A host MUST check this before sending the scope, and the reason is
+        // sharper than the usual additive-field case. `scope` carries
+        // `#[serde(default)]`, so an ABSENT scope is harmless on any Core; but
+        // an unknown VARIANT is not a missing field, it fails the whole
+        // `tool_approve` frame. On an older Core the approval is then never
+        // resolved and the pending call sits until the TTL reaper denies it —
+        // the host sees a hang, not a rejection. Undeclared therefore means
+        // "send `once` or `always` only", never "try it and see".
+        //
+        // Available, not ShapeOnly: an approved grant is honoured end to end
+        // by the same Core that declares this — `readable_roots()` for the OS
+        // sandbox and `SandboxedFs` for the in-process file tools. It says
+        // nothing about who raises the prompt; that is
+        // `path_boundary_prompt_v1` below.
+        ("path_grants_v1".into(), ContractCapabilityStatus::Available),
+        // The feature-detect for `tool_request.tool.escalation` (#1099): Core
+        // itself raises the approval when a read names a path outside every
+        // reachable root, instead of letting the call fail with an
+        // out-of-sandbox tool error.
+        //
+        // Separate from `path_grants_v1` because they are separate promises and
+        // a host must be able to hold one without the other. `path_grants_v1`
+        // says an `always_path` scope will be honoured; this says Core will
+        // ASK. A host that has only the first has to attach `always_path` to
+        // some unrelated pending approval, which is what shipping it alone
+        // meant in practice.
+        //
+        // Declared => when `escalation` is present with `kind:
+        // "path_boundary"`, answering that approval with
+        // `always_path { root: suggested_root }` is guaranteed to be accepted:
+        // the producer dry-runs that exact grant before emitting the frame.
+        // Undeclared => the field never appears, and its absence means nothing.
+        (
+            "path_boundary_prompt_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        // #1098 — the feature-detect for `render_artifact`: the engine can
+        // hand the host CONTENT to display instead of asking the OS to open a
+        // path. A host that declares a render surface gets one; a host that
+        // does not simply never sees the event (it is droppable by
+        // construction — see the `critical` const above).
+        //
+        // Available, not ShapeOnly: the event is emitted by a real registered
+        // tool whose content comes through the same vfs/policy path as an
+        // ordinary `read`, and the payload is capped and truncation-marked
+        // before it reaches the wire. What is NOT promised is that any host
+        // renders it — that is the host's half of #1098.
+        (
+            "render_artifact_v1".into(),
             ContractCapabilityStatus::Available,
         ),
         ("plugin_events".into(), ContractCapabilityStatus::ShapeOnly),

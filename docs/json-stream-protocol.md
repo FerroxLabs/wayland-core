@@ -388,6 +388,55 @@ Agent wants to invoke a tool and needs client approval. Agent PAUSES execution u
 | `tool.category` | string | `"info"` (read-only), `"edit"` (file mutation), `"exec"` (shell), `"mcp"` (MCP tool) |
 | `tool.args` | object | Tool arguments |
 | `tool.description` | string | Human-readable one-line description |
+| `tool.escalation` | object \| absent | Why this call is being shown beyond the ordinary gate. Absent on almost every request. See below. |
+
+**`tool.escalation` — the pre-flight boundary prompt**
+
+Requires the `path_boundary_prompt_v1` capability. When the field is absent
+(the overwhelmingly common case) nothing has changed and the frame is
+byte-identical to what older Core emitted.
+
+```json
+"escalation": {
+  "kind": "path_boundary",
+  "target": "/Users/me/Documents/notes/q3.md",
+  "access": "read",
+  "suggested_root": "/Users/me/Documents/notes"
+}
+```
+
+This appears when a read tool names a path outside every root the session can
+reach. Before it existed, such a call ran, failed with an out-of-sandbox tool
+error, and the model was left to explain the dead end to the user.
+
+* `target` — the path the call named, canonicalized.
+* `access` — always `"read"`. Write access outside the workspace is not
+  grantable, so a write never raises this escalation.
+* `suggested_root` — the **containing folder**, which is what a grant actually
+  opens. Putting `target` on an "always allow this folder" button would label
+  the button with a scope it does not have.
+
+Answering the approval with
+`{"scope": {"always_path": {"root": "<suggested_root>", "write": false}}}`
+(§2.3.2) is **guaranteed to be accepted**: Core dry-runs that exact grant
+against the session's workspace policy before emitting the frame, so this is
+never a button that silently fails.
+
+`always_path` is the ONLY answer that makes the call succeed, and a host that
+raises this card must offer it. The other two answers do not:
+
+* `once` releases the gate without minting a grant — so the call runs, reaches
+  the sandbox it was flagged for crossing, and fails with an out-of-sandbox
+  tool error. The prompt is not what makes the read work; the grant is.
+* `always` registers the TOOL name and nothing else. The boundary check runs in
+  front of every call and forces the gate past a tool-name grant, so the next
+  call on the same path prompts again, and the one after that, indefinitely.
+
+Denying mints nothing and skips the call, which is the honest refusal.
+
+The gate is forced for these calls even when the tool is on the allow-list or
+carries a tool-name/prefix auto-approval — those grant the tool, not the path.
+`force` mode still bypasses everything, so the field never appears there.
 
 **Category mapping for built-in tools:**
 
@@ -696,6 +745,142 @@ Approve a pending tool execution.
 | `scope` | string | `"once"` = this call only; `"always"` = auto-approve this tool+category for the session |
 
 When `scope = "always"`, the agent adds the tool's category to the session allow-list, so future calls of the same category skip approval.
+
+#### 2.3.1 Scoped grants
+
+`scope` also accepts two object forms. Both are additive: a host that only ever
+sends `"once"` / `"always"` is unaffected by their existence, and neither
+changes the bare-string wire shape.
+
+| Form | Meaning |
+|---|---|
+| `{"always_prefix": {"prefix": "cargo "}}` | Auto-approve later commands in the same category whose normalized head matches `prefix`. |
+| `{"always_path": {"root": "/Users/me/reports", "write": false}}` | Grant the session standing READ access to a folder outside the workspace. `write` defaults to `false`. |
+
+#### 2.3.2 `always_path` — "always allow this folder"
+
+This is the answer to an approval prompt raised because a path sits outside the
+session workspace. It exists so that case has a third option beside "do it this
+once" and "refuse", without ever turning the sandbox off.
+
+Core raises that prompt itself when it declares `path_boundary_prompt_v1`: the
+`tool_request` carries `tool.escalation` (§1.5) and its `suggested_root` is the
+root to send back here. Without that capability a host can still send
+`always_path`, but it has to attach it to an approval it already has.
+
+```json
+{
+  "type": "tool_approve",
+  "call_id": "tool-call-001",
+  "scope": { "always_path": { "root": "/Users/me/reports" } }
+}
+```
+
+Contract, in the order a host needs it:
+
+1. **`root` may be a file.** The host may send the exact path the user was
+   looking at; the agent grants the directory that contains it. That is what a
+   person answering "always allow this folder" believes they said. The prompt
+   SHOULD name the folder that will actually be granted, not the file.
+2. **The grant is READ-only.** `write: true` is refused outright rather than
+   silently downgraded, so a host cannot ship a button whose label promises
+   more than it delivers. Write authority outside the workspace is a separate,
+   larger thing and is not grantable through this field.
+3. **A grant lasts for the process lifetime** and is not persisted across
+   restarts. A host that wants a durable allow-list must re-send its grants on
+   each launch; the agent will not remember them for you.
+4. **It only applies to a genuinely local session.** A channel, remote or
+   managed engine refuses every path grant. A wire peer may ASK — this is the
+   same rule as `SessionMode::Force` (GHSA-8r7g), because a standing path grant
+   expands filesystem authority past the sandbox root and is therefore
+   precisely what a prompt-injected turn would like to arrange.
+5. **Some roots are always refused**, whatever the user clicks: the filesystem
+   root, `$HOME`, any directory that is or contains a credential store
+   (`~/.ssh`, `~/.aws`, `~/.config/gh`, …), and any path matching the secret
+   rules. A session holds at most 64 grants.
+6. **A refused grant does not fail the call.** The action the user approved
+   still runs — the approval degrades to `once`. The reason for the refusal is
+   written to stderr. A host SHOULD NOT treat "approved" as proof that the
+   standing grant was recorded.
+
+Because of (6), the honest UI is a prompt that says what will happen for *this*
+file, with "always allow this folder" as a convenience — not a setup step the
+user is told has succeeded.
+
+**What a grant does and does not protect, stated precisely** — the host is the
+party choosing which folder to hand over, so it needs this to choose well.
+
+* The `Read` tool resolves a granted file exactly once, relative to a retained
+  directory handle, refusing a symlink at the leaf and at the parent. Bytes
+  therefore come from the object that was checked, not from a name that could
+  be re-pointed after the check (FerroxLabs/wayland#1105).
+* That pin covers the file's own name and its immediate directory. Components
+  **above** the granted folder are still resolved by the kernel from a
+  pathname, so someone able to rename a directory higher up the tree can still
+  redirect the read. Do not grant a folder whose ancestors are writable by
+  anyone you would not grant the folder to.
+* `exists`, `metadata` and directory listing remain path-based. They disclose
+  presence, size and file names, never file contents.
+* `Grep` shells out to `rg`, which opens the paths itself. Nothing inside the
+  agent can pin that, so a grep over a granted folder carries the ordinary
+  check-then-use exposure of any external process.
+* A grant is still never a write grant, and never widens what may be read to
+  include a secret inside the granted folder.
+
+#### 2.3.3 `grant_path` / `revoke_path` — the flow with no pending call
+
+`always_path` rides an approval, so it only serves the **agent-initiated** case:
+the agent wanted something outside the workspace and a card was raised.
+
+The **user-initiated** case has no pending `call_id` at all — the operator picked a
+folder in a native picker, unprompted — so it gets its own command rather than a
+scope on an approval that does not exist. Both land in the same grant store, so
+there is exactly one mechanism to audit.
+
+```json
+{ "type": "grant_path",
+  "grant_id": "3f2a…",
+  "root": "/Users/me/Downloads/Mortgage",
+  "access": "read",
+  "expires_at_ms": 1755640000000 }
+```
+
+```json
+{ "type": "revoke_path", "grant_id": "3f2a…" }
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `grant_id` | yes | Host-chosen. Echo it to `revoke_path` to withdraw this exact grant |
+| `root` | yes | Folder to grant. May be a file — the containing directory is granted |
+| `access` | no | `read` (default) or `write`. `write` is **refused**, never downgraded |
+| `expires_at_ms` | no | Unix ms deadline. Absent = process lifetime |
+
+Every rule in §2.3.2 applies unchanged. In addition:
+
+- **Launch opt-in required.** Core refuses unless started with
+  `--allow-host-path-grants` (which itself requires `--json-stream`). It is a flag
+  and not an environment variable on purpose: an env var set once per spawn cannot
+  express "this session may, that one may not". Absent, the refusal is legible on
+  the wire, not silent.
+- **`revoke_path` is NOT gated.** Taking authority away is always permitted —
+  requiring the opt-in to revoke would leave a host unable to clean up a grant it
+  somehow held. An unknown `grant_id` is a no-op, so revoking is idempotent and a
+  host that crashed mid-flow can clean up without knowing what landed.
+- **Expiry is evaluated at use time**, not by a sweep, so a grant cannot outlive
+  its deadline by racing whatever would otherwise reap it. This is what makes an
+  unattended overnight run safe to grant to.
+- **The deny-list wins.** A grant says *where* the agent may look, never *what* it
+  may read. A secret inside a granted folder — `id_rsa`, `.env`, `*.pem` — stays
+  refused, in the in-process file tools and in the OS sandbox's read-deny list
+  alike. Checked lexically on the canonicalized path, so renaming a secret to
+  `notes.txt` does not launder it, and a secret created after the grant is still
+  caught.
+
+After any `grant_path` or `revoke_path`, Core re-emits
+[`workspace_policy`](#1n-workspace_policy) with the updated `readable_roots`. That
+event is the authoritative answer to "what can this chat actually reach" — prefer
+it over tracking grants host-side.
 
 ### 2.4 `tool_deny`
 
@@ -1388,6 +1573,11 @@ strings. A host that wants to render any of these adds the listed
 | `plugins` | W2.5/W8 | `plugin_event` (plus plugin-registered tools appear in `tool_request`/`tool_result`) |
 | `gepa_enabled` | W10B | `evolution_event` |
 
+`render_artifact` (§1.N+13) is gated by a CONTRACT capability
+(`render_artifact_v1` in `ready.contract.capabilities`), not by a
+`Capabilities.*` flag — it landed after contract negotiation existed, and the
+contract descriptor is where a host now feature-detects.
+
 #### Host-tolerated additive variants
 
 Some event variants ship without a dedicated `Capabilities.*` flag.
@@ -2026,6 +2216,110 @@ would drop it silently per W0).
 | `body` | string | yes | The message text. |
 | `subject` | string | no | Subject line. The current `send_message` schema has no subject input, so the engine omits it today; part of the wire contract for forward-compat. |
 | `conversation_id` | string | no | Session id of the emitting engine, when known. |
+
+### 1.N+13 `render_artifact` (#1098)
+
+"Show this to the user" as a **render capability**, not an OS `open`. The
+engine hands the host **content**; the host displays it. No path crosses the
+boundary, so displaying something costs the host zero filesystem authority,
+works headless and over SSH, and behaves identically on macOS, Linux and
+Windows.
+
+**Feature-detect on `render_artifact_v1` in `ready.contract.capabilities`**
+(contract v1.16). A host that never learns the type drops the frame safely —
+this event carries `"critical": false` explicitly, which is the only thing that
+makes an unknown type droppable under the W0 rules above.
+
+```json
+{
+  "type": "render_artifact",
+  "msg_id": "msg-001",
+  "call_id": "call-render-001",
+  "title": "Quarterly summary",
+  "mime": "text/markdown",
+  "content": "# Quarterly summary\n\nRevenue held.\n",
+  "truncated": false,
+  "critical": false
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `msg_id` | string | yes | Turn the artifact belongs to. Empty string when no turn is active. |
+| `call_id` | string | yes | The `render_artifact` tool call that produced it. |
+| `title` | string | yes | Short label for the surface. At most 256 bytes; longer titles are shortened, never refused. |
+| `mime` | string | yes | Closed vocabulary — see the table below. |
+| `content` | string | yes | The text to display. At most 1 MiB (plus the truncation marker). |
+| `truncated` | boolean | yes | `true` when `content` is a prefix and carries the in-band marker. |
+| `critical` | boolean | yes | Always the literal `false`. |
+
+Contract, in the order a host needs it:
+
+1. **`mime` is a CLOSED vocabulary.** Reject anything outside it rather than
+   guessing — a value you have never heard of is one you cannot render, and
+   rendering it as something else is worse than not rendering it. Widening the
+   vocabulary is an announced contract event (a minor bump plus a schema
+   change), never a silent new value.
+
+   | `mime` | Render as |
+   |---|---|
+   | `text/plain` | Preformatted text. No markup interpretation. |
+   | `text/markdown` | Markdown. The engine's default when the tool call omits `mime`. |
+   | `text/html` | An HTML document fragment. See (2) — this one has an obligation attached. |
+
+2. **`content` is UNTRUSTED, and `text/html` is the sharp edge.** The bytes are
+   either model-authored or read out of a workspace file, so they are exactly
+   the reach a prompt-injected turn would like. A host that renders
+   `text/html` MUST do it in a sandboxed renderer with no bridge to the host
+   process — in Electron terms: `sandbox: true`, `nodeIntegration: false`,
+   `contextIsolation: true`, no preload that exposes IPC, and a CSP that
+   forbids remote loads. Core cannot enforce this; it is the host's half of
+   #1098. If you are not prepared to do that, render `text/html` as
+   `text/plain` and say so in your UI.
+
+3. **The engine never asks you to open a path, and you should never accept
+   one.** That is the entire point. On macOS our seatbelt profile is
+   `(deny default)` and does not grant the SBPL `lsopen` operation, so `open`
+   fails with `-54` (#1102) — and granting it would let a sandboxed shell ask
+   launchd to start any installed app OUTSIDE the profile. A render event needs
+   none of that authority.
+
+4. **What the engine may render is exactly what it may read.** The
+   `render_artifact` tool obtains file content through the same vfs and policy
+   path as an ordinary `read`: workspace containment, standing path grants, and
+   the secret deny-list all apply unchanged. A file the agent may not read is a
+   file it may not render, so this event never widens the agent's reach — it
+   only changes how what it already read reaches the user.
+
+5. **`truncated: true` means you are looking at a prefix.** Content over 1 MiB
+   is cut on a UTF-8 character boundary and an in-band
+   `[wcore: CONTENT TRUNCATED …]` marker is appended, so a reader looking at the
+   rendered surface (rather than at the frame) is still told. Badge it in your
+   chrome as well. The cap is not decoration: an over-limit frame trips the
+   output pump's sticky failure and would take the session's entire stdout with
+   it, so it is enforced at the single emission chokepoint and can never be
+   raised per-call.
+
+6. **A file too large to render is refused at the tool, not truncated.** The
+   size is knowable before the read, and the model has a first-class way to
+   pick a part (`read` with offset/limit, then render the result inline), so
+   the engine returns an actionable tool error instead of silently showing the
+   first megabyte of a 2 GB file. Truncation is the backstop for content that
+   is already in hand.
+
+7. **No reply is expected.** Unlike `host_send_message_request` (§1.N+12), this
+   is fire-and-forget: there is no correlated result command, the tool call
+   completes immediately, and nothing in the engine waits on a render. That is
+   what keeps it free of authority — there is no outcome for a host to lie
+   about.
+
+8. **The event only reaches json-stream hosts.** The `render_artifact` tool is
+   always in the tool list — the tool set must not move with the output
+   surface, because `tool_inventory` is inside the recovery authority digest —
+   but a session with no protocol sink (a TUI run, or any sub-agent, which run
+   under a null or relay sink) refuses every call loudly rather than
+   discarding. The model is told there is nowhere to display and puts the
+   content in its reply instead.
 
 ### 2.11 `host_send_message_result` (#537/#141)
 

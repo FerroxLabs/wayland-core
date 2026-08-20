@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedReceiver;
-use wcore_protocol::events::{McpRemovalOutcome, ProtocolEvent, ToolStatus};
+use wcore_protocol::events::{McpRemovalOutcome, ProtocolEvent, ToolEscalation, ToolStatus};
 use wcore_types::message::{ContentBlock, Message, Role};
 
 use crate::tui::anim::AnimId;
@@ -446,6 +446,17 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 _ => {}
             }
             let input_pretty = pretty_input(&tool.args);
+            // #1099: a path-boundary escalation names the folder a grant would
+            // open. Snapshot it onto the card — `handle_approval_key` needs it
+            // to answer `ApprovalScope::AlwaysPath`, which is the only answer
+            // that makes an out-of-workspace read actually succeed. The closure
+            // pattern is irrefutable only while `ToolEscalation` has one
+            // variant, so a second kind breaks the build here rather than being
+            // silently dropped on the floor.
+            let path_grant_root = tool
+                .escalation
+                .as_ref()
+                .map(|ToolEscalation::PathBoundary { suggested_root, .. }| suggested_root.clone());
             // v0.9.1.2 F12: tool cards must land inline with the assistant
             // text that introduced them — not in a trailing block at the
             // end of the transcript. Flush any accumulated streaming text
@@ -483,6 +494,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 // all other tools leave it None.
                 plan_body: captured_plan_body,
                 crucible_plan: None,
+                path_grant_root,
             });
         }
         ProtocolEvent::ToolRunning {
@@ -600,6 +612,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                         approval_reason: reason,
                         plan_body: None,
                         crucible_plan: None,
+                        path_grant_root: None,
                     });
                     Some(crate::tui::permission::EGRESS_CARD_TOOL_NAME.to_string())
                 }
@@ -1012,6 +1025,11 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::BudgetGrantResult { .. }
         | ProtocolEvent::CompactOffload { .. }
         | ProtocolEvent::HostSendMessageRequest { .. }
+        // #1098 `RenderArtifact` is a json-stream host surface. The in-process
+        // TUI never emits one — `RenderArtifactTool` is only registered under
+        // a `ProtocolSink` — so this arm is unreachable in practice and must
+        // stay a no-op rather than inventing a terminal rendering of it.
+        | ProtocolEvent::RenderArtifact { .. }
         // Node state is redundant with the correlated child relay for the TUI;
         // Desktop consumes this authoritative lifecycle event directly.
         | ProtocolEvent::WorkflowNodeEvent { .. }
@@ -1744,6 +1762,7 @@ pub fn hydrate_history(messages: &[Message]) -> (Vec<TurnView>, Vec<ToolCardMode
                                 approval_reason: String::new(),
                                 plan_body: None,
                                 crucible_plan: None,
+                                path_grant_root: None,
                             });
                         }
                         ContentBlock::ToolResult { .. } => {}
@@ -2587,6 +2606,7 @@ mod tests {
                     category: ToolCategory::Exec,
                     args: json!({"command": "ls -la"}),
                     description: "list".into(),
+                    escalation: None,
                 },
             },
         );
@@ -3577,6 +3597,7 @@ mod tests {
             category: wcore_protocol::events::ToolCategory::Exec,
             args: serde_json::json!({"cmd": "ls"}),
             description: "run a shell command".into(),
+            escalation: None,
         };
         apply_event(
             &mut app,
@@ -3633,6 +3654,63 @@ mod tests {
             [TurnElement::ToolCard(id)] => assert_eq!(id, "call-1"),
             other => panic!("expected single ToolCard(call-1) element, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tool_request_carries_the_path_boundary_root_onto_the_card() {
+        // #1099: the escalation's `suggested_root` is the only thing the
+        // approval keys can build an `ApprovalScope::AlwaysPath` from. If it
+        // stops at the bridge, the TUI card can offer the user nothing that
+        // makes the read succeed — which is exactly the state this fixes.
+        let mut app = App::new();
+        let tool = wcore_protocol::events::ToolInfo {
+            name: "Read".into(),
+            category: wcore_protocol::events::ToolCategory::Info,
+            args: serde_json::json!({"file_path": "/srv/reports/q3.md"}),
+            description: "read a file".into(),
+            escalation: Some(ToolEscalation::PathBoundary {
+                target: "/srv/reports/q3.md".into(),
+                access: wcore_protocol::commands::PathGrantAccess::Read,
+                suggested_root: "/srv/reports".into(),
+            }),
+        };
+        apply_event(
+            &mut app,
+            ProtocolEvent::ToolRequest {
+                msg_id: "m1".into(),
+                call_id: "call-1".into(),
+                tool,
+            },
+        );
+        assert_eq!(
+            app.session.tool_cards[0].path_grant_root.as_deref(),
+            Some("/srv/reports"),
+            "the card must carry the CONTAINING FOLDER, which is what a grant opens"
+        );
+    }
+
+    #[test]
+    fn tool_request_without_an_escalation_leaves_the_grant_root_unset() {
+        // Known-positive control for the test above: the same handler, the
+        // same assertion target, an ordinary request. A `Some` here would
+        // mean every card was being offered a folder grant.
+        let mut app = App::new();
+        let tool = wcore_protocol::events::ToolInfo {
+            name: "Read".into(),
+            category: wcore_protocol::events::ToolCategory::Info,
+            args: serde_json::json!({"file_path": "src/lib.rs"}),
+            description: "read a file".into(),
+            escalation: None,
+        };
+        apply_event(
+            &mut app,
+            ProtocolEvent::ToolRequest {
+                msg_id: "m1".into(),
+                call_id: "call-1".into(),
+                tool,
+            },
+        );
+        assert!(app.session.tool_cards[0].path_grant_root.is_none());
     }
 
     // ── AUDIT-D D2 — streaming state self-heals on every terminal path ─
@@ -3972,6 +4050,7 @@ mod tests {
                     category: ToolCategory::Info,
                     args: json!({"query": "rust"}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
@@ -4076,6 +4155,7 @@ mod tests {
                     category: ToolCategory::Info,
                     args: json!({"q": "x"}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
@@ -4164,6 +4244,7 @@ mod tests {
                     category: ToolCategory::Info,
                     args: json!({}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
@@ -4240,6 +4321,7 @@ mod tests {
                     category: ToolCategory::Info,
                     args: json!({}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
@@ -4314,6 +4396,7 @@ mod tests {
                     category: ToolCategory::Exec,
                     args: json!({"command": "echo x"}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
@@ -4382,6 +4465,7 @@ mod tests {
                 category,
                 args,
                 description: String::new(),
+                escalation: None,
             },
         }
     }
@@ -4516,6 +4600,7 @@ mod tests {
                     category: ToolCategory::Edit,
                     args: json!({"file_path": "/tmp/x", "content": "y"}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
@@ -4578,6 +4663,7 @@ mod tests {
                 approval_reason: String::new(),
                 plan_body: None,
                 crucible_plan: None,
+                path_grant_root: None,
             });
         }
         // Push a turn.
@@ -4645,6 +4731,7 @@ mod tests {
             approval_reason: String::new(),
             plan_body: None,
             crucible_plan: None,
+            path_grant_root: None,
         });
         // The turn elements must contain ToolCard("c-real") and NOT
         // contain ToolCard("c-orphan") — the orphan card is in the
@@ -4854,6 +4941,7 @@ mod tests {
                     category: ToolCategory::Exec,
                     args: json!({}),
                     description: "deploy".into(),
+                    escalation: None,
                 },
             },
         );

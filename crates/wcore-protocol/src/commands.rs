@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use wcore_types::goal::GoalStrategy;
@@ -366,6 +366,34 @@ pub enum ProtocolCommand {
     GrantWorkspaceCapability {
         executable: String,
     },
+    /// Grant this session standing READ access to a folder outside the
+    /// workspace ("always allow this folder").
+    ///
+    /// A sibling of [`ProtocolCommand::GrantWorkspaceCapability`], not of
+    /// `ToolApprove`, and deliberately so: the user-initiated flow — the
+    /// operator picks a folder in a native picker — has NO pending tool call
+    /// to attach a scope to. Routing both flows through one grant command also
+    /// means there is exactly one mechanism to audit.
+    ///
+    /// Gated on the launcher opt-in (`--allow-host-path-grants`) and on a
+    /// trusted-local workspace, exactly as the capability grant is. It never
+    /// widens writes and never disables containment, and it is subordinate to
+    /// the credential deny-list: a granted root cannot un-deny a secret.
+    GrantPath {
+        /// Host-chosen id, echoed so the host can revoke this exact grant.
+        grant_id: String,
+        root: String,
+        #[serde(default)]
+        access: PathGrantAccess,
+        /// Wall-clock expiry in unix milliseconds. Absent = process lifetime.
+        #[serde(default)]
+        expires_at_ms: Option<u64>,
+    },
+    /// Withdraw a grant previously made by [`ProtocolCommand::GrantPath`].
+    /// Unknown ids are a no-op, so a host may revoke idempotently.
+    RevokePath {
+        grant_id: String,
+    },
     /// W7 S4: resume a session that emitted `ApprovalRequired`. The
     /// host echoes the `resume_token` from the corresponding event so
     /// the engine can route the decision to the right pending bridge.
@@ -513,6 +541,20 @@ fn valid_evidence_digest(value: &str) -> bool {
     })
 }
 
+/// Access level requested by [`ProtocolCommand::GrantPath`].
+///
+/// `Write` is accepted on the wire and REFUSED by the engine, rather than
+/// being absent or silently downgraded. A host that can express the request
+/// gets a legible refusal; a host that cannot express it might ship a button
+/// promising more than it delivers.
+#[derive(Debug, Serialize, Deserialize, Default, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum PathGrantAccess {
+    #[default]
+    Read,
+    Write,
+}
+
 #[derive(Debug, Deserialize, Default, PartialEq, Eq, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalScope {
@@ -526,6 +568,26 @@ pub enum ApprovalScope {
     /// it, so the `Once`/`Always` bare-string wire-format is unchanged.
     AlwaysPrefix {
         prefix: String,
+    },
+    /// Path-scoped always-allow. Grants the session standing access to a
+    /// filesystem ROOT that is outside the workspace, so a later tool call
+    /// touching anything under `root` no longer needs a prompt. Serializes
+    /// as `{"always_path":{"root":"/Users/me/reports"}}`; `write` defaults
+    /// to `false`, so the bare object grants READ only. Old clients never
+    /// emit it, so the `Once`/`Always` bare-string wire form is unchanged.
+    ///
+    /// SECURITY: unlike `Always`/`AlwaysPrefix`, which scope an existing
+    /// authority to fewer commands, this variant EXPANDS the session's
+    /// filesystem authority beyond the sandbox root. It is therefore gated
+    /// exactly like `SessionMode::Force` (GHSA-8r7g): a wire peer may
+    /// REQUEST it, but without the local-operator opt-in it is downgraded
+    /// to [`ApprovalScope::Once`] — the single approved act still happens,
+    /// only the standing grant is withheld. See
+    /// `ToolApprovalManager::set_allow_wire_path_grant`.
+    AlwaysPath {
+        root: String,
+        #[serde(default)]
+        write: bool,
     },
 }
 
@@ -940,6 +1002,40 @@ mod tests {
             ApprovalScope::AlwaysPrefix {
                 prefix: "cargo ".to_string()
             }
+        );
+    }
+
+    // A path grant rides the same externally-tagged object shape as
+    // `AlwaysPrefix`, and `write` is additive: a host that only knows how to
+    // say "always allow this folder" omits it and gets a READ-only grant.
+    #[test]
+    fn approval_scope_always_path_wire_format() {
+        let read_only: ApprovalScope =
+            serde_json::from_str("{\"always_path\":{\"root\":\"/srv/reports\"}}").unwrap();
+        assert_eq!(
+            read_only,
+            ApprovalScope::AlwaysPath {
+                root: "/srv/reports".to_string(),
+                write: false,
+            }
+        );
+
+        let writable: ApprovalScope =
+            serde_json::from_str("{\"always_path\":{\"root\":\"/srv/out\",\"write\":true}}")
+                .unwrap();
+        assert_eq!(
+            writable,
+            ApprovalScope::AlwaysPath {
+                root: "/srv/out".to_string(),
+                write: true,
+            }
+        );
+
+        // The bare-string forms must still parse — a path-grant-unaware host
+        // is unaffected by this variant existing.
+        assert_eq!(
+            serde_json::from_str::<ApprovalScope>("\"once\"").unwrap(),
+            ApprovalScope::Once
         );
     }
 

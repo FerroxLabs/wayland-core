@@ -112,6 +112,7 @@ mod tests {
             approval_reason: String::new(),
             plan_body,
             crucible_plan: None,
+            path_grant_root: None,
         }
     }
 

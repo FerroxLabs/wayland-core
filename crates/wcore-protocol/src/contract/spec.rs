@@ -23,12 +23,13 @@ use crate::diagnostics::{
 };
 use crate::events::{
     BudgetGrantRefusalReason, BudgetGrantResult, Capabilities, CapabilityActivation, CapabilityId,
-    CapabilityReasonCode, ErrorInfo, MonitorDirective, MonitorReason, OperatorResolutionEvidence,
-    OperatorResolutionEvidenceSource, OperatorToolEffectOutcome, OperatorToolEffectResolution,
-    OutputType, ProtocolEvent, RecoveryBudgetSnapshot, RecoveryCursor, RecoveryLifecycle,
-    RecoveryReconcileReason, RecoveryReplayItem, RecoveryReplayKind, RecoveryTurnSnapshot,
-    RecoveryUnavailableReason, SessionPersistence, ToolCategory, ToolInfo, ToolStatus, TurnCost,
-    Usage, WorkflowChildTerminalState, WorkflowNodeState, WorkflowTerminalState,
+    CapabilityReasonCode, ErrorInfo, MonitorDirective, MonitorReason, NonCritical,
+    OperatorResolutionEvidence, OperatorResolutionEvidenceSource, OperatorToolEffectOutcome,
+    OperatorToolEffectResolution, OutputType, ProtocolEvent, RecoveryBudgetSnapshot,
+    RecoveryCursor, RecoveryLifecycle, RecoveryReconcileReason, RecoveryReplayItem,
+    RecoveryReplayKind, RecoveryTurnSnapshot, RecoveryUnavailableReason, RenderMime,
+    SessionPersistence, ToolCategory, ToolInfo, ToolStatus, TurnCost, Usage,
+    WorkflowChildTerminalState, WorkflowNodeState, WorkflowTerminalState,
 };
 use crate::execution_policy::{ExecutionPolicyChangeReason, ExecutionPolicySequence};
 use crate::goal::{
@@ -879,6 +880,26 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "call_id",
         "host_delegated_delivery"
     ),
+    // #1098: "show this to the user" as CONTENT, never a path. Observational
+    // — losing it costs a display, never authority — and the only producer
+    // event that carries an explicit `critical` classification, which is what
+    // lets a host pinned below minor 16 drop it instead of hard-erroring.
+    wire!(
+        "render_artifact",
+        "events/render_artifact.json",
+        [
+            "msg_id",
+            "call_id",
+            "title",
+            "mime",
+            "content",
+            "truncated",
+            "critical"
+        ],
+        Observational,
+        "call_id",
+        "render_artifact_v1"
+    ),
     // Non-destructive compaction notice, gated by the `ready` capability flag
     // of the same name. `active_window_percent` is the same opaque 0..=100
     // scale as `Usage.active_window_percent` and is omitted when unmeasurable.
@@ -1002,6 +1023,8 @@ pub const PRODUCER_COMMAND_TYPES: &[&str] = &[
     "add_mcp_server",
     "remove_mcp_server",
     "grant_workspace_capability",
+    "grant_path",
+    "revoke_path",
     "approval_resume",
     "host_send_message_result",
     // F22-C1 host Goal control.
@@ -1067,6 +1090,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "cua_event",
     "cua_policy_denied",
     "host_send_message_request",
+    "render_artifact",
     "compact_offload",
     "anvil_receipt",
     "anvil_receipt_invalidated",
@@ -1863,6 +1887,18 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             },
         ),
         (
+            "events/render_artifact.json".into(),
+            ProtocolEvent::RenderArtifact {
+                msg_id: "msg-001".into(),
+                call_id: "call-render-001".into(),
+                title: "Quarterly summary".into(),
+                mime: RenderMime::Markdown,
+                content: "# Quarterly summary\n\nRevenue held.\n".into(),
+                truncated: false,
+                critical: NonCritical,
+            },
+        ),
+        (
             "events/goal_snapshot.json".into(),
             ProtocolEvent::GoalSnapshot {
                 goal_version: GOAL_PROTOCOL_VERSION,
@@ -2171,6 +2207,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                     category: ToolCategory::Exec,
                     args: json!({"command":"cargo test"}),
                     description: "Run the test suite".into(),
+                    escalation: None,
                 },
             },
         ),
@@ -2184,6 +2221,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                     category: ToolCategory::Exec,
                     args: json!({"command":"cargo test"}),
                     description: "Run the test suite".into(),
+                    escalation: None,
                 },
             },
         ),
@@ -2389,6 +2427,23 @@ pub fn compatibility_event_values() -> BTreeMap<String, ProtocolEvent> {
                 body: "hello".into(),
                 subject: None,
                 conversation_id: None,
+            },
+        ),
+        (
+            // The truncated shape a host must also be able to render: a
+            // partial artifact carrying the in-band marker. Every field is
+            // required on this event, so "minimal" here means the OTHER
+            // branch of `truncated`, which is the one a host is most likely
+            // to have never exercised.
+            "compat/events/render_artifact.truncated.json".into(),
+            ProtocolEvent::RenderArtifact {
+                msg_id: "msg-minimal".into(),
+                call_id: "call-render-minimal".into(),
+                title: "Large log".into(),
+                mime: RenderMime::Plain,
+                content: "first line\n\n[wcore: CONTENT TRUNCATED. …]\n".into(),
+                truncated: true,
+                critical: NonCritical,
             },
         ),
         (
