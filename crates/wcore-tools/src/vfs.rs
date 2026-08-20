@@ -1862,6 +1862,19 @@ impl<F: VirtualFs + 'static> VirtualFs for RepoControlDenyFs<F> {
     async fn read(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
         self.inner.read(path).await
     }
+    /// Forwards the pin, for exactly the reason `SecretDenyFs::read_pinned`
+    /// gives: this type is a MIDDLE layer of
+    /// `SandboxedFs<RepoControlDenyFs<SecretDenyFs<RealFs>>>`, and a middle
+    /// layer that does not forward swallows the capability. The trait default
+    /// refuses rather than falling back to `read` — deliberately, so the
+    /// TOCTOU window stays closed — so without this every jailed read in the
+    /// workspace posture fails, not just reads of the repo-control surface.
+    ///
+    /// No `guard` here on purpose: `.git` / `.wayland-core` are write-denied,
+    /// never read-denied. Guarding would deny reads this type exists to allow.
+    async fn read_pinned(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
+        self.inner.read_pinned(path).await
+    }
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError> {
         self.guard(path)?;
         self.inner.write(path, contents).await
