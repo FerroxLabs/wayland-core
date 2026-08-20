@@ -3208,7 +3208,19 @@ impl AgentBootstrap {
             let diag = std::env::var("WL_DIAG_NO_GUARD").unwrap_or_default();
             let diag_skip_strict = diag == "strict" || diag == "both";
             let diag_skip_trusted = diag == "trusted" || diag == "both";
-            eprintln!("WL_DIAG_NO_GUARD={diag:?} strict_workspace={strict_workspace}");
+            if let Ok(diag_log) = std::env::var("WL_DIAG_LOG") {
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(diag_log)
+                    .map(|mut f| {
+                        use std::io::Write;
+                        let _ = writeln!(
+                            f,
+                            "WL_DIAG_NO_GUARD={diag:?} strict_workspace={strict_workspace}"
+                        );
+                    });
+            }
             if strict_workspace {
                 let inner: std::sync::Arc<dyn wcore_tools::vfs::VirtualFs> = if diag_skip_strict {
                     std::sync::Arc::new(wcore_tools::vfs::SecretDenyFs::new(
