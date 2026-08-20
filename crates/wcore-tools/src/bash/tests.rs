@@ -1941,3 +1941,86 @@ fn the_sandbox_advisory_names_the_git_surface_that_still_works() {
         "the advisory must not overstate the blast radius; got:\n{advisory}"
     );
 }
+
+// ── P5: a path with a SPACE in it is still one path ─────────────────────────
+//
+// Every macOS desktop workspace lives under `~/Library/Application Support`,
+// so this is not an exotic case — it is the common one. A tokenizer that splits
+// on whitespace shatters such a path into fragments, each of which classifies
+// as ungranted, and the advisory then states a falsehood about a file that was
+// never out of reach. Three people spent a day chasing a boundary problem this
+// message invented.
+
+#[cfg(unix)]
+#[test]
+fn a_granted_path_containing_a_space_is_not_reported_as_ungranted() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Mimic the real layout, spaces and all.
+    let granted = tmp.path().join("Application Support/Wayland/wcore-temp-1");
+    std::fs::create_dir_all(&granted).unwrap();
+    let report = granted.join("morning-brief.html");
+    std::fs::write(&report, b"<html/>").unwrap();
+    let granted = std::fs::canonicalize(&granted).unwrap();
+
+    let manifest = wcore_sandbox::manifest::SandboxManifest {
+        fs_read_allow: vec![granted.clone()],
+        fs_write_allow: vec![granted.clone()],
+        ..Default::default()
+    };
+    let scope = super::policy::SandboxScope::new(&manifest, Some(&granted));
+
+    let result = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\nopen: {}: \
+                 _LSOpenURLsWithCompletionHandler() failed with error -54\n",
+                report.display()
+            ),
+            is_error: true,
+        },
+    );
+    assert!(
+        !result.content.to_lowercase().contains("outside every root"),
+        "the file is INSIDE a granted root — the space in `Application Support` \
+         must not turn it into two ungranted fragments; got:\n{}",
+        result.content
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_real_path_outside_every_granted_root_is_still_reported() {
+    // The control for the two tests above: the advisory must keep firing when
+    // it genuinely applies, or the fix would be a mute button rather than a
+    // correction.
+    let tmp = tempfile::tempdir().unwrap();
+    let granted = std::fs::canonicalize(tmp.path()).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let file = outside.path().join("secret notes.txt");
+    std::fs::write(&file, b"x").unwrap();
+
+    let manifest = wcore_sandbox::manifest::SandboxManifest {
+        fs_read_allow: vec![granted.clone()],
+        fs_write_allow: vec![granted.clone()],
+        ..Default::default()
+    };
+    let scope = super::policy::SandboxScope::new(&manifest, Some(&granted));
+
+    let result = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\ncat: {}: Operation not permitted\n",
+                file.display()
+            ),
+            is_error: true,
+        },
+    );
+    assert!(
+        result.content.to_lowercase().contains("outside every root"),
+        "a REAL file outside every granted root must still be named — and note \
+         it has a space too, so the reassembly has to find it; got:\n{}",
+        result.content
+    );
+}

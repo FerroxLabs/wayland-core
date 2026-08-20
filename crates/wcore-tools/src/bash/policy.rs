@@ -220,26 +220,105 @@ fn is_path_token(token: &str) -> bool {
 
 /// Pull the path-shaped tokens out of a tool result body. Deliberately crude:
 /// the caller only trusts a token once it matches the manifest.
-fn candidate_paths(body: &str) -> Vec<&str> {
-    body.split(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == '`')
-        .map(|token| token.trim_end_matches([':', ',', '.', ';', ')', ']']))
-        .filter(|token| is_path_token(token))
-        .collect()
+fn candidate_paths(body: &str, scope: &SandboxScope) -> Vec<String> {
+    let raw: Vec<&str> = body
+        .split(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == '`')
+        .collect();
+
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        // Greedily prefer the LONGEST run of space-joined tokens that names
+        // something real. `~/Library/Application Support/...` is one path, not
+        // two, and every macOS desktop workspace lives under it — splitting it
+        // produced two fragments that each looked ungranted, so the advisory
+        // stated a falsehood about a file that was never out of reach.
+        //
+        // The filesystem is the arbiter, which is sound HERE specifically:
+        // this runs in the parent process, outside the child's sandbox, so a
+        // path that resolves for us really does exist.
+        let mut best: Option<(usize, String)> = None;
+        let limit = raw.len().min(i + MAX_SPACE_JOINED_TOKENS);
+        for j in i..limit {
+            let joined = trim_trailing_punctuation(&raw[i..=j].join(" "));
+            if joined.is_empty() || !is_path_token(&joined) {
+                continue;
+            }
+            if resolve_candidate(scope, &joined).is_some_and(|p| path_exists(&p)) {
+                best = Some((j, joined));
+            }
+        }
+        match best {
+            Some((j, joined)) => {
+                out.push(joined);
+                i = j + 1;
+            }
+            None => {
+                // Nothing real here. Keep the bare token so a genuinely denied
+                // path that no longer exists on disk can still match the
+                // deny-list, and let `classify` decide.
+                let token = trim_trailing_punctuation(raw[i]);
+                if is_path_token(&token) {
+                    out.push(token);
+                }
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Longest run of whitespace-separated tokens considered as one path.
+///
+/// Real directory names contain a space or two (`Application Support`,
+/// `My Documents`); prose does not stop being prose for eight words running.
+/// The bound also keeps this quadratic scan cheap on a large tool output.
+const MAX_SPACE_JOINED_TOKENS: usize = 6;
+
+fn trim_trailing_punctuation(token: &str) -> String {
+    token
+        .trim_end_matches([':', ',', '.', ';', ')', ']'])
+        .to_string()
+}
+
+/// True only when the filesystem positively reports that something IS there.
+///
+/// The polarity matters, and an earlier version of this had it backwards. The
+/// reassembly below needs POSITIVE evidence that a joined run of tokens names
+/// a real path, not merely the absence of evidence that it does not. Those are
+/// the same test only on a platform where every stat failure is `NotFound`.
+/// Windows returns `InvalidInput` for a path containing characters no path may
+/// contain, so a "not definitely absent" check accepted
+/// `C:\w\repo\ STDERR: LoadLibrary failed for …` as an existing path and
+/// glued half a log line into one fabricated token.
+///
+/// A stat that fails for ANY reason is not a path worth joining on.
+fn path_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// Resolve a token the way [`classify`] does — absolute as written, relative
+/// against the child's cwd. Shared by the tokenizer so the two cannot drift
+/// into disagreeing about what a token even names.
+fn resolve_candidate(scope: &SandboxScope, token: &str) -> Option<PathBuf> {
+    let raw = Path::new(token);
+    if raw.is_absolute() {
+        Some(raw.to_path_buf())
+    } else {
+        Some(
+            scope
+                .cwd
+                .as_ref()?
+                .join(raw.strip_prefix("./").unwrap_or(raw)),
+        )
+    }
 }
 
 /// Classify one path token against the scope. `None` means "no evidence this
 /// path was blocked by the sandbox" — the default, so an unrelated failure is
 /// never given a fabricated cause.
 fn classify(scope: &SandboxScope, token: &str) -> Option<(PathBuf, DeniedBecause)> {
-    let raw = Path::new(token);
-    let joined = if raw.is_absolute() {
-        raw.to_path_buf()
-    } else {
-        scope
-            .cwd
-            .as_ref()?
-            .join(raw.strip_prefix("./").unwrap_or(raw))
-    };
+    let joined = resolve_candidate(scope, token)?;
     // Manifest roots are canonicalized by `WorkspacePolicy`, but a child names
     // whatever spelling it was given. On macOS the granted scratch root is
     // `/private/tmp/...` while the shell reports `/tmp/...`, so a prefix match on
@@ -384,8 +463,8 @@ pub(super) fn annotate_sandbox_denial(scope: &SandboxScope, mut result: ToolResu
         return result;
     }
     let mut denied: Vec<(PathBuf, DeniedBecause)> = Vec::new();
-    for token in candidate_paths(&result.content) {
-        if let Some(hit) = classify(scope, token)
+    for token in candidate_paths(&result.content, scope) {
+        if let Some(hit) = classify(scope, &token)
             && !denied.iter().any(|(seen, _)| *seen == hit.0)
         {
             denied.push(hit);
@@ -905,7 +984,33 @@ pub fn check_denylist(command: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_always_granted, is_path_token};
+    use super::{is_always_granted, is_path_token, path_exists};
+
+    /// The reassembly oracle must require POSITIVE evidence that a path
+    /// exists. Asking "is it definitely absent?" instead looks identical on a
+    /// platform where every stat failure is `NotFound`, and is wrong wherever
+    /// one is not — which is how a Windows-only regression got past a green
+    /// Linux gate.
+    ///
+    /// A file used as a directory component fails with `NotADirectory` on
+    /// Unix and an equivalent non-`NotFound` error on Windows, which is
+    /// exactly the shape that slipped through.
+    #[test]
+    fn the_existence_oracle_requires_a_positive_answer() {
+        let file = std::env::current_exe().expect("the test binary exists");
+        assert!(path_exists(&file), "positive control: the binary is there");
+
+        assert!(
+            !path_exists(&file.join("not-a-directory")),
+            "a stat that fails for ANY reason is not a path worth joining on; \
+             treating only NotFound as absence accepts this one"
+        );
+
+        assert!(
+            !path_exists(std::path::Path::new("/definitely/not/here/xyzzy")),
+            "and a plainly absent path is still absent"
+        );
+    }
 
     /// The verbatim spelling is the one `canonicalize` actually returns on
     /// Windows, and it is a plain string here, so this runs on every host
