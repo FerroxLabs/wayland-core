@@ -1660,6 +1660,43 @@ pub struct ToolInfo {
     pub category: ToolCategory,
     pub args: Value,
     pub description: String,
+    /// Why this call is being shown to the user beyond the ordinary approval
+    /// gate, as STRUCTURED data rather than prose in `description`.
+    ///
+    /// Additive and skipped when absent, so a host that has never heard of it
+    /// sees the exact `tool_request` frame it saw before. A host that HAS
+    /// heard of it can render the specific remedy the escalation implies
+    /// (an "always allow this folder" button) instead of asking the user to
+    /// read a path out of a sentence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<ToolEscalation>,
+}
+
+/// A boundary this tool call is about to cross, named for the host.
+///
+/// One variant today. It is an enum rather than a bare struct because "why am
+/// I being asked?" has more than one possible answer, and a host that switches
+/// on `kind` keeps working when the second answer arrives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolEscalation {
+    /// The call names a filesystem path outside every root this session can
+    /// reach. Answering the approval with
+    /// `ApprovalScope::AlwaysPath { root: suggested_root, write: false }` is
+    /// guaranteed to be accepted: Core only emits this variant after
+    /// dry-running that grant against the session's workspace policy, so the
+    /// host is never handed a button that will silently fail.
+    PathBoundary {
+        /// The path the call actually named, canonicalized.
+        target: String,
+        /// Always `read` today. Write access outside the workspace is not
+        /// grantable, so it never raises this escalation.
+        access: crate::commands::PathGrantAccess,
+        /// The CONTAINING DIRECTORY of `target`, which is what a grant opens.
+        /// Putting `target` on an "always allow this folder" button would be a
+        /// button that lies about its own scope.
+        suggested_root: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -2116,6 +2153,7 @@ mod tests {
                 category: ToolCategory::Exec,
                 args: json!({"command": "ls"}),
                 description: "Execute: ls".to_string(),
+                escalation: None,
             },
         };
         let json = serde_json::to_value(&event).unwrap();

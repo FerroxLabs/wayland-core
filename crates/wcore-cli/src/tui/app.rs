@@ -1075,6 +1075,18 @@ pub struct ToolCardModel {
     /// Crucible Stage 4: the typed proposal card (Some only for a Crucible
     /// council approval). Rendered by CrucibleComponent; None for all other tools.
     pub crucible_plan: Option<wcore_types::crucible::CruciblePlan>,
+    /// #1099: the folder to offer on an "always allow this folder" answer,
+    /// taken from `ToolInfo::escalation`'s `suggested_root`. `Some` only on a
+    /// read whose path sits outside every root the session can reach.
+    ///
+    /// The TUI is the only surface a local operator has, so this is what
+    /// lets `handle_approval_key` answer with
+    /// `ApprovalScope::AlwaysPath { root, write: false }` — the ONE scope
+    /// that makes such a read succeed. Without it the card can only send
+    /// `Once` (the call still dies on `VfsError::OutsideSandbox`) or the
+    /// bare `Always` (which re-prompts forever, because the pre-flight
+    /// boundary check forces the gate past a tool-name grant).
+    pub path_grant_root: Option<String>,
 }
 
 /// Lifecycle status of a tool-call card. FROZEN Wave-0 contract.
@@ -1644,6 +1656,7 @@ mod tests {
             approval_reason: String::new(),
             plan_body: None,
             crucible_plan: None,
+            path_grant_root: None,
         });
         // Fill past the cap with plain turns so the orphan-owning turn rolls off.
         for i in 0..(TURN_HISTORY_CAP + 5) {

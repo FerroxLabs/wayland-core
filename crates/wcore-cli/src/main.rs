@@ -9117,6 +9117,7 @@ mod tests {
                         category: ToolCategory::Edit,
                         args: json!({}),
                         description: String::new(),
+                        escalation: None,
                     },
                 })
                 .unwrap();
@@ -9175,6 +9176,7 @@ mod tests {
                         category: ToolCategory::Exec,
                         args: json!({}),
                         description: String::new(),
+                        escalation: None,
                     },
                 })
                 .unwrap();

@@ -1291,6 +1291,7 @@ mod tests {
             category: wcore_protocol::events::ToolCategory::Info,
             args: serde_json::json!({"path": "x"}),
             description: "desc".to_string(),
+            escalation: None,
         }
     }
 
@@ -1448,6 +1449,7 @@ mod tests {
                     category: wcore_protocol::events::ToolCategory::Exec,
                     args: serde_json::json!({"name": "demo"}),
                     description: "run a forgeflow".into(),
+                    escalation: None,
                 },
             })
             .unwrap();
@@ -1531,6 +1533,7 @@ mod tests {
                     category: wcore_protocol::events::ToolCategory::Exec,
                     args: serde_json::json!({}),
                     description: "council approval".into(),
+                    escalation: None,
                 },
             })
             .unwrap();
@@ -1579,6 +1582,7 @@ mod tests {
                     category: wcore_protocol::events::ToolCategory::Exec,
                     args: serde_json::json!({"command": "ls"}),
                     description: "run".into(),
+                    escalation: None,
                 },
             })
             .unwrap();

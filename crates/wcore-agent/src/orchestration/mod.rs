@@ -145,7 +145,10 @@ use crate::session_journal::{
 /// evidence. Named so an audit of a journal can tell the two apart.
 const DISPATCH_COMPLETION_RECONCILER: &str = "in-process:dispatch-completion";
 use wcore_plugin_api::registry::hooks::HookPhase;
-use wcore_protocol::events::{OutputType, ProtocolEvent, ToolCategory, ToolInfo, ToolStatus};
+use wcore_protocol::commands::PathGrantAccess;
+use wcore_protocol::events::{
+    OutputType, ProtocolEvent, ToolCategory, ToolEscalation, ToolInfo, ToolStatus,
+};
 use wcore_protocol::writer::ProtocolEmitter;
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
 use wcore_types::message::ContentBlock;
@@ -3133,8 +3136,31 @@ async fn execute_tool_calls_with_approval_budget_effects_inner(
             }
             retry => retry,
         };
+        // #1099: does this call name a readable path outside every root the
+        // session can reach? Asking here — in front of the call — is the whole
+        // feature: the alternative is `VfsError::OutsideSandbox` coming back as
+        // a tool error for the model to improvise around.
+        //
+        // `force` mode (`globally_approved`) still bypasses. The operator
+        // explicitly asked not to be asked, and honouring that is the point of
+        // the mode; skipping the classifier there also keeps a `canonicalize`
+        // off every tool call in the mode that most wants to be fast. A
+        // recovered approval already carries an answered card, so it is not
+        // re-asked either.
+        let path_boundary = if globally_approved || recovered_approval {
+            None
+        } else {
+            registry.workspace_policy().and_then(|policy| {
+                wcore_tools::path_boundary::read_path_boundary(&policy, name, input)
+            })
+        };
+        // A crossed boundary FORCES the gate, even where the allow-list or a
+        // tool-name / prefix / category rule would have skipped it. Those rules
+        // grant the TOOL; a user who allow-listed `Read` did not thereby allow
+        // reading everything outside their workspace.
         let needs_approval = !recovered_approval
             && (name == "AskUserQuestion"
+                || path_boundary.is_some()
                 || (!globally_approved && !tool_name_approved && !scoped_auto_approval));
         // Category-, mode- and prefix-scoped rules authorize the arguments
         // that matched them. A hook may still mutate input after a global or
@@ -3176,6 +3202,22 @@ async fn execute_tool_calls_with_approval_budget_effects_inner(
                         category,
                         args: input.clone(),
                         description,
+                        // `suggested_root` is the CONTAINING FOLDER, which is
+                        // what a grant opens. A host that put the file name on
+                        // an "always allow this folder" button would be
+                        // labelling a button with a scope it does not have.
+                        // Both strings are known-UTF-8: the classifier refuses
+                        // to raise a boundary it could only describe lossily.
+                        escalation: path_boundary.as_ref().map(|boundary| {
+                            ToolEscalation::PathBoundary {
+                                target: boundary.target.to_string_lossy().into_owned(),
+                                access: PathGrantAccess::Read,
+                                suggested_root: boundary
+                                    .suggested_root
+                                    .to_string_lossy()
+                                    .into_owned(),
+                            }
+                        }),
                     },
                 })
                 .is_err()
@@ -3357,6 +3399,7 @@ async fn execute_tool_calls_with_approval_budget_effects_inner(
                     category,
                     args: input.clone(),
                     description,
+                    escalation: None,
                 },
             });
         }

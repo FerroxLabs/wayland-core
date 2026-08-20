@@ -69,6 +69,7 @@ pub fn tool_call_with_approval() -> Vec<ProtocolEvent> {
                 category: ToolCategory::Exec,
                 args: json!({"command": "cargo test"}),
                 description: "Execute: cargo test".into(),
+                escalation: None,
             },
         },
         ProtocolEvent::ApprovalRequired {
@@ -114,6 +115,7 @@ pub fn edit_tool_call() -> Vec<ProtocolEvent> {
                     "new_string": "fn main() {\n    run();\n}",
                 }),
                 description: "Edit crates/wcore-cli/src/main.rs".into(),
+                escalation: None,
             },
         },
         ProtocolEvent::ToolResult {

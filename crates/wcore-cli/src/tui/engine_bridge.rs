@@ -4313,6 +4313,7 @@ mod tests {
                 category,
                 args: serde_json::json!({"command": "echo hi"}),
                 description: "execute a shell command".into(),
+                escalation: None,
             },
         }
     }
@@ -4450,6 +4451,7 @@ mod tests {
                         "plan": serde_json::to_value(&plan).unwrap(),
                     }),
                     description: "Convene a cross-vendor council".into(),
+                    escalation: None,
                 },
             })
             .expect("emit ToolRequest");

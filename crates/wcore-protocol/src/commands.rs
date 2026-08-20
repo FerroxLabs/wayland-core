@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use wcore_types::goal::GoalStrategy;
@@ -547,7 +547,7 @@ fn valid_evidence_digest(value: &str) -> bool {
 /// being absent or silently downgraded. A host that can express the request
 /// gets a legible refusal; a host that cannot express it might ship a button
 /// promising more than it delivers.
-#[derive(Debug, Deserialize, Default, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Default, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum PathGrantAccess {
     #[default]
