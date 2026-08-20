@@ -49,6 +49,26 @@ const SECRET_SUFFIXES: &[&str] = &[
 
 const SECRET_DIR_SEGMENTS: &[&str] = &["/.ssh/", "/.gnupg/", "/.aws/", "/.azure/", "/.gcloud/"];
 
+/// Workspace-relative directories that stay READ-ONLY to the in-process file
+/// tools in every posture — see
+/// [`WorkspacePolicy::is_repo_control_path`].
+///
+/// `.git` is listed WHOLE rather than as the two leaves
+/// (`hooks/`, `config`) already carried by [`SECRET_SUFFIXES`]: git's
+/// execute-on-next-command surface is not confined to `hooks/` — `config`
+/// alone reaches it through `core.fsmonitor`, `core.sshCommand`,
+/// `diff.*.textconv` and `filter.*.clean/smudge`, and `.git/info/attributes`
+/// selects those filters per path. Enumerating the reachable keys is a losing
+/// game against a format git keeps extending, so the directory is the unit.
+///
+/// This is a FILE-TOOL deny only, and deliberately so: `Bash` still writes
+/// `.git` freely, because `git commit`, `git add` and every other porcelain
+/// verb are ordinary session work and confining them would break committing
+/// outright. The asymmetry is the point — `Bash` is an explicit request to run
+/// a program, while `Write`/`Edit` are the low-friction surface a prompt
+/// injection reaches for.
+const REPO_CONTROL_DIRS: &[&str] = &[".git", ".wayland-core"];
+
 const SECRET_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "tfstate"];
 
 /// Extension-less secret basenames (SSH keys), matched on the final path
@@ -578,6 +598,32 @@ impl WorkspacePolicy {
     pub fn is_project_secret(&self, path: &Path) -> bool {
         let canon = canon_for_scope(path);
         is_secret_path_static(&canon) && canon.starts_with(&self.root)
+    }
+
+    /// True when `path` names this workspace's own REPOSITORY-CONTROL surface
+    /// ([`REPO_CONTROL_DIRS`]) — the directories whose contents are executed or
+    /// obeyed rather than merely read back.
+    ///
+    /// The predicate for a WRITE deny, never a read deny. Reading `.git/HEAD`
+    /// and loading `.wayland-core/skills/**` are ordinary session work; what
+    /// must not happen is the model AUTHORING those bytes. A `Write` of
+    /// `.git/hooks/pre-commit` is arbitrary code execution on the operator's
+    /// next commit, and a `Write` of `.wayland-core/skills/x/SKILL.md` is
+    /// arbitrary instruction injection into the next session — the very surface
+    /// [`wcore_config::workspace_trust::fingerprint_workspace`] hashes in order
+    /// to bind a trust grant to it. A tool that can rewrite that surface can
+    /// invalidate the grant's meaning without the operator ever seeing a prompt.
+    ///
+    /// Deliberately WORKSPACE-SCOPED and canonicalize-first, exactly like
+    /// [`is_project_secret`](Self::is_project_secret): the `<root>/.git` of THIS
+    /// session is protected, a `.git` elsewhere on the host is not this policy's
+    /// business, and a benign-named symlink into the control surface resolves
+    /// before the prefix match so it cannot be used to smuggle a write through.
+    pub fn is_repo_control_path(&self, path: &Path) -> bool {
+        let canon = canon_for_scope(path);
+        REPO_CONTROL_DIRS
+            .iter()
+            .any(|dir| canon.starts_with(self.root.join(dir)))
     }
 
     /// #667: opt a `Trusted` policy into the same PROJECT-committed-secret

@@ -332,6 +332,22 @@ pub struct SecurityConfig {
     /// receives the grant.
     #[serde(default)]
     pub allow_sandboxed_shell_network: bool,
+    /// Require version control before a workspace may use the trusted-local
+    /// profile. Off by default.
+    ///
+    /// A directory with no VCS has no undo: a wrong or malicious write is
+    /// unrecoverable, where in a repository it is a `git checkout` away. With
+    /// this on, a workspace that has no `.git` at or above its root keeps the
+    /// strict (contained) profile even when the operator's trust store holds a
+    /// current grant for it, and the session says so on startup.
+    ///
+    /// **Off by default because it changes the profile of an already-trusted
+    /// workspace**, which is a behaviour change for existing users; turning it
+    /// on is the operator's call. Like `allow_sandboxed_shell_network` it is
+    /// read from the TRUSTED (global) layer alone — a project file travels with
+    /// a cloned repository and must not be able to switch a hardening off.
+    #[serde(default)]
+    pub require_vcs_for_writes: bool,
 }
 
 impl Default for SecurityConfig {
@@ -340,6 +356,7 @@ impl Default for SecurityConfig {
             enabled: true,
             egress_allow: Vec::new(),
             allow_sandboxed_shell_network: false,
+            require_vcs_for_writes: false,
         }
     }
 }
@@ -5388,6 +5405,10 @@ fn merge_config_files_with_trust(
         enabled: global.security.enabled,
         egress_allow: [global.security.egress_allow, project.security.egress_allow].concat(),
         allow_sandboxed_shell_network: global.security.allow_sandboxed_shell_network,
+        // Trusted layer only, same shape and same reason as the switch above:
+        // this one is a HARDENING with a default-FALSE polarity, so letting the
+        // project layer speak would let a cloned repository turn it back off.
+        require_vcs_for_writes: global.security.require_vcs_for_writes,
     };
 
     // M5.bootstrap-wiring — session_cap is an opt-in `Option<BudgetConfig>`:
