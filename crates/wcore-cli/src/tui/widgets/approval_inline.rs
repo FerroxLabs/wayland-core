@@ -81,6 +81,7 @@ mod tests {
             approval_reason: reason.to_string(),
             plan_body: None,
             crucible_plan: None,
+            path_grant_root: None,
         }
     }
 

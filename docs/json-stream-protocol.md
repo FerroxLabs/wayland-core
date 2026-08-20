@@ -420,8 +420,19 @@ Answering the approval with
 `{"scope": {"always_path": {"root": "<suggested_root>", "write": false}}}`
 (§2.3.2) is **guaranteed to be accepted**: Core dry-runs that exact grant
 against the session's workspace policy before emitting the frame, so this is
-never a button that silently fails. Answering `once` runs the call this time
-without minting a grant; denying mints nothing.
+never a button that silently fails.
+
+`always_path` is the ONLY answer that makes the call succeed, and a host that
+raises this card must offer it. The other two answers do not:
+
+* `once` releases the gate without minting a grant — so the call runs, reaches
+  the sandbox it was flagged for crossing, and fails with an out-of-sandbox
+  tool error. The prompt is not what makes the read work; the grant is.
+* `always` registers the TOOL name and nothing else. The boundary check runs in
+  front of every call and forces the gate past a tool-name grant, so the next
+  call on the same path prompts again, and the one after that, indefinitely.
+
+Denying mints nothing and skips the call, which is the honest refusal.
 
 The gate is forced for these calls even when the tool is on the allow-list or
 carries a tool-name/prefix auto-approval — those grant the tool, not the path.

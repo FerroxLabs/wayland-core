@@ -11,6 +11,15 @@
 //! The body is the path/pattern rendered in the surface-hover "code" style
 //! shared with the Fallback card. `Read` is the low-risk case, so it also
 //! carries a dim `read-only` note under its path.
+//!
+//! #1099 — when the card carries a `path_grant_root`, the named path is
+//! OUTSIDE every root this session can reach and the gate was forced for
+//! exactly that reason. Approving once still ends in
+//! `VfsError::OutsideSandbox`, and a bare `Always` re-prompts forever
+//! (the pre-flight check forces the gate past a tool-name grant), so the
+//! only answer that works is `ApprovalScope::AlwaysPath` on the containing
+//! folder. The card names that folder on the `[a]` key — a button labelled
+//! "always" that granted something else would be lying about its scope.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -91,15 +100,31 @@ impl PermissionComponent for FilesystemComponent {
                 Style::default().fg(ctx.theme.text_muted),
             )));
         }
+        // #1099: say why the gate was forced, and say plainly that the
+        // cheap answer does not work here. Approving once leaves the
+        // sandbox untouched, so the call still dies on
+        // `VfsError::OutsideSandbox` — the user has to know that before
+        // they press Enter, not after.
+        if ctx.card.path_grant_root.is_some() {
+            lines.push(Line::from(Span::styled(
+                "outside this workspace — approving once will still be refused",
+                Style::default().fg(ctx.theme.orange),
+            )));
+        }
         lines
     }
 
     fn keys(&self, ctx: &PermissionContext) -> Line<'static> {
-        let _ = ctx;
-        Line::from(Span::styled(
-            "[enter/y] approve   [a] always in this workspace   [n] deny   [esc] cancel",
-            Style::default(),
-        ))
+        // #1099: on a boundary card `[a]` is a FOLDER grant, not a
+        // tool grant, so it names the folder it opens.
+        let text = match ctx.card.path_grant_root.as_deref() {
+            Some(root) => {
+                format!("[enter/y] approve   [a] always allow {root}   [n] deny   [esc] cancel")
+            }
+            None => "[enter/y] approve   [a] always in this workspace   [n] deny   [esc] cancel"
+                .to_string(),
+        };
+        Line::from(Span::styled(text, Style::default()))
     }
 }
 
@@ -122,6 +147,7 @@ mod tests {
             approval_reason: String::new(),
             plan_body: None,
             crucible_plan: None,
+            path_grant_root: None,
         }
     }
 
@@ -229,6 +255,57 @@ mod tests {
         assert!(keys.contains("always"));
         assert!(keys.contains("deny"));
         assert!(keys.contains("cancel"));
+    }
+
+    #[test]
+    fn boundary_card_names_the_folder_the_always_key_grants() {
+        // #1099: the `[a]` key on a boundary card grants a FOLDER. The label
+        // must name it — "always in this workspace" is worse than useless
+        // here, because the path is precisely NOT in this workspace.
+        let t = Theme::hearth();
+        let mut c = card("Read", "/Users/sean/Documents/notes/q3.md");
+        c.path_grant_root = Some("/Users/sean/Documents/notes".into());
+        let comp = FilesystemComponent;
+        let keys = line_text(&comp.keys(&ctx(&c, &t)));
+        assert!(
+            keys.contains("[a] always allow /Users/sean/Documents/notes"),
+            "the always key must name the granted folder; got {keys}"
+        );
+        assert!(
+            !keys.contains("always in this workspace"),
+            "the in-workspace label is false on a boundary card; got {keys}"
+        );
+    }
+
+    #[test]
+    fn card_without_a_boundary_keeps_the_workspace_label() {
+        // Known-positive control: an ordinary Read card is untouched, so the
+        // boundary branch cannot be relabelling every filesystem card.
+        let t = Theme::hearth();
+        let c = card("Read", "src/lib.rs");
+        let comp = FilesystemComponent;
+        let keys = line_text(&comp.keys(&ctx(&c, &t)));
+        assert!(keys.contains("[a] always in this workspace"), "{keys}");
+    }
+
+    #[test]
+    fn boundary_card_warns_that_approving_once_is_still_refused() {
+        // The gate was forced because the read is out of bounds; `Once`
+        // releases the gate without widening the sandbox, so the call still
+        // fails. The user has to learn that BEFORE pressing Enter.
+        let t = Theme::hearth();
+        let mut c = card("Read", "/etc/hosts");
+        c.path_grant_root = Some("/etc".into());
+        let comp = FilesystemComponent;
+        let body = comp.body(&ctx(&c, &t));
+        let last = line_text(body.last().expect("body is never empty"));
+        assert_eq!(
+            last,
+            "outside this workspace — approving once will still be refused"
+        );
+        // A plain Read card carries path + read-only only.
+        let plain = card("Read", "/etc/hosts");
+        assert_eq!(comp.body(&ctx(&plain, &t)).len(), 2);
     }
 
     #[test]
