@@ -402,6 +402,35 @@ jobs:
         with:
           tool: nextest
 
+      # Dependency-only cache, macOS ONLY and deliberately so.
+      #
+      # WHY macOS: workflow wall time is max(all jobs), and this job and
+      # `CI (linux-containerized)` are CO-BOTTLENECKS that trade places
+      # (measured: 67.1/61.7 on one run, 50.0/54.4 on the next). Speeding up
+      # either one alone moves the wall clock by ~0-5 minutes, because the
+      # other becomes the critical path. macOS is the leg with no cache at all.
+      #
+      # WHY NOT the self-hosted Windows runner: it already keeps `target/` warm
+      # between runs (see the matrix comment above), so a cache layer there
+      # would upload and re-download artifacts the box already has on disk.
+      #
+      # WHY dependency-only: `rust-cache` excludes workspace crates by default
+      # and prunes stale artifacts, so what it stores is third-party deps —
+      # single-digit GB — NOT this workspace's full `target/`, which measures
+      # 69-190 GB and would blow past the cache allowance, thrash on eviction,
+      # and cost more in transfer than it saves in compile.
+      #
+      # `save-if` restricts writes to the default branch: PR runs restore but
+      # never populate, so an untrusted PR cannot poison the cache other jobs
+      # read. That is a security property, not a tuning knob.
+      - name: Cache Rust dependencies (macOS)
+        if: runner.os == 'macOS'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-macos
+          cache-on-failure: 'true'
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2
         with:
