@@ -1446,7 +1446,7 @@ pub(super) fn execute_blocking(
             // join them to collect the fully-drained output. This MUST run before
             // the deferred error returns so the threads never outlive their
             // handles.
-            let (stdout, stdout_exceeded) = stdout_reader.join().unwrap_or_default();
+            let (mut stdout, stdout_exceeded) = stdout_reader.join().unwrap_or_default();
             let (mut stderr, stderr_exceeded) = stderr_reader.join().unwrap_or_default();
 
             if let Some((wait_res, last_err)) = wait_err {
@@ -1507,12 +1507,45 @@ pub(super) fn execute_blocking(
             // `OutputLimitExceeded` unreachable for exactly the input it was
             // written to describe. Exhaustion is the cause; the timeout (when
             // it still happens at all) is a consequence.
-            if output_exceeded_wakeup || stdout_exceeded || stderr_exceeded {
-                return Err(SandboxError::OutputLimitExceeded {
-                    limit_bytes: super::super::super::BUFFERED_OUTPUT_LIMIT_BYTES,
-                });
+            // wayland#1082. `drain_pipe` already does the right thing: it
+            // reserves against the shared budget, KEEPS the partial grant, and
+            // signals `exceeded_event` so the waiter tears the job down. This
+            // was the one step that undid all of it — turning that retained
+            // head into an error and handing the caller none of the command's
+            // own output. A command that produced megabytes got back a hundred
+            // bytes of error text. #1071 fixed the same inversion for the
+            // shared drain; this is the AppContainer backend's copy of it.
+            //
+            // Marker placement follows the PER-STREAM flags. `exceeded_event`
+            // is only ever set by `drain_pipe` on a stream that actually
+            // crossed the ceiling, so a wakeup with both flags clear cannot
+            // mean "some stream overflowed" — it means a reader thread died and
+            // the `unwrap_or_default()` above turned that into "no output, no
+            // overflow". That is worth saying out loud rather than guessing
+            // which pipe flooded and attaching a marker to the wrong one.
+            let exceeded_any = output_exceeded_wakeup || stdout_exceeded || stderr_exceeded;
+            if stdout_exceeded {
+                let kept = stdout.len();
+                stdout.extend_from_slice(&super::super::super::truncation_marker(kept));
             }
-            if timed_out {
+            if stderr_exceeded {
+                let kept = stderr.len();
+                stderr.extend_from_slice(&super::super::super::truncation_marker(kept));
+            }
+            if output_exceeded_wakeup && !stdout_exceeded && !stderr_exceeded {
+                stderr.extend_from_slice(
+                    b"\n[wcore-sandbox: the output ceiling was crossed but neither reader \
+                      reported it, which means a reader thread failed and its output was \
+                      lost. Treat this result as INCOMPLETE.]\n",
+                );
+            }
+            // Exhaustion still takes precedence over the timeout, and that
+            // ordering is load-bearing: the abuse shape this exists for — flood
+            // the pipe, then sit there — trips both, and when the timeout won,
+            // the overflow was reported as a Timeout instead. Now that crossing
+            // the cap yields OUTPUT rather than an error, the timeout must not
+            // fire on top of it and throw that output away again.
+            if timed_out && !exceeded_any {
                 return Err(SandboxError::Timeout);
             }
 
