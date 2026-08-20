@@ -134,7 +134,26 @@ jobs:
 
   ci:
     name: CI (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    # A PR from a FORK must never land on a self-hosted runner. That runner is a
+    # personal Windows machine, and `pull_request` executes the fork's code on
+    # it. Approval gating helps (the repo is now `all_external_contributors`
+    # rather than `first_time_contributors`), but approval is a HUMAN gate and
+    # human gates fail open under fatigue — one plausible-looking PR approved at
+    # the wrong hour is all it takes. This makes it structural instead: a fork
+    # PR gets GitHub-hosted Windows, so coverage is preserved and only the
+    # hardware changes.
+    #
+    # The JOB NAME is deliberately untouched. `CI (Array)` is a REQUIRED status
+    # check on `main`, and `main` is strict + linear + enforce_admins. Dropping
+    # or renaming this matrix entry for forks would mean that context never
+    # reports, so a fork PR could NEVER merge — a permanent block, which is a
+    # worse outcome than the exposure being closed. Only `runs-on` varies;
+    # `matrix.os` and therefore the rendered job name are unchanged.
+    #
+    # `contains()` is used rather than `matrix.os[0]` because the matrix mixes a
+    # plain string (`macos-latest`) with a label array, and indexing a string in
+    # a GitHub expression does not do what indexing an array does.
+    runs-on: ${{ (contains(matrix.os, 'self-hosted') && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'windows-latest' || matrix.os }}
     # gh#1072. Without this the job inherits GitHub's 6-HOUR default, and this
     # is a required context, so one wedged job blocks every PR in the repo.
     # Sized from measurement, not guesswork: across the last four successful
