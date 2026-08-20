@@ -1041,13 +1041,18 @@ impl OutputSink for ProtocolSink {
         // tool-text emitter that skipped it made it the cheapest way to lift a
         // live token.
         //
-        // Redaction runs BEFORE truncation, and the order is load-bearing in
-        // both directions. Truncating first would let a token straddling the
-        // cut leave a partial behind, and — worse — redaction can LENGTHEN the
-        // text, so a post-truncation scrub could push the frame back over
-        // RENDER_ARTIFACT_CONTENT_LIMIT_BYTES and trip the output pump's
-        // sticky failure, taking the session's whole stdout with it. Keeping
-        // truncation last is what makes the cap an invariant.
+        // Redaction runs BEFORE truncation, and the order is load-bearing.
+        // The scrub matches WHOLE tokens, so truncating first would cut a token
+        // straddling the cap in half and leave its prefix in the emitted frame,
+        // where no whole-token scrub can ever match it again — half an
+        // `apr-<uuid>` is still half a live credential. Redacting first removes
+        // the token before a cut position even exists.
+        //
+        // The order is NOT about the byte cap: `truncate_render_content`
+        // deliberately appends its in-band marker AFTER the cut, so the value it
+        // returns is already `RENDER_ARTIFACT_CONTENT_LIMIT_BYTES` plus the
+        // marker. The cap that actually protects the output pump is the 8 MiB
+        // frame limit, which 1 MiB of content cannot approach in either order.
         // Like `emit_tool_panicked`, and NOT like the older `self.token_redactor`
         // call sites: the process-wide set is a strict superset of any one
         // handle's, so a token minted on another bridge — a sub-agent, a second
@@ -1876,15 +1881,18 @@ mod tests {
         drop(sink_a);
     }
 
-    /// Pull the `content` off the one `RenderArtifact` frame an emitter
-    /// recorded, failing loudly if no frame was written at all.
-    fn recorded_render_content(emitter: &RecordingEmitter) -> String {
+    /// Pull the `content` and the `truncated` flag off the one
+    /// `RenderArtifact` frame an emitter recorded, failing loudly if no frame
+    /// was written at all.
+    fn recorded_render_frame(emitter: &RecordingEmitter) -> (String, bool) {
         emitter
             .events
             .lock()
             .iter()
             .find_map(|e| match e {
-                ProtocolEvent::RenderArtifact { content, .. } => Some(content.clone()),
+                ProtocolEvent::RenderArtifact {
+                    content, truncated, ..
+                } => Some((content.clone(), *truncated)),
                 _ => None,
             })
             .expect("emit_render_artifact must write a frame")
@@ -1921,7 +1929,7 @@ mod tests {
             &format!("the token is {token} !"),
         );
 
-        let content = recorded_render_content(&emitter_b);
+        let (content, _) = recorded_render_frame(&emitter_b);
         // CONTROL: the payload really rode the frame.
         assert!(
             content.contains("the token is"),
@@ -1949,7 +1957,7 @@ mod tests {
             &format!("the token is {token} !"),
         );
 
-        let content = recorded_render_content(&emitter);
+        let (content, _) = recorded_render_frame(&emitter);
         // CONTROL: the payload really rode the frame.
         assert!(
             content.contains("the token is"),
@@ -1961,30 +1969,53 @@ mod tests {
         );
     }
 
-    /// Redaction runs BEFORE truncation, and both halves of that order matter.
+    /// Redaction runs BEFORE truncation, and this is the test that pins it.
     ///
-    /// Scrubbing after the cut would leave a partial token where one straddles
-    /// the boundary, and — because `[REDACTED]` can be LONGER than what it
-    /// replaces — could push an at-limit frame back over
-    /// `RENDER_ARTIFACT_CONTENT_LIMIT_BYTES`. An over-limit render frame does
-    /// not merely fail to display: it sets the output pump's sticky failure and
-    /// takes the session's entire stdout with it. Truncation must stay last.
+    /// `redact_active_tokens` matches WHOLE tokens. Truncating first cuts a
+    /// token that straddles the cap in half and leaves the prefix in the emitted
+    /// frame, where no later whole-token scrub can ever match it — half an
+    /// `apr-<uuid>` is still half a live credential. So the payload carries two
+    /// tokens: one wholly inside the kept prefix, which fails if the scrub is
+    /// missing altogether, and one positioned to straddle the cut, which fails
+    /// only if the scrub runs AFTER truncation instead of before.
+    ///
+    /// Note what this deliberately does NOT assert: that the frame is at most
+    /// `RENDER_ARTIFACT_CONTENT_LIMIT_BYTES`. `truncate_render_content` appends
+    /// its in-band marker after the cut, so an over-cap render is always the cap
+    /// plus that marker — by design. The limit that protects the output pump is
+    /// the 8 MiB frame cap, which neither order can approach here.
     #[test]
-    fn render_artifact_scrubs_over_cap_content_and_still_fits_the_cap() {
+    fn render_artifact_redacts_before_truncating_over_cap_content() {
         let emitter = Arc::new(RecordingEmitter::default());
         let sink = ProtocolSink::with_emitter(emitter.clone());
-        // Short token so `[REDACTED]` is strictly longer than what it replaces,
-        // which is the direction that can overflow the cap.
-        let token = "apr-shrt".to_string();
-        sink.token_redactor().set(vec![token.clone()]);
+        let head_token = "apr-11111111-1111-1111-1111-111111111111".to_string();
+        let edge_token = "apr-eeeeeeee-2222-3333-4444-555555555555".to_string();
+        sink.token_redactor()
+            .set(vec![head_token.clone(), edge_token.clone()]);
 
         let limit = wcore_protocol::events::RENDER_ARTIFACT_CONTENT_LIMIT_BYTES;
-        // Token near the FRONT so it survives into the truncated prefix, then
-        // enough filler to push the whole payload well past the cap.
-        let payload = format!("{token} {}", "x".repeat(limit * 2));
+        let half = edge_token.len() / 2;
+        // Place `edge_token` so it starts `half` bytes before the cap in the RAW
+        // payload: an unredacted truncation then lands through its middle.
+        let filler = limit - half - head_token.len();
+        let payload = format!(
+            "{head_token}{}{edge_token}{}",
+            "x".repeat(filler),
+            "y".repeat(limit)
+        );
+        let straddling_half = &edge_token[..half];
+
+        // CONTROL: the payload is over the cap, so truncation actually runs.
         assert!(
             payload.len() > limit,
             "control failed: payload is not over the cap, so truncation never runs"
+        );
+        // CONTROL: the cut really does fall through the middle of `edge_token`.
+        // Without this the test cannot tell redact-then-truncate from
+        // truncate-then-redact, and would pass under both.
+        assert!(
+            payload[..limit].ends_with(straddling_half),
+            "control failed: the cut does not straddle the edge token"
         );
 
         sink.emit_render_artifact(
@@ -1994,16 +2025,20 @@ mod tests {
             &payload,
         );
 
-        let content = recorded_render_content(&emitter);
+        let (content, truncated) = recorded_render_frame(&emitter);
+        // CONTROL: this frame really was truncated.
         assert!(
-            !content.contains(&token),
-            "render_artifact leaked a token from over-cap content"
+            truncated,
+            "control failed: the frame was not truncated, so the cut never happened"
         );
         assert!(
-            content.len() <= limit,
-            "render frame is {} bytes, over the {limit}-byte cap — this trips the \
-             output pump's sticky failure and kills the session's stdout",
-            content.len()
+            !content.contains(&head_token),
+            "render_artifact leaked a whole token from over-cap content"
+        );
+        assert!(
+            !content.contains(straddling_half),
+            "render_artifact truncated BEFORE redacting: {half} bytes of a live \
+             token survived the cut, where a whole-token scrub can never match it"
         );
     }
 
