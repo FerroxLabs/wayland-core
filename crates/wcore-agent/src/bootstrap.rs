@@ -3202,47 +3202,40 @@ impl AgentBootstrap {
             // `.git/hooks/pre-commit` or `.wayland-core/skills/**` — gets it
             // over a bare `RealFs`. It denies writes only, so a trusted session
             // that could previously read those paths still can.
-            // DIAGNOSTIC (throwaway lane branch, never merged): WL_DIAG_NO_GUARD
-            // selects which half of the repo-control guard is installed, so ONE
-            // macOS build can bisect the patch instead of three CI cycles.
+            // DIAGNOSTIC (throwaway lane branch, never merged). One build,
+            // four arms. Each arm builds a CONCRETE SandboxedFs; only the
+            // finished jail is boxed, because `Arc<dyn VirtualFs>` does not
+            // itself implement `VirtualFs`.
             let diag = std::env::var("WL_DIAG_NO_GUARD").unwrap_or_default();
             let diag_skip_strict = diag == "strict" || diag == "both";
             let diag_skip_trusted = diag == "trusted" || diag == "both";
-            if let Ok(diag_log) = std::env::var("WL_DIAG_LOG") {
-                let _ = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(diag_log)
-                    .map(|mut f| {
-                        use std::io::Write;
-                        let _ = writeln!(
-                            f,
-                            "WL_DIAG_NO_GUARD={diag:?} strict_workspace={strict_workspace}"
-                        );
-                    });
-            }
-            if strict_workspace {
-                let inner: std::sync::Arc<dyn wcore_tools::vfs::VirtualFs> = if diag_skip_strict {
-                    std::sync::Arc::new(wcore_tools::vfs::SecretDenyFs::new(
+            if strict_workspace && diag_skip_strict {
+                let jail = wcore_tools::vfs::SandboxedFs::new(
+                    wcore_tools::vfs::SecretDenyFs::new(
                         wcore_tools::vfs::RealFs,
                         std::sync::Arc::clone(&policy),
-                    ))
-                } else {
-                    std::sync::Arc::new(wcore_tools::vfs::RepoControlDenyFs::new(
+                    ),
+                    workspace.clone(),
+                )
+                .with_read_grants(policy.session_read_grant_handle());
+                registry.set_tool_vfs(std::sync::Arc::new(jail));
+            } else if strict_workspace {
+                let jail = wcore_tools::vfs::SandboxedFs::new(
+                    wcore_tools::vfs::RepoControlDenyFs::new(
                         wcore_tools::vfs::SecretDenyFs::new(
                             wcore_tools::vfs::RealFs,
                             std::sync::Arc::clone(&policy),
                         ),
                         std::sync::Arc::clone(&policy),
-                    ))
-                };
-                let jail = wcore_tools::vfs::SandboxedFs::new(inner, workspace)
-                    // Share the LIVE grant list, not a copy: a folder the user
-                    // approves mid-session has to be readable on the very next
-                    // `Read`, and the OS sandbox (via `readable_roots`) and the
-                    // in-process file tools must never hold two different answers
-                    // to "what may this session look at".
-                    .with_read_grants(policy.session_read_grant_handle());
+                    ),
+                    workspace,
+                )
+                // Share the LIVE grant list, not a copy: a folder the user
+                // approves mid-session has to be readable on the very next
+                // `Read`, and the OS sandbox (via `readable_roots`) and the
+                // in-process file tools must never hold two different answers
+                // to "what may this session look at".
+                .with_read_grants(policy.session_read_grant_handle());
                 registry.set_tool_vfs(std::sync::Arc::new(jail));
             } else if !diag_skip_trusted {
                 registry.set_tool_vfs(std::sync::Arc::new(
