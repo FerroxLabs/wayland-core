@@ -96,18 +96,153 @@ fn enforces_read_deny_is_true_with_live_docker() {
 #[test]
 fn buffered_output_accepts_exact_limit() {
     let stdout = vec![0_u8; super::super::BUFFERED_OUTPUT_LIMIT_BYTES - 1];
-    assert!(reserve_docker_output(&stdout, &[], 1).is_ok());
+    assert_eq!(
+        reserve_docker_output(&stdout, &[], 1),
+        1,
+        "the byte that exactly reaches the cap must still be granted"
+    );
 }
 
+/// wayland#1082 (LIVE) — **a container that floods stdout keeps the bytes that
+/// fit, and is STOPPED at the cap.**
+///
+/// This is the evidence route the issue asks for, and it needs a real daemon:
+/// the defect is not in `reserve_docker_output` alone, it is in what the log
+/// loop does with a short grant. Before this change the whole read was dropped
+/// and the caller got `Err(OutputLimitExceeded)` — roughly a hundred bytes of
+/// error text and none of the command's own output.
+///
+/// `yes` is chosen deliberately: it NEVER reaches EOF. That is the abuse shape
+/// #1071 describes, so it also grades the trip wire — if crossing the cap did
+/// not kill the container, this test would sit until the manifest timeout
+/// instead of returning promptly, and the elapsed assertion below would fail.
+#[cfg(feature = "live-docker")]
+#[tokio::test]
+async fn a_flooding_container_is_truncated_and_stopped() {
+    let backend = match DockerBackend::connect().await {
+        Ok(b) => b,
+        Err(_) => {
+            eprintln!("skip: docker daemon unavailable");
+            return;
+        }
+    };
+
+    let manifest = SandboxManifest {
+        network: NetworkPolicy::Deny,
+        image: "alpine:3.19".into(),
+        timeout: Some(std::time::Duration::from_secs(60)),
+        ..Default::default()
+    };
+
+    // POSITIVE CONTROL first: an ordinary small command returns its output in
+    // full and is NOT marked truncated. Without this, the assertions below
+    // could pass on a backend that simply always truncates.
+    let small = backend
+        .execute(
+            &manifest,
+            SandboxCommand {
+                argv: vec!["echo".into(), "hello-1082".into()],
+                cwd: None,
+            },
+        )
+        .await
+        .expect("control: a small command must run");
+    let small_out = String::from_utf8_lossy(&small.stdout).into_owned();
+    assert!(
+        small_out.contains("hello-1082"),
+        "control: small output must survive intact: {small_out:?}"
+    );
+    assert!(
+        !small_out.contains("OUTPUT TRUNCATED"),
+        "control: a small command must not be marked truncated"
+    );
+
+    let started = std::time::Instant::now();
+    let flooded = backend
+        .execute(
+            &manifest,
+            SandboxCommand {
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "yes 0123456789abcdefghijklmnopqrstuvwxyz".into(),
+                ],
+                cwd: None,
+            },
+        )
+        .await
+        .expect("a flooding command must return output, not an error");
+    let elapsed = started.elapsed();
+
+    // THE DEFECT: this used to be an Err, so `stdout` never reached the caller.
+    let kept = flooded.stdout.len();
+    assert!(
+        kept > 1024 * 1024,
+        "the bytes that fit must be KEPT, not discarded — got {kept} bytes"
+    );
+    assert!(
+        kept <= super::super::BUFFERED_OUTPUT_LIMIT_BYTES + 1024,
+        "the cap must still bound host memory — got {kept} bytes"
+    );
+
+    let tail = String::from_utf8_lossy(&flooded.stdout[kept.saturating_sub(512)..]).into_owned();
+    assert!(
+        tail.contains("OUTPUT TRUNCATED"),
+        "the reader must be TOLD the output was cut; silent truncation is the \
+         same class of defect as discarding it. tail={tail:?}"
+    );
+    assert!(
+        tail.contains("STOPPED"),
+        "the marker must say the command did not run to completion: {tail:?}"
+    );
+
+    // THE TRIP WIRE. `yes` never ends, so returning at all means the container
+    // was killed at the cap rather than waited out.
+    assert!(
+        elapsed < std::time::Duration::from_secs(45),
+        "crossing the cap must STOP the container promptly, not fall through to \
+         the manifest timeout — took {elapsed:?}"
+    );
+}
+
+/// wayland#1082. A full budget grants ZERO further bytes — but that is now the
+/// TRUNCATION signal, not an error that discards what was already read. The old
+/// version of this test asserted `Err(OutputLimitExceeded)`, i.e. it pinned the
+/// defect in place.
 #[cfg(feature = "live-docker")]
 #[test]
-fn buffered_output_rejects_first_byte_over_limit() {
+fn a_full_budget_grants_nothing_further() {
     let stdout = vec![0_u8; super::super::BUFFERED_OUTPUT_LIMIT_BYTES];
-    assert!(matches!(
-        reserve_docker_output(&stdout, &[], 1),
-        Err(SandboxError::OutputLimitExceeded { limit_bytes })
-            if limit_bytes == super::super::BUFFERED_OUTPUT_LIMIT_BYTES
-    ));
+    assert_eq!(reserve_docker_output(&stdout, &[], 1), 0);
+}
+
+/// A PARTIAL grant is the case that distinguishes truncate-from-discard: with
+/// one byte of budget left and two bytes offered, exactly one is granted and
+/// the caller keeps it. Under the old code this whole read was thrown away.
+#[cfg(feature = "live-docker")]
+#[test]
+fn a_partial_grant_keeps_the_bytes_that_fit() {
+    let stdout = vec![0_u8; super::super::BUFFERED_OUTPUT_LIMIT_BYTES - 1];
+    assert_eq!(reserve_docker_output(&stdout, &[], 2), 1);
+}
+
+/// The budget is SHARED across both streams, exactly as `reserve_output` treats
+/// it. Counting them separately would let a command keep 16 MiB.
+#[cfg(feature = "live-docker")]
+#[test]
+fn the_budget_is_shared_between_stdout_and_stderr() {
+    let half = super::super::BUFFERED_OUTPUT_LIMIT_BYTES / 2;
+    let stdout = vec![0_u8; half];
+    let stderr = vec![0_u8; half];
+    assert_eq!(reserve_docker_output(&stdout, &stderr, 1), 0);
+}
+
+/// CONTROL — an ordinary read well inside the budget is granted in full, so the
+/// assertions above are not just "this function returns 0".
+#[cfg(feature = "live-docker")]
+#[test]
+fn an_ordinary_read_is_granted_in_full() {
+    assert_eq!(reserve_docker_output(&[], &[], 4096), 4096);
 }
 
 /// Task 5 (live integration): a file that is read-allowed under a mounted
