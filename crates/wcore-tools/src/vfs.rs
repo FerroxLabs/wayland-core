@@ -55,6 +55,16 @@ pub enum VfsError {
     NotFound { path: PathBuf },
     #[error("refused: {path:?} is a protected secret path")]
     SecretDenied { path: PathBuf },
+    /// The open did not land on the object the containment check approved.
+    ///
+    /// Raised by the handle-pinned read path (`vfs_pinned`) when the name it
+    /// was handed resolves to something other than the ordinary file the jail
+    /// cleared — a symlink, a directory, a device, or a parent directory that
+    /// was replaced between the two steps. Distinct from `OutsideSandbox`
+    /// because nothing about the REQUEST was out of bounds; the filesystem
+    /// changed underneath it.
+    #[error("refused: {path:?} did not resolve to the approved object: {reason}")]
+    PathRaced { path: PathBuf, reason: String },
 }
 
 /// Strong content identity used by conditional filesystem mutations.
@@ -287,6 +297,33 @@ pub trait VirtualFs: Send + Sync {
     async fn remove_file(&self, path: &Path) -> Result<(), VfsError>;
     async fn metadata(&self, path: &Path) -> Result<VfsMetadata, VfsError>;
 
+    /// Read a file with the check and the use bound to ONE kernel object
+    /// (FerroxLabs/wayland#1105).
+    ///
+    /// `read` takes a pathname and resolves it. A caller that has already
+    /// decided a path is permitted — `SandboxedFs`, which canonicalizes and
+    /// compares against its root and its standing grants — therefore hands
+    /// back a NAME, and the backend resolves it a second time. Anything that
+    /// can write in the directory can swap the leaf between those two
+    /// resolutions, and the approved object and the read object are then
+    /// different objects.
+    ///
+    /// An implementor of this method must resolve the leaf exactly once,
+    /// relative to a RETAINED parent directory handle, without following a
+    /// symlink at the leaf or at the parent, and read the bytes from that same
+    /// descriptor. Where that is impossible the default below applies and the
+    /// jail refuses rather than falling back to `read` — a fallback would be a
+    /// silent downgrade to the window this method exists to close.
+    async fn read_pinned(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
+        Err(VfsError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "handle-pinned reads are not implemented for {}",
+                path.display()
+            ),
+        )))
+    }
+
     /// Observe bytes and the VFS/path object identity in one implementation-
     /// owned read-only operation. Durable receipts use this instead of `read`
     /// so matching bytes alone can never resolve an uncertain effect.
@@ -382,6 +419,12 @@ impl VirtualFs for RealFs {
             size: m.len(),
             is_dir: m.is_dir(),
         })
+    }
+    async fn read_pinned(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::vfs_pinned::pinned_read_bytes(&path))
+            .await
+            .map_err(|error| VfsError::Io(io::Error::other(error)))?
     }
     async fn observe_file(&self, path: &Path) -> Result<IdentifiedFileObservation, VfsError> {
         let path = path.to_path_buf();
@@ -531,7 +574,12 @@ fn c_name(name: &OsStr) -> io::Result<CString> {
 }
 
 #[cfg(unix)]
-fn openat_file(parent: &fs::File, name: &OsStr, flags: i32, mode: u32) -> io::Result<fs::File> {
+pub(crate) fn openat_file(
+    parent: &fs::File,
+    name: &OsStr,
+    flags: i32,
+    mode: u32,
+) -> io::Result<fs::File> {
     let name = c_name(name)?;
     // SAFETY: `name` is a live NUL-terminated string, `parent` remains open,
     // and ownership of a successful descriptor is transferred exactly once.
@@ -702,7 +750,7 @@ fn observe_real_file_windows(path: &Path) -> Result<IdentifiedFileObservation, V
 /// that into a refusal (the `is_dir` check below fails) instead of a silent
 /// traversal.
 #[cfg(windows)]
-fn open_windows_directory(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn open_windows_directory(path: &Path) -> io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt as _;
 
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
@@ -717,7 +765,7 @@ fn open_windows_directory(path: &Path) -> io::Result<fs::File> {
 /// Everything the identity token and the type refusals are derived from, read
 /// once from a single retained handle.
 #[cfg(windows)]
-struct WindowsObjectIdentity {
+pub(crate) struct WindowsObjectIdentity {
     volume_serial: u32,
     file_index: u64,
     /// 128-bit `FILE_ID_INFO` identity. `None` where the volume cannot serve it
@@ -725,12 +773,14 @@ struct WindowsObjectIdentity {
     /// records that explicitly so a receipt written with one is never silently
     /// compared against a receipt written without.
     file_id: Option<[u8; 16]>,
-    attributes: u32,
+    pub(crate) attributes: u32,
     links: u32,
 }
 
 #[cfg(windows)]
-fn windows_object_identity(handle: &fs::File) -> Result<WindowsObjectIdentity, VfsError> {
+pub(crate) fn windows_object_identity(
+    handle: &fs::File,
+) -> Result<WindowsObjectIdentity, VfsError> {
     use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle,
@@ -982,7 +1032,10 @@ mod windows_identity_token_tests {
 /// kernel refuse a directory at open time and `FILE_OPEN_REPARSE_POINT` opens a
 /// symlink/junction as itself so the caller's attribute check can refuse it.
 #[cfg(windows)]
-fn open_windows_child_no_follow(parent: &fs::File, leaf: &OsStr) -> io::Result<fs::File> {
+pub(crate) fn open_windows_child_no_follow(
+    parent: &fs::File,
+    leaf: &OsStr,
+) -> io::Result<fs::File> {
     use std::os::windows::ffi::OsStrExt as _;
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
     use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
@@ -1250,6 +1303,14 @@ impl VirtualFs for InMemoryFs {
             size: bytes.bytes.len() as u64,
             is_dir: false,
         })
+    }
+    /// An in-memory map has no kernel objects and no pathname walk, so the key
+    /// lookup IS the pinned read. Load-bearing rather than decorative:
+    /// `SandboxedFs<InMemoryFs>` is a real configuration in the test suite, and
+    /// leaving it on the trait default would make every jailed read there
+    /// refuse.
+    async fn read_pinned(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
+        self.read(path).await
     }
     async fn observe_file(&self, path: &Path) -> Result<IdentifiedFileObservation, VfsError> {
         let files = self.files.read();
@@ -1595,9 +1656,23 @@ fn lex_normalize(path: &Path, base: &Path) -> PathBuf {
 
 #[async_trait]
 impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
+    /// Reads go through [`VirtualFs::read_pinned`], never `read` (#1105).
+    ///
+    /// `contain_read` decides about the OBJECT it canonicalized; handing the
+    /// resulting NAME to a path-based `read` lets the backend resolve it a
+    /// second time, and anything able to write in the directory can swap the
+    /// leaf in between. Measured on this tree before the change: 30,241 of
+    /// 85,051 jailed reads returned bytes from outside the granted root while
+    /// a second thread flipped the leaf between a regular file and a symlink.
+    ///
+    /// There is deliberately NO fallback to `self.inner.read` when a backend
+    /// answers `Unsupported`. A fallback would be a silent downgrade back to
+    /// that window, and it would be invisible because the read would still
+    /// succeed. An out-of-tree `VirtualFs` implementor therefore has to
+    /// implement `read_pinned` to be readable through a jail.
     async fn read(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
         let p = self.contain_read(path).await?;
-        self.inner.read(&p).await
+        self.inner.read_pinned(&p).await
     }
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError> {
         let p = self.contain(path).await?;
@@ -1692,6 +1767,14 @@ impl<F: VirtualFs + 'static> VirtualFs for SecretDenyFs<F> {
     async fn read(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
         self.guard(path)?;
         self.inner.read(path).await
+    }
+    /// Forwards the pin so the workspace posture — `SandboxedFs<SecretDenyFs
+    /// <RealFs>>` — keeps reaching `RealFs::read_pinned`. Without this the
+    /// layer in the middle would swallow the capability and every jailed read
+    /// in the default posture would refuse.
+    async fn read_pinned(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
+        self.guard(path)?;
+        self.inner.read_pinned(path).await
     }
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError> {
         self.guard(path)?;

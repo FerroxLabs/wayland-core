@@ -188,10 +188,7 @@ async fn the_jail_refuses_rather_than_falling_back_when_the_backend_cannot_pin()
 
     // Positive control: the backend really can serve these bytes by path, so
     // the refusal below is the jail declining to and not a broken fixture.
-    assert_eq!(
-        UnpinnableFs.read(&canonical).await.unwrap(),
-        b"in".to_vec()
-    );
+    assert_eq!(UnpinnableFs.read(&canonical).await.unwrap(), b"in".to_vec());
 
     let error = jail
         .read(&inside)

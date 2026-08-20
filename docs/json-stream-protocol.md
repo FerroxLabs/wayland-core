@@ -753,6 +753,26 @@ Because of (6), the honest UI is a prompt that says what will happen for *this*
 file, with "always allow this folder" as a convenience — not a setup step the
 user is told has succeeded.
 
+**What a grant does and does not protect, stated precisely** — the host is the
+party choosing which folder to hand over, so it needs this to choose well.
+
+* The `Read` tool resolves a granted file exactly once, relative to a retained
+  directory handle, refusing a symlink at the leaf and at the parent. Bytes
+  therefore come from the object that was checked, not from a name that could
+  be re-pointed after the check (FerroxLabs/wayland#1105).
+* That pin covers the file's own name and its immediate directory. Components
+  **above** the granted folder are still resolved by the kernel from a
+  pathname, so someone able to rename a directory higher up the tree can still
+  redirect the read. Do not grant a folder whose ancestors are writable by
+  anyone you would not grant the folder to.
+* `exists`, `metadata` and directory listing remain path-based. They disclose
+  presence, size and file names, never file contents.
+* `Grep` shells out to `rg`, which opens the paths itself. Nothing inside the
+  agent can pin that, so a grep over a granted folder carries the ordinary
+  check-then-use exposure of any external process.
+* A grant is still never a write grant, and never widens what may be read to
+  include a secret inside the granted folder.
+
 #### 2.3.3 `grant_path` / `revoke_path` — the flow with no pending call
 
 `always_path` rides an approval, so it only serves the **agent-initiated** case:

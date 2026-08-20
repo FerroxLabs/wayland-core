@@ -207,6 +207,11 @@ pub mod url_safety;
 pub mod unsaved_work;
 // W8a A.3: VirtualFs trait + RealFs / InMemoryFs / SandboxedFs (X2).
 pub mod vfs;
+// #1105: the platform half of `VirtualFs::read_pinned` — a read whose leaf is
+// resolved exactly once, relative to a retained parent-directory handle, so
+// the object the jail approved is the object the bytes come from. Crate-
+// internal: `RealFs::read_pinned` is the only supported way in.
+pub(crate) mod vfs_pinned;
 // T3-3.5 (sub-wave 5): video_analyze tool — AI video analysis via a
 // pluggable VideoAnalysisBackend (NullVideoBackend fails loud).
 pub mod video_analyze_tool;
