@@ -3158,7 +3158,21 @@ impl AgentBootstrap {
             // no business judging (credential store, `$HOME`, a non-local
             // session).
             if let Some(manager) = self.approval_manager.as_ref() {
-                let sink: std::sync::Arc<dyn wcore_protocol::PathGrantSink> = policy.clone();
+                // Wrapped so a REFUSED grant reaches the surface the user is
+                // actually looking at. `WorkspacePolicy::grant_path` reports
+                // refusal with `eprintln!`, which is right for a bare CLI and
+                // reaches nobody else: a JSON-stream host reads stdout frames
+                // and never sees stderr, and under the TUI stderr fights the
+                // rendered display. Without this the user answers "always allow
+                // this folder", the policy refuses the root, the approval
+                // degrades to `Once` as documented -- and nothing tells them,
+                // so a refused grant is indistinguishable from a granted one
+                // until the next read fails for a reason they cannot see.
+                let sink: std::sync::Arc<dyn wcore_protocol::PathGrantSink> =
+                    std::sync::Arc::new(ReportingPathGrantSink {
+                        inner: policy.clone(),
+                        output: self.output.clone(),
+                    });
                 manager.set_path_grant_sink(sink);
             }
             registry.set_workspace_policy(policy);
@@ -5453,5 +5467,124 @@ mod tests {
             local_shell_notice(&local, &failed).is_none(),
             "fail_closed refuses every command; announcing an enabled shell there is a lie"
         );
+    }
+}
+
+/// Reports a refused path grant on the session's own output surface.
+///
+/// `WorkspacePolicy` is the authority on whether a root may be granted and
+/// stays that way -- this only makes its answer visible. It deliberately says
+/// nothing on success: the grant taking effect is already observable as the
+/// read succeeding, whereas a refusal is otherwise silent everywhere except
+/// stderr.
+struct ReportingPathGrantSink {
+    inner: std::sync::Arc<dyn wcore_protocol::PathGrantSink>,
+    output: std::sync::Arc<dyn crate::output::OutputSink>,
+}
+
+#[cfg(test)]
+mod path_grant_report_tests {
+    use super::ReportingPathGrantSink;
+    use crate::output::OutputSink;
+    use parking_lot::Mutex;
+    use std::path::Path;
+    use std::sync::Arc;
+    use wcore_protocol::PathGrantSink;
+    use wcore_types::message::FinishReason;
+
+    /// Records only what this fix is about; everything else is a no-op, as in
+    /// `NullSink`.
+    #[derive(Default)]
+    struct RecordingSink {
+        infos: Mutex<Vec<String>>,
+    }
+
+    impl OutputSink for RecordingSink {
+        fn emit_text_delta(&self, _text: &str, _msg_id: &str) {}
+        fn emit_thinking(&self, _text: &str, _msg_id: &str) {}
+        fn emit_tool_call(&self, _name: &str, _input: &str) {}
+        fn emit_tool_result(&self, _name: &str, _is_error: bool, _content: &str) {}
+        fn emit_stream_start(&self, _msg_id: &str) {}
+        fn emit_stream_end(
+            &self,
+            _msg_id: &str,
+            _turns: usize,
+            _input_tokens: u64,
+            _output_tokens: u64,
+            _cache_creation_tokens: u64,
+            _cache_read_tokens: u64,
+            _finish_reason: FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _msg: &str, _retryable: bool) {}
+        fn emit_info(&self, msg: &str) {
+            self.infos.lock().push(msg.to_string());
+        }
+    }
+
+    struct FixedSink(bool);
+    impl PathGrantSink for FixedSink {
+        fn grant_path(&self, _root: &Path, _write: bool) -> bool {
+            self.0
+        }
+    }
+
+    fn run(inner_answer: bool) -> (bool, Vec<String>) {
+        let out = Arc::new(RecordingSink::default());
+        let sink = ReportingPathGrantSink {
+            inner: Arc::new(FixedSink(inner_answer)),
+            output: out.clone(),
+        };
+        let granted = sink.grant_path(Path::new("/tmp/somewhere"), false);
+        let infos = out.infos.lock().clone();
+        (granted, infos)
+    }
+
+    /// The defect: the policy refuses the root, the approval degrades to
+    /// `Once` as documented, and the user is told nothing on any surface a
+    /// JSON-stream host or the TUI can see.
+    #[test]
+    fn a_refused_grant_is_reported_on_the_session_output() {
+        let (granted, infos) = run(false);
+        assert!(!granted, "the adapter must not change the policy's answer");
+        assert_eq!(infos.len(), 1, "a refusal must emit exactly one info frame");
+        assert!(
+            infos[0].contains("/tmp/somewhere"),
+            "the message must name the folder that was refused: {}",
+            infos[0]
+        );
+        assert!(
+            infos[0].contains("NOT granted"),
+            "the message must say the grant did not take: {}",
+            infos[0]
+        );
+    }
+
+    /// KNOWN-POSITIVE CONTROL. A successful grant must stay silent, otherwise
+    /// the test above would pass on an adapter that narrates everything and
+    /// proves nothing about refusal specifically.
+    #[test]
+    fn a_successful_grant_says_nothing() {
+        let (granted, infos) = run(true);
+        assert!(granted, "the adapter must not change the policy's answer");
+        assert!(
+            infos.is_empty(),
+            "a granted root must not emit an info frame; got {infos:?}"
+        );
+    }
+}
+
+impl wcore_protocol::PathGrantSink for ReportingPathGrantSink {
+    fn grant_path(&self, root: &std::path::Path, write: bool) -> bool {
+        let granted = self.inner.grant_path(root, write);
+        if !granted {
+            self.output.emit_info(&format!(
+                "folder access was NOT granted for {} - the approval applied \
+                 to this call only, and reads outside the workspace will still \
+                 be refused",
+                root.display()
+            ));
+        }
+        granted
     }
 }

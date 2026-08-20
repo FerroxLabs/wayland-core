@@ -447,6 +447,50 @@ fn is_secret_path_folds_case_on_every_rule() {
     }
 }
 
+/// Win32 strips trailing spaces and dots from the final path component before
+/// opening it, so `.env `, `.env.` and `.env. ` all open `.env`. A denylist
+/// matching the literal name is bypassable by typing a space — the same class
+/// of alias as the case bypass above, and reachable the same way: the model
+/// names the spelling that escapes the guard.
+///
+/// Each variant is paired with its plain twin as a KNOWN-POSITIVE CONTROL, so
+/// a broken query fails loudly instead of passing.
+#[test]
+fn is_secret_path_strips_win32_trailing_space_and_dot() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let p = WorkspacePolicy::contained(root);
+
+    for (plain, alias) in [
+        (".env", ".env "),
+        (".env", ".env."),
+        (".env", ".env. "),
+        ("id_rsa", "id_rsa "),
+        ("id_rsa", "id_rsa."),
+        (".npmrc", ".npmrc "),
+        ("service-account.json", "service-account.json "),
+        // extension rule: `foo.key ` parses as extension `key ` and would
+        // otherwise match nothing in SECRET_EXTENSIONS.
+        ("server.key", "server.key "),
+        ("cert.pem", "cert.pem."),
+        // the alias and the case bypass compose — closing one must not leave
+        // the pair open.
+        (".env", ".ENV "),
+        ("id_rsa", "ID_RSA."),
+    ] {
+        assert!(
+            p.is_secret_path(&root.join(plain)),
+            "CONTROL FAILED: {plain} must be secret — the test is broken, \
+             not the product"
+        );
+        assert!(
+            p.is_secret_path(&root.join(alias)),
+            "{alias} must be secret: Win32 strips trailing spaces and dots, \
+             so it opens the same file as {plain}"
+        );
+    }
+}
+
 /// The case fold must not turn ordinary files into secrets. Guards the other
 /// direction of the same change: over-denying is the SAFE failure, but only
 /// while it stays confined to the denylist's own shapes.

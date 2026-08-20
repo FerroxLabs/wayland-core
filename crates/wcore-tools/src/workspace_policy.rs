@@ -1192,15 +1192,43 @@ pub(crate) fn is_secret_path_static(path: &Path) -> bool {
             c.to_ascii_lowercase()
         });
     }
+    // Trailing spaces/dots come off the WHOLE path too, not just the derived
+    // file name below. The suffix rules (`/.env`, `/.npmrc`, `/.aws/credentials`)
+    // match against this string, so without this `.env ` fails every one of
+    // them while `.env` matches — which is the bypass, just relocated.
+    // Trailing bytes of the path ARE the trailing bytes of its final
+    // component, so trimming the end is exactly the right scope.
+    let s = s.trim_end_matches([' ', '.']);
 
-    if let Some(ext) = path.extension().and_then(|e| e.to_str())
+    // Win32 STRIPS trailing spaces and dots from the final path component
+    // before opening it, so `.env `, `.env.` and `.env. ` all open `.env`.
+    // A denylist that matches the literal name is therefore bypassable by
+    // typing a space, exactly as it was bypassable by typing a capital before
+    // the case fold above. Same deny-list asymmetry, same answer: strip them
+    // on every platform. On Linux `.env ` is genuinely a distinct file, so
+    // this can over-deny by one pathological name — which refuses a read,
+    // against under-denying which hands over a credential.
+    //
+    // `trim_end_matches` returns a borrowed slice, so this allocates nothing.
+    let effective_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.trim_end_matches([' ', '.']))
+        .filter(|n| !n.is_empty());
+
+    // The extension is re-derived from the EFFECTIVE name rather than taken
+    // from `path.extension()`: for `foo.key ` the real extension is `key `,
+    // which matches nothing in SECRET_EXTENSIONS.
+    if let Some(ext) = effective_name
+        .and_then(|n| n.rsplit_once('.'))
+        .map(|(_, ext)| ext)
         && SECRET_EXTENSIONS
             .iter()
             .any(|e| ext.eq_ignore_ascii_case(e))
     {
         return true;
     }
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+    if let Some(name) = effective_name {
         if SECRET_BASENAMES
             .iter()
             .any(|b| name.eq_ignore_ascii_case(b))
