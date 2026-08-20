@@ -508,7 +508,12 @@ fn case_fold_does_not_overmatch_ordinary_files() {
         "PACKAGE.JSON",
         "Config.Json",
         "MONKEY.JSON",
-        "docs/ENVOY.md",
+        // NOT `docs/...`: `remedy_advertisements::advertised_doc_paths_exist`
+        // scans the tree for `docs/*.md` citations and asserts each file is
+        // real, so a fictional doc path here reads as a broken advertisement.
+        // The fixture only needs a name CONTAINING "env" that must not be
+        // classified secret; the directory is incidental.
+        "notes/ENVOY.md",
     ] {
         assert!(
             !p.is_secret_path(&root.join(rel)),
