@@ -1323,6 +1323,147 @@ fn b1_scope() -> super::policy::SandboxScope {
     super::policy::SandboxScope::new(&manifest, Some(Path::new("/w/repo")))
 }
 
+// ── wayland#1078: a masked (policy-denied) read succeeds silently ────────────
+// The bwrap backend binds /dev/null over a denied file, so `cat .env` exits 0
+// with empty output. Containment is right; the SILENCE is the defect, because
+// the agent then reports a populated file as empty and may overwrite it.
+
+/// THE DEFECT. Exit 0, empty stdout, and the denied path is named in the
+/// command — the annotation must fire even though nothing failed.
+#[test]
+fn masked_read_on_success_is_announced() {
+    let r = super::policy::annotate_masked_read(
+        &b1_scope(),
+        "cat .env",
+        ToolResult {
+            content: "Exit code: 0\nSTDOUT:\n\nSTDERR:\n".to_string(),
+            is_error: false,
+        },
+    );
+    assert!(
+        r.content.contains(".env"),
+        "the masked path must be named: {}",
+        r.content
+    );
+    assert!(
+        r.content.contains("POLICY"),
+        "must attribute the emptiness/failure to policy: {}",
+        r.content
+    );
+    assert!(
+        !r.is_error,
+        "the command genuinely succeeded — annotating must not fabricate a failure"
+    );
+}
+
+/// A bare filename has no interior separator, so `is_path_token` drops it. This
+/// is exactly the shape #1078 reports (`cat secret.txt`), so the masked-read
+/// tokenizer must be permissive and lean on the deny-list match as its filter.
+#[test]
+fn masked_read_detects_a_bare_filename_with_no_separator() {
+    let r = super::policy::annotate_masked_read(
+        &b1_scope(),
+        "cat .env",
+        ToolResult {
+            content: "Exit code: 0\n".into(),
+            is_error: false,
+        },
+    );
+    assert!(
+        r.content.contains("/w/repo/.env") || r.content.contains(".env"),
+        "bare filename must still resolve against cwd: {}",
+        r.content
+    );
+}
+
+/// CONTROL — the annotation must stay SILENT on an ordinary successful command.
+/// Without this a passing test above would prove only that the function appends
+/// text unconditionally.
+#[test]
+fn masked_read_is_silent_when_no_denied_path_is_named() {
+    let body = "Exit code: 0\nSTDOUT:\nhello\nSTDERR:\n".to_string();
+    let r = super::policy::annotate_masked_read(
+        &b1_scope(),
+        "echo hello",
+        ToolResult {
+            content: body.clone(),
+            is_error: false,
+        },
+    );
+    assert_eq!(
+        r.content, body,
+        "an unrelated success must not be annotated"
+    );
+    assert!(!r.is_error);
+}
+
+/// CONTROL — a granted path inside the workspace must not be reported as masked.
+#[test]
+fn masked_read_is_silent_for_a_granted_path() {
+    let body = "Exit code: 0\nSTDOUT:\nfn main() {}\nSTDERR:\n".to_string();
+    let r = super::policy::annotate_masked_read(
+        &b1_scope(),
+        "cat src/main.rs",
+        ToolResult {
+            content: body.clone(),
+            is_error: false,
+        },
+    );
+    assert_eq!(r.content, body, "a granted path must not be called masked");
+}
+
+/// CONTROL — a FAILED command is `annotate_sandbox_denial`'s territory. If both
+/// fired, a denied path would be explained twice in one result.
+#[test]
+fn masked_read_defers_to_the_failure_path() {
+    let body = "Exit code: 1\nSTDOUT:\nSTDERR:\ncat: .env: Operation not permitted\n".to_string();
+    let r = super::policy::annotate_masked_read(
+        &b1_scope(),
+        "cat .env",
+        ToolResult {
+            content: body.clone(),
+            is_error: true,
+        },
+    );
+    assert_eq!(r.content, body, "the failure path already annotates this");
+}
+
+/// CONTROL — nothing to attribute without a scope, so stay quiet.
+#[test]
+fn masked_read_is_silent_when_the_manifest_carried_no_scoping() {
+    let unscoped = super::policy::SandboxScope::new(
+        &wcore_sandbox::manifest::SandboxManifest::default(),
+        Some(Path::new("/w/repo")),
+    );
+    let body = "Exit code: 0\n".to_string();
+    let r = super::policy::annotate_masked_read(
+        &unscoped,
+        "cat .env",
+        ToolResult {
+            content: body.clone(),
+            is_error: false,
+        },
+    );
+    assert_eq!(r.content, body);
+}
+
+/// A command-line SWITCH must never be mistaken for a path. This is the same
+/// class of bug `is_path_token` documents (`/NOLOGO` blamed on the sandbox);
+/// the permissive tokenizer here has to drop switches too.
+#[test]
+fn masked_read_ignores_command_switches() {
+    let body = "Exit code: 0\n".to_string();
+    let r = super::policy::annotate_masked_read(
+        &b1_scope(),
+        "ls -la --color=auto",
+        ToolResult {
+            content: body.clone(),
+            is_error: false,
+        },
+    );
+    assert_eq!(r.content, body, "switches are not paths");
+}
+
 #[test]
 fn sandbox_denial_names_the_policy_denied_path_and_a_remedy() {
     let result = super::policy::annotate_sandbox_denial(

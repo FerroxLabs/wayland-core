@@ -361,8 +361,8 @@ impl SandboxBackend for DockerBackend {
         cmd: SandboxCommand,
     ) -> Result<SandboxOutput> {
         use bollard::container::{
-            Config, CreateContainerOptions, LogOutput, LogsOptions, StartContainerOptions,
-            WaitContainerOptions,
+            Config, CreateContainerOptions, KillContainerOptions, LogOutput, LogsOptions,
+            StartContainerOptions, WaitContainerOptions,
         };
         use bollard::models::HostConfig;
         use futures::stream::StreamExt;
@@ -529,12 +529,29 @@ impl SandboxBackend for DockerBackend {
             let mut stderr: Vec<u8> = Vec::new();
             let mut exit_code = None;
             let mut logs_done = false;
+            let mut truncated = false;
+            let mut stopped = false;
 
             while exit_code.is_none() || !logs_done {
                 tokio::select! {
                     waited = wait.next(), if exit_code.is_none() => {
                         exit_code = Some(match waited {
                             Some(Ok(response)) => response.status_code as i32,
+                            // A NON-ZERO exit is not a transport failure.
+                            // bollard reports it as a stream ERROR
+                            // (`DockerContainerWaitError`) carrying the real
+                            // code, and mapping that to `DockerIo` threw away
+                            // both the exit status AND every byte the command
+                            // had already written — `sh -c 'echo out; exit 3'`
+                            // returned an error and lost "out". Found while
+                            // fixing wayland#1082, and load-bearing for it:
+                            // stopping a flooding container at the cap makes it
+                            // exit non-zero by construction, so without this the
+                            // truncated output could never be returned.
+                            Some(Err(bollard::errors::Error::DockerContainerWaitError {
+                                code,
+                                ..
+                            })) => code as i32,
                             Some(Err(error)) => {
                                 return Err(SandboxError::DockerIo(error.to_string()));
                             }
@@ -544,12 +561,26 @@ impl SandboxBackend for DockerBackend {
                     chunk = logs.next(), if !logs_done => {
                         match chunk {
                             Some(Ok(LogOutput::StdOut { message })) => {
-                                reserve_docker_output(&stdout, &stderr, message.len())?;
-                                stdout.extend_from_slice(&message);
+                                let granted =
+                                    reserve_docker_output(&stdout, &stderr, message.len());
+                                stdout.extend_from_slice(&message[..granted]);
+                                if granted < message.len() {
+                                    let kept = stdout.len();
+                                    stdout.extend_from_slice(&super::truncation_marker(kept));
+                                    truncated = true;
+                                    logs_done = true;
+                                }
                             }
                             Some(Ok(LogOutput::StdErr { message })) => {
-                                reserve_docker_output(&stdout, &stderr, message.len())?;
-                                stderr.extend_from_slice(&message);
+                                let granted =
+                                    reserve_docker_output(&stdout, &stderr, message.len());
+                                stderr.extend_from_slice(&message[..granted]);
+                                if granted < message.len() {
+                                    let kept = stderr.len();
+                                    stderr.extend_from_slice(&super::truncation_marker(kept));
+                                    truncated = true;
+                                    logs_done = true;
+                                }
                             }
                             Some(Ok(_)) => {}
                             Some(Err(error)) => {
@@ -558,6 +589,21 @@ impl SandboxBackend for DockerBackend {
                             None => logs_done = true,
                         }
                     }
+                }
+
+                // wayland#1082 / #1071: crossing the cap is the trip wire that
+                // STOPS the child, and that is load-bearing. Without this kill
+                // the loop sits in `wait.next()` until the container exits on
+                // its own, trading a prompt stop for the caller's wall-clock
+                // timeout — which is the wait the discard-everything error was
+                // avoiding in the first place. Best-effort: the container is
+                // force-removed by `ContainerCleanup` regardless, so a failure
+                // here must not mask the output we just kept.
+                if truncated && !stopped {
+                    stopped = true;
+                    let _ = client
+                        .kill_container(&id, None::<KillContainerOptions<String>>)
+                        .await;
                 }
             }
 
@@ -587,8 +633,9 @@ impl SandboxBackend for DockerBackend {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<SandboxOutput> {
         use bollard::container::{
-            Config, CreateContainerOptions, DownloadFromContainerOptions, LogOutput, LogsOptions,
-            StartContainerOptions, UploadToContainerOptions, WaitContainerOptions,
+            Config, CreateContainerOptions, DownloadFromContainerOptions, KillContainerOptions,
+            LogOutput, LogsOptions, StartContainerOptions, UploadToContainerOptions,
+            WaitContainerOptions,
         };
         use bollard::models::HostConfig;
         use futures::stream::StreamExt;
@@ -680,28 +727,63 @@ impl SandboxBackend for DockerBackend {
             let mut stderr = Vec::new();
             let mut exit_code = None;
             let mut logs_done = false;
+            let mut truncated = false;
+            let mut stopped = false;
             while exit_code.is_none() || !logs_done {
                 tokio::select! {
                     waited = wait.next(), if exit_code.is_none() => {
                         exit_code = Some(match waited {
                             Some(Ok(response)) => response.status_code as i32,
+                            // See the note on the same arm above: a non-zero
+                            // exit arrives as a stream error carrying the code.
+                            Some(Err(bollard::errors::Error::DockerContainerWaitError {
+                                code,
+                                ..
+                            })) => code as i32,
                             Some(Err(error)) => return Err(SandboxError::DockerIo(error.to_string())),
                             None => -1,
                         });
                     }
                     chunk = logs.next(), if !logs_done => match chunk {
                         Some(Ok(LogOutput::StdOut { message })) => {
-                            reserve_docker_output(&stdout, &stderr, message.len())?;
-                            stdout.extend_from_slice(&message);
+                            let granted = reserve_docker_output(&stdout, &stderr, message.len());
+                            stdout.extend_from_slice(&message[..granted]);
+                            if granted < message.len() {
+                                let kept = stdout.len();
+                                stdout.extend_from_slice(&super::truncation_marker(kept));
+                                truncated = true;
+                                logs_done = true;
+                            }
                         }
                         Some(Ok(LogOutput::StdErr { message })) => {
-                            reserve_docker_output(&stdout, &stderr, message.len())?;
-                            stderr.extend_from_slice(&message);
+                            let granted = reserve_docker_output(&stdout, &stderr, message.len());
+                            stderr.extend_from_slice(&message[..granted]);
+                            if granted < message.len() {
+                                let kept = stderr.len();
+                                stderr.extend_from_slice(&super::truncation_marker(kept));
+                                truncated = true;
+                                logs_done = true;
+                            }
                         }
                         Some(Ok(_)) => {}
                         Some(Err(error)) => return Err(SandboxError::DockerIo(error.to_string())),
                         None => logs_done = true,
                     }
+                }
+
+                // wayland#1082 / #1071: crossing the cap is the trip wire that
+                // STOPS the child, and that is load-bearing. Without this kill
+                // the loop sits in `wait.next()` until the container exits on
+                // its own, trading a prompt stop for the caller's wall-clock
+                // timeout — which is the wait the discard-everything error was
+                // avoiding in the first place. Best-effort: the container is
+                // force-removed by `ContainerCleanup` regardless, so a failure
+                // here must not mask the output we just kept.
+                if truncated && !stopped {
+                    stopped = true;
+                    let _ = client
+                        .kill_container(&id, None::<KillContainerOptions<String>>)
+                        .await;
                 }
             }
             let mut downloaded = Vec::new();
@@ -857,18 +939,25 @@ pub(super) fn retained_container_plan(
     Ok(RetainedContainerPlan { argv, env, denied })
 }
 
+/// Grant up to `amount` bytes of the shared buffered-output budget, returning
+/// how many bytes were granted.
+///
+/// wayland#1082. This used to return `Err(OutputLimitExceeded)`, which made the
+/// caller drop everything it had already read: a command that produced 20 MB
+/// handed back roughly a hundred bytes of error text and none of its own
+/// output. #1071 fixed exactly that inversion for the shared drain in
+/// `backends/mod.rs`; the Docker backend kept the old behaviour because it does
+/// not use that drain, so the same command behaved differently depending on a
+/// backend the user did not choose and mostly cannot see.
+///
+/// A short grant (including zero) is the overflow signal — the caller keeps the
+/// bytes that fit, appends [`super::truncation_marker`], and stops the
+/// container. Mirrors [`super::reserve_output`] deliberately, so the two paths
+/// cannot drift into different definitions of the same cap.
 #[cfg(feature = "live-docker")]
-fn reserve_docker_output(stdout: &[u8], stderr: &[u8], amount: usize) -> Result<()> {
-    let next = stdout
-        .len()
-        .checked_add(stderr.len())
-        .and_then(|bytes| bytes.checked_add(amount));
-    if next.is_none_or(|bytes| bytes > super::BUFFERED_OUTPUT_LIMIT_BYTES) {
-        return Err(SandboxError::OutputLimitExceeded {
-            limit_bytes: super::BUFFERED_OUTPUT_LIMIT_BYTES,
-        });
-    }
-    Ok(())
+fn reserve_docker_output(stdout: &[u8], stderr: &[u8], amount: usize) -> usize {
+    let used = stdout.len().saturating_add(stderr.len());
+    amount.min(super::BUFFERED_OUTPUT_LIMIT_BYTES.saturating_sub(used))
 }
 
 #[cfg(test)]

@@ -343,6 +343,102 @@ fn classify(scope: &SandboxScope, token: &str) -> Option<(PathBuf, DeniedBecause
     Some((resolved, DeniedBecause::NotGranted))
 }
 
+/// Path-shaped tokens from a COMMAND, for the masked-read check.
+///
+/// Deliberately far more permissive than [`is_path_token`], and the asymmetry
+/// is the whole design. In the FAILURE path a stray token becomes a fabricated
+/// accusation, so a token must look path-shaped before it is trusted. Here a
+/// token survives only if it matches this manifest's OWN deny list, so that
+/// match IS the filter — which is what lets a bare filename through. `cat
+/// secret.txt` has no interior separator and would be dropped by
+/// [`is_path_token`], and it is precisely the case wayland#1078 is about.
+fn command_path_tokens(command: &str) -> Vec<&str> {
+    command
+        .split(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '\'' | '"' | '`' | ';' | '|' | '&' | '(' | ')' | '<' | '>'
+                )
+        })
+        .map(|token| token.trim_matches(|c| matches!(c, ',' | ']' | '[')))
+        .filter(|token| token.len() >= 2 && !token.contains("://") && !token.starts_with('-'))
+        .collect()
+}
+
+/// When a sandboxed command SUCCEEDS but named a path this workspace masks,
+/// say so.
+///
+/// wayland#1078, **narrowed by measurement**. The issue reports that a denied
+/// file "reads as an empty file, successfully". That is NOT what HEAD does: a
+/// file on `fs_read_deny` is masked by binding `/dev/null` over it (bwrap,
+/// `backends/bwrap.rs`), and a `cat` of the mask fails LOUDLY with
+/// `Permission denied` — which [`annotate_sandbox_denial`] already explains,
+/// because the result is an error.
+///
+/// The real residual gap is narrower: a COMPOUND command
+/// (`cat secret.pem; echo rc=$?`, `cat x || true`, `cat x 2>/dev/null`) lets
+/// the shell swallow that failure, so the tool result carries `is_error =
+/// false` and the agent sees only emptiness with no cause. `ls -l` on a masked
+/// path is the same shape — it succeeds and prints `crw-rw-rw- … 1, 3`, which
+/// is only a tell if you already suspect the answer.
+///
+/// The containment is correct and this does NOT weaken it — the bytes never
+/// leave. What it fixes is that the agent cannot tell "denied to me" from
+/// "empty", and acts on the difference: reporting a populated file as empty,
+/// or overwriting one it believes is empty and was never allowed to see.
+///
+/// [`annotate_sandbox_denial`] cannot cover this: it returns early unless
+/// `result.is_error`, and a masked read is not an error.
+///
+/// Only [`DeniedBecause::PolicyDeny`] counts here. A `NotGranted` path on a
+/// command that SUCCEEDED is not the masked-read shape and would be pure noise.
+pub(super) fn annotate_masked_read(
+    scope: &SandboxScope,
+    command: &str,
+    mut result: ToolResult,
+) -> ToolResult {
+    if result.is_error || scope.is_unscoped() || scope.deny.is_empty() {
+        return result;
+    }
+    let mut masked: Vec<PathBuf> = Vec::new();
+    for token in command_path_tokens(command) {
+        if let Some((path, DeniedBecause::PolicyDeny)) = classify(scope, token)
+            && !masked.contains(&path)
+        {
+            masked.push(path);
+        }
+    }
+    if masked.is_empty() {
+        return result;
+    }
+
+    result.content.push_str(
+        "\n\n⚠ This command named a path this workspace's policy DENIES, and the command's \
+         own exit status did not report it:",
+    );
+    for path in &masked {
+        result
+            .content
+            .push_str(&format!("\n  • {}", path.display()));
+    }
+    // Worded for the false positive, because one is reachable: `echo secret.txt`
+    // names the path without reading it. Claiming the read happened would be a
+    // fabrication of exactly the kind `annotate_sandbox_denial` is careful to
+    // avoid, so this states the conditional and lets the reader discharge it.
+    result.content.push_str(
+        "\nA read of a denied path cannot succeed. Measured on bubblewrap it fails with \
+         'Permission denied'; a directory mask, or a backend that binds an empty file, \
+         yields nothing instead. Either way the failure or the emptiness is the POLICY and \
+         not the file's contents — do not report such a file as empty or missing, and do \
+         not overwrite it on that basis. If the command only mentioned the path without \
+         reading it, ignore this note.",
+    );
+    // Deliberately NOT an error: the command genuinely succeeded, and flipping
+    // is_error here would turn an advisory into a failed tool call.
+    result
+}
+
 /// When a sandboxed command FAILS and its output names a path this workspace's
 /// policy actually put out of reach, say so.
 ///
