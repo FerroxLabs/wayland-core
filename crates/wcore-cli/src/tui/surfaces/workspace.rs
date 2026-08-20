@@ -1351,10 +1351,26 @@ impl WorkspaceSurface {
             // A (capital) → Approve ALL pending (drain queue).
             KeyCode::Char('A') => {
                 self.approval_batch = Some(ApprovalBatch::ApproveAll);
-                SurfaceAction::Approve {
-                    call_id,
-                    scope: ApprovalScope::Once,
-                    answer: None,
+                // Same reason `a` grants the folder: `Once` on a path-boundary
+                // card is an answer that cannot work. The read is refused for
+                // being outside the sandbox, so approving it "just this once"
+                // buys the user an interruption and then the identical failure.
+                // Approve-ALL must not be the one key that silently reverts to
+                // the broken behaviour the boundary card exists to fix.
+                match path_grant_root {
+                    Some(root) => SurfaceAction::Approve {
+                        call_id,
+                        scope: ApprovalScope::AlwaysPath {
+                            root: root.to_string(),
+                            write: false,
+                        },
+                        answer: None,
+                    },
+                    None => SurfaceAction::Approve {
+                        call_id,
+                        scope: ApprovalScope::Once,
+                        answer: None,
+                    },
                 }
             }
             // n / Esc → Deny.
@@ -1414,13 +1430,24 @@ impl WorkspaceSurface {
             .tool_cards
             .iter()
             .find(|c| c.status == ToolCardStatus::AwaitingApproval)
-            .map(|c| c.call_id.clone());
+            .map(|c| (c.call_id.clone(), c.path_grant_root.clone()));
         match next {
-            Some(call_id) => match batch {
-                ApprovalBatch::ApproveAll => SurfaceAction::Approve {
-                    call_id,
-                    scope: ApprovalScope::Once,
-                    answer: None,
+            Some((call_id, path_grant_root)) => match batch {
+                // A drained card gets the same treatment as the one the user
+                // pressed `A` on. Without this, "approve all" works for the
+                // first boundary card and silently fails for every one after
+                // it, which is worse than failing consistently.
+                ApprovalBatch::ApproveAll => match path_grant_root {
+                    Some(root) => SurfaceAction::Approve {
+                        call_id,
+                        scope: ApprovalScope::AlwaysPath { root, write: false },
+                        answer: None,
+                    },
+                    None => SurfaceAction::Approve {
+                        call_id,
+                        scope: ApprovalScope::Once,
+                        answer: None,
+                    },
                 },
                 ApprovalBatch::DenyAll => SurfaceAction::Deny {
                     call_id,
@@ -4515,6 +4542,37 @@ mod tests {
             }
             _ => panic!("expected Approve with AlwaysPath; got {action:?}"),
         }
+    }
+
+    #[test]
+    fn path_boundary_capital_a_also_grants_the_folder() {
+        // Approve-ALL must not be the one key that reverts to the broken
+        // answer. `Once` on a boundary card cannot work — the read is refused
+        // for being outside the sandbox — so a user who reaches for `A`
+        // (the fastest key on the card) would otherwise get an interruption
+        // followed by the identical failure the card exists to remove.
+        use wcore_protocol::commands::ApprovalScope;
+        let mut app = app_with_shell_approval("Read", "/tmp/outside/notes.md");
+        app.session.tool_cards[0].path_grant_root = Some("/tmp/outside".to_string());
+        let mut surface = WorkspaceSurface::new();
+        let action = surface.handle_key(key(KeyCode::Char('A')), &mut app);
+        match action {
+            SurfaceAction::Approve { scope, .. } => assert_eq!(
+                scope,
+                ApprovalScope::AlwaysPath {
+                    root: "/tmp/outside".to_string(),
+                    write: false,
+                },
+                "`A` on a boundary card must grant the folder, not answer Once"
+            ),
+            _ => panic!("expected Approve with AlwaysPath; got {action:?}"),
+        }
+        // CONTROL: the batch drain is still armed — fixing the scope must not
+        // cost the approve-all behaviour itself.
+        assert!(
+            surface.approval_batch.is_some(),
+            "control failed: capital A no longer arms the batch drain"
+        );
     }
 
     #[test]
