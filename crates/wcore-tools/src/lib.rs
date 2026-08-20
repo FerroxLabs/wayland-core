@@ -151,6 +151,10 @@ pub mod symbol_slice;
 // Memory write tool: log a meaningful event into P2 episodic memory.
 pub mod record_episode;
 pub mod registry;
+// #1098: `render_artifact` — hand the host CONTENT to display instead of
+// asking the OS to `open` a path. Zero filesystem/process authority leaves the
+// sandbox; content comes through the same vfs/policy path as an ordinary read.
+pub mod render;
 pub mod repomap;
 // T3-3.3.2: HELPER — broad JSON-Schema sanitizer for llama.cpp / strict
 // backend compat (port of the prior Wayland Python engine). Distinct from

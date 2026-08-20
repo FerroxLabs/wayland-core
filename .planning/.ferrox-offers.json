@@ -1,0 +1,10 @@
+{
+  "edges": {
+    "plan-it": "true",
+    "fleet-it": "true:false",
+    "ship-it": "verify-failed:true"
+  },
+  "outcomes": {
+    "plan-it": "shown"
+  }
+}

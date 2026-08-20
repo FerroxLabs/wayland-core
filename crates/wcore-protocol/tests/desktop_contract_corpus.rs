@@ -213,9 +213,9 @@ fn checked_corpus_matches_real_serializers_byte_for_byte() {
 }
 
 #[test]
-fn inventory_is_exactly_twenty_three_commands_and_sixty_events() {
+fn inventory_is_exactly_twenty_three_commands_and_sixty_one_events() {
     assert_eq!(COMMAND_SPECS.len(), 23);
-    assert_eq!(EVENT_SPECS.len(), 60);
+    assert_eq!(EVENT_SPECS.len(), 61);
     assert_eq!(
         COMMAND_SPECS
             .iter()
@@ -230,7 +230,7 @@ fn inventory_is_exactly_twenty_three_commands_and_sixty_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        60
+        61
     );
 }
 
@@ -316,9 +316,9 @@ fn manifest_pins_generator_and_all_three_digests() {
     assert_eq!(manifest["contract"]["major"], CONTRACT_MAJOR);
     assert_eq!(manifest["contract"]["minor"], CONTRACT_MINOR);
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 23);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 60);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 61);
     assert_eq!(manifest["counts"]["commands"], 23);
-    assert_eq!(manifest["counts"]["events"], 60);
+    assert_eq!(manifest["counts"]["events"], 61);
     assert_eq!(manifest["counts"]["child_types"], 3);
     assert_eq!(
         manifest["child_types"],

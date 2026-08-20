@@ -1025,6 +1025,11 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::BudgetGrantResult { .. }
         | ProtocolEvent::CompactOffload { .. }
         | ProtocolEvent::HostSendMessageRequest { .. }
+        // #1098 `RenderArtifact` is a json-stream host surface. The in-process
+        // TUI never emits one — `RenderArtifactTool` is only registered under
+        // a `ProtocolSink` — so this arm is unreachable in practice and must
+        // stay a no-op rather than inventing a terminal rendering of it.
+        | ProtocolEvent::RenderArtifact { .. }
         // Node state is redundant with the correlated child relay for the TUI;
         // Desktop consumes this authoritative lifecycle event directly.
         | ProtocolEvent::WorkflowNodeEvent { .. }

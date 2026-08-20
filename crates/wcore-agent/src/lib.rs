@@ -110,6 +110,9 @@ pub mod provider_recovery;
 pub mod project_context;
 pub mod recovery;
 pub(crate) mod recovery_confidential;
+// #1098 — binds `wcore_tools::render::RenderSink` to the session's OutputSink
+// so `render_artifact` reaches a json-stream host and nothing else.
+pub mod render_sink;
 pub mod user_context;
 // v0.6.1 hardening (CRIT-1) — opt-in wcore-permissions gate at tool
 // dispatch boundary; without this, the M5.8 ACL shipped in v0.6.0 was

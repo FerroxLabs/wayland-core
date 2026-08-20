@@ -623,6 +623,149 @@ pub enum SessionPersistence {
     DisabledByHost,
 }
 
+/// A `critical` classification that can only ever be `false`.
+///
+/// The W0 host decoder contract lets a host drop an unknown event ONLY when
+/// the frame explicitly says `"critical": false`; a missing or `true`
+/// classification is a hard error. An event that wants to be safely ignorable
+/// by an older host must therefore carry the field — and must never be able to
+/// carry the other value, because a producer that flipped it would turn "your
+/// host is a version behind" into "your host disconnects".
+///
+/// Making that structural rather than a convention is the whole point: there is
+/// no constructor for the `true` case, so no call site can get it wrong and the
+/// published schema's `const: false` can never reject one of our own frames.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NonCritical;
+
+impl Serialize for NonCritical {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(false)
+    }
+}
+
+/// The CLOSED media-type vocabulary a [`ProtocolEvent::RenderArtifact`] may
+/// carry.
+///
+/// Closed for the same reason `ready.session_persistence` is (see
+/// `contract/generate.rs`): a future value must not be able to arrive as free
+/// text and be accepted by a host that has never heard of it. Widening the
+/// vocabulary is therefore an announced contract event — a minor bump plus a
+/// schema change — rather than a silent dialect that renders as a blank pane on
+/// half the installed hosts.
+///
+/// Deliberately text-only. #1098 says the Desktop half should define any
+/// image/binary carriage; inventing a base64 image envelope here would be Core
+/// dictating a wire shape it cannot render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum RenderMime {
+    #[serde(rename = "text/plain")]
+    Plain,
+    #[serde(rename = "text/markdown")]
+    Markdown,
+    #[serde(rename = "text/html")]
+    Html,
+}
+
+impl RenderMime {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plain => "text/plain",
+            Self::Markdown => "text/markdown",
+            Self::Html => "text/html",
+        }
+    }
+
+    /// Parse a wire token. `None` for anything outside the closed vocabulary —
+    /// callers refuse rather than defaulting, so an unrenderable kind never
+    /// reaches a host as some other kind.
+    pub fn from_wire(token: &str) -> Option<Self> {
+        match token {
+            "text/plain" => Some(Self::Plain),
+            "text/markdown" => Some(Self::Markdown),
+            "text/html" => Some(Self::Html),
+            _ => None,
+        }
+    }
+
+    /// Every declared token, in wire order. The contract generator and the
+    /// docs test both read this so the enum stays the single source of truth.
+    pub fn all() -> &'static [&'static str] {
+        &["text/plain", "text/markdown", "text/html"]
+    }
+}
+
+/// Byte cap on [`ProtocolEvent::RenderArtifact`]'s `title`.
+pub const RENDER_ARTIFACT_TITLE_LIMIT_BYTES: usize = 256;
+
+/// Byte cap on [`ProtocolEvent::RenderArtifact`]'s `content`.
+///
+/// NOT a taste call. `output_pump.rs` REJECTS any frame larger than
+/// `MAX_QUEUED_BYTES` (8 MiB) and, on rejection, sets `sticky_failure` and
+/// calls `record_failure()` — whose `failed` flag is sticky, so every later
+/// write returns `BrokenPipe`. One oversized render frame would not merely
+/// fail to display: it would kill stdout for the rest of the session.
+///
+/// 1 MiB is the largest round number that provably survives that. serde_json's
+/// worst case for a String is a 6x expansion (`\u00XX` for every control byte),
+/// so 1 MiB of content is at most 6 MiB on the wire, and title plus envelope
+/// plus the truncation marker leave the 8 MiB frame limit intact. The fit is
+/// asserted against the real pump constant in this module's tests, not
+/// asserted about in a comment.
+pub const RENDER_ARTIFACT_CONTENT_LIMIT_BYTES: usize = 1024 * 1024;
+
+/// The in-band notice that stands in for the bytes past the cap.
+///
+/// In-band because the bytes are: a host renders `content` and nothing else, so
+/// a marker in the text is the only truncation signal that reaches a reader who
+/// is looking at the rendered surface rather than at the frame. The sibling
+/// `truncated` flag is for the host chrome; this is for the human.
+fn render_truncation_marker(kept: usize) -> String {
+    format!(
+        "\n\n[wcore: CONTENT TRUNCATED. This artifact is larger than the \
+         {RENDER_ARTIFACT_CONTENT_LIMIT_BYTES}-byte render cap. The {kept} bytes above are \
+         the START of it; everything after them is not shown here. Nothing was \
+         modified — only what is displayed was cut.]\n"
+    )
+}
+
+/// Clamp `content` to [`RENDER_ARTIFACT_CONTENT_LIMIT_BYTES`], returning the
+/// bytes to send and whether anything was cut.
+///
+/// Crossing the cap TRUNCATES; it never discards. Discarding inverts the cap's
+/// own purpose — the same argument `wcore-sandbox`'s buffered-output cap makes
+/// (FerroxLabs/wayland#1071), where dropping 20 MB of output handed the caller
+/// 129 bytes, none of them the ones that explained anything.
+///
+/// The cut lands on a UTF-8 character boundary, so a multi-byte character
+/// straddling the cap is dropped whole rather than emitted as a broken prefix.
+pub fn truncate_render_content(content: &str) -> (String, bool) {
+    if content.len() <= RENDER_ARTIFACT_CONTENT_LIMIT_BYTES {
+        return (content.to_string(), false);
+    }
+    let mut cut = RENDER_ARTIFACT_CONTENT_LIMIT_BYTES;
+    while cut > 0 && !content.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut kept = content[..cut].to_string();
+    kept.push_str(&render_truncation_marker(cut));
+    (kept, true)
+}
+
+/// Clamp `title` to [`RENDER_ARTIFACT_TITLE_LIMIT_BYTES`] on a character
+/// boundary. A title is chrome, so an over-long one is silently shortened
+/// rather than refused — refusing would lose the artifact over its label.
+pub fn truncate_render_title(title: &str) -> String {
+    if title.len() <= RENDER_ARTIFACT_TITLE_LIMIT_BYTES {
+        return title.to_string();
+    }
+    let mut cut = RENDER_ARTIFACT_TITLE_LIMIT_BYTES;
+    while cut > 0 && !title.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    title[..cut].to_string()
+}
+
 /// Events emitted by the agent to the client (Agent -> Client)
 ///
 /// `Clone` is derived (Wave 2) so the in-process TUI bridge can fan an
@@ -1328,6 +1471,59 @@ pub enum ProtocolEvent {
         /// Session id of the emitting engine, when known. Omitted otherwise.
         #[serde(skip_serializing_if = "Option::is_none")]
         conversation_id: Option<String>,
+    },
+    /// FerroxLabs/wayland#1098: "show this to the user" as a RENDER
+    /// capability instead of an OS `open`.
+    ///
+    /// Handing a filesystem path to LaunchServices (or `xdg-open`, or
+    /// `cmd /c start`) is a filesystem + process capability doing a UI job.
+    /// It is also why #1102 exists: the macOS seatbelt profile is
+    /// `(deny default)` and never grants the SBPL operation `lsopen`, so
+    /// `open` fails with `-54`. Granting `lsopen` would be an
+    /// execution-confinement ESCAPE — a sandboxed shell could ask launchd to
+    /// start any installed app OUTSIDE our profile. This event is what makes
+    /// refusing that cost nothing: it needs ZERO filesystem authority at the
+    /// host, works headless, works over SSH, and is identical on all three
+    /// platforms.
+    ///
+    /// SECURITY: the payload is CONTENT, never a path. The engine-side
+    /// producer (`wcore_tools::render::RenderArtifactTool`) obtains that
+    /// content through the SAME vfs/policy path as an ordinary `read`, so a
+    /// file the agent may not read is a file it may not render. Nothing here
+    /// widens what the agent can reach; it only changes how what it already
+    /// read reaches the user.
+    ///
+    /// `content` is UNTRUSTED — it is either model-authored or read out of the
+    /// workspace. A host that renders `text/html` MUST do so in a sandboxed
+    /// renderer with no host-process bridge. See
+    /// `docs/json-stream-protocol.md` §1.N+13.
+    ///
+    /// Always-on additive variant behind the `render_artifact_v1` contract
+    /// capability. Unlike every other additive event, this one carries
+    /// `critical: false` EXPLICITLY: the documented host rule
+    /// (`docs/json-stream-protocol.md` "Rules" §3, implemented by
+    /// `tests/desktop_contract_corpus_only_host.rs`) is that an unknown type
+    /// is dropped only when it says so, and hard-errors when the
+    /// classification is missing. Without the field a host pinned to an older
+    /// corpus would reject the frame instead of ignoring it.
+    RenderArtifact {
+        /// Turn the artifact belongs to. Empty when no turn is active.
+        msg_id: String,
+        /// The `render_artifact` tool call that produced it.
+        call_id: String,
+        /// Short human label for the rendered surface (tab title / card
+        /// heading). Capped at [`RENDER_ARTIFACT_TITLE_LIMIT_BYTES`].
+        title: String,
+        /// CLOSED vocabulary — see [`RenderMime`].
+        mime: RenderMime,
+        /// The bytes to display, already bounded by
+        /// [`RENDER_ARTIFACT_CONTENT_LIMIT_BYTES`].
+        content: String,
+        /// `true` when `content` is a truncated prefix and carries the in-band
+        /// truncation marker. A host SHOULD badge the surface as partial.
+        truncated: bool,
+        /// Always the JSON literal `false`; see the variant docs.
+        critical: NonCritical,
     },
     /// W5 M6 / #279(d) + #280: a context compaction occurred. Gated by
     /// capabilities.non_destructive_compact; hosts that don't recognise
@@ -2115,6 +2311,142 @@ mod tests {
         assert_eq!(json["body"], "hello");
         assert_eq!(json["subject"], "Re: invoice");
         assert_eq!(json["conversation_id"], "abc123");
+    }
+
+    /// #1098: the render frame serializes with the field names a host
+    /// implementer reads in the spec, and `critical` lands as the JSON literal
+    /// `false` (not a string, not omitted) — that literal is the ONLY thing
+    /// that makes an older host drop the event instead of disconnecting.
+    #[test]
+    fn render_artifact_serializes_with_an_explicit_noncritical_classification() {
+        let event = ProtocolEvent::RenderArtifact {
+            msg_id: "m-1".to_string(),
+            call_id: "call-1".to_string(),
+            title: "Q3 summary".to_string(),
+            mime: RenderMime::Markdown,
+            content: "# hello".to_string(),
+            truncated: false,
+            critical: NonCritical,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "render_artifact");
+        assert_eq!(json["msg_id"], "m-1");
+        assert_eq!(json["call_id"], "call-1");
+        assert_eq!(json["title"], "Q3 summary");
+        assert_eq!(json["mime"], "text/markdown");
+        assert_eq!(json["content"], "# hello");
+        assert_eq!(json["truncated"], false);
+        assert_eq!(
+            json["critical"],
+            Value::Bool(false),
+            "an unknown-to-the-host render frame is droppable ONLY while this is literal false"
+        );
+    }
+
+    /// #1098: the closed MIME vocabulary round-trips exactly, and nothing
+    /// outside it parses. A free-text mime would reach the wire and then be
+    /// rejected by our OWN published schema's enum.
+    #[test]
+    fn render_mime_vocabulary_is_closed() {
+        for token in RenderMime::all() {
+            let parsed = RenderMime::from_wire(token).expect("declared token must parse");
+            assert_eq!(parsed.as_str(), *token);
+        }
+        for rejected in [
+            "application/x-shellscript",
+            "text/html; charset=utf-8",
+            "image/png",
+            "TEXT/PLAIN",
+            "",
+        ] {
+            assert!(
+                RenderMime::from_wire(rejected).is_none(),
+                "{rejected} must not parse into the closed vocabulary"
+            );
+        }
+    }
+
+    /// #1098: crossing the content cap TRUNCATES and says so — it never
+    /// discards the artifact. Same rule as the wcore-sandbox buffered-output
+    /// cap (FerroxLabs/wayland#1071).
+    #[test]
+    fn render_content_over_the_cap_is_truncated_not_dropped() {
+        // A multi-byte character straddling the cap boundary: the cut must
+        // land on a char boundary, never mid-sequence.
+        let mut oversized = "a".repeat(RENDER_ARTIFACT_CONTENT_LIMIT_BYTES - 1);
+        oversized.push('\u{20ac}'); // 3 bytes, starts one byte below the cap
+        oversized.push_str(&"b".repeat(64));
+        assert!(oversized.len() > RENDER_ARTIFACT_CONTENT_LIMIT_BYTES);
+
+        let (rendered, truncated) = truncate_render_content(&oversized);
+        assert!(truncated, "crossing the cap must report truncation");
+        let marker_at = rendered
+            .find("[wcore: CONTENT TRUNCATED")
+            .expect("the in-band marker must be present so a human reading the surface is told");
+        // The marker opens with the blank line that separates it from the
+        // content, so the content prefix is everything before those newlines.
+        let kept = rendered[..marker_at].trim_end_matches('\n');
+        assert!(
+            kept.len() <= RENDER_ARTIFACT_CONTENT_LIMIT_BYTES,
+            "kept prefix {} exceeds the cap",
+            kept.len()
+        );
+        assert_eq!(
+            kept.len(),
+            RENDER_ARTIFACT_CONTENT_LIMIT_BYTES - 1,
+            "the straddling multi-byte character must be dropped whole"
+        );
+        assert!(
+            kept.chars().all(|c| c == 'a'),
+            "the kept bytes must be the START of the content"
+        );
+        assert!(
+            rendered.contains(&RENDER_ARTIFACT_CONTENT_LIMIT_BYTES.to_string()),
+            "the marker must name the cap it hit"
+        );
+    }
+
+    /// #1098: content at exactly the cap is untouched, so nothing is reported
+    /// truncated that was not.
+    #[test]
+    fn render_content_at_the_cap_is_untouched() {
+        let exact = "x".repeat(RENDER_ARTIFACT_CONTENT_LIMIT_BYTES);
+        let (rendered, truncated) = truncate_render_content(&exact);
+        assert!(!truncated);
+        assert_eq!(rendered, exact);
+    }
+
+    /// #1098: the reason the cap is 1 MiB and not a bigger round number.
+    ///
+    /// A worst-case escaped render frame — every content byte a control
+    /// character, which serde_json emits as the 6-byte `\u00XX` — must still
+    /// fit inside the output pump's per-frame limit. Over that limit
+    /// `output_pump` does not merely drop the frame: it sets `sticky_failure`
+    /// and calls `record_failure()`, and the `failed` flag is sticky, so every
+    /// later write returns BrokenPipe. One oversized artifact would kill the
+    /// session's entire stdout.
+    #[test]
+    fn a_worst_case_escaped_render_frame_fits_the_output_pump() {
+        let event = ProtocolEvent::RenderArtifact {
+            msg_id: "m".repeat(64),
+            call_id: "c".repeat(64),
+            title: truncate_render_title(&"t".repeat(RENDER_ARTIFACT_TITLE_LIMIT_BYTES * 2)),
+            mime: RenderMime::Html,
+            // `\u{0}` is serde_json's worst case: 1 byte in, 6 bytes out.
+            content: truncate_render_content(
+                &"\u{0}".repeat(RENDER_ARTIFACT_CONTENT_LIMIT_BYTES * 2),
+            )
+            .0,
+            truncated: true,
+            critical: NonCritical,
+        };
+        let encoded = serde_json::to_vec(&event).unwrap();
+        assert!(
+            encoded.len() + 1 < crate::output_pump::MAX_QUEUED_BYTES,
+            "worst-case render frame is {} bytes, pump limit is {}",
+            encoded.len(),
+            crate::output_pump::MAX_QUEUED_BYTES
+        );
     }
 
     /// #537/#141: optional fields are OMITTED (not null) when absent — the
