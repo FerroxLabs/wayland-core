@@ -391,6 +391,88 @@ fn is_secret_path_does_not_overmatch_json() {
     }
 }
 
+/// #1099 follow-up: the credential denylist must fold ASCII case on EVERY
+/// rule, not just the extension.
+///
+/// The predicate lower-cased only `path.extension()`, so `server.KEY` was
+/// refused while `.ENV`, `ID_RSA`, `.SSH/known_hosts` and
+/// `SERVICE-ACCOUNT.JSON` sailed through. On macOS and Windows — the two hosts
+/// the desktop app ships on — the filesystem is case-INSENSITIVE, so `.ENV`
+/// and `.env` are the SAME FILE and the alternate spelling is a plain read of
+/// the real secret.
+///
+/// Every case variant is paired with its lowercase twin as a KNOWN-POSITIVE
+/// CONTROL in the same loop: if a lowercase assertion ever fails, the query is
+/// broken rather than the world, and the test says so instead of passing.
+#[test]
+fn is_secret_path_folds_case_on_every_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let p = WorkspacePolicy::contained(root);
+
+    for (lower, variant) in [
+        // SECRET_SUFFIXES
+        (".env", ".ENV"),
+        (".env.local", ".Env.local"),
+        (".git-credentials", ".Git-Credentials"),
+        (".npmrc", ".NPMRC"),
+        (".netrc", ".NetRC"),
+        (".git/config", ".GIT/config"),
+        (".aws/credentials", ".AWS/Credentials"),
+        ("gradle.properties", "Gradle.Properties"),
+        // SECRET_BASENAMES
+        ("id_rsa", "ID_RSA"),
+        ("keys/id_ed25519", "keys/Id_Ed25519"),
+        // SECRET_DIR_SEGMENTS
+        (".ssh/known_hosts", ".SSH/known_hosts"),
+        (".gnupg/notes.txt", ".GnuPG/notes.txt"),
+        // the bounded *.json credential shapes
+        ("service-account.json", "SERVICE-ACCOUNT.JSON"),
+        ("ci-key.json", "CI-KEY.Json"),
+        // compound .tfstate extension — the plain `.tfstate` is caught by the
+        // already-folded SECRET_EXTENSIONS arm, but `.tfstate.backup` parses
+        // as extension `backup` and falls through to the name rule.
+        ("terraform.tfstate.backup", "terraform.TFSTATE.backup"),
+    ] {
+        assert!(
+            p.is_secret_path(&root.join(lower)),
+            "CONTROL FAILED: {lower} must be secret — the test is broken, \
+             not the product"
+        );
+        assert!(
+            p.is_secret_path(&root.join(variant)),
+            "{variant} must be secret: on a case-insensitive filesystem it \
+             names the same file as {lower}"
+        );
+    }
+}
+
+/// The case fold must not turn ordinary files into secrets. Guards the other
+/// direction of the same change: over-denying is the SAFE failure, but only
+/// while it stays confined to the denylist's own shapes.
+#[test]
+fn case_fold_does_not_overmatch_ordinary_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let p = WorkspacePolicy::contained(root);
+    for rel in [
+        "SRC/MAIN.RS",
+        "README.MD",
+        "Cargo.TOML",
+        ".GITIGNORE",
+        "Environment.rs",
+        "PACKAGE.JSON",
+        "Config.Json",
+        "MONKEY.JSON",
+        "docs/ENVOY.md",
+    ] {
+        assert!(
+            !p.is_secret_path(&root.join(rel)),
+            "{rel} must NOT be secret"
+        );
+    }
+}
+
 // ── Task 6 tests ──────────────────────────────────────────────────────────
 
 /// Contained mode: a project `.env` under the workspace root is in the

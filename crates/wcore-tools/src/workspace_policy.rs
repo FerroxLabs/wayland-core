@@ -1148,29 +1148,77 @@ fn path_is_in_credential_store(path: &Path) -> bool {
 /// it directly, because Grep has no policy instance and must not grow a second,
 /// divergent copy of this list.
 pub(crate) fn is_secret_path_static(path: &Path) -> bool {
-    let s = path.to_string_lossy().replace('\\', "/");
+    // ASCII case is folded on EVERY rule, on EVERY platform — not just on the
+    // extension, which is how this was written and how `.ENV` escaped while
+    // `server.KEY` did not.
+    //
+    // On macOS and Windows (the two hosts the desktop app ships on) the
+    // filesystem is case-INSENSITIVE, so `.ENV` and `.env` are the SAME FILE
+    // and a case-sensitive denylist is simply bypassable by spelling.
+    //
+    // On LINUX the filesystem IS case-sensitive, so `.ENV` is genuinely a
+    // different file and folding case here can over-deny. That is the right
+    // trade anyway, and it is taken deliberately rather than by omission:
+    //
+    //   * This is a DENY list. Over-denying refuses a read — visible,
+    //     recoverable, the operator picks another path. Under-denying hands a
+    //     credential to the model — silent and irreversible. The asymmetry is
+    //     not close.
+    //   * One predicate feeds `Read`, `Grep`, `SecretDenyFs` AND the OS-sandbox
+    //     deny-set computation. A `cfg(unix)`-split answer would make the
+    //     sandbox's deny list disagree with the in-process check on the same
+    //     path — exactly the seam holes appear in — and would make a Linux CI
+    //     run stop grading the macOS/Windows behaviour.
+    //   * The cost is bounded by the lists themselves: nothing in
+    //     SECRET_BASENAMES / SEGMENTS / SUFFIXES / EXTENSIONS has a legitimate
+    //     upper-case homonym a user would be blocked from reading. `ID_RSA` on
+    //     Linux is an SSH key that shouted, not a source file.
+    //   * `SECRET_EXTENSIONS` has folded case on Linux since it was written,
+    //     and `wcore-cli`'s `@`-attach guard folds case on every rule. Folding
+    //     here makes the codebase consistent instead of splitting it.
+    //
+    // Allocation: one `String` for the whole path (down from two — the old
+    // `replace` plus a per-call `to_ascii_lowercase` of the extension). The
+    // file-name rules match through `*_ci` helpers, which allocate nothing.
+    // This runs on every tool call.
+    let raw = path.to_string_lossy();
+    let mut s = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        // ASCII lower-casing never changes a char's UTF-8 length, so the
+        // capacity above is exact and `s` stays byte-aligned with `raw`.
+        s.push(if c == '\\' {
+            '/'
+        } else {
+            c.to_ascii_lowercase()
+        });
+    }
 
     if let Some(ext) = path.extension().and_then(|e| e.to_str())
-        && SECRET_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+        && SECRET_EXTENSIONS
+            .iter()
+            .any(|e| ext.eq_ignore_ascii_case(e))
     {
         return true;
     }
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if SECRET_BASENAMES.contains(&name) {
+        if SECRET_BASENAMES
+            .iter()
+            .any(|b| name.eq_ignore_ascii_case(b))
+        {
             return true;
         }
         // service-account*.json, bare key.json, and separator-bounded *-key.json / *_key.json.
         // Does NOT match monkey.json, turnkey.json, hotkey.json (no false positives).
-        if name.ends_with(".json")
-            && (name.starts_with("service-account")
-                || name == "key.json"
-                || name.ends_with("-key.json")
-                || name.ends_with("_key.json"))
+        if ends_with_ci(name, ".json")
+            && (starts_with_ci(name, "service-account")
+                || name.eq_ignore_ascii_case("key.json")
+                || ends_with_ci(name, "-key.json")
+                || ends_with_ci(name, "_key.json"))
         {
             return true;
         }
         // terraform.tfstate and terraform.tfstate.backup (compound extension)
-        if name.contains(".tfstate") {
+        if contains_ci(name, ".tfstate") {
             return true;
         }
     }
@@ -1187,6 +1235,29 @@ pub(crate) fn is_secret_path_static(path: &Path) -> bool {
             false
         }
     })
+}
+
+// ASCII-case-insensitive `starts_with` / `ends_with` / `contains` for the final
+// path component in `is_secret_path_static`. Byte-wise, so a multi-byte
+// character can never land the comparison on a UTF-8 boundary and panic, and
+// allocation-free — the predicate runs on every tool call. Every `needle` here
+// is a lower-case ASCII literal from the denylists above.
+fn starts_with_ci(hay: &str, needle: &str) -> bool {
+    hay.len() >= needle.len()
+        && hay.as_bytes()[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())
+}
+
+fn ends_with_ci(hay: &str, needle: &str) -> bool {
+    hay.len() >= needle.len()
+        && hay.as_bytes()[hay.len() - needle.len()..].eq_ignore_ascii_case(needle.as_bytes())
+}
+
+fn contains_ci(hay: &str, needle: &str) -> bool {
+    hay.len() >= needle.len()
+        && hay
+            .as_bytes()
+            .windows(needle.len())
+            .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 /// Compute the set of paths that must be denied for reading in the OS sandbox.
