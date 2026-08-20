@@ -1019,12 +1019,18 @@ impl OutputSink for ProtocolSink {
 
     /// #1098: emit `ProtocolEvent::RenderArtifact`.
     ///
-    /// THE truncation chokepoint. Every render passes through here, so the
-    /// cap cannot be routed around by a future caller that forgot it. Over the
-    /// cap the content is truncated with an in-band marker and `truncated` is
-    /// set — never dropped (wayland#1071), and never sent whole: an over-limit
-    /// frame does not merely fail to display, it sets the output pump's sticky
-    /// failure and takes the session's entire stdout with it.
+    /// THE truncation and redaction chokepoint. Every render passes through
+    /// here, so neither can be routed around by a future caller that forgot
+    /// them. Over the cap the content is truncated with an in-band marker and
+    /// `truncated` is set — never dropped (wayland#1071).
+    ///
+    /// The render cap (`RENDER_ARTIFACT_CONTENT_LIMIT_BYTES`, 1 MiB) is NOT the
+    /// output pump's threshold — that is `MAX_QUEUED_BYTES`, 8 MiB. An earlier
+    /// version of this comment conflated the two, and a test written against it
+    /// asserted the emitted string fits inside the render cap. It does not:
+    /// `truncate_render_content` returns the kept prefix PLUS the in-band
+    /// marker, so an over-cap render is deliberately cap+marker bytes long. The
+    /// pump is unaffected at that size; keep the two limits distinct.
     fn emit_render_artifact(
         &self,
         call_id: &str,
@@ -1064,7 +1070,16 @@ impl OutputSink for ProtocolSink {
         let _ = self.writer.emit(&ProtocolEvent::RenderArtifact {
             msg_id,
             call_id: call_id.to_string(),
-            title: wcore_protocol::events::truncate_render_title(title),
+            // The title is scrubbed on the same terms as the content. It is
+            // model-authored (`input["title"]`) and never file-derived, so a
+            // token here is one the model already holds — a materially weaker
+            // vector than `content`. It is closed anyway: "pre-existing" is not
+            // a disposition, and leaving one field of a frame unscrubbed at a
+            // chokepoint whose whole job is scrubbing invites the next reader
+            // to assume the frame is clean.
+            title: wcore_protocol::events::truncate_render_title(
+                &crate::output_redaction::redact_active_tokens(title),
+            ),
             mime,
             content,
             truncated,
@@ -2039,6 +2054,43 @@ mod tests {
             !content.contains(straddling_half),
             "render_artifact truncated BEFORE redacting: {half} bytes of a live \
              token survived the cut, where a whole-token scrub can never match it"
+        );
+    }
+
+    /// The title rides the same frame and is scrubbed on the same terms.
+    /// Weaker vector than `content` (model-authored, never file-derived), but a
+    /// chokepoint that scrubs one field and not the other is worse than either.
+    #[test]
+    fn render_artifact_scrubs_the_title_too() {
+        let emitter = Arc::new(RecordingEmitter::default());
+        let sink = ProtocolSink::with_emitter(emitter.clone());
+        let token = "apr-44444444-5555-6666-7777-888888888888".to_string();
+        sink.token_redactor().set(vec![token.clone()]);
+
+        sink.emit_render_artifact(
+            "c1",
+            &format!("report {token} summary"),
+            wcore_protocol::events::RenderMime::Plain,
+            "body",
+        );
+
+        let title = emitter
+            .events
+            .lock()
+            .iter()
+            .find_map(|e| match e {
+                ProtocolEvent::RenderArtifact { title, .. } => Some(title.clone()),
+                _ => None,
+            })
+            .expect("emit_render_artifact must write a frame");
+        // CONTROL: the title really rode the frame.
+        assert!(
+            title.contains("report"),
+            "control failed: the frame lost the title: {title}"
+        );
+        assert!(
+            !title.contains(&token),
+            "render_artifact leaked an approval token in the title: {title}"
         );
     }
 
