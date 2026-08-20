@@ -28,8 +28,13 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // 13 -> 14: `call_announced` added. Additive only - no field on an existing
 // event changed shape, and `major` therefore holds at 1. Hosts that pin the
 // descriptor must re-pin; hosts that ignore unknown types are unaffected.
-pub const CONTRACT_MINOR: u64 = 15;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/15";
+// 15 -> 16: `path_boundary_prompt_v1` declared, and `tool_request.tool` may
+// now carry an optional `escalation` object. Additive only — the field is
+// skipped when absent and `tool` already published
+// `additionalProperties: true`, so a host that has never heard of it validates
+// and renders exactly as before.
+pub const CONTRACT_MINOR: u64 = 16;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/16";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -1295,10 +1300,31 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         //
         // Available, not ShapeOnly: an approved grant is honoured end to end
         // by the same Core that declares this — `readable_roots()` for the OS
-        // sandbox and `SandboxedFs` for the in-process file tools. What is NOT
-        // promised is that anything raises the prompt; a host still has to
-        // attach the scope to an approval it already has.
+        // sandbox and `SandboxedFs` for the in-process file tools. It says
+        // nothing about who raises the prompt; that is
+        // `path_boundary_prompt_v1` below.
         ("path_grants_v1".into(), ContractCapabilityStatus::Available),
+        // The feature-detect for `tool_request.tool.escalation` (#1099): Core
+        // itself raises the approval when a read names a path outside every
+        // reachable root, instead of letting the call fail with an
+        // out-of-sandbox tool error.
+        //
+        // Separate from `path_grants_v1` because they are separate promises and
+        // a host must be able to hold one without the other. `path_grants_v1`
+        // says an `always_path` scope will be honoured; this says Core will
+        // ASK. A host that has only the first has to attach `always_path` to
+        // some unrelated pending approval, which is what shipping it alone
+        // meant in practice.
+        //
+        // Declared => when `escalation` is present with `kind:
+        // "path_boundary"`, answering that approval with
+        // `always_path { root: suggested_root }` is guaranteed to be accepted:
+        // the producer dry-runs that exact grant before emitting the frame.
+        // Undeclared => the field never appears, and its absence means nothing.
+        (
+            "path_boundary_prompt_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
         ("plugin_events".into(), ContractCapabilityStatus::ShapeOnly),
         (
             "semantic_failover_receipts".into(),

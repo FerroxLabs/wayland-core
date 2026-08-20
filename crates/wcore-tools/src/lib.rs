@@ -114,6 +114,9 @@ pub mod office_runtime;
 // T3-3.8.4: OSV malware advisory check before launching MCP package-runner
 // shims (`npx` / `uvx`) — ported from the prior Wayland Python engine (sub-wave 8).
 pub mod osv_check;
+// #1099: classify a tool call that names a path outside every reachable root,
+// so the orchestrator can ask BEFORE the call instead of explaining after it.
+pub mod path_boundary;
 // Wave SD: path validation for legacy `execute()` entry points (closes
 // SECURITY MAJOR #14 — top-level Read/Write/Edit without sandbox).
 pub mod path_validation;

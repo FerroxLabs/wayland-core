@@ -2587,6 +2587,7 @@ mod tests {
                     category: ToolCategory::Exec,
                     args: json!({"command": "ls -la"}),
                     description: "list".into(),
+                    escalation: None,
                 },
             },
         );
@@ -3577,6 +3578,7 @@ mod tests {
             category: wcore_protocol::events::ToolCategory::Exec,
             args: serde_json::json!({"cmd": "ls"}),
             description: "run a shell command".into(),
+            escalation: None,
         };
         apply_event(
             &mut app,
@@ -3972,6 +3974,7 @@ mod tests {
                     category: ToolCategory::Info,
                     args: json!({"query": "rust"}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
@@ -4076,6 +4079,7 @@ mod tests {
                     category: ToolCategory::Info,
                     args: json!({"q": "x"}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
@@ -4164,6 +4168,7 @@ mod tests {
                     category: ToolCategory::Info,
                     args: json!({}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
@@ -4240,6 +4245,7 @@ mod tests {
                     category: ToolCategory::Info,
                     args: json!({}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
@@ -4314,6 +4320,7 @@ mod tests {
                     category: ToolCategory::Exec,
                     args: json!({"command": "echo x"}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
@@ -4382,6 +4389,7 @@ mod tests {
                 category,
                 args,
                 description: String::new(),
+                escalation: None,
             },
         }
     }
@@ -4516,6 +4524,7 @@ mod tests {
                     category: ToolCategory::Edit,
                     args: json!({"file_path": "/tmp/x", "content": "y"}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
@@ -4854,6 +4863,7 @@ mod tests {
                     category: ToolCategory::Exec,
                     args: json!({}),
                     description: "deploy".into(),
+                    escalation: None,
                 },
             },
         );

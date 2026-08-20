@@ -6648,6 +6648,7 @@ mod tests {
                     category: ToolCategory::Exec,
                     args: json!({"command": "ls"}),
                     description: "List dir".into(),
+                    escalation: None,
                 },
             },
             ProtocolEvent::ApprovalRequired {
@@ -6684,6 +6685,7 @@ mod tests {
                     category: ToolCategory::Edit,
                     args: json!({"file_path": "/tmp/x.txt", "content": "y"}),
                     description: "Write file".into(),
+                    escalation: None,
                 },
             },
             ProtocolEvent::ApprovalRequired {
@@ -6781,6 +6783,7 @@ mod tests {
                     category: ToolCategory::Exec,
                     args: json!({"command": "ls"}),
                     description: "ls".into(),
+                    escalation: None,
                 },
             },
         );
@@ -6821,6 +6824,7 @@ mod tests {
                     category: ToolCategory::Edit,
                     args: json!({"file_path": "/tmp/x", "content": "y"}),
                     description: "write".into(),
+                    escalation: None,
                 },
             },
         );
@@ -8337,6 +8341,7 @@ mod tests {
                         "new_string": "fn main() {\n    run();\n}",
                     }),
                     description: "Edit crates/wcore-cli/src/main.rs".into(),
+                    escalation: None,
                 },
             },
             ProtocolEvent::ToolResult {
@@ -8426,6 +8431,7 @@ mod tests {
                     category: ToolCategory::Info,
                     args: serde_json::json!({ "pattern": "needle" }),
                     description: "Grep for needle".into(),
+                    escalation: None,
                 },
             },
         );

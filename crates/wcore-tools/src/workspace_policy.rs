@@ -979,6 +979,19 @@ impl WorkspacePolicy {
         Arc::clone(&self.session_read_grants)
     }
 
+    /// True when the in-process file tools can already READ `path`.
+    ///
+    /// Deliberately mirrors [`crate::vfs::SandboxedFs::contain_read`] — the
+    /// jail root plus the live standing grants — and NOT `readable_roots()`,
+    /// which is the wider set the OS shell sandbox mounts. The two lists
+    /// answer different questions, and the escalation prompt must be keyed to
+    /// the layer that will actually do the refusing: a prompt keyed to the
+    /// wider list would stay silent for a path the tool then refuses anyway.
+    pub fn is_read_reachable(&self, path: &Path) -> bool {
+        let canon = canon_for_scope(path);
+        canon.starts_with(&self.root) || self.is_session_read_granted(&canon)
+    }
+
     /// True when `path` is inside a standing read grant.
     pub fn is_session_read_granted(&self, path: &Path) -> bool {
         let canon = canon_for_scope(path);
@@ -1030,6 +1043,49 @@ impl WorkspacePolicy {
         grant_id: Option<String>,
         expires_at: Option<SystemTime>,
     ) -> Result<PathBuf, PathGrantError> {
+        let dir = self.grantable_read_root(root, write)?;
+
+        let now = SystemTime::now();
+        let mut grants = self.session_read_grants.write();
+        // Re-checked under the WRITE lock, because the dry run above took only
+        // a read lock and a concurrent grant may have landed since.
+        if grant_capacity(&grants, &dir, now)? {
+            return Ok(dir);
+        }
+        grants.push(SessionReadGrant {
+            root: dir.clone(),
+            id: grant_id,
+            expires_at,
+        });
+        Ok(dir)
+    }
+
+    /// Dry-run half of [`grant_session_read_root_full`](Self::grant_session_read_root_full):
+    /// every check, no mutation, returning the folder that WOULD be granted.
+    ///
+    /// This exists so the pre-flight escalation prompt (#1099) can promise
+    /// something. Core only shows a host an "always allow this folder" button
+    /// after this returns `Ok`, so the button cannot be one that silently
+    /// fails — the alternative is a card the user answers, a grant the policy
+    /// refuses, and a re-prompt on the very next sibling file.
+    pub fn grantable_read_root(
+        &self,
+        root: impl AsRef<Path>,
+        write: bool,
+    ) -> Result<PathBuf, PathGrantError> {
+        let dir = self.grantable_read_root_shape(root, write)?;
+        let now = SystemTime::now();
+        let grants = self.session_read_grants.read();
+        grant_capacity(&grants, &dir, now)?;
+        Ok(dir)
+    }
+
+    /// The path-shape half: is this a folder we are willing to open at all?
+    fn grantable_read_root_shape(
+        &self,
+        root: impl AsRef<Path>,
+        write: bool,
+    ) -> Result<PathBuf, PathGrantError> {
         if write {
             return Err(PathGrantError::WriteNotGrantable);
         }
@@ -1067,28 +1123,31 @@ impl WorkspacePolicy {
         if is_secret_path_static(&dir) {
             return Err(PathGrantError::SecretPath(dir));
         }
-
-        let now = SystemTime::now();
-        let mut grants = self.session_read_grants.write();
-        // Re-approving a folder already covered by a LIVE grant is a no-op,
-        // not a second entry. An expired grant does not count as cover, or a
-        // deadline could be silently extended by re-asking.
-        if grants
-            .iter()
-            .any(|existing| existing.is_live(now) && dir.starts_with(&existing.root))
-        {
-            return Ok(dir);
-        }
-        if grants.iter().filter(|g| g.is_live(now)).count() >= MAX_SESSION_READ_GRANTS {
-            return Err(PathGrantError::CapReached(MAX_SESSION_READ_GRANTS));
-        }
-        grants.push(SessionReadGrant {
-            root: dir.clone(),
-            id: grant_id,
-            expires_at,
-        });
         Ok(dir)
     }
+}
+
+/// Is there room for a grant on `dir`?
+///
+/// `Ok(true)` — a LIVE grant already covers it, so recording a second entry
+/// would be a duplicate. An expired grant does not count as cover, or a
+/// deadline could be silently extended by re-asking.
+/// `Ok(false)` — not covered, and under the cap.
+fn grant_capacity(
+    grants: &[SessionReadGrant],
+    dir: &Path,
+    now: SystemTime,
+) -> Result<bool, PathGrantError> {
+    if grants
+        .iter()
+        .any(|existing| existing.is_live(now) && dir.starts_with(&existing.root))
+    {
+        return Ok(true);
+    }
+    if grants.iter().filter(|g| g.is_live(now)).count() >= MAX_SESSION_READ_GRANTS {
+        return Err(PathGrantError::CapReached(MAX_SESSION_READ_GRANTS));
+    }
+    Ok(false)
 }
 
 impl PathGrantSink for WorkspacePolicy {
@@ -1370,7 +1429,7 @@ fn git_content_stores(root: &Path) -> Vec<PathBuf> {
 /// itself does not exist (e.g. a `Write` to a not-yet-created `.env`), so the
 /// `/var` → `/private/var` normalization still lands and the prefix match
 /// against the canonical root holds.
-fn canon_for_scope(path: &Path) -> PathBuf {
+pub(crate) fn canon_for_scope(path: &Path) -> PathBuf {
     if let Ok(c) = std::fs::canonicalize(path) {
         return c;
     }

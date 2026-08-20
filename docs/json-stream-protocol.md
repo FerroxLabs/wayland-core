@@ -388,6 +388,44 @@ Agent wants to invoke a tool and needs client approval. Agent PAUSES execution u
 | `tool.category` | string | `"info"` (read-only), `"edit"` (file mutation), `"exec"` (shell), `"mcp"` (MCP tool) |
 | `tool.args` | object | Tool arguments |
 | `tool.description` | string | Human-readable one-line description |
+| `tool.escalation` | object \| absent | Why this call is being shown beyond the ordinary gate. Absent on almost every request. See below. |
+
+**`tool.escalation` — the pre-flight boundary prompt**
+
+Requires the `path_boundary_prompt_v1` capability. When the field is absent
+(the overwhelmingly common case) nothing has changed and the frame is
+byte-identical to what older Core emitted.
+
+```json
+"escalation": {
+  "kind": "path_boundary",
+  "target": "/Users/sean/Documents/notes/q3.md",
+  "access": "read",
+  "suggested_root": "/Users/sean/Documents/notes"
+}
+```
+
+This appears when a read tool names a path outside every root the session can
+reach. Before it existed, such a call ran, failed with an out-of-sandbox tool
+error, and the model was left to explain the dead end to the user.
+
+* `target` — the path the call named, canonicalized.
+* `access` — always `"read"`. Write access outside the workspace is not
+  grantable, so a write never raises this escalation.
+* `suggested_root` — the **containing folder**, which is what a grant actually
+  opens. Putting `target` on an "always allow this folder" button would label
+  the button with a scope it does not have.
+
+Answering the approval with
+`{"scope": {"always_path": {"root": "<suggested_root>", "write": false}}}`
+(§2.3.2) is **guaranteed to be accepted**: Core dry-runs that exact grant
+against the session's workspace policy before emitting the frame, so this is
+never a button that silently fails. Answering `once` runs the call this time
+without minting a grant; denying mints nothing.
+
+The gate is forced for these calls even when the tool is on the allow-list or
+carries a tool-name/prefix auto-approval — those grant the tool, not the path.
+`force` mode still bypasses everything, so the field never appears there.
 
 **Category mapping for built-in tools:**
 
@@ -713,6 +751,11 @@ changes the bare-string wire shape.
 This is the answer to an approval prompt raised because a path sits outside the
 session workspace. It exists so that case has a third option beside "do it this
 once" and "refuse", without ever turning the sandbox off.
+
+Core raises that prompt itself when it declares `path_boundary_prompt_v1`: the
+`tool_request` carries `tool.escalation` (§1.5) and its `suggested_root` is the
+root to send back here. Without that capability a host can still send
+`always_path`, but it has to attach it to an approval it already has.
 
 ```json
 {

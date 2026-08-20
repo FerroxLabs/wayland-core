@@ -508,6 +508,7 @@ mod tests {
                     category: wcore_protocol::events::ToolCategory::Info,
                     args: serde_json::json!({}),
                     description: String::new(),
+                    escalation: None,
                 },
             },
         );
