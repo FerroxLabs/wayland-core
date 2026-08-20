@@ -17,7 +17,7 @@ use crate::context::ToolContext;
 mod policy;
 use crate::{Tool, ToolOutputSink};
 pub use policy::check_denylist;
-use policy::{SandboxScope, annotate_network_block, annotate_sandbox_denial};
+use policy::{SandboxScope, annotate_masked_read, annotate_network_block, annotate_sandbox_denial};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
@@ -656,9 +656,13 @@ impl Tool for BashTool {
                 is_error: true,
             },
             result = tokio::time::timeout(timeout, backend.execute(&manifest, cmd)) => match result {
-                Ok(Ok(output)) => annotate_sandbox_denial(
+                Ok(Ok(output)) => annotate_masked_read(
                     &scope,
-                    annotate_network_block(command, net, output_to_result(output)),
+                    command,
+                    annotate_sandbox_denial(
+                        &scope,
+                        annotate_network_block(command, net, output_to_result(output)),
+                    ),
                 ),
                 Ok(Err(e)) => exec_error_to_result(&e),
                 Err(_) => ToolResult { content: format!("Command timed out after {timeout_ms}ms"), is_error: true },
@@ -816,15 +820,19 @@ impl Tool for BashTool {
                     "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
                     exit_code, stdout_buf, stderr_buf
                 );
-                annotate_sandbox_denial(
+                annotate_masked_read(
                     &scope,
-                    annotate_network_block(
-                        command,
-                        net,
-                        ToolResult {
-                            content,
-                            is_error: exit_code != 0,
-                        },
+                    command,
+                    annotate_sandbox_denial(
+                        &scope,
+                        annotate_network_block(
+                            command,
+                            net,
+                            ToolResult {
+                                content,
+                                is_error: exit_code != 0,
+                            },
+                        ),
                     ),
                 )
             }
