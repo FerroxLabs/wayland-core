@@ -36,14 +36,18 @@ impl ProtocolEmitter for GrantingHost {
     fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
         self.events.lock().unwrap().push(event.clone());
         if let ProtocolEvent::ToolRequest { call_id, tool, .. } = event {
-            let scope = match (&tool.escalation, self.approve) {
-                (Some(ToolEscalation::PathBoundary { suggested_root, .. }), true) => {
+            // The scope is chosen from the card alone, NOT from `approve`, so
+            // the deny arm still carries `always_path`. That is what makes
+            // `denying_the_card_grants_nothing` a real test of where the grant
+            // is applied rather than a test of this fixture's own branching.
+            let scope = match &tool.escalation {
+                Some(ToolEscalation::PathBoundary { suggested_root, .. }) => {
                     ApprovalScope::AlwaysPath {
                         root: suggested_root.clone(),
                         write: false,
                     }
                 }
-                _ => ApprovalScope::Once,
+                None => ApprovalScope::Once,
             };
             self.manager
                 .resolve_host(call_id, self.approve, scope, None);

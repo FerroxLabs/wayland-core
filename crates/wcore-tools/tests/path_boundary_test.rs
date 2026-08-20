@@ -131,8 +131,10 @@ fn a_folder_that_would_be_refused_raises_no_card() {
     let policy = local_policy(ws.path());
 
     // Directly under the filesystem root: the grant would be `FilesystemRoot`.
-    let mut at_root = std::path::PathBuf::from(std::path::MAIN_SEPARATOR.to_string());
-    at_root.push("wayland-1099-not-a-real-file.txt");
+    // The root is taken from a real path rather than spelled literally, so the
+    // case means the same thing on Windows (`C:\`) as on Unix (`/`).
+    let fs_root = ws.path().ancestors().last().unwrap().to_path_buf();
+    let at_root = fs_root.join("wayland-1099-not-a-real-file.txt");
     assert_eq!(
         read_path_boundary(&policy, "Read", &json!({ "file_path": at_root })),
         None,
