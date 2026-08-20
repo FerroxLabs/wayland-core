@@ -511,6 +511,107 @@ async fn large_output_survives_live() {
     );
 }
 
+/// wayland#1082 (LIVE, AppContainer) — **crossing the output cap must TRUNCATE,
+/// not discard.**
+///
+/// `large_output_survives_live` above uses ~128 KB, far UNDER the 8 MiB cap, so
+/// it grades the pipe drain and says nothing about the ceiling. This is the
+/// ceiling.
+///
+/// `drain_pipe` already does the right thing: it reserves against the shared
+/// budget, KEEPS the partial grant, and signals `exceeded_event` so the waiter
+/// tears the job down. The defect is the last step — the caller turned all of
+/// that retained head into `Err(OutputLimitExceeded)`, so a command that
+/// produced megabytes handed back an error and none of its own output. #1071
+/// fixed the same inversion for the shared drain; this is the AppContainer
+/// backend's copy of it.
+#[tokio::test]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn output_past_the_cap_is_truncated_not_discarded_live() {
+    assert_eq!(
+        std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
+        Ok("1")
+    );
+    let b = AppContainerBackend::new();
+    assert!(b.is_available(), "AppContainer must be available");
+    let m = SandboxManifest {
+        timeout: Some(Duration::from_secs(90)),
+        ..Default::default()
+    };
+
+    // CONTROL FIRST: a small command must come back intact and unmarked. Without
+    // it, the assertions below could pass on a backend that truncates
+    // everything, which would prove nothing.
+    let small = b
+        .execute(
+            &m,
+            SandboxCommand {
+                argv: vec!["cmd.exe".into(), "/c".into(), "echo hello-1082".into()],
+                cwd: None,
+            },
+        )
+        .await
+        .expect("control: a small command must run");
+    let small_out = String::from_utf8_lossy(&small.stdout).into_owned();
+    assert!(
+        small_out.contains("hello-1082"),
+        "control: small output must survive intact: {small_out:?}"
+    );
+    assert!(
+        !small_out.contains("OUTPUT TRUNCATED"),
+        "control: a small command must not be marked truncated: {small_out:?}"
+    );
+
+    // ~400k lines x 32 bytes = ~12.8 MB, comfortably past the 8 MiB ceiling.
+    let started = std::time::Instant::now();
+    let out = b
+        .execute(
+            &m,
+            SandboxCommand {
+                argv: vec![
+                    "cmd.exe".into(),
+                    "/c".into(),
+                    "for /L %i in (1,1,400000) do @echo ABCDEFGHIJKLMNOPQRSTUVWXYZ0123".into(),
+                ],
+                cwd: None,
+            },
+        )
+        .await
+        .expect("crossing the cap must return the truncated output, not an error");
+    let elapsed = started.elapsed();
+
+    let kept = out.stdout.len();
+    eprintln!(
+        "MEASURED kept={kept} bytes elapsed={elapsed:?} exit={}",
+        out.exit_code
+    );
+
+    // THE DEFECT: this whole buffer used to be thrown away.
+    assert!(
+        kept > 1024 * 1024,
+        "the bytes that fit must be KEPT, not discarded — got {kept}"
+    );
+    assert!(
+        kept <= crate::backends::BUFFERED_OUTPUT_LIMIT_BYTES + 4096,
+        "the cap must still bound host memory — got {kept}"
+    );
+    let tail = String::from_utf8_lossy(&out.stdout[kept.saturating_sub(512)..]).into_owned();
+    assert!(
+        tail.contains("OUTPUT TRUNCATED"),
+        "the reader must be TOLD the output was cut: {tail:?}"
+    );
+    assert!(
+        tail.contains("STOPPED"),
+        "the marker must say the command did not run to completion: {tail:?}"
+    );
+    // The exceeded_event trip wire already exists on this backend, so crossing
+    // the cap must stop the child rather than run out the 90s timeout.
+    assert!(
+        elapsed < Duration::from_secs(75),
+        "crossing the cap must stop the child promptly — took {elapsed:?}"
+    );
+}
+
 // Live integrity-boundary verification lives in
 // `crates/wcore-sandbox/tests/live_integrity.rs` because it needs
 // to invoke a sibling binary target (`il_probe`) via

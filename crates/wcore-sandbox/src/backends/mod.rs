@@ -96,7 +96,7 @@ pub(crate) fn reserve_output(used: &AtomicUsize, amount: usize) -> usize {
 ///
 /// It says the command was STOPPED because that is what happens next, and a
 /// reader who is not told will assume the command ran to completion.
-fn truncation_marker(kept: usize) -> Vec<u8> {
+pub(crate) fn truncation_marker(kept: usize) -> Vec<u8> {
     format!(
         "\n[wcore-sandbox: OUTPUT TRUNCATED. This command produced more than the \
          {BUFFERED_OUTPUT_LIMIT_BYTES}-byte buffered output cap. The {kept} bytes above \
