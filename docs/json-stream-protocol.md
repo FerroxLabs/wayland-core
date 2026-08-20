@@ -399,9 +399,9 @@ byte-identical to what older Core emitted.
 ```json
 "escalation": {
   "kind": "path_boundary",
-  "target": "/Users/sean/Documents/notes/q3.md",
+  "target": "/Users/me/Documents/notes/q3.md",
   "access": "read",
-  "suggested_root": "/Users/sean/Documents/notes"
+  "suggested_root": "/Users/me/Documents/notes"
 }
 ```
 

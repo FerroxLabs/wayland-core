@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn read_title_uses_basename_of_the_path() {
         let t = Theme::hearth();
-        let c = card("Read", "/Users/sean/dev/wayland/src/lib.rs");
+        let c = card("Read", "/Users/me/dev/wayland/src/lib.rs");
         let comp = FilesystemComponent;
         assert_eq!(line_text(&comp.title(&ctx(&c, &t))), "Read lib.rs");
     }
@@ -263,12 +263,12 @@ mod tests {
         // must name it — "always in this workspace" is worse than useless
         // here, because the path is precisely NOT in this workspace.
         let t = Theme::hearth();
-        let mut c = card("Read", "/Users/sean/Documents/notes/q3.md");
-        c.path_grant_root = Some("/Users/sean/Documents/notes".into());
+        let mut c = card("Read", "/Users/me/Documents/notes/q3.md");
+        c.path_grant_root = Some("/Users/me/Documents/notes".into());
         let comp = FilesystemComponent;
         let keys = line_text(&comp.keys(&ctx(&c, &t)));
         assert!(
-            keys.contains("[a] always allow /Users/sean/Documents/notes"),
+            keys.contains("[a] always allow /Users/me/Documents/notes"),
             "the always key must name the granted folder; got {keys}"
         );
         assert!(

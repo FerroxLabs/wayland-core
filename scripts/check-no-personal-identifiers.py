@@ -188,7 +188,7 @@ HOME_PATH_REPORT_ONLY_PREFIXES = (".planning/",)
 #    2  .github/workflows/ci.yml — the self-hosted Windows runner's real python
 #       path, quoted in a diagnostic comment.
 #    3  AGENTS.md, .launch-ledger.md — operator instructions.
-HOME_PATH_BASELINE_BLOCKING = 31
+HOME_PATH_BASELINE_BLOCKING = 30
 
 # Report-only reference for `.planning/`, same measurement. Printed with its
 # delta so growth stays visible. NEVER sets the exit code — see module docstring.

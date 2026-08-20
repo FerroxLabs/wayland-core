@@ -15,8 +15,8 @@ fn request(escalation: Option<ToolEscalation>) -> serde_json::Value {
         tool: ToolInfo {
             name: "Read".into(),
             category: ToolCategory::Info,
-            args: json!({"file_path": "/Users/sean/Documents/notes/q3.md"}),
-            description: "Read /Users/sean/Documents/notes/q3.md".into(),
+            args: json!({"file_path": "/Users/me/Documents/notes/q3.md"}),
+            description: "Read /Users/me/Documents/notes/q3.md".into(),
             escalation,
         },
     })
@@ -37,27 +37,24 @@ fn tool_request_without_a_boundary_has_no_escalation_key() {
     // The pre-existing members are untouched.
     assert_eq!(tool["name"], "Read");
     assert_eq!(tool["category"], "info");
-    assert_eq!(
-        tool["description"],
-        "Read /Users/sean/Documents/notes/q3.md"
-    );
+    assert_eq!(tool["description"], "Read /Users/me/Documents/notes/q3.md");
 }
 
 #[test]
 fn the_card_serializes_the_desktop_shape() {
     let value = request(Some(ToolEscalation::PathBoundary {
-        target: "/Users/sean/Documents/notes/q3.md".into(),
+        target: "/Users/me/Documents/notes/q3.md".into(),
         access: PathGrantAccess::Read,
-        suggested_root: "/Users/sean/Documents/notes".into(),
+        suggested_root: "/Users/me/Documents/notes".into(),
     }));
 
     assert_eq!(
         value["tool"]["escalation"],
         json!({
             "kind": "path_boundary",
-            "target": "/Users/sean/Documents/notes/q3.md",
+            "target": "/Users/me/Documents/notes/q3.md",
             "access": "read",
-            "suggested_root": "/Users/sean/Documents/notes"
+            "suggested_root": "/Users/me/Documents/notes"
         }),
         "this is the object the host renders the 'always allow this folder' \
          button from; a rename on either side breaks the button"
