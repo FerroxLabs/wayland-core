@@ -1,0 +1,39 @@
+# THROWAWAY diagnostic. Lives only on lane/304-macos-repro; never merged.
+# Bisects the repo-control guard on a real Mac in ONE build via WL_DIAG_NO_GUARD.
+name: diag-mac
+on:
+  push:
+    branches: [ 'lane/304-macos-repro' ]
+  workflow_dispatch:
+
+jobs:
+  bisect:
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - name: Show host
+        run: |
+          sw_vers || true
+          echo "TMPDIR=$TMPDIR"
+          python3 -c "import os;print('TMPDIR realpath:',os.path.realpath(os.environ.get('TMPDIR','/tmp')))"
+      - name: Build the test binary once
+        run: cargo test -p wcore-cli --test path_boundary_tui_pty --no-run
+      - name: 'VARIANT both  (guard fully OFF - baseline, should PASS)'
+        env:
+          WL_DIAG_NO_GUARD: both
+        run: cargo test -p wcore-cli --test path_boundary_tui_pty -- --test-threads=1 --nocapture 2>&1 | tail -40
+        continue-on-error: true
+      - name: 'VARIANT trusted  (only the STRICT-jail insert active)'
+        env:
+          WL_DIAG_NO_GUARD: trusted
+        run: cargo test -p wcore-cli --test path_boundary_tui_pty -- --test-threads=1 --nocapture 2>&1 | tail -40
+        continue-on-error: true
+      - name: 'VARIANT strict  (only the TRUSTED-branch install active)'
+        env:
+          WL_DIAG_NO_GUARD: strict
+        run: cargo test -p wcore-cli --test path_boundary_tui_pty -- --test-threads=1 --nocapture 2>&1 | tail -40
+        continue-on-error: true
+      - name: 'VARIANT none  (full patch - expected to HANG)'
+        run: cargo test -p wcore-cli --test path_boundary_tui_pty -- --test-threads=1 --nocapture 2>&1 | tail -60
+        continue-on-error: true
