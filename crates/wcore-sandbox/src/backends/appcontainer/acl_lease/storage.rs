@@ -124,6 +124,47 @@ pub(super) fn test_lease_root() -> Result<PathBuf> {
     Ok(root.clone())
 }
 
+/// A lease directory that belongs to ONE test and to nothing else.
+///
+/// [`test_lease_root`] is keyed per PROCESS, and the default `cargo test`
+/// harness runs every test in this binary in ONE process, so that root is
+/// shared mutable state between tests running concurrently on different
+/// threads. `recover_dead_leases_locked` enumerates the lease directory and
+/// only then opens each entry it found, so a test that creates or removes a
+/// lease there makes another test's sweep fail on a file that existed at
+/// enumeration and was gone at open. Measured 10 failures in 10 runs of
+/// `cargo test -p wcore-sandbox --lib appcontainer_acl_lease` on Windows 11
+/// build 26200 (`#1095`): the sweeps in `tests.rs` failed with `os error 2`
+/// naming the lease that
+/// `a_lease_written_by_a_test_never_lands_in_the_production_directory` writes
+/// and then removes.
+///
+/// This is test isolation, NOT a repair of production behaviour, and the
+/// distinction is the whole reason the fix is here rather than in the sweep:
+/// every production lease write and every production sweep runs inside the
+/// same per-user machine-wide `MutationLock`, so a lease can neither appear nor
+/// vanish between a sweep's enumeration and its open. The unit tests that call
+/// `recover_dead_leases_locked` directly deliberately do NOT take that lock —
+/// it lives in the `Global\` namespace, so taking it would test the privileges
+/// of whoever ran `cargo test` rather than the repair — which is exactly why
+/// they get a directory of their own instead of a lock.
+#[cfg(test)]
+pub(super) fn private_lease_directory(local: &Path) -> Result<PathBuf> {
+    // This is the SECOND door into `lease_directory_from`, so it carries the
+    // same lock as the first: whatever a test passes here, it must not be the
+    // user's real lease root. See [`lease_root`] for what a test lease written
+    // there costs — it disabled the Windows sandbox on a real developer box
+    // until a human deleted the file.
+    if std::env::var_os("LOCALAPPDATA")
+        .is_some_and(|real| same_windows_path(local, Path::new(&real)))
+    {
+        return Err(exec_error(
+            "a private test lease directory must never be rooted at the real LOCALAPPDATA".into(),
+        ));
+    }
+    lease_directory_from(local.to_path_buf())
+}
+
 fn lease_directory_from(local: PathBuf) -> Result<PathBuf> {
     let local_root = open_directory_nofollow(&local, "LOCALAPPDATA")?;
     validate_local_canonical_path(&local_root.final_path)?;
@@ -860,6 +901,9 @@ mod tests {
     #[test]
     fn unit_tests_never_resolve_the_production_lease_directory() {
         let resolved = lease_directory().expect("test lease directory must resolve");
+        let Some(local) = std::env::var_os("LOCALAPPDATA") else {
+            return;
+        };
         let Some(production) = production_lease_directory() else {
             return;
         };
@@ -870,6 +914,12 @@ mod tests {
              user's real sandbox state, where a synthetic test profile can never \
              reconcile and disables the sandbox permanently.",
             resolved.display()
+        );
+        // The per-test door has to refuse the same destination, or the
+        // chokepoint above is only one of two ways in.
+        assert!(
+            private_lease_directory(Path::new(&local)).is_err(),
+            "private_lease_directory accepted the real LOCALAPPDATA"
         );
     }
 

@@ -18,7 +18,7 @@ mod tests;
 use self::mutation_lock::MutationLock;
 use self::sha256::sha256_hex;
 #[cfg(test)]
-use self::storage::{TEST_LEASE_ROOT_ENV, test_lease_root};
+use self::storage::{TEST_LEASE_ROOT_ENV, private_lease_directory, test_lease_root};
 use self::storage::{
     lease_directory, lease_is_zero_length, quarantine_lease, read_validated_lease,
     recover_rewrite_temps, remove_validated_lease, rewrite_synced_lease, write_new_synced_lease,

@@ -311,17 +311,38 @@ fn measure_locked_phase_cost_per_execution() {
 
 static SYNTHETIC_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Serialize the wedge tests against each other.
+/// A lease directory this test alone can reach.
 ///
-/// Deliberately a plain in-process mutex rather than [`MutationLock`]: these
-/// four tests share one per-process temp lease root, and all they need is that
-/// one of them is not deleting its lease while another enumerates the
-/// directory. Taking the real cross-process lock instead would make them depend
-/// on `SeCreateGlobalPrivilege` (its mutex lives in the `Global\` namespace),
+/// The per-process test root is shared by every test in this binary, and a
+/// recovery sweep enumerates a directory and only then opens what it found, so
+/// one test's lease creation or removal is another test's `os error 2`. See
+/// [`private_lease_directory`] for the measurement and for why the product
+/// itself has no such race.
+///
+/// Returned as a tuple so the caller has to bind the `TempDir`: it deletes the
+/// directory on drop, and a root dropped early would delete the lease the test
+/// is still working on.
+fn private_lease_root() -> (tempfile::TempDir, PathBuf) {
+    let local = tempfile::tempdir().unwrap();
+    let directory = private_lease_directory(local.path()).unwrap();
+    (local, directory)
+}
+
+/// Serialize the tests that share the process-global reclamation report sink.
+///
+/// `EMITTED_RECLAMATIONS` is one `static` for the whole test binary: any sweep
+/// that reclaims a lease pushes into it, and two tests below drain it and
+/// assert on the exact count. Since every test here now sweeps a lease
+/// directory of its own, that sink is the ONLY state they still share, and this
+/// lock guards it and nothing else.
+///
+/// Deliberately a plain in-process mutex rather than [`MutationLock`]: taking
+/// the real cross-process lock would make these tests depend on
+/// `SeCreateGlobalPrivilege` (its mutex lives in the `Global\` namespace),
 /// which would test the privileges of whoever ran `cargo test` rather than the
 /// repair. The lock is intentionally NOT poisoned-propagating: one failing
 /// assertion must not cascade into three misleading secondary failures.
-fn wedge_test_lock() -> std::sync::MutexGuard<'static, ()> {
+fn reclamation_sink_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
 }
@@ -335,7 +356,12 @@ fn wedge_test_lock() -> std::sync::MutexGuard<'static, ()> {
 /// owner identity provably does not exist. Using a mismatched creation time
 /// rather than an exited pid is deliberate — it cannot flake on Windows pid
 /// reuse, which would silently turn the "dead" leg into a "live" one.
-fn write_unreconcilable_lease(tag: &str, owner_live: bool, intents: Vec<AclIntent>) -> PathBuf {
+fn write_unreconcilable_lease(
+    directory: &Path,
+    tag: &str,
+    owner_live: bool,
+    intents: Vec<AclIntent>,
+) -> PathBuf {
     let sequence = SYNTHETIC_COUNTER.fetch_add(1, Ordering::Relaxed);
     let profile_name = format!(
         "{PROFILE_PREFIX}-h2{tag}-{:08x}-{sequence:04x}",
@@ -363,20 +389,23 @@ fn write_unreconcilable_lease(tag: &str, owner_live: bool, intents: Vec<AclInten
         owner_live,
         "the synthetic lease must present the owner liveness this leg is testing"
     );
-    let path = lease_directory()
-        .unwrap()
-        .join(format!("{profile_name}.toml"));
+    let path = directory.join(format!("{profile_name}.toml"));
     write_new_synced_lease(&path, &lease).unwrap();
     path
 }
 
 /// Files sitting in the quarantine directory whose name came from `lease_path`.
 ///
-/// Scoped to one lease rather than counting the whole directory: these tests
-/// share a per-process lease root, and a global count would couple them.
+/// Scoped to one lease rather than counting the whole directory: a bare count
+/// would also be satisfied by an artifact quarantined from some other lease.
+/// The quarantine directory is derived from the lease's own directory, so this
+/// follows the caller into its private lease root.
 fn quarantined_for(lease_path: &Path) -> Vec<PathBuf> {
     let name = lease_path.file_name().and_then(OsStr::to_str).unwrap();
-    let quarantine = lease_directory().unwrap().join(QUARANTINE_DIRECTORY);
+    let quarantine = lease_path
+        .parent()
+        .expect("a lease always sits in a lease directory")
+        .join(QUARANTINE_DIRECTORY);
     fs::read_dir(quarantine)
         .into_iter()
         .flatten()
@@ -392,9 +421,9 @@ fn quarantined_for(lease_path: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever() {
-    let _lock = wedge_test_lock();
-    let directory = lease_directory().unwrap();
-    let path = write_unreconcilable_lease("dead", false, Vec::new());
+    let _lock = reclamation_sink_lock();
+    let (_local, directory) = private_lease_root();
+    let path = write_unreconcilable_lease(&directory, "dead", false, Vec::new());
     assert!(path.exists(), "the wedge lease must start on disk");
 
     // Before F-28-02-002 was repaired this returned Err, and did so on every
@@ -422,12 +451,13 @@ fn dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever() {
 
 #[test]
 fn live_owner_unreconcilable_lease_is_honoured_not_reclaimed() {
-    let _lock = wedge_test_lock();
-    let directory = lease_directory().unwrap();
+    // No reclamation-sink lock: a live owner is skipped, so this sweep can
+    // never emit a report.
+    let (_local, directory) = private_lease_root();
     // Identical to the leg above in every respect EXCEPT that the recorded
     // owner is this running process. Reclaiming this would revoke the ACLs of a
     // container that is still executing.
-    let path = write_unreconcilable_lease("live", true, Vec::new());
+    let path = write_unreconcilable_lease(&directory, "live", true, Vec::new());
 
     unsafe { recover_dead_leases_locked(&directory) }
         .expect("a live owner's lease must be skipped, not error");
@@ -450,9 +480,9 @@ fn quarantine_directory_does_not_become_a_second_wedge() {
     // implementation that reclaimed the lease but did not allow-list its own
     // quarantine directory would refuse forever from the second pass onward —
     // the identical defect, one indirection further down.
-    let _lock = wedge_test_lock();
-    let directory = lease_directory().unwrap();
-    let path = write_unreconcilable_lease("reentry", false, Vec::new());
+    let _lock = reclamation_sink_lock();
+    let (_local, directory) = private_lease_root();
+    let path = write_unreconcilable_lease(&directory, "reentry", false, Vec::new());
     unsafe { recover_dead_leases_locked(&directory) }.unwrap();
     assert!(
         directory.join(QUARANTINE_DIRECTORY).is_dir(),
@@ -474,9 +504,9 @@ fn quarantine_directory_does_not_become_a_second_wedge() {
 /// contains the grant path because the file was MOVED verbatim, so asserting on
 /// it passes no matter what the operator is told.
 fn reclaim_and_capture_report(tag: &str, intents: Vec<AclIntent>) -> String {
-    let directory = lease_directory().unwrap();
+    let (_local, directory) = private_lease_root();
     let _ = take_emitted_reclamations();
-    let path = write_unreconcilable_lease(tag, false, intents);
+    let path = write_unreconcilable_lease(&directory, tag, false, intents);
 
     unsafe { recover_dead_leases_locked(&directory) }.unwrap();
 
@@ -504,7 +534,7 @@ fn reclamation_reports_grants_it_could_not_revoke() {
     // one that never does. Mutant M3 (adjudication `28-adj`) deletes the
     // disclosure branch so every reclamation claims nothing was left behind —
     // the negative assertion below is what catches it.
-    let _lock = wedge_test_lock();
+    let _lock = reclamation_sink_lock();
     const GRANT: &str = r"C:\f28h2-residual";
 
     let disclosed = reclaim_and_capture_report(
@@ -550,9 +580,9 @@ fn reclamation_reports_grants_it_could_not_revoke() {
 /// produces it. That the state is reachable is established by
 /// `write_new_synced_lease` creating the file before writing its content, and
 /// by `zero_length_lease_is_reachable_through_the_writer` below.
-fn write_raw_lease(tag: &str, bytes: &[u8]) -> PathBuf {
+fn write_raw_lease(directory: &Path, tag: &str, bytes: &[u8]) -> PathBuf {
     let sequence = SYNTHETIC_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = lease_directory().unwrap().join(format!(
+    let path = directory.join(format!(
         "{PROFILE_PREFIX}-h2{tag}-{:08x}-{sequence:04x}.toml",
         std::process::id()
     ));
@@ -565,10 +595,10 @@ fn zero_length_lease_is_reclaimed_not_refused_forever() {
     // F-28-ADJ-002. Reproduced on hardware at 1b9f148f before this fix: a
     // 0-byte .toml refused all sandboxed execution, twice running, with
     // `invalid AppContainer ACL lease size 0`.
-    let _lock = wedge_test_lock();
-    let directory = lease_directory().unwrap();
+    let _lock = reclamation_sink_lock();
+    let (_local, directory) = private_lease_root();
     let _ = take_emitted_reclamations();
-    let path = write_raw_lease("zerolen", b"");
+    let path = write_raw_lease(&directory, "zerolen", b"");
     assert_eq!(fs::metadata(&path).unwrap().len(), 0);
 
     unsafe { recover_dead_leases_locked(&directory) }
@@ -615,9 +645,14 @@ fn a_non_empty_unreadable_lease_still_fails_closed() {
     // Widening the 0-byte reclamation to "anything unreadable" would silently
     // convert this deliberate fail-closed into a reclaim, which is why this
     // test sits next to it rather than in the existing ignore-gated suite.
-    let _lock = wedge_test_lock();
-    let directory = lease_directory().unwrap();
-    let path = write_raw_lease("malformed", b"version = 1\nstate = \"nonsense\"\n");
+    // No reclamation-sink lock: this sweep fails closed before it reclaims
+    // anything, so it can never emit a report.
+    let (_local, directory) = private_lease_root();
+    let path = write_raw_lease(
+        &directory,
+        "malformed",
+        b"version = 1\nstate = \"nonsense\"\n",
+    );
     assert!(fs::metadata(&path).unwrap().len() > 0);
 
     let result = unsafe { recover_dead_leases_locked(&directory) };
@@ -640,10 +675,11 @@ fn zero_length_lease_is_reachable_through_the_writer() {
     // leaves on disk between creating the file and writing its content. Proved
     // by observing the file at that exact instant rather than by reading the
     // source, and without killing anything.
-    let _lock = wedge_test_lock();
+    // No reclamation-sink lock: this test never runs a recovery sweep.
+    let (_local, directory) = private_lease_root();
     let observed = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
     let probe = std::sync::Arc::clone(&observed);
-    let path = write_new_synced_lease_observed("window", move |path| {
+    let path = write_new_synced_lease_observed(&directory, "window", move |path| {
         *probe.lock().unwrap() = Some(fs::metadata(path).unwrap().len());
     });
     assert_eq!(
@@ -656,7 +692,11 @@ fn zero_length_lease_is_reachable_through_the_writer() {
 
 /// Drive the real writer, calling `probe` after the file exists and before its
 /// content is written.
-fn write_new_synced_lease_observed(tag: &str, probe: impl FnOnce(&Path)) -> PathBuf {
+fn write_new_synced_lease_observed(
+    directory: &Path,
+    tag: &str,
+    probe: impl FnOnce(&Path),
+) -> PathBuf {
     let sequence = SYNTHETIC_COUNTER.fetch_add(1, Ordering::Relaxed);
     let profile_name = format!(
         "{PROFILE_PREFIX}-h2{tag}-{:08x}-{sequence:04x}",
@@ -673,9 +713,7 @@ fn write_new_synced_lease_observed(tag: &str, probe: impl FnOnce(&Path)) -> Path
         lease_sha256: String::new(),
     };
     lease.refresh_digest();
-    let path = lease_directory()
-        .unwrap()
-        .join(format!("{profile_name}.toml"));
+    let path = directory.join(format!("{profile_name}.toml"));
     storage::write_new_synced_lease_with_probe(&path, &lease, probe).unwrap();
     path
 }
