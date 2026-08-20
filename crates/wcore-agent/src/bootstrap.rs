@@ -3228,30 +3228,41 @@ impl AgentBootstrap {
                     ),
                 ));
             }
-            // An approved `ApprovalScope::AlwaysPath` has to land somewhere.
-            // The policy is that somewhere — it owns filesystem authority, and
-            // it is the thing that can refuse a root the approval manager has
-            // no business judging (credential store, `$HOME`, a non-local
-            // session).
-            if let Some(manager) = self.approval_manager.as_ref() {
-                // Wrapped so a REFUSED grant reaches the surface the user is
-                // actually looking at. `WorkspacePolicy::grant_path` reports
-                // refusal with `eprintln!`, which is right for a bare CLI and
-                // reaches nobody else: a JSON-stream host reads stdout frames
-                // and never sees stderr, and under the TUI stderr fights the
-                // rendered display. Without this the user answers "always allow
-                // this folder", the policy refuses the root, the approval
-                // degrades to `Once` as documented -- and nothing tells them,
-                // so a refused grant is indistinguishable from a granted one
-                // until the next read fails for a reason they cannot see.
-                let sink: std::sync::Arc<dyn wcore_protocol::PathGrantSink> =
-                    std::sync::Arc::new(ReportingPathGrantSink {
-                        inner: policy.clone(),
-                        output: self.output.clone(),
-                    });
-                manager.set_path_grant_sink(sink);
-            }
             registry.set_workspace_policy(policy);
+        }
+
+        // An approved `ApprovalScope::AlwaysPath` has to land somewhere. The
+        // policy is that somewhere — it owns filesystem authority, and it is
+        // the thing that can refuse a root the approval manager has no
+        // business judging (credential store, `$HOME`, a non-local session).
+        //
+        // Wrapped so a REFUSED grant reaches the surface the user is actually
+        // looking at. `WorkspacePolicy::grant_path` reports refusal with
+        // `eprintln!`, which is right for a bare CLI and reaches nobody else:
+        // a JSON-stream host reads stdout frames and never sees stderr, and
+        // under the TUI stderr fights the rendered display.
+        //
+        // Installed OUTSIDE the `workspace_policy().is_none()` block above,
+        // because that condition is not a proxy for "this session can answer
+        // always_path". When another layer installed the policy first
+        // (`channel_tools`, `spawner`), that block never ran and the manager
+        // was left with NO sink at all — `apply_path_grant` then returns
+        // `false` from its `None` arm, which is indistinguishable from a
+        // policy refusal and is silent on EVERY surface, stderr included.
+        //
+        // The sink is reporting only: it forwards the policy's answer
+        // verbatim and never overrides it, so this widens no authority on any
+        // session shape. Sessions that previously had no sink are refused
+        // exactly as before, and now say so.
+        if let (Some(manager), Some(policy)) =
+            (self.approval_manager.as_ref(), registry.workspace_policy())
+        {
+            let sink: std::sync::Arc<dyn wcore_protocol::PathGrantSink> =
+                std::sync::Arc::new(ReportingPathGrantSink {
+                    inner: policy,
+                    output: self.output.clone(),
+                });
+            manager.set_path_grant_sink(sink);
         }
 
         // The local-shell activation notice. It fires exactly when this session
