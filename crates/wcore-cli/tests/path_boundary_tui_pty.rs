@@ -223,11 +223,46 @@ fn approving_once_leaves_the_read_refused_by_the_sandbox() {
         "the approval card to render for the out-of-workspace Read",
     );
     pty.send(b"y");
-    pty.wait_for(
-        |s| s.contains(DONE_TOKEN),
-        Duration::from_secs(30),
-        "the turn to continue after the once-approved read",
-    );
+    // DIAGNOSTIC BUILD ONLY - never merge. Replaces the panicking wait_for so
+    // that on timeout we can report how many requests the mock actually
+    // received. That single number splits the hypothesis space in two:
+    //   1 request  -> the engine never issued the continuation call.
+    //   2+         -> it did, and the response was discarded before render.
+    // Written from the TEST process, whose stderr nextest captures; the child's
+    // stderr is the PTY and is deliberately not touched.
+    {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut seen = false;
+        while std::time::Instant::now() < deadline {
+            if pty.screen_text().contains(DONE_TOKEN) {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        if !seen {
+            let diag = rt.block_on(support::mock_llm::received_requests(&server));
+            let bodies = diag
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    format!(
+                        "--- request {} ---\n{}",
+                        i + 1,
+                        serde_json::to_string(&r.body)
+                            .unwrap_or_else(|_| "<unserializable>".into())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            panic!(
+                "WLDIAG mock_request_count={}\n{}\n--- last screen ---\n{}\n--- end ---",
+                diag.len(),
+                bodies,
+                pty.screen_text()
+            );
+        }
+    }
     println!(
         "--- after approve-once ---\n{}\n--- end ---",
         pty.screen_text()

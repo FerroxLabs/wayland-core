@@ -1,0 +1,32 @@
+# THROWAWAY DIAGNOSTIC — never merge to main.
+# Runs ONLY the failing boundary test on GitHub-hosted macos-latest (the sole
+# environment that reproduces; the self-hosted Mac passes every arm) and reports
+# how many requests the mock LLM actually received.
+name: diag-pbtp
+on:
+  push:
+    branches: ['lane/pbtp-diag']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pbtp:
+    name: PBTP request-count diagnostic
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build the test binary once
+        run: cargo test -p wcore-cli --test path_boundary_tui_pty --no-run
+      # Three passes, retries OFF, so every try is recorded rather than masked.
+      - name: Pass 1
+        continue-on-error: true
+        run: cargo test -p wcore-cli --test path_boundary_tui_pty approving_once -- --nocapture --test-threads=1 2>&1 | tail -60
+      - name: Pass 2
+        continue-on-error: true
+        run: cargo test -p wcore-cli --test path_boundary_tui_pty approving_once -- --nocapture --test-threads=1 2>&1 | tail -60
+      - name: Pass 3
+        continue-on-error: true
+        run: cargo test -p wcore-cli --test path_boundary_tui_pty approving_once -- --nocapture --test-threads=1 2>&1 | tail -60
