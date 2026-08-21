@@ -1,7 +1,12 @@
 # THROWAWAY DIAGNOSTIC — never merge to main.
-# Runs ONLY the failing boundary test on GitHub-hosted macos-latest (the sole
-# environment that reproduces; the self-hosted Mac passes every arm) and reports
-# how many requests the mock LLM actually received.
+#
+# Reproduces the boundary-test failure UNDER FULL-SUITE LOAD on GitHub-hosted
+# macos-latest (running the test alone passes 3/3, so load is required), and
+# captures the engine's own debug log plus the mock request count.
+#
+# The child's RUST_LOG sink is a file under $WAYLAND_HOME (main.rs:906-921,
+# with_writer(non_blocking)) and never the PTY, so the instrument cannot
+# perturb the channel the test observes.
 name: diag-pbtp
 on:
   push:
@@ -13,20 +18,18 @@ permissions:
 
 jobs:
   pbtp:
-    name: PBTP request-count diagnostic
+    name: PBTP under full-suite load
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
-      - name: Build the test binary once
-        run: cargo test -p wcore-cli --test path_boundary_tui_pty --no-run
-      # Three passes, retries OFF, so every try is recorded rather than masked.
-      - name: Pass 1
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      # Full suite, ci profile, retries OFF so every try is recorded, and
+      # --no-fail-fast so the whole population runs.
+      - name: Full suite (reproduces the contention)
         continue-on-error: true
-        run: cargo test -p wcore-cli --test path_boundary_tui_pty approving_once -- --nocapture --test-threads=1 2>&1 | tail -60
-      - name: Pass 2
-        continue-on-error: true
-        run: cargo test -p wcore-cli --test path_boundary_tui_pty approving_once -- --nocapture --test-threads=1 2>&1 | tail -60
-      - name: Pass 3
-        continue-on-error: true
-        run: cargo test -p wcore-cli --test path_boundary_tui_pty approving_once -- --nocapture --test-threads=1 2>&1 | tail -60
+        run: |
+          cargo nextest run --workspace --profile ci --no-fail-fast --retries 0 2>&1 | tail -400

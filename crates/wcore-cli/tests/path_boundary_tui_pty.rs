@@ -210,7 +210,15 @@ fn approving_once_leaves_the_read_refused_by_the_sandbox() {
         Some(&server.uri()),
     );
 
-    let mut pty = Pty::spawn_with_env(home.path(), 40, 200, &[] as &[(&str, &str)]);
+    let mut pty = Pty::spawn_with_env(
+        home.path(),
+        40,
+        200,
+        &[(
+            "RUST_LOG",
+            "wcore_agent=debug,wcore_providers=debug,wcore_cli=debug",
+        )],
+    );
     pty.wait_for(
         |s| s.contains("WAYLAND") && s.contains("Workspace"),
         Duration::from_secs(60),
@@ -242,6 +250,32 @@ fn approving_once_leaves_the_read_refused_by_the_sandbox() {
         }
         if !seen {
             let diag = rt.block_on(support::mock_llm::received_requests(&server));
+            let engine_log = std::fs::read_to_string(home.path().join("logs/wayland-core.log"))
+                .unwrap_or_else(|e| format!("<no engine log: {e}>"));
+            let tail: String = engine_log
+                .lines()
+                .rev()
+                .take(160)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            let roles: Vec<String> = diag
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let n = r
+                        .body
+                        .get("messages")
+                        .and_then(|m| m.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    format!("req{}: {} message(s)", i + 1, n)
+                })
+                .collect();
+            eprintln!("WLDIAG_ENGINE_LOG_TAIL_BEGIN\n{tail}\nWLDIAG_ENGINE_LOG_TAIL_END");
+            eprintln!("WLDIAG_ROLES {}", roles.join(" | "));
             let bodies = diag
                 .iter()
                 .enumerate()
