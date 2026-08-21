@@ -410,3 +410,55 @@ test-group = 'native-windows-live'
 [[profile.ci.overrides]]
 filter = 'package(wcore-swarm)'
 threads-required = 4
+
+# ── PTY/TUI tests: reserve capacity so the READER THREAD is not starved ──────
+#
+# MEASURED, 2026-08-21, GitHub-hosted `macos-latest`:
+#   * `wcore-cli::path_boundary_tui_pty approving_once_leaves_the_read_refused_by_the_sandbox`
+#     failed 3/3 inside the full 14,882-test `--profile ci` run, each try burning
+#     the whole 30s deadline.
+#   * The SAME COMMIT, same runner image, that test ALONE: 3/3 PASS in
+#     2.12s / 1.90s / 1.67s. Run 32437602830.
+#   * When it passes inside the suite it also takes ~1.4s. So the deadline has a
+#     ~20x margin and this is not a slow test; it is a test that stops being
+#     SCHEDULED.
+#
+# WHY THESE TESTS SPECIFICALLY. `tests/support/pty.rs` spawns the real CLI on a
+# pty and feeds a `vt100` parser from a dedicated reader thread (`_reader`,
+# pty.rs:131). Every assertion is `wait_for(|screen| ...)`, which polls
+# `screen_text()` every 30ms. Starve the reader thread and the PARSER falls
+# behind the child: the test then polls a stale frame and never observes output
+# the child already produced. The failure surfaces as a timeout whose captured
+# "last screen" looks like the turn ended, because the screen is simply old.
+# Nothing in the product or the test's logic is wrong; the test just has to be
+# scheduled to see what it is watching. This is the same failure shape, and the
+# same remedy, as the wcore-swarm heartbeat override above.
+#
+# `threads-required` is again the correct lever rather than a test-group:
+# `max-threads` bounds concurrency WITHIN a group, and the pressure here comes
+# from the other ~14,800 tests in the run. `threads-required` reserves slots
+# from the global pool for the test's duration, which is the contended resource.
+# 4 matches the existing precedent; on a 3-4 core hosted runner that amounts to
+# "run this essentially alone", which is exactly the intent, and on a 96-core
+# host it is close to free because these binaries finish in seconds.
+#
+# HONESTY NOTE, per the warning on the override above: "flaky under load" must
+# not become a place to hide a real bug. Two things are therefore recorded
+# rather than absorbed. (1) The correlation with the repo-control write guard is
+# real — trees carrying it failed 6/6 tries, trees without it 1/13 — which is
+# consistent with the extra VFS layer adding enough work to widen an
+# already-open scheduling window, and is NOT evidence that the guard is
+# functionally wrong: the same tree passes 3/3 when the test is scheduled.
+# (2) The TUI drops `finish_reason` when destructuring `StreamEnd`, so a turn
+# that ended in error with an empty buffer would render as nothing. That is a
+# genuine observability gap, it is filed separately, and it is NOT what this
+# override is papering over — it was inferred by elimination BEFORE the
+# run-alone measurement, and the stale-frame mechanism explains the same
+# evidence without it.
+#
+# This is a SCHEDULING change only. No test, assertion, timeout, or selector is
+# added, removed, or loosened. A starved test still fails; it just is not
+# starved by our own runner. If any of these fails again, that failure is real.
+[[profile.ci.overrides]]
+filter = 'binary(path_boundary_tui_pty) + binary(goal_control_tui_pty) + binary(smoke_p0) + binary(config_unknown_keys_visible) + binary(p2_open_admission_entry_points) + binary(f21_02_01_child_tool_authority) + binary(f21_02_child_budget_live)'
+threads-required = 4

@@ -3116,10 +3116,48 @@ impl AgentBootstrap {
         // the Contained profile; repository content cannot select this branch.
         let is_channel_remote = self.channel_tool_posture.is_some();
         if registry.workspace_policy().is_none() {
-            let strict_workspace = is_channel_remote
-                || self.config.execution_policy.is_managed()
-                || !self.config.workspace_trust.is_trusted();
             let workspace = std::path::PathBuf::from(&self.workspace);
+            let trusted_by_grant = !is_channel_remote
+                && !self.config.execution_policy.is_managed()
+                && self.config.workspace_trust.is_trusted();
+            // `[security] require_vcs_for_writes` (OFF by default): a workspace
+            // with no version control has no undo, so a wrong write is
+            // unrecoverable rather than a `git checkout` away. When the operator
+            // opts in, such a workspace keeps the strict profile even with a
+            // current trust grant. Probed with the SAME
+            // `nearest_workspace_git_root` walk the trust fingerprint already
+            // uses for its executable-project boundary, so "is this a repo"
+            // cannot mean two different things in one session — and it looks at
+            // ancestors, so a subdirectory of a repository still counts.
+            //
+            // Evaluated only for a session that WOULD have been trusted: an
+            // already-strict session is unaffected, which is what keeps the
+            // default-off switch from being the only thing standing between an
+            // untrusted workspace and the trusted profile.
+            let unversioned_downgrade = trusted_by_grant
+                && self.config.security.require_vcs_for_writes
+                && wcore_config::workspace_trust::nearest_workspace_git_root(&workspace).is_none();
+            let strict_workspace = !trusted_by_grant || unversioned_downgrade;
+            if unversioned_downgrade {
+                // A user-visible notice, not a `warn!`: with `RUST_LOG` unset
+                // only ERROR reaches stderr, so a log line could never tell the
+                // operator why their profile changed. `emit_info` is the same
+                // channel the local-shell activation notice below uses.
+                let notice = format!(
+                    "Workspace {} is not under version control, so this session uses the \
+                     strict (contained) profile — an unrecoverable write has no `git \
+                     checkout` to undo it. Run `git init`, or set `[security] \
+                     require_vcs_for_writes = false` in the global config, to restore the \
+                     trusted-local profile.",
+                    workspace.display()
+                );
+                self.output.emit_info(&notice);
+                tracing::warn!(
+                    target: "wcore_agent::bootstrap",
+                    workspace = %workspace.display(),
+                    "{notice}"
+                );
+            }
             let policy = if strict_workspace {
                 // SEC-13 — the sandboxed shell's egress is decided by the
                 // OPERATOR's trusted `[security] allow_sandboxed_shell_network`,
@@ -3157,10 +3195,20 @@ impl AgentBootstrap {
                     .with_network(wcore_tools::workspace_policy::local_bash_network(false))
             };
             let policy = std::sync::Arc::new(policy);
+            // The repository-control write guard is installed for BOTH profiles.
+            // The strict profile gets it inside the existing jail; the trusted
+            // profile — which installs no VFS wrapper at all, and is therefore
+            // the one everyday local session that could `Write` its own
+            // `.git/hooks/pre-commit` or `.wayland-core/skills/**` — gets it
+            // over a bare `RealFs`. It denies writes only, so a trusted session
+            // that could previously read those paths still can.
             if strict_workspace {
                 let jail = wcore_tools::vfs::SandboxedFs::new(
-                    wcore_tools::vfs::SecretDenyFs::new(
-                        wcore_tools::vfs::RealFs,
+                    wcore_tools::vfs::RepoControlDenyFs::new(
+                        wcore_tools::vfs::SecretDenyFs::new(
+                            wcore_tools::vfs::RealFs,
+                            std::sync::Arc::clone(&policy),
+                        ),
                         std::sync::Arc::clone(&policy),
                     ),
                     workspace,
@@ -3172,31 +3220,49 @@ impl AgentBootstrap {
                 // to "what may this session look at".
                 .with_read_grants(policy.session_read_grant_handle());
                 registry.set_tool_vfs(std::sync::Arc::new(jail));
-            }
-            // An approved `ApprovalScope::AlwaysPath` has to land somewhere.
-            // The policy is that somewhere — it owns filesystem authority, and
-            // it is the thing that can refuse a root the approval manager has
-            // no business judging (credential store, `$HOME`, a non-local
-            // session).
-            if let Some(manager) = self.approval_manager.as_ref() {
-                // Wrapped so a REFUSED grant reaches the surface the user is
-                // actually looking at. `WorkspacePolicy::grant_path` reports
-                // refusal with `eprintln!`, which is right for a bare CLI and
-                // reaches nobody else: a JSON-stream host reads stdout frames
-                // and never sees stderr, and under the TUI stderr fights the
-                // rendered display. Without this the user answers "always allow
-                // this folder", the policy refuses the root, the approval
-                // degrades to `Once` as documented -- and nothing tells them,
-                // so a refused grant is indistinguishable from a granted one
-                // until the next read fails for a reason they cannot see.
-                let sink: std::sync::Arc<dyn wcore_protocol::PathGrantSink> =
-                    std::sync::Arc::new(ReportingPathGrantSink {
-                        inner: policy.clone(),
-                        output: self.output.clone(),
-                    });
-                manager.set_path_grant_sink(sink);
+            } else {
+                registry.set_tool_vfs(std::sync::Arc::new(
+                    wcore_tools::vfs::RepoControlDenyFs::new(
+                        wcore_tools::vfs::RealFs,
+                        std::sync::Arc::clone(&policy),
+                    ),
+                ));
             }
             registry.set_workspace_policy(policy);
+        }
+
+        // An approved `ApprovalScope::AlwaysPath` has to land somewhere. The
+        // policy is that somewhere — it owns filesystem authority, and it is
+        // the thing that can refuse a root the approval manager has no
+        // business judging (credential store, `$HOME`, a non-local session).
+        //
+        // Wrapped so a REFUSED grant reaches the surface the user is actually
+        // looking at. `WorkspacePolicy::grant_path` reports refusal with
+        // `eprintln!`, which is right for a bare CLI and reaches nobody else:
+        // a JSON-stream host reads stdout frames and never sees stderr, and
+        // under the TUI stderr fights the rendered display.
+        //
+        // Installed OUTSIDE the `workspace_policy().is_none()` block above,
+        // because that condition is not a proxy for "this session can answer
+        // always_path". When another layer installed the policy first
+        // (`channel_tools`, `spawner`), that block never ran and the manager
+        // was left with NO sink at all — `apply_path_grant` then returns
+        // `false` from its `None` arm, which is indistinguishable from a
+        // policy refusal and is silent on EVERY surface, stderr included.
+        //
+        // The sink is reporting only: it forwards the policy's answer
+        // verbatim and never overrides it, so this widens no authority on any
+        // session shape. Sessions that previously had no sink are refused
+        // exactly as before, and now say so.
+        if let (Some(manager), Some(policy)) =
+            (self.approval_manager.as_ref(), registry.workspace_policy())
+        {
+            let sink: std::sync::Arc<dyn wcore_protocol::PathGrantSink> =
+                std::sync::Arc::new(ReportingPathGrantSink {
+                    inner: policy,
+                    output: self.output.clone(),
+                });
+            manager.set_path_grant_sink(sink);
         }
 
         // The local-shell activation notice. It fires exactly when this session

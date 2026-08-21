@@ -215,3 +215,75 @@ async fn a_missing_file_is_still_not_found() {
         "an absent parent must be NotFound, got: {error}"
     );
 }
+
+/// REGRESSION: a decorator in the middle of the jail stack must FORWARD
+/// `read_pinned`, not inherit the trait default.
+///
+/// The default refuses instead of falling back to `read`, deliberately, so the
+/// TOCTOU window stays shut. The consequence is that any layer which forgets to
+/// forward does not degrade the pin — it breaks EVERY read through the jail,
+/// including ordinary project files that have nothing to do with that layer's
+/// concern. `SecretDenyFs` carries a comment saying exactly this, and
+/// `RepoControlDenyFs` was still added without the forward: the workspace
+/// posture then failed `read inside the workspace root must succeed`.
+///
+/// Graded through `SandboxedFs::read`, which is the production entry point and
+/// the thing that actually calls `inner.read_pinned`. The jail deliberately does
+/// NOT implement `read_pinned` itself, so calling that on the jail would only
+/// exercise the trait default and would fail whether or not the bug is present.
+///
+/// This grades the composed stack rather than one decorator, so the next layer
+/// inserted here is covered without anyone remembering to extend the test.
+#[tokio::test]
+async fn the_composed_jail_stack_still_forwards_a_pinned_read() {
+    use std::sync::Arc;
+    use wcore_tools::vfs::{RepoControlDenyFs, SandboxedFs, SecretDenyFs};
+    use wcore_tools::workspace_policy::WorkspacePolicy;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let ordinary = root.join("src/main.rs");
+    std::fs::write(&ordinary, b"fn main() {}\n").unwrap();
+
+    // Positive control: the fixture is readable by name, so a refusal below is
+    // a decision by the stack and not a missing or unreadable file.
+    assert_eq!(
+        RealFs.read(&ordinary).await.unwrap(),
+        b"fn main() {}\n".to_vec(),
+        "control: the fixture must be readable through the plain path"
+    );
+
+    // The exact production composition from `channel_tools::apply_posture`.
+    let policy = Arc::new(WorkspacePolicy::contained(root.clone()));
+    let jail = SandboxedFs::new(
+        RepoControlDenyFs::new(
+            SecretDenyFs::new(RealFs, Arc::clone(&policy)),
+            Arc::clone(&policy),
+        ),
+        root.clone(),
+    );
+
+    assert_eq!(
+        jail.read(&ordinary).await.unwrap(),
+        b"fn main() {}\n".to_vec(),
+        "a jailed read of an ordinary project file must survive every decorator"
+    );
+
+    // The repo-control surface is WRITE-denied, never READ-denied, so a pinned
+    // read of it must also succeed — guarding it here would be the opposite bug.
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let head = root.join(".git/HEAD");
+    std::fs::write(&head, b"ref: refs/heads/main\n").unwrap();
+    assert_eq!(
+        jail.read(&head).await.unwrap(),
+        b"ref: refs/heads/main\n".to_vec(),
+        "the repo-control surface is write-denied, not read-denied"
+    );
+
+    // Control in the other direction: the layer is still doing its job.
+    assert!(
+        jail.write(&head, b"ref: refs/heads/owned\n").await.is_err(),
+        "control: writes into the repo-control surface must still be refused"
+    );
+}

@@ -1,5 +1,101 @@
 # Changelog
 
+## [0.13.4](https://github.com/FerroxLabs/wayland-core/compare/v0.13.3...v0.13.4) (2026-08-21)
+
+**Release highlights.** One new capability and four fixes, and they share a
+subject: where the boundary of your workspace actually is, and whether the
+product tells you the truth about it. The boundary was wrong in both directions.
+Things you could reach were reported as out of bounds — a denied read came back
+as emptiness, and a path with a space in it was called outside your workspace
+when it never was. Things you should not have been able to reach were writable:
+`.git` hooks and the agent's own skill files. Meanwhile the one honest refusal,
+crossing the workspace edge, was the least useful thing it could be, because a
+refusal is not a question. This release makes the boundary correct, makes the
+refusals accurate, and in the largest case replaces the refusal with a question.
+No breaking changes.
+
+**You can grant a folder instead of being refused.** Reading a file outside the
+workspace used to end the same way every time: a denial, and a suggestion to
+restart under a different profile. There is now a fourth approval scope,
+`AlwaysPath`, that grants a directory for the rest of the session, and the
+boundary is checked *before* the read rather than discovered by failing it — so
+you are asked about a folder you are about to cross, instead of being told after
+the fact that you should not have. Three pieces make it work together and are
+released together because none is useful alone: the grant itself, the pre-flight
+boundary classifier that knows a read is about to leave the workspace, and a
+`render_artifact` path that hands content to the host without handing over any
+filesystem authority. The protocol contract goes from minor 14 to 16, which is
+additive: an existing host keeps working untouched.
+
+One limit is worth stating plainly rather than discovering. `Once` on a boundary
+card still cannot work — the authority plumbing does not support it, Enter is
+still bound to it, and the documentation that claimed otherwise has been
+corrected rather than the claim being made true. It is tracked, and not fixed
+here.
+
+A refused folder grant now says so on every session shape. The approval itself
+still stands for the call you approved — that is deliberate, and a refusal of
+the standing grant must never turn a yes into a no — but the grant failing to
+take is no longer silent. It was already announced on sessions where the agent
+installed the workspace policy itself. It is now announced on the ones where
+another layer installed it first, which previously had no reporting channel at
+all and so refused silently on every surface, stderr included. No authority
+changed: the reporting layer forwards the policy's answer verbatim, and a
+session that was refused before is refused now, and told why.
+
+**A path with a space in it is one path.** The advisory that explains a denied
+read split tool output on whitespace, so every macOS path under
+`Application Support` broke into two tokens, both of which then classified as
+ungranted. The result was a confident, specific, entirely invented message
+telling you the file was outside every root granted to your workspace — about
+files that were never out of reach. Because every Wayland desktop workspace lives
+under `Application Support`, this fired on the common case rather than an exotic
+one, and it cost two lanes and one user a day chasing a sandbox boundary problem
+that the error message had made up. Space-joined runs are now reassembled with
+the filesystem as the arbiter, and the test that matters is the control: a file
+that genuinely *is* outside your granted roots, also with a space in its name,
+still has to trigger the advisory.
+
+**The file tools can read your repository's control surface but never write
+it.** `.git` and `.wayland-core` were writable by the in-process `Write` and
+`Edit` tools in the trusted-local profile. Two concrete consequences, neither
+theoretical: a written `.git/hooks/pre-commit` is arbitrary code execution on
+your next commit, and a rewritten `.wayland-core/skills/*/SKILL.md` is arbitrary
+instruction injection into your next session — the agent editing its own
+standing orders. Both are now refused, in every profile, with an error that says
+to use the Bash tool and a real git command if the write is genuinely intended.
+Reads are untouched: this surface is write-denied, never read-denied.
+
+There is also an opt-in `[security] require_vcs_for_writes`, OFF by default,
+which keeps the strict profile in a workspace that is not under version control
+— on the reasoning that an unversioned workspace has no undo.
+
+**A denied file no longer reads as an empty one.** A masked read fails loudly on
+its own, but a compound command lets the shell swallow it — `cat secret.pem; echo
+rc=$?`, `cat x || true`, `cat x 2>/dev/null` — and what reaches the agent is
+success plus no bytes. That difference is acted on: a populated file gets
+reported as empty, a step is treated as having succeeded on no data, and a file
+the agent was never allowed to see can be overwritten in the belief that it was
+blank. The denial is now annotated on the success path too, by scanning the
+command rather than the output, since the empty output is the whole problem.
+Containment is unchanged, and the tests assert the secret's bytes never appear
+and the host file is byte-identical afterwards.
+
+**A command that produces too much output keeps what fits.** The Docker execution
+backend answered an over-cap command by discarding everything and returning an
+error, so the same command behaved differently depending on a backend you did not
+choose and mostly cannot see. It now grants what fits, appends the same
+truncation marker every other backend uses, and stops the container. Measured on
+a live daemon against a flood that never reaches EOF: 0 bytes before, 8,388,930
+after. A separate defect surfaced while fixing it and is fixed too — a non-zero
+container exit was being mapped to a generic I/O error that threw away both the
+exit status and every byte the command had already written.
+
+**Documentation for three shipped subsystems that had none.** Crucible (the
+cross-provider council), isolated profiles, and cost governance were all
+shippable and all undocumented. Every claim in the new pages was checked against
+the code before publishing rather than trusted from the draft.
+
 ## [0.13.3](https://github.com/FerroxLabs/wayland-core/compare/v0.13.2...v0.13.3) (2026-08-19)
 
 **Release highlights.** Two fixes, both about the product telling the truth. A
