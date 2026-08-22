@@ -33951,6 +33951,60 @@ mod stream_retry_budget_tests {
         );
     }
 
+    /// Wiring, not function — and the direction the whole cost argument for
+    /// this knob points in.
+    ///
+    /// `an_override_inside_the_ceiling_is_honoured_including_zero` proves the
+    /// RESOLVER honours a budget at or below the default; it cannot prove the
+    /// loop spends it, and the clamp test only ever pushes the budget UP.
+    /// Verified by mutation on this tree: flooring the loop bound at the
+    /// default (`max_stream_retries.max(DEFAULT_MAX_STREAM_RETRIES)`) silently
+    /// discarded every budget a user lowered and left all eight other tests in
+    /// this module green. A budget the user cut and the loop ignored is the
+    /// same silent lie the clamp exists to prevent, pointed the other way —
+    /// and it is the direction that costs money.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn a_below_default_budget_is_spent_by_the_loop_not_just_resolved() {
+        for (requested, expected_sends) in [("0", 1usize), ("1", 2usize)] {
+            let prior = std::env::var(super::MAX_STREAM_RETRIES_ENV).ok();
+            // SAFETY: same contract as the clamp test above — every test in
+            // this module that reads the budget is `#[serial_test::serial]`.
+            unsafe {
+                std::env::set_var(super::MAX_STREAM_RETRIES_ENV, requested);
+            }
+            let (sends, events) = run_against(Vec::new()).await;
+            unsafe {
+                match prior {
+                    Some(prior) => std::env::set_var(super::MAX_STREAM_RETRIES_ENV, prior),
+                    None => std::env::remove_var(super::MAX_STREAM_RETRIES_ENV),
+                }
+            }
+
+            assert_eq!(
+                sends,
+                expected_sends,
+                "{}={requested} must cost exactly {expected_sends} physical \
+                 send(s); the loop, not just the resolver, has to spend the \
+                 budget the user set",
+                super::MAX_STREAM_RETRIES_ENV
+            );
+            // The user-visible half: the retry notices they read must match
+            // the sends the provider actually saw.
+            let messages = notices(&events);
+            let retry_notices = messages
+                .iter()
+                .filter(|m| m.contains("Provider stream failed"))
+                .count();
+            assert_eq!(
+                retry_notices,
+                expected_sends - 1,
+                "one retry notice per re-send and no more; surface carried \
+                 {messages:?}"
+            );
+        }
+    }
+
     // --- (b) a silent provider stream is announced ------------------------
 
     /// The defect: the provider has accepted the request and sent nothing,
