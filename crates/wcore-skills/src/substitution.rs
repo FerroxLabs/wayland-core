@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use regex::Regex;
 
 /// Substitute all argument and environment variables in skill content.
@@ -10,6 +12,10 @@ use regex::Regex;
 /// 5. Skill directory: `${WCORE_SKILL_DIR}` (primary) or `${AIONRS_SKILL_DIR}` (alias) → `skill_root`
 /// 6. Session ID: `${WCORE_SESSION_ID}` (primary) or `${AIONRS_SESSION_ID}` (alias) → `session_id`
 /// 7. Fallback: if content is unchanged and args is non-empty, append `\n\nARGUMENTS: {args}`
+///
+/// Step 8 -- `${WCORE_SKILL_OUTPUT_DIR}` -- is applied separately by
+/// [`substitute_output_dir`], because its value is derived from the session
+/// CWD rather than from the skill metadata this function is given.
 ///
 /// The `AIONRS_*` tokens are backward-compat aliases retained so existing
 /// user-authored skills continue to work after the wayland-core rebrand.
@@ -104,6 +110,31 @@ pub fn substitute_arguments(
 
     result
 }
+
+/// Substitute `${WCORE_SKILL_OUTPUT_DIR}` -- the per-session directory a skill
+/// writes the files it PRODUCES into (FerroxLabs/wayland#1096).
+///
+/// Step 8 of the substitution order, applied by
+/// [`crate::executor::render_shell_input_in`] after
+/// [`substitute_arguments`] so the token expands in exactly the bytes that
+/// reach `sh -c` and the pre-dispatch execution-boundary scan sees the same
+/// string. Kept as its own function rather than a seventh parameter on
+/// `substitute_arguments` because the value is derived from the CWD, which the
+/// argument-substitution surface does not have and should not grow.
+///
+/// `None` leaves the token untouched: a caller with no session cwd (the cron
+/// pre-dispatch scan) must not invent a destination.
+#[must_use]
+pub fn substitute_output_dir(content: &str, output_dir: Option<&Path>) -> String {
+    match output_dir {
+        Some(dir) => content.replace(OUTPUT_DIR_TOKEN, &dir.to_string_lossy()),
+        None => content.to_owned(),
+    }
+}
+
+/// The one spelling of the output-directory placeholder. No `AIONRS_` alias:
+/// the token is new, so there is no pre-rebrand skill that could be using one.
+pub const OUTPUT_DIR_TOKEN: &str = "${WCORE_SKILL_OUTPUT_DIR}";
 
 /// Parse an argument string into individual arguments.
 ///
