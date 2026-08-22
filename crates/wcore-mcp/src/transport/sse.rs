@@ -557,6 +557,12 @@ fn resolve_endpoint(
 
 #[cfg(test)]
 mod tests {
+    // The same-origin fixtures below use a literal public IP, never a
+    // hostname: `resolve_endpoint` gates through
+    // `url_safety::is_safe_url`, which does a REAL DNS resolution and fails
+    // closed on an empty answer, so a hostname would make them depend on the
+    // runner's resolver. The cross-origin / smuggle cases keep hostnames —
+    // they are rejected on origin before any resolution is attempted.
     use super::*;
 
     fn transport_with_listener(listener: tokio::task::JoinHandle<()>) -> SseTransport {
@@ -876,21 +882,21 @@ mod tests {
     /// H-5 — a same-origin relative endpoint joins onto the base.
     #[test]
     fn resolve_endpoint_relative_same_origin_ok() {
-        let resolved = resolve_endpoint("https://example.com/mcp/sse", "/messages", false)
+        let resolved = resolve_endpoint("https://93.184.216.34/mcp/sse", "/messages", false)
             .expect("relative endpoint should resolve");
-        assert_eq!(resolved, "https://example.com/messages");
+        assert_eq!(resolved, "https://93.184.216.34/messages");
     }
 
     /// H-5 — a same-origin absolute endpoint is honored.
     #[test]
     fn resolve_endpoint_absolute_same_origin_ok() {
         let resolved = resolve_endpoint(
-            "https://example.com/mcp/sse",
-            "https://example.com/messages/abc",
+            "https://93.184.216.34/mcp/sse",
+            "https://93.184.216.34/messages/abc",
             false,
         )
         .expect("same-origin absolute endpoint should resolve");
-        assert_eq!(resolved, "https://example.com/messages/abc");
+        assert_eq!(resolved, "https://93.184.216.34/messages/abc");
     }
 
     /// H-5 — the core hole: a cross-origin absolute endpoint (the

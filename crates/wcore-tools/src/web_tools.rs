@@ -806,6 +806,15 @@ impl Tool for WebTool {
 
 #[cfg(test)]
 mod tests {
+    // Fixtures use a literal public IP, never a hostname.
+    //
+    // The tool path runs `url_safety::is_safe_url`, which performs a REAL DNS
+    // resolution and fails closed when it returns no addresses, so a hostname
+    // fixture makes these tests depend on the runner's resolver. A literal IP
+    // takes the `parse::<IpAddr>()` fast path and skips resolution entirely.
+    // Hostname resolution is covered hermetically in `url_safety`'s own tests
+    // via `is_safe_url_with(.., fake_resolver)`. Same convention as
+    // `transcription_tools`.
     use super::*;
     use wcore_types::tool::ToolEffectKind;
 
@@ -1019,14 +1028,14 @@ mod tests {
     async fn extract_mixed_safe_and_unsafe_calls_backend_with_only_safe_urls() {
         let backend = Arc::new(CapturingWebBackend::new().with_extract_payload(json!({
             "results": [
-                {"url": "https://example.com/", "title": "Example", "content": "..."}
+                {"url": "https://93.184.216.34/", "title": "Example", "content": "..."}
             ]
         })));
         let tool = WebTool::new(backend.clone());
         let r = tool
             .execute(json!({
                 "operation": "extract",
-                "urls": ["https://example.com/", "http://127.0.0.1/"]
+                "urls": ["https://93.184.216.34/", "http://127.0.0.1/"]
             }))
             .await;
         assert!(!r.is_error);
@@ -1034,7 +1043,7 @@ mod tests {
         assert_eq!(snap.len(), 1, "backend should be called exactly once");
         match &snap[0] {
             CapturedWebCall::Extract(req) => {
-                assert_eq!(req.urls, vec!["https://example.com/".to_string()]);
+                assert_eq!(req.urls, vec!["https://93.184.216.34/".to_string()]);
             }
             other => panic!("expected Extract, got {other:?}"),
         }
@@ -1082,13 +1091,13 @@ mod tests {
     #[tokio::test]
     async fn crawl_happy_path_invokes_backend_with_defaults() {
         let backend = Arc::new(CapturingWebBackend::new().with_crawl_payload(json!({
-            "results": [{"url": "https://example.com/", "title": "Ex", "content": "ok"}]
+            "results": [{"url": "https://93.184.216.34/", "title": "Ex", "content": "ok"}]
         })));
         let tool = WebTool::new(backend.clone());
         let r = tool
             .execute(json!({
                 "operation": "crawl",
-                "url": "example.com",
+                "url": "93.184.216.34",
                 "instructions": "find contact info"
             }))
             .await;
@@ -1097,7 +1106,7 @@ mod tests {
         assert_eq!(snap.len(), 1);
         match &snap[0] {
             CapturedWebCall::Crawl(req) => {
-                assert_eq!(req.url, "https://example.com");
+                assert_eq!(req.url, "https://93.184.216.34");
                 assert_eq!(req.depth, "basic");
                 assert!(req.use_llm_processing);
                 assert_eq!(req.instructions.as_deref(), Some("find contact info"));

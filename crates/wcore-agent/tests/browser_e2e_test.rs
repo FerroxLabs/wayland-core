@@ -146,7 +146,11 @@ async fn host_registrar_captures_wayland_browser_spec() {
 
 #[tokio::test]
 async fn reified_browser_tool_drives_real_http_to_wiremock_sidecar() {
-    // Wiremock pretends to be the Camoufox sidecar.
+    // Wiremock pretends to be the Camoufox sidecar. The navigation target
+    // is a literal public IP, not a hostname: `BrowserPolicy`'s DNS
+    // resolution gate fails closed on a host that resolves to nothing, and
+    // a hostname fixture would make this test require working DNS on the
+    // runner. A literal skips resolution entirely.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/tabs"))
@@ -159,16 +163,16 @@ async fn reified_browser_tool_drives_real_http_to_wiremock_sidecar() {
     Mock::given(method("POST"))
         .and(path("/tabs/wm-sess-1/navigate"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "url": "https://example.com/"
+            "url": "https://93.184.216.34/"
         })))
         .mount(&server)
         .await;
 
-    let tool = build_tool_pointed_at(&server.uri(), "example.com");
+    let tool = build_tool_pointed_at(&server.uri(), "93.184.216.34");
     let input = json!({
         "op": {
             "kind": "navigate",
-            "url": "https://example.com/"
+            "url": "https://93.184.216.34/"
         }
     });
     let result = tool

@@ -44,6 +44,13 @@
 //! This file measures that gate against a provider that performs the write the real
 //! backend would perform. It does not claim the end-to-end download.
 
+// The URL fixture is a literal public IP, never a hostname. `BrowserPolicy`'s
+// DNS resolution gate fails closed on a host that resolves to nothing, so a
+// hostname here would make these download-confinement tests depend on the
+// runner's resolver — the refusal under test would come from the DNS gate
+// rather than the local-path gate. A literal carries its own destination and
+// skips resolution, exactly as `dns_resolution_gate_test::PUBLIC_LITERAL` does.
+
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -130,8 +137,8 @@ impl BrowserProvider for RecordingProvider {
     }
 }
 
-/// Build a tool whose URL policy ALLOWS `example.com`, so any refusal observed is
-/// provably the local-path gate and not the URL policy.
+/// Build a tool whose URL policy ALLOWS the literal-IP fixture host, so any
+/// refusal observed is provably the local-path gate and not the URL policy.
 ///
 /// `#[cfg(unix)]` for the same reason as `download_dests` above: its only caller is
 /// the symlink-dependent baseline test.
@@ -139,7 +146,7 @@ impl BrowserProvider for RecordingProvider {
 fn tool_with_root(provider: Arc<RecordingProvider>, root: &Path) -> BrowserTool {
     BrowserTool::new(
         provider,
-        BrowserPolicy::new(PolicyAction::Allow, vec!["example.com".into()], vec![]),
+        BrowserPolicy::new(PolicyAction::Allow, vec!["93.184.216.34".into()], vec![]),
         Arc::new(BrowserSupervisor::new()),
     )
     .with_downloads_root(root.to_path_buf())
@@ -149,7 +156,7 @@ fn download_input(dest: &str) -> serde_json::Value {
     json!({
         "op": {
             "kind": "download",
-            "url": "https://example.com/payload.bin",
+            "url": "https://93.184.216.34/payload.bin",
             "dest_path": dest,
         }
     })
@@ -335,7 +342,7 @@ async fn baseline_default_root_is_fail_closed_pair() {
     let provider = Arc::new(RecordingProvider::default());
     let tool = BrowserTool::new(
         provider.clone(),
-        BrowserPolicy::new(PolicyAction::Allow, vec!["example.com".into()], vec![]),
+        BrowserPolicy::new(PolicyAction::Allow, vec!["93.184.216.34".into()], vec![]),
         Arc::new(BrowserSupervisor::new()),
     );
 

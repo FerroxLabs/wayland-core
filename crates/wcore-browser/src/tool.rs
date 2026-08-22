@@ -875,7 +875,7 @@ mod tests {
     async fn download_without_explicit_root_rejects_outside_default_root() {
         let tool = BrowserTool::new(
             Arc::new(OkBackend),
-            BrowserPolicy::new(PolicyAction::Allow, vec!["example.com".into()], vec![]),
+            BrowserPolicy::new(PolicyAction::Allow, vec!["93.184.216.34".into()], vec![]),
             Arc::new(BrowserSupervisor::new()),
         );
 
@@ -883,7 +883,7 @@ mod tests {
         let bad_input = json!({
             "op": {
                 "kind": "download",
-                "url": "https://example.com/x",
+                "url": "https://93.184.216.34/x",
                 "dest_path": "/etc/cron.d/wayland"
             }
         });
@@ -900,7 +900,7 @@ mod tests {
         let ok_input = json!({
             "op": {
                 "kind": "download",
-                "url": "https://example.com/x",
+                "url": "https://93.184.216.34/x",
                 "dest_path": inside.to_string_lossy(),
             }
         });
@@ -916,7 +916,7 @@ mod tests {
         let inside = root.path().join("report.pdf");
         let tool = BrowserTool::new(
             Arc::new(OkBackend),
-            BrowserPolicy::new(PolicyAction::Allow, vec!["example.com".into()], vec![]),
+            BrowserPolicy::new(PolicyAction::Allow, vec!["93.184.216.34".into()], vec![]),
             Arc::new(BrowserSupervisor::new()),
         )
         .with_downloads_root(root.path().to_path_buf());
@@ -924,7 +924,7 @@ mod tests {
         let ok_input = json!({
             "op": {
                 "kind": "download",
-                "url": "https://example.com/x",
+                "url": "https://93.184.216.34/x",
                 "dest_path": inside.to_string_lossy(),
             }
         });
@@ -937,7 +937,7 @@ mod tests {
         let bad_input = json!({
             "op": {
                 "kind": "download",
-                "url": "https://example.com/x",
+                "url": "https://93.184.216.34/x",
                 "dest_path": outside.to_string_lossy(),
             }
         });
