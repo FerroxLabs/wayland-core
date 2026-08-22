@@ -76,7 +76,8 @@ async fn silence_notice(after: Option<Duration>) -> Duration {
 /// spawned response workers can remain parked in `bytes_stream().next()` until
 /// the five-minute read timeout even though nobody can consume their output.
 ///
-/// Also the one place that can see a stream go quiet. Every provider polls
+/// Also where an ESTABLISHED stream is seen to go quiet; the window before it
+/// is established belongs to [`awaiting_first_byte`]. Every provider polls
 /// this function and nothing else sits between the socket and the engine, so
 /// a gap of [`stream_silence_notice_after`] with no bytes emits ONE
 /// [`LlmEvent::StreamSilent`] on the same channel the engine already consumes
@@ -121,34 +122,56 @@ where
     }
 }
 
-/// Observe the DISPATCH window — request sent, first byte not yet arrived.
+/// Observe the DISPATCH window — request sent, response head not yet arrived.
 ///
 /// [`next_or_consumer_closed`] is the wrong instrument for this: it can only
 /// watch a `Stream`, and a provider stream does not exist until `send().await`
 /// has already resolved. Every provider builds its `mpsc::Sender` AFTER the
 /// send returns 2xx (anthropic.rs:186, openai.rs:1557, azure_openai.rs:321,
-/// gemini.rs:684, cohere.rs, vertex.rs:432), so the window this function covers
-/// is the one window the product currently cannot say anything during.
+/// gemini.rs:684, cohere.rs, vertex.rs:432), so the window this call covers is
+/// the one window the product could not say anything during.
 ///
-/// Measured live on this host against a blackholed endpoint: 30.071 s of total
-/// silence between the last startup notice and the first retry line, at 0.05 s
-/// polling resolution on an unpiped raw file.
+/// Measured live on this host before the fix, against a blackholed endpoint:
+/// 30.076 s of total silence between the last startup notice and the first
+/// retry line, at 0.02 s polling resolution on an unpiped raw file.
 ///
-/// RED ARM (this commit): the body is a bare passthrough. It arms no timer and
-/// emits nothing, and NOTHING calls it yet — product behaviour is byte-identical
-/// to before. It exists so the reproduction below can be expressed against real
-/// module surface instead of a private re-implementation that would keep passing
-/// no matter what the fix did.
-/// RED ARM ONLY: no call sites until the fix wires the six provider dispatch
-/// points. CI builds with `-D warnings`, so the unused-function lint has to be
-/// held off explicitly rather than left to break the lint gate. Delete this
-/// attribute in the same commit that adds the first call site.
-#[allow(dead_code)]
-pub(crate) async fn awaiting_first_byte<F>(dispatch: F, _tx: &mpsc::Sender<LlmEvent>) -> F::Output
+/// Coverage is now continuous. This call spans dispatch → response head;
+/// [`next_or_consumer_closed`] spans response head → first byte and every
+/// later gap. The two windows are adjacent and disjoint, so a silence anywhere
+/// in the request is attributable to one of them.
+///
+/// DIAGNOSTIC ONLY — the dispatch is the only thing that can end this loop.
+/// The timer arm emits and latches; it never breaks, returns, or drops the
+/// dispatch. `dispatch` is awaited to completion and its own output is handed
+/// back unchanged, so nothing here can cancel, shorten or retry a request.
+/// `biased` polls the dispatch first, so a dispatch that resolves in the same
+/// wake as the timer wins and stays silent.
+///
+/// Same properties as the stream-side notice, for the same reasons: at most
+/// ONE notice per silent gap (the `notified` latch); the signal carries the
+/// elapsed duration and no prose, because the agent layer owns the rendering;
+/// the timer is owned by this call and dropped with it, so completing the
+/// dispatch CANCELS it rather than deferring it onto a request that already
+/// answered; and `try_send` never parks the task that owns the request on a
+/// full channel — a dropped notice costs one advisory line.
+pub async fn awaiting_first_byte<F>(dispatch: F, tx: &mpsc::Sender<LlmEvent>) -> F::Output
 where
     F: std::future::Future,
 {
-    dispatch.await
+    tokio::pin!(dispatch);
+    let notice = silence_notice(stream_silence_notice_after());
+    tokio::pin!(notice);
+    let mut notified = false;
+    loop {
+        tokio::select! {
+            biased;
+            output = &mut dispatch => return output,
+            silent_for = &mut notice, if !notified => {
+                notified = true;
+                let _ = tx.try_send(LlmEvent::StreamSilent { silent_for });
+            }
+        }
+    }
 }
 
 /// Default TCP+TLS connect timeout for provider clients.
@@ -170,19 +193,24 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(300);
 /// nobody can reach.
 pub const STREAM_SILENCE_NOTICE_ENV: &str = "WAYLAND_STREAM_SILENCE_NOTICE";
 
-/// Default silence before a provider stream reports that it is still waiting.
+/// Default silence before a request reports that it is still waiting.
 ///
-/// Derived from [`READ_TIMEOUT`] rather than invented: one tenth of the window
-/// that would eventually kill the request, which also lands on the same 30s
-/// order as [`CONNECT_TIMEOUT`]. The bar it has to clear is that the user
-/// hears something WELL before the read timeout fires — silence for the full
-/// five minutes is what a hang looks like.
+/// Derived from [`CONNECT_TIMEOUT`], not [`READ_TIMEOUT`]: the binding
+/// constraint is the EARLIEST deadline the notice has to precede, never the
+/// latest. The old derivation (`READ_TIMEOUT` / 10) came out at 30 s — exactly
+/// [`CONNECT_TIMEOUT`] — so on the dispatch window the notice was scheduled for
+/// the same instant as the failure it exists to precede and could never reach
+/// the user first. Half the connect deadline leaves a full 15 s of visible
+/// warning before a wedged connect is reported, and is still twenty times
+/// below [`READ_TIMEOUT`], so an established stream that goes quiet is still
+/// announced long before the read timeout would kill it.
 ///
 /// It is only a notice: nothing is cancelled, retried or failed, so a
 /// reasoning model that legitimately thinks for four minutes still streams
 /// normally afterwards. That is why this is much shorter than [`READ_TIMEOUT`]
 /// and is allowed to be.
-pub const STREAM_SILENCE_NOTICE_AFTER: Duration = Duration::from_secs(READ_TIMEOUT.as_secs() / 10);
+pub const STREAM_SILENCE_NOTICE_AFTER: Duration =
+    Duration::from_secs(CONNECT_TIMEOUT.as_secs() / 2);
 
 /// Resolved silence threshold: [`STREAM_SILENCE_NOTICE_AFTER`] unless
 /// [`STREAM_SILENCE_NOTICE_ENV`] overrides it, `None` when disabled.
@@ -464,9 +492,12 @@ mod tests {
     /// `off` has to actually mean off rather than "very soon".
     #[test]
     fn the_silence_threshold_reads_its_configured_override() {
-        // Default: 30s, one tenth of the read timeout that would kill the
-        // request — a notice long before the window a hang looks like.
-        assert_eq!(resolve_stream_silence_notice(None), Some(READ_TIMEOUT / 10));
+        // Default: 15s, half the connect deadline it has to precede — and
+        // still far below the read timeout that would kill a quiet stream.
+        assert_eq!(
+            resolve_stream_silence_notice(None),
+            Some(CONNECT_TIMEOUT / 2)
+        );
         assert_eq!(
             resolve_stream_silence_notice(None),
             Some(STREAM_SILENCE_NOTICE_AFTER)
@@ -693,6 +724,51 @@ mod tests {
             matches!(rx.try_recv(), Ok(LlmEvent::StreamSilent { .. })),
             "control: this receiver CAN observe a silence signal, so the two \
              absence assertions above are real absences and not a dead channel"
+        );
+    }
+
+    /// DIAGNOSTIC ONLY — the notice must not touch the request it reports on.
+    ///
+    /// That a silence signal must never abort, shorten or otherwise alter a
+    /// request is not covered by either control above: both use a dispatch
+    /// that answers before the timer, so neither can observe what happens to a
+    /// dispatch the notice has already fired against. A fix that returned,
+    /// broke, or dropped the dispatch on the timer arm would pass every other
+    /// test in this file and silently kill every slow request in production.
+    ///
+    /// Here the notice fires first and the dispatch resolves afterwards. It
+    /// must still resolve, with its OWN value, and exactly one notice may exist.
+    #[tokio::test(start_paused = true)]
+    async fn a_notified_dispatch_still_completes_and_returns_its_own_result() {
+        let (tx, mut rx) = mpsc::channel::<LlmEvent>(8);
+        let threshold = stream_silence_notice_after().expect("the default is enabled");
+
+        // Outlives the notice by a wide margin, and still has to be waited for.
+        let answered = awaiting_first_byte(
+            async {
+                tokio::time::sleep(threshold * 3).await;
+                "the dispatch resolved on its own"
+            },
+            &tx,
+        )
+        .await;
+        assert_eq!(
+            answered, "the dispatch resolved on its own",
+            "the silence notice must not cancel or shorten the request it reports on"
+        );
+
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(LlmEvent::StreamSilent { silent_for }) if silent_for == threshold
+            ),
+            "the notice must have fired once, carrying the elapsed silence"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a dispatch silent for {:?} against a {threshold:?} threshold must still \
+             raise exactly ONE notice, not one per elapsed window",
+            threshold * 3
         );
     }
 

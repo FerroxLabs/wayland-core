@@ -12218,41 +12218,80 @@ impl AgentEngine {
                     (None, _) => Arc::clone(&self.provider),
                 };
                 let provider_cancel = self.cancel_token.clone();
-                let provider_result = tokio::select! {
-                    biased;
-                    _ = provider_cancel.cancelled() => {
-                        {
-                            let mut fallback_state = fallback_budget_state
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            if let Some(reservation) = fallback_state.current.take() {
-                                // Cancellation may race a physical send. Once the
-                                // provider future has been polled, its outcome is
-                                // unknown; consume the conservative reservation so
-                                // the session neither understates possible spend
-                                // nor leaves an in-flight reservation stranded.
-                                let (input_tokens, output_tokens, cost_usd) =
-                                    reservation.conservative_charge();
-                                let _ = reservation.settle(input_tokens, output_tokens, cost_usd);
-                            }
-                        }
-                        if journal_turn_id.is_none() {
-                            self.prepare_durable_conversation().await?;
-                            self.save_session_mirror();
-                        }
-                        self.output.emit_info("Run cancelled while waiting for the provider.");
-                        return Err(AgentError::UserAborted);
-                    }
-                    result = wcore_providers::retry::scope_configured_fallback_admitter(
-                        fallback_admitter,
-                        wcore_providers::retry::scope_max_retries(
-                            0,
-                            wcore_providers::retry::observe_provider_attempts(
-                                attempt_observer,
-                                attempt_provider.stream(&request),
+                // #1077 — the DISPATCH window: request sent, response head not
+                // back yet. Measured at 30.076s of complete silence against a
+                // blackholed endpoint, which from here is indistinguishable
+                // from a hang. `awaiting_first_byte` owns the timer; this
+                // channel is how its notice reaches the user.
+                //
+                // It has to be drained CONCURRENTLY with the dispatch, which is
+                // why the select became a loop: a notice delivered after the
+                // dispatch resolved is a notice about a wait that is already
+                // over. Only the dispatch arm breaks the loop, so the notice
+                // can never shorten or cancel the request it reports on.
+                //
+                // Scoped in a block of its own so the pinned dispatch future is
+                // dropped the moment the loop ends. `tokio::select!` used to
+                // drop it with the expression; a `loop` + `pin!` would instead
+                // hold its borrow of `request` to the end of the enclosing
+                // block, where the retry paths below need `&mut request`.
+                let provider_result = {
+                    let (silence_tx, mut silence_rx) = tokio::sync::mpsc::channel::<LlmEvent>(4);
+                    let dispatch = wcore_providers::http_client::awaiting_first_byte(
+                        wcore_providers::retry::scope_configured_fallback_admitter(
+                            fallback_admitter,
+                            wcore_providers::retry::scope_max_retries(
+                                0,
+                                wcore_providers::retry::observe_provider_attempts(
+                                    attempt_observer,
+                                    attempt_provider.stream(&request),
+                                ),
                             ),
                         ),
-                    ) => result,
+                        &silence_tx,
+                    );
+                    tokio::pin!(dispatch);
+                    loop {
+                        tokio::select! {
+                        biased;
+                        _ = provider_cancel.cancelled() => {
+                            {
+                                let mut fallback_state = fallback_budget_state
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                if let Some(reservation) = fallback_state.current.take() {
+                                    // Cancellation may race a physical send. Once the
+                                    // provider future has been polled, its outcome is
+                                    // unknown; consume the conservative reservation so
+                                    // the session neither understates possible spend
+                                    // nor leaves an in-flight reservation stranded.
+                                    let (input_tokens, output_tokens, cost_usd) =
+                                        reservation.conservative_charge();
+                                    let _ = reservation.settle(input_tokens, output_tokens, cost_usd);
+                                }
+                            }
+                            if journal_turn_id.is_none() {
+                                self.prepare_durable_conversation().await?;
+                                self.save_session_mirror();
+                            }
+                            self.output.emit_info("Run cancelled while waiting for the provider.");
+                            return Err(AgentError::UserAborted);
+                        }
+                        result = &mut dispatch => break result,
+                        // The same signal the stream-poll path already emits, and
+                        // rendered with the same words: from the user's side the
+                        // two windows are one wait. The provider crate carries the
+                        // fact, this layer owns the prose.
+                        Some(event) = silence_rx.recv() => {
+                            if let LlmEvent::StreamSilent { silent_for } = event {
+                                self.output.emit_info(&format!(
+                                    "Still waiting on the provider - no output for {}s.",
+                                    silent_for.as_secs()
+                                ));
+                            }
+                        }
+                        }
+                    }
                 };
                 let (current_attempt_provider, current_attempt_model, fallback_admission_failure) = {
                     let mut fallback_state = fallback_budget_state

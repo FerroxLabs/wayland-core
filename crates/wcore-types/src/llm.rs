@@ -191,9 +191,11 @@ pub enum LlmEvent {
     ///
     /// Carries the elapsed silence and no prose: rendering belongs to the
     /// agent layer, which owns the user's surface. Emitted at most once per
-    /// silent gap by the single chokepoint every provider polls
-    /// (`wcore_providers::http_client::next_or_consumer_closed`), and
-    /// cancelled by the first byte.
+    /// silent gap, and cancelled rather than deferred when the wait ends, by
+    /// the two adjacent windows that together cover a whole request:
+    /// `wcore_providers::http_client::awaiting_first_byte` from dispatch to the
+    /// response head, and `..::next_or_consumer_closed`, which every provider
+    /// polls, from there to the first byte and every later gap.
     StreamSilent { silent_for: std::time::Duration },
     /// Error from the API
     Error(String),
