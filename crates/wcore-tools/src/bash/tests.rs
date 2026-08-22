@@ -2072,8 +2072,10 @@ struct CannedBackend {
 /// token and the tool reports success about half the time. That is an artefact
 /// of the canned backend, not a product behaviour — a real child process is
 /// never ready on the first poll — and it made the control test flaky (observed
-/// FAIL then PASS on retry). 5 ms is negligible against the >=250 ms walk these
-/// tests measure.
+/// FAIL then PASS on retry). The size only has to defeat first-poll readiness:
+/// none of the latency tests below reach `execute` at all (they are cancelled,
+/// or their manifest build times out first), so this delay is outside every
+/// `elapsed` they measure.
 const CANNED_EXEC_DELAY: Duration = Duration::from_millis(5);
 
 impl CannedBackend {
@@ -2134,14 +2136,72 @@ fn canned_ctx(
         )))
 }
 
+/// Pay `BashTool`'s one-time, process-wide lazy initialisation before any clock
+/// below starts.
+///
+/// Measured on hetzner under nextest (one process per test) against a
+/// COMPLETELY EMPTY workspace: three successive pre-cancelled calls cost
+/// 24.26 ms, 73 us, 38 us, all three returning the same "cancelled" result. The
+/// first `BashTool` call in a process pays ~24 ms of initialisation that is
+/// CONSTANT — independent of the tree, the walk, the policy posture and the
+/// backend (it is the same 24 ms on an empty tree as on a 130k-entry one).
+///
+/// Every latency test below starts its clock on exactly that first call, so
+/// that constant used to sit inside `elapsed` and get compared against a `walk`
+/// it has nothing to do with. Pinning the calibration at 250 ms hid it, because
+/// 24 ms * 3 still fits under 250 ms — the assertions were mostly grading
+/// lazy-static construction. Warming it here is what lets `elapsed` measure the
+/// bound actually under test, at any honestly reachable walk cost.
+async fn warm_bash_tool_process_init() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    // `trusted_local` skips the secret walk, and the token is pre-cancelled, so
+    // warming returns as soon as the initialisation it exists to pay is done.
+    let policy = std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::trusted_local(
+        &root,
+    ));
+    let ctx = canned_ctx(policy, CannedBackend::enforcing());
+    ctx.cancel.cancel();
+    let sink = crate::NullToolOutputSink;
+    // Both entry points, so neither path can be the one still paying it.
+    let _ = BashTool
+        .execute_with_ctx(json!({"command": "echo warm"}), &ctx)
+        .await;
+    let _ = BashTool
+        .execute_streaming_with_ctx(json!({"command": "echo warm"}), &ctx, &sink)
+        .await;
+}
+
+/// The walk cost the five latency tests below calibrate their trees to.
+///
+/// Deliberately modest, and NOT a claim that the product's walk is slow: it is
+/// only the point at which the walk is big enough to be measured against a
+/// bound. Each test derives its own bound from the cost it actually measures,
+/// so this constant sizes the tree and nothing else.
+///
+/// Sized from measurement: on an idle 96-core hetzner box the parallel walk
+/// costs ~0.4 us/entry, so 25 ms is reached at ~50k entries in ~5 batches —
+/// well inside the growth cap even with all five callers running concurrently.
+const CALIBRATED_WALK: Duration = Duration::from_millis(25);
+
 /// Grow `root` until its secret-deny walk costs at least `target`, and return
 /// the policy plus the MEASURED warm cost of that walk.
 ///
 /// Self-calibrating on purpose: the absolute cost per entry differs by host and
-/// filesystem (measured ~8.5 us/entry warm on hetzner ext4), so a hardcoded
-/// tree size would either be vacuously fast on a fast box or waste minutes on a
-/// slow one. The returned duration is warm — every growth iteration re-walks —
-/// so it is a LOWER bound on what the call under test would pay.
+/// filesystem, so a hardcoded tree size would either be vacuously fast on a fast
+/// box or waste minutes on a slow one. The returned duration is warm — every
+/// growth iteration re-walks — so it is a LOWER bound on what the call under
+/// test would pay.
+///
+/// The target is calibrated DOWN to what is cheaply reachable rather than up to
+/// an impressive number, and callers must derive their bound from the returned
+/// duration rather than pin a literal against it. An earlier revision did the
+/// opposite: it pinned 250 ms, and once the walk was parallelised that cost
+/// needed 630k entries — measured, idle box, the last batch before a 640k cap,
+/// i.e. zero margin — while under the concurrency of the five callers it was
+/// not reachable at all, so the helper spent ~30 s per test creating files and
+/// then panicked. The walk getting FASTER is a product improvement and must not
+/// break the tests that grade it.
 fn workspace_whose_walk_costs_at_least(
     root: &std::path::Path,
     target: std::time::Duration,
@@ -2153,7 +2213,7 @@ fn workspace_whose_walk_costs_at_least(
     std::fs::write(root.join(".env"), b"TOKEN=redacted\n").unwrap();
     let policy = std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::contained(root));
 
-    for batch in 0..64usize {
+    for batch in 0..24usize {
         let started = std::time::Instant::now();
         let deny = policy.secret_deny_paths_for_backend(true);
         let walk = started.elapsed();
@@ -2177,16 +2237,17 @@ fn workspace_whose_walk_costs_at_least(
             }
         }
     }
-    panic!("could not grow a workspace whose walk costs {target:?} within 640k entries");
+    panic!("could not grow a workspace whose walk costs {target:?} within 240k entries");
 }
 
 /// #1111, call site `bash.rs:641` (`execute_with_ctx`): Esc must not wait for
 /// the walk.
 #[tokio::test]
 async fn a_cancelled_bash_does_not_wait_for_the_secret_deny_walk() {
+    warm_bash_tool_process_init().await;
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
-    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, Duration::from_millis(250));
+    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
     let ctx = canned_ctx(policy, CannedBackend::enforcing());
     ctx.cancel.cancel();
@@ -2213,22 +2274,31 @@ async fn a_cancelled_bash_does_not_wait_for_the_secret_deny_walk() {
 /// execution, including the manifest build.
 #[tokio::test]
 async fn the_bash_timeout_bounds_the_secret_deny_walk() {
+    warm_bash_tool_process_init().await;
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
-    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, Duration::from_millis(250));
+    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
     let ctx = canned_ctx(policy, CannedBackend::enforcing());
 
+    // #1111 grades "the user's `timeout` BOUNDS the walk", which is a relation
+    // between the two — so the bound is derived from the walk just measured
+    // rather than pinned. A literal that is small against today's walk becomes
+    // large against a faster one, and this assertion would then pass for the
+    // wrong reason (or, as with the 250 ms target this replaced, never get the
+    // chance to run at all).
+    let timeout_ms = (walk / 10).as_millis().max(1) as u64;
+
     let started = std::time::Instant::now();
     let result = BashTool
-        .execute_with_ctx(json!({"command": "echo hi", "timeout": 1}), &ctx)
+        .execute_with_ctx(json!({"command": "echo hi", "timeout": timeout_ms}), &ctx)
         .await;
     let elapsed = started.elapsed();
 
     assert!(
         elapsed * 3 < walk,
-        "a 1ms timeout returned after {elapsed:?} against a walk measured at \
-         {walk:?} — the manifest build is outside the timeout scope"
+        "a {timeout_ms}ms timeout returned after {elapsed:?} against a walk \
+         measured at {walk:?} — the manifest build is outside the timeout scope"
     );
     // #1111 acceptance 3: "a manifest build that exceeds the timeout produces a
     // user-visible message NAMING THE CAUSE". `contains("timed out")` alone is
@@ -2247,9 +2317,10 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
 /// separate code path. Fixing only `execute_with_ctx` leaves this one live.
 #[tokio::test]
 async fn a_cancelled_streaming_bash_does_not_wait_for_the_secret_deny_walk() {
+    warm_bash_tool_process_init().await;
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
-    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, Duration::from_millis(250));
+    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
     let ctx = canned_ctx(policy, CannedBackend::enforcing());
     ctx.cancel.cancel();
@@ -2277,23 +2348,37 @@ async fn a_cancelled_streaming_bash_does_not_wait_for_the_secret_deny_walk() {
 /// manifest build too.
 #[tokio::test]
 async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
+    warm_bash_tool_process_init().await;
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
-    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, Duration::from_millis(250));
+    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
     let ctx = canned_ctx(policy, CannedBackend::enforcing());
+
+    // #1111 grades "the user's `timeout` BOUNDS the walk", which is a relation
+    // between the two — so the bound is derived from the walk just measured
+    // rather than pinned. A literal that is small against today's walk becomes
+    // large against a faster one, and this assertion would then pass for the
+    // wrong reason (or, as with the 250 ms target this replaced, never get the
+    // chance to run at all).
+    let timeout_ms = (walk / 10).as_millis().max(1) as u64;
 
     let sink = crate::NullToolOutputSink;
     let started = std::time::Instant::now();
     let result = BashTool
-        .execute_streaming_with_ctx(json!({"command": "echo hi", "timeout": 1}), &ctx, &sink)
+        .execute_streaming_with_ctx(
+            json!({"command": "echo hi", "timeout": timeout_ms}),
+            &ctx,
+            &sink,
+        )
         .await;
     let elapsed = started.elapsed();
 
     assert!(
         elapsed * 3 < walk,
-        "a 1ms streaming timeout returned after {elapsed:?} against a walk \
-         measured at {walk:?} — the manifest build is outside the timeout scope"
+        "a {timeout_ms}ms streaming timeout returned after {elapsed:?} against \
+         a walk measured at {walk:?} — the manifest build is outside the \
+         timeout scope"
     );
     // #1111 acceptance 3: "a manifest build that exceeds the timeout produces a
     // user-visible message NAMING THE CAUSE". `contains("timed out")` alone is
@@ -2320,9 +2405,10 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
 /// nothing about the walk.
 #[tokio::test]
 async fn a_workspace_that_does_not_walk_cancels_promptly_even_on_a_large_tree() {
+    warm_bash_tool_process_init().await;
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
-    let (_contained, walk) = workspace_whose_walk_costs_at_least(&root, Duration::from_millis(250));
+    let (_contained, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
     let local = std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::trusted_local(
         &root,
