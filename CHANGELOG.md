@@ -2,7 +2,7 @@
 
 ## [0.13.5](https://github.com/FerroxLabs/wayland-core/compare/v0.13.4...v0.13.5) (2026-08-22)
 
-**Release highlights.** Nineteen fixes with one subject: a guard that exists is
+**Release highlights.** Twenty-one fixes with one subject: a guard that exists is
 not a guard that runs. Most of what changed here was already written, already
 tested, and already correct — and did not reach the path you were actually on.
 The rate limiter that stops an agent talking to itself forever was never
@@ -107,16 +107,29 @@ server error keeps its failure class instead of being flattened into a
 connection error and granted a retry window the engine deliberately withholds
 from server errors.
 
-**One known issue, named here so you do not meet it by accident.** Pressing Esc
-during an in-flight turn — the key the in-turn keybar advertises as `interrupt` —
-stops the stream and then leaves that conversation permanently unusable. The
-composer still takes text and the cursor still blinks, but every further message
-is refused, and no recovery surface will reopen it. The refusal is not a bug in
-itself: the turn is suspended at an outcome the journal genuinely cannot
-resolve, and it declines to guess. What is missing is an honest way out, and
-adding one is the first thing being fixed after this release. It is not new
-here — 0.13.4 behaves identically — and nothing written to disk is lost. Until
-it is closed, leave a turn you want to abandon with Ctrl-C rather than Esc.
+**Esc no longer ends the conversation.** Pressing Esc during an in-flight turn —
+the key the in-turn keybar advertises as `interrupt` — stopped the stream and
+then left that conversation permanently unusable. The composer still took text
+and the cursor still blinked, but every further message was refused, and the
+recovery paths formed a closed loop: cancel pointed at resume, resume pointed at
+reconcile, and reconcile said only the engine could. Twelve times out of twelve
+in testing, and 0.13.4 behaves the same way. The cause sat above every one of
+those refusals. The interrupt path wrote no terminal receipt of any kind — no
+stream end, no provider attempt outcome, no turn commit — where a Ctrl-C or a
+clean finish wrote two of each, read back through the same journal reader. The
+turn was left at an outcome nothing could resolve, so each refusal was a correct
+guard reacting to a hole punched above it. The fix does not open that guard. A
+request that left this machine and never came back genuinely has no knowable
+outcome, so claiming it succeeded, failed, or never started stays refused. What
+was missing is the fourth option, and it is here now: the turn can be abandoned,
+recording the outcome as unknown — including that the provider may have served
+the request in full, in part, or not at all, and that anything it charged is not
+accounted for — alongside the digest of exactly the bytes that were captured. It
+is written at interrupt time by the live engine, the only party that can, so
+there is no wedge left to recover from afterwards. The way out is named on every
+surface the refusal reaches: `/recover abandon` in the terminal UI, and
+relaunching the session with `--resume` anywhere else, including the JSON stream
+host, whose recovery vocabulary never had an `abandon` verb to offer.
 
 ## [0.13.4](https://github.com/FerroxLabs/wayland-core/compare/v0.13.3...v0.13.4) (2026-08-21)
 
