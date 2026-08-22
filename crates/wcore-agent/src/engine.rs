@@ -7497,6 +7497,17 @@ impl AgentEngine {
             // unobserved provider outcome — cancel said resume, resume said
             // reconcile, reconcile said only the engine may — so the reader was
             // sent round a closed loop with no exit named anywhere in it.
+            //
+            // Name a remedy for EVERY surface this string reaches, not only the
+            // terminal UI. This error is handed verbatim to the `--json-stream`
+            // host, whose recovery vocabulary is continue|reconcile|cancel —
+            // measured: an `"action":"abandon"` on that wire is refused with
+            // "unknown variant `abandon`". A reader there who is told only to
+            // run `/recover abandon` has been sent round a second closed loop,
+            // this one built by the message itself. Relaunching the session with
+            // `--resume` settles it on any surface (the resume path calls
+            // `settle_interrupted_turn_for_resume` before the first prompt), so
+            // that is the exit every reader can actually take.
             let remedy = match &recovery.disposition {
                 crate::recovery::RecoveryDisposition::Blocked {
                     reason: crate::recovery::RecoveryBlocker::ProviderOutcomeUnknown,
@@ -7505,7 +7516,9 @@ impl AgentEngine {
                     "its request was still in flight and no reply was ever seen, so nothing can \
                      honestly claim an outcome for it — which is why continuing, reconciling and \
                      cancelling all refuse. Abandon the turn instead: that records the outcome as \
-                     unknown, which is true, and lets the session carry on. Run `/recover abandon`"
+                     unknown, which is true, and lets the session carry on. In the terminal UI \
+                     run `/recover abandon`; from any other surface, relaunching this session \
+                     with `--resume` abandons it for you"
                 }
                 _ => "resume, reconcile, or cancel it before starting a new message",
             };
@@ -9049,10 +9062,11 @@ impl AgentEngine {
     /// `Unknown` — the interruption the crash left implicit — and then resolves
     /// `Failed` with an error that says the effect may have landed. A PREPARED
     /// tool or attempt takes the not-started receipt the journal already proves
-    /// (there is no start event). An UNKNOWN provider attempt takes the
-    /// `Cancelled` completion the reducer accepts for an attempt with no
-    /// stream. None of these claims an outcome; each records that this process
-    /// never saw one.
+    /// (there is no start event). An UNKNOWN provider attempt is handed to
+    /// [`Self::abandon_unobserved_provider_attempts`], which records `Failed`
+    /// with [`crate::recovery::PROVIDER_OUTCOME_ABANDONED_UNOBSERVED`] and the
+    /// digest of the bytes actually captured. None of these claims an outcome;
+    /// each records that this process never saw one.
     ///
     /// Children and deliveries are deliberately not admitted here: no measured
     /// interruption has left one nonterminal, and inventing a receipt for a

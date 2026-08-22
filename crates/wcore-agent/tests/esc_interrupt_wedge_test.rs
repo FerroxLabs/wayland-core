@@ -522,6 +522,51 @@ async fn an_abandoned_turn_records_that_its_outcome_was_never_observed() {
     drop(_server);
 }
 
+/// CONTROL (e). THE REFUSAL MUST NAME AN EXIT THE READER'S SURFACE HAS.
+///
+/// This string is not TUI text. `AgentEngine::run` hands it verbatim to every
+/// surface, including the `--json-stream` host, whose recovery vocabulary is
+/// `continue|reconcile|cancel` — measured on the shipped binary, an
+/// `"action":"abandon"` there is refused with "unknown variant `abandon`",
+/// while `"action":"cancel"` parses and reaches the cursor check. So a refusal
+/// that names only `/recover abandon` rebuilds the closed loop for that reader
+/// out of the message itself: every verb their surface HAS refuses, and the one
+/// it names their surface does not have.
+///
+/// `--resume` is the exit that exists everywhere — the resume path settles the
+/// interrupted turn before the first prompt — so the refusal must name it.
+#[tokio::test]
+async fn the_refusal_names_an_exit_that_exists_off_the_terminal_ui() {
+    let mut harness = harness(vec![Script::StallMidStream]).await;
+    wedge_with_crash(&mut harness).await;
+
+    let refused = harness.engine.run(SECOND_PROMPT, "").await;
+    let AgentError::SessionAuthority(message) =
+        refused.expect_err("a crash-interrupted turn must still refuse the next message")
+    else {
+        panic!("the pre-turn gate must refuse with SessionAuthority")
+    };
+
+    // Vacuity: without this the assertions below could pass on some other
+    // refusal that never mentions recovery at all.
+    assert!(
+        message.contains("interrupted turn at journal cursor"),
+        "this control must be grading the pre-turn recovery gate, not some \
+         unrelated refusal. Got: {message}"
+    );
+    assert!(
+        message.contains("abandon"),
+        "the refusal must name the one disposition that is honest here. Got: {message}"
+    );
+    assert!(
+        message.contains("--resume"),
+        "the refusal must name an exit that exists on surfaces without \
+         `/recover` — the json-stream host rejects `abandon` as an unknown \
+         action, so naming only the slash command leaves that reader wedged \
+         by the message itself. Got: {message}"
+    );
+}
+
 /// CONTROL (c). THE FAIL-CLOSED GUARD MUST STILL BITE.
 ///
 /// An operator asserting an outcome (`--as-outcome succeeded|failed|not-started`)
