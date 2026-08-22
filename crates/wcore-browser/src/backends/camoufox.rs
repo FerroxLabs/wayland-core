@@ -299,7 +299,11 @@ impl BrowserProvider for CamoufoxBackend {
                                 .to_string(),
                         });
                     };
-                    match policy.evaluate(final_url) {
+                    // gh#1053: the landing URL goes through the RESOLUTION
+                    // gate, not the string-only `evaluate`. A 3xx chain that
+                    // ends on a name pointing at metadata / RFC 1918 has
+                    // nothing objectionable in its string.
+                    match policy.evaluate_navigation_target_async(final_url).await {
                         PolicyOutcome::Allow => {}
                         PolicyOutcome::Deny { reason } => {
                             return Err(BrowserOpError::PolicyDenied {
@@ -437,7 +441,7 @@ impl BrowserProvider for CamoufoxBackend {
                     self.policy.as_ref(),
                     response.get("url").and_then(|value| value.as_str()),
                 ) {
-                    enforce_post_navigation_policy(policy, url)?;
+                    enforce_post_navigation_policy(policy, url).await?;
                 }
                 Ok(OpResult::Ok)
             }
@@ -541,11 +545,13 @@ fn op_name(op: &BrowserOp) -> &'static str {
     }
 }
 
-fn enforce_post_navigation_policy(
+/// gh#1053: Back / Forward land on a URL the sidecar chose, so they get the
+/// same resolution gate the Navigate arm does.
+async fn enforce_post_navigation_policy(
     policy: &BrowserPolicy,
     final_url: &str,
 ) -> Result<(), BrowserOpError> {
-    match policy.evaluate(final_url) {
+    match policy.evaluate_navigation_target_async(final_url).await {
         PolicyOutcome::Allow => Ok(()),
         PolicyOutcome::Deny { reason } => Err(BrowserOpError::PolicyDenied {
             url: final_url.to_string(),

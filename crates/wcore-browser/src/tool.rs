@@ -333,7 +333,15 @@ impl BrowserTool {
     }
 
     /// Apply policy for URL-bearing ops. Non-URL ops always pass.
-    fn policy_check(&self, op: &BrowserOp) -> Result<(), BrowserOpError> {
+    ///
+    /// gh#1053: this is the pre-flight half of the resolution gate. It calls
+    /// `evaluate_navigation_target_async`, not `evaluate` — the string-only
+    /// gate cannot see that a public name points at the metadata endpoint.
+    /// `async` because the lookup is blocking I/O run on the blocking pool;
+    /// the post-navigation landing URL is gated separately in
+    /// `CamoufoxBackend::dispatch`, since a guard installed at only one of the
+    /// two seams leaves the other open.
+    async fn policy_check(&self, op: &BrowserOp) -> Result<(), BrowserOpError> {
         let url_opt = match op {
             BrowserOp::Navigate { url, .. } | BrowserOp::Download { url, .. } => Some(url.as_str()),
             BrowserOp::NewTab { url: Some(u), .. } => Some(u.as_str()),
@@ -342,7 +350,7 @@ impl BrowserTool {
         let Some(url) = url_opt else {
             return Ok(());
         };
-        match self.policy.evaluate(url) {
+        match self.policy.evaluate_navigation_target_async(url).await {
             PolicyOutcome::Allow => Ok(()),
             PolicyOutcome::Deny { reason } => Err(BrowserOpError::PolicyDenied {
                 url: url.to_string(),
@@ -482,7 +490,7 @@ impl Tool for BrowserTool {
         }
 
         // Policy check.
-        if let Err(e) = self.policy_check(&op) {
+        if let Err(e) = self.policy_check(&op).await {
             // F-023: when the policy denies solely because no origins are allow-listed
             // (the default fail-closed posture, reason starts with "default_action=Deny"),
             // surface a friendly config hint so operators know what to do.

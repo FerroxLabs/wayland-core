@@ -19,6 +19,20 @@
 //!
 //! Because chromiumoxide pulls in ~30MB of dependency surface, this module
 //! is feature-gated. The default build does NOT pull it in.
+//!
+//! ## This backend enforces NO `BrowserPolicy` (gh#1112)
+//!
+//! It calls `page.goto(url)` directly: there is no pre-flight URL check, no
+//! `allowed_origins` / `denied_origins`, no loopback-capability gate, no
+//! RFC1918 / metadata / loopback refusal and no post-navigation landing-URL
+//! re-check. Nothing here is aware a policy exists.
+//!
+//! Rather than let that be a silent total bypass, `selection::select_provider`
+//! REFUSES a `ProviderHint::Chromium` whenever a `BrowserPolicy` is in force
+//! and falls through to Camoufox, which does enforce it — the same treatment
+//! `BrowserbaseBackend` gets for the same reason. Chromium is therefore
+//! reachable only in the legacy `policy == None` mode. Wiring real enforcement
+//! in here would let that refusal be lifted.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
