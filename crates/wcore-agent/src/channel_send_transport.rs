@@ -40,12 +40,14 @@
 //! `ToolResult` the model actually reads — a `warn!` alone reaches nobody with
 //! `RUST_LOG` unset, so it can never end a model-driven loop.
 //!
-//! **Coverage limit, stated plainly:** this is not the only `MessageTransport`.
+//! **Coverage, stated plainly:** this is not the only `MessageTransport`.
 //! Under `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1` (the desktop) `bootstrap`
 //! deliberately keeps [`crate::host_send_transport::HostDelegatedTransport`]
-//! and never installs this adapter at all, so on that path tool-driven sends
-//! are still UNTHROTTLED. Closing it means throttling there too, or moving the
-//! check into `SendMessageTool` itself; neither is done here.
+//! and never installs this adapter at all — so that transport carries its
+//! OWN limiter, in this same shape, since the wayland#585 follow-up. Those
+//! two are the only production transports that deliver, and both are now
+//! throttled. The check still does NOT live in `SendMessageTool` itself, so
+//! a third transport added later would start unthrottled.
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
