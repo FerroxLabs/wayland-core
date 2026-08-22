@@ -344,16 +344,45 @@ async fn a_control_ephemeral_engine_keeps_the_provider_400_text() {
 /// are dropped. Write them down next to the session they belong to.
 #[tokio::test]
 async fn b_provider_400_captures_the_failing_request_to_the_session_dir() {
-    let mut h = harness(vec![Err(api_400(ORPHAN_400))]).await;
+    let mut h = harness(vec![Err(api_400(ORPHAN_400)), Err(api_400(ORPHAN_400))]).await;
     let _ = h.engine.run(USER_MARKER, "").await;
 
-    let hits = files_containing(&h.session_dir, "were found without");
+    // The capture ARTIFACT, not "the reason appears somewhere under the session
+    // dir". MEASURED: with `capture_rejected_provider_request` stubbed to return
+    // `None` — no capture written at all — a dir-wide substring scan for the
+    // provider's reason STILL passes, because #923(2)'s honest journal receipt
+    // (`CompletionOutcome::Failed { error }`) carries that same sentence into the
+    // journal file. Such a scan grades the settle fix, not this one. What #923(1)
+    // is for is the REQUEST ARRAY that earned the refusal, in a file a reporter
+    // can attach — so that is what is pinned here.
+    let captures: Vec<PathBuf> = files_under(&h.session_dir)
+        .into_iter()
+        .filter(|rel| rel.starts_with("rejected-requests"))
+        .collect();
     assert!(
-        !hits.is_empty(),
-        "#923(1): nothing under {} records why the provider refused this \
-         request. Files present: {:?}",
+        !captures.is_empty(),
+        "#923(1): no rejected-request capture was written under {}. Files \
+         present: {:?}",
         h.session_dir.display(),
         files_under(&h.session_dir)
+    );
+    let bodies: Vec<String> = captures
+        .iter()
+        .map(|rel| {
+            String::from_utf8_lossy(&std::fs::read(h.session_dir.join(rel)).expect("read capture"))
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.contains("were found without")),
+        "#923(1): the capture does not record WHY the provider refused: {captures:?}"
+    );
+    assert!(
+        bodies.iter().any(|body| body.contains(USER_MARKER)),
+        "#923(1): the capture does not hold the messages array that was refused \
+         — the one artifact four investigations needed: {captures:?}"
     );
 }
 
@@ -362,7 +391,7 @@ async fn b_provider_400_captures_the_failing_request_to_the_session_dir() {
 /// returns nothing, and nothing reads as "absent".
 #[tokio::test]
 async fn b_control_the_session_dir_scan_finds_what_is_really_there() {
-    let mut h = harness(vec![Err(api_400(ORPHAN_400))]).await;
+    let mut h = harness(vec![Err(api_400(ORPHAN_400)), Err(api_400(ORPHAN_400))]).await;
     let _ = h.engine.run(USER_MARKER, "").await;
 
     let hits = files_containing(&h.session_dir, USER_MARKER);
@@ -375,9 +404,15 @@ async fn b_control_the_session_dir_scan_finds_what_is_really_there() {
 }
 
 /// RED. The capture is worthless if nobody is told where it is.
+///
+/// Two identical refusals, for the same reason section A scripts them: with
+/// #923(3) in place a single orphan-shaped 400 is a RECOVERED turn (the retry
+/// lands on the harness's clean end-turn fallback), and a turn that recovered
+/// must NOT emit a hard error. This test is about the turn that genuinely
+/// fails.
 #[tokio::test]
 async fn b_provider_400_surfaces_an_error_to_the_user() {
-    let mut h = harness(vec![Err(api_400(ORPHAN_400))]).await;
+    let mut h = harness(vec![Err(api_400(ORPHAN_400)), Err(api_400(ORPHAN_400))]).await;
     let _ = h.engine.run(USER_MARKER, "").await;
     let errors = h.sink.errors();
     assert!(
@@ -408,6 +443,42 @@ async fn b_control_sink_receives_engine_errors() {
     );
 }
 
+/// NEGATIVE CONTROL for the capture. `MissingApiKey` is non-retryable and lands
+/// in the SAME dispatch arm as a 400, but nothing was ever sent for it — the
+/// budget reservation is released on that exact ground. A capture filed for it
+/// would be a record of a request that does not exist, and "Provider rejected
+/// this request" a claim about a provider that was never asked.
+#[tokio::test]
+async fn b_control_an_unsent_call_files_no_capture_and_claims_no_refusal() {
+    let mut h = harness(vec![
+        Err(ProviderError::MissingApiKey),
+        Err(ProviderError::MissingApiKey),
+    ])
+    .await;
+    let result = h.engine.run(USER_MARKER, "").await;
+    assert!(result.is_err(), "a missing credential must fail the turn");
+
+    let captures: Vec<PathBuf> = files_under(&h.session_dir)
+        .into_iter()
+        .filter(|rel| rel.starts_with("rejected-requests"))
+        .collect();
+    assert!(
+        captures.is_empty(),
+        "#923(1): a capture was filed for a request that was never sent: {captures:?}"
+    );
+    let errors = h.sink.errors();
+    assert!(
+        !errors.is_empty(),
+        "the user must still be told the call failed"
+    );
+    assert!(
+        !errors
+            .iter()
+            .any(|error| error.contains("Provider rejected this request")),
+        "#923(1): an unsent call was reported as a provider refusal: {errors:?}"
+    );
+}
+
 // ===========================================================================
 // #923 — C. one-shot repair-and-retry, narrowly gated
 // ===========================================================================
@@ -432,6 +503,15 @@ async fn c_orphan_shaped_400_is_repaired_and_retried_once() {
     assert_eq!(
         calls, 2,
         "#923(3): expected exactly one repair-and-retry (2 sends), got {calls}"
+    );
+    // A turn that RECOVERED must not also report a failure. `emit_error` is the
+    // host's hard-error channel and the signal the SkillRouter/auto-skill
+    // observers record a FAILURE from; emitting it for a refusal that is about
+    // to be retried marks a successful turn as failed.
+    assert!(
+        h.sink.errors().is_empty(),
+        "#923(3): the recovered turn still emitted a hard error: {:?}",
+        h.sink.errors()
     );
 }
 

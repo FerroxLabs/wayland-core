@@ -12334,9 +12334,27 @@ impl AgentEngine {
                         // failure: the `messages` array exactly as it went out,
                         // and the provider's own sentence naming what was wrong
                         // with it. Everything below this point discards them.
-                        let captured =
-                            self.capture_rejected_provider_request(&request, &failure, &e);
-                        let mut surfaced = format!("Provider rejected this request: {e}");
+                        //
+                        // Only a SERVED refusal has a request to capture or a
+                        // refusal to report. `MissingApiKey` and
+                        // `NotAttempted` are non-retryable and land in this same
+                        // arm, and nothing was ever sent for either — the budget
+                        // reservation above is released for exactly that reason.
+                        // Filing "the exact request that was refused" for one
+                        // would be a record of something that did not happen,
+                        // and "Provider rejected this request" would be a claim
+                        // about a provider that was never asked.
+                        let served_refusal = matches!(e, ProviderError::Api { .. });
+                        let captured = if served_refusal {
+                            self.capture_rejected_provider_request(&request, &failure, &e)
+                        } else {
+                            None
+                        };
+                        let mut surfaced = if served_refusal {
+                            format!("Provider rejected this request: {e}")
+                        } else {
+                            format!("The provider call failed with no response: {e}")
+                        };
                         if let Some(path) = captured.as_ref() {
                             surfaced.push_str(&format!(
                                 " The exact request that was refused was captured to {} — \
@@ -12344,7 +12362,6 @@ impl AgentEngine {
                                 path.display()
                             ));
                         }
-                        self.output.emit_error(&surfaced, false);
                         // #923(3) — an orphaned tool_use/tool_result pair is the
                         // one client error worth a second send: it is exactly
                         // what the unconditional pre-send repair exists to
@@ -12353,14 +12370,30 @@ impl AgentEngine {
                         // ONCE. `is_orphaned_tool_pair_rejection` keeps this off
                         // every other 400 — an auth refusal fails identically on
                         // a second send and must never be billed twice.
+                        //
+                        // This gate is checked BEFORE `emit_error`: a refusal
+                        // that is about to be retried is not the run's outcome,
+                        // and a turn that goes on to succeed must not leave a
+                        // hard error on the host's channel — the host renders
+                        // it, and the SkillRouter/auto-skill observers record a
+                        // FAILURE for a turn that produced an answer. The
+                        // sibling ContextOverflow retry arm above emits info for
+                        // exactly this reason. The capture is still written
+                        // either way, and still named.
                         if !orphan_repair_retried && is_orphaned_tool_pair_rejection(&e) {
                             orphan_repair_retried = true;
                             self.output.emit_provider_retry(Some("orphaned_tool_pair"));
-                            self.output.emit_info(
-                                "provider rejected the request for an orphaned \
-                                 tool_use/tool_result pair — repaired the conversation and \
-                                 retrying once",
-                            );
+                            let mut retry_note = "provider rejected the request for an \
+                                 orphaned tool_use/tool_result pair — repaired the \
+                                 conversation and retrying once"
+                                .to_string();
+                            if let Some(path) = captured.as_ref() {
+                                retry_note.push_str(&format!(
+                                    " (the refused request was captured to {})",
+                                    path.display()
+                                ));
+                            }
+                            self.output.emit_info(&retry_note);
                             self.settle_failed_turn_provider_attempts(&e.to_string())
                                 .await;
                             self.repair_all_orphaned_tool_uses();
@@ -12375,6 +12408,7 @@ impl AgentEngine {
                             self.sync_active_journal_conversation().await?;
                             continue 'stream;
                         }
+                        self.output.emit_error(&surfaced, false);
                         // #923(2) — fail the TURN, not the session. The dispatch
                         // left this turn's provider attempt nonterminal, and the
                         // reducer will not let a turn holding one take ANY
