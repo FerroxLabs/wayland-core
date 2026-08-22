@@ -1,0 +1,43 @@
+name: macOS live binary
+
+# Produces a runnable arm64 macOS binary for hand live-testing the release
+# candidate. macos-latest is arm64, so this needs none of Sean's own hardware.
+# Lane-branch only: it never runs on main or on a PR.
+on:
+  push:
+    branches: ['lane/mac-artifact']
+
+permissions:
+  contents: read
+
+jobs:
+  mac-binary:
+    name: Build macOS arm64 live binary
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Add target
+        run: rustup target add aarch64-apple-darwin
+
+      - name: Build release binary
+        run: vx cargo build --release --target aarch64-apple-darwin -p wcore-cli
+
+      - name: Prove the binary runs on this host
+        run: |
+          BIN=target/aarch64-apple-darwin/release/wayland-core
+          file "$BIN"
+          "$BIN" --version
+          shasum -a 256 "$BIN"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wayland-core-macos-arm64
+          path: target/aarch64-apple-darwin/release/wayland-core
+          if-no-files-found: error
