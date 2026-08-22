@@ -961,4 +961,237 @@ mod tests {
         let v6_loopback: Ipv6Addr = "::1".parse().unwrap();
         assert_eq!(ipv4_mapped(v6_loopback), None);
     }
+
+    // ======================================================================
+    // RED ARM -- gh#1053 resolution gate. These do NOT compile at 0ccaa90b:
+    // `evaluate_navigation_target_with` does not exist yet, because the
+    // resolution step has to be BUILT (0 hits for
+    // to_socket_addrs|lookup_host|getaddrinfo across crates/wcore-browser;
+    // positive control: 8 hits across `-- crates`).
+    //
+    // The seam is `fn(&str) -> Vec<IpAddr>`, deliberately the SAME shape
+    // `wcore-tools/src/url_safety.rs:202-207` already uses, and deliberately
+    // private -- the public surface is `evaluate_navigation_target(url)`,
+    // which passes the system resolver. Integration tests cannot reach a
+    // private seam, which is why the resolves-to-a-blocked-IP cases live
+    // here and the hermetic `.invalid` cases live in
+    // `tests/dns_resolution_gate_test.rs`.
+    //
+    // NOT covered by design, and the hint must say so: Camoufox is a
+    // sidecar. Firefox resolves in its own process, so the addresses it
+    // dials cannot be pinned. This closes static DNS SSRF and
+    // cross-navigation rebinding via the TOFU cache; it does not close
+    // TTL=0 intra-navigation rebinding.
+    // ======================================================================
+
+    /// `rebind.example` answers with the cloud metadata endpoint;
+    /// `split.example` answers with one good and one bad address;
+    /// `public.example` is clean; `gone.example` answers with nothing.
+    fn fake_resolver(host: &str) -> Vec<IpAddr> {
+        match host {
+            "rebind.example" => vec!["169.254.169.254".parse().unwrap()],
+            "inward.example" => vec!["10.1.2.3".parse().unwrap()],
+            "split.example" => vec![
+                "93.184.216.34".parse().unwrap(),
+                "169.254.169.254".parse().unwrap(),
+            ],
+            "public.example" => vec!["93.184.216.34".parse().unwrap()],
+            "localhost" => vec!["127.0.0.1".parse().unwrap()],
+            _ => Vec::new(),
+        }
+    }
+
+    /// A resolver that fails the test if it is consulted at all.
+    fn never_resolved(host: &str) -> Vec<IpAddr> {
+        panic!("the gate resolved {host}, which needs no resolution");
+    }
+
+    /// RED. The headline gh#1053 case: a public NAME that resolves to the
+    /// cloud metadata endpoint. `evaluate()` alone allows it -- there is
+    /// nothing in the URL string to object to.
+    #[test]
+    fn navigation_gate_refuses_a_name_that_resolves_to_the_metadata_endpoint() {
+        let p = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
+        assert!(
+            matches!(p.evaluate("http://rebind.example/"), PolicyOutcome::Allow),
+            "precondition: the string-only gate has no objection, which is the bug"
+        );
+        let r = p.evaluate_navigation_target_with("http://rebind.example/", fake_resolver);
+        assert!(
+            matches!(r, PolicyOutcome::Deny { .. }),
+            "a name resolving to 169.254.169.254 must be refused, got {r:?}"
+        );
+    }
+
+    /// RED. The RFC1918 variant of the same attack.
+    #[test]
+    fn navigation_gate_refuses_a_name_that_resolves_into_the_private_range() {
+        let p = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
+        let r = p.evaluate_navigation_target_with("http://inward.example/", fake_resolver);
+        assert!(
+            matches!(r, PolicyOutcome::Deny { .. }),
+            "a name resolving to 10.1.2.3 must be refused, got {r:?}"
+        );
+    }
+
+    /// RED. A host commonly has several A records. Checking only the first
+    /// one is a gate an attacker picks their way past by ordering the answer.
+    #[test]
+    fn navigation_gate_refuses_when_only_one_of_several_addresses_is_blocked() {
+        let p = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
+        let r = p.evaluate_navigation_target_with("http://split.example/", fake_resolver);
+        assert!(
+            matches!(r, PolicyOutcome::Deny { .. }),
+            "EVERY resolved address must clear the gate, not just the first, \
+             got {r:?}"
+        );
+    }
+
+    /// NEGATIVE CONTROL for all three above. A name resolving to a clean
+    /// public address must pass, or the gate is just a blanket refusal.
+    #[test]
+    fn navigation_gate_allows_a_name_that_resolves_to_a_public_address() {
+        let p = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
+        let r = p.evaluate_navigation_target_with("http://public.example/", fake_resolver);
+        assert!(
+            matches!(r, PolicyOutcome::Allow),
+            "a clean public resolution must pass, got {r:?}"
+        );
+    }
+
+    /// RED. "I could not resolve it" is not "allowed" -- the gate has no idea
+    /// where the request will land. Paired with the hermetic `.invalid` test
+    /// in `tests/dns_resolution_gate_test.rs`, which drives the same
+    /// behaviour through the real production entry points.
+    #[test]
+    fn navigation_gate_refuses_a_name_that_resolves_to_nothing() {
+        let p = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
+        let r = p.evaluate_navigation_target_with("http://gone.example/", fake_resolver);
+        assert!(
+            matches!(r, PolicyOutcome::Deny { .. }),
+            "an unresolvable host must fail closed, got {r:?}"
+        );
+    }
+
+    /// NEGATIVE CONTROL. An IP literal already carries its destination; the
+    /// gate must not spend a DNS lookup on it. The resolver panics if called.
+    #[test]
+    fn navigation_gate_does_not_resolve_an_ip_literal() {
+        let p = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
+        let r = p.evaluate_navigation_target_with("http://93.184.216.34/", never_resolved);
+        assert!(matches!(r, PolicyOutcome::Allow), "got {r:?}");
+        // ... and a blocked literal is still refused by the string-only half.
+        let r = p.evaluate_navigation_target_with("http://169.254.169.254/", never_resolved);
+        assert!(matches!(r, PolicyOutcome::Deny { .. }), "got {r:?}");
+    }
+
+    /// THE TRAP (gh#911). `check_resolved_host` refuses loopback
+    /// unconditionally, so feeding it every resolution kills the loopback
+    /// capability: `localhost` resolves to 127.0.0.1 and the grant never gets
+    /// a say. The gate must SKIP resolution for a canonical loopback host
+    /// holding an authorising grant -- `is_canonical_loopback_host` plus
+    /// `self.loopback.authorize(port)`, the two predicates `evaluate()`
+    /// already uses. `never_resolved` proves the skip is a real skip.
+    ///
+    /// `wcore_tools::url_safety::safe_url_pinned_ips` is NOT the shortcut
+    /// here: it embeds url_safety's own blocklist, which rejects loopback
+    /// unconditionally, and would break gh#911 in exactly this way.
+    #[test]
+    fn navigation_gate_skips_resolution_for_granted_canonical_loopback() {
+        let p = BrowserPolicy::new(PolicyAction::Deny, vec![], vec![]).with_loopback(
+            LoopbackCapability {
+                enabled: true,
+                schema_version: LOOPBACK_CAPABILITY_VERSION,
+                session_scope: "local-dev".into(),
+                ports: vec![3000],
+            },
+        );
+        let r = p.evaluate_navigation_target_with("http://localhost:3000/", never_resolved);
+        assert!(
+            matches!(r, PolicyOutcome::Allow),
+            "gh#911: a granted loopback port must survive the resolution gate, \
+             got {r:?}"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the trap. The skip is scoped to an AUTHORISING
+    /// grant, so an ungranted port stays refused and the exemption cannot be
+    /// read as "loopback is exempt".
+    #[test]
+    fn navigation_gate_still_refuses_loopback_outside_the_grant() {
+        let p = BrowserPolicy::new(PolicyAction::Deny, vec![], vec![]).with_loopback(
+            LoopbackCapability {
+                enabled: true,
+                schema_version: LOOPBACK_CAPABILITY_VERSION,
+                session_scope: "local-dev".into(),
+                ports: vec![3000],
+            },
+        );
+        let r = p.evaluate_navigation_target_with("http://localhost:9999/", fake_resolver);
+        assert!(matches!(r, PolicyOutcome::Deny { .. }), "got {r:?}");
+
+        // And with no grant at all, loopback is refused before resolution.
+        let bare = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
+        let r = bare.evaluate_navigation_target_with("http://localhost:3000/", never_resolved);
+        assert!(matches!(r, PolicyOutcome::Deny { .. }), "got {r:?}");
+    }
+
+    /// RED. The TOFU half: the gate must PIN what it resolved, so a second
+    /// navigation to the same name that now answers differently is refused.
+    /// This is the cross-navigation rebinding the fix legitimately closes
+    /// (as opposed to the intra-navigation TTL=0 case, which it cannot).
+    #[test]
+    fn navigation_gate_pins_the_host_it_resolved() {
+        let p = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
+        assert_eq!(p.dns_cache_len(), 0, "precondition: nothing pinned yet");
+
+        let r = p.evaluate_navigation_target_with("http://public.example/", fake_resolver);
+        assert!(matches!(r, PolicyOutcome::Allow), "got {r:?}");
+        assert_eq!(
+            p.dns_cache_len(),
+            1,
+            "the gate must record what it resolved, or the TOFU cache it \
+             already owns can never fire"
+        );
+
+        // Same name, different answer on the next navigation.
+        fn rebound(host: &str) -> Vec<IpAddr> {
+            match host {
+                "public.example" => vec!["203.0.113.9".parse().unwrap()],
+                _ => Vec::new(),
+            }
+        }
+        let r = p.evaluate_navigation_target_with("http://public.example/", rebound);
+        assert!(
+            matches!(r, PolicyOutcome::Deny { .. }),
+            "a name that answers with a different address on a later \
+             navigation must be refused, got {r:?}"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the pin. A repeat navigation with the SAME answer
+    /// must keep working -- a pin that refuses its own host is worse than no
+    /// pin.
+    #[test]
+    fn navigation_gate_pin_permits_a_stable_answer() {
+        let p = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
+        for _ in 0..3 {
+            let r = p.evaluate_navigation_target_with("http://public.example/", fake_resolver);
+            assert!(matches!(r, PolicyOutcome::Allow), "got {r:?}");
+        }
+        assert_eq!(p.dns_cache_len(), 1);
+    }
+
+    /// RED. The origin lists still decide first -- the resolution gate is an
+    /// ADDITIONAL refusal, never a new way in. A host that resolves cleanly
+    /// but is not on the allow list stays denied.
+    #[test]
+    fn navigation_gate_does_not_override_the_origin_lists() {
+        let p = BrowserPolicy::new(PolicyAction::Deny, vec!["other.example".into()], vec![]);
+        let r = p.evaluate_navigation_target_with("http://public.example/", fake_resolver);
+        assert!(
+            matches!(r, PolicyOutcome::Deny { .. }),
+            "a clean resolution must not launder an allow-list miss, got {r:?}"
+        );
+    }
 }
