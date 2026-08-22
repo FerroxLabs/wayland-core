@@ -52,7 +52,7 @@ pub fn render_shell_input_in(
     if let Some(root) = skill.skill_root.as_deref() {
         base.push_str(&format!(
             "Base directory for this skill: {}\n\n",
-            normalize_path_separators(root)
+            crate::paths::normalize_path_separators(root)
         ));
     }
     // #1096: a skill body that produces a file previously had NO stated
@@ -103,18 +103,8 @@ fn output_dir_header(dir: &Path) -> String {
     format!(
         "Write any files this skill produces under: {} \
          (create it if it does not exist)\n\n",
-        normalize_path_separators(&dir.to_string_lossy())
+        crate::paths::normalize_path_separators(&dir.to_string_lossy())
     )
-}
-
-/// Normalize path separators to forward slashes.
-/// On non-Windows platforms this is a no-op; included for portability.
-fn normalize_path_separators(path: &str) -> String {
-    if cfg!(windows) {
-        path.replace('\\', "/")
-    } else {
-        path.to_owned()
-    }
 }
 
 /// Check whether a skill can be executed in inline mode.

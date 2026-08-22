@@ -127,7 +127,10 @@ pub fn substitute_arguments(
 #[must_use]
 pub fn substitute_output_dir(content: &str, output_dir: Option<&Path>) -> String {
     match output_dir {
-        Some(dir) => content.replace(OUTPUT_DIR_TOKEN, &dir.to_string_lossy()),
+        Some(dir) => content.replace(
+            OUTPUT_DIR_TOKEN,
+            &crate::paths::normalize_path_separators(&dir.to_string_lossy()),
+        ),
         None => content.to_owned(),
     }
 }
