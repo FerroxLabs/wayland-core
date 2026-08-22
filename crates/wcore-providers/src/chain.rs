@@ -6,8 +6,10 @@
 //! errors) propagate immediately — the request cannot succeed by retrying
 //! on a different provider.
 //!
-//! On full exhaustion the last error is returned wrapped in a
-//! `ProviderError::Connection` message that includes the attempt count.
+//! On full exhaustion the last error is returned with its VARIANT intact —
+//! see `exhausted`. Wrapping it in a `ProviderError::Connection` (as this did
+//! before #1077) erased the failure class, so a 5xx or a 429 that exhausted a
+//! chain was indistinguishable from a connect failure downstream.
 //!
 //! This is intentionally stateless: no circuit-breaker, no cooldown. It
 //! composes with `ResilientProvider` — each slot can be a `ResilientProvider`
@@ -67,6 +69,39 @@ fn is_chain_retryable(e: &ProviderError) -> bool {
         ProviderError::PremiumLocked { .. }
         | ProviderError::UpgradeRequired { .. }
         | ProviderError::SpendCeilingUnresolved { .. } => false,
+    }
+}
+
+/// Render the chain's exhaustion without erasing the failure CLASS (#1077).
+///
+/// This used to return `ProviderError::Connection(format!("all N provider(s)
+/// …"))` for every exhaustion. That is a lie for four of the five errors that
+/// can reach here (only `Connection` itself survived it), and downstream
+/// classification is variant-driven: `retry::provider_failure_code` reported
+/// `connection` for a chain exhausted on an HTTP 500, and `wcore_agent`
+/// deliberately treats a connect failure and a 500 differently — a 500 can
+/// follow partial generation that was already billed, so it is denied the
+/// unserved-outage retry budget a connect failure is granted.
+///
+/// So: keep the variant. Fold the attempt count into the message only where a
+/// free-form message already exists (`Connection`, `Api`); the variants that
+/// carry no message (`RateLimited`) or an opaque source (`Http`, `Egress`) are
+/// returned verbatim rather than being flattened to reach a format string.
+fn exhausted(attempts: usize, last_err: Option<ProviderError>) -> ProviderError {
+    let prefix = format!("all {attempts} provider(s) in chain failed: ");
+    match last_err {
+        // Unreachable in practice — `new` asserts the chain is non-empty, so
+        // the loop always records an error before falling through. Kept so the
+        // exhaustion path has no `unwrap`.
+        None => ProviderError::Connection(format!("{prefix}unknown")),
+        Some(ProviderError::Connection(message)) => {
+            ProviderError::Connection(format!("{prefix}{message}"))
+        }
+        Some(ProviderError::Api { status, message }) => ProviderError::Api {
+            status,
+            message: format!("{prefix}{message}"),
+        },
+        Some(other) => other,
     }
 }
 
@@ -169,13 +204,7 @@ impl LlmProvider for ProviderChain {
         }
 
         // All providers exhausted with retryable errors.
-        Err(ProviderError::Connection(format!(
-            "all {} provider(s) in chain failed: {}",
-            attempts,
-            last_err
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "unknown".into()),
-        )))
+        Err(exhausted(attempts, last_err))
     }
 }
 
@@ -609,6 +638,49 @@ mod tests {
             "http_500",
             "chain exhaustion must not launder a 5xx into a connect failure"
         );
+    }
+
+    /// The class is preserved WITHOUT dropping the diagnostic that the old
+    /// rendering existed for: a message-bearing variant still carries the
+    /// attempt count, it just keeps its own variant while doing so.
+    #[tokio::test]
+    async fn chain_exhaustion_keeps_the_attempt_count_on_a_message_bearing_error() {
+        let chain = ProviderChain::new(vec![
+            (
+                "p1",
+                err_provider(
+                    || ProviderError::Api {
+                        status: 502,
+                        message: "gateway".into(),
+                    },
+                    Arc::new(AtomicUsize::new(0)),
+                ),
+            ),
+            (
+                "p2",
+                err_provider(
+                    || ProviderError::Api {
+                        status: 503,
+                        message: "overloaded".into(),
+                    },
+                    Arc::new(AtomicUsize::new(0)),
+                ),
+            ),
+        ]);
+        match chain.stream(&dummy_request()).await.unwrap_err() {
+            ProviderError::Api { status, message } => {
+                assert_eq!(status, 503, "the LAST error is the one returned");
+                assert!(
+                    message.contains("2 provider(s)"),
+                    "attempt count must survive; got: {message}"
+                );
+                assert!(
+                    message.contains("overloaded"),
+                    "the underlying message must survive; got: {message}"
+                );
+            }
+            other => panic!("expected the 503 to survive as Api, got {other:?}"),
+        }
     }
 
     /// Same laundering, second class: a rate limit exhausted through the chain
