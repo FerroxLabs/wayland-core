@@ -644,4 +644,283 @@ mod tests {
         }
         assert_eq!(bridge.pending_count(), 0, "drop guard must clean the entry");
     }
+
+    // ---------------------------------------------------------------------
+    // wayland#585 — RED ARM. The DESKTOP seam consults NO rate limiter.
+    //
+    // #585 was closed on `ChannelManagerTransport`, but `bootstrap.rs`
+    // deliberately SKIPS that upgrade under
+    // `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1` (re-located by symbol:
+    // `host_delegated_send_enabled` branch at bootstrap.rs:4021, with the
+    // primary-transport install at bootstrap.rs:1300), so the desktop keeps
+    // `HostDelegatedTransport` — which has no limiter at all. An
+    // agent-to-agent reply loop is therefore completely unbounded there.
+    //
+    // TWO-SEAM RULE: the throttle belongs on this TOOL-driven transport, not
+    // on a shared human/operator path. `HostDelegatedTransport` is reachable
+    // only from `SendMessageTool::execute`, and nothing in this file touches
+    // `ChannelManager::send_to`, so
+    // `channel_inbound::tests::interactive_sends_bypass_the_rate_limit`
+    // (re-located by symbol: channel_inbound.rs:1474) cannot regress from a
+    // change confined here.
+    //
+    // The surface that actually ENDS a loop is the model-facing `is_error`
+    // `ToolResult` — a `warn!` reaches nobody with `RUST_LOG` unset. Same
+    // shape as the `channel_send_transport` fix; no second convention.
+    // ---------------------------------------------------------------------
+
+    /// Sink that BOTH records every request frame and answers it instantly
+    /// with `ok: true`, so a whole budget can be driven with no live host.
+    struct InstantOkCaptureSink {
+        bridge: Arc<HostSendBridge>,
+        /// `platform\u{1f}chat_id` for each frame that reached the host.
+        delivered: Mutex<Vec<String>>,
+    }
+
+    impl InstantOkCaptureSink {
+        fn new(bridge: Arc<HostSendBridge>) -> Self {
+            Self {
+                bridge,
+                delivered: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn delivered_count(&self) -> usize {
+            self.delivered.lock().map(|v| v.len()).unwrap_or(0)
+        }
+    }
+
+    impl crate::output::OutputSink for InstantOkCaptureSink {
+        fn emit_text_delta(&self, _text: &str, _msg_id: &str) {}
+        fn emit_thinking(&self, _text: &str, _msg_id: &str) {}
+        fn emit_tool_call(&self, _name: &str, _input: &str) {}
+        fn emit_tool_result(&self, _name: &str, _is_error: bool, _content: &str) {}
+        fn emit_stream_start(&self, _msg_id: &str) {}
+        fn emit_stream_end(
+            &self,
+            _msg_id: &str,
+            _turns: usize,
+            _input_tokens: u64,
+            _output_tokens: u64,
+            _cache_creation_tokens: u64,
+            _cache_read_tokens: u64,
+            _finish_reason: wcore_protocol::events::FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _msg: &str, _retryable: bool) {}
+        fn emit_info(&self, _msg: &str) {}
+        fn emit_host_send_message_request(
+            &self,
+            call_id: &str,
+            platform: &str,
+            chat_id: Option<&str>,
+            _thread_id: Option<&str>,
+            _body: &str,
+            _subject: Option<&str>,
+            _conversation_id: Option<&str>,
+        ) {
+            if let Ok(mut v) = self.delivered.lock() {
+                v.push(format!("{platform}\u{1f}{}", chat_id.unwrap_or_default()));
+            }
+            self.bridge.resolve(
+                call_id,
+                HostSendResult {
+                    ok: true,
+                    message_id: Some("host-ok".to_string()),
+                    error: None,
+                },
+            );
+        }
+    }
+
+    fn instant_ok_transport() -> (HostDelegatedTransport, Arc<InstantOkCaptureSink>) {
+        let bridge = Arc::new(HostSendBridge::new());
+        let sink = Arc::new(InstantOkCaptureSink::new(Arc::clone(&bridge)));
+        (HostDelegatedTransport::new(bridge, sink.clone()), sink)
+    }
+
+    fn chat_target(chat_id: &str) -> ParsedTarget {
+        ParsedTarget {
+            platform: MessagingPlatform::Email,
+            chat_id: Some(chat_id.to_string()),
+            thread_id: None,
+        }
+    }
+
+    /// RED ARM 1 — the desktop tool seam admits an unbounded number of sends.
+    ///
+    /// Drive ONE conversation past `DEFAULT_MAX_AUTO_REPLIES` through
+    /// `HostDelegatedTransport::send`, the seam the `send_message` tool
+    /// reaches under `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1`. Every send past
+    /// the cap must be refused and must never be emitted to the host. Today
+    /// all `cap + over` are delivered.
+    #[tokio::test]
+    async fn host_delegated_sends_are_rate_limited_per_conversation() {
+        let (transport, sink) = instant_ok_transport();
+        let cap = wcore_channels::DEFAULT_MAX_AUTO_REPLIES;
+        let over = 5usize;
+
+        // POSITIVE CONTROL: the harness delivers at all. Without this a
+        // wedged sink (every send failing) would satisfy "refused" vacuously.
+        assert!(
+            matches!(
+                transport.send(&chat_target("c1"), "m0").await,
+                SendOutcome::Ok { .. }
+            ),
+            "the first in-budget send must be delivered; the harness is broken otherwise"
+        );
+
+        let mut allowed = 1usize;
+        let mut refused = 0usize;
+        for i in 1..cap + over {
+            match transport.send(&chat_target("c1"), &format!("m{i}")).await {
+                SendOutcome::Ok { .. } => allowed += 1,
+                SendOutcome::Err { .. } => refused += 1,
+            }
+        }
+
+        assert_eq!(
+            allowed, cap,
+            "the desktop tool path must admit exactly the per-conversation budget"
+        );
+        assert_eq!(
+            refused, over,
+            "every send past the budget must be refused, not delegated to the host"
+        );
+        assert_eq!(
+            sink.delivered_count(),
+            cap,
+            "a refused send must never be emitted as a host_send_message_request"
+        );
+    }
+
+    /// RED ARM 2 — the throttle is PER CONVERSATION, with its own control.
+    ///
+    /// The first half is red today (the over-budget send succeeds). The
+    /// second half is the paired NEGATIVE CONTROL: a different conversation
+    /// on the same transport must still send. Without it the first half could
+    /// pass vacuously from a globally wedged transport or a sink that simply
+    /// stops answering after N frames.
+    #[tokio::test]
+    async fn a_second_conversation_is_unaffected_by_the_first_ones_budget() {
+        let (transport, sink) = instant_ok_transport();
+        let cap = wcore_channels::DEFAULT_MAX_AUTO_REPLIES;
+
+        for i in 0..cap {
+            assert!(
+                matches!(
+                    transport.send(&chat_target("c1"), &format!("m{i}")).await,
+                    SendOutcome::Ok { .. }
+                ),
+                "send {i} is within budget and must be delivered"
+            );
+        }
+        match transport.send(&chat_target("c1"), "over").await {
+            SendOutcome::Err { .. } => {}
+            SendOutcome::Ok { .. } => {
+                panic!("the send past the per-conversation budget must be refused")
+            }
+        }
+
+        // NEGATIVE CONTROL: the transport and the host bridge are both healthy.
+        match transport
+            .send(&chat_target("c2"), "fresh conversation")
+            .await
+        {
+            SendOutcome::Ok { .. } => {}
+            SendOutcome::Err { message } => {
+                panic!("a different conversation must not inherit c1's budget; got: {message}")
+            }
+        }
+        assert_eq!(
+            sink.delivered_count(),
+            cap + 1,
+            "c1's budget plus c2's one send reached the host"
+        );
+    }
+
+    /// RED ARM 3 — the suppression must reach the MODEL.
+    ///
+    /// A `warn!` reaches nobody with `RUST_LOG` unset, so a log line can never
+    /// stop an agent-to-agent loop: the model just calls `send_message` again.
+    /// The only surface that ends the loop is an `is_error` `ToolResult`.
+    /// Paired POSITIVE CONTROL: the FIRST call must be a non-error result, so
+    /// a blanket `is_error` cannot pass this test.
+    #[tokio::test]
+    async fn a_throttled_host_delegated_send_is_an_error_tool_result() {
+        use wcore_tools::Tool;
+        use wcore_tools::send_message::SendMessageTool;
+
+        let (transport, _sink) = instant_ok_transport();
+        let tool = SendMessageTool::new(Arc::new(transport));
+        let cap = wcore_channels::DEFAULT_MAX_AUTO_REPLIES;
+
+        // POSITIVE CONTROL: an in-budget send is NOT an error result.
+        let first = tool
+            .execute(serde_json::json!({ "target": "email:a@example.com", "message": "m0" }))
+            .await;
+        assert!(
+            !first.is_error,
+            "an in-budget send must be a success result; got: {}",
+            first.content
+        );
+
+        for i in 1..cap {
+            let _ = tool
+                .execute(serde_json::json!({
+                    "target": "email:a@example.com",
+                    "message": format!("m{i}")
+                }))
+                .await;
+        }
+
+        let over = tool
+            .execute(serde_json::json!({ "target": "email:a@example.com", "message": "over" }))
+            .await;
+        assert!(
+            over.is_error,
+            "a throttled send must reach the model as an is_error ToolResult; got: {}",
+            over.content
+        );
+        assert!(
+            over.content.to_ascii_lowercase().contains("rate limit"),
+            "the model must be told WHY it was refused, not handed a bare failure; got: {}",
+            over.content
+        );
+    }
+
+    /// RED ARM 4 — the budget is per TRANSPORT, not a process-global static.
+    ///
+    /// A limiter parked in a `static` would leak one session's spent budget
+    /// into the next engine/session that builds a fresh transport, silently
+    /// muting a brand-new conversation. First half is red today (the
+    /// over-budget send on `t1` succeeds); the second half is the paired
+    /// NEGATIVE CONTROL that must hold after the fix too.
+    #[tokio::test]
+    async fn a_fresh_transport_starts_with_a_fresh_budget() {
+        let (t1, _s1) = instant_ok_transport();
+        let cap = wcore_channels::DEFAULT_MAX_AUTO_REPLIES;
+
+        for i in 0..cap {
+            let _ = t1.send(&chat_target("c1"), &format!("m{i}")).await;
+        }
+        match t1.send(&chat_target("c1"), "over").await {
+            SendOutcome::Err { .. } => {}
+            SendOutcome::Ok { .. } => panic!("t1's over-budget send must be refused"),
+        }
+
+        // NEGATIVE CONTROL: a new transport is a new budget for the same key.
+        let (t2, s2) = instant_ok_transport();
+        match t2.send(&chat_target("c1"), "new session").await {
+            SendOutcome::Ok { .. } => {}
+            SendOutcome::Err { message } => {
+                panic!("a fresh transport must not inherit a spent budget; got: {message}")
+            }
+        }
+        assert_eq!(
+            s2.delivered_count(),
+            1,
+            "the fresh transport's send must reach the host"
+        );
+    }
 }
