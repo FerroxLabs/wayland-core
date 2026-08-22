@@ -2230,9 +2230,15 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
         "a 1ms timeout returned after {elapsed:?} against a walk measured at \
          {walk:?} — the manifest build is outside the timeout scope"
     );
+    // #1111 acceptance 3: "a manifest build that exceeds the timeout produces a
+    // user-visible message NAMING THE CAUSE". `contains("timed out")` alone is
+    // satisfied by the byte-identical string the CHILD-timeout path returns, so
+    // it does not grade that criterion — the caller has to be told the
+    // workspace scan ate the budget and that no child ever ran.
     assert!(
-        result.content.contains("timed out"),
-        "the caller must be told WHY it stopped; got: {}",
+        result.content.contains("timed out") && result.content.contains("manifest"),
+        "the caller must be told WHY it stopped, and that it was the manifest \
+         build rather than the command itself; got: {}",
         result.content
     );
 }
@@ -2289,9 +2295,15 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
         "a 1ms streaming timeout returned after {elapsed:?} against a walk \
          measured at {walk:?} — the manifest build is outside the timeout scope"
     );
+    // #1111 acceptance 3: "a manifest build that exceeds the timeout produces a
+    // user-visible message NAMING THE CAUSE". `contains("timed out")` alone is
+    // satisfied by the byte-identical string the CHILD-timeout path returns, so
+    // it does not grade that criterion — the caller has to be told the
+    // workspace scan ate the budget and that no child ever ran.
     assert!(
-        result.content.contains("timed out"),
-        "the caller must be told WHY it stopped; got: {}",
+        result.content.contains("timed out") && result.content.contains("manifest"),
+        "the caller must be told WHY it stopped, and that it was the manifest \
+         build rather than the command itself; got: {}",
         result.content
     );
 }

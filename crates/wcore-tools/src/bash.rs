@@ -724,9 +724,20 @@ impl Tool for BashTool {
             };
         }
         // #1111: the caller's clock starts HERE, before the manifest build, so
-        // `timeout` bounds the whole execution and not just the child. The
-        // build itself is raced against cancellation on the blocking pool —
-        // see `spawn_manifest_build` for why an inline call cannot be raced.
+        // `timeout` bounds the manifest build AND the child, not just the
+        // child. The build itself is raced against cancellation on the blocking
+        // pool — see `spawn_manifest_build` for why an inline call cannot be
+        // raced.
+        //
+        // NOT "the whole execution", and this comment used to say so:
+        // `unsaved_shell_refusal` above still runs synchronously ahead of this
+        // clock, so it is neither cancellable nor bounded. Measured on
+        // hetzner-dsm against a 40,000-file git work tree: 5 ms for `echo hi`,
+        // but 1,396 ms for `git checkout .` and 968 ms for `rm -rf <dir>` —
+        // the same order as the secret-deny walk this fix bounds. Closing it is
+        // a SEPARATE change and deliberately not attempted here: the P2b
+        // unsaved-work guard must never be skipped because it timed out, or a
+        // destructive command runs unguarded. Recorded rather than claimed.
         let deadline = tokio::time::Instant::now() + timeout;
         let build = spawn_manifest_build(
             command,
@@ -755,8 +766,17 @@ impl Tool for BashTool {
                     };
                 }
                 Err(_) => {
+                    // #1111 acceptance 3 — name the cause. A bare "Command
+                    // timed out after Nms" is byte-identical to what the CHILD
+                    // timeout below returns, so the caller cannot tell that the
+                    // workspace secret-scan ate the whole budget and no child
+                    // was ever started. The prefix is kept so anything matching
+                    // on it (TUI formatter, breaker telemetry) is unaffected.
                     return ToolResult {
-                        content: format!("Command timed out after {timeout_ms}ms"),
+                        content: format!(
+                            "Command timed out after {timeout_ms}ms while building the sandbox \
+                             manifest (the workspace secret-scan); the command never ran"
+                        ),
                         is_error: true,
                     };
                 }
@@ -888,8 +908,17 @@ impl Tool for BashTool {
                     };
                 }
                 Err(_) => {
+                    // #1111 acceptance 3 — name the cause. A bare "Command
+                    // timed out after Nms" is byte-identical to what the CHILD
+                    // timeout below returns, so the caller cannot tell that the
+                    // workspace secret-scan ate the whole budget and no child
+                    // was ever started. The prefix is kept so anything matching
+                    // on it (TUI formatter, breaker telemetry) is unaffected.
                     return ToolResult {
-                        content: format!("Command timed out after {timeout_ms}ms"),
+                        content: format!(
+                            "Command timed out after {timeout_ms}ms while building the sandbox \
+                             manifest (the workspace secret-scan); the command never ran"
+                        ),
                         is_error: true,
                     };
                 }
