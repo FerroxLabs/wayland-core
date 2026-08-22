@@ -44,6 +44,26 @@ pub enum RecoveryDisposition {
     },
 }
 
+/// The error text on an ABANDONED provider attempt's terminal receipt.
+///
+/// A turn can be interrupted after its request was dispatched but before any
+/// reply — or any *complete* reply — came back. The truthful account of that
+/// attempt is neither "it succeeded" nor "it never happened": the request left
+/// this machine, and whether the provider served it, how much of it, and what
+/// it charged are all unobserved. This string is that account, written into the
+/// receipt so a later reader finds the fact recorded rather than a gap.
+///
+/// Its receipt is `Failed` because that is this engine's outcome — it obtained
+/// no usable reply — and it carries the digest of exactly the bytes that were
+/// durably captured, so the record stays checkable against the stream. Both
+/// halves are deliberate: `Cancelled` would suggest the request was stopped
+/// before it counted, and `Succeeded` is unavailable precisely because no
+/// terminal provider event was ever seen. It is the provider-side twin of
+/// [`INTERRUPTED_EFFECT_UNOBSERVED`].
+pub const PROVIDER_OUTCOME_ABANDONED_UNOBSERVED: &str = "the turn was abandoned before this provider request's outcome was observed; the provider \
+     may have served it in full, in part, or not at all, and anything it charged for the request \
+     is not accounted for here";
+
 /// Reconciler identity recorded when an INTERRUPTION, not an observation,
 /// decided a tool effect. The receipt it writes is `Failed` with
 /// [`INTERRUPTED_EFFECT_UNOBSERVED`]: the effect may or may not have landed

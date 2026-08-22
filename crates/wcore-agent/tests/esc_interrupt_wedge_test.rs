@@ -294,6 +294,29 @@ async fn wedge_with_esc(harness: &mut Harness) {
     );
 }
 
+/// Drive a session into a CRASHED mid-stream state: the turn's future is
+/// dropped while its provider attempt is in flight, so nothing unwinds and no
+/// terminal event is ever written.
+///
+/// This is the state Esc used to leave behind, and the one it no longer does.
+/// A crash still produces it, and must: no live engine witnessed the end, so
+/// the attempt's outcome is outstanding in the strict sense — nobody is in a
+/// position to write a receipt for it. That is exactly the subject control (c)
+/// grades the fail-closed operator guard on.
+async fn wedge_with_crash(harness: &mut Harness) {
+    let sink = harness.sink.clone();
+    tokio::select! {
+        _ = harness.engine.run(FIRST_PROMPT, "") => {
+            panic!("the stalled turn must not complete on its own")
+        }
+        // A batch is made durable BEFORE its delta is forwarded, so a delta
+        // proves the journal already holds provider bytes for this attempt.
+        () = wait_for_stream_in_flight(&sink) => {}
+    }
+    // The run future is dropped here: no unwind, no terminal event, no
+    // cancellation. The process is simply gone as far as the journal knows.
+}
+
 // ---------------------------------------------------------------------------
 // RED ARM
 // ---------------------------------------------------------------------------
@@ -398,21 +421,135 @@ async fn a_normally_completed_turn_leaves_the_next_message_acceptable() {
     assert!(second.text.contains(SECOND_ANSWER));
 }
 
+/// CONTROL (d). THE ABANDONMENT MUST BE LEGIBLE, NOT A GAP.
+///
+/// Letting the user carry on is only half the job. Whatever the session did
+/// with the interrupted request has to be READABLE afterwards by someone who
+/// was not there — otherwise "recovered" and "quietly dropped on the floor"
+/// look identical in the journal, and the next person to ask what that turn
+/// cost has nothing to read.
+///
+/// So this asserts the durable record says, in order: the request went out, we
+/// captured exactly these bytes, we never saw it end, and the turn was
+/// cancelled. Note what is deliberately NOT asserted and NOT written — no
+/// success, no `not-started`, and no finished stream. The stream stays open
+/// forever because it never received a terminal event, and that open stream is
+/// itself part of the record.
+#[tokio::test]
+async fn an_abandoned_turn_records_that_its_outcome_was_never_observed() {
+    use wcore_agent::session_journal::{CompletionOutcome, ExternalEffectState, SessionJournal};
+
+    let mut harness = harness(vec![Script::StallMidStream]).await;
+    wedge_with_esc(&mut harness).await;
+
+    let session_id = harness.session_id.clone();
+    let session_dir = harness.session_dir.clone();
+    let Harness {
+        engine,
+        _root,
+        _server,
+        ..
+    } = harness;
+    drop(engine);
+
+    // Read the journal exactly as an outside reader would: from the file on
+    // disk, with no engine and no privileged handle.
+    let state = SessionJournal::recovered_state(session_dir.join(format!("{session_id}.journal")))
+        .expect("a later reader must be able to replay the journal");
+
+    let (attempt_id, attempt) = state
+        .provider_attempts
+        .iter()
+        .next()
+        .expect("the dispatched request must still be in the record");
+
+    // 1. The outcome is recorded as unobserved — not claimed either way.
+    let ExternalEffectState::Completed {
+        outcome: CompletionOutcome::Failed { error },
+    } = &attempt.effect
+    else {
+        panic!(
+            "an abandoned attempt must carry a terminal receipt, not be left \
+             nonterminal for a reader to guess at. Got: {:?}",
+            attempt.effect
+        )
+    };
+    assert_eq!(
+        error,
+        wcore_agent::recovery::PROVIDER_OUTCOME_ABANDONED_UNOBSERVED,
+        "the receipt must say IN WORDS that the provider may have served and \
+         charged for this request; a bare status code is not a record anyone \
+         can act on"
+    );
+
+    // 2. The bytes actually captured are pinned, so the record is checkable
+    //    against the stream rather than merely asserted beside it.
+    assert!(
+        attempt.response_digest.is_some(),
+        "a partial capture must pin what it captured"
+    );
+
+    // 3. The stream is NOT marked finished: it never received a terminal
+    //    event, and saying otherwise would claim a complete reply arrived.
+    let stream = state
+        .streams
+        .values()
+        .find(|stream| stream.attempt_id == *attempt_id)
+        .expect("the durable stream must survive for a later reader");
+    assert!(
+        !stream.finished,
+        "a stream cut off mid-reply must stay open — a finished stream is the \
+         claim that the whole reply arrived"
+    );
+    assert!(
+        !stream.batches.is_empty(),
+        "the bytes that DID arrive must still be readable"
+    );
+
+    // 4. The turn itself reached a terminal boundary, which is what lets the
+    //    session carry on at all.
+    let turn = state
+        .turns
+        .values()
+        .next()
+        .expect("the interrupted turn must still be in the record");
+    assert!(
+        turn.completion.is_some(),
+        "the abandoned turn must be terminal; a nonterminal turn is the wedge"
+    );
+
+    drop(_root);
+    drop(_server);
+}
+
 /// CONTROL (c). THE FAIL-CLOSED GUARD MUST STILL BITE.
 ///
-/// The refusal in the red arm is correct in intent — the product genuinely does
-/// not know whether the interrupted attempt produced effects. The fix must NOT
-/// be to open this guard. On exactly the state the red arm produces, an
-/// operator asserting an outcome (`--as-outcome succeeded|failed|not-started`)
-/// must still be REFUSED, because the attempt has durable stream events and so
-/// no operator-writable receipt exists for it.
+/// An operator asserting an outcome (`--as-outcome succeeded|failed|not-started`)
+/// on an attempt with durable stream events must still be REFUSED: only the
+/// engine that dispatched the request can mint a receipt carrying what it
+/// proved, and no operator can honestly claim what the provider did.
 ///
-/// If a later change makes the red arm pass by letting an operator assert a
-/// false outcome, or by failing open, this control turns red and says so.
+/// FIXTURE NOTE — read this before changing it. This control originally reached
+/// that state through `wedge_with_esc`, and no longer can, because the fix
+/// removed the state from the Esc path rather than opening any guard: the live
+/// engine now writes the attempt's honest terminal receipt at interrupt time,
+/// so after Esc there is no outstanding attempt left for anyone to assert
+/// about. The guard itself (`session_lifecycle`'s `operator_resolvable`, and
+/// `reconcile_resolve`) was not touched. So the control now grades it on the
+/// state that DOES still contain an unobserved attempt — a crash, where no
+/// engine survived to write anything. Same assertions, same guard, on a
+/// subject that still exists.
+///
+/// The `panic!` below is the vacuity guard and must be left in place: if the
+/// crash fixture ever stops producing an outstanding provider attempt, this
+/// control proves nothing and says so instead of passing quietly.
+///
+/// If a later change lets an operator assert a false outcome, or fails open,
+/// this control turns red.
 #[tokio::test]
 async fn an_operator_still_cannot_assert_an_outcome_the_journal_cannot_support() {
     let mut harness = harness(vec![Script::StallMidStream]).await;
-    wedge_with_esc(&mut harness).await;
+    wedge_with_crash(&mut harness).await;
 
     let session_id = harness.session_id.clone();
     let session_dir = harness.session_dir.clone();
