@@ -87,6 +87,16 @@ fn is_chain_retryable(e: &ProviderError) -> bool {
 /// free-form message already exists (`Connection`, `Api`); the variants that
 /// carry no message (`RateLimited`) or an opaque source (`Http`, `Egress`) are
 /// returned verbatim rather than being flattened to reach a format string.
+///
+/// REACHABILITY — measured, not assumed. `ProviderChain::new` has **zero**
+/// production call sites on this tree: all 17 occurrences repo-wide are
+/// `#[cfg(test)]` or under `tests/` (13 of them in this module's own test
+/// block). The shipped failover path is `ResilientProvider`, built by
+/// `create_provider`/`bootstrap`, and it already returns `last_error`
+/// verbatim (`resilient.rs:617`) — it never laundered anything. So this is a
+/// latent defect in an exported type, closed before a host or a future
+/// wiring reaches it; it is NOT a bug any 0.13.4 user could have hit. Do not
+/// re-grade #1077 as a user-visible fix.
 fn exhausted(attempts: usize, last_err: Option<ProviderError>) -> ProviderError {
     let prefix = format!("all {attempts} provider(s) in chain failed: ");
     match last_err {
