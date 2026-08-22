@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -306,18 +307,106 @@ fn exec_error_to_result(e: &SandboxError) -> ToolResult {
     }
 }
 
+/// #1076: appended to any Bash result whose bytes had to be decoded lossily.
+///
+/// `String::from_utf8_lossy` substitutes U+FFFD for every invalid byte and
+/// says nothing about it, so a model reading a binary or mis-encoded payload
+/// gets plausible text with no signal that it is not what the command wrote —
+/// and can then reason, diff or re-write against characters that were never
+/// there. One constant shared by all three decode sites so the buffered and
+/// the two streaming paths cannot drift into different wordings.
+pub(crate) const LOSSY_OUTPUT_NOTE: &str = "\n[wayland] Some output bytes were \
+    not valid UTF-8 and were replaced with U+FFFD. The text above is not a \
+    faithful copy of what the command wrote.";
+
+/// Lossy-decode `bytes`, reporting whether anything was actually replaced.
+///
+/// `Cow::Owned` is the exact signal: `from_utf8_lossy` borrows its input
+/// unchanged when it is already valid UTF-8 and only allocates when it has to
+/// substitute. The two obvious alternatives are both wrong — comparing byte
+/// count to char count flags every faithful multi-byte payload, and scanning
+/// the output for U+FFFD flags output that legitimately contains one.
+fn decode_lossy(bytes: &[u8]) -> (Cow<'_, str>, bool) {
+    let text = String::from_utf8_lossy(bytes);
+    let lossy = matches!(text, Cow::Owned(_));
+    (text, lossy)
+}
+
+/// Forward `bytes` to the sink line-by-line, appending each line (with a
+/// trailing newline) to `buf` so the final result matches the pre-S9
+/// line-buffered shape. Returns true when the chunk had to be decoded lossily.
+///
+/// Module-level rather than nested inside each streaming path: the two copies
+/// were byte-identical and #1076 needs the same lossy signal out of both.
+///
+/// A chunk boundary that splits a multi-byte sequence also reports true. That
+/// is not a false positive — the text this call emitted to the sink really did
+/// carry a U+FFFD the command never wrote.
+fn drain_lines(bytes: &[u8], sink: &dyn ToolOutputSink, buf: &mut String) -> bool {
+    let (text, lossy) = decode_lossy(bytes);
+    for line in text.lines() {
+        sink.emit_chunk(line);
+        buf.push_str(line);
+        buf.push('\n');
+    }
+    lossy
+}
+
 fn output_to_result(output: SandboxOutput) -> ToolResult {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (stdout, stdout_lossy) = decode_lossy(&output.stdout);
+    let (stderr, stderr_lossy) = decode_lossy(&output.stderr);
     let exit_code = output.exit_code;
-    let content = format!(
+    let mut content = format!(
         "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
         exit_code, stdout, stderr
     );
+    if stdout_lossy || stderr_lossy {
+        content.push_str(LOSSY_OUTPUT_NOTE);
+    }
     ToolResult {
         content,
         is_error: exit_code != 0,
     }
+}
+
+/// #1111 — run the manifest build on the blocking pool.
+///
+/// `build_sandbox_pieces_for_session` calls
+/// `WorkspacePolicy::secret_deny_paths_for_backend`, which walks the whole
+/// workspace synchronously and never yields. Called inline from an async fn it
+/// pins the runtime thread, so neither `ctx.cancel.cancelled()` nor the
+/// caller's timeout timer can be polled until the walk finishes: Esc does
+/// nothing and `timeout` does not bound it. `tokio::select!` alone cannot fix
+/// that — the walk would still run to completion while the select is being
+/// constructed. It needs a real await point, which is what this provides.
+///
+/// Measured on Linux (hetzner, live bwrap, 91,633-entry tree): 1,253 ms cold /
+/// ~800 ms warm, ~8.5 us/entry and linear, and only the
+/// contained/channel/remote/Managed posture pays it at all — `trusted_local`
+/// measured 0.18 ms on the same tree because `secret_read_deny_required` is
+/// false there. So this is a cancellability and boundedness fix, NOT a
+/// throughput fix, and nothing here caches or prunes:
+///
+/// * No memoisation. `readable_roots()` filters grants against
+///   `SystemTime::now()`, so the correct deny list changes with no mutation
+///   call at all and any cache key without "now" in it is wrong (#234).
+/// * No prune. See the guard at `workspace_policy.rs:1417-1425` and
+///   `no_prune_survives_the_922_backend_gate`.
+fn spawn_manifest_build(
+    command: &str,
+    workspace: Option<Arc<crate::workspace_policy::WorkspacePolicy>>,
+    sandbox: Arc<wcore_sandbox::SandboxRegistry>,
+    backend_enforces_read_deny: bool,
+) -> tokio::task::JoinHandle<(SandboxManifest, SandboxCommand)> {
+    let command = command.to_string();
+    tokio::task::spawn_blocking(move || {
+        build_sandbox_pieces_for_session(
+            &command,
+            workspace.as_deref(),
+            Some(sandbox.env_passthrough()),
+            backend_enforces_read_deny,
+        )
+    })
 }
 
 pub struct BashTool;
@@ -509,26 +598,19 @@ impl Tool for BashTool {
         let mut stderr_buf = String::new();
         let mut exit_code: Option<i32> = None;
 
-        // Forward `bytes` to the sink line-by-line, appending each line
-        // (with a trailing newline) to `buf` so the final result matches
-        // the pre-S9 line-buffered shape.
-        fn drain_lines(bytes: &[u8], sink: &dyn ToolOutputSink, buf: &mut String) {
-            let text = String::from_utf8_lossy(bytes);
-            for line in text.lines() {
-                sink.emit_chunk(line);
-                buf.push_str(line);
-                buf.push('\n');
-            }
-        }
+        // #1076: true once any chunk on either stream had to be decoded
+        // lossily. Tracked across the whole run because the note describes the
+        // combined content, not one chunk.
+        let mut lossy = false;
 
         let run = async {
             while let Some(chunk) = rx.recv().await {
                 match chunk {
                     SandboxChunk::Stdout(bytes) => {
-                        drain_lines(&bytes, sink, &mut stdout_buf);
+                        lossy |= drain_lines(&bytes, sink, &mut stdout_buf);
                     }
                     SandboxChunk::Stderr(bytes) => {
-                        drain_lines(&bytes, sink, &mut stderr_buf);
+                        lossy |= drain_lines(&bytes, sink, &mut stderr_buf);
                     }
                     SandboxChunk::Exit {
                         exit_code: code, ..
@@ -561,10 +643,13 @@ impl Tool for BashTool {
             };
         };
 
-        let content = format!(
+        let mut content = format!(
             "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
             exit_code, stdout_buf, stderr_buf
         );
+        if lossy {
+            content.push_str(LOSSY_OUTPUT_NOTE);
+        }
         annotate_network_block(
             command,
             default_bash_network_policy(),
@@ -638,13 +723,45 @@ impl Tool for BashTool {
                 is_error: true,
             };
         }
-        let (manifest, mut cmd) = build_sandbox_pieces_for_session(
+        // #1111: the caller's clock starts HERE, before the manifest build, so
+        // `timeout` bounds the whole execution and not just the child. The
+        // build itself is raced against cancellation on the blocking pool —
+        // see `spawn_manifest_build` for why an inline call cannot be raced.
+        let deadline = tokio::time::Instant::now() + timeout;
+        let build = spawn_manifest_build(
             command,
-            ctx.workspace.as_deref(),
-            Some(ctx.sandbox.env_passthrough()),
+            ctx.workspace.clone(),
+            Arc::clone(&ctx.sandbox),
             // Same `backend` handle that runs `execute()` below.
             backend.enforces_read_deny(),
         );
+        let build_abort = build.abort_handle();
+        let (manifest, mut cmd) = tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                build_abort.abort();
+                return ToolResult {
+                    content: "Bash command cancelled by cancellation token".to_string(),
+                    is_error: true,
+                };
+            },
+            built = tokio::time::timeout_at(deadline, build) => match built {
+                Ok(Ok(pieces)) => pieces,
+                Ok(Err(join)) => {
+                    return ToolResult {
+                        content: format!(
+                            "Failed to execute command: sandbox manifest build failed: {join}"
+                        ),
+                        is_error: true,
+                    };
+                }
+                Err(_) => {
+                    return ToolResult {
+                        content: format!("Command timed out after {timeout_ms}ms"),
+                        is_error: true,
+                    };
+                }
+            },
+        };
         downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
         // B1: captured before `cmd` is consumed, so a failure can be attributed
@@ -655,7 +772,7 @@ impl Tool for BashTool {
                 content: "Bash command cancelled by cancellation token".to_string(),
                 is_error: true,
             },
-            result = tokio::time::timeout(timeout, backend.execute(&manifest, cmd)) => match result {
+            result = tokio::time::timeout_at(deadline, backend.execute(&manifest, cmd)) => match result {
                 Ok(Ok(output)) => annotate_masked_read(
                     &scope,
                     command,
@@ -741,13 +858,43 @@ impl Tool for BashTool {
                 is_error: true,
             };
         }
-        let (manifest, mut cmd) = build_sandbox_pieces_for_session(
+        // #1111: same defect and same fix as `execute_with_ctx` — fixing only
+        // one call site leaves the other live.
+        let deadline = tokio::time::Instant::now() + timeout;
+        let build = spawn_manifest_build(
             command,
-            ctx.workspace.as_deref(),
-            Some(ctx.sandbox.env_passthrough()),
+            ctx.workspace.clone(),
+            Arc::clone(&ctx.sandbox),
             // Same `backend` handle that runs `execute()` below.
             backend.enforces_read_deny(),
         );
+        let build_abort = build.abort_handle();
+        let (manifest, mut cmd) = tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                build_abort.abort();
+                return ToolResult {
+                    content: "Bash command cancelled by cancellation token".to_string(),
+                    is_error: true,
+                };
+            },
+            built = tokio::time::timeout_at(deadline, build) => match built {
+                Ok(Ok(pieces)) => pieces,
+                Ok(Err(join)) => {
+                    return ToolResult {
+                        content: format!(
+                            "Failed to execute command: sandbox manifest build failed: {join}"
+                        ),
+                        is_error: true,
+                    };
+                }
+                Err(_) => {
+                    return ToolResult {
+                        content: format!("Command timed out after {timeout_ms}ms"),
+                        is_error: true,
+                    };
+                }
+            },
+        };
         downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
         // B1: see `execute_with_ctx` — same attribution on the streaming path.
@@ -764,23 +911,17 @@ impl Tool for BashTool {
         let mut stderr_buf = String::new();
         let mut exit_code: Option<i32> = None;
 
-        fn drain_lines(bytes: &[u8], sink: &dyn ToolOutputSink, buf: &mut String) {
-            let text = String::from_utf8_lossy(bytes);
-            for line in text.lines() {
-                sink.emit_chunk(line);
-                buf.push_str(line);
-                buf.push('\n');
-            }
-        }
+        // #1076: see `execute_streaming` — same tracking on the ctx path.
+        let mut lossy = false;
 
         let run = async {
             while let Some(chunk) = rx.recv().await {
                 match chunk {
                     SandboxChunk::Stdout(bytes) => {
-                        drain_lines(&bytes, sink, &mut stdout_buf);
+                        lossy |= drain_lines(&bytes, sink, &mut stdout_buf);
                     }
                     SandboxChunk::Stderr(bytes) => {
-                        drain_lines(&bytes, sink, &mut stderr_buf);
+                        lossy |= drain_lines(&bytes, sink, &mut stderr_buf);
                     }
                     SandboxChunk::Exit {
                         exit_code: code, ..
@@ -791,7 +932,7 @@ impl Tool for BashTool {
             }
         };
 
-        let timed = tokio::time::timeout(timeout, run);
+        let timed = tokio::time::timeout_at(deadline, run);
 
         tokio::select! {
             _ = ctx.cancel.cancelled() => ToolResult {
@@ -816,10 +957,13 @@ impl Tool for BashTool {
                         is_error: true,
                     };
                 };
-                let content = format!(
+                let mut content = format!(
                     "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
                     exit_code, stdout_buf, stderr_buf
                 );
+                if lossy {
+                    content.push_str(LOSSY_OUTPUT_NOTE);
+                }
                 annotate_masked_read(
                     &scope,
                     command,
