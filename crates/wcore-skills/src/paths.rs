@@ -186,6 +186,26 @@ pub fn stop_boundary(cwd: &Path) -> Option<PathBuf> {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Render a filesystem path the way SKILL BODIES must carry it: forward
+/// slashes on every platform.
+///
+/// These paths land in model-facing prose that the model then puts into shell
+/// commands, where a Windows backslash is an escape character. Windows accepts
+/// forward slashes, so normalising is safe and a mixed-separator path is not.
+///
+/// Centralised deliberately: this used to be a private helper in `executor`,
+/// so `substitute_output_dir` rendered the SAME directory with native
+/// separators while the header above it rendered forward slashes — a skill
+/// body could carry `C:\\a\\b/c.html`. Every site that puts a path into a
+/// skill body must call this.
+pub(crate) fn normalize_path_separators(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

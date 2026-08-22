@@ -161,6 +161,24 @@ async fn declared_artifact_cannot_escape_the_jail_through_a_symlink() {
     );
 }
 
+/// The composed skill body renders the output directory with FORWARD SLASHES on
+/// every platform — `wcore_skills::executor::normalize_path_separators` does that
+/// deliberately, because the path lands in model-facing prose that the model then
+/// puts into shell commands, where a Windows backslash is an escape character.
+///
+/// A test that builds its expectation with `Path::join` therefore compares native
+/// separators against normalised ones and fails on Windows only. Normalise the
+/// expectation the same way; the assertion still names the whole path, so this
+/// does not weaken it.
+fn as_rendered(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s
+    }
+}
+
 /// #1096 red arm. A skill body that produces a file has nowhere to be told to
 /// put it, so it picks its own source directory in the global config dir — a
 /// place the producing session's own tools cannot reach. The composed body the
@@ -179,9 +197,7 @@ async fn skill_body_is_told_where_to_put_the_files_it_produces() {
         .join("skills")
         .join("sess-artifact-containment");
     assert!(
-        result
-            .content
-            .contains(&expected.to_string_lossy().to_string()),
+        result.content.contains(&as_rendered(&expected)),
         "the composed skill body must name the session-workspace output \
          directory {}; got:\n{}",
         expected.display(),
@@ -218,9 +234,7 @@ async fn skill_body_can_substitute_the_output_directory_token() {
         .join("sess-artifact-containment")
         .join("brief.html");
     assert!(
-        result
-            .content
-            .contains(&expected.to_string_lossy().to_string()),
+        result.content.contains(&as_rendered(&expected)),
         "expected {} in:\n{}",
         expected.display(),
         result.content
