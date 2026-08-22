@@ -61,6 +61,36 @@ fn delivery_origin_belongs_to_turn(origin: &DeliveryOrigin, turn_id: &str) -> bo
     matches!(origin, DeliveryOrigin::Turn { turn_id: origin_turn } if origin_turn == turn_id)
 }
 
+/// How many times to re-derive an abandonment receipt whose digest a
+/// concurrent stream batch invalidated. See
+/// [`AgentEngine::abandon_unobserved_provider_attempts`] for why a couple of
+/// passes is already more than the race can use.
+const ABANDONMENT_RECEIPT_PASSES: usize = 8;
+
+/// Digest of exactly the provider bytes `attempt_id` durably captured, or
+/// `None` when it captured none.
+///
+/// This is the same value the reducer recomputes when it checks a terminal
+/// receipt, derived the same way from the same batches, so a receipt built
+/// from it validates against the journal instead of being refused by it.
+fn durable_attempt_response_digest(
+    state: &crate::session_journal::ReducedSessionState,
+    attempt_id: &str,
+) -> Result<Option<String>, AgentError> {
+    let events = state
+        .streams
+        .values()
+        .filter(|stream| stream.attempt_id == attempt_id)
+        .flat_map(|stream| stream.batches.iter().flatten().cloned())
+        .collect::<Vec<_>>();
+    if events.is_empty() {
+        return Ok(None);
+    }
+    crate::provider_recovery::provider_response_digest(&events)
+        .map(Some)
+        .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+}
+
 #[cfg(test)]
 mod durable_session_authority_tests {
     use std::sync::Arc;
@@ -7462,8 +7492,38 @@ impl AgentEngine {
             recovery.disposition,
             crate::recovery::RecoveryDisposition::Ready
         ) {
+            // Name a remedy that can actually lift THIS refusal. The old text
+            // listed three verbs that all refuse when the blocker is an
+            // unobserved provider outcome — cancel said resume, resume said
+            // reconcile, reconcile said only the engine may — so the reader was
+            // sent round a closed loop with no exit named anywhere in it.
+            //
+            // Name a remedy for EVERY surface this string reaches, not only the
+            // terminal UI. This error is handed verbatim to the `--json-stream`
+            // host, whose recovery vocabulary is continue|reconcile|cancel —
+            // measured: an `"action":"abandon"` on that wire is refused with
+            // "unknown variant `abandon`". A reader there who is told only to
+            // run `/recover abandon` has been sent round a second closed loop,
+            // this one built by the message itself. Relaunching the session with
+            // `--resume` settles it on any surface (the resume path calls
+            // `settle_interrupted_turn_for_resume` before the first prompt), so
+            // that is the exit every reader can actually take.
+            let remedy = match &recovery.disposition {
+                crate::recovery::RecoveryDisposition::Blocked {
+                    reason: crate::recovery::RecoveryBlocker::ProviderOutcomeUnknown,
+                    ..
+                } => {
+                    "its request was still in flight and no reply was ever seen, so nothing can \
+                     honestly claim an outcome for it — which is why continuing, reconciling and \
+                     cancelling all refuse. Abandon the turn instead: that records the outcome as \
+                     unknown, which is true, and lets the session carry on. In the terminal UI \
+                     run `/recover abandon`; from any other surface, relaunching this session \
+                     with `--resume` abandons it for you"
+                }
+                _ => "resume, reconcile, or cancel it before starting a new message",
+            };
             return Err(AgentError::SessionAuthority(format!(
-                "session has an interrupted turn at journal cursor {:?}; resume, reconcile, or cancel it before starting a new message",
+                "session has an interrupted turn at journal cursor {:?}: {remedy}",
                 recovery.journal_sequence
             )));
         }
@@ -7542,15 +7602,30 @@ impl AgentEngine {
         // Close only effects whose physical boundary provably was not crossed.
         // Unknown/running descendants retain durable reconciliation authority
         // and the original UserAborted result.
-        if matches!(result, Err(AgentError::UserAborted))
-            && matches!(
+        // The user pressed Esc. THIS engine watched the request leave and
+        // watched itself stop reading, so it is the only party that can write
+        // the attempt's one true receipt — that no outcome was ever observed —
+        // and it must do so before the turn unwinds. Skipping it left the
+        // attempt `Unknown`, a nonterminal state; the turn then reached no
+        // terminal event at all, `RecoveryPlan` reported
+        // `Blocked{ProviderOutcomeUnknown}`, and the pre-turn gate below
+        // refused every later message for the rest of the session's life. The
+        // wedge was manufactured here, at interrupt time — an advertised
+        // "interrupt" that ended the session instead.
+        //
+        // Tools, children and deliveries are untouched and still block: see
+        // `abandon_unobserved_provider_attempts` for why the provider case is
+        // the one that can be released safely.
+        if matches!(result, Err(AgentError::UserAborted)) {
+            self.abandon_unobserved_provider_attempts(&turn_id).await?;
+            if matches!(
                 self.close_not_started_descendants_for_cancellation(&turn_id)
                     .await?,
                 CancellationDescendantClosure::ReconciliationRequired
-            )
-        {
-            self.active_journal_turn_id = None;
-            return result;
+            ) {
+                self.active_journal_turn_id = None;
+                return result;
+            }
         }
         let sync_result = if matches!(result, Err(AgentError::UserAborted)) {
             self.prepare_durable_conversation().await
@@ -7908,15 +7983,19 @@ impl AgentEngine {
         // Apply the same safe closure rule as a fresh run: pending/prepared
         // descendants are cancelled, but started unknown effects keep the
         // interrupted turn open for reconciliation.
-        if matches!(result, Err(AgentError::UserAborted))
-            && matches!(
+        if matches!(result, Err(AgentError::UserAborted)) {
+            // Same rule as a fresh turn: abandon the unobserved request with
+            // its ignorance recorded, then let started tool/child effects keep
+            // the turn open for reconciliation.
+            self.abandon_unobserved_provider_attempts(turn_id).await?;
+            if matches!(
                 self.close_not_started_descendants_for_cancellation(turn_id)
                     .await?,
                 CancellationDescendantClosure::ReconciliationRequired
-            )
-        {
-            self.active_journal_turn_id = None;
-            return result;
+            ) {
+                self.active_journal_turn_id = None;
+                return result;
+            }
         }
         let sync_result = if matches!(result, Err(AgentError::UserAborted)) {
             self.prepare_durable_conversation().await
@@ -8983,10 +9062,11 @@ impl AgentEngine {
     /// `Unknown` — the interruption the crash left implicit — and then resolves
     /// `Failed` with an error that says the effect may have landed. A PREPARED
     /// tool or attempt takes the not-started receipt the journal already proves
-    /// (there is no start event). An UNKNOWN provider attempt takes the
-    /// `Cancelled` completion the reducer accepts for an attempt with no
-    /// stream. None of these claims an outcome; each records that this process
-    /// never saw one.
+    /// (there is no start event). An UNKNOWN provider attempt is handed to
+    /// [`Self::abandon_unobserved_provider_attempts`], which records `Failed`
+    /// with [`crate::recovery::PROVIDER_OUTCOME_ABANDONED_UNOBSERVED`] and the
+    /// digest of the bytes actually captured. None of these claims an outcome;
+    /// each records that this process never saw one.
     ///
     /// Children and deliveries are deliberately not admitted here: no measured
     /// interruption has left one nonterminal, and inventing a receipt for a
@@ -9051,48 +9131,133 @@ impl AgentEngine {
             let Some((attempt_id, attempt)) =
                 state.provider_attempts.iter().find(|(_, attempt)| {
                     attempt.turn_id == turn_id
-                        && matches!(
-                            attempt.effect,
-                            ExternalEffectState::Prepared | ExternalEffectState::Unknown
-                        )
+                        && matches!(attempt.effect, ExternalEffectState::Prepared)
                 })
             else {
                 break;
             };
             let attempt_id = attempt_id.clone();
             let dispatch_id = attempt.dispatch_id.clone();
-            let event = match (&attempt.effect, dispatch_id) {
-                (ExternalEffectState::Prepared, None) => SessionEvent::ProviderAttemptNotStarted {
-                    attempt_id,
-                    reason: ProviderAttemptNotStartedReason::Cancelled {
-                        reason: "interrupted before the request was dispatched".to_string(),
-                    },
-                },
-                (ExternalEffectState::Prepared, Some(dispatch_id)) => {
-                    SessionEvent::ProviderAttemptNotStartedV2 {
-                        attempt_id,
-                        dispatch_id,
-                        reason: ProviderAttemptNotStartedReason::Cancelled {
-                            reason: "interrupted before the request was dispatched".to_string(),
-                        },
-                    }
-                }
-                (_, None) => SessionEvent::ProviderAttemptFinished {
-                    attempt_id,
-                    outcome: crate::session_journal::CompletionOutcome::Cancelled,
-                    response_digest: None,
-                },
-                (_, Some(dispatch_id)) => SessionEvent::ProviderAttemptFinishedV2 {
+            let reason = ProviderAttemptNotStartedReason::Cancelled {
+                reason: "interrupted before the request was dispatched".to_string(),
+            };
+            let event = match dispatch_id {
+                None => SessionEvent::ProviderAttemptNotStarted { attempt_id, reason },
+                Some(dispatch_id) => SessionEvent::ProviderAttemptNotStartedV2 {
                     attempt_id,
                     dispatch_id,
-                    outcome: crate::session_journal::CompletionOutcome::Cancelled,
-                    response_digest: None,
+                    reason,
                 },
             };
             self.append_journal_event(event).await?;
         }
 
+        // A DISPATCHED attempt is a different question from a prepared one and
+        // takes the receipt that says so. It used to take `Cancelled` with no
+        // digest, which the reducer accepts only for an attempt that streamed
+        // nothing — so the moment an interruption caught a reply part-way, the
+        // one routine meant to settle it was refused
+        // ("provider attempt ... has durable events without a response
+        // digest") and the session stayed unsettleable for the rest of its life.
+        self.abandon_unobserved_provider_attempts(turn_id).await?;
+
         Ok(())
+    }
+
+    /// Write the honest terminal receipt for every provider attempt of
+    /// `turn_id` whose outcome this process never observed, and report whether
+    /// there was one.
+    ///
+    /// This is the fourth thing an interrupted turn can do with an in-flight
+    /// request, alongside continuing it, reconciling it against evidence, and
+    /// proving it never started: ABANDON it, with the fact that its outcome is
+    /// unknown written down rather than assumed away. It is honest for the
+    /// same reason the other three are not available here — it asserts
+    /// nothing about what the provider did. The receipt records this engine's
+    /// outcome (`Failed` — no usable reply), the reason
+    /// ([`crate::recovery::PROVIDER_OUTCOME_ABANDONED_UNOBSERVED`], which says
+    /// in words that the request may have been served and billed), and the
+    /// digest of exactly the bytes that were durably captured, so the claim
+    /// stays checkable against the journal's own stream.
+    ///
+    /// What it deliberately does NOT do is mark the stream finished. A
+    /// correlated stream may only be finished once its events carry a terminal
+    /// `Done`, and this one never will — so it stays open forever, which is
+    /// the durable record that the reply was cut off mid-flight.
+    ///
+    /// PROVIDER attempts only. A running tool or child keeps blocking the
+    /// turn, and must: its unobserved effect can be a booked shipment, and
+    /// releasing the next turn as though it were settled is how one
+    /// interruption becomes two charges. An unserved provider request has no
+    /// such twin — the cost it may have incurred is recorded here and no later
+    /// turn repeats it.
+    async fn abandon_unobserved_provider_attempts(
+        &self,
+        turn_id: &str,
+    ) -> Result<bool, AgentError> {
+        let mut abandoned = false;
+        loop {
+            let journal = self.session_journal.as_ref().ok_or_else(|| {
+                AgentError::SessionAuthority("session journal is not initialized".to_string())
+            })?;
+            let mut last_error = None;
+            let mut wrote = false;
+            // Re-derive the receipt if a stream batch lands between reading the
+            // state and appending, which would leave the digest describing a
+            // stream that has since grown. The window is one append wide and it
+            // shuts permanently: once the receipt lands the attempt is no longer
+            // `Unknown`, and the reducer refuses every later batch on it. Only
+            // the forwarder task can re-open it, and once the engine has dropped
+            // its receiver that task commits at most one more batch before its
+            // next send fails and it returns. Two passes would do.
+            for _ in 0..ABANDONMENT_RECEIPT_PASSES {
+                let state = journal
+                    .state()
+                    .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                let Some((attempt_id, attempt)) =
+                    state.provider_attempts.iter().find(|(_, attempt)| {
+                        attempt.turn_id == turn_id
+                            && matches!(attempt.effect, ExternalEffectState::Unknown)
+                    })
+                else {
+                    return Ok(abandoned);
+                };
+                let attempt_id = attempt_id.clone();
+                let dispatch_id = attempt.dispatch_id.clone();
+                let response_digest = durable_attempt_response_digest(&state, &attempt_id)?;
+                let outcome = crate::session_journal::CompletionOutcome::Failed {
+                    error: crate::recovery::PROVIDER_OUTCOME_ABANDONED_UNOBSERVED.to_string(),
+                };
+                let event = match dispatch_id {
+                    None => SessionEvent::ProviderAttemptFinished {
+                        attempt_id,
+                        outcome,
+                        response_digest,
+                    },
+                    Some(dispatch_id) => SessionEvent::ProviderAttemptFinishedV2 {
+                        attempt_id,
+                        dispatch_id,
+                        outcome,
+                        response_digest,
+                    },
+                };
+                match self.append_journal_event(event).await {
+                    Ok(()) => {
+                        wrote = true;
+                        break;
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            if !wrote {
+                return Err(last_error.unwrap_or_else(|| {
+                    AgentError::SessionAuthority(
+                        "an interrupted provider attempt could not be abandoned".to_string(),
+                    )
+                }));
+            }
+            abandoned = true;
+        }
     }
 
     /// Tool execution ids of `turn_id` whose durable effect matches `wanted`,
@@ -29611,12 +29776,15 @@ mod audit_2026_05_22_tests {
         );
         assert!(
             matches!(
-                state.provider_attempts["attempt-1"].effect,
+                &state.provider_attempts["attempt-1"].effect,
                 crate::session_journal::ExternalEffectState::Completed {
-                    outcome: crate::session_journal::CompletionOutcome::Cancelled
-                }
+                    outcome: crate::session_journal::CompletionOutcome::Failed { error }
+                } if error == crate::recovery::PROVIDER_OUTCOME_ABANDONED_UNOBSERVED
             ),
-            "an in-flight provider attempt takes the cancelled receipt: {:?}",
+            "an in-flight provider attempt terminalizes as UNOBSERVED, held to the same \
+             standard as the interrupted tool above: never succeeded, never not-started, and \
+             not merely `Cancelled` either — the request left this machine and may have been \
+             served and charged for, which the receipt has to say rather than imply: {:?}",
             state.provider_attempts["attempt-1"].effect
         );
         assert_eq!(

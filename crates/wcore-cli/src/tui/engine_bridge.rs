@@ -1101,6 +1101,16 @@ pub(crate) enum TuiRecoveryAction {
     Reconcile,
     Resolve,
     Cancel,
+    /// Give up on the interrupted turn and record that its provider request's
+    /// outcome was never observed.
+    ///
+    /// The one honest thing an operator can do about a request that went out
+    /// and never came back. `Continue` would need a reply nobody has,
+    /// `Resolve` would need evidence nobody holds, and `Cancel` would claim the
+    /// request was stopped before it counted. This claims nothing about the
+    /// provider at all — it writes down that the outcome is unknown and lets
+    /// the session move on.
+    Abandon,
 }
 
 impl TuiRecoveryAction {
@@ -1112,6 +1122,7 @@ impl TuiRecoveryAction {
             Self::Reconcile => "reconcile",
             Self::Resolve => "resolve",
             Self::Cancel => "cancel",
+            Self::Abandon => "abandon",
         }
     }
 }
@@ -1219,6 +1230,16 @@ impl TuiRecoveryView {
                 reason: wcore_agent::recovery::RecoveryBlocker::ContextCheckpointMissing,
                 ..
             } => vec![TuiRecoveryAction::Cancel],
+            // A request that went out and never came back. Every other verb
+            // needs something nobody has — a reply, evidence, or the right to
+            // say it never counted — which is why this used to render
+            // "Allowed: none (fail-closed)" and leave the reader with a
+            // suspended session and no exit. Abandoning is the one action that
+            // asserts nothing false, so it is the one offered.
+            RecoveryDisposition::Blocked {
+                reason: wcore_agent::recovery::RecoveryBlocker::ProviderOutcomeUnknown,
+                ..
+            } => vec![TuiRecoveryAction::Abandon],
             RecoveryDisposition::Ready | RecoveryDisposition::Blocked { .. } => Vec::new(),
         };
         Some(Self {
@@ -3512,6 +3533,9 @@ impl TuiEngine {
                         )
                         .await
                 }
+                TuiRecoveryAction::Abandon => {
+                    guard.settle_interrupted_turn_for_resume().await.map(|_| ())
+                }
             };
             let result = match action_result {
                 Ok(()) => {
@@ -4004,6 +4028,56 @@ mod tests {
 
         let view = TuiRecoveryView::from_plan(&plan).expect("blocked turn remains visible");
         assert_eq!(view.actions, vec![TuiRecoveryAction::Cancel]);
+    }
+
+    /// The blocker that used to render "Allowed: none (fail-closed)" must now
+    /// offer the one action that is honest for it.
+    ///
+    /// This is what the user actually reads. `/recover` composes its line as
+    /// `format!("/recover {}", action.as_str())` over exactly this list, so an
+    /// empty list here IS the closed loop the reader was left in — the surface
+    /// naming three verbs that all refuse and no verb that does not.
+    #[test]
+    fn provider_outcome_unknown_offers_the_abandon_action() {
+        let plan = wcore_agent::recovery::RecoveryPlan {
+            session_id: "session-abandon".into(),
+            journal_sequence: Some(9),
+            journal_digest: "a".repeat(64),
+            state_digest: "b".repeat(64),
+            budget: wcore_protocol::events::RecoveryBudgetSnapshot {
+                tokens_used: 0,
+                token_limit: None,
+                cost_used_usd: 0.0,
+                cost_limit_usd: None,
+            },
+            disposition: wcore_agent::recovery::RecoveryDisposition::Blocked {
+                turn_id: "turn-abandon".into(),
+                reason: wcore_agent::recovery::RecoveryBlocker::ProviderOutcomeUnknown,
+            },
+        };
+
+        let view = TuiRecoveryView::from_plan(&plan).expect("a suspended turn stays visible");
+        assert_eq!(view.actions, vec![TuiRecoveryAction::Abandon]);
+        assert_eq!(
+            TuiRecoveryAction::Abandon.as_str(),
+            "abandon",
+            "the rendered line and the parsed verb must be the same word, or the \
+             surface names a command that does not exist"
+        );
+
+        // The unsafe actions stay off this list: none of them can be honest
+        // about a request whose outcome was never observed.
+        for refused in [
+            TuiRecoveryAction::Continue,
+            TuiRecoveryAction::Reconcile,
+            TuiRecoveryAction::Resolve,
+            TuiRecoveryAction::Cancel,
+        ] {
+            assert!(
+                !view.actions.contains(&refused),
+                "{refused:?} must not be offered for an unobserved provider outcome"
+            );
+        }
     }
 
     #[test]

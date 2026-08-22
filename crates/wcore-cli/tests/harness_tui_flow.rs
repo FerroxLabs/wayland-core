@@ -1100,12 +1100,13 @@ fn resume_repaints_prior_conversation_into_the_transcript() {
 /// covers the real-provider Ctrl-C path; this is the deterministic mock twin and
 /// adds the recover-and-continue assertion.)
 #[test]
-fn esc_on_an_accepted_provider_stream_surfaces_recovery_and_blocks_redispatch() {
+fn esc_on_an_accepted_provider_stream_cancels_cleanly_and_the_session_survives() {
     let home = TempDir::new().expect("tempdir");
 
     // Turn 0 is SLOW (reply held ~4s) so we can interrupt it after the
-    // physical provider boundary. A second scripted response exists only to
-    // prove the blocked follow-up cannot consume it before reconciliation.
+    // physical provider boundary. The second scripted response is what the
+    // follow-up turn consumes, which is how this proves the session genuinely
+    // still works rather than merely failing to complain.
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let server = rt.block_on(
         support::mock_llm::MockLlm::new()
@@ -1161,33 +1162,28 @@ fn esc_on_an_accepted_provider_stream_surfaces_recovery_and_blocks_redispatch() 
     );
 
     // F14: local Esc is not proof that an already-accepted provider request
-    // stopped. Provider attempts do not have the tool-effect reconciliation
-    // authority behind `/recover reconcile`, so the TUI must surface the
-    // durable unknown outcome and expose no unsafe recovery action.
-    h.wait_for(
-        |s| {
-            let screen = s.to_ascii_lowercase();
-            screen.contains("suspended")
-                && screen.contains("provideroutcomeunknown")
-                && screen.contains("allowed: none (fail-closed)")
-        },
-        Duration::from_secs(15),
-        "Esc to surface the fail-closed provider-outcome-unknown state",
-    );
-
-    // A normal message while the provider outcome is unresolved must fail
-    // closed and must not trigger the fixture's second provider response.
+    // stopped, and nothing here claims it did — the attempt's durable receipt
+    // records that its outcome was never observed, which
+    // `f14_sigkill_recovery::stop_during_active_host_continue_preserves_unknown_provider_authority`
+    // asserts on the journal itself. What this test covers is the half that
+    // lives on screen: Esc is advertised as INTERRUPT, so the user must be
+    // able to carry on afterwards.
+    //
+    // This previously asserted the opposite — "allowed: none (fail-closed)"
+    // and a permanently refused follow-up — which is the wedge, not the
+    // contract. The doc comment above this test always described the behaviour
+    // asserted below, and the fixture's own second response was already
+    // scripted to say the session still works after cancel.
     h.type_text("now a normal turn");
     h.send(b"\r");
     h.wait_for(
-        |s| {
-            let screen = s.to_ascii_lowercase();
-            screen.contains("session persistence authority unavailable")
-                && screen.contains("journal cursor")
-        },
-        Duration::from_secs(15),
-        "a pre-reconciliation follow-up to fail closed",
+        |s| s.contains("WAYLAND_RECOVERED_OK"),
+        Duration::from_secs(30),
+        "the message after an interrupt to be answered normally",
     );
+
+    // Exactly one further dispatch: the new turn went out, and the interrupted
+    // one was never silently retried.
     let requests = rt
         .block_on(server.received_requests())
         .expect("read provider fixture requests");
@@ -1196,12 +1192,14 @@ fn esc_on_an_accepted_provider_stream_surfaces_recovery_and_blocks_redispatch() 
             .iter()
             .filter(|request| request.url.path() == "/v1/messages")
             .count(),
-        1,
-        "pre-reconciliation follow-up dispatched the provider"
+        2,
+        "the follow-up turn must dispatch exactly once and the cancelled turn \
+         must not be retried"
     );
+    let final_screen = h.screen_text();
     assert!(
-        !h.screen_text().contains("WAYLAND_RECOVERED_OK"),
-        "the blocked second provider response became visible"
+        !final_screen.contains("WAYLAND_SHOULD_NOT_APPEAR"),
+        "the cancelled turn's body must never render; screen:\n{final_screen}"
     );
 
     // Clean shutdown via the proven palette quit path.
