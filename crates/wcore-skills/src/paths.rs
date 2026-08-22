@@ -51,6 +51,70 @@ pub fn wayland_home_skills_dirs() -> Vec<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// Session output directory (FerroxLabs/wayland#1096)
+// ---------------------------------------------------------------------------
+
+/// Workspace-relative root for everything a session PRODUCES.
+///
+/// Deliberately NOT `.wayland-core`. That directory is repository CONTROL
+/// surface: `WorkspacePolicy::is_repo_control_path` write-denies it for every
+/// session, trusted and contained alike, because its contents are obeyed
+/// rather than merely read. An output root has to be writable, so it gets its
+/// own name.
+pub const SKILL_OUTPUT_ROOT: &str = ".wayland-out";
+
+/// Where a skill puts the files it produces: `<cwd>/.wayland-out/skills/<session>/`.
+///
+/// The two properties that pick this location, and the reason both halves of
+/// #1096/#1097 have to ship together:
+///
+/// * **Inside the session workspace**, so the producing session's own `Read`
+///   can open the result. A `SandboxedFs` jail is rooted at the workspace, and
+///   an output written outside it is a file the agent creates and then cannot
+///   act on -- the dead end the UAT hit.
+/// * **Outside [`REPO_CONTROL_DIRS`]**, so the write is not refused. This is
+///   why the root is not `.wayland-core/out`.
+///
+/// Rejected alternatives, recorded so they are not re-proposed: the skill's own
+/// source directory under `app_config_dir()` (that IS the #1096 bug -- outside
+/// the workspace entirely), and `$WAYLAND_HOME` (writable but outside the jail,
+/// i.e. #1097 again).
+///
+/// [`REPO_CONTROL_DIRS`]: https://docs.rs/wcore-tools
+#[must_use]
+pub fn skill_output_dir(cwd: &Path, session_id: Option<&str>) -> PathBuf {
+    cwd.join(SKILL_OUTPUT_ROOT)
+        .join("skills")
+        .join(session_dir_component(session_id))
+}
+
+/// Reduce a session id to ONE safe path component.
+///
+/// Session ids are UUIDs in production, but this value is joined onto a path
+/// and the function must not become a traversal primitive if that ever stops
+/// being true. Anything outside `[A-Za-z0-9._-]` becomes `_`, and the three
+/// component values that are not ordinary names -- empty, `.`, `..` -- fall
+/// back to the shared `session` bucket.
+fn session_dir_component(session_id: Option<&str>) -> String {
+    let raw = session_id.unwrap_or("").trim();
+    let mapped: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if mapped.is_empty() || mapped == "." || mapped == ".." {
+        "session".to_string()
+    } else {
+        mapped
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Project-level directories (walk up from cwd)
 // ---------------------------------------------------------------------------
 
@@ -159,6 +223,49 @@ mod tests {
             assert!(s.contains("wayland-core"));
             assert!(s.ends_with("commands"));
         }
+    }
+
+    // --- skill_output_dir (#1096) ---
+
+    #[test]
+    fn skill_output_dir_is_inside_cwd_and_outside_repo_control() {
+        let cwd = Path::new("/work/proj");
+        let dir = skill_output_dir(cwd, Some("abc-123"));
+        assert_eq!(dir, cwd.join(".wayland-out").join("skills").join("abc-123"));
+        assert!(dir.starts_with(cwd), "must be readable inside the jail");
+        for control in [".git", ".wayland-core"] {
+            assert!(
+                !dir.starts_with(cwd.join(control)),
+                "{control} is write-denied for every session; the output dir must not be under it"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_output_dir_never_escapes_through_the_session_id() {
+        let cwd = Path::new("/work/proj");
+        let base = cwd.join(".wayland-out").join("skills");
+        for hostile in ["..", "../..", "a/../../b", "/etc", "", "   ", "."] {
+            let dir = skill_output_dir(cwd, Some(hostile));
+            assert_eq!(
+                dir.strip_prefix(&base).map(|p| p.components().count()),
+                Ok(1),
+                "session id {hostile:?} produced more than one component: {dir:?}"
+            );
+            assert!(
+                dir.starts_with(&base),
+                "session id {hostile:?} escaped: {dir:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_output_dir_without_a_session_uses_one_shared_bucket() {
+        let cwd = Path::new("/work/proj");
+        assert_eq!(
+            skill_output_dir(cwd, None),
+            cwd.join(".wayland-out").join("skills").join("session")
+        );
     }
 
     // --- find_git_root ---

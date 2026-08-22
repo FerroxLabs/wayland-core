@@ -21,7 +21,7 @@ use wcore_skills::permissions::SkillPermissionChecker;
 use wcore_skills::refs::SkillCatalog;
 use wcore_skills::types::{ArtifactSpec, ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
 use wcore_tools::context::ToolContext;
-use wcore_tools::vfs::{RealFs, RepoControlDenyFs, SandboxedFs, VirtualFs};
+use wcore_tools::vfs::{RealFs, RepoControlDenyFs, SandboxedFs, SecretDenyFs, VirtualFs};
 use wcore_tools::workspace_policy::WorkspacePolicy;
 use wcore_tools::{NullToolOutputSink, Tool};
 
@@ -264,4 +264,137 @@ async fn declared_artifact_into_a_skill_source_dir_is_refused_by_name() {
          got:\n{}",
         result.content
     );
+}
+
+/// The whole point of the destination, exercised against the REAL jail stack a
+/// contained session installs (`bootstrap.rs:3206-3215`), not a stand-in.
+///
+/// `<cwd>/.wayland-out/skills/<session>/` has to satisfy both halves at once:
+/// writable (or the skill cannot produce anything) and readable (or we have
+/// reproduced #1097 at a new address). The two rejected alternatives are
+/// asserted alongside it so the reasons stay checkable rather than remembered:
+/// `.wayland-core/out` is write-denied, and anything outside the workspace is
+/// unreachable to the same session's Read.
+#[tokio::test]
+async fn the_decided_output_directory_is_both_writable_and_readable() {
+    let cwd = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let policy = Arc::new(WorkspacePolicy::contained(cwd.path()));
+    let vfs: Arc<dyn VirtualFs> = Arc::new(
+        SandboxedFs::new(
+            RepoControlDenyFs::new(
+                SecretDenyFs::new(RealFs, Arc::clone(&policy)),
+                Arc::clone(&policy),
+            ),
+            cwd.path(),
+        )
+        .with_read_grants(policy.session_read_grant_handle()),
+    );
+
+    let chosen =
+        wcore_skills::paths::skill_output_dir(cwd.path(), Some("sess-1")).join("brief.html");
+    vfs.write(&chosen, b"<h1>report</h1>")
+        .await
+        .expect("the chosen output directory must be WRITABLE");
+    assert_eq!(
+        vfs.read(&chosen).await.expect("and READABLE"),
+        b"<h1>report</h1>",
+        "an output the producing session cannot read back is the #1097 trap"
+    );
+
+    // Rejected alternative 1: inside the repo-control surface.
+    assert!(
+        vfs.write(
+            &cwd.path()
+                .join(".wayland-core")
+                .join("out")
+                .join("brief.html"),
+            b"x"
+        )
+        .await
+        .is_err(),
+        ".wayland-core/out was rejected because it is write-denied; if this          write now succeeds the repo-control guard has regressed"
+    );
+    // Rejected alternative 2: outside the workspace (the $WAYLAND_HOME shape).
+    assert!(
+        vfs.write(&outside.path().join("brief.html"), b"x")
+            .await
+            .is_err(),
+        "a destination outside the workspace is writable-but-unreadable,          which is #1097 with a new path"
+    );
+}
+
+/// End to end: a declared artifact aimed at the convention lands there AND the
+/// same session can read it back through the same vfs. This is the UAT case
+/// with both halves in place.
+#[tokio::test]
+async fn a_declared_artifact_in_the_output_dir_is_readable_by_its_own_session() {
+    let cwd = TempDir::new().unwrap();
+    let policy = Arc::new(WorkspacePolicy::contained(cwd.path()));
+    let vfs: Arc<dyn VirtualFs> = Arc::new(SandboxedFs::new(
+        RepoControlDenyFs::new(RealFs, Arc::clone(&policy)),
+        cwd.path(),
+    ));
+
+    let mut s = skill("reporter", "body");
+    s.artifacts = vec![ArtifactSpec {
+        path: ".wayland-out/skills/sess-artifact-containment/morning-brief.html".into(),
+        template: "<h1>brief</h1>".into(),
+    }];
+
+    let result = tool(cwd.path(), vec![s])
+        .execute_with_ctx(json!({ "skill": "reporter" }), &ctx_with(Arc::clone(&vfs)))
+        .await;
+    assert!(!result.is_error, "{}", result.content);
+
+    let expected =
+        wcore_skills::paths::skill_output_dir(cwd.path(), Some("sess-artifact-containment"))
+            .join("morning-brief.html");
+    assert_eq!(
+        vfs.read(&expected)
+            .await
+            .expect("readable by the session that made it"),
+        b"<h1>brief</h1>"
+    );
+}
+
+/// Every `Tool` entry point that can reach the artifact writer must carry the
+/// session filesystem. The streaming default in the trait discards `ctx` and
+/// falls through to `execute`, so this is asserted rather than assumed.
+///
+/// The SYMLINK case, deliberately, not the `.git/hooks` case: the fallback vfs
+/// `execute` builds is itself a `RepoControlDenyFs`, so a repo-control target
+/// is refused whether or not `ctx` survived and could not tell the two apart.
+/// Only the jail refuses this one, so only a `ctx` that actually arrived can
+/// make it pass.
+#[tokio::test]
+async fn the_streaming_entry_point_is_contained_too() {
+    let cwd = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), cwd.path().join("out")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(outside.path(), cwd.path().join("out")).unwrap();
+
+    let vfs: Arc<dyn VirtualFs> = Arc::new(SandboxedFs::new(RealFs, cwd.path()));
+
+    let mut s = skill("streamer", "body");
+    s.artifacts = vec![ArtifactSpec {
+        path: "out/leak.txt".into(),
+        template: "exfiltrated".into(),
+    }];
+
+    let result = tool(cwd.path(), vec![s])
+        .execute_streaming_with_ctx(
+            json!({ "skill": "streamer" }),
+            &ctx_with(vfs),
+            &wcore_tools::NullToolOutputSink,
+        )
+        .await;
+
+    assert!(
+        !outside.path().join("leak.txt").exists(),
+        "the streaming entry point dropped the session vfs"
+    );
+    assert!(result.is_error, "{}", result.content);
 }
