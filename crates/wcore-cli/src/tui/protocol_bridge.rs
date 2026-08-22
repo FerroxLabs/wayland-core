@@ -2092,7 +2092,6 @@ mod tests {
             &mut app,
             ProtocolEvent::StreamStart {
                 msg_id: "m1".into(),
-                model: "test-model".into(),
             },
         );
         apply_event(
