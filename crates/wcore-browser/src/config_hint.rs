@@ -170,8 +170,8 @@ pub fn loopback_blocked_hint(refusal: &str) -> String {
          Only the ports listed above become reachable. Private (RFC 1918), \
          link-local and cloud-metadata addresses stay blocked when they appear \
          literally in the URL, and any other host is re-checked after DNS \
-         resolution — a name resolving inward is refused, and its first answer \
-         is pinned so a later navigation cannot swap it.\n\n\
+         resolution — a name that resolves inward is refused, and one that \
+         resolves to nothing at all is refused too.\n\n\
          One gap remains, and it is not closable from here: the browser runs as \
          a separate sidecar process and performs its own DNS resolution, so a \
          record served with TTL=0 can still be re-answered inside a single \
@@ -288,8 +288,7 @@ mod tests {
     /// to say so -- and, just as importantly, has to say what it still does
     /// NOT cover. Camoufox is a SIDECAR: Firefox resolves DNS in its own
     /// process and we cannot pin the addresses it dials. The gate closes
-    /// static DNS SSRF and cross-navigation rebinding via the TOFU cache; it
-    /// does not close TTL=0 intra-navigation rebinding.
+    /// static DNS SSRF; it does not close TTL=0 intra-navigation rebinding.
     ///
     /// An overclaiming hint is the exact failure gh#826 was: a message naming
     /// a protection the reader does not actually have.

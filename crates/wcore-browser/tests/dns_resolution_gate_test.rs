@@ -37,8 +37,8 @@
 //!
 //! Camoufox is a SIDECAR: Firefox performs its own DNS resolution in another
 //! process, so we cannot pin the addresses it dials. This gate closes STATIC
-//! DNS SSRF (currently 100% open) and cross-navigation rebinding via the TOFU
-//! cache. It does NOT close TTL=0 intra-navigation rebinding.
+//! DNS SSRF (currently 100% open). It does NOT close TTL=0 intra-navigation
+//! rebinding.
 
 use std::sync::Arc;
 
@@ -124,6 +124,56 @@ async fn preflight_refuses_a_navigation_whose_host_resolves_to_nothing() {
         r.content.to_ascii_lowercase().contains("resolv"),
         "the refusal must say the resolution gate is why, or an operator cannot \
          tell this apart from an allow-list miss; got: {}",
+        r.content
+    );
+}
+
+/// GRADES THE PRE-FLIGHT SEAM ALONE.
+///
+/// `preflight_refuses_a_navigation_whose_host_resolves_to_nothing` above does
+/// NOT: the sidecar mock there hands back the same unresolvable name as the
+/// landing URL, so the post-navigation gate in `CamoufoxBackend::dispatch`
+/// refuses it even when `BrowserTool::policy_check` is left completely
+/// un-gated. Measured 2026-08-22: reverting only `tool.rs:353` to the
+/// string-only `evaluate` left all six tests in this file GREEN. That is the
+/// "unit-tested guard shipped through an ungraded call site" shape this file
+/// was written to prevent, reproduced inside the file itself.
+///
+/// Here the sidecar answers with a PUBLIC LITERAL landing URL, which the
+/// post-navigation gate is obliged to allow. The pre-flight gate is therefore
+/// the only thing left that can refuse the op, so this test fails if and only
+/// if the pre-flight seam loses the resolution gate.
+#[tokio::test]
+async fn preflight_alone_refuses_it_even_when_the_landing_url_is_clean() {
+    let server = MockServer::start().await;
+    mount_open(&server, "tab-pre").await;
+    // Landing URL needs no DNS => the post-navigation gate cannot object.
+    mount_navigate(
+        &server,
+        "tab-pre",
+        &format!("http://{PUBLIC_LITERAL}/landed"),
+    )
+    .await;
+
+    let t = tool(
+        server.uri(),
+        BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]),
+    );
+    let input = json!({ "op": { "kind": "navigate", "url": format!("http://{UNRESOLVABLE}/") } });
+
+    use wcore_tools::Tool;
+    let r = t.execute(input).await;
+
+    assert!(
+        r.is_error,
+        "the requested URL is unresolvable and only the PRE-FLIGHT gate can \
+         say so here -- the landing URL is a clean literal. Got a success: {}",
+        r.content
+    );
+    assert!(
+        r.content.contains(UNRESOLVABLE),
+        "the refusal must name the REQUESTED host, proving it came from the \
+         pre-flight seam and not from the landing-URL check; got: {}",
         r.content
     );
 }
@@ -237,6 +287,75 @@ async fn landing_url_on_a_public_literal_is_still_accepted() {
     assert!(
         r.is_ok(),
         "a literal-IP landing URL needs no resolution and must pass: {r:?}"
+    );
+}
+
+/// GRADES THE THIRD SEAM: `enforce_post_navigation_policy`, the Back/Forward
+/// landing-URL check (`camoufox.rs:554`).
+///
+/// The Navigate arm and this one are separate call sites, and the test above
+/// only exercises the Navigate arm. Measured 2026-08-22: reverting ONLY
+/// `camoufox.rs:554` to the string-only `evaluate` left all 194 tests green.
+/// Back/Forward land on a URL the sidecar chose from its own history, which is
+/// exactly the kind of URL the model never typed and nobody re-checks.
+#[tokio::test]
+async fn history_landing_url_goes_through_the_resolution_gate_too() {
+    let server = MockServer::start().await;
+    mount_open(&server, "tab-hist").await;
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-hist/back"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({ "ok": true, "url": format!("http://{UNRESOLVABLE}/previous") }),
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    let policy = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
+    let backend = CamoufoxBackend::with_policy(server.uri(), policy);
+    let session = backend.open_session(false).await.unwrap();
+
+    let r = backend.dispatch(&session.ctx, BrowserOp::Back {}).await;
+
+    match r {
+        Err(BrowserOpError::PolicyDenied { url, reason }) => {
+            assert!(
+                url.contains(UNRESOLVABLE),
+                "the denial must name the history landing URL, got {url}"
+            );
+            assert!(
+                reason.to_ascii_lowercase().contains("resolv"),
+                "the denial must name the resolution gate, got {reason}"
+            );
+        }
+        other => panic!("Back landed outside the resolution gate, got {other:?}"),
+    }
+}
+
+/// NEGATIVE CONTROL for the test above. A history landing URL on a public
+/// literal needs no lookup and must still be accepted, so the Back/Forward
+/// gate cannot pass by refusing every history step.
+#[tokio::test]
+async fn history_landing_url_on_a_public_literal_is_still_accepted() {
+    let server = MockServer::start().await;
+    mount_open(&server, "tab-hist-ok").await;
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-hist-ok/back"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({ "ok": true, "url": format!("http://{PUBLIC_LITERAL}/previous") }),
+        ))
+        .mount(&server)
+        .await;
+
+    let policy = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
+    let backend = CamoufoxBackend::with_policy(server.uri(), policy);
+    let session = backend.open_session(false).await.unwrap();
+
+    let r = backend.dispatch(&session.ctx, BrowserOp::Back {}).await;
+    assert!(
+        r.is_ok(),
+        "a literal-IP history landing URL needs no resolution and must pass: {r:?}"
     );
 }
 

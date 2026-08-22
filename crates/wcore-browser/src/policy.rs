@@ -61,22 +61,43 @@
 //!     recovery path entirely.
 //!   * `denied_origins` still wins over an authorized grant.
 //!
-//! ## DNS resolution gate + rebinding TOFU cache (gh#1053)
+//! ## DNS resolution gate (gh#1053)
 //!
 //! [`BrowserPolicy::evaluate`] decides from the URL **string** alone, so a
 //! public NAME that resolves to `169.254.169.254` or into RFC 1918 passes it
 //! — there is nothing in the string to object to.
 //! [`BrowserPolicy::evaluate_navigation_target`] is the gate the executed
 //! path calls: it runs `evaluate` first, then resolves the host and requires
-//! EVERY resolved address to clear the same block-list, fails closed on a host
-//! that resolves to nothing, and pins the surviving answer so a later
-//! navigation to the same name that answers differently is refused.
+//! EVERY resolved address to clear the same block-list, and fails closed on a
+//! host that resolves to nothing.
 //!
-//! **What it does not close.** Camoufox is a SIDECAR: Firefox performs its own
-//! DNS resolution in another process, so the addresses it actually dials
-//! cannot be pinned to the ones checked here. This closes static DNS SSRF and
-//! cross-navigation rebinding via the TOFU cache. It does NOT close TTL=0
-//! intra-navigation rebinding.
+//! ### Why there is no TOFU pin on this path
+//!
+//! An earlier shape of this gate also pinned the answer (via
+//! [`BrowserPolicy::check_resolved_host`]) so a later navigation answering
+//! differently was refused. That is wrong twice over:
+//!
+//!   * It buys nothing. A rebind means the second answer points somewhere the
+//!     policy blocks — and every address of every answer already has to clear
+//!     `blocked_resolved_ip_reason` above. A public-to-public change is not an
+//!     attack this policy has an opinion about.
+//!   * It breaks real hosts. MEASURED 2026-08-22 against the upstream resolver
+//!     with the local cache bypassed, 11 re-queries over ~60s: the answer set
+//!     for `s3.amazonaws.com` was fully DISJOINT from the first answer on
+//!     11/11 re-queries, `www.akamai.com` on 9/11, `cdn.jsdelivr.net` on 8/11,
+//!     `outlook.office365.com` on 6/11. (Control: `www.wikipedia.org` 0/11 —
+//!     the measurement can report "stable".) Neither the first address nor an
+//!     order-independent representative such as `min()` survives that, so the
+//!     pin refuses the SECOND navigation to those hosts for the rest of the
+//!     session, reported as a rebinding attack.
+//!
+//! `check_resolved_host` itself is unchanged and still available to a caller
+//! that resolves once and dials that exact address.
+//!
+//! **What the gate does not close.** Camoufox is a SIDECAR: Firefox performs
+//! its own DNS resolution in another process, so the addresses it actually
+//! dials are not the ones checked here. This closes static DNS SSRF. It does
+//! NOT close TTL=0 intra-navigation rebinding.
 //!
 //! ## Redirect re-check
 //!
@@ -440,7 +461,10 @@ impl BrowserPolicy {
     ///      answer.
     ///   5. A host that resolves to nothing fails CLOSED. "I could not check"
     ///      is not "allowed".
-    ///   6. The surviving answer is pinned in the TOFU cache.
+    ///
+    /// There is deliberately NO TOFU pin on this path — see the module
+    /// header. Step 4 is what actually stops a rebind, and a pin on top of it
+    /// refuses ordinary rotating multi-A hosts for no security gain.
     ///
     /// See the crate-level "DNS resolution gate" section for the residual gap
     /// this cannot close (the sidecar resolves DNS itself, so TTL=0
@@ -520,7 +544,9 @@ impl BrowserPolicy {
         if addrs.is_empty() {
             return PolicyOutcome::Deny {
                 reason: format!(
-                    "{host} resolved to no address at all; refused because the policy                      cannot tell where the request would land (DNS resolution gate)"
+                    "{host} resolved to no address at all; refused because the \
+                     policy cannot tell where the request would land \
+                     (DNS resolution gate)"
                 ),
             };
         }
@@ -530,19 +556,11 @@ impl BrowserPolicy {
             }
         }
 
-        // 6. Pin the answer set's ORDER-INDEPENDENT representative rather than
-        //    `addrs[0]`. Resolvers rotate multi-A answers, so pinning whichever
-        //    address happened to come back first would refuse ordinary
-        //    CDN-hosted hosts on their second navigation — a false rebinding
-        //    denial. Every address in the set has already cleared the
-        //    block-list above, which is the check that actually stops a swap to
-        //    a private / metadata target; the pin is the cross-navigation half.
-        let pinned = addrs
-            .iter()
-            .copied()
-            .min()
-            .expect("addrs was checked non-empty above");
-        self.check_resolved_host(host, pinned)
+        // 6. NO TOFU PIN HERE — deliberately. See the "why there is no pin"
+        //    section in the module header. The loop above is the check that
+        //    stops a rebind; a pin on top of it stops nothing extra and,
+        //    measured, refuses real hosts.
+        PolicyOutcome::Allow
     }
 
     /// DNS-rebinding TOFU check. Call this when the *resolved* IP for a
@@ -1362,50 +1380,93 @@ mod tests {
         assert!(matches!(r, PolicyOutcome::Deny { .. }), "got {r:?}");
     }
 
-    /// RED. The TOFU half: the gate must PIN what it resolved, so a second
-    /// navigation to the same name that now answers differently is refused.
-    /// This is the cross-navigation rebinding the fix legitimately closes
-    /// (as opposed to the intra-navigation TTL=0 case, which it cannot).
+    /// The gate must NOT pin. Two REAL consecutive answer sets for
+    /// `s3.amazonaws.com`, captured 45s apart on 2026-08-22 from the upstream
+    /// resolver (`dig @185.12.64.1`, local cache bypassed) — they are fully
+    /// DISJOINT. A TOFU pin, whether it pins `addrs[0]` or an
+    /// order-independent representative such as `min()`, refuses the second
+    /// navigation and reports it as a rebinding attack; and because the pin
+    /// lives as long as the policy instance, that host stays refused for the
+    /// rest of the session.
+    ///
+    /// Every address in both sets is public and clears the block-list, which
+    /// is the check that actually stops a rebind.
     #[test]
-    fn navigation_gate_pins_the_host_it_resolved() {
-        let p = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
-        assert_eq!(p.dns_cache_len(), 0, "precondition: nothing pinned yet");
-
-        let r = p.evaluate_navigation_target_with("http://public.example/", fake_resolver);
-        assert!(matches!(r, PolicyOutcome::Allow), "got {r:?}");
-        assert_eq!(
-            p.dns_cache_len(),
-            1,
-            "the gate must record what it resolved, or the TOFU cache it \
-             already owns can never fire"
-        );
-
-        // Same name, different answer on the next navigation.
-        fn rebound(host: &str) -> Vec<IpAddr> {
+    fn navigation_gate_does_not_refuse_a_rotating_multi_a_host() {
+        fn s3_first(host: &str) -> Vec<IpAddr> {
             match host {
-                "public.example" => vec!["203.0.113.9".parse().unwrap()],
+                "s3.amazonaws.com" => [
+                    "16.15.183.181",
+                    "16.15.229.87",
+                    "16.15.245.37",
+                    "16.15.255.55",
+                    "16.182.32.224",
+                    "52.217.115.248",
+                    "52.217.135.16",
+                    "52.217.228.192",
+                ]
+                .iter()
+                .map(|s| s.parse().unwrap())
+                .collect(),
                 _ => Vec::new(),
             }
         }
-        let r = p.evaluate_navigation_target_with("http://public.example/", rebound);
+        fn s3_45s_later(host: &str) -> Vec<IpAddr> {
+            match host {
+                "s3.amazonaws.com" => [
+                    "16.15.191.118",
+                    "16.15.207.62",
+                    "16.15.245.238",
+                    "16.15.253.16",
+                    "16.15.255.132",
+                    "52.216.32.248",
+                    "52.217.203.128",
+                    "52.217.69.174",
+                ]
+                .iter()
+                .map(|s| s.parse().unwrap())
+                .collect(),
+                _ => Vec::new(),
+            }
+        }
+
+        let p = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
+        let r = p.evaluate_navigation_target_with("https://s3.amazonaws.com/b/k", s3_first);
+        assert!(matches!(r, PolicyOutcome::Allow), "first navigation: {r:?}");
+
+        let r = p.evaluate_navigation_target_with("https://s3.amazonaws.com/b/k", s3_45s_later);
         assert!(
-            matches!(r, PolicyOutcome::Deny { .. }),
-            "a name that answers with a different address on a later \
-             navigation must be refused, got {r:?}"
+            matches!(r, PolicyOutcome::Allow),
+            "a rotating multi-A public host must not be refused on its second \
+             navigation -- the two answer sets are real, measured, and fully \
+             disjoint, and neither contains a blocked address: {r:?}"
         );
     }
 
-    /// NEGATIVE CONTROL for the pin. A repeat navigation with the SAME answer
-    /// must keep working -- a pin that refuses its own host is worse than no
-    /// pin.
+    /// PAIRED CONTROL for the test above, and the property that actually
+    /// matters: rotation is fine, rotating INTO a blocked address is not.
+    /// Dropping the pin must not drop this.
     #[test]
-    fn navigation_gate_pin_permits_a_stable_answer() {
+    fn navigation_gate_still_refuses_a_later_answer_that_points_inward() {
         let p = BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]);
-        for _ in 0..3 {
-            let r = p.evaluate_navigation_target_with("http://public.example/", fake_resolver);
-            assert!(matches!(r, PolicyOutcome::Allow), "got {r:?}");
+        let r = p.evaluate_navigation_target_with("http://public.example/", fake_resolver);
+        assert!(matches!(r, PolicyOutcome::Allow), "first navigation: {r:?}");
+
+        fn rebound_inward(host: &str) -> Vec<IpAddr> {
+            match host {
+                "public.example" => vec![
+                    "93.184.216.34".parse().unwrap(),
+                    "169.254.169.254".parse().unwrap(),
+                ],
+                _ => Vec::new(),
+            }
         }
-        assert_eq!(p.dns_cache_len(), 1);
+        let r = p.evaluate_navigation_target_with("http://public.example/", rebound_inward);
+        assert!(
+            matches!(r, PolicyOutcome::Deny { .. }),
+            "a later answer containing the metadata endpoint must be refused \
+             by the per-address block-list, pin or no pin: {r:?}"
+        );
     }
 
     /// RED. The origin lists still decide first -- the resolution gate is an
