@@ -41,6 +41,7 @@
 //! finite REST/GraphQL responses), so the cap that would break `build()`
 //! is exactly right for the tool client.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
@@ -55,10 +56,43 @@ pub(crate) enum StreamPoll<T> {
     ConsumerClosed,
 }
 
+/// The silence timer for one poll, resolving to the silence it measured.
+///
+/// `None` arms NO timer — the future simply never completes — rather than
+/// arming one that is merely very long, so a disabled threshold costs nothing
+/// per streamed token.
+async fn silence_notice(after: Option<Duration>) -> Duration {
+    match after {
+        Some(after) => {
+            tokio::time::sleep(after).await;
+            after
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// Poll one provider-stream item, returning immediately when the engine drops
 /// its receiver (for example after user cancellation). Without this select,
 /// spawned response workers can remain parked in `bytes_stream().next()` until
 /// the five-minute read timeout even though nobody can consume their output.
+///
+/// Also the one place that can see a stream go quiet. Every provider polls
+/// this function and nothing else sits between the socket and the engine, so
+/// a gap of [`stream_silence_notice_after`] with no bytes emits ONE
+/// [`LlmEvent::StreamSilent`] on the same channel the engine already consumes
+/// and then keeps waiting. A `warn!` would not do: with `RUST_LOG` unset only
+/// ERROR reaches stderr, so a log here reaches nobody while the user watches
+/// a frozen cursor.
+///
+/// The signal carries the elapsed silence and no prose — the agent layer
+/// renders it. It is at most one per silent gap (a stream silent for the full
+/// read-timeout window does not repeat), and the first byte cancels the timer
+/// rather than deferring it: the timer is owned by this call and dropped with
+/// it, so nothing can fire late against a stream that already answered.
+///
+/// `try_send`, never `send().await`: this runs on the task that owns the
+/// stream, and blocking it on a full channel would stall the very stream the
+/// notice is about. A dropped notice costs one advisory line.
 pub(crate) async fn next_or_consumer_closed<S, T>(
     stream: &mut S,
     tx: &mpsc::Sender<LlmEvent>,
@@ -66,13 +100,24 @@ pub(crate) async fn next_or_consumer_closed<S, T>(
 where
     S: Stream<Item = T> + Unpin,
 {
-    tokio::select! {
-        biased;
-        _ = tx.closed() => StreamPoll::ConsumerClosed,
-        item = stream.next() => match item {
-            Some(item) => StreamPoll::Item(item),
-            None => StreamPoll::End,
-        },
+    let notice = silence_notice(stream_silence_notice_after());
+    tokio::pin!(notice);
+    let mut notified = false;
+    loop {
+        tokio::select! {
+            biased;
+            _ = tx.closed() => return StreamPoll::ConsumerClosed,
+            item = stream.next() => {
+                return match item {
+                    Some(item) => StreamPoll::Item(item),
+                    None => StreamPoll::End,
+                };
+            }
+            silent_for = &mut notice, if !notified => {
+                notified = true;
+                let _ = tx.try_send(LlmEvent::StreamSilent { silent_for });
+            }
+        }
     }
 }
 
@@ -84,6 +129,63 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// L2: raised from 120s to 300s so extended-thinking / long server-side
 /// reasoning does not false-trip the timeout. See module docs.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Environment override for [`stream_silence_notice_after`], in whole
+/// seconds. `off` (or `0`) disables the notice entirely; an unparsable value
+/// keeps the default rather than failing a run over a typo in an env var.
+///
+/// Same shape as the `WAYLAND_MODEL_DISCOVERY` switch
+/// (`model_catalog::discovery_enabled`) — this repo configures provider-side
+/// behaviour by env override with a documented default, not by a new constant
+/// nobody can reach.
+pub const STREAM_SILENCE_NOTICE_ENV: &str = "WAYLAND_STREAM_SILENCE_NOTICE";
+
+/// Default silence before a provider stream reports that it is still waiting.
+///
+/// Derived from [`READ_TIMEOUT`] rather than invented: one tenth of the window
+/// that would eventually kill the request, which also lands on the same 30s
+/// order as [`CONNECT_TIMEOUT`]. The bar it has to clear is that the user
+/// hears something WELL before the read timeout fires — silence for the full
+/// five minutes is what a hang looks like.
+///
+/// It is only a notice: nothing is cancelled, retried or failed, so a
+/// reasoning model that legitimately thinks for four minutes still streams
+/// normally afterwards. That is why this is much shorter than [`READ_TIMEOUT`]
+/// and is allowed to be.
+pub const STREAM_SILENCE_NOTICE_AFTER: Duration = Duration::from_secs(READ_TIMEOUT.as_secs() / 10);
+
+/// Resolved silence threshold: [`STREAM_SILENCE_NOTICE_AFTER`] unless
+/// [`STREAM_SILENCE_NOTICE_ENV`] overrides it, `None` when disabled.
+///
+/// Read once per process — this is polled on the hot path of every streamed
+/// token, and the value cannot change under a running stream anyway.
+pub fn stream_silence_notice_after() -> Option<Duration> {
+    static RESOLVED: OnceLock<Option<Duration>> = OnceLock::new();
+    *RESOLVED.get_or_init(|| {
+        resolve_stream_silence_notice(std::env::var(STREAM_SILENCE_NOTICE_ENV).ok().as_deref())
+    })
+}
+
+/// The decision half of [`stream_silence_notice_after`], split from the env
+/// read so it can be tested without a process-global that the caching above
+/// would freeze after the first test to run.
+fn resolve_stream_silence_notice(raw: Option<&str>) -> Option<Duration> {
+    let Some(raw) = raw.map(str::trim) else {
+        return Some(STREAM_SILENCE_NOTICE_AFTER);
+    };
+    if raw.eq_ignore_ascii_case("off") {
+        return None;
+    }
+    match raw.parse::<u64>() {
+        // An explicit zero is the same instruction as `off`; firing instantly
+        // would otherwise emit a notice on every healthy stream.
+        Ok(0) => None,
+        Ok(seconds) => Some(Duration::from_secs(seconds)),
+        // A typo in an env var must not silently disable the notice, and must
+        // not fail a run either.
+        Err(_) => Some(STREAM_SILENCE_NOTICE_AFTER),
+    }
+}
 
 /// AUDIT B-5 — request-level wall-clock timeout for non-streaming HTTP
 /// tools. A generous 300s cap: large GitHub/GitLab responses and slow
@@ -272,5 +374,151 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    /// SLOW FIRST BYTE — a stream that has produced NOTHING must surface a
+    /// signal the user can actually observe.
+    ///
+    /// `next_or_consumer_closed` is the single chokepoint every provider polls
+    /// (bedrock.rs:806, cohere.rs:336, gemini.rs:836, openai.rs:1709 and :1821,
+    /// anthropic_shared.rs:362 — 6 call sites, verified by grep), and the only
+    /// channel it holds to the user is `tx`. Between dispatch and the first
+    /// byte the product currently says NOTHING for up to `READ_TIMEOUT` (300 s),
+    /// which the user cannot tell apart from a hang.
+    ///
+    /// This test asserts the OBSERVABLE, deliberately not a log line: with
+    /// `RUST_LOG` unset only ERROR reaches stderr, so a `warn!` here reaches
+    /// nobody. A test that asserted on a log would pass while the user still
+    /// stared at a frozen cursor.
+    ///
+    /// The bar is the minimum defensible one, tied to an existing constant
+    /// rather than an invented threshold: before `READ_TIMEOUT` expires and
+    /// kills the request, the user must have been told at least once that the
+    /// stream is still silent. A fix should fire well before that; this test
+    /// only refuses total silence.
+    ///
+    /// Virtual clock (`start_paused`), so the 300 s window costs no wall time.
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_silent_past_the_threshold_surfaces_a_signal_to_the_user() {
+        let (tx, mut rx) = mpsc::channel::<LlmEvent>(4);
+        let started = tokio::time::Instant::now();
+
+        // A provider stream that accepted the request and then produced nothing
+        // at all — the slow-first-byte shape.
+        let poll = tokio::spawn(async move {
+            let mut stream = futures::stream::pending::<u8>();
+            next_or_consumer_closed(&mut stream, &tx).await
+        });
+
+        let observed = tokio::time::timeout(READ_TIMEOUT, rx.recv()).await;
+        poll.abort();
+
+        let Ok(event) = observed else {
+            panic!(
+                "a provider stream produced no bytes for {READ_TIMEOUT:?} and told \
+                 the user NOTHING: no LlmEvent reached the consumer before the \
+                 read timeout would have killed the request. RUST_LOG is unset in \
+                 production, so a warn! here is invisible — the signal has to be \
+                 observable on the channel the engine actually consumes."
+            );
+        };
+        let event = event.expect("the event channel must not be closed while the poll is live");
+        println!(
+            "slow-first-byte signal fired after {:?}: {event:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The threshold is configurable, and every branch of the override is
+    /// pinned: the default has to survive an absent or malformed value, and
+    /// `off` has to actually mean off rather than "very soon".
+    #[test]
+    fn the_silence_threshold_reads_its_configured_override() {
+        // Default: 30s, one tenth of the read timeout that would kill the
+        // request — a notice long before the window a hang looks like.
+        assert_eq!(resolve_stream_silence_notice(None), Some(READ_TIMEOUT / 10));
+        assert_eq!(
+            resolve_stream_silence_notice(None),
+            Some(STREAM_SILENCE_NOTICE_AFTER)
+        );
+        assert_eq!(
+            resolve_stream_silence_notice(Some(" 45 ")),
+            Some(Duration::from_secs(45))
+        );
+        // Disabled, both spellings.
+        assert_eq!(resolve_stream_silence_notice(Some("off")), None);
+        assert_eq!(resolve_stream_silence_notice(Some("OFF")), None);
+        assert_eq!(resolve_stream_silence_notice(Some("0")), None);
+        // A typo keeps the default: it must neither disable the notice
+        // silently nor fail the run.
+        assert_eq!(
+            resolve_stream_silence_notice(Some("banana")),
+            Some(STREAM_SILENCE_NOTICE_AFTER)
+        );
+        assert_eq!(
+            resolve_stream_silence_notice(Some("")),
+            Some(STREAM_SILENCE_NOTICE_AFTER)
+        );
+    }
+
+    /// A DISABLED threshold must arm NOTHING — not a timer that fires
+    /// eventually. Virtual clock, so "eventually" is cheap: ten read-timeout
+    /// windows pass and the notice must still not have completed.
+    #[tokio::test(start_paused = true)]
+    async fn a_disabled_threshold_arms_no_timer() {
+        let notice = silence_notice(resolve_stream_silence_notice(Some("off")));
+        tokio::pin!(notice);
+        tokio::select! {
+            biased;
+            silent_for = &mut notice => {
+                panic!("a disabled threshold fired a notice after {silent_for:?}")
+            }
+            _ = tokio::time::sleep(READ_TIMEOUT * 10) => {}
+        }
+
+        // Positive control for the mechanism: an ENABLED threshold fires
+        // inside the same window, so the pass above is an absence and not a
+        // select that never polls the notice at all.
+        let notice = silence_notice(resolve_stream_silence_notice(Some("5")));
+        tokio::pin!(notice);
+        tokio::select! {
+            biased;
+            silent_for = &mut notice => assert_eq!(silent_for, Duration::from_secs(5)),
+            _ = tokio::time::sleep(READ_TIMEOUT * 10) => {
+                panic!("control: an enabled threshold must fire")
+            }
+        }
+    }
+
+    /// NEGATIVE CONTROL for the test above: a stream that answers immediately
+    /// must NOT raise the slow-stream signal. Without this, a fix that fires
+    /// unconditionally would pass.
+    ///
+    /// Passes today (nothing is ever emitted); it exists to fail if the fix
+    /// over-fires.
+    #[tokio::test(start_paused = true)]
+    async fn a_fast_first_byte_does_not_fire_the_slow_stream_signal() {
+        let (tx, mut rx) = mpsc::channel::<LlmEvent>(4);
+        let mut stream = futures::stream::iter([7_u8]);
+
+        assert!(matches!(
+            next_or_consumer_closed(&mut stream, &tx).await,
+            StreamPoll::Item(7)
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "a stream that answered immediately must not raise a slow-stream signal"
+        );
+
+        // And the timer must be CANCELLED by the first byte, not merely
+        // not-yet-due: a fix that spawns a detached timer would fire it late,
+        // long after the bytes arrived, and spam a healthy stream.
+        tokio::time::sleep(READ_TIMEOUT * 2).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "the slow-stream signal must be cancelled by the first byte, not deferred: \
+             it fired {:?} after a stream that had already delivered its item",
+            READ_TIMEOUT * 2
+        );
     }
 }

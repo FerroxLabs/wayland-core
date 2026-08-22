@@ -179,6 +179,22 @@ pub enum LlmEvent {
         /// without echoing a half-written payload back at them.
         partial_arg_bytes: usize,
     },
+    /// The provider accepted the request and the stream has produced NO
+    /// bytes for `silent_for`.
+    ///
+    /// NOT an error and NOT terminal: the request is still live, the
+    /// between-bytes read timeout has not fired, and the turn may still
+    /// complete normally. A long silence before the first byte is legitimate
+    /// on reasoning models, which is exactly why the read timeout is five
+    /// minutes — but from outside, a healthy silent stream and a hung one are
+    /// indistinguishable, and the product said nothing for the whole window.
+    ///
+    /// Carries the elapsed silence and no prose: rendering belongs to the
+    /// agent layer, which owns the user's surface. Emitted at most once per
+    /// silent gap by the single chokepoint every provider polls
+    /// (`wcore_providers::http_client::next_or_consumer_closed`), and
+    /// cancelled by the first byte.
+    StreamSilent { silent_for: std::time::Duration },
     /// Error from the API
     Error(String),
     /// FluxRouter web_search grounding (contract §5.4): the deduplicated set of

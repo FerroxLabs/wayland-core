@@ -222,7 +222,9 @@ async fn collect_text(
             | LlmEvent::TruncatedToolCall { .. }
             | LlmEvent::Citations(_)
             | LlmEvent::SearchResults(_)
-            | LlmEvent::ProviderMeta { .. } => {}
+            | LlmEvent::ProviderMeta { .. }
+            // Progress signal, not content: a paraphrase is the text only.
+            | LlmEvent::StreamSilent { .. } => {}
         }
     }
     Err(LlmParaphraseError::StreamEndedEarly)
