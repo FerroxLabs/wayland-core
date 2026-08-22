@@ -31,15 +31,45 @@
 //! **Never hang:** the await is bounded by [`HOST_SEND_TIMEOUT`] (mirroring
 //! the bounded approval-bridge waits); a timeout is a loud `SendOutcome::Err`
 //! surfaced to the model, and the pending entry is cleaned up.
+//!
+//! ## Rate limiting (wayland#585)
+//!
+//! wayland#585 was first closed on [`crate::channel_send_transport`], but
+//! `bootstrap` deliberately SKIPS that upgrade when
+//! [`host_delegated_send_enabled`] is true, so under the desktop the tool
+//! keeps THIS transport and tool-driven sends were completely unthrottled —
+//! two agents wired to the same conversation could ping-pong without bound.
+//! The same per-conversation guard is therefore applied here, in the same
+//! shape, so there is one convention and not two.
+//!
+//! TWO-SEAM RULE: the throttle sits on this TOOL-driven transport only.
+//! `HostDelegatedTransport` is reachable solely from
+//! `SendMessageTool::execute`; nothing here touches
+//! `ChannelManager::send_to`, which the human/operator and cron paths share
+//! (pinned by `channel_inbound::tests::interactive_sends_bypass_the_rate_limit`).
+//! A human send can never be throttled by this change.
+//!
+//! A suppressed send returns [`SendOutcome::Err`] carrying
+//! [`THROTTLED_ERROR_PREFIX`], which `SendMessageTool` renders as an
+//! `is_error` `ToolResult` the model actually reads. A `warn!` alone reaches
+//! nobody with `RUST_LOG` unset, so it can never end a model-driven loop.
+//! The refusal is decided BEFORE the `host_send_message_request` is emitted,
+//! so a throttled send never reaches the host at all.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::oneshot;
 
-use wcore_tools::send_message::{MessageTransport, ParsedTarget, SendOutcome};
+use wcore_channels::{
+    AutoReplyRateLimiter, DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP,
+    DEFAULT_MAX_AUTO_REPLIES,
+};
+use wcore_tools::send_message::{
+    MessageTransport, ParsedTarget, SendOutcome, THROTTLED_ERROR_PREFIX,
+};
 
 /// How long a delegated send waits for the host's
 /// `host_send_message_result` before failing loudly. 30s per the #537 Core
@@ -184,6 +214,15 @@ pub struct HostDelegatedTransport {
     bridge: Arc<HostSendBridge>,
     output: Arc<dyn crate::output::OutputSink>,
     timeout: Duration,
+    /// Per-conversation rolling-window guard on TOOL-DRIVEN sends
+    /// (wayland#585). Owned by the transport rather than parked in a
+    /// `static`, so a fresh engine/session starts with a fresh budget and
+    /// cannot inherit a previous session's spent one. Behind a `std::Mutex`
+    /// because `MessageTransport::send` takes `&self` and the tool is shared
+    /// across concurrent turns; the critical section is a bounded map op and
+    /// the guard is dropped before any `.await`, so it never crosses a
+    /// suspension point.
+    rate_limiter: Mutex<AutoReplyRateLimiter>,
 }
 
 impl HostDelegatedTransport {
@@ -192,6 +231,13 @@ impl HostDelegatedTransport {
             bridge,
             output,
             timeout: HOST_SEND_TIMEOUT,
+            // Constructed from the named constants rather than `default()` so
+            // the refusal message below cannot drift from the live budget.
+            rate_limiter: Mutex::new(AutoReplyRateLimiter::new(
+                DEFAULT_MAX_AUTO_REPLIES,
+                DEFAULT_AUTO_REPLY_WINDOW,
+                DEFAULT_CONVERSATION_CAP,
+            )),
         }
     }
 
@@ -206,6 +252,49 @@ impl HostDelegatedTransport {
 #[async_trait]
 impl MessageTransport for HostDelegatedTransport {
     async fn send(&self, target: &ParsedTarget, message: &str) -> SendOutcome {
+        // wayland#585 — throttle the tool seam per conversation. Keyed on the
+        // platform token plus the chat id, joined by an ASCII unit separator
+        // so no platform / conversation pair can alias another. Checked here,
+        // ahead of the bridge registration and the request emit, so a refused
+        // send produces NO protocol event and never reaches the host. A
+        // poisoned mutex is recovered rather than panicking: the critical
+        // section is a bounded map op that cannot itself panic.
+        let platform_token = target.platform.as_str();
+        let conversation_id = target.chat_id.clone().unwrap_or_default();
+        let limit_key = format!("{platform_token}\u{1f}{conversation_id}");
+        let allowed = {
+            let mut limiter = self
+                .rate_limiter
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            limiter.check_and_record(&limit_key, Instant::now())
+        };
+        if !allowed {
+            // Content-free: platform and conversation only, never message text.
+            tracing::warn!(
+                target: "wcore_agent::host_send_transport",
+                platform = %platform_token,
+                conversation = %conversation_id,
+                "send_message suppressed: per-conversation rate limit hit (ping-pong guard)"
+            );
+            // `THROTTLED_ERROR_PREFIX` is not decoration: `SendMessageTool`
+            // matches on it to tag the tool result as caller-attributed, which
+            // is what keeps a throttle from arming the row-B-3
+            // human-unreachable freeze (see that constant's doc).
+            return SendOutcome::Err {
+                message: format!(
+                    "{}this conversation has already sent {} messages through \
+                     send_message within the last {} seconds, so further sends are \
+                     suppressed to stop a runaway agent-to-agent reply loop. Stop sending \
+                     to this conversation and report the situation instead of retrying; \
+                     the budget refills as older sends age out of the window.",
+                    THROTTLED_ERROR_PREFIX,
+                    DEFAULT_MAX_AUTO_REPLIES,
+                    DEFAULT_AUTO_REPLY_WINDOW.as_secs(),
+                ),
+            };
+        }
+
         let call_id = format!("hsm-{}", uuid::Uuid::new_v4());
         // Register BEFORE emit — an instant host reply must find the waiter.
         let rx = self.bridge.register(call_id.clone());
