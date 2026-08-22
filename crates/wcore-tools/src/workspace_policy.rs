@@ -1622,7 +1622,12 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
 ///      256   0.137ms     0.488ms     13.75ms     10.59ms       120.5ms
 ///     1024   0.137ms     0.487ms     17.26ms     14.30ms       130.2ms
 /// ```
-const SERIAL_WALK_BUDGET: usize = 256;
+///
+/// `pub` ONLY so `tests/walk_parallel_identity_test.rs` can prove its parallel
+/// fixture actually crosses this threshold. A fixture that silently sits under
+/// it grades the serial arm twice and leaves the parallel arm ungraded.
+#[doc(hidden)]
+pub const SERIAL_WALK_BUDGET: usize = 256;
 
 /// The lock is taken only to push a path that has already been canonicalized,
 /// so nothing that can panic runs while it is held and this cannot fire.

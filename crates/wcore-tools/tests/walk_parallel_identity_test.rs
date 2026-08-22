@@ -20,19 +20,34 @@
 //!   above could be satisfied by an instrument that can no longer see a second
 //!   walk at all, and would pass vacuously.
 //!
-//! * `deny_set_is_complete_and_identical_across_repeated_walks` — the IDENTITY
-//!   contract. A parallel walk that returns a different set is a security
-//!   regression, not an optimisation. Pins membership against a hand-enumerated
-//!   nasty tree (gitignored secret, secret under `node_modules/`, secret under
-//!   `target/`, benign-named symlink to a secret, secret at depth 8, symlink
-//!   loop) and pins run-to-run identity across 25 walks. Carries its own
-//!   negative control: a benign file must be ABSENT, so an assertion that
-//!   accepted everything would fail.
+//! * `deny_set_is_complete_..._on_the_serial_arm` / `..._on_the_parallel_arm` —
+//!   the IDENTITY contract, asserted ONCE PER ARM. A parallel walk that returns
+//!   a different set is a security regression, not an optimisation. Each pins
+//!   membership against a hand-enumerated nasty tree (gitignored secret, secret
+//!   under `node_modules/`, secret under `target/`, benign-named symlink to a
+//!   secret, secret at depth 8, symlink loop, unreadable directory) and pins
+//!   run-to-run identity across 25 walks. Each carries its own negative
+//!   control: a benign file must be ABSENT, so an assertion that accepted
+//!   everything would fail.
+//!
+//!   The split is load-bearing, not cosmetic. `project_committed_secrets` walks
+//!   serially until a tree exceeds `SERIAL_WALK_BUDGET` and only then starts a
+//!   thread pool, so a fixture under that budget grades the arm this lane did
+//!   NOT change and leaves the new one untested. Each test therefore asserts
+//!   which side of the budget its own fixture is on, BY COUNT.
+//!
+//! * `the_parallel_arm_returns_exactly_what_the_serial_arm_returns` — the
+//!   cross-arm equality the two tests above cannot state on their own. The same
+//!   nasty tree is built twice, once under the budget and once padded over it
+//!   with benign files, and the two deny sets are compared relative to their
+//!   roots. Padding is `.txt` only, so the sole difference between the fixtures
+//!   is which arm walks them. Carries a positive control: the compared sets
+//!   must be non-empty.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use wcore_tools::workspace_policy::WorkspacePolicy;
+use wcore_tools::workspace_policy::{SERIAL_WALK_BUDGET, WorkspacePolicy};
 
 /// Dirs x files for the timing fixtures. Big enough that a duplicated walk is
 /// unmistakable, small enough to build in well under a second.
@@ -263,44 +278,85 @@ fn build_nasty_tree(root: &Path) -> (Vec<PathBuf>, PathBuf) {
     (expected, benign)
 }
 
-/// IDENTITY CONTRACT. Whatever walks the tree, the answer must be the same set
-/// every time and must contain every secret the file tools would refuse.
-///
-/// The parallel walk this issue sanctions changes the ORDER entries are
-/// visited in and the thread they are canonicalized on. Neither may change
-/// membership, and neither may make the result vary run to run.
-#[test]
-fn deny_set_is_complete_and_identical_across_repeated_walks() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().to_path_buf();
-    let (expected, benign) = build_nasty_tree(&root);
+/// Benign padding, so a fixture can be pushed past [`SERIAL_WALK_BUDGET`]
+/// without adding a single path to the deny set. `.txt` files only: the two
+/// fixtures below must differ ONLY in which walk arm they take.
+fn pad_tree(root: &Path, files: usize) {
+    for i in 0..files {
+        let d = root.join(format!("pad/d{}", i / 100));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(format!("f{i}.txt")), b"x").unwrap();
+    }
+}
 
-    let policy = WorkspacePolicy::contained(&root);
+/// Entries under `dir`, counted WITHOUT following symlinks (the fixture holds a
+/// loop). Only ever called AFTER the deny set has been taken — these tests do
+/// no timing, but a sizing walk still has no business running first.
+fn count_entries(dir: &Path) -> usize {
+    let mut n = 1;
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return n;
+    };
+    for entry in read.flatten() {
+        match std::fs::symlink_metadata(entry.path()) {
+            Ok(meta) if meta.is_dir() => n += count_entries(&entry.path()),
+            _ => n += 1,
+        }
+    }
+    n
+}
+
+/// Hand a 0o000 fixture directory back so `TempDir::drop` can remove it on a
+/// non-root runner (its Drop swallows the error and leaks the tree instead).
+fn unlock(root: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ =
+            std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o700));
+    }
+    let _ = root;
+}
+
+/// Deny-set entries that live under `root`, as paths RELATIVE to it, so two
+/// fixtures built in different temp dirs can be compared directly. Everything
+/// outside the fixture (system credential stores, the runner's own home) is
+/// dropped by the `strip_prefix`, because it is not what these tests are about.
+fn relative_set(root: &Path, set: &[PathBuf]) -> BTreeSet<PathBuf> {
+    let canon = std::fs::canonicalize(root).unwrap();
+    set.iter()
+        .filter_map(|p| p.strip_prefix(&canon).ok())
+        .map(Path::to_path_buf)
+        .collect()
+}
+
+/// The identity contract itself, run against whichever arm the caller's fixture
+/// size selects: every planted secret present, the benign control absent, and
+/// 25 repeats byte-identical. Returns the deny set.
+fn assert_identity_contract(root: &Path, expected: &[PathBuf], benign: &PathBuf) -> Vec<PathBuf> {
+    let policy = WorkspacePolicy::contained(root);
 
     let first = policy.secret_deny_paths_dynamic();
     let first_set: BTreeSet<&PathBuf> = first.iter().collect();
 
     // POSITIVE: every planted secret is present.
-    for want in &expected {
+    for want in expected {
         assert!(
             first_set.contains(want),
-            "planted secret {} is missing from the deny set (set: {:?})",
+            "planted secret {} is missing from the deny set (set: {first:?})",
             want.display(),
-            first
         );
     }
 
-    // The benign-named symlink's own canonical path resolves to `.env`, which is
-    // already asserted above; assert instead that the link cannot be used as an
-    // unlisted alias by checking the resolved target is denied.
+    // A benign-NAMED symlink must not be usable as an unlisted alias: its
+    // resolved target has to be denied.
     #[cfg(unix)]
     {
-        let link = root.join("links/notes.txt");
-        let resolved = std::fs::canonicalize(&link).unwrap();
+        let resolved = std::fs::canonicalize(root.join("links/notes.txt")).unwrap();
         assert!(
             first_set.contains(&resolved),
             "a benign-named symlink to a secret resolves to {} which is not denied",
-            resolved.display()
+            resolved.display(),
         );
     }
 
@@ -310,7 +366,7 @@ fn deny_set_is_complete_and_identical_across_repeated_walks() {
     assert!(
         !first_set.contains(&benign),
         "the negative control {} was denied - this deny set does not discriminate",
-        benign.display()
+        benign.display(),
     );
 
     // IDENTITY: 25 repeats must be byte-identical, order included. A walk whose
@@ -322,13 +378,101 @@ fn deny_set_is_complete_and_identical_across_repeated_walks() {
             "walk {i} returned a different deny set than walk 0 - the walk is not deterministic"
         );
     }
+    first
+}
 
-    // Hand the 0o000 directory back so `TempDir::drop` can remove it on a
-    // non-root runner (its Drop swallows the error and leaks the tree instead).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ =
-            std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o700));
-    }
+/// IDENTITY CONTRACT, SERIAL ARM. The nasty tree on its own is well under
+/// `SERIAL_WALK_BUDGET`, so this is the arm that predates the lane.
+#[test]
+fn deny_set_is_complete_and_identical_on_the_serial_arm() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let (expected, benign) = build_nasty_tree(&root);
+
+    assert_identity_contract(&root, &expected, &benign);
+
+    let entries = count_entries(&root);
+    assert!(
+        entries <= SERIAL_WALK_BUDGET,
+        "this fixture has {entries} entries and the serial budget is {SERIAL_WALK_BUDGET} - \
+         it takes the PARALLEL arm, so the serial arm is now ungraded"
+    );
+    unlock(&root);
+}
+
+/// IDENTITY CONTRACT, PARALLEL ARM. Same tree, padded past
+/// `SERIAL_WALK_BUDGET` with benign files so the thread pool actually starts.
+///
+/// Without this test the arm this lane added is graded by nothing: a mutation
+/// that drops symlink masking in the parallel closure alone passed all 1645
+/// `wcore-tools` tests.
+#[test]
+fn deny_set_is_complete_and_identical_on_the_parallel_arm() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let (expected, benign) = build_nasty_tree(&root);
+    pad_tree(&root, SERIAL_WALK_BUDGET * 4);
+
+    assert_identity_contract(&root, &expected, &benign);
+
+    let entries = count_entries(&root);
+    assert!(
+        entries > SERIAL_WALK_BUDGET,
+        "this fixture has only {entries} entries against a serial budget of \
+         {SERIAL_WALK_BUDGET} - it never leaves the serial arm, so this test \
+         grades the parallel walk not at all"
+    );
+    unlock(&root);
+}
+
+/// CROSS-ARM EQUALITY. A faster walk that returns a DIFFERENT set is a security
+/// regression, and neither per-arm test above can see that on its own.
+///
+/// The same nasty tree is built twice — once under the budget, once padded over
+/// it — and the deny sets are compared relative to their roots. The padding is
+/// benign `.txt`, so the only difference between the two fixtures is which arm
+/// walks them.
+#[test]
+fn the_parallel_arm_returns_exactly_what_the_serial_arm_returns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let serial_root = tmp.path().join("serial");
+    let parallel_root = tmp.path().join("parallel");
+    std::fs::create_dir_all(&serial_root).unwrap();
+    std::fs::create_dir_all(&parallel_root).unwrap();
+    build_nasty_tree(&serial_root);
+    build_nasty_tree(&parallel_root);
+    pad_tree(&parallel_root, SERIAL_WALK_BUDGET * 4);
+
+    let serial = WorkspacePolicy::contained(&serial_root).secret_deny_paths_dynamic();
+    let parallel = WorkspacePolicy::contained(&parallel_root).secret_deny_paths_dynamic();
+
+    let serial_rel = relative_set(&serial_root, &serial);
+    let parallel_rel = relative_set(&parallel_root, &parallel);
+
+    // POSITIVE CONTROL: an empty comparison would be satisfied by two walks
+    // that both found nothing.
+    assert!(
+        !serial_rel.is_empty(),
+        "the serial fixture denied nothing - this comparison is vacuous"
+    );
+
+    assert_eq!(
+        serial_rel,
+        parallel_rel,
+        "the parallel arm returned a different deny set than the serial arm - \
+         only in parallel: {:?}, only in serial: {:?}",
+        parallel_rel.difference(&serial_rel).collect::<Vec<_>>(),
+        serial_rel.difference(&parallel_rel).collect::<Vec<_>>(),
+    );
+
+    // The arms were really different arms, by count.
+    let (n_serial, n_parallel) = (count_entries(&serial_root), count_entries(&parallel_root));
+    assert!(
+        n_serial <= SERIAL_WALK_BUDGET && n_parallel > SERIAL_WALK_BUDGET,
+        "both fixtures took the same arm ({n_serial} and {n_parallel} entries \
+         against a budget of {SERIAL_WALK_BUDGET}) - nothing was compared"
+    );
+
+    unlock(&serial_root);
+    unlock(&parallel_root);
 }
