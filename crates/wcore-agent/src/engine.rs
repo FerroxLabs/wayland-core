@@ -1590,6 +1590,41 @@ const AUTH_FAILURE_REMEDY: &str = "The provider rejected this API key — not re
      encrypted vault), pass --api-key for a one-off, or set an environment \
      variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).";
 
+/// #923(3) — does this provider refusal name an orphaned `tool_use` /
+/// `tool_result` pair?
+///
+/// This is the ONE client-error shape the engine may re-send after repairing,
+/// because it is the exact shape the unconditional pre-send repair
+/// (`repair_all_orphaned_tool_uses` / `repair_orphaned_tool_results`) exists to
+/// prevent: seeing it means the repair missed a path, and re-running the repair
+/// against the live history has a real chance of producing a request that is
+/// accepted.
+///
+/// The gate is deliberately narrow. Every other 400 — an invalid key above all
+/// — fails identically on a second send, so a wider match would silently bill
+/// the user twice for every malformed request. Both block names must appear
+/// AND the sentence must describe a pairing fault; a message that merely
+/// mentions tools does not qualify.
+fn is_orphaned_tool_pair_rejection(error: &ProviderError) -> bool {
+    let ProviderError::Api { status, message } = error else {
+        return false;
+    };
+    if *status != 400 {
+        return false;
+    }
+    let message = message.to_ascii_lowercase();
+    if !(message.contains("tool_use") && message.contains("tool_result")) {
+        return false;
+    }
+    // The pairing fault itself, in the shapes providers actually emit:
+    // Anthropic "…ids were found without `tool_result` blocks…", and the
+    // reverse direction "…`tool_result` … when previous message does not
+    // contain any `tool_use` blocks" / "unexpected `tool_result`".
+    message.contains("without")
+        || message.contains("unexpected")
+        || message.contains("does not contain")
+}
+
 fn is_http_4xx_error(reason: &str) -> bool {
     /// Returns true if the first 3 bytes of `s` are ASCII digits and
     /// the first digit is `4` — i.e. `s` starts with a literal 4xx
@@ -10689,6 +10724,15 @@ impl AgentEngine {
             // recovery contract. Worst case after a mid-turn resume is one
             // further retry — still bounded, never a loop.
             let mut output_truncation_retried = false;
+            // #923(3) ORPHAN-REPAIR GATE: bounds the repair-and-retry of an
+            // orphaned tool-pair 400 to ONE extra provider send per turn.
+            // Deliberately NOT carried on the recovery checkpoint, for the same
+            // reason as `output_truncation_retried` above: a resumed turn
+            // re-dispatches from scratch and widening the checkpoint schema for
+            // a per-turn guard would couple this fix to the recovery contract.
+            // Worst case after a mid-turn resume is one further retry — still
+            // bounded, never a loop.
+            let mut orphan_repair_retried = false;
             let mut resumed_provider_dispatch = false;
             let mut resumed_dispatch_id = None;
             let (mut request, effective_model, mut input_token_estimate, mut last_routed_model) =
@@ -12285,6 +12329,97 @@ impl AgentEngine {
                     Err(e) => {
                         let failure = wcore_providers::retry::provider_failure_code(&e);
                         self.output.emit_provider_failure(&failure);
+                        // #923(1) — capture the evidence. This arm is the only
+                        // place that holds BOTH halves of a malformed-request
+                        // failure: the `messages` array exactly as it went out,
+                        // and the provider's own sentence naming what was wrong
+                        // with it. Everything below this point discards them.
+                        //
+                        // Only a SERVED refusal has a request to capture or a
+                        // refusal to report. `MissingApiKey` and
+                        // `NotAttempted` are non-retryable and land in this same
+                        // arm, and nothing was ever sent for either — the budget
+                        // reservation above is released for exactly that reason.
+                        // Filing "the exact request that was refused" for one
+                        // would be a record of something that did not happen,
+                        // and "Provider rejected this request" would be a claim
+                        // about a provider that was never asked.
+                        let served_refusal = matches!(e, ProviderError::Api { .. });
+                        let captured = if served_refusal {
+                            self.capture_rejected_provider_request(&request, &failure, &e)
+                        } else {
+                            None
+                        };
+                        let mut surfaced = if served_refusal {
+                            format!("Provider rejected this request: {e}")
+                        } else {
+                            format!("The provider call failed with no response: {e}")
+                        };
+                        if let Some(path) = captured.as_ref() {
+                            surfaced.push_str(&format!(
+                                " The exact request that was refused was captured to {} — \
+                                 attach it when reporting this.",
+                                path.display()
+                            ));
+                        }
+                        // #923(3) — an orphaned tool_use/tool_result pair is the
+                        // one client error worth a second send: it is exactly
+                        // what the unconditional pre-send repair exists to
+                        // prevent, so a 400 naming one means the repair missed a
+                        // path. Repair again from the live history and re-send
+                        // ONCE. `is_orphaned_tool_pair_rejection` keeps this off
+                        // every other 400 — an auth refusal fails identically on
+                        // a second send and must never be billed twice.
+                        //
+                        // This gate is checked BEFORE `emit_error`: a refusal
+                        // that is about to be retried is not the run's outcome,
+                        // and a turn that goes on to succeed must not leave a
+                        // hard error on the host's channel — the host renders
+                        // it, and the SkillRouter/auto-skill observers record a
+                        // FAILURE for a turn that produced an answer. The
+                        // sibling ContextOverflow retry arm above emits info for
+                        // exactly this reason. The capture is still written
+                        // either way, and still named.
+                        if !orphan_repair_retried && is_orphaned_tool_pair_rejection(&e) {
+                            orphan_repair_retried = true;
+                            self.output.emit_provider_retry(Some("orphaned_tool_pair"));
+                            let mut retry_note = "provider rejected the request for an \
+                                 orphaned tool_use/tool_result pair — repaired the \
+                                 conversation and retrying once"
+                                .to_string();
+                            if let Some(path) = captured.as_ref() {
+                                retry_note.push_str(&format!(
+                                    " (the refused request was captured to {})",
+                                    path.display()
+                                ));
+                            }
+                            self.output.emit_info(&retry_note);
+                            self.settle_failed_turn_provider_attempts(&e.to_string())
+                                .await;
+                            self.repair_all_orphaned_tool_uses();
+                            self.repair_orphaned_tool_results();
+                            request.messages = self.messages.clone();
+                            let recount = estimate::estimate_request_tokens(
+                                &self.messages,
+                                &request.system,
+                                &request.tools,
+                            );
+                            request.client_context_tokens = Some(recount);
+                            self.sync_active_journal_conversation().await?;
+                            continue 'stream;
+                        }
+                        self.output.emit_error(&surfaced, false);
+                        // #923(2) — fail the TURN, not the session. The dispatch
+                        // left this turn's provider attempt nonterminal, and the
+                        // reducer will not let a turn holding one take ANY
+                        // terminal receipt: `sync_journal_conversation` then
+                        // fails with `InvalidTransition` and that authority
+                        // error becomes the error the caller sees, in place of
+                        // the provider's own words. Settle the attempt with the
+                        // honest failure receipt first, so the provider error is
+                        // what propagates and the session stays usable.
+                        self.settle_failed_turn_provider_attempts(&e.to_string())
+                            .await;
                         return Err(e.into());
                     }
                 };
@@ -13204,7 +13339,13 @@ impl AgentEngine {
             // host shows nothing and the user can't tell what went wrong.
             // Surface a visible, non-retryable error instead of the silent
             // no-op. (Genuine content/tool-call/thinking turns are unaffected.)
-            if assistant_content.is_empty() {
+            //
+            // #1109b widens the guard from "no content at all" to "nothing the
+            // user can read and nothing left to run". A turn carrying ONLY
+            // reasoning has non-empty `assistant_content` and so escaped this
+            // guard entirely: the run returned Ok with an empty answer and
+            // nothing on any channel — literally nothing happened.
+            if assistant_text.is_empty() && tool_calls.is_empty() {
                 // T3: `finish_reason=length` is a KNOWN cause of an empty
                 // turn — the model spent its whole output budget (typically
                 // on reasoning tokens) and was cut off before emitting
@@ -13216,6 +13357,25 @@ impl AgentEngine {
                     "The model was cut off by the provider's output token limit before it \
                      produced any content — this turn is TRUNCATED, not complete. Raise \
                      this model's max_tokens, or ask for the work in smaller pieces."
+                } else if finish_reason == FinishReason::Error {
+                    // #1109b: the same argument that carved out `Length`.
+                    // `Error` means the PROVIDER signalled a failure (or sent a
+                    // stop signal the mapper could not classify) — a fact about
+                    // this response, not evidence about the wire format. Report
+                    // the fact; do not send the user to verify an endpoint that
+                    // is answering.
+                    "The provider ended this turn with an error stop signal and produced no \
+                     content. That is the provider reporting a failure on this request, not \
+                     a wire-format mismatch — check the provider's own error detail (and any \
+                     content filter or safety stop) for it."
+                } else if !assistant_content.is_empty() {
+                    // Reasoning, and nothing else. The model thought and then
+                    // said nothing; the thinking is not an answer and on most
+                    // hosts is not even displayed.
+                    "The model produced only reasoning — no answer text and no tool calls — \
+                     so this turn ended with nothing to show. Ask again, or raise this \
+                     model's max_tokens if its reasoning is consuming the whole output \
+                     budget."
                 } else {
                     "Provider returned an empty response — no content and no tool calls. \
                      The endpoint or model may be incompatible (verify it speaks the OpenAI \
@@ -17262,6 +17422,165 @@ impl AgentEngine {
     /// Bootstrap calls this when the M2 audit log is wired.
     pub fn set_audit_log(&mut self, log: Arc<wcore_memory::audit::AuditLog>) {
         self.audit_log = Some(log);
+    }
+
+    /// #923(1) — write the exact provider request that was refused, and the
+    /// provider's own reason for refusing it, beside the session it belongs to.
+    ///
+    /// Best-effort by construction: a capture that cannot be written must never
+    /// replace the provider error as the cause of the stop, so every failure
+    /// here is logged and swallowed. Returns the path written, or `None` when
+    /// this engine has no session directory of its own to write into.
+    fn capture_rejected_provider_request(
+        &self,
+        request: &LlmRequest,
+        failure_code: &str,
+        error: &ProviderError,
+    ) -> Option<std::path::PathBuf> {
+        // No session manager means no session directory this engine owns; an
+        // ephemeral run has nowhere to put this that its user would ever find.
+        self.session_manager.as_ref()?;
+        let session_id = self
+            .current_session_id()
+            .unwrap_or_else(|| "unidentified-session".to_string());
+        let directory =
+            std::path::Path::new(self.config.session.directory.as_str()).join("rejected-requests");
+        if let Err(err) = std::fs::create_dir_all(&directory) {
+            tracing::warn!(
+                error = %err,
+                "could not create the rejected-request capture directory"
+            );
+            return None;
+        }
+        let now = chrono::Utc::now();
+        let path = directory.join(format!(
+            "{session_id}-{stamp}-{unique}.json",
+            stamp = now.format("%Y%m%dT%H%M%S%3fZ"),
+            unique = uuid::Uuid::new_v4().simple(),
+        ));
+        let record = serde_json::json!({
+            "captured_at": now.to_rfc3339(),
+            "session_id": session_id,
+            "turn_id": self.active_journal_turn_id,
+            "provider_failure_code": failure_code,
+            "provider_error": error.to_string(),
+            "model": request.model,
+            "system": request.system,
+            "tools": request
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            "messages": request.messages,
+        });
+        let bytes = match serde_json::to_vec_pretty(&record) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not serialize the rejected provider request");
+                return None;
+            }
+        };
+        match std::fs::write(&path, bytes) {
+            Ok(()) => Some(path),
+            Err(err) => {
+                tracing::warn!(error = %err, "could not write the rejected provider request");
+                None
+            }
+        }
+    }
+
+    /// #923(2) — settle every provider attempt of the ACTIVE journal turn that
+    /// a failed dispatch left nonterminal, so the turn itself can take a
+    /// terminal receipt.
+    ///
+    /// `require_turn_descendants_terminal` (`session_journal/reducer.rs`)
+    /// refuses ANY terminal transition for a turn that still holds a `Prepared`
+    /// or `Unknown` provider attempt. Without this, a provider error returned
+    /// straight out of the dispatch arm makes the turn unclosable, and the
+    /// reducer's `InvalidTransition` — raised much later, in
+    /// `sync_journal_conversation` — becomes the error the caller sees INSTEAD
+    /// of the provider's own words.
+    ///
+    /// Nothing here claims an outcome that was not observed. A `Prepared`
+    /// attempt has no durable start event, so it takes the not-started receipt
+    /// the journal already proves; an attempt that was dispatched takes
+    /// `Failed` carrying the provider's error, which is precisely what this
+    /// process saw. Failures are logged and swallowed: this routine exists to
+    /// stop one error masking another and must never become the mask itself.
+    async fn settle_failed_turn_provider_attempts(&self, error: &str) {
+        let Some(turn_id) = self.active_journal_turn_id.clone() else {
+            return;
+        };
+        if self.session_journal.is_none() {
+            return;
+        }
+        loop {
+            let Some(journal) = self.session_journal.as_ref() else {
+                return;
+            };
+            let state = match journal.state() {
+                Ok(state) => state,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "could not read journal state to settle a failed turn's provider attempts"
+                    );
+                    return;
+                }
+            };
+            let Some((attempt_id, attempt)) =
+                state.provider_attempts.iter().find(|(_, attempt)| {
+                    attempt.turn_id == turn_id
+                        && matches!(
+                            attempt.effect,
+                            ExternalEffectState::Prepared | ExternalEffectState::Unknown
+                        )
+                })
+            else {
+                return;
+            };
+            let attempt_id = attempt_id.clone();
+            let dispatch_id = attempt.dispatch_id.clone();
+            let event = match (&attempt.effect, dispatch_id) {
+                (ExternalEffectState::Prepared, None) => SessionEvent::ProviderAttemptNotStarted {
+                    attempt_id,
+                    reason: ProviderAttemptNotStartedReason::Cancelled {
+                        reason: format!("the provider call failed before dispatch: {error}"),
+                    },
+                },
+                (ExternalEffectState::Prepared, Some(dispatch_id)) => {
+                    SessionEvent::ProviderAttemptNotStartedV2 {
+                        attempt_id,
+                        dispatch_id,
+                        reason: ProviderAttemptNotStartedReason::Cancelled {
+                            reason: format!("the provider call failed before dispatch: {error}"),
+                        },
+                    }
+                }
+                (_, None) => SessionEvent::ProviderAttemptFinished {
+                    attempt_id,
+                    outcome: crate::session_journal::CompletionOutcome::Failed {
+                        error: error.to_owned(),
+                    },
+                    response_digest: None,
+                },
+                (_, Some(dispatch_id)) => SessionEvent::ProviderAttemptFinishedV2 {
+                    attempt_id,
+                    dispatch_id,
+                    outcome: crate::session_journal::CompletionOutcome::Failed {
+                        error: error.to_owned(),
+                    },
+                    response_digest: None,
+                },
+            };
+            if let Err(err) = self.append_journal_event(event).await {
+                tracing::warn!(
+                    error = %err,
+                    "could not settle a nonterminal provider attempt after a failed dispatch"
+                );
+                return;
+            }
+        }
     }
 
     async fn prepare_durable_conversation(&mut self) -> Result<(), AgentError> {
@@ -33201,5 +33520,83 @@ mod crucible_error_card_tests {
             result.text
         );
         drop(redactor);
+    }
+}
+
+/// #923(3) — the gate that decides whether a client error may be re-sent.
+///
+/// The POSITIVE case is covered end-to-end by
+/// `tests/issue_923_1109b_red_test.rs`; what is pinned here is the NEGATIVE
+/// half, because that is the half whose failure is silent. A gate that matched
+/// too widely would turn every malformed request into two billed sends and
+/// nothing in the output would say so.
+#[cfg(test)]
+mod issue_923_orphan_repair_gate_tests {
+    use super::is_orphaned_tool_pair_rejection;
+    use wcore_providers::ProviderError;
+
+    fn api(status: u16, message: &str) -> ProviderError {
+        ProviderError::Api {
+            status,
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn anthropic_orphaned_tool_use_400_matches() {
+        assert!(is_orphaned_tool_pair_rejection(&api(
+            400,
+            "messages.1: `tool_use` ids were found without `tool_result` blocks immediately \
+             after: toolu_01ABC. Each `tool_use` block must have a corresponding `tool_result` \
+             block in the next message."
+        )));
+    }
+
+    #[test]
+    fn reverse_direction_orphaned_tool_result_400_matches() {
+        assert!(is_orphaned_tool_pair_rejection(&api(
+            400,
+            "messages.2: unexpected `tool_result` blocks: the previous message does not \
+             contain any `tool_use` blocks"
+        )));
+    }
+
+    #[test]
+    fn auth_400_is_never_repair_retried() {
+        // The one that stops this becoming a blind second send of every client
+        // error: an invalid key fails identically on attempt two.
+        assert!(!is_orphaned_tool_pair_rejection(&api(
+            400,
+            "invalid x-api-key"
+        )));
+        assert!(!is_orphaned_tool_pair_rejection(&api(
+            400,
+            "authentication_error: invalid bearer token"
+        )));
+    }
+
+    #[test]
+    fn unrelated_400s_do_not_match() {
+        // Mentions tools, but names no pairing fault.
+        assert!(!is_orphaned_tool_pair_rejection(&api(
+            400,
+            "tool_use is not supported by this model; drop `tool_result` handling"
+        )));
+        // Names a pairing fault, but is not a request-shape refusal we can
+        // repair — the model, not the array, is wrong.
+        assert!(!is_orphaned_tool_pair_rejection(&api(
+            404,
+            "model not found: `tool_use` / `tool_result` without a route"
+        )));
+    }
+
+    #[test]
+    fn non_api_errors_do_not_match() {
+        assert!(!is_orphaned_tool_pair_rejection(
+            &ProviderError::MissingApiKey
+        ));
+        assert!(!is_orphaned_tool_pair_rejection(
+            &ProviderError::Connection("tool_use tool_result without".to_string())
+        ));
     }
 }
