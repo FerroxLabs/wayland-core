@@ -228,17 +228,28 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             // the arm clears `streaming_active` at its foot.
             //
             // `streaming_active` is the de-duplication key, not an
-            // afterthought. Every producer of a `FinishReason::Error`
-            // `StreamEnd` sends a `ProtocolEvent::Error` immediately before
-            // it (`engine_bridge.rs:656` TerminalGuard, `:1170` recovery
-            // refusal, `:1667` the engine `Err` arm), and that arm already
-            // pushes a system notice AND clears `streaming_active`. So a
-            // `StreamEnd` arriving with the stream already inactive has been
-            // reported once, and reporting it again would print two banners
-            // for one failure. `Length` and `MaxTurns` have no such
-            // predecessor -- they ride the `Ok` arm at `engine_bridge.rs:1632`
-            // -- so they arrive with the stream still live, and they are the
-            // genuinely silent cases this closes.
+            // afterthought. Every site that CONSTRUCTS a
+            // `FinishReason::Error` `StreamEnd` sends a `ProtocolEvent::Error`
+            // immediately before it (`engine_bridge.rs:658` behind the `:646`
+            // TerminalGuard error, `:1172` behind the `:1162` recovery
+            // refusal, `:1669` behind the `:1659` engine `Err` arm), and that
+            // arm already pushes a system notice AND clears
+            // `streaming_active`. So a `StreamEnd` arriving with the stream
+            // already inactive has been reported once, and reporting it again
+            // would print two banners for one failure.
+            //
+            // The enumeration above is of CONSTRUCTORS, not of values: two
+            // sites forward `result.finish_reason` verbatim from an `Ok`
+            // AgentResult (`emit_recovery_result` at `:1134` and the send-path
+            // `Ok` arm at `:1634`), so the wayland#200 shape -- a turn the
+            // engine classifies as success while carrying
+            // `finish_reason = Error` -- reaches here with NO preceding
+            // `ProtocolEvent::Error` and the stream still live. That one IS
+            // reported, and deliberately: json-stream mode already surfaces it
+            // explicitly (`main.rs`, the `#200` emit_error), and the TUI had
+            // nothing. `Length` and `MaxTurns` ride the same `Ok` arms with no
+            // predecessor either -- they are the other genuinely silent cases
+            // this closes.
             let abnormal_finish = app
                 .session
                 .streaming_active
@@ -1321,21 +1332,25 @@ fn abnormal_finish_notice(reason: wcore_types::message::FinishReason) -> Option<
         // The model ran out of output budget mid-answer. Naming the knob
         // matters: the fix is the user's to make, not the agent's.
         FinishReason::Length => Some(
-            "Response truncated — the model reached its max_tokens budget before it              finished. Ask it to continue, or raise `max_tokens` for this profile."
+            "Response truncated — the model reached its max_tokens budget before it \
+             finished. Ask it to continue, or raise `max_tokens` for this profile."
                 .to_string(),
         ),
         // #457 split this out of `Error` precisely so a host could offer
         // "Continue" instead of the provider-error UX. Say the model did not
         // fail, or the user reads a cap as a crash.
         FinishReason::MaxTurns => Some(
-            "Stopped at the max_turns cap — the run hit the engine's per-run turn limit.              The model did not fail; send another message to continue."
+            "Stopped at the max_turns cap — the run hit the engine's per-run turn \
+             limit. The model did not fail; send another message to continue."
                 .to_string(),
         ),
         // Reached only when no `ProtocolEvent::Error` preceded this
         // `StreamEnd` (see the de-duplication note at the call site), so the
         // wording has to stand alone without a cause to quote.
         FinishReason::Error => Some(
-            "The turn ended abnormally — the provider returned an unrecognised stop              signal, or the stream ended without a completion. Anything above may be              incomplete."
+            "The turn ended abnormally — the provider returned an unrecognised stop \
+             signal, or the stream ended without a completion. Anything above may \
+             be incomplete."
                 .to_string(),
         ),
     }
@@ -2252,6 +2267,45 @@ mod tests {
             .collect()
     }
 
+    /// The #1109(a) notices are user-facing prose, and a `\`-continued literal
+    /// is the only way to wrap one in source without smuggling the source
+    /// indentation into the rendered text. The first cut of this fix shipped
+    /// all three arms carrying 14-space runs mid-sentence -- text no assertion
+    /// in this file looked at, because every other test compares two renders
+    /// to each other rather than reading one. This grades the text itself.
+    #[test]
+    fn every_abnormal_finish_notice_is_free_of_source_indentation() {
+        use wcore_types::message::FinishReason;
+        let abnormal = [
+            FinishReason::Length,
+            FinishReason::MaxTurns,
+            FinishReason::Error,
+        ];
+        let notices: Vec<String> = abnormal
+            .iter()
+            .filter_map(|reason| abnormal_finish_notice(*reason))
+            .collect();
+        // POSITIVE CONTROL: if an arm stopped producing a notice, the
+        // whitespace assertion below would pass by having nothing to read.
+        assert_eq!(
+            notices.len(),
+            abnormal.len(),
+            "an abnormal arm produced no notice, so this test would certify \
+             nothing: {notices:?}"
+        );
+        for notice in &notices {
+            assert!(
+                !notice.contains("  "),
+                "a user-facing notice carries a run of spaces from the source \
+                 layout: {notice:?}"
+            );
+        }
+        // The `Stop` arm is the reason a wildcard match would be wrong here:
+        // a new FinishReason variant must be a deliberate decision, not a
+        // silent `None`.
+        assert!(abnormal_finish_notice(FinishReason::Stop).is_none());
+    }
+
     /// A clean turn must gain NO banner. Without this the three `assert_ne!`
     /// arms could be satisfied by a fix that decorates every turn and merely
     /// varies the wording -- which would put permanent chrome under normal
@@ -2289,11 +2343,14 @@ mod tests {
         );
     }
 
-    /// #1109(a) DE-DUPLICATION. Every live producer of a
+    /// #1109(a) DE-DUPLICATION. Every site that CONSTRUCTS a
     /// `FinishReason::Error` `StreamEnd` sends a `ProtocolEvent::Error`
-    /// immediately before it (`engine_bridge.rs:656`, `:1170`, `:1667`), and
+    /// immediately before it (`engine_bridge.rs:658`, `:1172`, `:1669`), and
     /// that arm already pushes a system notice. The `StreamEnd` that follows
     /// must NOT push a second one, or every engine failure prints two banners.
+    /// (The two `result.finish_reason` pass-throughs, `:1134` and `:1634`, can
+    /// also carry `Error` with no predecessor -- see the call-site note -- and
+    /// those ARE reported. This test pins the preceded case only.)
     ///
     /// The positive control is the assertion that the surviving notice is the
     /// engine's own message: a count of exactly one would also be satisfied by
@@ -2344,7 +2401,8 @@ mod tests {
         );
         assert!(
             notices[0].contains("upstream refused the request"),
-            "the surviving notice must be the engine's own error, not a              generic footer that replaced it: {notices:?}"
+            "the surviving notice must be the engine's own error, not a generic \
+             footer that replaced it: {notices:?}"
         );
     }
 

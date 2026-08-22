@@ -1,12 +1,14 @@
 //! FerroxLabs/wayland#1079 — `--doctor` discards the invocation's config-
 //! selecting arguments.
 //!
-//! `main.rs:1769` calls `doctor::run(cli.probe_mcp)` and nothing else, and
-//! every `Config::resolve` inside `doctor/mod.rs` (`:427`, `:488`, `:637`)
-//! passes `CliArgs::default()`. So `--profile` and `--project-dir` are
-//! dropped on the floor and the two config-derived sections — the declared
-//! MCP server list and the durable-sessions verdict — are computed against a
-//! DIFFERENT config than the one the same flags would select for a real run.
+//! Before the fix, `main.rs` called `doctor::run(cli.probe_mcp)` and nothing
+//! else, and every `Config::resolve` inside `doctor/mod.rs` passed
+//! `CliArgs::default()`. So `--profile` and `--project-dir` were dropped on
+//! the floor and the two config-derived sections — the declared MCP server
+//! list and the durable-sessions verdict — were computed against a DIFFERENT
+//! config than the one the same flags would select for a real run. `run` now
+//! takes the invocation's own `CliArgs` and threads it to all three sites
+//! (`doctor/mod.rs:440`, `:501`, `:650`).
 //!
 //! The ticket describes a missing provider/model/api-key row. That is not the
 //! defect: doctor prints no such row at all, so there is nothing to be wrong.
