@@ -2064,6 +2064,128 @@ fn push_node_feed_line(node: &mut WorkflowNodeView, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------
+    // FerroxLabs/wayland#1109 (a) -- the TUI silently drops `finish_reason`.
+    //
+    // The `StreamEnd` arm at `:221` destructures `{ usage, usage_delta, .. }`.
+    // The `..` swallows `finish_reason`, and production code in this file
+    // never reads it: every textual occurrence of `finish_reason` in
+    // protocol_bridge.rs sits inside this `mod tests`, and every one of them
+    // constructs `FinishReason::Stop`. So no existing test could ever have
+    // caught this -- the abnormal variants are untested as well as unhandled.
+    //
+    // Consequence: a turn truncated by the token budget (`Length`), killed by
+    // a provider error (`Error`), or stopped by the engine turn cap
+    // (`MaxTurns`) renders EXACTLY like a clean completion. That is the
+    // "silent turn" the ticket reports.
+    //
+    // The assertions below are deliberately DIFFERENTIAL rather than string
+    // matches: they demand only that an abnormal ending be distinguishable
+    // from a clean one, and leave the wording and the surface to the fix.
+
+    /// Drive one complete turn through `apply_event` and return a stable,
+    /// render-facing snapshot of everything the user would end up seeing.
+    fn render_turn_with_finish_reason(reason: wcore_protocol::events::FinishReason) -> String {
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::StreamStart {
+                msg_id: "m1".into(),
+                model: "test-model".into(),
+            },
+        );
+        apply_event(
+            &mut app,
+            ProtocolEvent::TextDelta {
+                text: "partial answer".into(),
+                msg_id: "m1".into(),
+            },
+        );
+        apply_event(
+            &mut app,
+            ProtocolEvent::StreamEnd {
+                msg_id: "m1".into(),
+                finish_reason: reason,
+                usage: None,
+                usage_delta: None,
+                agent_run_id: None,
+            },
+        );
+        // Everything the completed turn carries. `{:?}` over the element
+        // vector captures new variants a fix might add without this helper
+        // needing to know their shape.
+        format!(
+            "turns={:?}\nphase={:?}\nstreaming={:?}",
+            app.session
+                .turns
+                .iter()
+                .map(|t| (t.role, format!("{:?}", t.elements), t.text()))
+                .collect::<Vec<_>>(),
+            app.session.phase,
+            app.session.streaming,
+        )
+    }
+
+    /// NEGATIVE CONTROL -- must pass both before and after the fix. Two turns
+    /// that ended the SAME way must render identically.
+    ///
+    /// Without this, the `assert_ne!` red arms below could pass vacuously on
+    /// any incidental nondeterminism in the snapshot (an elapsed-seconds
+    /// field, a timestamp, a hash-map iteration order), and would then be
+    /// measuring the clock rather than `finish_reason`.
+    #[test]
+    fn two_identically_finished_turns_render_identically() {
+        let a = render_turn_with_finish_reason(wcore_protocol::events::FinishReason::Stop);
+        let b = render_turn_with_finish_reason(wcore_protocol::events::FinishReason::Stop);
+        assert_eq!(
+            a, b,
+            "the turn snapshot is not deterministic, so the finish_reason \
+             assertions below would prove nothing"
+        );
+    }
+
+    /// RED ARM. A turn truncated at the token budget must not be
+    /// indistinguishable from one that finished cleanly.
+    #[test]
+    fn a_length_truncated_turn_is_distinguishable_from_a_clean_stop() {
+        let clean = render_turn_with_finish_reason(wcore_protocol::events::FinishReason::Stop);
+        let truncated =
+            render_turn_with_finish_reason(wcore_protocol::events::FinishReason::Length);
+        assert_ne!(
+            clean, truncated,
+            "#1109(a): StreamEnd drops finish_reason, so a turn TRUNCATED at \
+             max_tokens renders byte-identically to a clean completion. The \
+             user is never told the answer was cut off."
+        );
+    }
+
+    /// RED ARM. An engine turn-cap stop (#457 added `MaxTurns` precisely so a
+    /// host could tell it apart and offer "Continue") must reach the user.
+    #[test]
+    fn a_max_turns_stop_is_distinguishable_from_a_clean_stop() {
+        let clean = render_turn_with_finish_reason(wcore_protocol::events::FinishReason::Stop);
+        let capped = render_turn_with_finish_reason(wcore_protocol::events::FinishReason::MaxTurns);
+        assert_ne!(
+            clean, capped,
+            "#1109(a): the engine stopped the run at its max_turns cap and the \
+             TUI renders it as a normal completion, so the user is never \
+             offered the Continue affordance #457 introduced this variant for."
+        );
+    }
+
+    /// RED ARM. A provider-side failure or unrecognised stop signal must not
+    /// present as a successful turn.
+    #[test]
+    fn an_error_finish_is_distinguishable_from_a_clean_stop() {
+        let clean = render_turn_with_finish_reason(wcore_protocol::events::FinishReason::Stop);
+        let errored = render_turn_with_finish_reason(wcore_protocol::events::FinishReason::Error);
+        assert_ne!(
+            clean, errored,
+            "#1109(a): a turn that ended in a provider error renders as a \
+             clean completion, so a partial or empty answer looks final."
+        );
+    }
     use crate::tui::app::App;
     use crate::tui::fixtures;
     use serde_json::json;

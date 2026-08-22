@@ -7397,6 +7397,171 @@ mod tests {
         ));
     }
 
+    // -----------------------------------------------------------------
+    // FerroxLabs/wayland#1083 -- host EOF does not cancel approvals parked on
+    // the OTHER approval store.
+    //
+    // The ticket's anchor is wrong. `deny_all_pending` is
+    // `ToolApprovalManager::deny_all_pending`
+    // (`wcore-protocol/src/lib.rs:340`), it is already wired to both EOF sites
+    // by #1070, and the two tests above pin it. Nothing in `approval.rs` is
+    // involved in that path.
+    //
+    // The store that IS stranded is `wcore_agent::approval::ApprovalBridge` --
+    // a different crate with a different store (`by_token` + `by_corr`) and NO
+    // bulk-deny of any kind. It backs the egress consent doorbell and the
+    // Crucible proposal card. `deny_pending_approvals_on_host_eof` takes only a
+    // `&ToolApprovalManager`, so a bridge approval parked when the host goes
+    // away is untouched.
+    //
+    // Its ONLY escape is `reap_expired`, which needs the entry's TTL to have
+    // elapsed and runs on a 30s reaper tick. A Crucible card is minted with
+    // `CRUCIBLE_APPROVAL_TTL`, which is 86,400s. So the real symptom is not
+    // the ticket's 300-second stall -- it is a TWENTY-FOUR HOUR one.
+    //
+    // The 2-second timeout is the assertion: if the reaper is what eventually
+    // unblocks this, the test fails instead of hanging CI for a day.
+
+    fn bridge_request(call_id: &str) -> wcore_agent::approval::ApprovalRequest {
+        wcore_agent::approval::ApprovalRequest {
+            call_id: call_id.to_string(),
+            reason: "crucible proposal card".to_string(),
+            context: "multi-vendor cost decision".to_string(),
+        }
+    }
+
+    /// RED ARM. A Crucible-TTL approval parked on the `ApprovalBridge` must be
+    /// resolved when the host's command stream reaches EOF, exactly as a
+    /// `ToolApprovalManager` approval already is.
+    #[tokio::test]
+    async fn host_command_stream_eof_cancels_a_parked_bridge_approval() {
+        let approval_manager = Arc::new(ToolApprovalManager::new());
+        let bridge = Arc::new(wcore_agent::approval::ApprovalBridge::new());
+
+        // Park a Crucible card on the bridge -- 24h TTL, so the reaper is not
+        // a plausible rescuer inside this test's timeout.
+        let (_secret, parked_rx) = bridge
+            .request_with_id_and_ttl(
+                "crucible:eof-card".to_string(),
+                bridge_request("crucible:eof-card"),
+                wcore_agent::approval::CRUCIBLE_APPROVAL_TTL,
+            )
+            .await;
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let future = async move {
+            ready_tx.send(()).unwrap();
+            parked_rx.await
+        };
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+        let host = tokio::spawn(async move {
+            ready_rx.await.unwrap();
+            // The host process went away with the card still on screen.
+            drop(cmd_tx);
+        });
+        let writer = CapturingProtocolEmitter::default();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            drive_active_recovery(
+                future,
+                &mut cmd_rx,
+                approval_manager.as_ref(),
+                &writer,
+                &|| {},
+            ),
+        )
+        .await
+        .expect(
+            "#1083: host EOF left an ApprovalBridge approval parked. \
+             deny_pending_approvals_on_host_eof drains only the \
+             ToolApprovalManager, and the bridge's sole escape is the TTL \
+             reaper -- 86,400s for a Crucible card. The agent stalls for 24h.",
+        );
+        host.await.unwrap();
+
+        let ActiveRecoveryOutcome::Finished(result) = outcome else {
+            panic!("recovery driver stopped unexpectedly");
+        };
+        let result = result.expect("the parked bridge approval must resolve, not be dropped");
+        assert!(
+            !result.approved,
+            "EOF must fail CLOSED: no approval decision can arrive after the \
+             command stream closed, so the card must resolve as NOT approved"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the test above -- passes today and must keep
+    /// passing. With the command stream still open, the same parked bridge
+    /// approval is answered by the operator and delivers THAT decision.
+    ///
+    /// This proves the red arm's failure is the missing EOF drain and not a
+    /// broken harness: parking on the bridge, awaiting it inside
+    /// `drive_active_recovery`, and resolving it all work.
+    #[tokio::test]
+    async fn an_open_command_stream_still_answers_a_parked_bridge_approval() {
+        let approval_manager = Arc::new(ToolApprovalManager::new());
+        let bridge = Arc::new(wcore_agent::approval::ApprovalBridge::new());
+
+        let (_secret, parked_rx) = bridge
+            .request_with_id_and_ttl(
+                "crucible:open-card".to_string(),
+                bridge_request("crucible:open-card"),
+                wcore_agent::approval::CRUCIBLE_APPROVAL_TTL,
+            )
+            .await;
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let future = async move {
+            ready_tx.send(()).unwrap();
+            parked_rx.await
+        };
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+        let resolver = bridge.clone();
+        let host = tokio::spawn(async move {
+            ready_rx.await.unwrap();
+            resolver
+                .resolve_by_correlation(
+                    "crucible:open-card",
+                    wcore_agent::approval::ApprovalOutcome {
+                        approved: true,
+                        modifications: None,
+                    },
+                )
+                .await;
+            // Held open past the decision, then closed so the driver returns.
+            drop(cmd_tx);
+        });
+        let writer = CapturingProtocolEmitter::default();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            drive_active_recovery(
+                future,
+                &mut cmd_rx,
+                approval_manager.as_ref(),
+                &writer,
+                &|| {},
+            ),
+        )
+        .await
+        .expect("an answered bridge approval must not deadlock");
+        host.await.unwrap();
+
+        let ActiveRecoveryOutcome::Finished(result) = outcome else {
+            panic!("recovery driver stopped unexpectedly");
+        };
+        let result = result.expect("the parked bridge approval must resolve");
+        assert!(
+            result.approved,
+            "an open stream must deliver the operator's APPROVAL, not an EOF \
+             cancellation -- otherwise the red arm above would pass for the \
+             wrong reason (everything cancels)"
+        );
+    }
+
     /// FerroxLabs/wayland#1070 (b) — the host's command stream reaching EOF
     /// while a tool is parked on its approval must resolve that approval
     /// immediately (denied), not after the approval TTL.
