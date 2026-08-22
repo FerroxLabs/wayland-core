@@ -400,3 +400,102 @@ async fn a_control_non_retryable_400_still_settles_exactly_once() {
         "CONTROL BROKEN: the failed turn took a non-failure receipt: {completions:?}"
     );
 }
+// ===========================================================================
+// THE RECOVERED RETRY — the exit the first pass at this lane did not grade
+// ===========================================================================
+
+/// A retryable failure whose RETRY SUCCEEDS must still be able to commit its
+/// turn.
+///
+/// `require_turn_descendants_terminal` gates `TurnCommitted` with the SAME
+/// predicate it gates `TurnFailed` with (`reducer.rs`), so an attempt left
+/// nonterminal by the retryable dispatch arm breaks the SUCCESS path too, not
+/// only the retry-exhausted one. Settling at the exhausted exit alone left
+/// this open: measured on that shape, a 500 followed by a clean answer handed
+/// the caller
+///
+///     SessionAuthority("invalid journal state transition: turn turn-... has
+///     nonterminal provider attempt ...")
+///
+/// and discarded the answer the provider had already produced. `sends > 1`
+/// pins the test to the retry loop; `result.is_ok()` is the claim the
+/// exhausted-exit test cannot make.
+#[tokio::test]
+async fn a_recovered_retry_can_still_commit_its_turn() {
+    let mut h = harness(vec![
+        Err(api_error(500, SERVED_5XX_BODY)),
+        Ok(end_turn_text("recovered")),
+    ])
+    .await;
+    let result = h.engine.run(USER_MARKER, "").await;
+
+    let sends = h.calls.load(Ordering::SeqCst);
+    assert!(
+        sends > 1,
+        "ARM NOT REACHED: {sends} physical send(s) means the run never entered \
+         the retry loop, so this test graded the dispatch arm"
+    );
+    assert!(
+        result.is_ok(),
+        "#923: a run that RECOVERED on retry was failed anyway after {sends} \
+         sends. Nonterminal attempts: {:?}. Unclosed turns: {:?}. Caller got: \
+         {:?}",
+        h.nonterminal_attempts(),
+        h.unclosed_turns(),
+        result.as_ref().err()
+    );
+    assert!(
+        h.nonterminal_attempts().is_empty(),
+        "#923: the failed first attempt was never settled even though the \
+         retry succeeded: {:?}",
+        h.nonterminal_attempts()
+    );
+    assert!(
+        h.unclosed_turns().is_empty(),
+        "#923: the recovered turn took no terminal receipt: {:?}",
+        h.unclosed_turns()
+    );
+}
+/// The same defect on the sibling retry arm: `ProviderError::ContextOverflow`
+/// compacts and re-sends ONCE (`engine.rs`, the `!overflow_retried` arm).
+/// That arm left its overflowing attempt nonterminal across the `continue`,
+/// so a compaction that WORKED still could not commit its turn.
+///
+/// Measured before the fix: the caller was handed
+/// `SessionAuthority("... has nonterminal provider attempt ...")` after 2
+/// sends with the second one a clean `Done`.
+#[tokio::test]
+async fn a_compacted_overflow_retry_can_still_commit_its_turn() {
+    let mut h = harness(vec![
+        Err(ProviderError::ContextOverflow {
+            required_tokens: 900_000,
+            model_window: 200_000,
+            routed_model: "probe-model".to_string(),
+            message: "context overflow".to_string(),
+        }),
+        Ok(end_turn_text("recovered after compaction")),
+    ])
+    .await;
+    let result = h.engine.run(USER_MARKER, "").await;
+
+    let sends = h.calls.load(Ordering::SeqCst);
+    assert!(
+        sends > 1,
+        "ARM NOT REACHED: {sends} physical send(s) means the overflow arm never \
+         re-sent, so this test graded nothing"
+    );
+    assert!(
+        result.is_ok(),
+        "#923: a compacted-and-retried overflow was failed anyway after {sends} \
+         sends. Nonterminal attempts: {:?}. Unclosed turns: {:?}. Caller got: \
+         {:?}",
+        h.nonterminal_attempts(),
+        h.unclosed_turns(),
+        result.as_ref().err()
+    );
+    assert!(
+        h.nonterminal_attempts().is_empty(),
+        "#923: the overflowing attempt was never settled: {:?}",
+        h.nonterminal_attempts()
+    );
+}
