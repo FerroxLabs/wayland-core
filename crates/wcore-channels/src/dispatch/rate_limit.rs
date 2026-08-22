@@ -16,17 +16,20 @@
 //! logged by the caller) until enough of the window has elapsed for older sends
 //! to age out.
 //!
-//! Two seams consult this limiter, both of them AUTONOMOUS: the `run_turn`
-//! auto-reply in `wcore_agent::channel_inbound`, and — since wayland#585 —
-//! `wcore_agent::channel_send_transport::ChannelManagerTransport`, the seam the
-//! LLM-driven `send_message` tool reaches when the engine owns the channel
-//! table. They keep separate limiter instances, so an agent cannot spend one
-//! budget to exhaust the other.
+//! Three seams consult this limiter, all of them AUTONOMOUS: the `run_turn`
+//! auto-reply in `wcore_agent::channel_inbound`; and — since wayland#585 —
+//! both `MessageTransport` implementations the LLM-driven `send_message`
+//! tool can actually deliver through:
+//! `wcore_agent::channel_send_transport::ChannelManagerTransport` (the
+//! engine-owned channel table) and
+//! `wcore_agent::host_send_transport::HostDelegatedTransport` (the desktop,
+//! `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1`). Each keeps its own limiter
+//! instance, so an agent cannot spend one budget to exhaust another.
 //!
-//! That second seam is NOT total coverage of the tool: under
-//! `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1` the desktop's
-//! `HostDelegatedTransport` replaces it and consults no limiter at all. Do not
-//! read "the `send_message` tool is rate limited" out of this module.
+//! Those two are the only production transports that deliver at all
+//! (`NullMessageTransport` always errors), so the tool seam IS covered
+//! today. The check still does not live in `SendMessageTool` itself,
+//! however, so a THIRD transport added later would start unthrottled.
 //!
 //! Human/operator-initiated sends are NOT gated: cron and direct
 //! [`crate::ChannelManager::send_to`] take a different code path and never
