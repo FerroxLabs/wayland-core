@@ -2,7 +2,7 @@
 
 ## [0.13.5](https://github.com/FerroxLabs/wayland-core/compare/v0.13.4...v0.13.5) (2026-08-22)
 
-**Release highlights.** Seventeen fixes with one subject: a guard that exists is
+**Release highlights.** Nineteen fixes with one subject: a guard that exists is
 not a guard that runs. Most of what changed here was already written, already
 tested, and already correct — and did not reach the path you were actually on.
 The rate limiter that stops an agent talking to itself forever was never
@@ -22,13 +22,29 @@ recovery was rendered as a failure. There are now four settle points where there
 were two, covering the retry arm, the retry-exhausted exit, and the
 compact-and-resend arm, and each has its own test rather than sharing one.
 
-**The product stops going quiet on you.** A request that connects but receives
-nothing used to produce thirty seconds of nothing at all before the first retry
-line appeared. The silence is now announced on your surface, not written to a
-log you do not have enabled. Relatedly, a connect deadline that expired was
-being classified as a generic connection failure rather than a timeout, which
-routed it into a fifteen-minute outage budget it was never meant to have; that
-was latent rather than live, and it is closed before it became live.
+**The product stops going quiet on you.** Two silences, and they were not the
+same bug. A request whose connect never completes — a blackholed endpoint, or a
+typo in your `base_url` — used to produce thirty seconds of nothing at all
+before the first retry line appeared, because the notice was armed inside the
+stream loop and every provider builds its channel only after the connect
+returns 2xx. There was not even a channel to notice on. A request that *does*
+connect and then produces no bytes had a channel, but could stay quiet for the
+full five-minute read timeout. Both are announced now, on your surface rather
+than a log you do not have enabled. The threshold moved from thirty seconds to
+fifteen, and had to: thirty was exactly the connect deadline, so the notice was
+scheduled for the same instant as the failure it exists to precede and could
+never arrive first. It is only a notice — measured against a blackholed
+endpoint, the retry sequence and total wall time are unchanged within about
+fifty milliseconds. Relatedly, a connect deadline that expired was being
+classified as a generic connection failure rather than a timeout, which routed
+it into a fifteen-minute outage budget it was never meant to have. That one was
+live, not theoretical: the same failure renders two ways, and the spelling that
+contains no "timed out" anywhere accounted for 281 of 300 measured connect
+timeouts — so a typo in your `base_url` bought the full window about fifteen
+times in sixteen, and failed fast the other time. That is the nine-hundred-second
+hang and the thirty-six-send storm seen in testing. It fails fast now, on all
+three spellings including the Windows one, with a control proving genuine
+refusals and DNS failures keep their own class.
 
 **The stream retry budget is yours to set.** It was a constant compiled into a
 function. It is now configurable with a ceiling, and if you ask for more than the
@@ -49,7 +65,12 @@ These two shipped together because fixing either alone relocates the problem
 rather than closing it: closing the output convention alone moves the escape to
 the repo-control surface through frontmatter, and closing the write path alone
 leaves the guard scoped to the workspace so it never reaches the global config
-directory.
+directory. One thing that shipped after: the same feature rendered that
+directory two ways. The header telling a skill where to write normalised the
+path to forward slashes and the `{output_dir}` token did not, so on Windows a
+skill body could carry `F:\Temp\...\containment/brief.html` — mixed separators
+in model-facing prose the model then puts into a shell command, where a
+backslash is an escape character. Both sites now go through one normaliser.
 
 **The workspace boundary walk can be interrupted, and it is faster.** The
 per-execution secret-deny walk sat outside both cancellation points, so neither
@@ -59,8 +80,9 @@ on a large contained workspace is roughly five times faster, with the resulting
 deny set proven byte-identical to the serial one across symlink loops,
 execute-only directories, and nested roots. Worth stating plainly: an earlier
 report of a 76-second stall was a Windows measurement for a path already fixed
-in 0.13.1. The real cost on Linux was about nine tenths of a second. The defect
-was that you could not interrupt it, not that it was slow.
+in 0.13.1. The real cost on Linux was about nine tenths of a second warm, and
+one and four tenths cold, on a ninety-thousand-entry tree. The defect was that
+you could not interrupt it, not that it was slow.
 
 **Browser DNS resolution is checked, and the claim about it is honest.** The
 resolution gate did not exist — the browser crate never resolved a hostname
@@ -68,10 +90,12 @@ anywhere — so it was built. Static DNS-based SSRF is now closed. What is *not*
 closed is intra-navigation rebinding against a zero-TTL record, because the
 browser resolves in its own process; the operator hint and the README now say
 that instead of implying otherwise. A pin-first-answer cache was written and
-then removed after measuring real DNS: across eleven queries, the answer set for
-one major CDN host was completely disjoint from its first answer eleven times
-out of eleven. Pinning would have refused ordinary hosts for the rest of a
-session while buying nothing.
+then removed after measuring real DNS: across eleven re-queries over about a
+minute, the answer set for `s3.amazonaws.com` was completely disjoint from its
+first answer eleven times out of eleven, and `cdn.jsdelivr.net` eight times out
+of eleven, against a `www.wikipedia.org` control that stayed stable on all
+eleven. Pinning would have refused ordinary hosts for the rest of a session
+while buying nothing.
 
 **Smaller, but each one is a thing that lied to you.** Pending approvals are now
 cancelled when the host command stream ends, instead of stalling until a
