@@ -121,6 +121,36 @@ where
     }
 }
 
+/// Observe the DISPATCH window — request sent, first byte not yet arrived.
+///
+/// [`next_or_consumer_closed`] is the wrong instrument for this: it can only
+/// watch a `Stream`, and a provider stream does not exist until `send().await`
+/// has already resolved. Every provider builds its `mpsc::Sender` AFTER the
+/// send returns 2xx (anthropic.rs:186, openai.rs:1557, azure_openai.rs:321,
+/// gemini.rs:684, cohere.rs, vertex.rs:432), so the window this function covers
+/// is the one window the product currently cannot say anything during.
+///
+/// Measured live on this host against a blackholed endpoint: 30.071 s of total
+/// silence between the last startup notice and the first retry line, at 0.05 s
+/// polling resolution on an unpiped raw file.
+///
+/// RED ARM (this commit): the body is a bare passthrough. It arms no timer and
+/// emits nothing, and NOTHING calls it yet — product behaviour is byte-identical
+/// to before. It exists so the reproduction below can be expressed against real
+/// module surface instead of a private re-implementation that would keep passing
+/// no matter what the fix did.
+/// RED ARM ONLY: no call sites until the fix wires the six provider dispatch
+/// points. CI builds with `-D warnings`, so the unused-function lint has to be
+/// held off explicitly rather than left to break the lint gate. Delete this
+/// attribute in the same commit that adds the first call site.
+#[allow(dead_code)]
+pub(crate) async fn awaiting_first_byte<F>(dispatch: F, _tx: &mpsc::Sender<LlmEvent>) -> F::Output
+where
+    F: std::future::Future,
+{
+    dispatch.await
+}
+
 /// Default TCP+TLS connect timeout for provider clients.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -520,5 +550,185 @@ mod tests {
              it fired {:?} after a stream that had already delivered its item",
             READ_TIMEOUT * 2
         );
+    }
+
+    /// #1077 — PRE-CONNECT SILENCE. Reproduction of the live symptom.
+    ///
+    /// Measured on hetzner-dsm against `--base-url http://192.0.2.1:9999`
+    /// (TEST-NET-1, SYNs dropped), isolated `WAYLAND_HOME`, raw redirect to a
+    /// file polled every 50 ms — no pipe on the binary, because a pipe
+    /// collapses every arrival to the moment it flushes:
+    ///
+    /// ```text
+    /// +000.060s  notice: crash replay protection is OFF ...
+    /// +000.122s  warning: no secure credential backend ...
+    /// +030.193s  Provider stream failed (... deadline has elapsed); retrying (attempt 1/2)
+    /// +060.709s  ... (attempt 2/2)
+    /// +091.727s  error: Provider stream failed after retries
+    /// ```
+    ///
+    /// 30.071 s of total silence. The instrument resolved the 62 ms gap between
+    /// the two startup writes, so that silence is the product's, not a flush
+    /// artifact. `LlmEvent::StreamSilent` never fired.
+    ///
+    /// TWO independent reasons it cannot fire — this test covers the structural
+    /// one, `the_silence_threshold_must_beat_the_connect_deadline` the other:
+    ///
+    /// 1. STRUCTURAL — the notice is armed inside the stream poll loop, and the
+    ///    channel it would send on is not constructed until `send().await` has
+    ///    already returned 2xx. A connect that never completes never reaches it.
+    /// 2. ARITHMETIC — `STREAM_SILENCE_NOTICE_AFTER` (`READ_TIMEOUT` / 10 = 30 s)
+    ///    equals `CONNECT_TIMEOUT` (30 s) exactly, so even once wired it would
+    ///    tie with the failure it is supposed to precede.
+    ///
+    /// The bar is the reference behaviour: Claude Code arms its slow-first-byte
+    /// timer on REQUEST SENT, not on stream established, and reports before the
+    /// request dies. Diagnostic only — nothing here cancels or fails anything.
+    ///
+    /// Asserts the OBSERVABLE (`LlmEvent` on the channel the engine consumes),
+    /// never a log line: with `RUST_LOG` unset only ERROR reaches stderr, so a
+    /// `warn!` would satisfy a log-shaped test while the user still watched a
+    /// frozen cursor for thirty seconds.
+    ///
+    /// Virtual clock, so the 30 s window costs no wall time.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_dispatch_surfaces_a_silence_signal_before_the_connect_timeout() {
+        let (tx, mut rx) = mpsc::channel::<LlmEvent>(4);
+        let started = tokio::time::Instant::now();
+
+        // A dispatch that was sent and has produced nothing at all — the
+        // blackholed-endpoint shape above. It never resolves, exactly as the
+        // live send did not resolve until the 30 s connect deadline killed it.
+        let dispatch =
+            tokio::spawn(
+                async move { awaiting_first_byte(std::future::pending::<()>(), &tx).await },
+            );
+
+        let observed = tokio::time::timeout(CONNECT_TIMEOUT, rx.recv()).await;
+        dispatch.abort();
+
+        let Ok(event) = observed else {
+            panic!(
+                "a dispatch that produced no bytes told the user NOTHING for the whole \
+                 {CONNECT_TIMEOUT:?} connect window: no LlmEvent reached the consumer \
+                 before the connect timeout would have killed the request. This is the \
+                 measured 30.071s of live silence — the notice is armed in the stream \
+                 poll loop, which a never-completing connect never reaches."
+            );
+        };
+        let event = event.expect("the event channel must not be closed while the dispatch is live");
+        assert!(
+            matches!(event, LlmEvent::StreamSilent { .. }),
+            "the dispatch window must surface a silence signal, got: {event:?}"
+        );
+        // STRICTLY before. A notice that lands exactly ON the connect deadline
+        // is worth nothing to the user — the failure arrives in the same
+        // instant. This is the half that the 30 s == 30 s tie fails.
+        assert!(
+            started.elapsed() < CONNECT_TIMEOUT,
+            "the silence signal must PRECEDE the connect deadline, not tie with it: \
+             fired after {:?} against a {CONNECT_TIMEOUT:?} connect timeout",
+            started.elapsed()
+        );
+    }
+
+    /// The arithmetic half of the defect above, isolated so it cannot be fixed
+    /// by accident and so its failure is unambiguous.
+    ///
+    /// A notice threshold that equals the connect timeout can never precede a
+    /// connect failure — it is scheduled for the same instant the request dies.
+    /// The default is `READ_TIMEOUT` / 10 = 30 s and `CONNECT_TIMEOUT` is 30 s,
+    /// so the dispatch-window notice has no room to fire at all.
+    #[test]
+    fn the_silence_threshold_must_beat_the_connect_deadline() {
+        assert!(
+            STREAM_SILENCE_NOTICE_AFTER < CONNECT_TIMEOUT,
+            "the silence notice is scheduled at {STREAM_SILENCE_NOTICE_AFTER:?} but the \
+             connect deadline is {CONNECT_TIMEOUT:?}: a notice that ties with the failure \
+             it is meant to precede can never reach the user first. The dispatch window \
+             needs a threshold strictly below the connect timeout."
+        );
+    }
+
+    /// NEGATIVE CONTROL (a) — a dispatch that answers immediately must raise
+    /// NOTHING. Without this, a fix that fires unconditionally would pass the
+    /// reproduction above.
+    ///
+    /// Passes today (the seam emits nothing); it exists to fail if the fix
+    /// over-fires, and to fail if the fix spawns a DETACHED timer that fires
+    /// late against a request that already answered.
+    #[tokio::test(start_paused = true)]
+    async fn a_fast_dispatch_does_not_fire_the_connect_silence_signal() {
+        let (tx, mut rx) = mpsc::channel::<LlmEvent>(4);
+
+        let answered = awaiting_first_byte(std::future::ready(7_u8), &tx).await;
+        assert_eq!(
+            answered, 7,
+            "the seam must return the dispatch's own output"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a dispatch that answered immediately must not raise a silence signal"
+        );
+
+        // Cancelled, not merely not-yet-due.
+        tokio::time::sleep(READ_TIMEOUT * 2).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "the dispatch silence signal must be cancelled by the response, not deferred: \
+             it fired {:?} after a dispatch that had already answered",
+            READ_TIMEOUT * 2
+        );
+
+        // KNOWN-POSITIVE CONTROL for the two absences above. Both assert that
+        // NOTHING arrived, and an absence proves nothing unless the instrument
+        // could have seen a presence — a closed or already-drained receiver
+        // would satisfy them for free. Put one real event through the same
+        // receiver and require it to land.
+        tx.try_send(LlmEvent::StreamSilent {
+            silent_for: Duration::from_secs(1),
+        })
+        .expect("control: the channel must accept an event");
+        assert!(
+            matches!(rx.try_recv(), Ok(LlmEvent::StreamSilent { .. })),
+            "control: this receiver CAN observe a silence signal, so the two \
+             absence assertions above are real absences and not a dead channel"
+        );
+    }
+
+    /// NEGATIVE CONTROL (b) — the case that ALREADY WORKS must keep working.
+    ///
+    /// An established stream that goes quiet still emits EXACTLY ONE notice:
+    /// one when the gap opens, and not one per elapsed window afterwards. Ten
+    /// further read-timeout windows pass here and nothing more may arrive.
+    ///
+    /// Passes today. It is the regression guard on the stream-poll path that a
+    /// fix to the dispatch path must not disturb.
+    #[tokio::test(start_paused = true)]
+    async fn an_established_stream_that_goes_quiet_still_emits_exactly_one_notice() {
+        let (tx, mut rx) = mpsc::channel::<LlmEvent>(8);
+
+        let poll = tokio::spawn(async move {
+            let mut stream = futures::stream::pending::<u8>();
+            next_or_consumer_closed(&mut stream, &tx).await
+        });
+
+        let first = tokio::time::timeout(READ_TIMEOUT, rx.recv())
+            .await
+            .expect("an established stream going quiet must still raise its notice")
+            .expect("the event channel must not be closed while the poll is live");
+        assert!(
+            matches!(first, LlmEvent::StreamSilent { .. }),
+            "expected the established-stream silence notice, got: {first:?}"
+        );
+
+        tokio::time::sleep(READ_TIMEOUT * 10).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "the established-stream notice must be at most ONE per silent gap, not one \
+             per elapsed window"
+        );
+
+        poll.abort();
     }
 }
