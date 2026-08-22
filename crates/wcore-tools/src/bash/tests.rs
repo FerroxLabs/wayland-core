@@ -2172,6 +2172,55 @@ async fn warm_bash_tool_process_init() {
         .await;
 }
 
+/// This host's FLOOR on how quickly a `tokio::time::timeout` can return.
+///
+/// Measured, never assumed. On hetzner (Linux) it is ~1.3 ms. On the
+/// self-hosted Windows CI host it is 16-20 ms, because the Windows default
+/// timer resolution quantises every timer wait to ~15.6 ms: a 3 ms timeout
+/// there returned after 19.5 ms.
+///
+/// It is the same CLASS of constant as the lazy-init cost that
+/// `warm_bash_tool_process_init` pays — independent of the tree, the walk and
+/// the policy — but it cannot be warmed away, because it is a property of
+/// EVERY timer wait rather than of the first one. So it is measured and
+/// subtracted instead. Leaving it inside `elapsed` compares the walk against a
+/// number the walk does not contribute to, and on Windows that number alone
+/// exceeds the `walk / 3` budget: measured on the real host, the streaming
+/// test below failed 2 of 3 CI-profile runs with `elapsed` 17.7-19.5 ms
+/// against a walk of 31.7-40.2 ms, purely on the quantum.
+///
+/// Growing the tree until `walk / 3` clears the quantum is NOT the
+/// alternative. Measured on that same host, the 25 ms target already grows the
+/// tree close to the batch cap, so a target big enough to clear a 15.6 ms
+/// quantum is exactly the unreachable-target failure this helper exists to
+/// avoid — the pre-repair 250 ms target times out 10 of 10 there.
+///
+/// The MINIMUM of the samples is taken on purpose: the quantity is a floor, so
+/// the smallest observation is the least generous correction available and
+/// this can only ever under-subtract. It also cannot turn a red arm green —
+/// with the bound removed `elapsed` is the whole walk PLUS this floor, so
+/// subtracting the floor still leaves the walk, which is what the assertion
+/// refuses. Proven by running the red arm on both hosts, not argued.
+async fn measured_timeout_floor(timeout_ms: u64) -> Duration {
+    let mut floor = Duration::MAX;
+    for _ in 0..3 {
+        let started = std::time::Instant::now();
+        // What is measured is the TIMER's return latency, so the inner future
+        // only has to be one that never completes — and it must leave nothing
+        // behind. A `spawn_blocking` here would copy the product's shape
+        // faithfully and cost 30 s per test, because the runtime waits for the
+        // blocking pool at drop even though the timeout already returned.
+        // Measured on hetzner: 3.0 s -> 31.6 s per test.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            std::future::pending::<()>(),
+        )
+        .await;
+        floor = floor.min(started.elapsed());
+    }
+    floor
+}
+
 /// The walk cost the five latency tests below calibrate their trees to.
 ///
 /// Deliberately modest, and NOT a claim that the product's walk is slow: it is
@@ -2294,11 +2343,16 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
         .execute_with_ctx(json!({"command": "echo hi", "timeout": timeout_ms}), &ctx)
         .await;
     let elapsed = started.elapsed();
+    // Measured AFTER the call under test, so the measurement cannot warm or
+    // otherwise perturb the thing it is correcting.
+    let floor = measured_timeout_floor(timeout_ms).await;
+    let bounded = elapsed.saturating_sub(floor);
 
     assert!(
-        elapsed * 3 < walk,
-        "a {timeout_ms}ms timeout returned after {elapsed:?} against a walk \
-         measured at {walk:?} — the manifest build is outside the timeout scope"
+        bounded * 3 < walk,
+        "a {timeout_ms}ms timeout returned after {elapsed:?} ({bounded:?} above \
+         this host's {floor:?} timer floor) against a walk measured at {walk:?} \
+         — the manifest build is outside the timeout scope"
     );
     // #1111 acceptance 3: "a manifest build that exceeds the timeout produces a
     // user-visible message NAMING THE CAUSE". `contains("timed out")` alone is
@@ -2373,12 +2427,16 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
         )
         .await;
     let elapsed = started.elapsed();
+    // Measured AFTER the call under test, so the measurement cannot warm or
+    // otherwise perturb the thing it is correcting.
+    let floor = measured_timeout_floor(timeout_ms).await;
+    let bounded = elapsed.saturating_sub(floor);
 
     assert!(
-        elapsed * 3 < walk,
-        "a {timeout_ms}ms streaming timeout returned after {elapsed:?} against \
-         a walk measured at {walk:?} — the manifest build is outside the \
-         timeout scope"
+        bounded * 3 < walk,
+        "a {timeout_ms}ms streaming timeout returned after {elapsed:?} \
+         ({bounded:?} above this host's {floor:?} timer floor) against a walk \
+         measured at {walk:?} — the manifest build is outside the timeout scope"
     );
     // #1111 acceptance 3: "a manifest build that exceeds the timeout produces a
     // user-visible message NAMING THE CAUSE". `contains("timed out")` alone is
