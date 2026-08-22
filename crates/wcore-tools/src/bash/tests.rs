@@ -2172,12 +2172,12 @@ async fn warm_bash_tool_process_init() {
         .await;
 }
 
-/// This host's FLOOR on how quickly a `tokio::time::timeout` can return.
+/// An ALLOWANCE for what ONE `tokio::time::timeout` wait costs on this host.
 ///
-/// Measured, never assumed. On hetzner (Linux) it is ~1.3 ms. On the
-/// self-hosted Windows CI host it is 16-20 ms, because the Windows default
-/// timer resolution quantises every timer wait to ~15.6 ms: a 3 ms timeout
-/// there returned after 19.5 ms.
+/// Measured, never assumed. On hetzner (Linux) a 2 ms timeout returns in
+/// ~3.1 ms. On the self-hosted Windows CI host it returns in 15.0-16.1 ms,
+/// because the Windows default timer resolution quantises every timer wait to
+/// a ~15.6 ms tick.
 ///
 /// It is the same CLASS of constant as the lazy-init cost that
 /// `warm_bash_tool_process_init` pays — independent of the tree, the walk and
@@ -2189,21 +2189,53 @@ async fn warm_bash_tool_process_init() {
 /// test below failed 2 of 3 CI-profile runs with `elapsed` 17.7-19.5 ms
 /// against a walk of 31.7-40.2 ms, purely on the quantum.
 ///
-/// Growing the tree until `walk / 3` clears the quantum is NOT the
-/// alternative. Measured on that same host, the 25 ms target already grows the
-/// tree close to the batch cap, so a target big enough to clear a 15.6 ms
-/// quantum is exactly the unreachable-target failure this helper exists to
-/// avoid — the pre-repair 250 ms target times out 10 of 10 there.
+/// TWO properties of that quantum decide how it has to be measured, and both
+/// were measured on the real Windows host — 40 samples of `timeout(2ms)` per
+/// arm, one `#[tokio::test]` process:
 ///
-/// The MINIMUM of the samples is taken on purpose: the quantity is a floor, so
-/// the smallest observation is the least generous correction available and
-/// this can only ever under-subtract. It also cannot turn a red arm green —
-/// with the bound removed `elapsed` is the whole walk PLUS this floor, so
-/// subtracting the floor still leaves the walk, which is what the assertion
-/// refuses. Proven by running the red arm on both hosts, not argued.
-async fn measured_timeout_floor(timeout_ms: u64) -> Duration {
-    let mut floor = Duration::MAX;
-    for _ in 0..3 {
+/// * The cost is set by the START PHASE relative to the tick, not by the
+///   timeout. Samples started at random phases spanned **2.671-17.774 ms** —
+///   the whole `[T, T + tick]` band.
+/// * A timer wait RETURNS on a tick, so a sample taken straight after another
+///   one starts at phase ~0 and pays a whole tick. Back-to-back samples came
+///   in at **14.786-16.472 ms**, and samples explicitly aligned with a 1 ms
+///   sleep at **14.862-16.081 ms** — the top of the band, and tight.
+///
+/// The pre-repair helper took the MINIMUM of three back-to-back samples and
+/// subtracted it from a SINGLE sample of the call under test. That is a
+/// best-case correction applied to an any-case measurement: the correction was
+/// drawn from the tight 15-16 ms cluster (or, when CI load broke the lock,
+/// from anywhere in the band) while the subject was drawn from the full band,
+/// so the residue was the tick rather than the product. It is what made
+/// `the_streaming_bash_timeout_bounds_the_secret_deny_walk` fail CI run
+/// 32582493307 on SEANDESKTOP: a floor of 6.5033 ms subtracted from an elapsed
+/// of 15.8632 ms left 9.3599 ms of pure quantum against a `walk / 3` budget of
+/// 9.1869 ms, and the retry then hid it behind a green conclusion.
+///
+/// So this helper (a) phase-aligns every sample, so all of them and the call
+/// under test start at the same point in the tick, and (b) returns the
+/// MAXIMUM. A quantity that is SUBTRACTED has to be an upper bound of what it
+/// removes, or what is left over is the noise instead of the product.
+///
+/// Taking the maximum cannot turn a red arm green. With the bound removed,
+/// `elapsed` is the whole walk PLUS one timer wait, while this allowance is
+/// never more than one timer wait — measured 16.1 ms against a 29 ms walk on
+/// Windows and 3.1 ms against a 27 ms walk on Linux — so `elapsed - allowance`
+/// is still essentially the walk, which is what the assertion refuses. Proven
+/// by running the red arm on both hosts, not argued.
+///
+/// Growing the tree until `walk / 3` clears the quantum outright is NOT the
+/// alternative, and that is measured too: on the Windows host a 70 ms target
+/// does not finish growing inside nextest's 120 s slow-timeout (`1 timed out`),
+/// while the 25 ms target it replaces costs 20-30k entries and 25-37 s per
+/// test. Raising the TIMEOUT to a multiple of the tick is not the alternative
+/// either: `timeout(2ms)` there already costs 15.0-16.1 ms, so asking for one
+/// tick would make the real wait ~31 ms against a 29 ms walk and the timeout
+/// would stop cutting the walk at all — the test would grade nothing.
+async fn timer_allowance(timeout_ms: u64, samples: usize) -> Duration {
+    let mut worst = Duration::ZERO;
+    for _ in 0..samples {
+        phase_align_to_the_timer_tick().await;
         let started = std::time::Instant::now();
         // What is measured is the TIMER's return latency, so the inner future
         // only has to be one that never completes — and it must leave nothing
@@ -2216,9 +2248,26 @@ async fn measured_timeout_floor(timeout_ms: u64) -> Duration {
             std::future::pending::<()>(),
         )
         .await;
-        floor = floor.min(started.elapsed());
+        worst = worst.max(started.elapsed());
     }
-    floor
+    worst
+}
+
+/// Put the NEXT timer wait at the same point in this host's timer tick that
+/// every `timer_allowance` sample starts at.
+///
+/// A timer wait returns when the tick fires, so a 1 ms sleep lands just after
+/// one and the wait that follows pays a whole tick rather than whatever
+/// fraction of one the test happened to arrive on. Measured on the Windows
+/// host: unaligned starts spread `timeout(2ms)` over 2.671-17.774 ms, aligned
+/// starts hold it to 14.862-16.081 ms. On Linux, where the tick is ~1 ms, it
+/// costs 1 ms and changes nothing.
+///
+/// This removes a nuisance variable from BOTH sides of the comparison rather
+/// than from one of them. It cannot mask an unbounded walk: the walk is not a
+/// timer wait, and aligning the phase of the timeout does not shorten it.
+async fn phase_align_to_the_timer_tick() {
+    tokio::time::sleep(Duration::from_millis(1)).await;
 }
 
 /// The walk cost the five latency tests below calibrate their trees to.
@@ -2232,6 +2281,21 @@ async fn measured_timeout_floor(timeout_ms: u64) -> Duration {
 /// costs ~0.4 us/entry, so 25 ms is reached at ~50k entries in ~5 batches —
 /// well inside the growth cap even with all five callers running concurrently.
 const CALIBRATED_WALK: Duration = Duration::from_millis(25);
+
+/// How many timer samples each bracket of `timer_allowance` takes.
+///
+/// The allowance is a maximum, so more samples can only make it a tighter
+/// upper bound. Four per bracket is eight samples per test, each costing one
+/// alignment sleep plus one timer wait — on Windows BOTH halves quantise to a
+/// tick, so ~250 ms per test there against ~33 ms on Linux.
+///
+/// That is not a tax, and it was measured rather than assumed: interleaved A/B
+/// over the whole five-test group, six reps per arm, rebuilt between arms.
+/// hetzner 2.664 s -> 2.625 s, the Windows host 12.10 s -> 10.76 s. The
+/// repaired arm is the faster of the two on both hosts, which is the
+/// tree-growth batch count moving between reps rather than anything this
+/// costs.
+const TIMER_ALLOWANCE_SAMPLES: usize = 4;
 
 /// Grow `root` until its secret-deny walk costs at least `target`, and return
 /// the policy plus the MEASURED warm cost of that walk.
@@ -2275,7 +2339,37 @@ fn workspace_whose_walk_costs_at_least(
             "instrument control: the contained walk must find the planted .env; got {deny:?}"
         );
         if walk >= target {
-            return (policy, walk);
+            // A SINGLE sample can hit the target because the host stalled, not
+            // because the tree is big enough — and then the tree stays tiny
+            // while `walk` reports a cost it does not have. Measured on the
+            // Windows host, 1 rep in 20: an early batch reported an 80 ms walk,
+            // so the callers below derived an 8 ms timeout, and the manifest
+            // build that timeout is supposed to cut finished well inside it.
+            // The test failed on the wrong assertion — "got: Command timed out
+            // after 8ms", the CHILD-timeout message — which grades nothing
+            // about #1111.
+            //
+            // So the target has to be met by the SMALLEST of three samples, not
+            // by any one of them. The walk is a cost floor: the smallest
+            // observation is the one least contaminated by whatever else the
+            // host was doing, it is the honest number to report to callers, and
+            // it is the CONSERVATIVE one in both directions — it shrinks the
+            // `walk / 3` budget the latency assertions get, and it shrinks the
+            // `walk / 10` timeout they ask for, so the timeout stays a real cut
+            // of a real walk.
+            let mut floor = walk;
+            for _ in 0..2 {
+                let started = std::time::Instant::now();
+                let deny = policy.secret_deny_paths_for_backend(true);
+                floor = floor.min(started.elapsed());
+                assert!(
+                    deny.iter().any(|p| p.ends_with(".env")),
+                    "instrument control: the contained walk must find the planted .env; got {deny:?}"
+                );
+            }
+            if floor >= target {
+                return (policy, floor);
+            }
         }
         // 10k more entries per batch.
         for d in 0..100 {
@@ -2338,21 +2432,32 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
     // chance to run at all).
     let timeout_ms = (walk / 10).as_millis().max(1) as u64;
 
+    // The host's timer cost is BRACKETED around the call under test and the
+    // larger bracket is used. On Windows the timer resolution is a system-wide
+    // setting any process can raise or drop, so a correction measured only
+    // afterwards can belong to a different regime than the one the call paid
+    // for — which is exactly the shape of the CI failure, a 6.5033 ms
+    // correction against a 15.8632 ms call. Measuring on both sides means a
+    // regime has to appear and vanish inside the bracket to escape it. These
+    // samples touch nothing but the timer, so the before-bracket cannot warm
+    // or perturb the call it is correcting.
+    let allowance_before = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
+
+    phase_align_to_the_timer_tick().await;
     let started = std::time::Instant::now();
     let result = BashTool
         .execute_with_ctx(json!({"command": "echo hi", "timeout": timeout_ms}), &ctx)
         .await;
     let elapsed = started.elapsed();
-    // Measured AFTER the call under test, so the measurement cannot warm or
-    // otherwise perturb the thing it is correcting.
-    let floor = measured_timeout_floor(timeout_ms).await;
-    let bounded = elapsed.saturating_sub(floor);
+    let allowance_after = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
+    let allowance = allowance_before.max(allowance_after);
+    let bounded = elapsed.saturating_sub(allowance);
 
     assert!(
         bounded * 3 < walk,
         "a {timeout_ms}ms timeout returned after {elapsed:?} ({bounded:?} above \
-         this host's {floor:?} timer floor) against a walk measured at {walk:?} \
-         — the manifest build is outside the timeout scope"
+         this host's {allowance:?} allowance for one timer wait) against a walk \
+         measured at {walk:?} — the manifest build is outside the timeout scope"
     );
     // #1111 acceptance 3: "a manifest build that exceeds the timeout produces a
     // user-visible message NAMING THE CAUSE". `contains("timed out")` alone is
@@ -2418,6 +2523,18 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
     let timeout_ms = (walk / 10).as_millis().max(1) as u64;
 
     let sink = crate::NullToolOutputSink;
+    // The host's timer cost is BRACKETED around the call under test and the
+    // larger bracket is used. On Windows the timer resolution is a system-wide
+    // setting any process can raise or drop, so a correction measured only
+    // afterwards can belong to a different regime than the one the call paid
+    // for — which is exactly the shape of the CI failure, a 6.5033 ms
+    // correction against a 15.8632 ms call. Measuring on both sides means a
+    // regime has to appear and vanish inside the bracket to escape it. These
+    // samples touch nothing but the timer, so the before-bracket cannot warm
+    // or perturb the call it is correcting.
+    let allowance_before = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
+
+    phase_align_to_the_timer_tick().await;
     let started = std::time::Instant::now();
     let result = BashTool
         .execute_streaming_with_ctx(
@@ -2427,16 +2544,16 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
         )
         .await;
     let elapsed = started.elapsed();
-    // Measured AFTER the call under test, so the measurement cannot warm or
-    // otherwise perturb the thing it is correcting.
-    let floor = measured_timeout_floor(timeout_ms).await;
-    let bounded = elapsed.saturating_sub(floor);
+    let allowance_after = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
+    let allowance = allowance_before.max(allowance_after);
+    let bounded = elapsed.saturating_sub(allowance);
 
     assert!(
         bounded * 3 < walk,
         "a {timeout_ms}ms streaming timeout returned after {elapsed:?} \
-         ({bounded:?} above this host's {floor:?} timer floor) against a walk \
-         measured at {walk:?} — the manifest build is outside the timeout scope"
+         ({bounded:?} above this host's {allowance:?} allowance for one timer \
+         wait) against a walk measured at {walk:?} — the manifest build is \
+         outside the timeout scope"
     );
     // #1111 acceptance 3: "a manifest build that exceeds the timeout produces a
     // user-visible message NAMING THE CAUSE". `contains("timed out")` alone is
