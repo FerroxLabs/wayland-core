@@ -273,4 +273,89 @@ mod tests {
 
         server.abort();
     }
+
+    /// SLOW FIRST BYTE — a stream that has produced NOTHING must surface a
+    /// signal the user can actually observe.
+    ///
+    /// `next_or_consumer_closed` is the single chokepoint every provider polls
+    /// (bedrock.rs:806, cohere.rs:336, gemini.rs:836, openai.rs:1709 and :1821,
+    /// anthropic_shared.rs:362 — 6 call sites, verified by grep), and the only
+    /// channel it holds to the user is `tx`. Between dispatch and the first
+    /// byte the product currently says NOTHING for up to `READ_TIMEOUT` (300 s),
+    /// which the user cannot tell apart from a hang.
+    ///
+    /// This test asserts the OBSERVABLE, deliberately not a log line: with
+    /// `RUST_LOG` unset only ERROR reaches stderr, so a `warn!` here reaches
+    /// nobody. A test that asserted on a log would pass while the user still
+    /// stared at a frozen cursor.
+    ///
+    /// The bar is the minimum defensible one, tied to an existing constant
+    /// rather than an invented threshold: before `READ_TIMEOUT` expires and
+    /// kills the request, the user must have been told at least once that the
+    /// stream is still silent. A fix should fire well before that; this test
+    /// only refuses total silence.
+    ///
+    /// Virtual clock (`start_paused`), so the 300 s window costs no wall time.
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_silent_past_the_threshold_surfaces_a_signal_to_the_user() {
+        let (tx, mut rx) = mpsc::channel::<LlmEvent>(4);
+        let started = tokio::time::Instant::now();
+
+        // A provider stream that accepted the request and then produced nothing
+        // at all — the slow-first-byte shape.
+        let poll = tokio::spawn(async move {
+            let mut stream = futures::stream::pending::<u8>();
+            next_or_consumer_closed(&mut stream, &tx).await
+        });
+
+        let observed = tokio::time::timeout(READ_TIMEOUT, rx.recv()).await;
+        poll.abort();
+
+        let Ok(event) = observed else {
+            panic!(
+                "a provider stream produced no bytes for {READ_TIMEOUT:?} and told \
+                 the user NOTHING: no LlmEvent reached the consumer before the \
+                 read timeout would have killed the request. RUST_LOG is unset in \
+                 production, so a warn! here is invisible — the signal has to be \
+                 observable on the channel the engine actually consumes."
+            );
+        };
+        let event = event.expect("the event channel must not be closed while the poll is live");
+        println!(
+            "slow-first-byte signal fired after {:?}: {event:?}",
+            started.elapsed()
+        );
+    }
+
+    /// NEGATIVE CONTROL for the test above: a stream that answers immediately
+    /// must NOT raise the slow-stream signal. Without this, a fix that fires
+    /// unconditionally would pass.
+    ///
+    /// Passes today (nothing is ever emitted); it exists to fail if the fix
+    /// over-fires.
+    #[tokio::test(start_paused = true)]
+    async fn a_fast_first_byte_does_not_fire_the_slow_stream_signal() {
+        let (tx, mut rx) = mpsc::channel::<LlmEvent>(4);
+        let mut stream = futures::stream::iter([7_u8]);
+
+        assert!(matches!(
+            next_or_consumer_closed(&mut stream, &tx).await,
+            StreamPoll::Item(7)
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "a stream that answered immediately must not raise a slow-stream signal"
+        );
+
+        // And the timer must be CANCELLED by the first byte, not merely
+        // not-yet-due: a fix that spawns a detached timer would fire it late,
+        // long after the bytes arrived, and spam a healthy stream.
+        tokio::time::sleep(READ_TIMEOUT * 2).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "the slow-stream signal must be cancelled by the first byte, not deferred: \
+             it fired {:?} after a stream that had already delivered its item",
+            READ_TIMEOUT * 2
+        );
+    }
 }

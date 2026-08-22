@@ -1791,4 +1791,221 @@ mod tests {
             None
         );
     }
+
+    /// THE 900 s BUG — a connect-phase DEADLINE expiry must classify as
+    /// `timeout`, not `connection`.
+    ///
+    /// MEASURED on this tree (reqwest 0.12 / hyper-util 0.1 / tokio 1, probe
+    /// run 2026-08-22 on hetzner-dsm), a `ClientBuilder::connect_timeout`
+    /// expiring against a blackhole produces:
+    ///
+    /// ```text
+    /// display    = "error sending request for url (http://192.0.2.1:9/v1)"
+    /// is_timeout = true          <-- reqwest KNOWS it is a timeout
+    /// is_connect = true
+    /// source[0]  = "client error (Connect)"
+    /// source[1]  = "tcp connect error"
+    /// source[2]  = "deadline has elapsed"     <-- no "timed out" anywhere
+    /// ```
+    ///
+    /// The product wraps that as `ProviderError::Connection(with_transport_cause(&e))`.
+    /// On the `Connection(String)` arm only the rendered text survives, the
+    /// `contains("timed out")` guard misses `deadline has elapsed`, and
+    /// `classify_connect_chain` falls through to `FAILURE_CONNECTION`.
+    /// `"connection"` is one of the four codes `wcore_agent`'s
+    /// `is_unserved_request_failure` admits into `UNSERVED_OUTAGE_BUDGET`
+    /// (READ_TIMEOUT 300 s x DEFAULT_FAILURE_THRESHOLD 3 = 900 s), so a
+    /// connect timeout buys the full 900 s outage window instead of failing
+    /// fast — the measured 902 s / 36-send storm.
+    ///
+    /// Every rendering below is the SAME failure; the fix must catch all of
+    /// them, not one literal.
+    #[test]
+    fn a_connect_deadline_expiry_is_a_timeout_not_a_connection_failure() {
+        // Positive control for the assertion mechanism itself: the rendering
+        // that ALREADY works. If this line ever fails, the harness is broken
+        // and the failures below prove nothing.
+        assert_eq!(
+            provider_failure_code(&ProviderError::Connection(
+                "error sending request for url (http://192.0.2.1:9/v1): operation timed out"
+                    .to_owned()
+            )),
+            "timeout",
+            "control: the 'operation timed out' rendering must already classify as a timeout"
+        );
+
+        let connect_timeout_renderings = [
+            // As `with_transport_cause` renders it on THIS tree today: reqwest's
+            // base Display keeps the URL, and the innermost link is appended.
+            "error sending request for url (http://192.0.2.1:9/v1): deadline has elapsed",
+            // The URL-less spelling of the identical failure — reqwest omits the
+            // `for url (...)` clause when the URL cannot be rendered, and
+            // `with_transport_cause` drops any link that looks like a URL (H-2).
+            "error sending request: deadline has elapsed",
+            // The bare innermost link, which is all that survives when the base
+            // Display already contains the cause and no suffix is appended.
+            "deadline has elapsed",
+        ];
+
+        for rendering in connect_timeout_renderings {
+            assert_eq!(
+                provider_failure_code(&ProviderError::Connection(rendering.to_owned())),
+                "timeout",
+                "a connect timeout rendered as {rendering:?} must classify as a \
+                 timeout; classifying it as a connection failure hands it the \
+                 900 s UNSERVED_OUTAGE_BUDGET and reproduces the 902 s hang"
+            );
+        }
+    }
+
+    /// NEGATIVE CONTROL for the fix above. Widening the timeout class must not
+    /// swallow the connect failures that are genuinely NOT timeouts — if it
+    /// does, `dns_failure`'s fail-fast and `connection_refused`'s prompt
+    /// fail-over both regress into the timeout bucket.
+    ///
+    /// Every row here PASSES today. They exist to fail if the fix over-matches.
+    #[test]
+    fn widening_the_timeout_class_must_not_swallow_other_connect_failures() {
+        let must_not_become_timeout = [
+            // MEASURED: a genuine refusal, same probe run.
+            (
+                "error sending request for url (http://127.0.0.1:1/v1): Connection refused (os error 111)",
+                FAILURE_CONNECTION_REFUSED,
+            ),
+            // Windows spelling of the same refusal (WSAECONNREFUSED).
+            (
+                "error sending request: the target machine actively refused it (os error 10061)",
+                FAILURE_CONNECTION_REFUSED,
+            ),
+            // A name that does not exist stays PERMANENT and keeps failing fast.
+            (
+                "error sending request: failed to lookup address information: Name or service not known",
+                FAILURE_DNS,
+            ),
+            // A resolver outage stays transient and keeps the generous budget.
+            (
+                "error sending request: failed to lookup address information: Temporary failure in name resolution",
+                FAILURE_CONNECTION,
+            ),
+            // The ambiguous residue stays ambiguous — not a timeout.
+            (
+                "error sending request: Network is unreachable (os error 101)",
+                FAILURE_CONNECTION,
+            ),
+        ];
+
+        for (rendering, expected) in must_not_become_timeout {
+            let code = provider_failure_code(&ProviderError::Connection(rendering.to_owned()));
+            assert_eq!(
+                code, expected,
+                "{rendering:?} must stay {expected:?}; it is not a timeout and \
+                 must not be swept into the timeout class by an over-broad fix"
+            );
+            assert_ne!(
+                code, "timeout",
+                "{rendering:?} was reclassified as a timeout — the fix over-matches"
+            );
+        }
+    }
+
+    /// The live reproduction, driven end to end through the REAL production
+    /// path — `EgressClient` -> `provider_error_from_egress` ->
+    /// `provider_error_from_reqwest` -> `provider_failure_code` — with nothing
+    /// hand-constructed. The fixture test above pins the strings; this one
+    /// proves the strings are real and the defect is reachable, not modelled.
+    ///
+    /// MEASURED (300 blackholed connects, hetzner-dsm, 2026-08-22): ONE failure
+    /// mode renders TWO ways, non-deterministically, both with
+    /// `is_timeout()=true` and `is_connect()=true`:
+    ///
+    /// ```text
+    /// 281/300 (93.7%)  "...: deadline has elapsed"   -> classified "connection"  BUG
+    ///  19/300 ( 6.3%)  "...: operation timed out"    -> classified "timeout"     ok
+    /// ```
+    ///
+    /// So the 900 s hang is INTERMITTENT: the same misconfigured `base_url`
+    /// fails fast about one time in sixteen and burns the full outage budget
+    /// the rest of the time. That race is also why a single-sample probe can
+    /// conclude the classifier is fine.
+    ///
+    /// The loop exists for exactly that reason — a one-shot version of this
+    /// test passes vacuously 6% of the time (MEASURED: 1 pass in 20 runs). It
+    /// asserts that EVERY observed rendering classifies as a timeout, and
+    /// separately that the `deadline has elapsed` rendering was actually
+    /// exercised, so a run that never reproduces the defect fails loudly
+    /// instead of reporting a green it did not earn.
+    #[tokio::test]
+    async fn a_live_connect_timeout_reaches_the_classifier_as_a_connection_failure() {
+        const SAMPLES: usize = 40;
+        let mut saw_deadline_rendering = false;
+        let mut misclassified: Vec<(String, String)> = Vec::new();
+
+        for _ in 0..SAMPLES {
+            // 192.0.2.1 is TEST-NET-1 (RFC 5737): reserved, non-routable, blackholes.
+            // B1: constructed through the egress chokepoint, like every other
+            // client in this crate.
+            let client = wcore_egress::EgressClient::builder()
+                .connect_timeout(std::time::Duration::from_millis(50))
+                .build()
+                .expect("client builds");
+            let error = client
+                .get("http://192.0.2.1:9/v1")
+                .send()
+                .await
+                .expect_err("a blackholed connect must not succeed");
+
+            // Preconditions: announce loudly if the environment produced some
+            // other failure (an RST from a middlebox), rather than passing
+            // vacuously on a sample that never exercised the defect.
+            let EgressError::Transport(ref transport) = error else {
+                panic!(
+                    "precondition: a blackholed connect must surface as a transport \
+                     failure, got: {error}"
+                );
+            };
+            assert!(
+                transport.is_timeout(),
+                "precondition: reqwest must report this as a timeout, got: {transport}"
+            );
+            assert!(
+                transport.is_connect(),
+                "precondition: it must also be a connect-phase failure, got: {transport}"
+            );
+
+            // The real mapping the product runs, not a re-implementation.
+            let provider_error = provider_error_from_egress(error);
+            let ProviderError::Connection(ref rendered) = provider_error else {
+                panic!(
+                    "precondition: a transient transport failure must be wrapped as \
+                     ProviderError::Connection, got: {provider_error}"
+                );
+            };
+            if rendered
+                .to_ascii_lowercase()
+                .contains("deadline has elapsed")
+            {
+                saw_deadline_rendering = true;
+            }
+            let code = provider_failure_code(&provider_error);
+            if code != "timeout" {
+                misclassified.push((rendered.clone(), code));
+            }
+        }
+
+        assert!(
+            saw_deadline_rendering,
+            "anti-vacuity: {SAMPLES} blackholed connects never produced the \
+             'deadline has elapsed' rendering, so this run never exercised the \
+             defect and its result means nothing"
+        );
+        assert!(
+            misclassified.is_empty(),
+            "reqwest reported is_timeout()=true, but {} of {SAMPLES} connect \
+             timeouts classified as something else — the timeout signal is lost \
+             crossing into ProviderError::Connection and the 900 s \
+             UNSERVED_OUTAGE_BUDGET takes the request. First: {:?}",
+            misclassified.len(),
+            misclassified.first().expect("non-empty")
+        );
+    }
 }
