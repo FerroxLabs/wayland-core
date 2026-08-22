@@ -22,22 +22,68 @@
 //! so the family arm maps the "email" token onto the registered
 //! "email-imap"/"email-agentmail" instance. Without this, `send_to("email")`
 //! missed and every IMAP email user's `send_message` failed.
+//!
+//! ## Rate limiting (wayland#585)
+//!
+//! This adapter is the seam the LLM-driven `send_message` tool reaches in the
+//! default (engine-owned channel table) configuration, and it is throttled
+//! here — NOT one layer lower in
+//! [`ChannelManager::send_to`], which the human/operator and cron paths share
+//! (pinned by `channel_inbound::tests::interactive_sends_bypass_the_rate_limit`
+//! and by `operator_send_to_is_not_throttled_by_the_tool_limiter` below).
+//!
+//! [`wcore_channels::AutoReplyRateLimiter`] previously gated exactly one seam,
+//! the `run_turn` auto-reply in `channel_inbound.rs`, so two agents wired to
+//! the same channel could ping-pong forever *through the tool* while the guard
+//! built for that failure never saw it. A suppressed send returns
+//! [`SendOutcome::Err`], which `SendMessageTool` renders as an `is_error`
+//! `ToolResult` the model actually reads — a `warn!` alone reaches nobody with
+//! `RUST_LOG` unset, so it can never end a model-driven loop.
+//!
+//! **Coverage limit, stated plainly:** this is not the only `MessageTransport`.
+//! Under `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1` (the desktop) `bootstrap`
+//! deliberately keeps [`crate::host_send_transport::HostDelegatedTransport`]
+//! and never installs this adapter at all, so on that path tool-driven sends
+//! are still UNTHROTTLED. Closing it means throttling there too, or moving the
+//! check into `SendMessageTool` itself; neither is done here.
 
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
-use wcore_channels::ChannelManager;
 use wcore_channels::outgoing::OutgoingMessage;
-use wcore_tools::send_message::{MessageTransport, ParsedTarget, SendOutcome};
+use wcore_channels::{
+    AutoReplyRateLimiter, ChannelManager, DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP,
+    DEFAULT_MAX_AUTO_REPLIES,
+};
+use wcore_tools::send_message::{
+    MessageTransport, ParsedTarget, SendOutcome, THROTTLED_ERROR_PREFIX,
+};
 
 pub struct ChannelManagerTransport {
     mgr: Arc<RwLock<ChannelManager>>,
+    /// Per-conversation rolling-window guard on TOOL-DRIVEN sends
+    /// (wayland#585). Behind a `std::Mutex` because `MessageTransport::send`
+    /// takes `&self` and the tool is shared across concurrent turns; the
+    /// critical section is a bounded map op and the guard is dropped before
+    /// any `.await`, so it never crosses a suspension point.
+    rate_limiter: StdMutex<AutoReplyRateLimiter>,
 }
 
 impl ChannelManagerTransport {
     pub fn new(mgr: Arc<RwLock<ChannelManager>>) -> Self {
-        Self { mgr }
+        Self {
+            mgr,
+            // Constructed from the named constants rather than `default()` so
+            // the refusal message below cannot drift from the live budget.
+            rate_limiter: StdMutex::new(AutoReplyRateLimiter::new(
+                DEFAULT_MAX_AUTO_REPLIES,
+                DEFAULT_AUTO_REPLY_WINDOW,
+                DEFAULT_CONVERSATION_CAP,
+            )),
+        }
     }
 }
 
@@ -112,6 +158,46 @@ impl MessageTransport for ChannelManagerTransport {
         // name-shaped guess (issue #116 and the B-3 corpus row).
         let members = guard.names_for_platform(platform_token).await;
         let channel_name = resolve_channel_name(&guard.list_names(), &members, platform_token);
+
+        // wayland#585 — throttle the tool seam per conversation. Keyed on the
+        // RESOLVED channel plus the conversation id, joined by an ASCII unit
+        // separator so no channel name / conversation id pair can alias
+        // another. A poisoned mutex is recovered rather than panicking: the
+        // critical section is a bounded map op that cannot itself panic.
+        let limit_key = format!("{channel_name}\u{1f}{}", outgoing.conversation_id);
+        let allowed = {
+            let mut limiter = self
+                .rate_limiter
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            limiter.check_and_record(&limit_key, Instant::now())
+        };
+        if !allowed {
+            // Content-free: channel and conversation only, never message text.
+            tracing::warn!(
+                target: "wcore_agent::channel_send_transport",
+                channel = %channel_name,
+                conversation = %outgoing.conversation_id,
+                "send_message suppressed: per-conversation rate limit hit (ping-pong guard)"
+            );
+            // `THROTTLED_ERROR_PREFIX` is not decoration: `SendMessageTool`
+            // matches on it to tag the tool result as caller-attributed, which
+            // is what keeps a throttle from arming the row-B-3
+            // human-unreachable freeze (see that constant's doc).
+            return SendOutcome::Err {
+                message: format!(
+                    "{}this conversation has already sent {} messages through \
+                     send_message within the last {} seconds, so further sends are \
+                     suppressed to stop a runaway agent-to-agent reply loop. Stop sending \
+                     to this conversation and report the situation instead of retrying; \
+                     the budget refills as older sends age out of the window.",
+                    THROTTLED_ERROR_PREFIX,
+                    DEFAULT_MAX_AUTO_REPLIES,
+                    DEFAULT_AUTO_REPLY_WINDOW.as_secs(),
+                ),
+            };
+        }
+
         match guard.send_to(&channel_name, outgoing).await {
             Ok(receipt) => SendOutcome::Ok {
                 message_id: Some(receipt.id),
@@ -126,7 +212,7 @@ impl MessageTransport for ChannelManagerTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wcore_channels::MockChannel;
+    use wcore_channels::{DEFAULT_MAX_AUTO_REPLIES, MockChannel};
     use wcore_tools::send_message::MessagingPlatform;
 
     fn target(platform: MessagingPlatform, chat_id: &str) -> ParsedTarget {
@@ -310,5 +396,287 @@ mod tests {
                 panic!("wecom must NOT resolve to a wecom_callback channel")
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // wayland#585 — RED ARM. `send_message` bypasses the auto-reply limiter.
+    //
+    // `AutoReplyRateLimiter` gates exactly one seam: the `run_turn` auto-reply
+    // in `channel_inbound.rs`. The LLM-driven `send_message` tool never touches
+    // it — it lands here, in `ChannelManagerTransport::send`, which calls
+    // `ChannelManager::send_to` with no throttle of any kind. So two agents
+    // wired to the same channel ping-pong forever THROUGH THE TOOL, and the
+    // guard that exists for precisely that failure never sees it.
+    //
+    // The check belongs in this transport and NOT in `ChannelManager::send_to`:
+    // `send_to` is shared with the human/operator path, pinned by
+    // `channel_inbound::tests::interactive_sends_bypass_the_rate_limit`.
+    // ------------------------------------------------------------------
+
+    /// A channel whose outbound log is SHARED with the test, so the number of
+    /// messages that actually reached the wire can be asserted — not merely the
+    /// outcome the transport reported. `MockChannel` owns its `sent` vec by
+    /// value once boxed into the manager, which makes "was it suppressed, or
+    /// sent and then reported as an error" unaskable.
+    struct LoggingChannel {
+        name: String,
+        platform: String,
+        started: bool,
+        sent: SentLog,
+        next_id: u64,
+    }
+
+    type SentLog = Arc<tokio::sync::Mutex<Vec<OutgoingMessage>>>;
+
+    impl LoggingChannel {
+        fn new(name: &str, platform: &str) -> (Self, SentLog) {
+            let sent: SentLog = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    name: name.to_string(),
+                    platform: platform.to_string(),
+                    started: false,
+                    sent: Arc::clone(&sent),
+                    next_id: 0,
+                },
+                sent,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl wcore_channels::Channel for LoggingChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn platform(&self) -> &str {
+            &self.platform
+        }
+        async fn start(&mut self) -> Result<(), wcore_channels::ChannelError> {
+            self.started = true;
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), wcore_channels::ChannelError> {
+            self.started = false;
+            Ok(())
+        }
+        async fn poll_events(
+            &mut self,
+        ) -> Result<Vec<wcore_channels::ChannelEvent>, wcore_channels::ChannelError> {
+            Ok(Vec::new())
+        }
+        async fn send_message(
+            &mut self,
+            msg: OutgoingMessage,
+        ) -> Result<wcore_channels::MessageReceipt, wcore_channels::ChannelError> {
+            if !self.started {
+                return Err(wcore_channels::ChannelError::NotStarted);
+            }
+            let id = format!("log-out-{}", self.next_id);
+            self.next_id += 1;
+            let receipt = wcore_channels::MessageReceipt {
+                id,
+                conversation_id: msg.conversation_id.clone(),
+                ts_secs: 0,
+            };
+            self.sent.lock().await.push(msg);
+            Ok(receipt)
+        }
+        fn config_schema(&self) -> &str {
+            r#"{"name": "string", "platform": "mock"}"#
+        }
+    }
+
+    async fn logging_transport(platform: &str) -> (ChannelManagerTransport, SentLog) {
+        let (ch, sent) = LoggingChannel::new(platform, platform);
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+        mgr.start_all().await.expect("start channels");
+        (
+            ChannelManagerTransport::new(Arc::new(RwLock::new(mgr))),
+            sent,
+        )
+    }
+
+    /// RED ARM 1 — the tool seam has no limiter at all.
+    ///
+    /// Drive ONE conversation past `DEFAULT_MAX_AUTO_REPLIES` through
+    /// `ChannelManagerTransport::send`, the seam the `send_message` tool
+    /// reaches. Every send past the cap must be refused and must never reach
+    /// the wire. Today all 35 are delivered, which is the unbounded
+    /// agent-to-agent loop the limiter was built to stop.
+    #[tokio::test]
+    async fn tool_driven_sends_are_rate_limited_per_conversation() {
+        let (transport, sent) = logging_transport("slack").await;
+
+        let cap = DEFAULT_MAX_AUTO_REPLIES;
+        let over = 5usize;
+        let mut allowed = 0usize;
+        let mut refused = 0usize;
+        for i in 0..cap + over {
+            match transport
+                .send(&target(MessagingPlatform::Slack, "c1"), &format!("m{i}"))
+                .await
+            {
+                SendOutcome::Ok { .. } => allowed += 1,
+                SendOutcome::Err { .. } => refused += 1,
+            }
+        }
+
+        assert_eq!(
+            allowed, cap,
+            "the tool path must admit exactly the per-conversation budget"
+        );
+        assert_eq!(
+            refused, over,
+            "every send past the budget must be refused, not delivered"
+        );
+        assert_eq!(
+            sent.lock().await.len(),
+            cap,
+            "a refused send must never reach the wire"
+        );
+    }
+
+    /// RED ARM 2 — the throttle is per conversation, with its own control.
+    ///
+    /// The first half is red today (the over-budget send succeeds). The second
+    /// half is the paired NEGATIVE CONTROL: a different conversation on the
+    /// same channel must still send. Without it the first half could pass
+    /// vacuously from a globally wedged transport or a mock that simply dies
+    /// after N sends.
+    #[tokio::test]
+    async fn a_second_conversation_is_unaffected_by_the_first_ones_budget() {
+        let (transport, sent) = logging_transport("slack").await;
+
+        for i in 0..DEFAULT_MAX_AUTO_REPLIES {
+            let outcome = transport
+                .send(&target(MessagingPlatform::Slack, "c1"), &format!("m{i}"))
+                .await;
+            assert!(
+                matches!(outcome, SendOutcome::Ok { .. }),
+                "send {i} is within budget and must be delivered"
+            );
+        }
+        match transport
+            .send(&target(MessagingPlatform::Slack, "c1"), "over")
+            .await
+        {
+            SendOutcome::Err { .. } => {}
+            SendOutcome::Ok { .. } => {
+                panic!("the send past the per-conversation budget must be refused")
+            }
+        }
+
+        // NEGATIVE CONTROL: the channel and the transport are both healthy.
+        match transport
+            .send(
+                &target(MessagingPlatform::Slack, "c2"),
+                "fresh conversation",
+            )
+            .await
+        {
+            SendOutcome::Ok { .. } => {}
+            SendOutcome::Err { message } => {
+                panic!("a different conversation must not inherit c1's budget; got: {message}")
+            }
+        }
+        assert_eq!(
+            sent.lock().await.len(),
+            DEFAULT_MAX_AUTO_REPLIES + 1,
+            "c1's budget plus c2's one send reached the wire"
+        );
+    }
+
+    /// RED ARM 3 — the suppression must reach the MODEL.
+    ///
+    /// A `warn!` reaches nobody with `RUST_LOG` unset, so a log line can never
+    /// stop an agent-to-agent loop: the model just calls `send_message` again.
+    /// The only surface that ends the loop is an `is_error` `ToolResult` the
+    /// model actually reads. Paired positive control: the FIRST call must be a
+    /// non-error result, so a blanket `is_error` cannot pass this test.
+    #[tokio::test]
+    async fn a_throttled_send_message_is_an_error_tool_result() {
+        use wcore_tools::Tool;
+        use wcore_tools::send_message::SendMessageTool;
+
+        let (transport, _sent) = logging_transport("slack").await;
+        let tool = SendMessageTool::new(Arc::new(transport));
+
+        // POSITIVE CONTROL: an in-budget send is NOT an error result.
+        let first = tool
+            .execute(serde_json::json!({ "target": "slack:c1", "message": "m0" }))
+            .await;
+        assert!(
+            !first.is_error,
+            "an in-budget send must be a success result; got: {}",
+            first.content
+        );
+
+        for i in 1..DEFAULT_MAX_AUTO_REPLIES {
+            let _ = tool
+                .execute(serde_json::json!({
+                    "target": "slack:c1",
+                    "message": format!("m{i}")
+                }))
+                .await;
+        }
+
+        let over = tool
+            .execute(serde_json::json!({ "target": "slack:c1", "message": "over" }))
+            .await;
+        assert!(
+            over.is_error,
+            "a throttled send must reach the model as an is_error ToolResult; got: {}",
+            over.content
+        );
+        assert!(
+            over.content.to_ascii_lowercase().contains("rate limit"),
+            "the model must be told WHY it was refused, not handed a bare failure; got: {}",
+            over.content
+        );
+    }
+
+    /// CONTROL for the two-seam decision — the human/operator path stays open.
+    ///
+    /// The limiter goes in this transport, NOT in `ChannelManager::send_to`,
+    /// which the operator/human path shares (pinned by
+    /// `channel_inbound::tests::interactive_sends_bypass_the_rate_limit`).
+    /// After the TOOL budget for a conversation is fully spent, direct
+    /// `send_to` for that same conversation must still be delivered. This test
+    /// passes today and must keep passing: it is what fails if the check is
+    /// put one layer too low.
+    #[tokio::test]
+    async fn operator_send_to_is_not_throttled_by_the_tool_limiter() {
+        let (ch, sent) = LoggingChannel::new("slack", "slack");
+        let mut inner = ChannelManager::new();
+        inner.register(Box::new(ch)).await;
+        inner.start_all().await.expect("start channels");
+        let mgr = Arc::new(RwLock::new(inner));
+        let transport = ChannelManagerTransport::new(Arc::clone(&mgr));
+
+        for i in 0..DEFAULT_MAX_AUTO_REPLIES + 5 {
+            let _ = transport
+                .send(&target(MessagingPlatform::Slack, "c1"), &format!("m{i}"))
+                .await;
+        }
+        let before = sent.lock().await.len();
+
+        for i in 0..10 {
+            mgr.read()
+                .await
+                .send_to(
+                    "slack",
+                    OutgoingMessage::text("c1", format!("operator-{i}")),
+                )
+                .await
+                .expect("operator sends are never rate limited");
+        }
+
+        assert_eq!(
+            sent.lock().await.len(),
+            before + 10,
+            "direct operator sends must bypass the tool-path limiter entirely"
+        );
     }
 }

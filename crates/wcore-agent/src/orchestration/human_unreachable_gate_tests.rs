@@ -346,3 +346,127 @@ async fn read_only_tools_still_run_under_the_freeze() {
         text(&read)
     );
 }
+
+// ---------------------------------------------------------------------------
+// wayland#585 composed with this gate — the throttle must not be read as a
+// down route.
+//
+// The #585 tool-seam rate limiter returns `SendOutcome::Err`, which
+// `SendMessageTool` renders as an `is_error` ToolResult (that is the whole
+// point: only an error result ends a model-driven loop). But
+// `record_human_reach_outcome` above arms the freeze on ANY `is_error` from a
+// `reaches_a_human` tool, with no `Tool::error_is_tool_fault` neutrality —
+// unlike `record_dispatch_outcome`, which has it. So the guard that exists to
+// stop an agent-to-agent ping-pong ALSO freezes every world-changing tool for
+// the rest of the session, at the exact moment the outbound route has just
+// demonstrated it is healthy by delivering thirty messages.
+//
+// The agent cannot talk its way out either: the refusal text tells it to stop
+// sending to this conversation, and every further send to that conversation is
+// refused for the same reason, so the one call carved out of the freeze cannot
+// clear the latch.
+// ---------------------------------------------------------------------------
+
+/// Build a registry whose `send_message` runs through the REAL
+/// `ChannelManagerTransport` (the production seam #585 throttles) over a
+/// healthy mock email channel. Nothing here models the limiter; the limiter
+/// under test is the shipped one.
+async fn registry_with_real_channel_transport() -> ToolRegistry {
+    let mut mgr = wcore_channels::ChannelManager::new();
+    mgr.register(Box::new(
+        wcore_channels::MockChannel::new("email").with_platform("email"),
+    ))
+    .await;
+    mgr.start_all().await.expect("start channels");
+    let transport = Arc::new(crate::channel_send_transport::ChannelManagerTransport::new(
+        Arc::new(tokio::sync::RwLock::new(mgr)),
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(SendMessageTool::new(transport)));
+    registry.register(Box::new(wcore_tools::write::WriteTool::new(None)));
+    registry
+}
+
+#[tokio::test]
+async fn a_rate_limited_send_must_not_freeze_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_journal, scope) = scope_fixture(dir.path());
+    let registry = registry_with_real_channel_transport().await;
+
+    // Spend the per-conversation budget. Every one of these is DELIVERED —
+    // the outbound route is demonstrably up.
+    let cap = wcore_channels::DEFAULT_MAX_AUTO_REPLIES;
+    for i in 0..cap {
+        let sent = dispatch(&registry, &send_call(&format!("ask-{i}")), &scope, i as u64).await;
+        assert!(
+            !is_error(&sent),
+            "in-budget send {i} must be delivered; got: {}",
+            text(&sent)
+        );
+    }
+    assert!(
+        !registry.human_unreachable(),
+        "precondition: thirty delivered sends leave the latch clear"
+    );
+
+    // CONTROL: with the route up, a write runs. Without this the assertion
+    // below could pass on a harness that never had a working write.
+    let control = dir.path().join("control.txt");
+    let wrote = dispatch(
+        &registry,
+        &call(
+            "control-write",
+            "Write",
+            json!({"file_path": control.to_str().unwrap(), "content": "ok\n"}),
+        ),
+        &scope,
+        cap as u64,
+    )
+    .await;
+    assert!(
+        !is_error(&wrote),
+        "control write must run: {}",
+        text(&wrote)
+    );
+    assert!(control.exists(), "control proves a working write");
+
+    // The over-budget send. It MUST reach the model as an error (#585) ...
+    let over = dispatch(&registry, &send_call("over"), &scope, cap as u64 + 1).await;
+    assert!(
+        is_error(&over),
+        "wayland#585: the throttled send must reach the model as an error"
+    );
+    assert!(
+        text(&over).to_ascii_lowercase().contains("rate limit"),
+        "precondition: this must be the rate-limit refusal, not some other \
+         failure; got: {}",
+        text(&over)
+    );
+
+    // ... and it must NOT be read as "the human is unreachable".
+    assert!(
+        !registry.human_unreachable(),
+        "a rate-limited send is OUR throttle, not a down route: the human just \
+         received thirty messages. Arming the freeze here stops every \
+         world-changing tool for the rest of the session."
+    );
+
+    let after = dir.path().join("after-throttle.txt");
+    let wrote = dispatch(
+        &registry,
+        &call(
+            "act",
+            "Write",
+            json!({"file_path": after.to_str().unwrap(), "content": "still working\n"}),
+        ),
+        &scope,
+        cap as u64 + 2,
+    )
+    .await;
+    assert!(
+        !is_error(&wrote),
+        "the session must keep working after a throttled send; got: {}",
+        text(&wrote)
+    );
+    assert!(after.exists(), "the write must have landed");
+}

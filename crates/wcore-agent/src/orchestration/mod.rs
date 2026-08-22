@@ -2504,7 +2504,25 @@ async fn execute_single_with_streaming(
             // latch. A failed send arms the freeze above; a delivered one
             // lifts it. No-op for every tool that is not the outbound
             // messaging surface.
-            registry.record_human_reach_outcome(name, r.is_error);
+            //
+            // wayland#585: an error the tool attributes to the CALLER'S
+            // request rather than to its own machinery is NEUTRAL here, the
+            // same rule `record_dispatch_outcome` already applies to the
+            // breaker. The case that forced it: the tool-seam send rate
+            // limiter returns an `is_error` result (the only surface that
+            // ends a runaway agent-to-agent loop) at the exact moment the
+            // outbound route has proven healthy by delivering a full budget.
+            // Arming the freeze there stopped every world-changing tool for
+            // the rest of the session, and the one call carved out of the
+            // freeze - another send to that same conversation - is refused
+            // for the same reason, so nothing could clear it.
+            if !r.is_error
+                || registry
+                    .get(name)
+                    .is_none_or(|tool| tool.error_is_tool_fault(&r.content))
+            {
+                registry.record_human_reach_outcome(name, r.is_error);
+            }
             // _budget_guard drops here, recording elapsed runtime.
             let modifier = if r.is_error {
                 None
