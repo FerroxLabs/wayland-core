@@ -25,8 +25,9 @@
 //!
 //! ## Rate limiting (wayland#585)
 //!
-//! This adapter is the seam the LLM-driven `send_message` tool reaches, and it
-//! is throttled here — NOT one layer lower in
+//! This adapter is the seam the LLM-driven `send_message` tool reaches in the
+//! default (engine-owned channel table) configuration, and it is throttled
+//! here — NOT one layer lower in
 //! [`ChannelManager::send_to`], which the human/operator and cron paths share
 //! (pinned by `channel_inbound::tests::interactive_sends_bypass_the_rate_limit`
 //! and by `operator_send_to_is_not_throttled_by_the_tool_limiter` below).
@@ -38,6 +39,13 @@
 //! [`SendOutcome::Err`], which `SendMessageTool` renders as an `is_error`
 //! `ToolResult` the model actually reads — a `warn!` alone reaches nobody with
 //! `RUST_LOG` unset, so it can never end a model-driven loop.
+//!
+//! **Coverage limit, stated plainly:** this is not the only `MessageTransport`.
+//! Under `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1` (the desktop) `bootstrap`
+//! deliberately keeps [`crate::host_send_transport::HostDelegatedTransport`]
+//! and never installs this adapter at all, so on that path tool-driven sends
+//! are still UNTHROTTLED. Closing it means throttling there too, or moving the
+//! check into `SendMessageTool` itself; neither is done here.
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -50,7 +58,9 @@ use wcore_channels::{
     AutoReplyRateLimiter, ChannelManager, DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP,
     DEFAULT_MAX_AUTO_REPLIES,
 };
-use wcore_tools::send_message::{MessageTransport, ParsedTarget, SendOutcome};
+use wcore_tools::send_message::{
+    MessageTransport, ParsedTarget, SendOutcome, THROTTLED_ERROR_PREFIX,
+};
 
 pub struct ChannelManagerTransport {
     mgr: Arc<RwLock<ChannelManager>>,
@@ -170,13 +180,18 @@ impl MessageTransport for ChannelManagerTransport {
                 conversation = %outgoing.conversation_id,
                 "send_message suppressed: per-conversation rate limit hit (ping-pong guard)"
             );
+            // `THROTTLED_ERROR_PREFIX` is not decoration: `SendMessageTool`
+            // matches on it to tag the tool result as caller-attributed, which
+            // is what keeps a throttle from arming the row-B-3
+            // human-unreachable freeze (see that constant's doc).
             return SendOutcome::Err {
                 message: format!(
-                    "rate limit: this conversation has already sent {} messages through \
+                    "{}this conversation has already sent {} messages through \
                      send_message within the last {} seconds, so further sends are \
                      suppressed to stop a runaway agent-to-agent reply loop. Stop sending \
                      to this conversation and report the situation instead of retrying; \
                      the budget refills as older sends age out of the window.",
+                    THROTTLED_ERROR_PREFIX,
                     DEFAULT_MAX_AUTO_REPLIES,
                     DEFAULT_AUTO_REPLY_WINDOW.as_secs(),
                 ),

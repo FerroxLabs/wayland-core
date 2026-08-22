@@ -19,8 +19,14 @@
 //! Two seams consult this limiter, both of them AUTONOMOUS: the `run_turn`
 //! auto-reply in `wcore_agent::channel_inbound`, and — since wayland#585 —
 //! `wcore_agent::channel_send_transport::ChannelManagerTransport`, the seam the
-//! LLM-driven `send_message` tool reaches. They keep separate limiter
-//! instances, so an agent cannot spend one budget to exhaust the other.
+//! LLM-driven `send_message` tool reaches when the engine owns the channel
+//! table. They keep separate limiter instances, so an agent cannot spend one
+//! budget to exhaust the other.
+//!
+//! That second seam is NOT total coverage of the tool: under
+//! `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1` the desktop's
+//! `HostDelegatedTransport` replaces it and consults no limiter at all. Do not
+//! read "the `send_message` tool is rate limited" out of this module.
 //!
 //! Human/operator-initiated sends are NOT gated: cron and direct
 //! [`crate::ChannelManager::send_to`] take a different code path and never
