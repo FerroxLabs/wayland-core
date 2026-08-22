@@ -396,6 +396,53 @@ fn classify_connect_chain(refused_io_kind: bool, chain_text: &[String]) -> &'sta
     FAILURE_CONNECTION
 }
 
+/// Whether a RENDERED transport failure describes an expired deadline.
+///
+/// Only [`ProviderError::Connection`] needs this. Everywhere else the live
+/// `reqwest::Error` is still in hand and `is_timeout()` answers directly
+/// (see [`egress_failure_code`] and the `Http` arms of
+/// [`provider_failure_code`]); on the `Connection(String)` arm the error is
+/// gone and its rendering is all that survives.
+///
+/// The `timed out` literal alone was not enough, because ONE failure renders
+/// TWO ways. MEASURED on this tree (300 blackholed connects through a 50 ms
+/// `connect_timeout`, hetzner-dsm, 2026-08-22), both with `is_timeout()=true`
+/// and `is_connect()=true`:
+///
+/// ```text
+/// 281/300 (93.7%)  "error sending request: deadline has elapsed"
+///  19/300 ( 6.3%)  "error sending request: operation timed out"
+/// ```
+///
+/// The first rendering carries no `timed out` anywhere, fell through to
+/// [`classify_connect_chain`], and came back [`FAILURE_CONNECTION`] — one of
+/// the four codes `wcore_agent`'s `is_unserved_request_failure` admits into
+/// its 900 s unserved-outage budget. A `base_url` typo therefore bought the
+/// full outage window about fifteen times in sixteen, which is the measured
+/// 902 s hang; the other one in sixteen failed fast. Same request, same
+/// failure, different budget — the intermittency is why a single-sample probe
+/// can conclude the classifier is healthy.
+///
+/// Deliberately NOT a general "does this look slow" match: only spellings
+/// that name an expired deadline are admitted, so a refusal, an absent name
+/// or an unreachable network keeps its own class (pinned by
+/// `widening_the_timeout_class_must_not_swallow_other_connect_failures`).
+fn is_timeout_rendering(message: &str) -> bool {
+    let text = message.to_ascii_lowercase();
+    // `operation timed out` (reqwest), `Connection timed out (os error 110)`
+    // (ETIMEDOUT), and `timed out reading response` all share this substring.
+    text.contains("timed out")
+        // tokio's `Elapsed`, surfaced through hyper-util's connect leg. The
+        // dominant rendering above, and the one the old guard missed.
+        || text.contains("deadline has elapsed")
+        // Windows. WSAETIMEDOUT's prose ("the connection attempt failed
+        // because the connected party did not properly respond") shares no
+        // substring with the Unix text, so match the numeric suffix Rust
+        // appends itself, which is locale-invariant -- the same technique
+        // `classify_connect_chain` already uses for 10061 / 11001 / 11002.
+        || text.contains("(os error 10060)")
+}
+
 fn egress_failure_code(error: &EgressError) -> &'static str {
     match error {
         EgressError::Transport(error) if error.is_timeout() => "timeout",
@@ -439,9 +486,7 @@ pub fn provider_failure_code(error: &ProviderError) -> String {
         ProviderError::Parse(_) => "provider_parse".to_string(),
         ProviderError::RateLimited { .. } => "http_429".to_string(),
         ProviderError::PromptTooLong(_) => "prompt_too_long".to_string(),
-        ProviderError::Connection(message)
-            if message.to_ascii_lowercase().contains("timed out") =>
-        {
+        ProviderError::Connection(message) if is_timeout_rendering(message) => {
             "timeout".to_string()
         }
         // Only a rendered message survives here; classify what it says. See
