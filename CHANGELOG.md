@@ -107,6 +107,17 @@ server error keeps its failure class instead of being flattened into a
 connection error and granted a retry window the engine deliberately withholds
 from server errors.
 
+**One known issue, named here so you do not meet it by accident.** Pressing Esc
+during an in-flight turn — the key the in-turn keybar advertises as `interrupt` —
+stops the stream and then leaves that conversation permanently unusable. The
+composer still takes text and the cursor still blinks, but every further message
+is refused, and no recovery surface will reopen it. The refusal is not a bug in
+itself: the turn is suspended at an outcome the journal genuinely cannot
+resolve, and it declines to guess. What is missing is an honest way out, and
+adding one is the first thing being fixed after this release. It is not new
+here — 0.13.4 behaves identically — and nothing written to disk is lost. Until
+it is closed, leave a turn you want to abandon with Ctrl-C rather than Esc.
+
 ## [0.13.4](https://github.com/FerroxLabs/wayland-core/compare/v0.13.3...v0.13.4) (2026-08-21)
 
 **Release highlights.** One new capability and four fixes, and they share a
