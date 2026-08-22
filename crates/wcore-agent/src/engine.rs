@@ -12519,6 +12519,21 @@ impl AgentEngine {
                             // stop mid-value is worse than not running it.
                             attempt_truncated_tool_calls.push((name, partial_arg_bytes));
                         }
+                        LlmEvent::StreamSilent { silent_for } => {
+                            // The provider accepted the request and has sent
+                            // nothing since. NOT a failure: the read timeout
+                            // has not fired and this turn is still live, so
+                            // the attempt is not touched. Say it out loud
+                            // anyway — from the user's side a healthy silent
+                            // stream and a hung one look identical, and the
+                            // product used to say nothing for up to five
+                            // minutes. Rendering lives here because the
+                            // provider crate carries the fact, not the prose.
+                            self.output.emit_info(&format!(
+                                "Still waiting on the provider - no output for {}s.",
+                                silent_for.as_secs()
+                            ));
+                        }
                         LlmEvent::Error(e) => {
                             if crate::journal_provider::is_journal_authority_error(&e) {
                                 return Err(AgentError::SessionAuthority(e));
