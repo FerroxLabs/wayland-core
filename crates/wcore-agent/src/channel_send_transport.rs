@@ -22,22 +22,58 @@
 //! so the family arm maps the "email" token onto the registered
 //! "email-imap"/"email-agentmail" instance. Without this, `send_to("email")`
 //! missed and every IMAP email user's `send_message` failed.
+//!
+//! ## Rate limiting (wayland#585)
+//!
+//! This adapter is the seam the LLM-driven `send_message` tool reaches, and it
+//! is throttled here — NOT one layer lower in
+//! [`ChannelManager::send_to`], which the human/operator and cron paths share
+//! (pinned by `channel_inbound::tests::interactive_sends_bypass_the_rate_limit`
+//! and by `operator_send_to_is_not_throttled_by_the_tool_limiter` below).
+//!
+//! [`wcore_channels::AutoReplyRateLimiter`] previously gated exactly one seam,
+//! the `run_turn` auto-reply in `channel_inbound.rs`, so two agents wired to
+//! the same channel could ping-pong forever *through the tool* while the guard
+//! built for that failure never saw it. A suppressed send returns
+//! [`SendOutcome::Err`], which `SendMessageTool` renders as an `is_error`
+//! `ToolResult` the model actually reads — a `warn!` alone reaches nobody with
+//! `RUST_LOG` unset, so it can never end a model-driven loop.
 
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
-use wcore_channels::ChannelManager;
 use wcore_channels::outgoing::OutgoingMessage;
+use wcore_channels::{
+    AutoReplyRateLimiter, ChannelManager, DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP,
+    DEFAULT_MAX_AUTO_REPLIES,
+};
 use wcore_tools::send_message::{MessageTransport, ParsedTarget, SendOutcome};
 
 pub struct ChannelManagerTransport {
     mgr: Arc<RwLock<ChannelManager>>,
+    /// Per-conversation rolling-window guard on TOOL-DRIVEN sends
+    /// (wayland#585). Behind a `std::Mutex` because `MessageTransport::send`
+    /// takes `&self` and the tool is shared across concurrent turns; the
+    /// critical section is a bounded map op and the guard is dropped before
+    /// any `.await`, so it never crosses a suspension point.
+    rate_limiter: StdMutex<AutoReplyRateLimiter>,
 }
 
 impl ChannelManagerTransport {
     pub fn new(mgr: Arc<RwLock<ChannelManager>>) -> Self {
-        Self { mgr }
+        Self {
+            mgr,
+            // Constructed from the named constants rather than `default()` so
+            // the refusal message below cannot drift from the live budget.
+            rate_limiter: StdMutex::new(AutoReplyRateLimiter::new(
+                DEFAULT_MAX_AUTO_REPLIES,
+                DEFAULT_AUTO_REPLY_WINDOW,
+                DEFAULT_CONVERSATION_CAP,
+            )),
+        }
     }
 }
 
@@ -112,6 +148,41 @@ impl MessageTransport for ChannelManagerTransport {
         // name-shaped guess (issue #116 and the B-3 corpus row).
         let members = guard.names_for_platform(platform_token).await;
         let channel_name = resolve_channel_name(&guard.list_names(), &members, platform_token);
+
+        // wayland#585 — throttle the tool seam per conversation. Keyed on the
+        // RESOLVED channel plus the conversation id, joined by an ASCII unit
+        // separator so no channel name / conversation id pair can alias
+        // another. A poisoned mutex is recovered rather than panicking: the
+        // critical section is a bounded map op that cannot itself panic.
+        let limit_key = format!("{channel_name}\u{1f}{}", outgoing.conversation_id);
+        let allowed = {
+            let mut limiter = self
+                .rate_limiter
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            limiter.check_and_record(&limit_key, Instant::now())
+        };
+        if !allowed {
+            // Content-free: channel and conversation only, never message text.
+            tracing::warn!(
+                target: "wcore_agent::channel_send_transport",
+                channel = %channel_name,
+                conversation = %outgoing.conversation_id,
+                "send_message suppressed: per-conversation rate limit hit (ping-pong guard)"
+            );
+            return SendOutcome::Err {
+                message: format!(
+                    "rate limit: this conversation has already sent {} messages through \
+                     send_message within the last {} seconds, so further sends are \
+                     suppressed to stop a runaway agent-to-agent reply loop. Stop sending \
+                     to this conversation and report the situation instead of retrying; \
+                     the budget refills as older sends age out of the window.",
+                    DEFAULT_MAX_AUTO_REPLIES,
+                    DEFAULT_AUTO_REPLY_WINDOW.as_secs(),
+                ),
+            };
+        }
+
         match guard.send_to(&channel_name, outgoing).await {
             Ok(receipt) => SendOutcome::Ok {
                 message_id: Some(receipt.id),

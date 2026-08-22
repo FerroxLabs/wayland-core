@@ -16,9 +16,16 @@
 //! logged by the caller) until enough of the window has elapsed for older sends
 //! to age out.
 //!
-//! Only autonomous auto-replies are gated. Human/operator-initiated sends (the
-//! `send_message` tool, cron, direct [`crate::ChannelManager::send_to`]) take a
-//! different code path and never reach this limiter.
+//! Two seams consult this limiter, both of them AUTONOMOUS: the `run_turn`
+//! auto-reply in `wcore_agent::channel_inbound`, and — since wayland#585 —
+//! `wcore_agent::channel_send_transport::ChannelManagerTransport`, the seam the
+//! LLM-driven `send_message` tool reaches. They keep separate limiter
+//! instances, so an agent cannot spend one budget to exhaust the other.
+//!
+//! Human/operator-initiated sends are NOT gated: cron and direct
+//! [`crate::ChannelManager::send_to`] take a different code path and never
+//! reach this limiter. That is deliberate — `send_to` is shared with the
+//! operator path, which is why the tool check lives one layer above it.
 //!
 //! Time is caller-supplied (`now: Instant`, monotonic) so the limiter is fully
 //! deterministic under test — it never reads the wall clock. Production callers
@@ -38,8 +45,11 @@ use std::time::{Duration, Instant};
 /// turns complete (seconds apart → hundreds per window) and is caught, while a
 /// person rapidly messaging their own agent stays under it. On the primary
 /// threat channel (email) a human never approaches this rate. Suppression logs
-/// at WARN (operator-visible); it does not surface a channel-side notice — that
-/// and tool-driven-send coverage are tracked follow-ups.
+/// at WARN (operator-visible) on both seams, and on the tool seam it is also
+/// returned to the model as an `is_error` tool result — a `warn!` alone reaches
+/// nobody with `RUST_LOG` unset and so can never end a model-driven loop. It
+/// still does not surface a channel-side notice to the remote party; that
+/// remains a tracked follow-up.
 pub const DEFAULT_MAX_AUTO_REPLIES: usize = 30;
 
 /// Default rolling window for [`DEFAULT_MAX_AUTO_REPLIES`].
