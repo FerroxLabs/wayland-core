@@ -12409,6 +12409,23 @@ impl AgentEngine {
                             "context overflow on {routed_model} ({required_tokens} tokens > \
                              {model_window} window) — compacted and retrying"
                         ));
+                        // #923(2) — the overflowing send left a nonterminal
+                        // physical attempt, exactly as the retryable arm below
+                        // does. Settle it BEFORE the compaction, so both exits
+                        // of this arm are covered: the compaction failure
+                        // return just below, and the `continue` at the bottom
+                        // whose retry may SUCCEED — and a turn still holding a
+                        // nonterminal attempt cannot take `TurnCommitted`
+                        // either (`require_turn_descendants_terminal`), so the
+                        // recovered answer would be replaced by the reducer
+                        // InvalidTransition. Same convention as the orphaned
+                        // tool-pair repair arm below, which settles before its
+                        // own `continue` for this reason.
+                        self.settle_failed_turn_provider_attempts(&format!(
+                            "context overflow on {routed_model}: {required_tokens} tokens \
+                             exceeds the {model_window} token window"
+                        ))
+                        .await;
                         if let Err(e) = self.run_compaction().await {
                             self.prepare_durable_conversation().await?;
                             self.fire_on_session_end(turn).await;
@@ -13054,6 +13071,36 @@ impl AgentEngine {
                 let failure_code =
                     stream_failure_code.unwrap_or_else(|| "stream_truncated".to_string());
                 self.output.emit_provider_failure(&failure_code);
+                // #923(2), second half — settle the physical attempt that
+                // just failed HERE, at the one point every failed attempt
+                // passes through, rather than at one of the exits below.
+                // The retryable dispatch arm above (`Err(e) if e.is_retryable()`)
+                // leaves its attempt nonterminal, and
+                // `require_turn_descendants_terminal` refuses ANY terminal
+                // receipt — `TurnCommitted` included — for a turn still
+                // holding one. Settling only on the retry-EXHAUSTED exit
+                // leaves the common case broken: a 500 whose RETRY SUCCEEDS
+                // still cannot commit its turn, and the caller is handed the
+                // reducer InvalidTransition in place of the answer the
+                // provider actually produced. Every other exit out of this
+                // failure block — the output-stall gate, the budget
+                // cancellation, the backoff cancellation and the exhausted
+                // budget — is downstream of this line for the same reason.
+                //
+                // The receipt carries `reason`, the provider error observed on
+                // THIS attempt, exactly as the dispatch arm settles with
+                // `e.to_string()`: the journal records what the provider said,
+                // not what we told the user about it. Settling per attempt
+                // here also keeps each receipt carrying its own error rather
+                // than the last one for the whole turn.
+                //
+                // No stream forwarder can be racing this. `forward_durable_stream`
+                // writes its terminal receipt BEFORE it sends the `Error` / `Done`
+                // event that ends the recv loop above, and its one deliberate
+                // leave-it-`Unknown` exit (`tx.closed()`) fires only once the
+                // receiver has already been dropped. Every attempt reaching here
+                // is therefore already terminal or permanently abandoned.
+                self.settle_failed_turn_provider_attempts(&reason).await;
                 // v0.9.1.1 B6: HTTP 4xx errors (especially 400
                 // `invalid_request_error`) are NOT transient — retrying
                 // sends the same malformed request and burns the retry
@@ -13202,7 +13249,6 @@ impl AgentEngine {
                 // billed nothing usable; surface a hard error so the
                 // host (and the SkillRouter / auto-skill observers)
                 // record a FAILURE, not a silent empty success.
-                //
                 // Fail SAFELY first. Everything this run has already done —
                 // the instructions the user gave once at the start, every tool
                 // result, the assistant turns that produced the files now
