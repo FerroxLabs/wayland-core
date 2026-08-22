@@ -2024,3 +2024,466 @@ fn a_real_path_outside_every_granted_root_is_still_reported() {
         result.content
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RED ARM — #1111 (the per-exec secret-deny walk is outside the cancellation
+// and timeout scope) and #1076 (non-UTF-8 output is silently replaced).
+//
+// #1111 is NOT a performance emergency on Linux. Measured on hetzner-dsm at
+// 0ccaa90b against a live bwrap backend: a 91,633-entry real tree costs
+// 1,422 ms cold / ~926 ms warm end-to-end, of which the walk is 1,253 ms cold /
+// ~800 ms warm (~8.5 us/entry, linear). The 76,367 ms figure in the source
+// comment is a Windows/SeanDesktop number and reaching it here would need
+// ~8.6 M entries. And only the `contained`/channel/remote/Managed posture pays
+// it at all: `trusted_local` measured 0.18 ms on the same tree, because
+// `secret_read_deny_required` is false there and no walk happens.
+//
+// So the defect these tests pin is the one the user actually experiences:
+// however long the walk takes, it is uncancellable and unbounded. It runs
+// BEFORE the `tokio::select!` and outside the `tokio::time::timeout`, on BOTH
+// call sites (`execute_with_ctx` and `execute_streaming_with_ctx`), so Esc does
+// nothing and the `timeout` parameter does not bound it.
+//
+// The tests are therefore latency tests with a self-calibrating tree: each one
+// first MEASURES the warm walk on the tree it built (growing the tree until the
+// walk is expensive enough to separate the two arms on this host) and then
+// asserts that cancellation / timeout does not wait for a walk of that cost.
+// The measured budget is the anti-vacuity guard: a tree too small to measure
+// makes the helper panic rather than let the assertion pass for free.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A backend that runs nothing and returns canned bytes instantly.
+///
+/// Two reasons this is not a real backend: the walk must be the ONLY
+/// significant cost in the measured window (a real `bwrap` spawn is ~100 ms and
+/// would blur the arms), and `enforces_read_deny()` must be `true` on every
+/// host — `#922` makes the walk conditional on exactly that predicate, and the
+/// `WAYLAND_SANDBOX=none` backend the rest of this suite uses answers `false`,
+/// which would skip the walk and make the red arm pass vacuously.
+struct CannedBackend {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    enforces_read_deny: bool,
+}
+
+/// Small, deliberate, and load-bearing: `execute` must not be READY on its
+/// first poll. `tokio::select!` picks an arm at random among the ready ones, so
+/// a backend that returns `Ok` synchronously races the already-fired cancel
+/// token and the tool reports success about half the time. That is an artefact
+/// of the canned backend, not a product behaviour — a real child process is
+/// never ready on the first poll — and it made the control test flaky (observed
+/// FAIL then PASS on retry). 5 ms is negligible against the >=250 ms walk these
+/// tests measure.
+const CANNED_EXEC_DELAY: Duration = Duration::from_millis(5);
+
+impl CannedBackend {
+    fn enforcing() -> Self {
+        Self {
+            stdout: b"hi\n".to_vec(),
+            stderr: Vec::new(),
+            enforces_read_deny: true,
+        }
+    }
+
+    fn emitting(stdout: &[u8]) -> Self {
+        Self {
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+            enforces_read_deny: true,
+        }
+    }
+}
+
+#[async_trait]
+impl SandboxBackend for CannedBackend {
+    async fn execute(
+        &self,
+        _manifest: &SandboxManifest,
+        _cmd: SandboxCommand,
+    ) -> wcore_sandbox::Result<SandboxOutput> {
+        tokio::time::sleep(CANNED_EXEC_DELAY).await;
+        Ok(SandboxOutput {
+            exit_code: 0,
+            stdout: self.stdout.clone(),
+            stderr: self.stderr.clone(),
+            resource_limits: wcore_sandbox::ResourceLimitEnforcement::None,
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "canned-red-arm"
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn enforces_read_deny(&self) -> bool {
+        self.enforces_read_deny
+    }
+}
+
+fn canned_ctx(
+    policy: std::sync::Arc<crate::workspace_policy::WorkspacePolicy>,
+    backend: CannedBackend,
+) -> crate::context::ToolContext {
+    crate::context::ToolContext::test_default()
+        .with_workspace(policy)
+        .with_sandbox(std::sync::Arc::new(wcore_sandbox::SandboxRegistry::new(
+            std::sync::Arc::new(backend),
+        )))
+}
+
+/// Grow `root` until its secret-deny walk costs at least `target`, and return
+/// the policy plus the MEASURED warm cost of that walk.
+///
+/// Self-calibrating on purpose: the absolute cost per entry differs by host and
+/// filesystem (measured ~8.5 us/entry warm on hetzner ext4), so a hardcoded
+/// tree size would either be vacuously fast on a fast box or waste minutes on a
+/// slow one. The returned duration is warm — every growth iteration re-walks —
+/// so it is a LOWER bound on what the call under test would pay.
+fn workspace_whose_walk_costs_at_least(
+    root: &std::path::Path,
+    target: std::time::Duration,
+) -> (
+    std::sync::Arc<crate::workspace_policy::WorkspacePolicy>,
+    std::time::Duration,
+) {
+    // One real committed secret, so the walk has a positive result to report.
+    std::fs::write(root.join(".env"), b"TOKEN=redacted\n").unwrap();
+    let policy = std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::contained(root));
+
+    for batch in 0..64usize {
+        let started = std::time::Instant::now();
+        let deny = policy.secret_deny_paths_for_backend(true);
+        let walk = started.elapsed();
+        // Known-positive control on the instrument itself: if the walk stopped
+        // finding the planted `.env`, a cheap `walk` would mean "the walk was
+        // skipped", not "the walk is fast", and every latency assertion below
+        // would pass for the wrong reason.
+        assert!(
+            deny.iter().any(|p| p.ends_with(".env")),
+            "instrument control: the contained walk must find the planted .env; got {deny:?}"
+        );
+        if walk >= target {
+            return (policy, walk);
+        }
+        // 10k more entries per batch.
+        for d in 0..100 {
+            let dir = root.join(format!("b{batch}")).join(format!("d{d}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for f in 0..100 {
+                std::fs::write(dir.join(format!("f{f}.txt")), b"x").unwrap();
+            }
+        }
+    }
+    panic!("could not grow a workspace whose walk costs {target:?} within 640k entries");
+}
+
+/// #1111, call site `bash.rs:641` (`execute_with_ctx`): Esc must not wait for
+/// the walk.
+#[tokio::test]
+async fn a_cancelled_bash_does_not_wait_for_the_secret_deny_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, Duration::from_millis(250));
+
+    let ctx = canned_ctx(policy, CannedBackend::enforcing());
+    ctx.cancel.cancel();
+
+    let started = std::time::Instant::now();
+    let result = BashTool
+        .execute_with_ctx(json!({"command": "echo hi"}), &ctx)
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        result.content.contains("cancelled"),
+        "a cancelled command must say so; got: {}",
+        result.content
+    );
+    assert!(
+        elapsed * 3 < walk,
+        "cancellation waited {elapsed:?} for a walk measured at {walk:?} — the \
+         manifest build is outside the cancellation scope"
+    );
+}
+
+/// #1111, call site `bash.rs:641`: the `timeout` parameter must bound the whole
+/// execution, including the manifest build.
+#[tokio::test]
+async fn the_bash_timeout_bounds_the_secret_deny_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, Duration::from_millis(250));
+
+    let ctx = canned_ctx(policy, CannedBackend::enforcing());
+
+    let started = std::time::Instant::now();
+    let result = BashTool
+        .execute_with_ctx(json!({"command": "echo hi", "timeout": 1}), &ctx)
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed * 3 < walk,
+        "a 1ms timeout returned after {elapsed:?} against a walk measured at \
+         {walk:?} — the manifest build is outside the timeout scope"
+    );
+    // #1111 acceptance 3: "a manifest build that exceeds the timeout produces a
+    // user-visible message NAMING THE CAUSE". `contains("timed out")` alone is
+    // satisfied by the byte-identical string the CHILD-timeout path returns, so
+    // it does not grade that criterion — the caller has to be told the
+    // workspace scan ate the budget and that no child ever ran.
+    assert!(
+        result.content.contains("timed out") && result.content.contains("manifest"),
+        "the caller must be told WHY it stopped, and that it was the manifest \
+         build rather than the command itself; got: {}",
+        result.content
+    );
+}
+
+/// #1111, call site `bash.rs:744` (`execute_streaming_with_ctx`): same defect,
+/// separate code path. Fixing only `execute_with_ctx` leaves this one live.
+#[tokio::test]
+async fn a_cancelled_streaming_bash_does_not_wait_for_the_secret_deny_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, Duration::from_millis(250));
+
+    let ctx = canned_ctx(policy, CannedBackend::enforcing());
+    ctx.cancel.cancel();
+
+    let sink = crate::NullToolOutputSink;
+    let started = std::time::Instant::now();
+    let result = BashTool
+        .execute_streaming_with_ctx(json!({"command": "echo hi"}), &ctx, &sink)
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        result.content.contains("cancelled"),
+        "a cancelled streaming command must say so; got: {}",
+        result.content
+    );
+    assert!(
+        elapsed * 3 < walk,
+        "streaming cancellation waited {elapsed:?} for a walk measured at \
+         {walk:?} — the manifest build is outside the cancellation scope"
+    );
+}
+
+/// #1111, call site `bash.rs:744`: the timeout must bound the streaming path's
+/// manifest build too.
+#[tokio::test]
+async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, Duration::from_millis(250));
+
+    let ctx = canned_ctx(policy, CannedBackend::enforcing());
+
+    let sink = crate::NullToolOutputSink;
+    let started = std::time::Instant::now();
+    let result = BashTool
+        .execute_streaming_with_ctx(json!({"command": "echo hi", "timeout": 1}), &ctx, &sink)
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed * 3 < walk,
+        "a 1ms streaming timeout returned after {elapsed:?} against a walk \
+         measured at {walk:?} — the manifest build is outside the timeout scope"
+    );
+    // #1111 acceptance 3: "a manifest build that exceeds the timeout produces a
+    // user-visible message NAMING THE CAUSE". `contains("timed out")` alone is
+    // satisfied by the byte-identical string the CHILD-timeout path returns, so
+    // it does not grade that criterion — the caller has to be told the
+    // workspace scan ate the budget and that no child ever ran.
+    assert!(
+        result.content.contains("timed out") && result.content.contains("manifest"),
+        "the caller must be told WHY it stopped, and that it was the manifest \
+         build rather than the command itself; got: {}",
+        result.content
+    );
+}
+
+/// NEGATIVE CONTROL for the four tests above — and it must stay GREEN on the
+/// unfixed tree.
+///
+/// Same host, same tempdir, a tree grown to the same walk cost, the same canned
+/// backend, the same pre-cancelled token — but a `trusted_local` policy, whose
+/// `secret_read_deny_required` is false, so `secret_deny_paths_dynamic` takes
+/// the bounded named-path branch and never walks. If this were slow too, the
+/// latency in the red tests would be attributable to tree size, to tempdir
+/// teardown or to BashTool being slow in general, and those tests would prove
+/// nothing about the walk.
+#[tokio::test]
+async fn a_workspace_that_does_not_walk_cancels_promptly_even_on_a_large_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (_contained, walk) = workspace_whose_walk_costs_at_least(&root, Duration::from_millis(250));
+
+    let local = std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::trusted_local(
+        &root,
+    ));
+    // The control's own control: this posture must genuinely skip the walk.
+    let started = std::time::Instant::now();
+    let deny = local.secret_deny_paths_for_backend(true);
+    let local_walk = started.elapsed();
+    assert!(
+        local_walk * 10 < walk,
+        "trusted_local computed its deny list in {local_walk:?} against a \
+         contained walk of {walk:?} on the SAME tree — expected no walk at all \
+         (deny list: {} entries)",
+        deny.len()
+    );
+
+    let ctx = canned_ctx(local, CannedBackend::enforcing());
+    ctx.cancel.cancel();
+
+    let started = std::time::Instant::now();
+    let result = BashTool
+        .execute_with_ctx(json!({"command": "echo hi"}), &ctx)
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(result.content.contains("cancelled"));
+    assert!(
+        elapsed * 3 < walk,
+        "the no-walk posture took {elapsed:?} on a tree whose contained walk \
+         costs {walk:?} — the red arm's latency would not be attributable to \
+         the walk"
+    );
+}
+
+// ── #1076 — non-UTF-8 output is replaced with U+FFFD and reported as faithful ─
+
+/// The exact marker the model needs. Asserted here so the three decode sites
+/// (`bash.rs:310`, `:516`, `:768`) cannot each invent their own wording.
+const LOSSY_MARKER: &str = "not valid UTF-8";
+
+/// #1076, buffered path (`output_to_result`, `bash.rs:310`).
+#[tokio::test]
+async fn invalid_utf8_in_buffered_output_is_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let policy = std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::trusted_local(
+        &root,
+    ));
+    // 0xFF and 0xFE are never valid UTF-8 anywhere in a sequence.
+    let ctx = canned_ctx(policy, CannedBackend::emitting(b"before\xff\xfeafter\n"));
+
+    let result = BashTool
+        .execute_with_ctx(json!({"command": "cat blob.bin"}), &ctx)
+        .await;
+
+    assert!(
+        result.content.contains('\u{fffd}'),
+        "precondition: the bytes really were replaced; got: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains(LOSSY_MARKER),
+        "the model is handed U+FFFD with nothing marking the content as \
+         unfaithful; got: {}",
+        result.content
+    );
+}
+
+/// NEGATIVE CONTROL for the three #1076 tests: faithful output must NOT carry
+/// the marker. Green before the fix and after it — without this, a fix that
+/// appends the note unconditionally would pass every positive assertion while
+/// making the flag meaningless.
+#[tokio::test]
+async fn valid_utf8_output_is_not_flagged_as_lossy() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let policy = std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::trusted_local(
+        &root,
+    ));
+    // Multi-byte UTF-8 on purpose: a length-comparison implementation that
+    // compares byte count to char count would flag this.
+    let ctx = canned_ctx(
+        policy,
+        CannedBackend::emitting("naïve — 日本語\n".as_bytes()),
+    );
+
+    let result = BashTool
+        .execute_with_ctx(json!({"command": "cat notes.txt"}), &ctx)
+        .await;
+
+    assert!(
+        result.content.contains("日本語"),
+        "precondition: the output must have survived; got: {}",
+        result.content
+    );
+    assert!(
+        !result.content.contains('\u{fffd}'),
+        "precondition: nothing was replaced; got: {}",
+        result.content
+    );
+    assert!(
+        !result.content.contains(LOSSY_MARKER),
+        "faithful output must not be marked lossy, or the marker means \
+         nothing; got: {}",
+        result.content
+    );
+}
+
+/// #1076, ctx streaming path (`drain_lines`, `bash.rs:768`).
+#[tokio::test]
+async fn invalid_utf8_in_ctx_streaming_output_is_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let policy = std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::trusted_local(
+        &root,
+    ));
+    let ctx = canned_ctx(policy, CannedBackend::emitting(b"before\xff\xfeafter\n"));
+
+    let sink = crate::NullToolOutputSink;
+    let result = BashTool
+        .execute_streaming_with_ctx(json!({"command": "cat blob.bin"}), &ctx, &sink)
+        .await;
+
+    assert!(
+        result.content.contains('\u{fffd}'),
+        "precondition: the bytes really were replaced; got: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains(LOSSY_MARKER),
+        "the streaming path hands the model U+FFFD unflagged; got: {}",
+        result.content
+    );
+}
+
+/// #1076, non-ctx streaming path (`drain_lines`, `bash.rs:516`). This path
+/// takes `default_for_platform()` and cannot be handed a canned backend, so it
+/// runs a real shell in the documented no-sandbox degraded mode, exactly as the
+/// other exec tests in this file do.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial]
+async fn invalid_utf8_in_non_ctx_streaming_output_is_flagged() {
+    // SAFETY: test-only env mutation; `#[serial]` prevents env races.
+    unsafe {
+        std::env::set_var("WAYLAND_SANDBOX", "none");
+        std::env::set_var("WAYLAND_ALLOW_NO_SANDBOX", "1");
+    }
+    let sink = crate::NullToolOutputSink;
+    let result = BashTool
+        .execute_streaming(json!({"command": r"printf 'before\377\376after\n'"}), &sink)
+        .await;
+
+    assert!(
+        result.content.contains('\u{fffd}'),
+        "precondition: printf must have emitted bytes that are not UTF-8; got: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains(LOSSY_MARKER),
+        "the non-ctx streaming path hands the model U+FFFD unflagged; got: {}",
+        result.content
+    );
+}
