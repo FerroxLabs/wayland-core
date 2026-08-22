@@ -13203,6 +13203,29 @@ impl AgentEngine {
                 // host (and the SkillRouter / auto-skill observers)
                 // record a FAILURE, not a silent empty success.
                 //
+                // #923(2), second half — settle THIS turn's provider attempts
+                // before anything else in this exit. The retryable dispatch arm
+                // above (`Err(e) if e.is_retryable()`) and every retried send
+                // leave their physical attempt nonterminal, and
+                // `require_turn_descendants_terminal` refuses ANY terminal
+                // receipt for a turn that still holds one — so the caller is
+                // handed the reducer's `InvalidTransition` in place of the
+                // provider's own words, exactly as it was on the non-retryable
+                // path before #923(2). Settling FIRST also keeps the durable
+                // write below from failing for that same reason.
+                //
+                // The receipt carries `reason` — the provider's own error — not
+                // the composed remedy prose below, for the same reason the
+                // dispatch arm settles with `e.to_string()`: the journal records
+                // what the provider said, not what we told the user about it.
+                //
+                // No stream forwarder can be racing this. `forward_durable_stream`
+                // writes its terminal receipt BEFORE it sends the `Error` / `Done`
+                // event that ends the engine's recv loop, and its one deliberate
+                // leave-it-`Unknown` exit (`tx.closed()`) fires only once the
+                // engine has already dropped the receiver. Every attempt reaching
+                // here is therefore already terminal or permanently abandoned.
+                self.settle_failed_turn_provider_attempts(&reason).await;
                 // Fail SAFELY first. Everything this run has already done —
                 // the instructions the user gave once at the start, every tool
                 // result, the assistant turns that produced the files now
