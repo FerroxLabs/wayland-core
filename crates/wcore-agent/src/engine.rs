@@ -34152,4 +34152,106 @@ mod stream_retry_budget_tests {
             "a healthy turn must produce no silence notice, got {events:?}"
         );
     }
+
+    // --- (c) a STALLED DISPATCH is announced ------------------------------
+
+    /// A provider whose `stream()` FUTURE stalls before it has produced a
+    /// channel at all — the blackholed-connect shape from #1077.
+    ///
+    /// `RepeatProvider` cannot express this: it returns its receiver
+    /// immediately, so every wait it models is a wait on an ALREADY
+    /// ESTABLISHED stream, which is the window that already worked.
+    struct StallingDispatchProvider {
+        stall: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StallingDispatchProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            tokio::time::sleep(self.stall).await;
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta("answered".into())).await;
+                let _ = tx.send(done_endturn()).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    /// Drive one run whose dispatch stalls for `stall` before it answers.
+    async fn run_against_stalling_dispatch(stall: std::time::Duration) -> Vec<serde_json::Value> {
+        let provider = Arc::new(StallingDispatchProvider { stall });
+        let sink = TestSink::new();
+        let surface = sink.handle();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(sink),
+        );
+        engine.max_turns = Some(2);
+        let _ = engine.run("task", "m-1").await;
+        surface.snapshot()
+    }
+
+    /// WIRING, not function.
+    ///
+    /// `wcore_providers::http_client::awaiting_first_byte` closing the
+    /// dispatch window is worth nothing unless this file calls it, and that
+    /// call site was graded by nothing else: with the wiring reverted the
+    /// whole wcore-agent suite still passed 3539/3539 while #1077 was fully
+    /// reintroduced. Measured on this host, not assumed.
+    ///
+    /// The two tests above cover the ESTABLISHED-stream window and neither can
+    /// fail for a stalled dispatch: both are handed a provider that has
+    /// already returned its channel.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn a_stalled_dispatch_is_announced_on_the_users_surface() {
+        let threshold = wcore_providers::http_client::stream_silence_notice_after()
+            .expect("the silence notice is enabled by default");
+        let events = run_against_stalling_dispatch(threshold * 2).await;
+        let messages = notices(&events);
+        let announced: Vec<&String> = messages
+            .iter()
+            .filter(|m| m.contains("Still waiting on the provider"))
+            .collect();
+        assert_eq!(
+            announced.len(),
+            1,
+            "a dispatch stalled past {threshold:?} must reach the user exactly \
+             once — the provider had not yet produced a channel, so the \
+             stream-poll notice cannot cover it; surface carried {messages:?}"
+        );
+        assert!(
+            announced[0].contains(&threshold.as_secs().to_string()),
+            "the notice must say how long it has been quiet, got {:?}",
+            announced[0]
+        );
+    }
+
+    /// Negative control for the test above, on the SAME provider and the same
+    /// paused clock — where an over-eager timer WOULD get its chance to fire.
+    /// A dispatch that answers at once must stay silent; without this the test
+    /// above would also pass against a notice that fired unconditionally.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn a_fast_dispatch_produces_no_silence_notice() {
+        let events = run_against_stalling_dispatch(std::time::Duration::ZERO).await;
+        // Known-positive: the harness really did observe this run. Without it
+        // an empty capture would satisfy the absence check below for free.
+        assert!(
+            !events.is_empty(),
+            "the sink captured nothing at all — the absence below proves nothing"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.to_string().contains("Still waiting")),
+            "a dispatch that answered immediately must produce no notice, got {events:?}"
+        );
+    }
 }
