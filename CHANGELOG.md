@@ -1,5 +1,88 @@
 # Changelog
 
+## [0.13.5](https://github.com/FerroxLabs/wayland-core/compare/v0.13.4...v0.13.5) (2026-08-22)
+
+**Release highlights.** Seventeen fixes with one subject: a guard that exists is
+not a guard that runs. Most of what changed here was already written, already
+tested, and already correct — and did not reach the path you were actually on.
+The rate limiter that stops an agent talking to itself forever was never
+consulted on the desktop. The session-saving repair covered one failure arm out
+of six, and the arm it missed was the common one. The skill containment guard
+was workspace-scoped, so it never reached the directory the escape used. In each
+case the unit test passed, because the unit was fine. The second subject is
+silence: several things the product knew, it did not say. No breaking changes;
+the protocol contract stays at minor 16.
+
+**A retry that succeeded no longer fails your turn.** This is the most serious
+one. When a provider errored and the retry then worked — the answer generated,
+the content returned — the turn could still be handed back as a journal
+authority error, because the failed attempt was never marked terminal and the
+commit path checks that with the same predicate the failure path uses. So a
+recovery was rendered as a failure. There are now four settle points where there
+were two, covering the retry arm, the retry-exhausted exit, and the
+compact-and-resend arm, and each has its own test rather than sharing one.
+
+**The product stops going quiet on you.** A request that connects but receives
+nothing used to produce thirty seconds of nothing at all before the first retry
+line appeared. The silence is now announced on your surface, not written to a
+log you do not have enabled. Relatedly, a connect deadline that expired was
+being classified as a generic connection failure rather than a timeout, which
+routed it into a fifteen-minute outage budget it was never meant to have; that
+was latent rather than live, and it is closed before it became live.
+
+**The stream retry budget is yours to set.** It was a constant compiled into a
+function. It is now configurable with a ceiling, and if you ask for more than the
+ceiling the product clamps it *and tells you which number it is actually using* —
+an unreported clamp is a quieter lie than the one it replaces. The default is
+unchanged, and there is a test asserting the default is unchanged, because a
+silent change to everyone's retry behaviour would be worse than the limitation.
+
+**Rate limiting reaches the desktop.** Under host-delegated sending — how the
+desktop app sends — the tool kept a transport that consulted no limiter at all,
+so agent-to-agent reply loops were entirely unthrottled there. The throttle now
+reaches the model as an error result rather than only a log line, on both
+delivering transports. The human and operator paths remain unthrottled, which is
+deliberate and pinned by its own test.
+
+**Skill output has a destination, and artifact writes go through the jail.**
+These two shipped together because fixing either alone relocates the problem
+rather than closing it: closing the output convention alone moves the escape to
+the repo-control surface through frontmatter, and closing the write path alone
+leaves the guard scoped to the workspace so it never reaches the global config
+directory.
+
+**The workspace boundary walk can be interrupted, and it is faster.** The
+per-execution secret-deny walk sat outside both cancellation points, so neither
+Ctrl-C nor your own `timeout` parameter bounded it — the parameter did not do
+what it said. Both call sites are fixed. The walk itself is now parallel, which
+on a large contained workspace is roughly five times faster, with the resulting
+deny set proven byte-identical to the serial one across symlink loops,
+execute-only directories, and nested roots. Worth stating plainly: an earlier
+report of a 76-second stall was a Windows measurement for a path already fixed
+in 0.13.1. The real cost on Linux was about nine tenths of a second. The defect
+was that you could not interrupt it, not that it was slow.
+
+**Browser DNS resolution is checked, and the claim about it is honest.** The
+resolution gate did not exist — the browser crate never resolved a hostname
+anywhere — so it was built. Static DNS-based SSRF is now closed. What is *not*
+closed is intra-navigation rebinding against a zero-TTL record, because the
+browser resolves in its own process; the operator hint and the README now say
+that instead of implying otherwise. A pin-first-answer cache was written and
+then removed after measuring real DNS: across eleven queries, the answer set for
+one major CDN host was completely disjoint from its first answer eleven times
+out of eleven. Pinning would have refused ordinary hosts for the rest of a
+session while buying nothing.
+
+**Smaller, but each one is a thing that lied to you.** Pending approvals are now
+cancelled when the host command stream ends, instead of stalling until a
+twenty-four-hour token expiry. `doctor` honours `--profile` and `--project-dir`
+rather than discarding them and reporting on a configuration you did not ask
+about. A turn that ended because it hit a length limit, a turn limit, or an
+error is now distinguishable from one that ended cleanly. A chain exhausted on a
+server error keeps its failure class instead of being flattened into a
+connection error and granted a retry window the engine deliberately withholds
+from server errors.
+
 ## [0.13.4](https://github.com/FerroxLabs/wayland-core/compare/v0.13.3...v0.13.4) (2026-08-21)
 
 **Release highlights.** One new capability and four fixes, and they share a
