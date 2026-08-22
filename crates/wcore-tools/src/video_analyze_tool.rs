@@ -491,6 +491,15 @@ transitions. Then answer the following question:\n\n{question}"
 
 #[cfg(test)]
 mod tests {
+    // Fixtures use a literal public IP, never a hostname.
+    //
+    // The tool path runs `url_safety::is_safe_url`, which performs a REAL DNS
+    // resolution and fails closed when it returns no addresses, so a hostname
+    // fixture makes these tests depend on the runner's resolver. A literal IP
+    // takes the `parse::<IpAddr>()` fast path and skips resolution entirely.
+    // Hostname resolution is covered hermetically in `url_safety`'s own tests
+    // via `is_safe_url_with(.., fake_resolver)`. Same convention as
+    // `transcription_tools`.
     use super::*;
 
     // --- detect_video_mime_type ---
@@ -546,7 +555,7 @@ mod tests {
         let tool = VideoAnalyzeTool::new();
         let result = tool
             .execute(json!({
-                "video_url": "https://example.com/clip.mp4",
+                "video_url": "https://93.184.216.34/clip.mp4",
                 "question": "what happens?"
             }))
             .await;

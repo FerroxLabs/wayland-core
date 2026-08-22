@@ -496,6 +496,19 @@ impl Tool for OsvTool {
 
 #[cfg(test)]
 mod tests {
+    // The endpoint fixture is a literal public IP, never a hostname.
+    //
+    // `check_package_for_malware` gates its endpoint through
+    // `url_safety::is_safe_url`, which performs a REAL DNS resolution and
+    // fails closed on an empty answer. With `DEFAULT_OSV_ENDPOINT` (a
+    // hostname) these tests therefore depend on the runner's resolver: four
+    // of them fail outright when it hiccups, and two more (the
+    // `unknown_command` / `clean_returns_ok` pair) pass VACUOUSLY because the
+    // gate fails open before the backend is ever called. A literal IP takes
+    // the `parse::<IpAddr>()` fast path and skips resolution entirely.
+    // `check_refuses_unsafe_endpoint` below keeps a literal metadata IP, so
+    // the SSRF gate itself is still graded.
+    const TEST_OSV_ENDPOINT: &str = "https://93.184.216.34/v1/query";
     use super::*;
 
     fn s(v: &[&str]) -> Vec<String> {
@@ -605,7 +618,7 @@ mod tests {
         let msg = check_package_for_malware(
             "npx",
             &s(&["-y", "evil-pkg@1.0.0"]),
-            DEFAULT_OSV_ENDPOINT,
+            TEST_OSV_ENDPOINT,
             backend.as_ref(),
         )
         .await
@@ -630,13 +643,9 @@ mod tests {
             id: "MAL-1".into(),
             summary: "x".into(),
         }]));
-        let outcome = check_package_for_malware(
-            "python",
-            &s(&["evil"]),
-            DEFAULT_OSV_ENDPOINT,
-            backend.as_ref(),
-        )
-        .await;
+        let outcome =
+            check_package_for_malware("python", &s(&["evil"]), TEST_OSV_ENDPOINT, backend.as_ref())
+                .await;
         assert!(outcome.is_none());
         // Backend must NOT be called for unrecognized commands.
         assert!(backend.calls.lock().is_empty());
@@ -650,7 +659,7 @@ mod tests {
         let outcome = check_package_for_malware(
             "npx",
             &s(&["left-pad@1.0.0"]),
-            DEFAULT_OSV_ENDPOINT,
+            TEST_OSV_ENDPOINT,
             backend.as_ref(),
         )
         .await;
@@ -683,7 +692,7 @@ mod tests {
         let outcome = check_package_for_malware(
             "uvx",
             &s(&["requests==2.31.0"]),
-            DEFAULT_OSV_ENDPOINT,
+            TEST_OSV_ENDPOINT,
             backend.as_ref(),
         )
         .await;
@@ -701,7 +710,7 @@ mod tests {
             id: "MAL-2024-XYZ".into(),
             summary: "credential exfiltration on install".into(),
         }]));
-        let tool = OsvTool::new(backend);
+        let tool = OsvTool::new(backend).with_endpoint(TEST_OSV_ENDPOINT);
         let result = tool
             .execute(json!({
                 "command": "npx",
@@ -717,7 +726,7 @@ mod tests {
     #[tokio::test]
     async fn osv_tool_execute_clean_returns_ok() {
         let backend = Arc::new(CapturingOsvBackend::with_response(vec![]));
-        let tool = OsvTool::new(backend);
+        let tool = OsvTool::new(backend).with_endpoint(TEST_OSV_ENDPOINT);
         let result = tool
             .execute(json!({
                 "command": "uvx",
@@ -731,7 +740,7 @@ mod tests {
     #[tokio::test]
     async fn osv_tool_execute_missing_command_errors() {
         let backend = Arc::new(CapturingOsvBackend::with_response(vec![]));
-        let tool = OsvTool::new(backend);
+        let tool = OsvTool::new(backend).with_endpoint(TEST_OSV_ENDPOINT);
         let result = tool.execute(json!({ "args": [] })).await;
         assert!(result.is_error);
     }

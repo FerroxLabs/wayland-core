@@ -180,6 +180,27 @@ pub fn parse_target(target: &str) -> Result<ParsedTarget, String> {
     })
 }
 
+/// Prefix a transport puts on a [`SendOutcome::Err`] whose cause is OUR OWN
+/// throttle rather than a failure of the outbound route (wayland#585).
+///
+/// The distinction is load-bearing, not cosmetic. `send_message` declares
+/// [`Tool::reaches_a_human`], and the orchestration dispatch path arms the
+/// row-B-3 human-unreachable freeze on ANY `is_error` result from such a tool
+/// — which stops every world-changing tool for the rest of the session. A
+/// rate-limited send is the opposite situation: the route just delivered the
+/// whole budget, and it is the AGENT that is being held back. Marking it here
+/// lets [`SendMessageTool::error_is_tool_fault`] report the outcome as
+/// caller-attributed, so the freeze and the circuit breaker both stay neutral
+/// while the model still gets its `is_error` stop signal.
+///
+/// Transports must build throttle refusals with this prefix; the channel
+/// adapter in `wcore_agent::channel_send_transport` does.
+pub const THROTTLED_ERROR_PREFIX: &str = "rate limit: ";
+
+/// Key set on the error payload of a throttled send. Machine-readable so the
+/// neutrality decision never depends on re-matching prose.
+pub const THROTTLED_ERROR_KEY: &str = "throttled";
+
 /// Outcome of a transport `send` attempt. Mirrors the JSON shape the
 /// Python tool serializes back to the model (`success` / `error`
 /// dicts) so existing prompts/examples keep working.
@@ -327,6 +348,18 @@ impl Tool for SendMessageTool {
         true
     }
 
+    fn error_is_tool_fault(&self, content: &str) -> bool {
+        // A throttled send (wayland#585) is this tool refusing the CALLER, not
+        // the outbound route failing. Reporting it as a tool fault would arm
+        // the human-unreachable freeze and stop every world-changing tool for
+        // the rest of the session, moments after the route delivered a full
+        // budget of messages. Everything else stays a fault.
+        !serde_json::from_str::<Value>(content)
+            .ok()
+            .and_then(|v| v.get(THROTTLED_ERROR_KEY).and_then(Value::as_bool))
+            .unwrap_or(false)
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let target_str = match input.get("target").and_then(Value::as_str) {
             Some(s) if !s.trim().is_empty() => s,
@@ -371,10 +404,20 @@ impl Tool for SendMessageTool {
                     is_error: false,
                 }
             }
-            SendOutcome::Err { message: err } => ToolResult {
-                content: json!({ "error": err }).to_string(),
-                is_error: true,
-            },
+            SendOutcome::Err { message: err } => {
+                // A throttle is still an ERROR to the model — that is the only
+                // surface that ends a runaway send loop — but it is tagged so
+                // the human-unreachable latch and the breaker can tell it
+                // apart from a route that is actually down (wayland#585).
+                let mut payload = json!({ "error": err });
+                if err.starts_with(THROTTLED_ERROR_PREFIX) {
+                    payload[THROTTLED_ERROR_KEY] = json!(true);
+                }
+                ToolResult {
+                    content: payload.to_string(),
+                    is_error: true,
+                }
+            }
         }
     }
 }

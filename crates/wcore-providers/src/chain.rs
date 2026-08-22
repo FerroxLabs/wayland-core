@@ -6,8 +6,10 @@
 //! errors) propagate immediately — the request cannot succeed by retrying
 //! on a different provider.
 //!
-//! On full exhaustion the last error is returned wrapped in a
-//! `ProviderError::Connection` message that includes the attempt count.
+//! On full exhaustion the last error is returned with its VARIANT intact —
+//! see `exhausted`. Wrapping it in a `ProviderError::Connection` (as this did
+//! before #1077) erased the failure class, so a 5xx or a 429 that exhausted a
+//! chain was indistinguishable from a connect failure downstream.
 //!
 //! This is intentionally stateless: no circuit-breaker, no cooldown. It
 //! composes with `ResilientProvider` — each slot can be a `ResilientProvider`
@@ -67,6 +69,49 @@ fn is_chain_retryable(e: &ProviderError) -> bool {
         ProviderError::PremiumLocked { .. }
         | ProviderError::UpgradeRequired { .. }
         | ProviderError::SpendCeilingUnresolved { .. } => false,
+    }
+}
+
+/// Render the chain's exhaustion without erasing the failure CLASS (#1077).
+///
+/// This used to return `ProviderError::Connection(format!("all N provider(s)
+/// …"))` for every exhaustion. That is a lie for four of the five errors that
+/// can reach here (only `Connection` itself survived it), and downstream
+/// classification is variant-driven: `retry::provider_failure_code` reported
+/// `connection` for a chain exhausted on an HTTP 500, and `wcore_agent`
+/// deliberately treats a connect failure and a 500 differently — a 500 can
+/// follow partial generation that was already billed, so it is denied the
+/// unserved-outage retry budget a connect failure is granted.
+///
+/// So: keep the variant. Fold the attempt count into the message only where a
+/// free-form message already exists (`Connection`, `Api`); the variants that
+/// carry no message (`RateLimited`) or an opaque source (`Http`, `Egress`) are
+/// returned verbatim rather than being flattened to reach a format string.
+///
+/// REACHABILITY — measured, not assumed. `ProviderChain::new` has **zero**
+/// production call sites on this tree: all 17 occurrences repo-wide are
+/// `#[cfg(test)]` or under `tests/` (13 of them in this module's own test
+/// block). The shipped failover path is `ResilientProvider`, built by
+/// `create_provider`/`bootstrap`, and it already returns `last_error`
+/// verbatim (`resilient.rs:617`) — it never laundered anything. So this is a
+/// latent defect in an exported type, closed before a host or a future
+/// wiring reaches it; it is NOT a bug any 0.13.4 user could have hit. Do not
+/// re-grade #1077 as a user-visible fix.
+fn exhausted(attempts: usize, last_err: Option<ProviderError>) -> ProviderError {
+    let prefix = format!("all {attempts} provider(s) in chain failed: ");
+    match last_err {
+        // Unreachable in practice — `new` asserts the chain is non-empty, so
+        // the loop always records an error before falling through. Kept so the
+        // exhaustion path has no `unwrap`.
+        None => ProviderError::Connection(format!("{prefix}unknown")),
+        Some(ProviderError::Connection(message)) => {
+            ProviderError::Connection(format!("{prefix}{message}"))
+        }
+        Some(ProviderError::Api { status, message }) => ProviderError::Api {
+            status,
+            message: format!("{prefix}{message}"),
+        },
+        Some(other) => other,
     }
 }
 
@@ -169,13 +214,7 @@ impl LlmProvider for ProviderChain {
         }
 
         // All providers exhausted with retryable errors.
-        Err(ProviderError::Connection(format!(
-            "all {} provider(s) in chain failed: {}",
-            attempts,
-            last_err
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "unknown".into()),
-        )))
+        Err(exhausted(attempts, last_err))
     }
 }
 
@@ -520,5 +559,163 @@ mod tests {
         let err = chain.stream(&dummy_request()).await.unwrap_err();
         assert!(matches!(err, ProviderError::Parse(_)));
         assert_eq!(c2.load(Ordering::SeqCst), 0, "p2 must not be tried");
+    }
+
+    // ── #1077 red arm ────────────────────────────────────────────────────────
+
+    /// A real, DNS-free `reqwest` connect failure: bind a loopback port, learn
+    /// its number, drop the listener, then connect to it. Nothing is listening,
+    /// so the kernel answers RST — `ECONNREFUSED`, the shape #1077 is about —
+    /// and no name is ever resolved, so the test stays DNS-hermetic.
+    async fn real_refused_egress_error() -> wcore_egress::EgressError {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+        crate::http_client::build()
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .expect_err("a port with no listener must refuse")
+    }
+
+    /// #1077 quotes `is_chain_retryable`'s `ProviderError::Http` arm (line 40)
+    /// and asks for `is_connect()` to be split there. That arm cannot fire for
+    /// a connect failure: `provider_error_from_reqwest` (reached from the live
+    /// egress path via `provider_error_from_egress`) converts every
+    /// connect/timeout reqwest error into `ProviderError::Connection` first, so
+    /// the only arm a refused connect ever reaches is line 38.
+    ///
+    /// Editing line 40 or line 44 changes nothing at runtime. This pins that.
+    #[tokio::test]
+    async fn a_refused_connect_never_reaches_the_http_or_egress_arm() {
+        let err = crate::retry::provider_error_from_egress(real_refused_egress_error().await);
+        assert!(
+            matches!(err, ProviderError::Connection(_)),
+            "the ticket's premise is that a refused connect arrives as Http/Egress; got {err:?}"
+        );
+        assert!(
+            is_chain_retryable(&err),
+            "line 38 is the arm that decides a refused connect"
+        );
+
+        // CONTROL: the Egress arm the ticket points at is reachable by SOME
+        // error, so the assertion above is about ROUTING, not about a match
+        // that never matches anything.
+        assert!(
+            !is_chain_retryable(&ProviderError::Egress(wcore_egress::EgressError::Denied(
+                "policy".into()
+            ))),
+            "control: the Egress arm must still be exercised by the match"
+        );
+    }
+
+    /// RED ARM — #1077, the defect that IS in this file.
+    ///
+    /// On exhaustion the chain re-renders the last error as
+    /// `ProviderError::Connection(format!("all N provider(s) …"))`. That erases
+    /// the failure CLASS. `wcore_agent`'s `is_unserved_request_failure` admits
+    /// `"connection"` to the 900 s `UNSERVED_OUTAGE_BUDGET` and deliberately
+    /// denies it to every 5xx other than 503/529 ("a 500 can follow partial
+    /// generation that was billed"). So exhausting a chain on an HTTP 500
+    /// promotes that 500 into a retry window the engine refuses to give it.
+    #[tokio::test]
+    async fn chain_exhaustion_preserves_the_failure_class() {
+        // NEGATIVE CONTROL first: `provider_failure_code` is not stuck
+        // returning "connection" for everything. A real refused connect,
+        // converted by the production path, must classify as
+        // `connection_refused` — if this fails, the assertion below proves
+        // nothing.
+        let refused = crate::retry::provider_error_from_egress(real_refused_egress_error().await);
+        assert_eq!(
+            crate::retry::provider_failure_code(&refused),
+            crate::retry::FAILURE_CONNECTION_REFUSED,
+            "control: the classifier must be able to return something other than `connection`"
+        );
+
+        let chain = ProviderChain::new(vec![(
+            "p1",
+            err_provider(
+                || ProviderError::Api {
+                    status: 500,
+                    message: "upstream boom".into(),
+                },
+                Arc::new(AtomicUsize::new(0)),
+            ),
+        )]);
+        let err = chain.stream(&dummy_request()).await.unwrap_err();
+        assert_eq!(
+            crate::retry::provider_failure_code(&err),
+            "http_500",
+            "chain exhaustion must not launder a 5xx into a connect failure"
+        );
+    }
+
+    /// The class is preserved WITHOUT dropping the diagnostic that the old
+    /// rendering existed for: a message-bearing variant still carries the
+    /// attempt count, it just keeps its own variant while doing so.
+    #[tokio::test]
+    async fn chain_exhaustion_keeps_the_attempt_count_on_a_message_bearing_error() {
+        let chain = ProviderChain::new(vec![
+            (
+                "p1",
+                err_provider(
+                    || ProviderError::Api {
+                        status: 502,
+                        message: "gateway".into(),
+                    },
+                    Arc::new(AtomicUsize::new(0)),
+                ),
+            ),
+            (
+                "p2",
+                err_provider(
+                    || ProviderError::Api {
+                        status: 503,
+                        message: "overloaded".into(),
+                    },
+                    Arc::new(AtomicUsize::new(0)),
+                ),
+            ),
+        ]);
+        match chain.stream(&dummy_request()).await.unwrap_err() {
+            ProviderError::Api { status, message } => {
+                assert_eq!(status, 503, "the LAST error is the one returned");
+                assert!(
+                    message.contains("2 provider(s)"),
+                    "attempt count must survive; got: {message}"
+                );
+                assert!(
+                    message.contains("overloaded"),
+                    "the underlying message must survive; got: {message}"
+                );
+            }
+            other => panic!("expected the 503 to survive as Api, got {other:?}"),
+        }
+    }
+
+    /// Same laundering, second class: a rate limit exhausted through the chain
+    /// loses `http_429`, so the engine's `Retry-After` path can never see it.
+    #[tokio::test]
+    async fn chain_exhaustion_preserves_the_rate_limit_class() {
+        // CONTROL: unwrapped, the same error classifies correctly.
+        assert_eq!(
+            crate::retry::provider_failure_code(&ProviderError::RateLimited { retry_after_ms: 0 }),
+            "http_429",
+            "control: an unwrapped rate limit classifies as http_429"
+        );
+
+        let chain = ProviderChain::new(vec![(
+            "p1",
+            err_provider(
+                || ProviderError::RateLimited { retry_after_ms: 0 },
+                Arc::new(AtomicUsize::new(0)),
+            ),
+        )]);
+        let err = chain.stream(&dummy_request()).await.unwrap_err();
+        assert_eq!(
+            crate::retry::provider_failure_code(&err),
+            "http_429",
+            "chain exhaustion must not launder a rate limit into a connect failure"
+        );
     }
 }

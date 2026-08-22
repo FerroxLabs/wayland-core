@@ -89,7 +89,20 @@ pub async fn collect() -> DoctorReport {
 /// Public entry point invoked from `main.rs` when the `--doctor` flag
 /// is passed. Performs all checks, prints the report, returns the
 /// platform-appropriate exit code.
-pub async fn run(probe_mcp: bool) -> ExitCode {
+///
+/// FerroxLabs/wayland#1079 — `cli_args` is the SAME `CliArgs` the invocation
+/// would have used for a real run. Before this, `run` took only `probe_mcp`
+/// and every `Config::resolve` below passed `CliArgs::default()`, so
+/// `--profile` and `--project-dir` were discarded: the declared-MCP list and
+/// the durable-sessions verdict were computed against a DIFFERENT config than
+/// the one the user's own flags select. Worse, under default args
+/// `Config::resolve` can fail with `MissingApiKey` on a host where
+/// `--provider` / `--api-key` would have succeeded, degrading BOTH sections to
+/// a "config not loaded" line for no reason.
+///
+/// The check rows themselves ([`collect`]) are config-independent and are
+/// deliberately left alone — the TUI `/doctor` surface shares them.
+pub async fn run(probe_mcp: bool, cli_args: &wcore_config::config::CliArgs) -> ExitCode {
     let report = collect().await;
     let version = &report.version;
     println!("wayland-core doctor v{version}\n");
@@ -141,11 +154,11 @@ pub async fn run(probe_mcp: bool) -> ExitCode {
     // Report whether durable session persistence is on, and if it is off,
     // WHICH of the two very different reasons turned it off. Informational
     // only — never flips the exit code below.
-    print_durable_sessions_section().await;
+    print_durable_sessions_section(cli_args).await;
 
     // A4b: list declared MCP servers (and optionally probe). Informational
     // only — never flips the exit code below.
-    print_mcp_section(probe_mcp).await;
+    print_mcp_section(probe_mcp, cli_args).await;
 
     if failed > 0 {
         ExitCode::from(1)
@@ -419,12 +432,12 @@ async fn check_ollama() -> CheckResult {
 /// rows, not from anything printed here). It is deliberately kept out of
 /// [`collect`]/[`CheckResult`] so it does NOT duplicate the live MCP
 /// section the TUI `/doctor` surface already renders.
-async fn print_mcp_section(probe: bool) {
+async fn print_mcp_section(probe: bool, cli_args: &wcore_config::config::CliArgs) {
     println!();
     println!("MCP servers (declared):");
 
     // --- config-declared servers (cascaded), best-effort load ---
-    match wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default()) {
+    match wcore_config::config::Config::resolve(cli_args) {
         Ok(cfg) => {
             if cfg.mcp.servers.is_empty() {
                 println!("  (none declared in config)");
@@ -485,7 +498,7 @@ async fn print_mcp_section(probe: bool) {
     if probe {
         println!();
         println!("Probing config-declared MCP servers (connect-test)...");
-        match wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default()) {
+        match wcore_config::config::Config::resolve(cli_args) {
             Ok(cfg) if !cfg.mcp.servers.is_empty() => {
                 // #111 note: this deliberately connect-tests ALL config servers,
                 // INCLUDING any marked `only_for_assistant` — the per-assistant
@@ -631,10 +644,10 @@ fn classify_durable_sessions(session_enabled: bool, replay_unavailable: bool) ->
 /// degraded state, which measures nothing.
 ///
 /// Informational only: like the MCP section it can never flip the exit code.
-async fn print_durable_sessions_section() {
+async fn print_durable_sessions_section(cli_args: &wcore_config::config::CliArgs) {
     println!();
     println!("Durable sessions:");
-    match wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default()) {
+    match wcore_config::config::Config::resolve(cli_args) {
         Err(e) => {
             println!("  UNKNOWN  config did not resolve ({e})");
             println!("           run `wayland-core --config-path` and check that file");
