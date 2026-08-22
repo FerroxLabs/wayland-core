@@ -290,9 +290,19 @@ fn files_containing(dir: &Path, needle: &str) -> Vec<PathBuf> {
 /// `InvalidTransition` becomes the error the caller sees. The provider's own
 /// words — the one artifact four investigations needed — are destroyed on the
 /// way out.
+///
+/// The script holds the SAME 400 twice on purpose. Section C requires one
+/// repair-and-retry for exactly this shape, so a turn whose second send would
+/// succeed is a turn that legitimately ends `Ok` — and a one-entry script ends
+/// in the harness's clean end-turn fallback. Two identical refusals is the case
+/// this test is actually about: the provider refuses, the repair changes
+/// nothing because there is nothing to repair, and the caller must be told what
+/// the PROVIDER said. Pre-fix this script is indistinguishable from a
+/// one-entry one — the arm returned on the first `Err` and never issued a
+/// second send — so the assertion below is red against `0ccaa90b` either way.
 #[tokio::test]
 async fn a_provider_400_reaches_the_caller_as_a_provider_400() {
-    let mut h = harness(vec![Err(api_400(ORPHAN_400))]).await;
+    let mut h = harness(vec![Err(api_400(ORPHAN_400)), Err(api_400(ORPHAN_400))]).await;
     let error = h
         .engine
         .run(USER_MARKER, "")
@@ -311,7 +321,7 @@ async fn a_provider_400_reaches_the_caller_as_a_provider_400() {
 /// path is what destroys it.
 #[tokio::test]
 async fn a_control_ephemeral_engine_keeps_the_provider_400_text() {
-    let mut h = harness_ephemeral(vec![Err(api_400(ORPHAN_400))]).await;
+    let mut h = harness_ephemeral(vec![Err(api_400(ORPHAN_400)), Err(api_400(ORPHAN_400))]).await;
     let error = h
         .engine
         .run(USER_MARKER, "")
