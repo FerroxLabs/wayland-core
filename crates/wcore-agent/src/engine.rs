@@ -1534,6 +1534,89 @@ fn unserved_retry_backoff(attempt: u32) -> std::time::Duration {
         .min(UNSERVED_RETRY_BACKOFF_CAP)
 }
 
+/// Backoff before re-issuing a request the provider DID serve and that then
+/// failed: linear 500 ms steps. `attempt` is 1-based.
+///
+/// Named rather than inlined for the same reason [`unserved_retry_backoff`]
+/// is: the ceiling on the retry budget is derived from the total this
+/// schedule spends, and a derivation that reads a different expression from
+/// the one the loop runs is not a derivation.
+fn served_retry_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(500u64.saturating_mul(attempt as u64))
+}
+
+/// Environment override for the engine's bounded SERVED-failure retry count.
+///
+/// Same shape as the two engine guards above it (`WAYLAND_MAX_REPEATED_TOOL_CALLS`,
+/// `WAYLAND_MAX_CONSECUTIVE_TOOL_FAILURES`): a `WAYLAND_MAX_*` integer read
+/// once per run with a documented default. Unlike those two it is CLAMPED —
+/// see [`MAX_STREAM_RETRIES_CEILING`].
+///
+/// Governs ONLY the count-bounded path. A request the provider never served
+/// is bounded by [`UNSERVED_OUTAGE_BUDGET`] — a window, not a count — and is
+/// untouched by this.
+const MAX_STREAM_RETRIES_ENV: &str = "WAYLAND_MAX_STREAM_RETRIES";
+
+/// Default served-failure retry count: 2 retries, so 3 total attempts.
+///
+/// Bound to the provider layer's own [`wcore_providers::retry::DEFAULT_MAX_RETRIES`]
+/// rather than repeated as a literal. The engine loop is the outer mirror of
+/// that budget (the provider call itself runs under `scope_max_retries(0)`),
+/// and two bare `2`s in two crates drift apart silently.
+const DEFAULT_MAX_STREAM_RETRIES: u32 = wcore_providers::retry::DEFAULT_MAX_RETRIES;
+
+/// Ceiling on [`MAX_STREAM_RETRIES_ENV`].
+///
+/// An unbounded value here is not a preference, it is a spend: every attempt
+/// on this path was SERVED, so each re-send re-bills the whole outbound
+/// context. A user who types an extra zero should get a warning, not a bill.
+///
+/// Derived, not invented. Served retries sleep on [`served_retry_backoff`],
+/// so a budget of N spends 250*N*(N+1) ms waiting. The ceiling is the largest
+/// N whose cumulative backoff still fits inside
+/// [`wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS`] — the cooldown
+/// after which the resilience layer would probe or fail over. Past that point
+/// the extra attempts are not resilience: they pin the run to one broken
+/// endpoint, billed, while the component whose job is failover waits on it.
+/// N=10 spends 27.5 s and fits; N=11 spends 33 s and does not.
+/// `the_ceiling_is_the_largest_budget_that_fits_the_breaker_cooldown` pins it.
+const MAX_STREAM_RETRIES_CEILING: u32 = 10;
+
+/// One run's served-failure retry budget, plus the value the user asked for
+/// when it had to be clamped — a clamp notice that cannot name the rejected
+/// number tells the user nothing.
+struct StreamRetryBudget {
+    retries: u32,
+    clamped_from: Option<u32>,
+}
+
+/// Decision half of [`MAX_STREAM_RETRIES_ENV`], split from the `std::env`
+/// read so the default and the clamp are testable without a process-global.
+fn resolve_max_stream_retries(raw: Option<&str>) -> StreamRetryBudget {
+    let requested = raw
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| raw.parse::<u32>().ok());
+    match requested {
+        // Absent, blank, or unparsable all mean the same thing: nobody
+        // successfully asked for anything. A typo must not silently change
+        // the retry budget, and must not fail the run either.
+        None => StreamRetryBudget {
+            retries: DEFAULT_MAX_STREAM_RETRIES,
+            clamped_from: None,
+        },
+        Some(requested) if requested > MAX_STREAM_RETRIES_CEILING => StreamRetryBudget {
+            retries: MAX_STREAM_RETRIES_CEILING,
+            clamped_from: Some(requested),
+        },
+        // Zero is a real answer: "do not re-send a served failure at all".
+        Some(requested) => StreamRetryBudget {
+            retries: requested,
+            clamped_from: None,
+        },
+    }
+}
+
 /// Does this provider failure say, in words rather than in a status line, that
 /// the credential was rejected?
 ///
@@ -10646,6 +10729,24 @@ impl AgentEngine {
             Some(checkpoint) => FailureGuard::restore(&checkpoint.failure_guard)?,
             None => FailureGuard::from_env(),
         };
+        // Served-failure retry budget for this run. Read here beside the
+        // other per-run `WAYLAND_MAX_*` guards so one run cannot have the
+        // budget change under it between turns.
+        let StreamRetryBudget {
+            retries: max_stream_retries,
+            clamped_from: retry_budget_clamped_from,
+        } = resolve_max_stream_retries(std::env::var(MAX_STREAM_RETRIES_ENV).ok().as_deref());
+        if let Some(requested) = retry_budget_clamped_from {
+            // On the user's surface, not through `warn!`: with `RUST_LOG`
+            // unset only ERROR reaches stderr, so a log line here reaches
+            // nobody and the user silently runs a budget they did not ask
+            // for. Same channel the retry notice below uses.
+            self.output.emit_info(&format!(
+                "{MAX_STREAM_RETRIES_ENV}={requested} is above the ceiling of \
+                 {MAX_STREAM_RETRIES_CEILING}; using {MAX_STREAM_RETRIES_CEILING} \
+                 provider retries for this run."
+            ));
+        }
         let mut turn = match resume_checkpoint.as_ref() {
             Some(checkpoint) => usize::try_from(checkpoint.turn_index).map_err(|_| {
                 AgentError::SessionAuthority(
@@ -11494,14 +11595,16 @@ impl AgentEngine {
             // retry, even though the identical error BEFORE headers
             // would have been retried by the provider's own retry
             // layer. Now the engine re-issues the same request up to
-            // `MAX_STREAM_RETRIES` times with linear backoff.
+            // `max_stream_retries` times with linear backoff — resolved once
+            // per run from `WAYLAND_MAX_STREAM_RETRIES`, defaulting to
+            // `DEFAULT_MAX_STREAM_RETRIES` and clamped at
+            // `MAX_STREAM_RETRIES_CEILING`.
             //
             // A truncated stream (channel closes with no `Done` event)
             // is likewise treated as a failed attempt and retried; if
             // every attempt is exhausted the turn ends as an ERROR
             // verdict (not the old silent "successful empty turn" that
             // poisoned the SkillRouter / auto-skill learning).
-            const MAX_STREAM_RETRIES: u32 = 2;
             // T3: appended to the OUTBOUND system prompt for the single
             // output-cap retry (never persisted). Re-sending byte-identical
             // context after a truncation just buys the same cut again.
@@ -12991,7 +13094,7 @@ impl AgentEngine {
                     });
                     tokio::time::Instant::now() < deadline
                 } else {
-                    stream_attempt < MAX_STREAM_RETRIES
+                    stream_attempt < max_stream_retries
                 };
                 if !is_client_error && !permanent_endpoint && retry_admitted {
                     // Spec v1 Task 5 (clean retry): a retry re-sends the whole
@@ -13066,7 +13169,7 @@ impl AgentEngine {
                     let backoff = if unserved {
                         unserved_retry_backoff(stream_attempt)
                     } else {
-                        std::time::Duration::from_millis(500 * stream_attempt as u64)
+                        served_retry_backoff(stream_attempt)
                     };
                     let progress = match unserved_deadline.filter(|_| unserved) {
                         Some(deadline) => format!(
@@ -13075,7 +13178,7 @@ impl AgentEngine {
                                 .saturating_duration_since(tokio::time::Instant::now())
                                 .as_secs()
                         ),
-                        None => format!("attempt {stream_attempt}/{MAX_STREAM_RETRIES}"),
+                        None => format!("attempt {stream_attempt}/{max_stream_retries}"),
                     };
                     self.output.emit_info(&format!(
                         "Provider stream failed ({reason}); retrying ({progress})…"
@@ -33613,5 +33716,355 @@ mod issue_923_orphan_repair_gate_tests {
         assert!(!is_orphaned_tool_pair_rejection(
             &ProviderError::Connection("tool_use tool_result without".to_string())
         ));
+    }
+}
+
+/// Lane `engine-retry-budget`. Two things are under test here, and they are
+/// the same defect seen from two ends: the engine spends the user's money and
+/// the user's time on provider retries, and until now it neither let them say
+/// how much nor told them while it was happening.
+///
+/// (a) the served-failure retry count is a tunable with a CLAMP, and its
+///     default is byte-for-byte what it was.
+/// (b) a provider stream that has gone quiet is announced on the user's
+///     surface — the same `emit_info` channel the retry notice already uses.
+#[cfg(test)]
+mod stream_retry_budget_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    use crate::test_utils::TestSink;
+
+    /// A provider that replays the SAME script on every call and counts the
+    /// calls, so a test can read the engine's retry budget off the number of
+    /// physical sends the provider saw.
+    struct RepeatProvider {
+        script: Vec<LlmEvent>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RepeatProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let script = self.script.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                for ev in script {
+                    let _ = tx.send(ev).await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    fn done_endturn() -> LlmEvent {
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: TokenUsage::default(),
+        }
+    }
+
+    /// Every message the engine put on the user's surface, in order.
+    fn notices(events: &[serde_json::Value]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| {
+                event
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    /// Drive one run against a provider replaying `script`. Returns the
+    /// physical sends the provider saw and every protocol event the engine
+    /// emitted.
+    async fn run_against(script: Vec<LlmEvent>) -> (usize, Vec<serde_json::Value>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(RepeatProvider {
+            script,
+            calls: Arc::clone(&calls),
+        });
+        let sink = TestSink::new();
+        let surface = sink.handle();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(sink),
+        );
+        engine.max_turns = Some(2);
+        let _ = engine.run("task", "m-1").await;
+        (calls.load(Ordering::SeqCst), surface.snapshot())
+    }
+
+    // --- (a) the retry count is configurable, clamped, and unchanged ------
+
+    /// The whole point of exposing the knob is that exposing it must not move
+    /// the number. A provider that returns a stream and then closes it
+    /// without a `Done` is a SERVED failure, which is the count-bounded path.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_default_served_retry_budget_is_still_two_retries() {
+        let (sends, _) = run_against(Vec::new()).await;
+        assert_eq!(
+            sends, 3,
+            "the shipped budget is 1 send + 2 retries; exposing it as a knob \
+             must not be a silent behaviour change"
+        );
+        assert_eq!(
+            sends,
+            super::DEFAULT_MAX_STREAM_RETRIES as usize + 1,
+            "the loop must spend exactly the resolved budget, not a literal \
+             that can drift away from it"
+        );
+    }
+
+    #[test]
+    fn an_absent_or_unreadable_override_keeps_the_default() {
+        for raw in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("lots"),
+            Some("-1"),
+            Some("2.5"),
+        ] {
+            let resolved = super::resolve_max_stream_retries(raw);
+            assert_eq!(
+                resolved.retries,
+                super::DEFAULT_MAX_STREAM_RETRIES,
+                "{raw:?} must leave the budget at its default"
+            );
+            assert_eq!(resolved.clamped_from, None, "{raw:?} clamped nothing");
+        }
+    }
+
+    #[test]
+    fn an_override_inside_the_ceiling_is_honoured_including_zero() {
+        for requested in [0u32, 1, 5, super::MAX_STREAM_RETRIES_CEILING] {
+            let resolved = super::resolve_max_stream_retries(Some(&requested.to_string()));
+            assert_eq!(
+                resolved.retries, requested,
+                "a budget at or under the ceiling is the user's to choose"
+            );
+            assert_eq!(resolved.clamped_from, None);
+        }
+    }
+
+    /// The clamp is the reason this is not just `unwrap_or(2)`. An unbounded
+    /// value here is not a preference, it is a spend: every attempt on this
+    /// path was served, so each re-send re-bills the whole outbound context.
+    #[test]
+    fn an_override_above_the_ceiling_is_clamped_and_the_user_is_told_which() {
+        let resolved = super::resolve_max_stream_retries(Some("500"));
+        assert_eq!(
+            resolved.retries,
+            super::MAX_STREAM_RETRIES_CEILING,
+            "an over-ceiling request must not be honoured"
+        );
+        assert_eq!(
+            resolved.clamped_from,
+            Some(500),
+            "the clamp must carry what was ASKED for — a notice that cannot \
+             name the rejected value tells the user nothing"
+        );
+    }
+
+    /// The ceiling is derived, not invented, and this pins the derivation:
+    /// the largest retry budget whose cumulative linear backoff still fits
+    /// inside the resilience layer's own recovery cooldown. Past that the
+    /// extra attempts hold the run on a broken endpoint, billed, while the
+    /// component whose job is failover is already waiting.
+    #[test]
+    fn the_ceiling_is_the_largest_budget_that_fits_the_breaker_cooldown() {
+        let cooldown =
+            std::time::Duration::from_secs(wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS);
+        let spent = |budget: u32| {
+            (1..=budget)
+                .map(super::served_retry_backoff)
+                .sum::<std::time::Duration>()
+        };
+        let ceiling = super::MAX_STREAM_RETRIES_CEILING;
+        assert!(
+            spent(ceiling) <= cooldown,
+            "the ceiling ({ceiling}) spends {:?} in backoff, past the {cooldown:?} \
+             cooldown it is supposed to fit inside",
+            spent(ceiling)
+        );
+        assert!(
+            spent(ceiling + 1) > cooldown,
+            "one retry past the ceiling still fits in {cooldown:?} ({:?}) — the \
+             ceiling is lower than its own derivation allows",
+            spent(ceiling + 1)
+        );
+    }
+
+    /// The clamp has to be AUDIBLE, and it has to be the number the run
+    /// actually spends. Wiring, not function: a resolver that knows it
+    /// clamped is worth nothing if the run never says so — and this is the
+    /// only test that reads the real `std::env` path end to end.
+    ///
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn a_clamped_override_is_announced_and_is_the_budget_actually_spent() {
+        let prior = std::env::var(super::MAX_STREAM_RETRIES_ENV).ok();
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test
+        // in this binary, and every test in this module that reads the budget
+        // carries the same attribute.
+        unsafe {
+            std::env::set_var(super::MAX_STREAM_RETRIES_ENV, "500");
+        }
+        let (sends, events) = run_against(Vec::new()).await;
+        unsafe {
+            match prior {
+                Some(prior) => std::env::set_var(super::MAX_STREAM_RETRIES_ENV, prior),
+                None => std::env::remove_var(super::MAX_STREAM_RETRIES_ENV),
+            }
+        }
+
+        let messages = notices(&events);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("500") && m.contains("ceiling")),
+            "the clamp must be announced on the user's surface, naming what \
+             they asked for; surface carried {messages:?}"
+        );
+        assert_eq!(
+            sends,
+            super::MAX_STREAM_RETRIES_CEILING as usize + 1,
+            "the run must spend the CLAMPED budget, not the 500 it was asked \
+             for and not the default it would have used without the override"
+        );
+    }
+
+    /// Wiring, not function — and the direction the whole cost argument for
+    /// this knob points in.
+    ///
+    /// `an_override_inside_the_ceiling_is_honoured_including_zero` proves the
+    /// RESOLVER honours a budget at or below the default; it cannot prove the
+    /// loop spends it, and the clamp test only ever pushes the budget UP.
+    /// Verified by mutation on this tree: flooring the loop bound at the
+    /// default (`max_stream_retries.max(DEFAULT_MAX_STREAM_RETRIES)`) silently
+    /// discarded every budget a user lowered and left all eight other tests in
+    /// this module green. A budget the user cut and the loop ignored is the
+    /// same silent lie the clamp exists to prevent, pointed the other way —
+    /// and it is the direction that costs money.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn a_below_default_budget_is_spent_by_the_loop_not_just_resolved() {
+        for (requested, expected_sends) in [("0", 1usize), ("1", 2usize)] {
+            let prior = std::env::var(super::MAX_STREAM_RETRIES_ENV).ok();
+            // SAFETY: same contract as the clamp test above — every test in
+            // this module that reads the budget is `#[serial_test::serial]`.
+            unsafe {
+                std::env::set_var(super::MAX_STREAM_RETRIES_ENV, requested);
+            }
+            let (sends, events) = run_against(Vec::new()).await;
+            unsafe {
+                match prior {
+                    Some(prior) => std::env::set_var(super::MAX_STREAM_RETRIES_ENV, prior),
+                    None => std::env::remove_var(super::MAX_STREAM_RETRIES_ENV),
+                }
+            }
+
+            assert_eq!(
+                sends,
+                expected_sends,
+                "{}={requested} must cost exactly {expected_sends} physical \
+                 send(s); the loop, not just the resolver, has to spend the \
+                 budget the user set",
+                super::MAX_STREAM_RETRIES_ENV
+            );
+            // The user-visible half: the retry notices they read must match
+            // the sends the provider actually saw.
+            let messages = notices(&events);
+            let retry_notices = messages
+                .iter()
+                .filter(|m| m.contains("Provider stream failed"))
+                .count();
+            assert_eq!(
+                retry_notices,
+                expected_sends - 1,
+                "one retry notice per re-send and no more; surface carried \
+                 {messages:?}"
+            );
+        }
+    }
+
+    // --- (b) a silent provider stream is announced ------------------------
+
+    /// The defect: the provider has accepted the request and sent nothing,
+    /// the read timeout has not fired, and the product says nothing at all
+    /// for up to five minutes. A `warn!` does not fix it — with `RUST_LOG`
+    /// unset only ERROR reaches stderr. It has to land on the same surface
+    /// the retry notice lands on.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_silent_provider_stream_is_announced_on_the_users_surface() {
+        let (_, events) = run_against(vec![
+            LlmEvent::StreamSilent {
+                silent_for: std::time::Duration::from_secs(30),
+            },
+            LlmEvent::TextDelta("late but fine".into()),
+            done_endturn(),
+        ])
+        .await;
+        let messages = notices(&events);
+        let announced: Vec<&String> = messages
+            .iter()
+            .filter(|m| m.contains("Still waiting on the provider"))
+            .collect();
+        assert_eq!(
+            announced.len(),
+            1,
+            "exactly one silence notice must reach the user; surface carried \
+             {messages:?}"
+        );
+        assert!(
+            announced[0].contains("30"),
+            "the notice must say how long it has been quiet, got {:?}",
+            announced[0]
+        );
+    }
+
+    /// Negative control. A stream that answers immediately must add nothing —
+    /// a notice on every healthy turn is noise, and noise is how a real
+    /// warning stops being read. The known-positive is in the same
+    /// assertion: the harness DID observe this run's output.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_normal_fast_stream_produces_no_silence_notice() {
+        let (sends, events) = run_against(vec![
+            LlmEvent::TextDelta("immediate".into()),
+            done_endturn(),
+        ])
+        .await;
+        assert_eq!(sends, 1, "a served, complete stream is sent exactly once");
+        // Known-positive: the harness really did observe this run. Without it
+        // an empty capture would satisfy the absence check below for free.
+        assert!(
+            !events.is_empty(),
+            "the sink captured nothing at all — the absence below proves nothing"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.to_string().contains("Still waiting")),
+            "a healthy turn must produce no silence notice, got {events:?}"
+        );
     }
 }
