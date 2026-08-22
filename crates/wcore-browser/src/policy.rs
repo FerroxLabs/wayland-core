@@ -54,24 +54,43 @@
 //!     the granted port, so a grant cannot be spent across categories.
 //!   * It never relaxes [`check_resolved_host`]. A public hostname that
 //!     resolves to 127.0.0.1 is still a rebinding attack, grant or no grant.
+//!     The one place the grant IS consulted ahead of resolution is
+//!     [`BrowserPolicy::evaluate_navigation_target`], which skips the lookup
+//!     for a canonical loopback host the grant already authorizes — resolving
+//!     `localhost` would otherwise refuse it unconditionally and delete the
+//!     recovery path entirely.
 //!   * `denied_origins` still wins over an authorized grant.
 //!
-//! ## DNS rebinding (TOFU cache)
+//! ## DNS resolution gate + rebinding TOFU cache (gh#1053)
 //!
-//! Hostnames resolved once via [`check_resolved_host`] are pinned per
-//! policy instance. Subsequent resolutions returning a different IP are
-//! refused — defense against DNS rebinding attacks that swap a benign
-//! initial resolve for a private / metadata target.
+//! [`BrowserPolicy::evaluate`] decides from the URL **string** alone, so a
+//! public NAME that resolves to `169.254.169.254` or into RFC 1918 passes it
+//! — there is nothing in the string to object to.
+//! [`BrowserPolicy::evaluate_navigation_target`] is the gate the executed
+//! path calls: it runs `evaluate` first, then resolves the host and requires
+//! EVERY resolved address to clear the same block-list, fails closed on a host
+//! that resolves to nothing, and pins the surviving answer so a later
+//! navigation to the same name that answers differently is refused.
+//!
+//! **What it does not close.** Camoufox is a SIDECAR: Firefox performs its own
+//! DNS resolution in another process, so the addresses it actually dials
+//! cannot be pinned to the ones checked here. This closes static DNS SSRF and
+//! cross-navigation rebinding via the TOFU cache. It does NOT close TTL=0
+//! intra-navigation rebinding.
 //!
 //! ## Redirect re-check
 //!
 //! [`BrowserPolicy::reqwest_redirect_policy`] returns a
 //! [`reqwest::redirect::Policy`] that re-evaluates this policy on every
-//! redirect hop. Backends that follow redirects via reqwest MUST install
-//! it on their client builder.
+//! redirect hop of a request **we** issue. Backends that follow redirects via
+//! reqwest MUST install it on their client builder. It is the string-only
+//! `evaluate`, because a `reqwest` redirect closure is synchronous and cannot
+//! block an async worker on a DNS lookup. Redirects the sidecar follows in its
+//! own process are covered instead by re-checking the landing URL through the
+//! resolution gate after the fact.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -394,6 +413,138 @@ impl BrowserPolicy {
         PolicyOutcome::Allow
     }
 
+    /// The gate the executed path calls: [`evaluate`](Self::evaluate) plus a
+    /// DNS-resolution check on the host it just approved.
+    ///
+    /// gh#1053: every URL-bearing op used to reach the backend without its
+    /// host ever being resolved, because
+    /// [`check_resolved_host`](Self::check_resolved_host) had no production
+    /// caller at all. A public name pointing at the cloud metadata endpoint
+    /// was therefore permitted outright.
+    ///
+    /// The order below is load-bearing:
+    ///
+    ///   1. The string-only gate decides FIRST. A clean resolution never
+    ///      launders an allow-list miss — this is an additional refusal, never
+    ///      a new way in.
+    ///   2. An IP literal already carries its destination; `evaluate` has
+    ///      judged it and no lookup is spent on it.
+    ///   3. gh#911: a canonical loopback host holding an AUTHORISING grant
+    ///      skips resolution. `check_resolved_host` refuses loopback
+    ///      unconditionally, so feeding it every resolution would deny
+    ///      `http://localhost:3000/` with a valid grant and delete the only
+    ///      loopback recovery path an operator has.
+    ///   4. EVERY resolved address must clear the block-list, not just the
+    ///      first: a host commonly has several A records, and a first-only
+    ///      gate is one an attacker picks their way past by ordering the
+    ///      answer.
+    ///   5. A host that resolves to nothing fails CLOSED. "I could not check"
+    ///      is not "allowed".
+    ///   6. The surviving answer is pinned in the TOFU cache.
+    ///
+    /// See the crate-level "DNS resolution gate" section for the residual gap
+    /// this cannot close (the sidecar resolves DNS itself, so TTL=0
+    /// intra-navigation rebinding stays open).
+    pub fn evaluate_navigation_target(&self, url_str: &str) -> PolicyOutcome {
+        self.evaluate_navigation_target_with(url_str, system_resolver)
+    }
+
+    /// Async form of
+    /// [`evaluate_navigation_target`](Self::evaluate_navigation_target) for the
+    /// executed path.
+    ///
+    /// The system resolver is BLOCKING I/O that can stall for seconds against
+    /// a slow or unreachable nameserver, and both production call sites sit
+    /// inside `async fn`s — so the lookup runs on the blocking pool instead of
+    /// an async worker. The clone shares `dns_cache` through its `Arc`, so the
+    /// pin the blocking task records is the one this policy reads back.
+    pub async fn evaluate_navigation_target_async(&self, url_str: &str) -> PolicyOutcome {
+        let policy = self.clone();
+        let url = url_str.to_string();
+        match tokio::task::spawn_blocking(move || policy.evaluate_navigation_target(&url)).await {
+            Ok(outcome) => outcome,
+            // A panicked or cancelled resolution task is not an allow.
+            Err(e) => PolicyOutcome::Deny {
+                reason: format!("DNS resolution gate did not complete: {e}"),
+            },
+        }
+    }
+
+    /// Resolver-injected seam behind
+    /// [`evaluate_navigation_target`](Self::evaluate_navigation_target).
+    /// Private on purpose: the public surface passes the system resolver, and
+    /// only the in-crate tests get to choose the answers.
+    fn evaluate_navigation_target_with(&self, url_str: &str, resolve: Resolver) -> PolicyOutcome {
+        // 1. String-only gate first.
+        match self.evaluate(url_str) {
+            PolicyOutcome::Allow => {}
+            other => return other,
+        }
+
+        let Ok(parsed) = Url::parse(url_str) else {
+            // Not reachable in practice — `evaluate` denies an unparseable URL
+            // before this point — but fail closed rather than assume.
+            return PolicyOutcome::Deny {
+                reason: format!("invalid URL at the DNS resolution gate: {url_str}"),
+            };
+        };
+        let Some(host) = parsed.host_str() else {
+            // No host to resolve (and nothing for an attacker to point
+            // anywhere); `evaluate` already had the final say.
+            return PolicyOutcome::Allow;
+        };
+
+        // 2. IP literal — nothing to resolve. Brackets stripped the same way
+        //    `blocked_host_reason` strips them.
+        let bare = host
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(host);
+        if IpAddr::from_str(bare).is_ok() {
+            return PolicyOutcome::Allow;
+        }
+
+        // 3. gh#911 — a granted canonical loopback host is exempt from
+        //    resolution, and ONLY while the grant authorizes this port.
+        if is_canonical_loopback_host(host)
+            && self
+                .loopback
+                .authorize(parsed.port_or_known_default())
+                .is_ok()
+        {
+            return PolicyOutcome::Allow;
+        }
+
+        // 4/5. Resolve, and require the whole answer set to clear the gate.
+        let addrs = resolve(host);
+        if addrs.is_empty() {
+            return PolicyOutcome::Deny {
+                reason: format!(
+                    "{host} resolved to no address at all; refused because the policy                      cannot tell where the request would land (DNS resolution gate)"
+                ),
+            };
+        }
+        for ip in &addrs {
+            if let Some(reason) = blocked_resolved_ip_reason(host, *ip) {
+                return PolicyOutcome::Deny { reason };
+            }
+        }
+
+        // 6. Pin the answer set's ORDER-INDEPENDENT representative rather than
+        //    `addrs[0]`. Resolvers rotate multi-A answers, so pinning whichever
+        //    address happened to come back first would refuse ordinary
+        //    CDN-hosted hosts on their second navigation — a false rebinding
+        //    denial. Every address in the set has already cleared the
+        //    block-list above, which is the check that actually stops a swap to
+        //    a private / metadata target; the pin is the cross-navigation half.
+        let pinned = addrs
+            .iter()
+            .copied()
+            .min()
+            .expect("addrs was checked non-empty above");
+        self.check_resolved_host(host, pinned)
+    }
+
     /// DNS-rebinding TOFU check. Call this when the *resolved* IP for a
     /// hostname is known (e.g. from the OS resolver). The first call
     /// records the IP; subsequent calls with a different IP for the same
@@ -464,6 +615,23 @@ impl BrowserPolicy {
                 )),
             }
         })
+    }
+}
+
+/// Resolver seam. Production passes [`system_resolver`]; the in-crate tests
+/// pass a deterministic stub. Deliberately the same `fn(&str) -> Vec<IpAddr>`
+/// shape `wcore-tools/src/url_safety.rs` already uses for the identical job.
+///
+/// `wcore_tools::url_safety::safe_url_pinned_ips` is NOT reused here: it
+/// embeds url_safety's own block-list, which refuses loopback
+/// unconditionally, and would delete the gh#911 loopback grant.
+type Resolver = fn(&str) -> Vec<IpAddr>;
+
+/// The system resolver. Port 0 — only the addresses matter, not connectivity.
+fn system_resolver(host: &str) -> Vec<IpAddr> {
+    match (host, 0u16).to_socket_addrs() {
+        Ok(addrs) => addrs.map(|sa| sa.ip()).collect(),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -730,9 +898,67 @@ fn parse_legacy_octet(s: &str) -> Option<u64> {
     }
 }
 
+/// Reduce an operator-written origin pattern to the bare host
+/// [`origin_matches`] can actually compare (gh#1075).
+///
+/// The field is named `allowed_ORIGINS`, and an origin in the web-platform
+/// sense is scheme + host + port — so `https://x.example` is the spelling the
+/// field name asks for, and it is exactly the spelling that could never match
+/// anything. Nothing diagnosed it: a never-matching ALLOW entry silently
+/// blocks the operator, and a never-matching DENY entry silently fails OPEN.
+///
+/// Normalisation lives here rather than in a constructor or the config loader
+/// because it is the ONE point every construction path funnels through.
+/// `BrowserPolicy` is built from operator config (`adapter.rs`), from the
+/// plugin mirror (`wcore-plugin-api` → `browser_adapter.rs`), and directly by
+/// serde — `allowed_origins` / `denied_origins` are public fields on a
+/// `Deserialize` struct. A fix in `BrowserPolicy::new` alone leaves the serde
+/// path broken.
+///
+/// Only the two schemes the gate itself accepts are stripped. A pattern
+/// written with a scheme the allow-list refuses outright (`javascript:`,
+/// `file:`, ...) is left verbatim, so it keeps matching nothing: an entry the
+/// gate would never honour must not be resurrected by normalisation.
+///
+/// A port in the pattern is DROPPED, not honoured. Origin matching in this
+/// policy has always been host-granular — a port never narrowed anything, it
+/// only made the whole entry match nothing — so `x.example:8443` now admits
+/// `x.example` on every port. The one port-scoped control here is the
+/// [`LoopbackCapability`] grant, which is a separate field and is unaffected.
+///
+/// Borrows rather than allocating — every step is a prefix/suffix trim.
+fn normalize_origin_pattern(pattern: &str) -> &str {
+    let rest = strip_scheme_ci(pattern, "https://")
+        .or_else(|| strip_scheme_ci(pattern, "http://"))
+        .unwrap_or(pattern);
+    // Path first: a host never contains `/`.
+    let rest = rest.split('/').next().unwrap_or(rest);
+    // Then the port. An IPv6 literal keeps its brackets, which is the form
+    // `Url::host_str()` hands the matcher.
+    if rest.starts_with('[') {
+        return match rest.find(']') {
+            Some(close) => &rest[..=close],
+            None => rest,
+        };
+    }
+    match rest.split_once(':') {
+        Some((host, _port)) => host,
+        None => rest,
+    }
+}
+
+/// Case-insensitive scheme-prefix strip. `scheme` must already be lowercase.
+fn strip_scheme_ci<'a>(pattern: &'a str, scheme: &str) -> Option<&'a str> {
+    let head = pattern.get(..scheme.len())?;
+    head.eq_ignore_ascii_case(scheme)
+        .then(|| &pattern[scheme.len()..])
+}
+
 /// Suffix-glob match: `*.example.com` matches `foo.example.com` and
-/// `example.com`. Plain `example.com` matches only the exact host.
+/// `example.com`. Plain `example.com` matches only the exact host. The
+/// pattern is normalized first — see [`normalize_origin_pattern`].
 fn origin_matches(host: &str, pattern: &str) -> bool {
+    let pattern = normalize_origin_pattern(pattern);
     if let Some(suffix) = pattern.strip_prefix("*.") {
         host == suffix || host.ends_with(&format!(".{suffix}"))
     } else {

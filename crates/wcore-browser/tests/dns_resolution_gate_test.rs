@@ -19,6 +19,7 @@
 //!   * post-navigation landing URL — `CamoufoxBackend::dispatch`
 //!     (`camoufox.rs:302`) and `enforce_post_navigation_policy`
 //!     (`camoufox.rs:548`)
+//!
 //! Each has its own test below.
 //!
 //! ## What is hermetically testable here, and what is not

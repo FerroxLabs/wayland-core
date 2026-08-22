@@ -152,6 +152,13 @@ pub fn disabled_by_default_hint() -> String {
 /// specific gate that refused (no grant / wrong `schema_version` / empty
 /// `session_scope` / ungranted port). This wraps it with the real setting to
 /// change, so the message a user reads always names a control that exists.
+///
+/// gh#1053 changed what the last paragraph is allowed to say. The host IS now
+/// re-checked after DNS resolution on the executed path, so the old "NOT
+/// re-checked" sentence became false — but the gate is still not total, and
+/// saying it were would be gh#826 all over again (a message naming a
+/// protection the reader does not have). Both halves are stated: what the gate
+/// closes, and the residual sidecar/TTL gap it cannot.
 pub fn loopback_blocked_hint(refusal: &str) -> String {
     format!(
         "{refusal}\n\n\
@@ -162,8 +169,14 @@ pub fn loopback_blocked_hint(refusal: &str) -> String {
          {ENABLE_LOOPBACK_TOML}\n\
          Only the ports listed above become reachable. Private (RFC 1918), \
          link-local and cloud-metadata addresses stay blocked when they appear \
-         literally in the URL. The host is NOT re-checked after DNS resolution, \
-         so do not rely on this gate to stop a name that resolves inward.",
+         literally in the URL, and any other host is re-checked after DNS \
+         resolution — a name resolving inward is refused, and its first answer \
+         is pinned so a later navigation cannot swap it.\n\n\
+         One gap remains, and it is not closable from here: the browser runs as \
+         a separate sidecar process and performs its own DNS resolution, so a \
+         record served with TTL=0 can still be re-answered inside a single \
+         navigation. Do not rely on this gate against an attacker who controls \
+         the authoritative zone.",
         config_target_block()
     )
 }

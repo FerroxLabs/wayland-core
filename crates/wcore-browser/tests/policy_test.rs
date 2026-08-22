@@ -255,6 +255,16 @@ async fn camoufox_final_url_metadata_refused() {
     }
 }
 
+/// An allow-listed landing URL passes the post-navigation re-check.
+///
+/// gh#1053 changed this test's FIXTURE, not its claim. The landing URL now
+/// also goes through the DNS resolution gate, and the host it used
+/// (`foo.allowed.example`) is RFC 2606-reserved — it resolves to nothing, so
+/// the gate refuses it, correctly. A public IP literal carries its own
+/// destination and needs no lookup, which keeps the test hermetic while
+/// asserting exactly what it always asserted. The unresolvable-name case is
+/// graded in
+/// `dns_resolution_gate_test.rs::landing_url_goes_through_the_resolution_gate_too`.
 #[tokio::test]
 async fn camoufox_final_url_allowed_when_in_allow_list() {
     let server = MockServer::start().await;
@@ -270,14 +280,14 @@ async fn camoufox_final_url_allowed_when_in_allow_list() {
         .and(path("/tabs/tab-B/navigate"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "ok": true,
-            "url": "https://foo.allowed.example/landed"
+            "url": "https://93.184.216.34/landed"
         })))
         .mount(&server)
         .await;
 
     let policy = BrowserPolicy::new(
         PolicyAction::Allow,
-        vec!["*.allowed.example".into()],
+        vec!["93.184.216.34".into()],
         Vec::new(),
     );
     let backend = CamoufoxBackend::with_policy(server.uri(), policy);
@@ -286,7 +296,7 @@ async fn camoufox_final_url_allowed_when_in_allow_list() {
         .dispatch(
             &session.ctx,
             BrowserOp::Navigate {
-                url: "https://foo.allowed.example/start".into(),
+                url: "https://93.184.216.34/start".into(),
                 wait_until_loaded: true,
             },
         )
