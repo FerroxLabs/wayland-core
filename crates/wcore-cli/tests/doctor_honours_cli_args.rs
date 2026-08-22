@@ -35,6 +35,12 @@ fn bin() -> &'static str {
 
 /// Write a project config declaring `MARKER_SERVER`, plus a provider/key so
 /// `Config::resolve` succeeds on a host with no ambient credentials.
+///
+/// The key belongs under `[providers.<name>]`, not `[default]` —
+/// `DefaultConfig` has no `api_key` field, so a key placed there is silently
+/// dropped and the resolve fails `MissingApiKey`, which degrades the very
+/// sections this test reads. No command ever runs with it: doctor without
+/// `--probe-mcp` only lists what the config declares.
 fn write_project_config(dir: &Path) {
     std::fs::write(
         dir.join(".wayland-core.toml"),
@@ -42,6 +48,8 @@ fn write_project_config(dir: &Path) {
             r#"
 [default]
 provider = "anthropic"
+
+[providers.anthropic]
 api_key = "test-key-not-used"
 
 [mcp.servers.{MARKER_SERVER}]

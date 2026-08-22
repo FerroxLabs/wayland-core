@@ -1766,7 +1766,31 @@ async fn run() -> anyhow::Result<ExitCode> {
     // mode so a misconfigured environment can be diagnosed without
     // touching config files, OAuth, or the engine bootstrap.
     if cli.doctor {
-        return Ok(doctor::run(cli.probe_mcp).await);
+        // #1079: doctor resolves config for two of its sections (the declared
+        // MCP list and the durable-sessions verdict). It used to do that with
+        // `CliArgs::default()`, which threw away `--profile` and
+        // `--project-dir` -- so it reported on a config the same invocation
+        // would never have used -- and could fail with `MissingApiKey` on a
+        // host where the user's own `--provider`/`--api-key` resolve fine.
+        // Hand it the same args a real run gets.
+        //
+        // `max_turns` and `system_prompt` are the raw flags rather than the
+        // `effective_*` values computed at `:2005`: those are derived AFTER
+        // this early return, and neither one participates in selecting or
+        // loading a config file, so the extra hop would buy nothing.
+        let doctor_args = CliArgs {
+            provider: cli.provider.clone(),
+            api_key: cli.api_key.clone(),
+            base_url: cli.base_url.clone(),
+            model: cli.model.clone(),
+            max_tokens: cli.max_tokens,
+            max_turns: cli.max_turns,
+            system_prompt: cli.system_prompt.clone(),
+            profile: cli.profile.clone(),
+            auto_approve: cli.auto_approve,
+            project_dir: cli.project_dir.clone(),
+        };
+        return Ok(doctor::run(cli.probe_mcp, &doctor_args).await);
     }
 
     // Issue #114: the explicit, user-initiated TCC prompt. Kept next to
@@ -4292,12 +4316,36 @@ const HOST_EOF_DENY_REASON: &str = "host closed the command stream while this ap
 /// as denied NOW rather than stalling for the rest of the 5-minute approval
 /// TTL (live UAT measured a 330-second stall). Fails closed, matching the
 /// reaper.
-fn deny_pending_approvals_on_host_eof(approval_manager: &ToolApprovalManager) {
+///
+/// FerroxLabs/wayland#1083 — there are TWO approval stores, and #1070 drained
+/// only one. `ToolApprovalManager` gates ordinary tool calls;
+/// `wcore_agent::approval::ApprovalBridge` is a separate store, with its own
+/// `by_token`/`by_corr` maps, that backs the egress-consent doorbell and the
+/// Crucible proposal card. A bridge approval parked at EOF had no bulk escape
+/// at all — only the TTL reaper, on a 30-second tick, needing the entry to
+/// expire. A Crucible card is minted with `CRUCIBLE_APPROVAL_TTL` = 86,400s,
+/// so the real symptom was not the ticket's 300-second stall but a
+/// TWENTY-FOUR HOUR one. Both stores are drained here, together, so the
+/// two can never drift apart again.
+async fn deny_pending_approvals_on_host_eof(
+    approval_manager: &ToolApprovalManager,
+    approval_bridge: &wcore_agent::approval::ApprovalBridge,
+) {
     let denied = approval_manager.deny_all_pending(HOST_EOF_DENY_REASON);
     if denied > 0 {
         tracing::warn!(
             denied,
             "host closed the command stream with approvals pending; denied them immediately"
+        );
+    }
+    let cancelled = approval_bridge
+        .cancel_all_pending(HOST_EOF_DENY_REASON)
+        .await;
+    if cancelled > 0 {
+        tracing::warn!(
+            cancelled,
+            "host closed the command stream with bridge approvals pending; \
+             cancelled them immediately"
         );
     }
 }
@@ -4311,10 +4359,18 @@ enum ActiveRecoveryOutcome<T> {
 /// an ordinary active turn. Recovery can encounter more than one gated tool;
 /// parking only on the engine future would strand later approval commands in
 /// `cmd_rx` and deadlock the turn.
+///
+/// #1083: `approval_bridge` is the engine's shared
+/// [`wcore_agent::approval::ApprovalBridge`], cloned out BEFORE `future` takes
+/// its `&mut` borrow of the engine. It is a required parameter rather than an
+/// `Option` on purpose — an EOF that drains one store and not the other is
+/// exactly the defect this closes, so there is no caller shape that may skip
+/// it.
 async fn drive_active_recovery<F, T, C>(
     future: F,
     cmd_rx: &mut tokio::sync::mpsc::Receiver<ProtocolCommand>,
     approval_manager: &ToolApprovalManager,
+    approval_bridge: &wcore_agent::approval::ApprovalBridge,
     writer: &dyn ProtocolEmitter,
     cancel_active_turn: &C,
 ) -> ActiveRecoveryOutcome<T>
@@ -4384,7 +4440,7 @@ where
                 }
                 None => {
                     commands_open = false;
-                    deny_pending_approvals_on_host_eof(approval_manager);
+                    deny_pending_approvals_on_host_eof(approval_manager, approval_bridge).await;
                 }
             },
             result = &mut future => {
@@ -4466,11 +4522,15 @@ async fn handle_resume_turn<C>(
     let result =
         match action {
             ResumeTurnAction::Continue => {
+                // #1083: clone the shared bridge handle BEFORE `future` takes
+                // its `&mut` borrow of the engine.
+                let approval_bridge = engine.approval_bridge().clone();
                 let future = engine.resume_interrupted_turn(&turn_id, &cursor, &request_id);
                 match drive_active_recovery(
                     future,
                     cmd_rx,
                     approval_manager,
+                    &approval_bridge,
                     writer,
                     cancel_active_turn,
                 )
@@ -4680,6 +4740,9 @@ async fn handle_recovered_approval<C>(
         emit_recovered_terminal(output, &request_id, FinishReason::Error);
         return;
     }
+    // #1083: clone the shared bridge handle BEFORE `future` takes its `&mut`
+    // borrow of the engine.
+    let approval_bridge = engine.approval_bridge().clone();
     let future = engine.resolve_interrupted_approval(
         &turn_id,
         &cursor,
@@ -4688,58 +4751,62 @@ async fn handle_recovered_approval<C>(
         answer.as_deref(),
         &request_id,
     );
-    let result =
-        match drive_active_recovery(future, cmd_rx, approval_manager, writer, cancel_active_turn)
-            .await
-        {
-            ActiveRecoveryOutcome::Finished(result) => result,
-            ActiveRecoveryOutcome::Stopped(result) => {
-                let terminal_if_ready = match result {
-                    Ok(_) => RecoveryLifecycle::Completed,
-                    Err(wcore_agent::engine::AgentError::UserAborted) => {
-                        RecoveryLifecycle::Cancelled
-                    }
-                    Err(error) => {
-                        output.emit_error(
-                            &format!("resolve_interrupted_approval refused: {error}"),
-                            false,
-                        );
-                        emit_recovered_terminal(output, &request_id, FinishReason::Error);
-                        emit_recovery_unavailable(
-                            writer,
-                            request_id,
-                            session_id,
-                            RecoveryUnavailableReason::UnknownCriticalState,
-                        );
-                        return;
-                    }
-                };
-                emit_recovered_terminal(output, &request_id, FinishReason::Stop);
-                let next = match engine.recovery_plan() {
-                    Ok(plan) => plan,
-                    Err(_) => {
-                        emit_recovery_unavailable(
-                            writer,
-                            request_id,
-                            session_id,
-                            RecoveryUnavailableReason::JournalCorrupt,
-                        );
-                        return;
-                    }
-                };
-                let (lifecycle, reconcile_reason) =
-                    interrupted_action_lifecycle(&next, terminal_if_ready);
-                let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
-                    recovery_version: RECOVERY_PROTOCOL_VERSION,
-                    session_id,
-                    turn_id,
-                    cursor: next.cursor(),
-                    lifecycle,
-                    reconcile_reason,
-                });
-                return;
-            }
-        };
+    let result = match drive_active_recovery(
+        future,
+        cmd_rx,
+        approval_manager,
+        &approval_bridge,
+        writer,
+        cancel_active_turn,
+    )
+    .await
+    {
+        ActiveRecoveryOutcome::Finished(result) => result,
+        ActiveRecoveryOutcome::Stopped(result) => {
+            let terminal_if_ready = match result {
+                Ok(_) => RecoveryLifecycle::Completed,
+                Err(wcore_agent::engine::AgentError::UserAborted) => RecoveryLifecycle::Cancelled,
+                Err(error) => {
+                    output.emit_error(
+                        &format!("resolve_interrupted_approval refused: {error}"),
+                        false,
+                    );
+                    emit_recovered_terminal(output, &request_id, FinishReason::Error);
+                    emit_recovery_unavailable(
+                        writer,
+                        request_id,
+                        session_id,
+                        RecoveryUnavailableReason::UnknownCriticalState,
+                    );
+                    return;
+                }
+            };
+            emit_recovered_terminal(output, &request_id, FinishReason::Stop);
+            let next = match engine.recovery_plan() {
+                Ok(plan) => plan,
+                Err(_) => {
+                    emit_recovery_unavailable(
+                        writer,
+                        request_id,
+                        session_id,
+                        RecoveryUnavailableReason::JournalCorrupt,
+                    );
+                    return;
+                }
+            };
+            let (lifecycle, reconcile_reason) =
+                interrupted_action_lifecycle(&next, terminal_if_ready);
+            let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                recovery_version: RECOVERY_PROTOCOL_VERSION,
+                session_id,
+                turn_id,
+                cursor: next.cursor(),
+                lifecycle,
+                reconcile_reason,
+            });
+            return;
+        }
+    };
     match result {
         Ok(result) => {
             emit_recovered_stream_end(output, &request_id, &result);
@@ -5754,7 +5821,14 @@ async fn run_json_stream_mode(
                                 // parked approval to wait out its full TTL.
                                 let Some(sub_cmd) = maybe_cmd else {
                                     commands_open = false;
-                                    deny_pending_approvals_on_host_eof(&approval_manager);
+                                    // #1083: drains the ApprovalBridge too — a
+                                    // Crucible card parked here otherwise waits
+                                    // out its 24h TTL.
+                                    deny_pending_approvals_on_host_eof(
+                                        &approval_manager,
+                                        &approval_bridge,
+                                    )
+                                    .await;
                                     continue;
                                 };
                                 match sub_cmd {
@@ -7375,6 +7449,7 @@ mod tests {
                 future,
                 &mut cmd_rx,
                 approval_manager.as_ref(),
+                &empty_bridge(),
                 &writer,
                 &|| {},
             ),
@@ -7422,6 +7497,14 @@ mod tests {
     // The 2-second timeout is the assertion: if the reaper is what eventually
     // unblocks this, the test fails instead of hanging CI for a day.
 
+    /// A bridge with nothing parked on it, for the #1070 tests that exercise
+    /// only the `ToolApprovalManager` half of the EOF drain. Draining an empty
+    /// bridge is a no-op, so these keep asserting exactly what they did before
+    /// `drive_active_recovery` grew the parameter.
+    fn empty_bridge() -> wcore_agent::approval::ApprovalBridge {
+        wcore_agent::approval::ApprovalBridge::new()
+    }
+
     fn bridge_request(call_id: &str) -> wcore_agent::approval::ApprovalRequest {
         wcore_agent::approval::ApprovalRequest {
             call_id: call_id.to_string(),
@@ -7468,6 +7551,7 @@ mod tests {
                 future,
                 &mut cmd_rx,
                 approval_manager.as_ref(),
+                bridge.as_ref(),
                 &writer,
                 &|| {},
             ),
@@ -7542,6 +7626,7 @@ mod tests {
                 future,
                 &mut cmd_rx,
                 approval_manager.as_ref(),
+                bridge.as_ref(),
                 &writer,
                 &|| {},
             ),
@@ -7600,6 +7685,7 @@ mod tests {
                 future,
                 &mut cmd_rx,
                 approval_manager.as_ref(),
+                &empty_bridge(),
                 &writer,
                 &|| {},
             ),
@@ -7655,6 +7741,7 @@ mod tests {
                 future,
                 &mut cmd_rx,
                 approval_manager.as_ref(),
+                &empty_bridge(),
                 &writer,
                 &|| {},
             ),
@@ -7692,9 +7779,14 @@ mod tests {
 
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            drive_active_recovery(future, &mut cmd_rx, &approval_manager, &writer, &|| {
-                cancellation.cancel()
-            }),
+            drive_active_recovery(
+                future,
+                &mut cmd_rx,
+                &approval_manager,
+                &empty_bridge(),
+                &writer,
+                &|| cancellation.cancel(),
+            ),
         )
         .await
         .expect("Stop must be observed by the recovery future before it is dropped");
@@ -7733,11 +7825,15 @@ mod tests {
         let writer = CapturingProtocolEmitter::default();
         let approval_manager = ToolApprovalManager::new();
 
-        let outcome =
-            drive_active_recovery(future, &mut cmd_rx, &approval_manager, &writer, &|| {
-                cancellation.cancel()
-            })
-            .await;
+        let outcome = drive_active_recovery(
+            future,
+            &mut cmd_rx,
+            &approval_manager,
+            &empty_bridge(),
+            &writer,
+            &|| cancellation.cancel(),
+        )
+        .await;
 
         assert!(matches!(outcome, ActiveRecoveryOutcome::Stopped(())));
         let events = writer.events.lock().unwrap();
