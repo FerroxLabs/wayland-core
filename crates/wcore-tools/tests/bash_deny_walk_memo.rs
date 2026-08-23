@@ -11,6 +11,7 @@
 //! growth succeeded before grading anything.
 
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -27,6 +28,7 @@ use wcore_tools::context::ToolContext;
 use wcore_tools::workspace_policy::WorkspacePolicy;
 
 /// The cold walk a fixture must reach before any latency verdict is taken.
+#[cfg(unix)]
 const TARGET_WALK: Duration = Duration::from_millis(60);
 
 /// A backend that really runs the command and CLAIMS OS read-deny enforcement,
@@ -82,6 +84,7 @@ async fn warm_bash_process_init(root: &std::path::Path) {
 /// Each sample uses a FRESH policy: a memoised policy would report ~0 for every
 /// sample after the first, the loop would grow the tree for ever, and the
 /// latency verdicts would be taken against a walk cost that does not exist.
+#[cfg(unix)]
 fn workspace_whose_cold_walk_costs_at_least(root: &std::path::Path, target: Duration) -> Duration {
     std::fs::write(root.join(".env"), b"TOKEN=redacted\n").unwrap();
     for batch in 0..24usize {
@@ -103,6 +106,11 @@ fn workspace_whose_cold_walk_costs_at_least(root: &std::path::Path, target: Dura
         if floor >= target {
             return floor;
         }
+        // File-heavy on purpose, ~50 files per directory: that is the shape of
+        // a real workspace, and it is the shape the memo is FOR. A
+        // directory-dominated tree is the memo's worst case (revalidation costs
+        // one `stat` per directory, so a tree with two files per directory
+        // saves almost nothing) — see the note on the issue.
         for d in 0..200 {
             let dir = root.join(format!("b{batch}")).join(format!("d{d}"));
             std::fs::create_dir_all(&dir).unwrap();
@@ -114,6 +122,15 @@ fn workspace_whose_cold_walk_costs_at_least(root: &std::path::Path, target: Dura
     panic!("could not grow a workspace whose cold walk costs {target:?}");
 }
 
+/// Wall-clock arms are Unix-only, and deliberately so. Growing a fixture whose
+/// cold walk costs 60 ms takes ~240k entries, and creating that many files on
+/// NTFS is minutes rather than seconds. The two verdicts these arms take are
+/// ALSO taken by `two_execs_perform_exactly_one_walk`, which uses the injected
+/// counter, needs no fixture at all and DOES run on Windows — so nothing about
+/// this acceptance goes ungraded on any platform. What is lost here is only the
+/// wall-clock reproduction of the reported symptom, and that reproduction is
+/// recorded against a Linux host.
+#[cfg(unix)]
 /// #1111 acceptance 1, buffered call site (`execute_with_ctx`).
 #[tokio::test]
 async fn a_second_bash_exec_does_not_repeat_the_walk_buffered() {
@@ -139,6 +156,10 @@ async fn a_second_bash_exec_does_not_repeat_the_walk_buffered() {
     let second_elapsed = t.elapsed();
     assert!(!second.is_error, "{}", second.content);
 
+    println!(
+        "#1111 buffered: cold walk {walk:?}, first exec {first_elapsed:?}, \
+         second exec {second_elapsed:?}"
+    );
     assert!(
         second_elapsed * 3 < walk,
         "the second exec took {second_elapsed:?} against a cold walk measured at \
@@ -147,6 +168,8 @@ async fn a_second_bash_exec_does_not_repeat_the_walk_buffered() {
 }
 
 /// #1111 acceptance 1, streaming call site (`execute_streaming_with_ctx`).
+/// See the note above on why the wall-clock arms are Unix-only.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_second_bash_exec_does_not_repeat_the_walk_streaming() {
     let tmp = tempfile::tempdir().unwrap();
@@ -171,6 +194,10 @@ async fn a_second_bash_exec_does_not_repeat_the_walk_streaming() {
     let second_elapsed = t.elapsed();
     assert!(!second.is_error, "{}", second.content);
 
+    println!(
+        "#1111 streaming: cold walk {walk:?}, first exec {first_elapsed:?}, \
+         second exec {second_elapsed:?}"
+    );
     assert!(
         second_elapsed * 3 < walk,
         "the second streaming exec took {second_elapsed:?} against a cold walk \

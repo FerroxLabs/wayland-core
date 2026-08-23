@@ -1823,8 +1823,17 @@ fn dir_stamp(entry: &ignore::DirEntry) -> Option<(PathBuf, SystemTime)> {
     if !entry.file_type().is_some_and(|t| t.is_dir()) {
         return None;
     }
-    let mtime = entry
-        .metadata()
+    // `std::fs::symlink_metadata`, NOT `entry.metadata()`, and the difference is
+    // load-bearing rather than stylistic: revalidation reads the mtime with
+    // `symlink_metadata`, and a stamp is only meaningful if both sides use the
+    // SAME instrument. On Windows they are not interchangeable — a walk's
+    // `DirEntry` carries the timestamps the parent directory's enumeration
+    // returned, and NTFS updates that cached copy lazily, so the enumerated
+    // value routinely differs from the one an open of the directory reports.
+    // Stamping from the enumeration made every revalidation mismatch and the
+    // memo never hit on Windows; caught by `two_execs_perform_exactly_one_walk`
+    // running on a real Windows host, not by reading this code.
+    let mtime = std::fs::symlink_metadata(entry.path())
         .ok()
         .and_then(|meta| meta.modified().ok())
         .unwrap_or(SystemTime::UNIX_EPOCH);
