@@ -1457,11 +1457,181 @@ fn is_unserved_request_failure(failure_code: &str) -> bool {
 ///
 /// Scoped to name resolution alone. `connection_refused` is NOT here — a port
 /// that refuses today can accept in a second (a provider rolling a listener) —
-/// it is merely no longer admitted to the outage WINDOW, so it keeps the
-/// ordinary bounded `MAX_STREAM_RETRIES`. Anything unrecognised keeps the old
-/// generous behaviour; see `wcore_providers::retry::connect_failure_code`.
+/// it is not permanent, it is merely CHEAP to give up on: see
+/// [`is_refused_endpoint_failure`] and [`REFUSED_ENDPOINT_MAX_RETRIES`].
+/// Anything unrecognised keeps the ordinary budget; see
+/// `wcore_providers::retry::connect_failure_code`.
 fn is_permanent_endpoint_failure(failure_code: &str) -> bool {
     failure_code == wcore_providers::retry::FAILURE_DNS
+}
+
+/// True when the configured endpoint actively REFUSED the connection: the
+/// host resolved, the route worked, and something at the other end answered
+/// the SYN with a RST.
+///
+/// A refusal is not permanent — [`is_permanent_endpoint_failure`] is the
+/// right home for a fact that cannot change, and a listener being rolled
+/// (Ollama restarting, a dev proxy re-execing) refuses for a second or two
+/// and then accepts. It gets its own SHORT budget rather than no budget:
+/// [`REFUSED_ENDPOINT_MAX_RETRIES`].
+fn is_refused_endpoint_failure(failure_code: &str) -> bool {
+    failure_code == wcore_providers::retry::FAILURE_CONNECTION_REFUSED
+}
+
+/// Retries admitted for an actively refused connection, in place of the
+/// configured [`DEFAULT_MAX_STREAM_RETRIES`].
+///
+/// ## Why this class needs its own number
+///
+/// A retry budget buys the chance that the next send gets a different answer.
+/// What it costs is wall-clock the user spends staring at a stalled prompt,
+/// and that price is set by how FAST the class fails. A refused connection
+/// fails in about a millisecond, so essentially the entire budget is spent
+/// asleep in the backoff curve: at the shipped budget of 10 the run is
+/// silent for a measured 142.9 s across 11 sends, and 142.5 s of that is
+/// sleep. Every other retryable class pays for its wall-clock with a real
+/// network attempt.
+///
+/// The chance being bought is also the thinnest in the retryable set. A RST
+/// is a definite answer from the machine at the far end: nothing is
+/// listening on that port. That heals only if a listener starts, which is a
+/// second-scale event (a process restarting) or a never event (the port in
+/// `base_url` is wrong). Two retries cover the first; no budget covers the
+/// second, and the overwhelmingly common trigger — measured against this
+/// product's own defaults, a `base_url` typo — is the second.
+///
+/// ## Why 2, and why it is not a reclassification
+///
+/// 2 retries = 3 sends, spanning `0.5 s + 1.0 s` of curve — a measured 1.9 s.
+/// That is the behaviour v0.13.5 shipped for this shape (1.8 s / 3 sends),
+/// chosen deliberately then and preserved here. The change that made it
+/// intolerable was the retry budget going 2 -> 10, which moved the cost of
+/// this one class by 80x while leaving its benefit exactly where it was.
+///
+/// The alternative — adding `connection_refused` to
+/// [`is_permanent_endpoint_failure`] — is refused on the evidence: it would
+/// send ONCE, and a local provider restarting really does recover inside
+/// two retries. Keeping the class retryable and bounding it separately is
+/// the honest encoding of "cheap to abandon, not impossible to recover".
+const REFUSED_ENDPOINT_MAX_RETRIES: u32 = 2;
+
+/// The sentence the run ends on when the provider retry budget is spent.
+///
+/// Leads with the fault the USER can act on. "Provider stream failed after
+/// retries: API error 500" reads as a provider outage; for an auth refusal it
+/// is the key that is wrong and the 500 is incidental. The provider's own
+/// words are kept, in parentheses, because they are the evidence for the
+/// claim.
+///
+/// The ordering is by specificity, and every branch above the fallback exists
+/// because a real run ended on a sentence that named a CONSEQUENCE instead of
+/// a cause — a rate limit reported as an open circuit, a rate limit reported
+/// as a missing API key, a `base_url` typo reported as a provider outage.
+fn exhausted_provider_remedy(
+    failure_code: &str,
+    reason: &str,
+    sends: u32,
+    permanent_endpoint: bool,
+    is_auth_failure: bool,
+) -> String {
+    if permanent_endpoint {
+        // Name the remedy, in the shape the no-API-key error already uses:
+        // what is wrong, and the exact setting to change. The URL itself is
+        // deliberately NOT echoed — a provider may carry its credential in
+        // the query string (H-2), and the config key is what the user edits
+        // anyway.
+        format!(
+            "Cannot reach the configured provider: the endpoint host name does not resolve. \
+             That is a permanent failure — every re-send gets the same answer — so the run \
+             stopped after {sends} attempt(s) instead of spending the {budget}s \
+             provider-outage budget on it. Check `base_url` for the selected provider in your \
+             wayland-core config (or the `--base-url` you passed), then check DNS on this \
+             host. The session has been saved — resume it once the endpoint is right. \
+             (underlying error: {reason})",
+            budget = UNSERVED_OUTAGE_BUDGET.as_secs(),
+        )
+    } else if is_auth_failure {
+        format!("{AUTH_FAILURE_REMEDY} The provider reported: {reason}")
+    } else if is_refused_endpoint_failure(failure_code) {
+        // Same shape as the DNS remedy above: name the fault, the setting
+        // that carries it, and why the run stopped early rather than
+        // spending the full budget.
+        format!(
+            "Cannot reach the configured provider: the endpoint refused the connection. The \
+             host resolved and the route worked, so something answered — nothing is listening \
+             on that port. The run stopped after {sends} attempt(s) rather than spending the \
+             full retry budget on it, because a refusal is answered in a millisecond and \
+             re-sending mostly buys silence. Check the port in `base_url` for the selected \
+             provider in your wayland-core config (or the `--base-url` you passed), and check \
+             that the provider is running if it is a local one. The session has been saved — \
+             resume it once the endpoint is right. (underlying error: {reason})"
+        )
+    } else if failure_code == wcore_providers::retry::FAILURE_RATE_LIMITED {
+        // Name the RATE LIMIT. Everything downstream of a 429 — the breaker
+        // opening, the budget running out — is a consequence, and a user
+        // told about a consequence has no idea what to change. This is the
+        // same defect class as the 429 that used to end the run claiming
+        // there was no API key.
+        format!(
+            "The provider rate-limited this request (HTTP 429) and was still rate-limiting it \
+             after {sends} attempt(s), honouring the wait it asked for each time. This is not \
+             an outage and nothing is misconfigured — the account or key is over its quota. \
+             Wait for the limit to reset, use a key with more headroom, or configure a \
+             fallback provider so the run can route around a throttled one. The session has \
+             been saved — resume it to continue from here rather than starting over. (the \
+             provider reported: {reason})"
+        )
+    } else {
+        format!(
+            "Provider stream failed after retries: {reason}. The session has been saved — \
+             resume it to continue from here rather than starting over."
+        )
+    }
+}
+
+/// Count bound in force for ONE failure class, given the configured budget.
+///
+/// Every class keeps `configured` except an actively refused connection,
+/// which is capped at [`REFUSED_ENDPOINT_MAX_RETRIES`]. The `min` matters:
+/// a user who LOWERED the budget must never be handed a larger one by this
+/// branch, and a naive `if refused { 2 }` would do exactly that at
+/// `WAYLAND_MAX_STREAM_RETRIES=0`.
+fn class_retry_budget(failure_code: &str, configured: u32) -> u32 {
+    if is_refused_endpoint_failure(failure_code) {
+        configured.min(REFUSED_ENDPOINT_MAX_RETRIES)
+    } else {
+        configured
+    }
+}
+
+/// Whether one more engine retry is admitted.
+///
+/// Two bounds, ANDed, and they no longer fight because they bound different
+/// failure SHAPES.
+///
+/// The COUNT bounds a class that fails fast: an `http_503` answers in
+/// milliseconds, so with only the window in force, 900 s admits as many
+/// sends as fit — a measured 39 against a stated budget of 10, while every
+/// notice printed a budget it was not counting against. "attempt N/10" has
+/// to mean what it says.
+///
+/// The WINDOW bounds a class that fails SLOWLY: a `transport` failure can
+/// take a full `READ_TIMEOUT` to surface, and ten of those is fifty minutes.
+///
+/// The earlier design note argued a count was simply the wrong unit here,
+/// and against the budget it was written for that was true:
+/// `MAX_STREAM_RETRIES` was 2 and spanned 1.5 s, shorter than one TCP
+/// re-establishment, so a count could not express "ride out an outage" at
+/// all. The curve in `wcore_providers::backoff` dissolved that objection —
+/// at a budget of 10 the count spans ~143 s of backoff on its own. Whichever
+/// bound fires first wins; neither is redundant.
+fn stream_retry_admitted(
+    unserved: bool,
+    stream_attempt: u32,
+    class_max_retries: u32,
+    outage_window_open: bool,
+) -> bool {
+    stream_attempt < class_max_retries && (!unserved || outage_window_open)
 }
 
 /// True when the failure code says a response HEAD arrived — the provider
@@ -2261,6 +2431,200 @@ mod v0911_engine_recovery_tests {
         //    driven by the SAME predicate, so a connect-phase failure no longer
         //    inflates a sentence that claims each request "was dispatched".
         assert!(!is_unserved_request_failure(FAILURE_DNS));
+    }
+
+    /// Correction 1. A `base_url` typo must not cost two and a half minutes.
+    ///
+    /// Measured on this harness: `connection_refused` against
+    /// `http://127.0.0.1:9` ran 145.5 s over 11 sends, of which ~145 s was
+    /// backoff sleep — the failure itself is answered in about a
+    /// millisecond. v0.13.5 spent 1.8 s / 3 sends on the same shape. Nothing
+    /// about the BENEFIT of retrying a refusal changed between those two
+    /// numbers; only the budget did, from 2 to 10.
+    #[test]
+    fn a_refused_connection_gets_a_short_budget_of_its_own() {
+        use wcore_providers::backoff::base_backoff;
+        use wcore_providers::retry::{
+            FAILURE_CONNECTION, FAILURE_CONNECTION_REFUSED, FAILURE_DNS, FAILURE_RATE_LIMITED,
+        };
+
+        assert_eq!(
+            class_retry_budget(FAILURE_CONNECTION_REFUSED, DEFAULT_MAX_STREAM_RETRIES),
+            REFUSED_ENDPOINT_MAX_RETRIES
+        );
+
+        // Known-positive controls: every other class still gets the whole
+        // configured budget. Without these, capping EVERYTHING at 2 would
+        // pass the assertion above while silently undoing the parity work.
+        for other in [
+            FAILURE_CONNECTION,
+            FAILURE_DNS,
+            FAILURE_RATE_LIMITED,
+            "transport",
+            "http_500",
+            "http_503",
+            "http_529",
+            "timeout",
+            "stream_truncated",
+            "",
+        ] {
+            assert_eq!(
+                class_retry_budget(other, DEFAULT_MAX_STREAM_RETRIES),
+                DEFAULT_MAX_STREAM_RETRIES,
+                "{other} must keep the configured budget"
+            );
+        }
+
+        // The `min`: a user who LOWERED the budget must never be handed a
+        // larger one by this branch. A bare `if refused { 2 }` fails here.
+        for configured in [0u32, 1, 2] {
+            assert_eq!(
+                class_retry_budget(FAILURE_CONNECTION_REFUSED, configured),
+                configured,
+                "a configured budget of {configured} must not be RAISED to \
+                 {REFUSED_ENDPOINT_MAX_RETRIES}"
+            );
+        }
+
+        // The number is chosen against the real curve, so grade it against
+        // the real curve rather than against itself: the short budget must
+        // be seconds and the full budget must be minutes. This is the
+        // 80x cost move that reopened the decision, asserted.
+        let spent = |retries: u32| -> std::time::Duration { (1..=retries).map(base_backoff).sum() };
+        assert!(
+            spent(REFUSED_ENDPOINT_MAX_RETRIES) <= std::time::Duration::from_secs(2),
+            "a refused endpoint must be abandoned in about the ~1.8 s v0.13.5 \
+             took, not {:?}",
+            spent(REFUSED_ENDPOINT_MAX_RETRIES)
+        );
+        assert!(
+            spent(DEFAULT_MAX_STREAM_RETRIES) >= std::time::Duration::from_secs(100),
+            "control: the full budget really is the expensive one this class \
+             is being excused from ({:?})",
+            spent(DEFAULT_MAX_STREAM_RETRIES)
+        );
+
+        // It is a SHORT budget, not zero, and not permanence. A local
+        // provider being restarted refuses for a second and then accepts, so
+        // the class must still get at least one re-send.
+        assert!(
+            class_retry_budget(FAILURE_CONNECTION_REFUSED, DEFAULT_MAX_STREAM_RETRIES) >= 1,
+            "a refused endpoint must still be retried at least once — a \
+             listener that is being restarted comes back"
+        );
+        assert!(!is_permanent_endpoint_failure(FAILURE_CONNECTION_REFUSED));
+    }
+
+    /// Correction 2. Thirty-nine sends against a stated budget of 10 means
+    /// the count bound was not applying to the unserved class at all.
+    ///
+    /// Measured on the shipped tree: an `http_503` endpoint ran 904.5 s over
+    /// 39 sends while every retry notice named an outage window and none
+    /// named a count. The two bounds are now ANDed.
+    #[test]
+    fn the_count_bound_applies_to_the_unserved_class_too() {
+        const MAX: u32 = 10;
+
+        // THE regression. The window is wide open and the count is spent:
+        // admission must be refused. Before the fix this returned true, and
+        // kept returning true for 29 more sends.
+        assert!(
+            !stream_retry_admitted(true, MAX, MAX, true),
+            "an unserved failure must stop at the retry budget even with the \
+             outage window wide open"
+        );
+        for attempt in MAX..MAX + 30 {
+            assert!(!stream_retry_admitted(true, attempt, MAX, true));
+        }
+
+        // Known-positive: below the count, an open window still admits. If
+        // this failed, the assertion above would be passing because nothing
+        // is ever admitted rather than because the count binds.
+        for attempt in 0..MAX {
+            assert!(
+                stream_retry_admitted(true, attempt, MAX, true),
+                "attempt {attempt} of {MAX} must still be admitted"
+            );
+        }
+
+        // The window is still a real bound, not decoration: it closes the
+        // door on a class that fails slowly enough to outlast it.
+        assert!(!stream_retry_admitted(true, 0, MAX, false));
+
+        // ...and it is gated on `unserved`. A SERVED failure must be judged
+        // by the count alone; letting a closed window bind it would silently
+        // shrink every other class to zero retries once one unserved failure
+        // had armed the clock earlier in the same turn.
+        assert!(stream_retry_admitted(false, 0, MAX, false));
+        assert!(!stream_retry_admitted(false, MAX, MAX, false));
+
+        // A budget of zero admits nothing, in either class.
+        assert!(!stream_retry_admitted(true, 0, 0, true));
+        assert!(!stream_retry_admitted(false, 0, 0, true));
+    }
+
+    /// Correction 3(b), and the DNS/auth remedies it must not disturb. A user
+    /// reading the last line of a failed run has to learn what to CHANGE.
+    #[test]
+    fn the_sentence_a_run_dies_on_names_the_cause_not_a_consequence() {
+        use wcore_providers::retry::{
+            FAILURE_CONNECTION, FAILURE_CONNECTION_REFUSED, FAILURE_RATE_LIMITED,
+        };
+        let remedy = |code: &str, reason: &str, permanent, auth| {
+            exhausted_provider_remedy(code, reason, 11, permanent, auth)
+        };
+
+        // A rate limit names the rate limit — and never the circuit that is
+        // merely how the old build happened to stop.
+        let rate = remedy(
+            FAILURE_RATE_LIMITED,
+            "Rate limited, retry after 7000ms",
+            false,
+            false,
+        );
+        assert!(rate.contains("rate-limited"), "{rate}");
+        assert!(rate.contains("429"), "{rate}");
+        assert!(rate.contains("quota"), "{rate}");
+        assert!(
+            !rate.contains("circuit"),
+            "the user's problem is a quota, not our breaker: {rate}"
+        );
+        // The provider's own words survive as the evidence for the claim.
+        assert!(rate.contains("retry after 7000ms"), "{rate}");
+
+        // A refusal names the port and says why it stopped early, so the
+        // short budget does not read as a truncated one.
+        let refused = remedy(
+            FAILURE_CONNECTION_REFUSED,
+            "Connection error: Connection refused (os error 111)",
+            false,
+            false,
+        );
+        assert!(refused.contains("refused the connection"), "{refused}");
+        assert!(refused.contains("port"), "{refused}");
+        assert!(refused.contains("11 attempt(s)"), "{refused}");
+
+        // Untouched neighbours. Permanence outranks the code, an auth
+        // failure outranks everything below it, and anything unrecognised
+        // still gets the generic sentence.
+        let dns = remedy("dns_failure", "no such host", true, false);
+        assert!(dns.contains("does not resolve"), "{dns}");
+        let auth = remedy("http_500", "Invalid proxy server token", false, true);
+        assert!(auth.starts_with(AUTH_FAILURE_REMEDY), "{auth}");
+        let generic = remedy(FAILURE_CONNECTION, "connection reset", false, false);
+        assert!(
+            generic.starts_with("Provider stream failed after retries"),
+            "{generic}"
+        );
+        // Specificity ordering: a permanent endpoint wins over the refusal
+        // branch even when the code would match it.
+        let both = remedy(FAILURE_CONNECTION_REFUSED, "x", true, false);
+        assert!(both.contains("does not resolve"), "{both}");
+
+        // Every remedy tells the user the work was not lost.
+        for sentence in [&rate, &refused, &dns, &generic] {
+            assert!(sentence.contains("session has been saved"), "{sentence}");
+        }
     }
 
     #[test]
@@ -13410,14 +13774,21 @@ impl AgentEngine {
                     // different questions.
                     self.unserved_resends = self.unserved_resends.saturating_add(1);
                 }
-                let retry_admitted = if unserved {
+                let class_max_retries = class_retry_budget(&failure_code, max_stream_retries);
+                // The window is armed lazily, on the first unserved failure of
+                // the turn, so a turn that never sees one never starts a clock.
+                let outage_window_open = !unserved || {
                     let deadline = *unserved_deadline.get_or_insert_with(|| {
                         tokio::time::Instant::now() + UNSERVED_OUTAGE_BUDGET
                     });
                     tokio::time::Instant::now() < deadline
-                } else {
-                    stream_attempt < max_stream_retries
                 };
+                let retry_admitted = stream_retry_admitted(
+                    unserved,
+                    stream_attempt,
+                    class_max_retries,
+                    outage_window_open,
+                );
                 if !is_client_error && !permanent_endpoint && retry_admitted {
                     // Spec v1 Task 5 (clean retry): a retry re-sends the whole
                     // outbound context. When the most recent tool round
@@ -13493,16 +13864,21 @@ impl AgentEngine {
                     let backoff = retry_delay(
                         stream_attempt,
                         stream_retry_after_ms,
-                        failure_code == "http_429",
+                        failure_code == wcore_providers::retry::FAILURE_RATE_LIMITED,
                     );
+                    // Both bounds, whenever both apply. Printing only the
+                    // window on the unserved class is what let 39 sends go
+                    // past while every notice claimed a budget it was not
+                    // counting against.
                     let progress = match unserved_deadline.filter(|_| unserved) {
                         Some(deadline) => format!(
-                            "attempt {stream_attempt}, {}s of outage budget left",
+                            "attempt {stream_attempt}/{class_max_retries}, {}s of outage \
+                             budget left",
                             deadline
                                 .saturating_duration_since(tokio::time::Instant::now())
                                 .as_secs()
                         ),
-                        None => format!("attempt {stream_attempt}/{max_stream_retries}"),
+                        None => format!("attempt {stream_attempt}/{class_max_retries}"),
                     };
                     // Name the wait. The later steps of the curve run
                     // 16-30 s and NOTHING else speaks during them: the silence
@@ -13562,37 +13938,13 @@ impl AgentEngine {
                 }
                 self.save_session_mirror();
                 let sends = stream_attempt.saturating_add(1);
-                // Lead with the fault the user can act on. "Provider stream
-                // failed after retries: API error 500" reads as a provider
-                // outage; for an auth refusal it is the key that is wrong, the
-                // 500 is incidental, and there were no retries to speak of.
-                // The provider's own words are kept, in parentheses, because
-                // they are the evidence for the claim.
-                let final_error = if permanent_endpoint {
-                    // Name the remedy, in the shape the no-API-key error
-                    // already uses: what is wrong, and the exact setting to
-                    // change. The URL itself is deliberately NOT echoed — a
-                    // provider may carry its credential in the query string
-                    // (H-2), and the config key is what the user edits anyway.
-                    format!(
-                        "Cannot reach the configured provider: the endpoint host name does not \
-                         resolve. That is a permanent failure — every re-send gets the same \
-                         answer — so the run stopped after {sends} attempt(s) instead of \
-                         spending the {budget}s provider-outage budget on it. Check `base_url` \
-                         for the selected provider in your wayland-core config (or the \
-                         `--base-url` you passed), then check DNS on this host. The session has \
-                         been saved — resume it once the endpoint is right. (underlying error: \
-                         {reason})",
-                        budget = UNSERVED_OUTAGE_BUDGET.as_secs(),
-                    )
-                } else if is_auth_failure {
-                    format!("{AUTH_FAILURE_REMEDY} The provider reported: {reason}")
-                } else {
-                    format!(
-                        "Provider stream failed after retries: {reason}. The session has been \
-                         saved — resume it to continue from here rather than starting over."
-                    )
-                };
+                let final_error = exhausted_provider_remedy(
+                    &failure_code,
+                    &reason,
+                    sends,
+                    permanent_endpoint,
+                    is_auth_failure,
+                );
                 self.output
                     .emit_error(&final_error, !is_client_error && !permanent_endpoint);
                 return Err(AgentError::ApiError(final_error));
@@ -26690,74 +27042,90 @@ mod audit_2026_05_22_tests {
         (calls.load(std::sync::atomic::Ordering::SeqCst), elapsed)
     }
 
-    /// The headline of round 2. The budget for a request the provider never
-    /// served is an outage WINDOW, not a send count.
+    /// REVISED — this test used to assert that an unserved request is bounded
+    /// by the outage WINDOW and deliberately NOT by a send count. That was
+    /// the design, and shipping it produced the defect this replaces:
+    /// measured against a 503 endpoint, 904.5 s over 39 physical sends while
+    /// every retry notice named a budget of 10 and none of them counted.
     ///
-    /// The discriminating measurement is the pair: the same code, the same
-    /// budget, two outages that differ only in how fast each attempt fails.
-    /// A count-bounded budget gives both arms the identical number of sends
-    /// and wildly different wall clocks; a window-bounded budget does the
-    /// opposite, which is what "ride out an outage" actually means. Any
-    /// reversion to a fixed count collapses the two arms together and fails
-    /// here.
+    /// The contract now is TWO bounds, ANDed, each binding a different
+    /// failure shape — and this is still a discriminating pair, just on the
+    /// other axis. Same code, same constants, two outages differing only in
+    /// how fast each attempt fails:
     ///
-    /// Runs on a paused clock, so the 300 s window costs no real time.
+    /// * fail instantly -> the COUNT binds. Eleven sends, and the run stops
+    ///   far inside the window rather than filling it.
+    /// * fail after a full `READ_TIMEOUT` -> the WINDOW binds, well before
+    ///   the count is spent. This is the half that keeps ten slow attempts
+    ///   from parking a run for the better part of an hour.
+    ///
+    /// Collapse either bound and one arm goes wrong: drop the count and the
+    /// fast arm runs the window out again; drop the window and the slow arm
+    /// runs ten full timeouts.
+    ///
+    /// Runs on a paused clock, so neither arm costs real time.
     #[tokio::test(start_paused = true)]
-    async fn an_unserved_outage_is_bounded_by_wall_clock_not_by_a_send_count() {
+    async fn an_unserved_outage_is_bounded_by_the_count_and_by_the_window() {
+        let slow_step = wcore_providers::http_client::READ_TIMEOUT;
         let (fast_sends, fast_elapsed) = unserved_outage(std::time::Duration::ZERO).await;
-        let (slow_sends, slow_elapsed) = unserved_outage(std::time::Duration::from_secs(60)).await;
+        let (slow_sends, slow_elapsed) = unserved_outage(slow_step).await;
 
-        // Both arms are held open for the whole window and then stop. Without
-        // a deadline this loop never ends; with the old count it stopped in
-        // ~10 s of wall clock however long the outage actually lasted.
-        for (label, elapsed) in [("fast", fast_elapsed), ("slow", slow_elapsed)] {
-            assert!(
-                elapsed >= super::UNSERVED_OUTAGE_BUDGET,
-                "the {label} outage gave up after {elapsed:?}, inside the budget"
-            );
-            assert!(
-                elapsed
-                    <= super::UNSERVED_OUTAGE_BUDGET
-                        + wcore_providers::backoff::RETRY_BACKOFF_CAP
-                        + std::time::Duration::from_secs(120),
-                "the {label} outage ran {elapsed:?}, well past the budget — the \
-                 deadline is not bounding the loop"
-            );
-        }
-
-        // Both are far past the served-failure budget.
-        assert!(
-            fast_sends > 3 && slow_sends > 3,
-            "an unserved failure must outlast MAX_STREAM_RETRIES: fast={fast_sends} \
-             slow={slow_sends}"
-        );
-        // A fixed COUNT would make these equal. Time does not — and the
-        // strong form of that claim is not a multiplier between the arms but
-        // an EXACT prediction for each arm, computed from the same two
-        // constants the loop uses. A count bound cannot satisfy both.
+        // Exact predictions from the same two constants the loop uses.
         for (label, delay, observed) in [
             ("fast", std::time::Duration::ZERO, fast_sends),
-            ("slow", std::time::Duration::from_secs(60), slow_sends),
+            ("slow", slow_step, slow_sends),
         ] {
-            let predicted = sends_the_window_admits(delay);
             assert_eq!(
-                observed, predicted,
-                "the {label} arm must fit exactly the sends the window admits \
-                 at {delay:?} per attempt: predicted {predicted}, saw {observed}"
+                observed,
+                sends_the_budget_admits(delay),
+                "the {label} arm must fit exactly the sends the two bounds \
+                 admit at {delay:?} per attempt: saw {observed}"
             );
         }
-        // And the two arms must genuinely differ, which is the part a count
-        // bound fails outright.
-        assert!(
-            fast_sends > slow_sends,
-            "a fast-failing outage must fit more sends into the same window \
-             than a slow-failing one (fast={fast_sends} slow={slow_sends}); \
-             equal counts mean the bound is still a count"
+
+        // The fast arm is COUNT-bound: it spends the configured budget and
+        // stops, without filling the window. Before the fix it ran the whole
+        // window out and sent 39 times against a budget of 10.
+        assert_eq!(
+            fast_sends,
+            super::DEFAULT_MAX_STREAM_RETRIES as usize + 1,
+            "a fast-failing outage must stop at the configured budget"
         );
+        assert!(
+            fast_elapsed < super::UNSERVED_OUTAGE_BUDGET,
+            "the fast arm ran {fast_elapsed:?} — it is still filling the \
+             window, so the count is not binding"
+        );
+
+        // The slow arm is WINDOW-bound: it stops before the count is spent,
+        // which is what keeps ten `READ_TIMEOUT`s from parking the run.
+        assert!(
+            slow_sends <= super::DEFAULT_MAX_STREAM_RETRIES as usize,
+            "the slow arm sent {slow_sends} times — the window is not \
+             bounding it, so ten full timeouts can still be spent"
+        );
+        assert!(
+            slow_elapsed >= super::UNSERVED_OUTAGE_BUDGET
+                && slow_elapsed
+                    <= super::UNSERVED_OUTAGE_BUDGET
+                        + slow_step
+                        + wcore_providers::backoff::RETRY_BACKOFF_CAP,
+            "the slow arm ran {slow_elapsed:?}, which is not the window"
+        );
+
+        // Both still far outlast the two-retry budget the class was given
+        // before any of this work.
+        assert!(fast_sends > 3 && slow_sends > 3);
     }
 
-    /// How many sends [`super::UNSERVED_OUTAGE_BUDGET`] admits when every
-    /// attempt fails after `delay`, walking the real backoff schedule.
+    /// How many sends the unserved class admits when every attempt fails
+    /// after `delay`, walking the real backoff schedule against BOTH bounds.
+    ///
+    /// It used to walk the window alone, and that is the shape of the defect
+    /// it now guards: with only the window in force an `http_503` endpoint
+    /// ran a measured 904.5 s over 39 sends while the configured budget said
+    /// 10. `stream_retry_admitted` ANDs the count in; this walks the same
+    /// two bounds so the prediction stays derived rather than tuned.
     ///
     /// This replaces two hand-tuned numbers that used to guard this test: a
     /// `fast_sends > slow_sends * 3` ratio and a `budget / cap + 12` ceiling.
@@ -26772,7 +27140,7 @@ mod audit_2026_05_22_tests {
     /// run its engine inside `scope_jitter(0.0, …)`. An unpinned draw adds up
     /// to 25 % per gap, which both shrinks the real count below this
     /// prediction and makes it differ run to run.
-    fn sends_the_window_admits(delay: std::time::Duration) -> usize {
+    fn sends_the_budget_admits(delay: std::time::Duration) -> usize {
         // The deadline is armed on the FIRST failure, so the window starts at
         // the end of send 1 and each retry is admitted on the clock reading
         // taken when it fails.
@@ -26780,6 +27148,12 @@ mod audit_2026_05_22_tests {
         let mut sends = 1usize;
         let mut elapsed = delay;
         loop {
+            // `stream_attempt` — the retries already taken — is `sends - 1`,
+            // and admission needs it strictly below the budget. That is
+            // `sends > budget`, which is the form clippy insists on.
+            if sends > super::DEFAULT_MAX_STREAM_RETRIES as usize {
+                return sends;
+            }
             if elapsed >= deadline {
                 return sends;
             }
@@ -26796,13 +27170,26 @@ mod audit_2026_05_22_tests {
     /// not on the small served-failure count.
     ///
     /// 529 is the status Anthropic and OpenAI use for "overloaded". It means
-    /// the provider explicitly did not do the work, so re-sending is free and
-    /// the window is the right budget — but only if the classification wiring
-    /// actually carries the status that far, which is what this measures.
+    /// the provider explicitly did not do the work, so it belongs to the
+    /// unserved class — but only if the classification wiring actually
+    /// carries the status that far, which is what this measures.
+    ///
+    /// The discriminator had to change with the bounds. It used to be "more
+    /// sends than the served count allows", and that worked while the served
+    /// count was 2. Both classes now share the same count, so a fast 529 and
+    /// a fast 500 produce identical send counts and that assertion can no
+    /// longer fail — it would be a test that cannot detect its own defect.
+    ///
+    /// What still separates the classes is the WINDOW, and it separates them
+    /// only when attempts are slow. So make them slow: a 529 that takes a
+    /// full `READ_TIMEOUT` to arrive is window-bound and stops early; the
+    /// same shape misclassified as SERVED would spend the whole count and
+    /// send more. The arms differ, so the assertion can fail.
     #[tokio::test(start_paused = true)]
-    async fn an_http_529_outage_is_ridden_out_on_the_window() {
+    async fn an_http_529_outage_is_classified_unserved_and_capped_by_the_window() {
         struct Overloaded {
             calls: Arc<std::sync::atomic::AtomicUsize>,
+            delay: std::time::Duration,
         }
         #[async_trait]
         impl LlmProvider for Overloaded {
@@ -26811,6 +27198,7 @@ mod audit_2026_05_22_tests {
                 _: &LlmRequest,
             ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
                 self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(self.delay).await;
                 Err(ProviderError::Api {
                     status: 529,
                     message: "overloaded".into(),
@@ -26818,9 +27206,11 @@ mod audit_2026_05_22_tests {
             }
         }
 
+        let slow_step = wcore_providers::http_client::READ_TIMEOUT;
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut engine = engine_with(Arc::new(Overloaded {
             calls: Arc::clone(&calls),
+            delay: slow_step,
         }));
         // Pinned draw — see `unserved_outage`; the assertion below is an
         // exact send count derived from the un-jittered curve.
@@ -26831,17 +27221,21 @@ mod audit_2026_05_22_tests {
         );
 
         let sends = calls.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(
-            sends > 3,
-            "a 529 was bounded by the served-failure count ({sends} sends; \
-             MAX_STREAM_RETRIES is 2, so 3 total attempts) — the status never \
-             reached the unserved classifier"
-        );
         assert_eq!(
             sends,
-            sends_the_window_admits(std::time::Duration::ZERO),
-            "a 529 outage must fit exactly the sends the window admits"
+            sends_the_budget_admits(slow_step),
+            "a slow 529 must fit exactly the sends the two bounds admit"
         );
+        // The discriminator, stated as the thing that could go wrong: a 529
+        // treated as a SERVED failure has no window over it and spends the
+        // whole count instead.
+        assert!(
+            sends <= super::DEFAULT_MAX_STREAM_RETRIES as usize,
+            "a slow 529 sent {sends} times — the full served-class budget — \
+             so the status never reached the unserved classifier"
+        );
+        // ...and it is still genuinely retried, not failed fast.
+        assert!(sends > 1, "a 529 must be retried at all");
     }
 
     /// An engine whose emitted events can be read back.
@@ -26906,7 +27300,7 @@ mod audit_2026_05_22_tests {
         let sent = calls.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             sent,
-            sends_the_window_admits(std::time::Duration::ZERO),
+            sends_the_budget_admits(std::time::Duration::ZERO),
             "precondition: the outage must have run the window out"
         );
 
