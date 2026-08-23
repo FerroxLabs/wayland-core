@@ -51,6 +51,45 @@ pub struct TempEnvOptions {
     pub provider_read_timeout_ms: Option<u64>,
 }
 
+/// Pin the retry budget of every evaluated child spawned while this guard is
+/// alive, restoring the previous value on drop.
+///
+/// For scenarios that script a fixed number of failing provider steps: they
+/// assert what happens when the budget is EXHAUSTED, so they must state the
+/// budget rather than inherit it. Inheriting it is how they silently changed
+/// meaning when the shipped default moved from 2 to 10 — the script ran out of
+/// failures and the run began to SUCCEED.
+///
+/// `std::env` is process-global; `cargo nextest` runs each test in its own
+/// process, and callers sharing a binary under plain `cargo test` must
+/// serialize.
+pub struct ScenarioRetryBudget {
+    prior: Option<std::ffi::OsString>,
+}
+
+impl ScenarioRetryBudget {
+    pub fn pin(retries: u32) -> Self {
+        let key = crate::child_env::STREAM_RETRY_BUDGET_CONTROL;
+        let prior = std::env::var_os(key);
+        // SAFETY: documented above.
+        unsafe { std::env::set_var(key, retries.to_string()) };
+        Self { prior }
+    }
+}
+
+impl Drop for ScenarioRetryBudget {
+    fn drop(&mut self) {
+        let key = crate::child_env::STREAM_RETRY_BUDGET_CONTROL;
+        // SAFETY: as above.
+        unsafe {
+            match self.prior.take() {
+                Some(prior) => std::env::set_var(key, prior),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 /// Build a fresh hermetic env for one run.
 ///
 /// The seeded config never persists the API key. T4's `--strict` mode catches
