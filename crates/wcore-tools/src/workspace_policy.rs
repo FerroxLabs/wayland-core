@@ -19,6 +19,7 @@
 
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use thiserror::Error;
@@ -199,6 +200,53 @@ pub struct WorkspacePolicy {
     /// lifetime. This is interior-mutable so an already-running Bash tool sees
     /// the grant on its next call without replacing the session sandbox.
     session_read_grants: Arc<RwLock<Vec<SessionReadGrant>>>,
+    /// #1111 — the memoised exec-path deny set, with the stamp that proves it
+    /// is still what a fresh walk would produce. Interior-mutable and shared by
+    /// `Arc` for the same reason `session_read_grants` is: `bash.rs` holds the
+    /// policy behind an `Arc` and cannot replace it between executions.
+    deny_cache: Arc<RwLock<Option<DenyCache>>>,
+    /// #1111 — how many times this policy has actually recomputed the dynamic
+    /// deny set from the filesystem. Read by
+    /// [`secret_deny_walk_count`](Self::secret_deny_walk_count); it is the
+    /// injected counter #1111 asks the repeated-walk assertion to be made with,
+    /// so the grade does not rest on a wall clock.
+    deny_walks: Arc<AtomicU64>,
+}
+
+/// #1111 — one memoised deny set plus everything needed to decide whether it is
+/// stale.
+#[derive(Debug)]
+struct DenyCache {
+    /// Everything about the POLICY (as opposed to the tree) that changes the
+    /// answer — see [`WorkspacePolicy::deny_cache_key`]. A difference here is an
+    /// outright miss and no directory is stat'ed.
+    key: u64,
+    /// The instant the walk that produced `paths` started.
+    stamped_at: SystemTime,
+    /// Every directory that walk descended into, with its modification time.
+    dirs: Vec<(PathBuf, SystemTime)>,
+    paths: Vec<PathBuf>,
+}
+
+/// #1111 — a tree with more directories than this keeps today's per-exec walk
+/// rather than growing an unbounded stamp. Remembering a directory costs a
+/// `PathBuf` and revalidating it costs one `stat`, so past some size the memo
+/// stops paying for itself and starts costing memory instead.
+const DENY_CACHE_MAX_DIRS: usize = 100_000;
+
+/// #667/#1118 — THE shell-principal predicate, in one place.
+///
+/// True when the ONLY principal that can drive a shell built from this decision
+/// is the local operator at their own keyboard. Read directly by seams that must
+/// derive a principal without building a policy first (a one-shot CLI driver's
+/// spawner); [`WorkspacePolicy::with_shell_principal`] is the same question
+/// asked of a policy, so the two cannot drift.
+#[must_use]
+pub fn local_operator_shell_principal(
+    channel_posture_present: bool,
+    managed_execution_floor: bool,
+) -> bool {
+    !(channel_posture_present || managed_execution_floor)
 }
 
 #[derive(Debug, Error)]
@@ -338,6 +386,8 @@ impl WorkspacePolicy {
             local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(developer_capabilities)),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
+            deny_cache: Arc::new(RwLock::new(None)),
+            deny_walks: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -388,6 +438,8 @@ impl WorkspacePolicy {
             local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(Vec::new())),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
+            deny_cache: Arc::new(RwLock::new(None)),
+            deny_walks: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -491,6 +543,8 @@ impl WorkspacePolicy {
             local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(Vec::new())),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
+            deny_cache: Arc::new(RwLock::new(None)),
+            deny_walks: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -685,10 +739,39 @@ impl WorkspacePolicy {
         channel_posture_present: bool,
         managed_execution_floor: bool,
     ) -> Self {
-        if channel_posture_present || managed_execution_floor {
-            self
-        } else {
+        if local_operator_shell_principal(channel_posture_present, managed_execution_floor) {
             self.with_local_operator_principal()
+        } else {
+            self
+        }
+    }
+
+    /// #1118 — a DELEGATED CHILD's shell principal is its parent's, and can
+    /// never be wider.
+    ///
+    /// The sub-agent seam has no channel scope of its own to inspect: it is
+    /// reached only from a parent session that already made this decision at a
+    /// seam that could see one ([`with_shell_principal`](Self::with_shell_principal)).
+    /// Before this existed the spawner made no decision at all, so every child
+    /// fell to the fail-safe `false` while its parent — same operator, same
+    /// machine, same workspace — held `true`, and `bash.rs` refused the child's
+    /// shell on any backend that cannot enforce OS read-deny (the Windows
+    /// session default) while running the parent's.
+    ///
+    /// This is principal DERIVATION, not a profile relaxation:
+    /// `secret_read_deny_required` is untouched, the deny LIST is still computed
+    /// and still handed to the backend, and a backend that can enforce it (Linux
+    /// `bwrap`, macOS `sandbox_exec`, `docker`) still enforces every path in it
+    /// — including the delegating parent's own workspace. What changes is
+    /// confined to backends that were going to enforce nothing either way, where
+    /// the refusal removed the child's shell without removing anything a parent
+    /// shell on the same machine could not already reach.
+    #[must_use]
+    pub fn with_inherited_shell_principal(self, parent_is_local_operator: bool) -> Self {
+        if parent_is_local_operator {
+            self.with_local_operator_principal()
+        } else {
+            self
         }
     }
 
@@ -831,6 +914,35 @@ impl WorkspacePolicy {
     /// secret cannot be reconstructed from `.git/objects` via `Bash("git show
     /// HEAD:.env")` and friends — the sibling of the typed-GitTool drop (MF1).
     pub fn secret_deny_paths_dynamic(&self) -> Vec<PathBuf> {
+        self.secret_deny_paths_stamped().0
+    }
+
+    /// #1111 — how many times this policy has recomputed the deny set from the
+    /// filesystem. The injected counter the repeated-walk acceptance is graded
+    /// with; a wall clock cannot tell a skipped walk from a fast one.
+    #[doc(hidden)]
+    pub fn secret_deny_walk_count(&self) -> u64 {
+        self.deny_walks.load(Ordering::Relaxed)
+    }
+
+    /// [`secret_deny_paths_dynamic`](Self::secret_deny_paths_dynamic) plus the
+    /// stamp a later call needs to decide whether that answer is still current.
+    ///
+    /// The stamp is every DIRECTORY the walk descended into with its mtime, and
+    /// the instant the walk started. Secrecy is decided by NAME
+    /// ([`secret_entry`]), never by content, so the only events that can change
+    /// this answer are an entry being created, renamed, deleted or re-pointed —
+    /// and every one of those updates the containing directory's mtime. A stamp
+    /// over directories therefore detects every change that matters, WHOEVER
+    /// made it: this process, the operator's editor, a `git checkout`, or an
+    /// unrelated program. That is strictly stronger than invalidating on writes
+    /// through our own VFS, which sees only the first of those.
+    fn secret_deny_paths_stamped(&self) -> (Vec<PathBuf>, Vec<(PathBuf, SystemTime)>, SystemTime) {
+        // Taken BEFORE the walk: anything modified from here on is inside the
+        // walk's own window and must not be trusted by a later revalidation.
+        let stamped_at = SystemTime::now();
+        self.deny_walks.fetch_add(1, Ordering::Relaxed);
+        let mut dirs: Vec<(PathBuf, SystemTime)> = Vec::new();
         // Recompute the base deny set against the CURRENT readable roots. A
         // desktop capability grant can add a read-only runtime mount after
         // bootstrap; using the construction-time cache here would expose any
@@ -850,9 +962,13 @@ impl WorkspacePolicy {
         } else {
             self.trust
         };
-        let mut out = compute_secret_deny(base_trust, &self.root, &readable_canon);
+        let mut out = compute_secret_deny(base_trust, &self.root, &readable_canon, &mut dirs);
         if self.secret_read_deny_required {
-            out.extend(project_committed_secrets(&self.root, &readable_canon));
+            out.extend(project_committed_secrets(
+                &self.root,
+                &readable_canon,
+                &mut dirs,
+            ));
             out.extend(git_content_stores(&self.root));
             // A granted folder is a mounted root the child can reach, so it
             // needs the same secret walk the workspace gets. Without this the
@@ -889,14 +1005,63 @@ impl WorkspacePolicy {
                     continue;
                 }
                 let scope = vec![granted.clone()];
-                out.extend(project_committed_secrets(&granted, &scope));
+                out.extend(project_committed_secrets(&granted, &scope, &mut dirs));
                 walked.push(granted);
             }
         }
         out.extend(self.authority_read_deny.iter().cloned());
         out.sort();
         out.dedup();
-        out
+        (out, dirs, stamped_at)
+    }
+
+    /// #1111 — everything about the POLICY that changes the deny answer. A
+    /// difference here misses outright, before a single directory is stat'ed.
+    ///
+    /// `readable_roots` already folds in the network posture, the developer
+    /// capability roots and the LIVE session read grants (expiry included),
+    /// which is the whole of what moves the walk's scope.
+    fn deny_cache_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.root.hash(&mut hasher);
+        matches!(self.trust, WorkspaceTrust::Contained).hash(&mut hasher);
+        self.secret_read_deny_required.hash(&mut hasher);
+        self.authority_read_deny.hash(&mut hasher);
+        self.readable_roots().hash(&mut hasher);
+        self.session_read_grant_roots().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// #1111 — the memoised answer, but ONLY if a fresh walk would produce the
+    /// same one.
+    ///
+    /// Every stamped directory must still report the exact mtime the walk saw.
+    /// Any failure to read one, any difference, any sentinel and any mtime at or
+    /// after the walk's own start instant is a miss — the cache is never trusted
+    /// through a hole in its stamp.
+    fn deny_cache_hit(&self, key: u64) -> Option<Vec<PathBuf>> {
+        let guard = self.deny_cache.read();
+        let cache = guard.as_ref()?;
+        if cache.key != key {
+            return None;
+        }
+        for (dir, seen) in &cache.dirs {
+            // The sentinel `dir_stamp` records for a directory whose mtime the
+            // platform would not report. It can never match, so an unstampable
+            // directory disables the memo instead of punching a hole in it.
+            if *seen == SystemTime::UNIX_EPOCH {
+                return None;
+            }
+            let now = std::fs::symlink_metadata(dir).ok()?.modified().ok()?;
+            // `>= stamped_at` is the timestamp-granularity guard: a write that
+            // landed in the same clock tick as the walk leaves an mtime the
+            // equality test above cannot distinguish from the one recorded.
+            if now != *seen || now >= cache.stamped_at {
+                return None;
+            }
+        }
+        Some(cache.paths.clone())
     }
 
     /// #922 R1: the OS read-deny list, computed only for a backend that will
@@ -936,7 +1101,28 @@ impl WorkspacePolicy {
             // The backend discards this field; producing it is pure cost.
             return Vec::new();
         }
-        self.secret_deny_paths_dynamic()
+        // #1111: this is the EXEC path — one call per `Bash` execution, for the
+        // life of the session, over a tree that is usually identical to the one
+        // the last execution walked. `secret_deny_paths_dynamic` itself stays
+        // uncached, so the determinism and identity contracts that grade the
+        // walk keep grading a real walk every time they ask for one.
+        let key = self.deny_cache_key();
+        if let Some(hit) = self.deny_cache_hit(key) {
+            return hit;
+        }
+        let (paths, dirs, stamped_at) = self.secret_deny_paths_stamped();
+        // An empty stamp means no walk happened (a `Trusted` policy with no
+        // project-secret denial), so there is nothing to memoise and nothing
+        // that could go stale; storing it would be a cache that can only ever
+        // be wrong.
+        *self.deny_cache.write() =
+            (!dirs.is_empty() && dirs.len() <= DENY_CACHE_MAX_DIRS).then(|| DenyCache {
+                key,
+                stamped_at,
+                dirs,
+                paths: paths.clone(),
+            });
+        paths
     }
 
     /// #667 (F2): true when `Bash` must be REFUSED on a backend that cannot
@@ -1434,6 +1620,7 @@ fn compute_secret_deny(
     trust: WorkspaceTrust,
     root: &Path,
     readable_canon: &[PathBuf],
+    dirs: &mut Vec<(PathBuf, SystemTime)>,
 ) -> Vec<PathBuf> {
     // Always-on system credential mounts (unconditionally granted by backends).
     let system_roots: Vec<PathBuf> = SYSTEM_CREDENTIAL_STORES.iter().map(PathBuf::from).collect();
@@ -1501,7 +1688,7 @@ fn compute_secret_deny(
     // #667: `with_project_secret_deny` reuses `project_committed_secrets` to
     // apply the SAME denial to a `Full`-posture channel/remote `Trusted` policy.
     if trust == WorkspaceTrust::Contained {
-        out.extend(project_committed_secrets(root, readable_canon));
+        out.extend(project_committed_secrets(root, readable_canon, dirs));
     }
 
     out.sort();
@@ -1519,7 +1706,11 @@ fn compute_secret_deny(
 ///
 /// The returned list is SORTED. A big tree is walked in parallel (below), and a
 /// security boundary must not vary with thread scheduling.
-fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<PathBuf> {
+fn project_committed_secrets(
+    root: &Path,
+    readable_canon: &[PathBuf],
+    dirs: &mut Vec<(PathBuf, SystemTime)>,
+) -> Vec<PathBuf> {
     let system_roots: Vec<PathBuf> = SYSTEM_CREDENTIAL_STORES.iter().map(PathBuf::from).collect();
     let under_mounted = |p: &Path| {
         readable_canon.iter().any(|r| p.starts_with(r))
@@ -1559,6 +1750,11 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
     // tree proves it is big enough to be worth a thread pool.
     {
         let mut out: Vec<PathBuf> = Vec::new();
+        // #1111: held aside rather than appended straight to `dirs`, because the
+        // oversized arm below abandons this prefix and re-walks it in parallel —
+        // and a stamp that listed the same directory twice would still be
+        // correct but would pay for it on every revalidation.
+        let mut stamp: Vec<(PathBuf, SystemTime)> = Vec::new();
         let mut visited = 0usize;
         let mut oversized = false;
         for result in builder().build() {
@@ -1567,14 +1763,18 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
                 oversized = true;
                 break;
             }
-            if let Ok(entry) = result
-                && let Some(secret) = secret_entry(&entry, &under_mounted)
-            {
-                out.push(secret);
+            if let Ok(entry) = result {
+                if let Some(stamped) = dir_stamp(&entry) {
+                    stamp.push(stamped);
+                }
+                if let Some(secret) = secret_entry(&entry, &under_mounted) {
+                    out.push(secret);
+                }
             }
         }
         if !oversized {
             out.sort();
+            dirs.append(&mut stamp);
             return out;
         }
     }
@@ -1590,21 +1790,45 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
     // answer is identical run to run and identical to the serial arm's. Pinned
     // by `tests/walk_parallel_identity_test.rs`.
     let found = Mutex::new(Vec::<PathBuf>::new());
+    let walked = Mutex::new(Vec::<(PathBuf, SystemTime)>::new());
     builder().build_parallel().run(|| {
         Box::new(|result| {
             // An unreadable directory is skipped here exactly as the serial
             // arm's `Err` skips it.
-            if let Ok(entry) = result
-                && let Some(secret) = secret_entry(&entry, &under_mounted)
-            {
-                found.lock().expect(POISONED).push(secret);
+            if let Ok(entry) = result {
+                if let Some(stamped) = dir_stamp(&entry) {
+                    walked.lock().expect(POISONED).push(stamped);
+                }
+                if let Some(secret) = secret_entry(&entry, &under_mounted) {
+                    found.lock().expect(POISONED).push(secret);
+                }
             }
             ignore::WalkState::Continue
         })
     });
     let mut out = found.into_inner().expect(POISONED);
     out.sort();
+    dirs.extend(walked.into_inner().expect(POISONED));
     out
+}
+
+/// #1111 — the directory half of the walk's stamp.
+///
+/// `None` for anything that is not a directory. A directory whose mtime the
+/// platform will not report is stamped with `UNIX_EPOCH`, a value
+/// [`WorkspacePolicy::deny_cache_hit`] refuses to match: an unstampable
+/// directory must DISABLE the memo, never sit inside a stamp as a hole that
+/// revalidation silently steps over.
+fn dir_stamp(entry: &ignore::DirEntry) -> Option<(PathBuf, SystemTime)> {
+    if !entry.file_type().is_some_and(|t| t.is_dir()) {
+        return None;
+    }
+    let mtime = entry
+        .metadata()
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    Some((entry.path().to_path_buf(), mtime))
 }
 
 /// Entries the serial arm of [`project_committed_secrets`] will visit before it
