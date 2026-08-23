@@ -243,3 +243,77 @@ fn a_disjoint_grant_root_really_is_walked() {
          the dedup has started skipping grants it does not cover"
     );
 }
+
+/// The refutation of #1111 bullet 1 in the direction that actually LEAKS.
+///
+/// `the_deny_list_changes_with_no_mutation_call_at_all` above shows a cache
+/// serving a STALE-WIDE list: after a grant expires the cache keeps denying
+/// paths it should have dropped. That is wrong, but it is wrong in the safe
+/// direction — over-denial refuses a read nobody was entitled to anyway, and on
+/// its own it is a weak argument against a cache ("so it is conservative").
+///
+/// This test pins the other direction, and it is the one that matters. A read
+/// root granted AFTER the first deny-list computation must contribute its
+/// secrets to every later computation. A session-lifetime memo keyed on the
+/// workspace root cannot do that: it answers the second call from a list built
+/// before the grant existed, the granted subtree's `.env` and `id_rsa` are
+/// absent from `fs_read_deny`, and the sandboxed child can `cat` them. That is
+/// the exact cross-command TOCTOU #234 deleted the frozen list to close.
+///
+/// So the two directions together say a cache is not merely stale, it is
+/// UNSOUND: bullet 1 cannot be satisfied without reopening a secret-read hole.
+#[test]
+fn a_grant_added_after_the_first_walk_still_contributes_its_secrets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let elsewhere = tmp.path().join("elsewhere");
+    tree_with_a_secret(&root);
+    tree_with_a_secret(&elsewhere);
+    std::fs::write(elsewhere.join("id_rsa"), b"-----BEGIN PRIVATE KEY-----").unwrap();
+
+    let policy = WorkspacePolicy::contained(&root).with_local_operator_principal();
+
+    // First exec: the grant does not exist yet. This is what populates any
+    // cache, and the ORDER is the whole point of the test.
+    let before = walk_calls();
+    let first = denied(&policy);
+    assert_eq!(
+        walk_calls() - before,
+        1,
+        "the first computation did not walk - there is no populated state for \
+         the grant below to be missing from, and this test is vacuous"
+    );
+    assert!(
+        !first.iter().any(|p| p.starts_with(&elsewhere)),
+        "the ungranted tree is already denied ({first:?}) - the assertion below \
+         would pass without the grant doing anything"
+    );
+
+    // The ONLY thing that happens between the two computations.
+    policy
+        .grant_session_read_root(&elsewhere, false)
+        .expect("the grant must be accepted or this test proves nothing");
+
+    let before = walk_calls();
+    let after = denied(&policy);
+    let walks = walk_calls() - before;
+
+    for name in [".env", "id_rsa"] {
+        assert!(
+            after
+                .iter()
+                .any(|p| p.starts_with(&elsewhere) && p.ends_with(name)),
+            "{name} under a root granted AFTER the first computation is NOT in \
+             the deny set ({after:?}) - the sandboxed child can read it. A \
+             cache is serving a list built before the grant existed; this is \
+             the cross-command TOCTOU #234 closed, and it is why #1111 bullet \
+             1 cannot be implemented."
+        );
+    }
+    assert_eq!(
+        walks, 2,
+        "the post-grant computation cost {walks} walks, expected 2 (workspace \
+         + the newly granted disjoint root) - if this is 0 the answer came \
+         from a cache"
+    );
+}
