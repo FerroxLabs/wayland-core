@@ -7740,6 +7740,55 @@ mod tests {
         );
     }
 
+    /// FerroxLabs/wayland#1083 criterion 1 -- "awaited at EVERY EOF site".
+    ///
+    /// The tests around this one grade the shared drain HELPER. None of them
+    /// grades the WIRING: a third `commands_open = false` site that forgot to
+    /// call the helper would leave every one of them green while a parked
+    /// Crucible card went back to waiting out its 24h TTL. Only one of the two
+    /// existing sites (`drive_active_recovery`) has a behavioural test at all;
+    /// the `run_json_stream_mode` inner loop has no harness of its own, so this
+    /// is what stands between it and a silent regression.
+    ///
+    /// Comment lines are stripped first, so the prose above (which names both
+    /// markers) cannot satisfy the check -- a scan that matches its own
+    /// documentation grades nothing.
+    #[test]
+    fn every_command_stream_eof_site_drains_the_approval_bridge() {
+        let source = include_str!("main.rs");
+        let code: Vec<&str> = source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect();
+
+        let eof_sites: Vec<usize> = code
+            .iter()
+            .enumerate()
+            // Exact match, not `contains`: this test's own body mentions the
+            // marker in a string literal, and a scan that finds ITSELF is a
+            // scan that grades nothing.
+            .filter(|(_, line)| **line == "commands_open = false;")
+            .map(|(i, _)| i)
+            .collect();
+
+        // POSITIVE CONTROL: if the marker is ever renamed, the scan below finds
+        // nothing and would pass vacuously. Both sites exist today.
+        assert!(
+            eof_sites.len() >= 2,
+            "expected at least the 2 known host-EOF sites, found {} -- the              marker this scan looks for must have been renamed, and the check              below is now vacuous",
+            eof_sites.len()
+        );
+
+        for site in eof_sites {
+            let window = code[site..code.len().min(site + 8)].join(" ");
+            assert!(
+                window.contains("deny_pending_approvals_on_host_eof("),
+                "the host-EOF site at code line {site} (of comment-stripped                  source) does not drain the approval stores. Every                  `commands_open = false` site must call                  deny_pending_approvals_on_host_eof, or a bridge approval                  parked there waits out CRUCIBLE_APPROVAL_TTL (86,400s).                  Context: {window}"
+            );
+        }
+    }
+
     /// The EOF drain is invoked from BOTH `commands_open = false` sites -- the
     /// recovery driver (covered end to end above) and the `run_json_stream_mode`
     /// inner loop, which has no test harness of its own. This grades the shared

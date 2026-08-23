@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
-use wcore_agent::approval::{ApprovalBridge, ApprovalOutcome};
+use wcore_agent::approval::{ApprovalBridge, ApprovalCancelCause, ApprovalOutcome};
 use wcore_tools::Tool;
 use wcore_tools::dispatcher::{ClosureDispatcher, ToolDispatcher};
 use wcore_tools::script::{ApprovalProducer, ScriptOutputSink, ScriptTool};
@@ -158,8 +158,17 @@ async fn script_approval_gate_rejects_when_denied() {
     let _ = rejector.await;
     assert!(result.is_error);
     assert!(
-        result.content.contains("rejected"),
+        result.content.contains("rejected by user"),
         "expected rejection text; got: {}",
+        result.content
+    );
+    // #1083 CONTROL: an operator's own "no" must keep saying a USER rejected
+    // it. If this drifted to the cancellation wording, the two tests below
+    // would pass while telling every refusal the same new story — the same
+    // defect, inverted.
+    assert!(
+        !result.content.contains("was not approved:"),
+        "an operator decision is not a bridge cancellation; got: {}",
         result.content
     );
     assert!(
@@ -185,6 +194,139 @@ async fn script_approval_gate_without_bridge_still_short_circuits() {
     assert!(
         result.content.contains("no approval bridge"),
         "expected W4 short-circuit; got: {}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FerroxLabs/wayland#1083 criterion 3, at the surface a user and a model
+// actually read.
+//
+// Observed on released v0.13.5 (addb4f48): with an approval-gated script step
+// parked and the host's command stream closing, the step resolved (the #1083
+// EOF drain works) but reported
+//
+//     step 's_eof' rejected by user
+//
+// to the model and the transcript. Nobody rejected it. The TTL reaper produced
+// the same sentence. `ApprovalOutcome` carried the cause by then, but the
+// `ApprovalOutcomeLite` mirror dropped it on the floor, so the one consumer
+// that renders text for a human could not tell the three cases apart.
+// ---------------------------------------------------------------------------
+
+/// Host-EOF arm. The step must say the HOST WENT AWAY.
+#[tokio::test]
+async fn script_step_says_the_host_disconnected_rather_than_blaming_a_user() {
+    let bridge: Arc<ApprovalBridge> = Arc::new(ApprovalBridge::new());
+    let bridge_producer: Arc<dyn ApprovalProducer> = bridge.clone() as Arc<dyn ApprovalProducer>;
+    let sink: Arc<CapScriptSink> = Arc::new(CapScriptSink::default());
+    let sink_for_tool: Arc<dyn ScriptOutputSink> = sink.clone() as Arc<dyn ScriptOutputSink>;
+
+    let disp = dispatcher_returns("never-reached");
+    let tool = ScriptTool::new(Arc::clone(&disp)).with_approval(bridge_producer, sink_for_tool);
+
+    let input = json!({
+        "steps": [
+            {"id": "s_eof", "tool": "Bash", "input": {"command": "x"}, "approval_required": true}
+        ]
+    });
+
+    // This is exactly what `deny_pending_approvals_on_host_eof` does to the
+    // bridge when the CLI sees `commands_open = false`.
+    let host_eof = {
+        let bridge = bridge.clone();
+        tokio::spawn(async move {
+            let _ = await_pending_token(&bridge).await;
+            bridge
+                .cancel_all_pending(ApprovalCancelCause::HostStreamClosed)
+                .await
+        })
+    };
+
+    let result = tool.execute(input).await;
+    assert_eq!(
+        host_eof.await.unwrap(),
+        1,
+        "the EOF drain must be what resolved this step -- if it were 0, the \
+         step resolved some other way and the assertions below prove nothing"
+    );
+
+    assert!(result.is_error, "an unapproved step still fails closed");
+    assert!(
+        !result.content.contains("never-reached"),
+        "the dispatcher must not run: {}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("rejected by user"),
+        "the host disconnected; no user rejected anything. Got: {}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains(ApprovalCancelCause::HostStreamClosed.reason()),
+        "the step must carry the host-disconnect reason so a reader can tell \
+         it from a TTL expiry. Got: {}",
+        result.content
+    );
+}
+
+/// TTL arm. The same step, resolved by the reaper instead, must NOT claim the
+/// host went away -- otherwise the EOF wording above discriminates nothing.
+#[tokio::test]
+async fn script_step_says_the_approval_expired_when_the_reaper_collects_it() {
+    let bridge: Arc<ApprovalBridge> = Arc::new(ApprovalBridge::with_ttl(
+        std::time::Duration::from_millis(20),
+    ));
+    let bridge_producer: Arc<dyn ApprovalProducer> = bridge.clone() as Arc<dyn ApprovalProducer>;
+    let sink: Arc<CapScriptSink> = Arc::new(CapScriptSink::default());
+    let sink_for_tool: Arc<dyn ScriptOutputSink> = sink.clone() as Arc<dyn ScriptOutputSink>;
+
+    let disp = dispatcher_returns("never-reached");
+    let tool = ScriptTool::new(Arc::clone(&disp)).with_approval(bridge_producer, sink_for_tool);
+
+    let input = json!({
+        "steps": [
+            {"id": "s_ttl", "tool": "Bash", "input": {"command": "x"}, "approval_required": true}
+        ]
+    });
+
+    let reaper = {
+        let bridge = bridge.clone();
+        tokio::spawn(async move {
+            let _ = await_pending_token(&bridge).await;
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            bridge.reap_now().await
+        })
+    };
+
+    let result = tool.execute(input).await;
+    assert_eq!(
+        reaper.await.unwrap(),
+        1,
+        "a real reaper collection must be what resolved this step"
+    );
+
+    assert!(result.is_error, "an expired step still fails closed");
+    assert!(
+        result
+            .content
+            .contains(ApprovalCancelCause::Expired.reason()),
+        "an expiry must say so. Got: {}",
+        result.content
+    );
+    assert!(
+        !result
+            .content
+            .contains(ApprovalCancelCause::HostStreamClosed.reason()),
+        "an expiry must NOT be reported as a host disconnect, or the two \
+         cases collapse back into one message. Got: {}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("rejected by user"),
+        "nobody rejected an expired approval. Got: {}",
         result.content
     );
 }
