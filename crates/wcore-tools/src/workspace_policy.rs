@@ -1509,6 +1509,30 @@ fn compute_secret_deny(
     out
 }
 
+thread_local! {
+    /// #1111 acceptance 1 asked for the walk to be counted "via an injected
+    /// counter, not wall-clock". This is that counter. It is THREAD-LOCAL on
+    /// purpose: `cargo test` runs one binary as threads in a single process, so
+    /// a process-global would be corrupted by any concurrent test that also
+    /// walks and the count would quietly stop meaning anything. Every
+    /// `project_committed_secrets` call runs on the thread that asked for it.
+    static WALK_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of full workspace secret walks ([`project_committed_secrets`])
+/// performed **on the calling thread** since the process started.
+///
+/// Read it either side of an operation to assert how many walks that operation
+/// really cost. It counts WALKS, not entries: one call that starts serial and
+/// restarts in parallel above `SERIAL_WALK_BUDGET` is one walk, because the
+/// question #1111 asks is whether a walk is repeated.
+///
+/// Graded by `tests/secret_walk_call_count_test.rs`, which also carries the
+/// executable evidence for why this walk is deliberately NOT memoised.
+pub fn walk_calls() -> u64 {
+    WALK_CALLS.with(|c| c.get())
+}
+
 /// Absolute, canonicalized paths of the workspace's OWN committed secrets
 /// (`.env`, `service-account*.json`, `*.pem`, …) that are reachable from a
 /// sandbox mounted at `root`. Walks `root` ignoring `.gitignore` (a
@@ -1520,6 +1544,8 @@ fn compute_secret_deny(
 /// The returned list is SORTED. A big tree is walked in parallel (below), and a
 /// security boundary must not vary with thread scheduling.
 fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<PathBuf> {
+    WALK_CALLS.with(|c| c.set(c.get() + 1));
+
     let system_roots: Vec<PathBuf> = SYSTEM_CREDENTIAL_STORES.iter().map(PathBuf::from).collect();
     let under_mounted = |p: &Path| {
         readable_canon.iter().any(|r| p.starts_with(r))
