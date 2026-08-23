@@ -262,6 +262,13 @@ pub struct BrowserPolicy {
     pub loopback: LoopbackCapability,
     #[serde(skip)]
     dns_cache: Arc<Mutex<HashMap<String, IpAddr>>>,
+    /// gh#1053 test seam: replaces [`system_resolver`] on the navigation
+    /// gate. `None` in every build that is not `cfg(test)` of this crate,
+    /// because [`with_resolver`](Self::with_resolver) — the only thing that
+    /// can set it — does not exist outside one. The compiler, not a comment,
+    /// is what keeps a resolver override out of production.
+    #[serde(skip)]
+    resolver_override: Option<Resolver>,
 }
 
 impl Default for BrowserPolicy {
@@ -275,6 +282,7 @@ impl Default for BrowserPolicy {
             denied_origins: Vec::new(),
             loopback: LoopbackCapability::default(),
             dns_cache: Arc::new(Mutex::new(HashMap::new())),
+            resolver_override: None,
         }
     }
 }
@@ -302,7 +310,30 @@ impl BrowserPolicy {
             denied_origins,
             loopback: LoopbackCapability::default(),
             dns_cache: Arc::new(Mutex::new(HashMap::new())),
+            resolver_override: None,
         }
+    }
+
+    /// Replace the system resolver on the navigation gate with a
+    /// deterministic one. gh#1053.
+    ///
+    /// `#[cfg(test)]` and `pub(crate)` ON PURPOSE, and both halves matter:
+    /// the gate is a security boundary, so the seam that decides what a name
+    /// resolves to must be unreachable from production code AND from other
+    /// crates. Gated this way it is a compile error anywhere else, which is a
+    /// stronger guarantee than a doc-hidden `pub` plus a warning comment.
+    ///
+    /// It exists so the END-TO-END tests in `dns_gate_e2e` can drive the real
+    /// `BrowserTool` / `CamoufoxBackend` path against a host that resolves to
+    /// a DENIED address. Before it, the only hermetic resolution outcome an
+    /// out-of-crate test could produce was "resolves to nothing", so deleting
+    /// the block-list loop in
+    /// [`evaluate_navigation_target_with`](Self::evaluate_navigation_target_with)
+    /// left every test outside `src/policy.rs` green.
+    #[cfg(test)]
+    pub(crate) fn with_resolver(mut self, resolve: Resolver) -> Self {
+        self.resolver_override = Some(resolve);
+        self
     }
 
     /// Attach a loopback grant. Separate from [`new`](Self::new) so that
@@ -477,7 +508,13 @@ impl BrowserPolicy {
     /// this cannot close (the sidecar resolves DNS itself, so TTL=0
     /// intra-navigation rebinding stays open).
     pub fn evaluate_navigation_target(&self, url_str: &str) -> PolicyOutcome {
-        self.evaluate_navigation_target_with(url_str, system_resolver)
+        // `resolver_override` is `None` unless an in-crate test installed one
+        // — see [`with_resolver`](Self::with_resolver).
+        self.evaluate_navigation_target_with(
+            url_str,
+            self.resolver_override
+                .unwrap_or(system_resolver as Resolver),
+        )
     }
 
     /// Async form of
@@ -623,6 +660,7 @@ impl BrowserPolicy {
             denied_origins: self.denied_origins.clone(),
             loopback: self.loopback.clone(),
             dns_cache: Arc::clone(&self.dns_cache),
+            resolver_override: self.resolver_override,
         };
         reqwest::redirect::Policy::custom(move |attempt| {
             let url = attempt.url().to_string();
@@ -650,7 +688,7 @@ impl BrowserPolicy {
 /// `wcore_tools::url_safety::safe_url_pinned_ips` is NOT reused here: it
 /// embeds url_safety's own block-list, which refuses loopback
 /// unconditionally, and would delete the gh#911 loopback grant.
-type Resolver = fn(&str) -> Vec<IpAddr>;
+pub(crate) type Resolver = fn(&str) -> Vec<IpAddr>;
 
 /// The system resolver. Port 0 — only the addresses matter, not connectivity.
 fn system_resolver(host: &str) -> Vec<IpAddr> {
