@@ -1549,3 +1549,76 @@ fn a_granted_read_root_makes_a_write_target_acceptable() {
         .ensure_write_target_readable(&target)
         .expect("the grant is in readable_roots(), so the write target is covered now");
 }
+
+/// The escape the FIRST form of this check let through, kept as a standing
+/// case: a `..` that follows a component which does not exist yet.
+///
+/// This is not a hypothetical shape — a spill target's own directories
+/// (`<root>/.wayland-out/results/`) do not exist before the first spill, so
+/// "part of the path is missing" is the ordinary state, not the edge case.
+/// Resolving only the longest existing ancestor and appending the rest
+/// verbatim leaves the `..` in the string: the result still `starts_with` the
+/// workspace root while the real target is outside it.
+#[test]
+fn a_traversal_through_a_directory_that_does_not_exist_yet_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let workspace = dir.path().join("ws");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let policy = WorkspacePolicy::contained(&workspace);
+
+    let missing = workspace.join("nope");
+    assert!(
+        !missing.exists(),
+        "the point of this case is that this component is absent"
+    );
+
+    let traversal = missing
+        .join("..")
+        .join("..")
+        .join("outside")
+        .join("loot.txt");
+    policy
+        .ensure_write_target_readable(&traversal)
+        .expect_err("a `..` after a missing component must still be applied");
+
+    // Known-positive control: the identical shape that lands back INSIDE the
+    // workspace is still accepted, so the case is not passing merely because
+    // anything containing a `..` is refused.
+    let inside = missing.join("..").join(".wayland-out").join("results.txt");
+    policy
+        .ensure_write_target_readable(&inside)
+        .expect("a `..` that lands back inside the workspace is fine");
+}
+
+/// The same missing-component path, but the escape is a SYMLINK reached only
+/// after the `..`. It has to be resolved before the prefix compare, which is
+/// only true if resolution re-runs as the path is walked down.
+#[test]
+fn a_symlink_reached_after_a_missing_component_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let workspace = dir.path().join("ws");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let policy = WorkspacePolicy::contained(&workspace);
+
+    let link = workspace.join("escape");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    #[cfg(windows)]
+    let _ = std::os::windows::fs::symlink_dir(&outside, &link);
+    if !link.exists() {
+        return;
+    }
+
+    let traversal = workspace
+        .join("nope")
+        .join("..")
+        .join("escape")
+        .join("loot.txt");
+    policy
+        .ensure_write_target_readable(&traversal)
+        .expect_err("a symlink reached after a missing component must be resolved");
+}

@@ -18,7 +18,7 @@
 //! `operator_bash_network` for a sandboxed one). It is never hardcoded here.
 
 use parking_lot::RwLock;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use thiserror::Error;
@@ -1786,32 +1786,49 @@ pub(crate) fn canon_for_scope(path: &Path) -> PathBuf {
     }
 }
 
-/// Canonicalize the longest EXISTING ancestor of `path` and re-append the rest.
+/// Resolve `path` to where it would ACTUALLY land, component by component,
+/// without requiring any of it to exist yet.
 ///
 /// [`canon_for_scope`] resolves at most one missing component, which is enough
 /// for a leaf that does not exist yet but not for a target whose directories
 /// have not been created either (`<root>/.wayland-out/results/x.txt` on a fresh
-/// workspace). Walking all the way up keeps the two properties that matter:
-/// every `..` and every symlinked ancestor is resolved before any prefix
-/// comparison, and a target under a directory that does not exist yet is still
-/// judged on where it would actually land.
+/// workspace, which is what every FIRST spill looks like).
+///
+/// Walking DOWN and re-canonicalizing after every component — rather than
+/// canonicalizing the longest existing ancestor once and appending the rest
+/// verbatim — is what keeps the result honest for the two escapes that matter,
+/// both of which appear only when part of the path is missing:
+///
+/// * `<root>/nope/../../outside/x` — a `..` that follows a component which
+///   does not exist. Appended verbatim it stays in the string, and the result
+///   still `starts_with` the root while the real target is outside it.
+/// * `<root>/nope/../link/x` — a symlinked component reached only after such a
+///   `..`. It has to be resolved before the prefix compare, not after.
+///
+/// A `..` is applied lexically (`pop`) because the prefix accumulated so far is
+/// already canonical, so there is no symlink left for it to traverse wrongly.
 fn canon_existing_ancestor(path: &Path) -> PathBuf {
-    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
-    let mut cursor = path;
-    loop {
-        if let Ok(resolved) = std::fs::canonicalize(cursor) {
-            let mut out = resolved;
-            out.extend(trailing.iter().rev());
-            return out;
-        }
-        match (cursor.parent(), cursor.file_name()) {
-            (Some(parent), Some(name)) => {
-                trailing.push(name.to_os_string());
-                cursor = parent;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
             }
-            _ => return path.to_path_buf(),
+            Component::Normal(name) => out.push(name),
+        }
+        // Resolve as soon as the prefix so far exists, so a symlinked
+        // component is replaced by its target BEFORE any later `..` is
+        // applied to it, and so a `..` that follows a component which does
+        // not exist is still applied instead of being carried into the
+        // comparison verbatim.
+        if let Ok(resolved) = std::fs::canonicalize(&out) {
+            out = resolved;
         }
     }
+    out
 }
 
 fn canon(p: PathBuf) -> PathBuf {
