@@ -386,6 +386,99 @@ mod tests {
         }
     }
 
+    /// wayland#585 criterion 1: the channel notice is rationed to once per
+    /// conversation per window, so the notice cannot itself become the loop.
+    #[test]
+    fn the_notice_is_claimed_once_per_window() {
+        let mut rl = AutoReplyRateLimiter::new(1, Duration::from_secs(600), 1024);
+        let t = base();
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", t),
+            AutoReplyOutcome::Allowed
+        );
+        // First suppression claims the notice.
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 1)),
+            AutoReplyOutcome::Suppressed { notify: true }
+        );
+        // Every later suppression in the same window is silent.
+        for i in 2..10 {
+            assert_eq!(
+                rl.check_and_record_with_notice("conv", after(t, i)),
+                AutoReplyOutcome::Suppressed { notify: false },
+                "only the first suppression in a window notifies"
+            );
+        }
+    }
+
+    /// The notice re-arms once a full window has passed, so a conversation that
+    /// runs away again later is announced again rather than silently throttled.
+    #[test]
+    fn a_later_window_re_arms_the_notice() {
+        let mut rl = AutoReplyRateLimiter::new(1, Duration::from_secs(600), 1024);
+        let t = base();
+        assert!(rl.check_and_record("conv", t));
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 1)),
+            AutoReplyOutcome::Suppressed { notify: true }
+        );
+        // At t+600 the first send ages out, so this one is allowed and recorded.
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 600)),
+            AutoReplyOutcome::Allowed
+        );
+        // Suppressed again, and now a full window has passed since the notice.
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 601)),
+            AutoReplyOutcome::Suppressed { notify: true }
+        );
+    }
+
+    /// An allowed send does NOT re-arm the notice inside the same window.
+    /// Without this, a conversation sitting at the cap alternates
+    /// allow/suppress as sends age out and would emit a notice per allowed
+    /// send — exactly the unbounded chatter the rationing exists to prevent.
+    #[test]
+    fn an_allowed_send_does_not_re_arm_the_notice_mid_window() {
+        let mut rl = AutoReplyRateLimiter::new(2, Duration::from_secs(600), 1024);
+        let t = base();
+        assert!(rl.check_and_record("conv", t));
+        assert!(rl.check_and_record("conv", after(t, 300)));
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 301)),
+            AutoReplyOutcome::Suppressed { notify: true }
+        );
+        // The t+0 send ages out at t+600, freeing a slot: allowed again.
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 600)),
+            AutoReplyOutcome::Allowed
+        );
+        // Suppressed once more, still inside the notice window (t+301..t+901).
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 601)),
+            AutoReplyOutcome::Suppressed { notify: false },
+            "an allowed send must not re-arm the notice inside its window"
+        );
+    }
+
+    /// The bool API is used by the two tool-driven send seams, which have no
+    /// channel to deliver a notice on. It must never consume the notice a
+    /// notice-capable caller on the same limiter would be owed.
+    #[test]
+    fn the_bool_api_never_burns_the_notice() {
+        let mut rl = AutoReplyRateLimiter::new(1, Duration::from_secs(600), 1024);
+        let t = base();
+        assert!(rl.check_and_record("conv", t));
+        // Several suppressions through the bool API...
+        assert!(!rl.check_and_record("conv", after(t, 1)));
+        assert!(!rl.check_and_record("conv", after(t, 2)));
+        // ...leave the notice unclaimed.
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 3)),
+            AutoReplyOutcome::Suppressed { notify: true }
+        );
+    }
+
     #[test]
     fn eviction_keeps_the_just_recorded_conversation() {
         // Cap of 1: each new conversation evicts the previous, but the one being
