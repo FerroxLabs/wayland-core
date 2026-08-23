@@ -20,6 +20,11 @@
 //! predicate alone: a guard that is correct in isolation and unreachable from
 //! the tool is indistinguishable from no guard.
 
+// Every case here needs a real symlink, so the whole file is Unix-only; without
+// this the helpers and imports are dead code on the Windows target and `-D warnings`
+// rejects them.
+#![cfg(unix)]
+
 use std::path::Path;
 use std::sync::Arc;
 
