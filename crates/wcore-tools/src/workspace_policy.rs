@@ -620,7 +620,19 @@ impl WorkspacePolicy {
     /// business, and a benign-named symlink into the control surface resolves
     /// before the prefix match so it cannot be used to smuggle a write through.
     pub fn is_repo_control_path(&self, path: &Path) -> bool {
-        let canon = canon_for_scope(path);
+        // `canon_deep`, not `canon_for_scope`: the root is canonicalized at
+        // construction, so a candidate that resolves to something shallower
+        // never matches it. `canon_for_scope` resolves only the IMMEDIATE
+        // parent and returns the RAW path when that parent is missing —
+        // which is exactly the shape of a NEW control file
+        // (`.wayland-core/skills/<new>/SKILL.md`, `.git/<new>/hook`), and
+        // exactly the write this guard exists to refuse. Measured on this
+        // tree before the change: with the workspace addressed through a
+        // symlink, `Write` of `<link>/.git/hooks/pre-commit` (parent not yet
+        // created) reported `Created`, while the same write addressed through
+        // the real root was refused. See
+        // `crates/wcore-tools/tests/repo_control_symlink.rs`.
+        let canon = canon_deep(path);
         REPO_CONTROL_DIRS
             .iter()
             .any(|dir| canon.starts_with(self.root.join(dir)))
