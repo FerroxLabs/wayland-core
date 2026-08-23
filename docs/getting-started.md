@@ -71,7 +71,7 @@ wayland-core [OPTIONS] [PROMPT]...
 | `--toon` | Enable TOON tabular encoding (with `full` compaction) |
 | `--init-config` | Generate a default config file and exit |
 | `--config-path` | Print the config file path and exit |
-| `--doctor` | Run the system-dependency / provider health doctor |
+| `--doctor` | Run the system-dependency doctor, and report the provider, model, base URL and credential THIS invocation resolves to (it makes no provider call, so it cannot tell you whether a key is valid) |
 
 Diagnostic and replay flags (`--skills-audit`, `--replay`, `--memory-show`,
 `--probe-mcp`, …) are intentionally omitted here — run `wayland-core --help`

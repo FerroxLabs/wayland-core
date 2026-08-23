@@ -151,6 +151,11 @@ pub async fn run(probe_mcp: bool, cli_args: &wcore_config::config::CliArgs) -> E
          {skipped} skipped, {manual} manual"
     );
 
+    // #1079: what THIS command line resolves to. Printed first of the three
+    // sections because it is the config the two below are computed from.
+    // Informational only — never flips the exit code below.
+    print_provider_section(cli_args);
+
     // Report whether durable session persistence is on, and if it is off,
     // WHICH of the two very different reasons turned it off. Informational
     // only — never flips the exit code below.
@@ -627,6 +632,80 @@ fn classify_durable_sessions(session_enabled: bool, replay_unavailable: bool) ->
 /// a degraded capability must be *reportable on demand*, not only printed into
 /// a log nobody kept.
 ///
+/// FerroxLabs/wayland#1079 — the invocation's own provider selection, printed.
+///
+/// The ticket's headline is `--doctor --api-key <key>` being ignored. Threading
+/// `CliArgs` into [`run`] fixed the COMPUTATION, but nothing in the OUTPUT
+/// changed for `--api-key`, `--provider`, `--model` or `--base-url`: doctor has
+/// no provider row at any version — [`collect_checks`] emits binary version,
+/// Chromium, `wlrctl`/`grim`/`WAYLAND_DISPLAY`/`X DISPLAY`, two macOS TCC
+/// probes, `BROWSERBASE_API_KEY` and Ollama, and nothing else. So a user still
+/// could not SEE that the flag had been honoured, and no test could observe it
+/// either: dropping `api_key` from the `CliArgs` literal in `main.rs` compiles
+/// and reddens nothing. An ungraded behaviour regresses silently.
+///
+/// This section closes both halves. It prints what `Config::resolve` made of
+/// THIS command line, and marks each value with where it came from, so every
+/// config-selecting flag has a visible effect on doctor's output.
+///
+/// **The credential is never printed** — only whether one resolved and from
+/// which rung. `doctor_never_prints_the_api_key_value` guards that.
+///
+/// Printed, deliberately NOT a `CheckResult` row, for exactly the reason given
+/// on [`print_durable_sessions_section`]: the TUI diagnostics surface turns
+/// every `CheckResult` into a row inside a fixed 80x24 viewport, and one more
+/// row pushes the PROVIDERS section off screen.
+///
+/// Informational only: like the other two sections it can never flip the exit
+/// code.
+fn print_provider_section(cli_args: &wcore_config::config::CliArgs) {
+    println!();
+    println!("Provider (this invocation):");
+    match wcore_config::config::Config::resolve(cli_args) {
+        Err(e) => {
+            println!("  (config not loaded: {e})");
+            println!("           run `wayland-core --config-path` and check that file");
+        }
+        Ok(cfg) => {
+            let source = |flag: &str, from_flag: bool| {
+                if from_flag {
+                    format!("(from {flag})")
+                } else {
+                    "(from config)".to_string()
+                }
+            };
+            println!(
+                "  provider   {:<38} {}",
+                cfg.provider_label,
+                source("--provider", cli_args.provider.is_some())
+            );
+            println!(
+                "  model      {:<38} {}",
+                cfg.model,
+                source("--model", cli_args.model.is_some())
+            );
+            println!(
+                "  base url   {:<38} {}",
+                cfg.base_url,
+                source("--base-url", cli_args.base_url.is_some())
+            );
+            // State comes from the RESOLVED config, source from the flag: an
+            // explicitly empty `--api-key ""` must not read as "present".
+            let (state, key_source) = if cfg.api_key.is_empty() {
+                ("not set", "(no credential resolved)".to_string())
+            } else if cli_args.api_key.is_some() {
+                ("present", "(from --api-key)".to_string())
+            } else {
+                (
+                    "present",
+                    "(from config, credential store or environment)".to_string(),
+                )
+            };
+            println!("  api key    {state:<38} {key_source}");
+        }
+    }
+}
+
 /// **Printed, deliberately NOT a `CheckResult` row** — the same reason
 /// [`print_mcp_section`] is. The TUI diagnostics surface converts every
 /// `CheckResult` into a row and renders into a fixed 80x24 viewport, so adding
