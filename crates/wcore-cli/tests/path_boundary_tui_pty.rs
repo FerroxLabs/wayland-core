@@ -92,6 +92,56 @@ fn tool_result_text(bodies: &[Value]) -> String {
     out
 }
 
+/// What the mock provider actually received, in one line, for the moment a
+/// wait gives up.
+///
+/// FerroxLabs/wayland#1109: `approving_once_leaves_the_read_refused_by_the_sandbox`
+/// timed out at 30s on macOS inside the full suite (3 of the last 7 legs), and
+/// every investigation of it stalled on the same ambiguity — the harness could
+/// see the terminal and nothing else, so a timeout could not say whether the
+/// engine never dispatched the closing turn or whether it dispatched, was
+/// answered, and the answer never reached the screen. Those are different
+/// components with different fixes. This is the fact that separates them, and
+/// it is read out of the mock server itself rather than off a log line.
+fn provider_traffic(rt: &tokio::runtime::Runtime, server: &wiremock::MockServer) -> String {
+    let bodies: Vec<Value> = rt
+        .block_on(support::mock_llm::received_requests(server))
+        .into_iter()
+        .map(|r| r.body)
+        .collect();
+    let with_tool_result = bodies
+        .iter()
+        .filter(|body| {
+            body.get("messages")
+                .and_then(Value::as_array)
+                .is_some_and(|messages| {
+                    messages.iter().any(|message| {
+                        message
+                            .get("content")
+                            .and_then(Value::as_array)
+                            .is_some_and(|blocks| {
+                                blocks.iter().any(|block| {
+                                    block.get("type").and_then(Value::as_str) == Some("tool_result")
+                                })
+                            })
+                    })
+                })
+        })
+        .count();
+    format!(
+        "--- provider traffic ---\n\
+         the mock provider received {} request(s); {} of them carried a tool_result.\n\
+         0 requests                       = the engine never dispatched a turn at all.\n\
+         1 request, no tool_result        = turn 1 went out and the tool has not been answered.\n\
+         a request carrying a tool_result = the CLOSING turn was dispatched, the mock answered it \
+         (its script replays the last turn forever), and the answer is what failed to reach the \
+         screen.\n\
+         --- end ---",
+        bodies.len(),
+        with_tool_result
+    )
+}
+
 /// THE proof. A model asks to read a file outside the workspace; the card
 /// offers the containing folder by name; `a` grants it; the read succeeds.
 ///
@@ -155,11 +205,15 @@ fn a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds() {
     pty.send(b"a");
 
     // 4. The turn continues — which only happens once a tool_result is POSTed.
-    pty.wait_for(
+    if let Err(report) = pty.try_wait_for(
         |s| s.contains(DONE_TOKEN),
         Duration::from_secs(30),
         "the turn to continue after the granted read",
-    );
+    ) {
+        let traffic = provider_traffic(&rt, &server);
+        let alive = pty.child_is_running();
+        panic!("{report}\nchild still running: {alive}\n{traffic}");
+    }
     let after = pty.screen_text();
     println!("--- after the grant ---\n{after}\n--- end ---");
     pty.quit();
@@ -223,11 +277,15 @@ fn approving_once_leaves_the_read_refused_by_the_sandbox() {
         "the approval card to render for the out-of-workspace Read",
     );
     pty.send(b"y");
-    pty.wait_for(
+    if let Err(report) = pty.try_wait_for(
         |s| s.contains(DONE_TOKEN),
         Duration::from_secs(30),
         "the turn to continue after the once-approved read",
-    );
+    ) {
+        let traffic = provider_traffic(&rt, &server);
+        let alive = pty.child_is_running();
+        panic!("{report}\nchild still running: {alive}\n{traffic}");
+    }
     println!(
         "--- after approve-once ---\n{}\n--- end ---",
         pty.screen_text()

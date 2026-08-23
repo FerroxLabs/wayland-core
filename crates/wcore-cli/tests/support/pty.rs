@@ -248,19 +248,45 @@ impl Pty {
     }
 
     pub fn wait_for<F: Fn(&str) -> bool>(&self, predicate: F, timeout: Duration, what: &str) {
+        if let Err(report) = self.try_wait_for(predicate, timeout, what) {
+            panic!("{report}");
+        }
+    }
+
+    /// [`Pty::wait_for`] without the panic, so a caller that can say something
+    /// USEFUL about a timeout gets the chance to say it.
+    ///
+    /// FerroxLabs/wayland#1109. The panic message this harness produced was a
+    /// screen and nothing else, and a screen cannot distinguish the two
+    /// components a timeout can blame: an engine that produced no answer, and
+    /// an answer that never reached the terminal. Two macOS CI investigations
+    /// stalled on exactly that ambiguity. `Err` carries the same report so the
+    /// test can append the fact that separates them (what the mock provider
+    /// actually received) before failing.
+    pub fn try_wait_for<F: Fn(&str) -> bool>(
+        &self,
+        predicate: F,
+        timeout: Duration,
+        what: &str,
+    ) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
         let mut last = String::new();
         while Instant::now() < deadline {
             last = self.screen_text();
             if predicate(&last) {
-                return;
+                return Ok(());
             }
             std::thread::sleep(Duration::from_millis(30));
         }
-        panic!(
-            "timed out after {:?} waiting for {what}.\n--- last screen ---\n{}\n--- end ---",
-            timeout, last
-        );
+        Err(format!(
+            "timed out after {timeout:?} waiting for {what}.\n--- last screen ---\n{last}\n--- end ---"
+        ))
+    }
+
+    /// Is the child still running? Reported beside a timeout so "the binary
+    /// exited" is never mistaken for "the binary is stuck".
+    pub fn child_is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 
     /// Type at the terminal.
