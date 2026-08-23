@@ -31,7 +31,10 @@ pub const DEFAULT_MAX_RETRIES: u32 = 2;
 /// balancer dropping connections through a rollover, a keep-alive raced to
 /// close. The window has to contain at least one full re-establishment of the
 /// connection, and the product already states how long that may take:
-/// [`crate::http_client::CONNECT_TIMEOUT`] is 30 s. Anything longer than one
+/// [`crate::http_client::CONNECT_TIMEOUT`], now 10 s. The window is left at
+/// 30 s rather than tracked down with it — the requirement is "at least one
+/// re-establishment", which 30 s over-satisfies at three, and shrinking a
+/// window costs the outages it exists to ride out. Anything longer than one
 /// re-establishment is not a blip and belongs to the OUTER bound — the
 /// engine's per-turn unserved-request budget, which is an order of magnitude
 /// longer and rebuilds the whole request.
