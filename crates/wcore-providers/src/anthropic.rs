@@ -83,10 +83,13 @@ impl AnthropicProvider {
 
     /// Select the API key to authenticate the next request. Delegates to
     /// [`KeyPool::next_key`] (prefers the last-good key, rotates round-robin on
-    /// failure, skips keys in cooldown). Returns [`ProviderError::MissingApiKey`]
-    /// when no key is configured or every key is cooling — matching the
-    /// pre-rotation behavior of surfacing a clear error rather than a blank
-    /// credential that would produce an opaque 401.
+    /// failure, deprioritises keys in cooldown). Returns
+    /// [`ProviderError::MissingApiKey`] only when no key is CONFIGURED —
+    /// matching the pre-rotation behavior of surfacing a clear error rather
+    /// than a blank credential that would produce an opaque 401. A pool where
+    /// every key is cooling still yields one; see
+    /// [`crate::key_rotation::KeyPool::next_key`] for why a 429 on a single
+    /// key must not read as a missing credential.
     fn select_key(&self) -> Result<String, ProviderError> {
         // F19: recover the guard on poison instead of cascade-panicking —
         // KeyPool stays valid across a prior panic, so a transient fault must

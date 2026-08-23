@@ -13444,8 +13444,20 @@ impl AgentEngine {
                         ),
                         None => format!("attempt {stream_attempt}/{max_stream_retries}"),
                     };
+                    // Name the wait. The later steps of the curve run
+                    // 16-30 s and NOTHING else speaks during them: the silence
+                    // notice is armed on a provider dispatch, not on this
+                    // sleep, so an unannounced gap that long reads as a hang.
+                    // Measured on this host at a budget of 10 — the shipped
+                    // ceiling — four consecutive 24-29 s gaps with no output
+                    // at all between them.
+                    let wait = if backoff >= std::time::Duration::from_secs(1) {
+                        format!("{:.1}s", backoff.as_secs_f64())
+                    } else {
+                        format!("{}ms", backoff.as_millis())
+                    };
                     self.output.emit_info(&format!(
-                        "Provider stream failed ({reason}); retrying ({progress})…"
+                        "Provider stream failed ({reason}); retrying in {wait} ({progress})…"
                     ));
                     let backoff_cancel = self.cancel_token.clone();
                     tokio::select! {
@@ -34605,12 +34617,15 @@ mod stream_retry_budget_tests {
     /// user surface and the whole run then finished in 0.677 s. The number was
     /// parsed, carried into the message, and ignored by the loop.
     ///
-    /// That run also made only ONE physical send, because the 429 demoted the
-    /// only API key into a cooldown and the retry found the pool empty. This
-    /// test can only reach a second attempt because
-    /// `wcore_providers::key_rotation` no longer reports a fully-cooling pool
-    /// as an unconfigured one; `a_lone_rate_limited_key_is_still_offered`
-    /// grades that half, in the crate that owns it.
+    /// That run also made only ONE physical send, for a SECOND reason this
+    /// test cannot see: the 429 demoted the only API key into a cooldown and
+    /// the retry found the pool empty. The provider here is a mock
+    /// `LlmProvider`, so no `KeyPool` is consulted and reverting that fix
+    /// leaves this test green — measured, not assumed. The credential half is
+    /// graded where it lives, by
+    /// `wcore_providers::key_rotation::tests::a_lone_rate_limited_key_is_still_offered`,
+    /// and end to end by the live 0.13.5-vs-HEAD comparison in which 0.13.5
+    /// answers a 429 with "No API key. Set an api_key via --api-key…".
     #[tokio::test(start_paused = true)]
     async fn a_rate_limit_hint_is_slept_not_just_printed() {
         let gaps = wcore_providers::backoff::scope_jitter(0.0, send_gaps_ms(rate_limited_7s)).await;
@@ -34652,6 +34667,98 @@ mod stream_retry_budget_tests {
                  gaps: {gaps:?}"
             );
         }
+    }
+
+    /// The notice must NAME the wait.
+    ///
+    /// Nothing else speaks during a backoff sleep: the silence notice
+    /// (`stream_silence_notice_after`) is armed on a provider dispatch, not on
+    /// this sleep. Measured on this host against a real 127.0.0.1 server at a
+    /// budget of 10 — the shipped ceiling — the run produced four consecutive
+    /// gaps of 24-29 s carrying ZERO output, and `Still waiting on the
+    /// provider` appeared 0 times in the whole run. A curve whose later steps
+    /// are half a minute has to say so, or it is a hang with a schedule.
+    #[tokio::test(start_paused = true)]
+    async fn the_retry_notice_names_how_long_it_will_wait() {
+        let events = wcore_providers::backoff::scope_jitter(0.0, async {
+            let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let provider = Arc::new(TimedFailProvider {
+                error: rate_limited_7s,
+                sends,
+            });
+            let sink = TestSink::new();
+            let surface = sink.handle();
+            let mut engine = super::AgentEngine::new_with_provider(
+                provider,
+                wcore_config::config::Config::default(),
+                ToolRegistry::new(),
+                Arc::new(sink),
+            );
+            engine.max_turns = Some(2);
+            let _ = engine.run("task", "m-1").await;
+            surface.snapshot()
+        })
+        .await;
+        let retries: Vec<String> = notices(&events)
+            .into_iter()
+            .filter(|m| m.contains("retrying in"))
+            .collect();
+        assert!(
+            !retries.is_empty(),
+            "no retry notice reached the user surface at all; \
+             the absence check below would pass for free. Surface: {:?}",
+            notices(&events)
+        );
+        for notice in &retries {
+            assert!(
+                notice.contains("7.0s"),
+                "the notice must name the wait it is about to spend — the \
+                 server asked for 7000 ms and the surface said {notice:?}"
+            );
+        }
+    }
+
+    /// Control for the test above: a SUB-second wait must render in
+    /// milliseconds, not as `0.5s`-shaped noise, and must still be named.
+    /// Without this, a notice that only ever printed a hard-coded string
+    /// would satisfy the 7 s assertion.
+    #[tokio::test(start_paused = true)]
+    async fn a_sub_second_wait_is_named_in_milliseconds() {
+        let events = wcore_providers::backoff::scope_jitter(0.0, async {
+            let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let provider = Arc::new(TimedFailProvider {
+                error: served_500,
+                sends,
+            });
+            let sink = TestSink::new();
+            let surface = sink.handle();
+            let mut engine = super::AgentEngine::new_with_provider(
+                provider,
+                wcore_config::config::Config::default(),
+                ToolRegistry::new(),
+                Arc::new(sink),
+            );
+            engine.max_turns = Some(2);
+            let _ = engine.run("task", "m-1").await;
+            surface.snapshot()
+        })
+        .await;
+        let retries: Vec<String> = notices(&events)
+            .into_iter()
+            .filter(|m| m.contains("retrying in"))
+            .collect();
+        assert!(!retries.is_empty(), "no retry notice reached the surface");
+        assert!(
+            retries[0].contains("500ms"),
+            "the first step of the curve is 500 ms and must render as such, \
+             got {:?}",
+            retries[0]
+        );
+        assert!(
+            retries[1].contains("1.0s"),
+            "the second step is 1 s and must cross into seconds, got {:?}",
+            retries[1]
+        );
     }
 
     /// WALL CLOCK. Everything above runs on a paused clock, which proves the
