@@ -7,11 +7,14 @@
 //!    This is the first line of defense and is not handled here.
 //! 2. **Per-result persistence** ([`maybe_persist_tool_result`]) — after a
 //!    tool returns, if its output exceeds the registered threshold the
-//!    full output is written to a tempdir-backed file
-//!    (`$TMPDIR/wayland-results/<tool_use_id>.txt`) and the in-context
-//!    content is replaced by a `<persisted-output>` preview + path
-//!    reference. The model can then `Read` the file to access the full
-//!    output on demand.
+//!    full output is written to a file under the session's spill directory
+//!    ([`StorageDir::for_session`] — `<workspace>/.wayland-out/results/`)
+//!    and the in-context content is replaced by a `<persisted-output>`
+//!    preview + path reference. The model can then `Read` the file to
+//!    access the full output on demand — which is why the directory has to
+//!    be one the session can read back, and why a target outside its
+//!    readable roots is REFUSED rather than written
+//!    (FerroxLabs/wayland#1097).
 //! 3. **Per-turn aggregate budget** ([`enforce_turn_budget`]) — after all
 //!    tool results in a single assistant turn are collected, if the total
 //!    exceeds [`BudgetConfig::turn_budget`] the largest non-persisted
@@ -43,8 +46,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+
+use crate::workspace_policy::{WorkspacePolicy, WriteTargetNotReadable};
 
 /// Default per-result preview window (chars).
 pub const DEFAULT_PREVIEW_SIZE_CHARS: usize = 2_000;
@@ -67,6 +73,11 @@ pub const BUDGET_TOOL_NAME: &str = "__budget_enforcement__";
 
 /// Subdirectory under the OS temp dir where spill files live.
 pub const STORAGE_SUBDIR: &str = "wayland-results";
+
+/// Subdirectory under the session output root
+/// ([`wcore_config::config::SESSION_OUTPUT_ROOT`]) where a session's spill
+/// files live: `<workspace>/.wayland-out/results/`.
+pub const RESULTS_SUBDIR: &str = "results";
 
 /// Threshold sentinel meaning "never persist this tool's output".
 pub const THRESHOLD_DISABLED: usize = usize::MAX;
@@ -150,22 +161,103 @@ impl BudgetConfig {
     }
 }
 
-/// Where spill files are written. Defaults to
-/// `std::env::temp_dir().join("wayland-results")`; tests inject a
-/// tempdir-rooted override.
+/// Where spill files are written, plus the session that has to be able to READ
+/// them back.
+///
+/// The readback guard is carried HERE rather than passed to
+/// [`maybe_persist_tool_result`] so that no call site can spill without it:
+/// every persistence path in the process takes a `StorageDir`, so binding the
+/// check to the directory binds it to all of them at once
+/// (FerroxLabs/wayland#1097).
 #[derive(Debug, Clone)]
-pub struct StorageDir(pub PathBuf);
+pub struct StorageDir {
+    dir: PathBuf,
+    /// The session whose readable roots this directory must sit inside.
+    /// `None` for a bare directory (tests, and callers with no session
+    /// policy) — an unguarded `StorageDir` behaves exactly as before.
+    session: Option<Arc<WorkspacePolicy>>,
+}
 
 impl StorageDir {
+    /// A bare storage directory with no readback guard.
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: dir.into(),
+            session: None,
+        }
+    }
+
     /// OS default — `$TMPDIR/wayland-results` (or `/tmp/wayland-results`
     /// on Unix when `TMPDIR` is unset).
+    ///
+    /// NOT readable by a session that has a workspace policy: the host temp
+    /// tree is granted to nothing (`WorkspacePolicy::readable_roots`) and the
+    /// file-tool jail is rooted at the workspace. Use
+    /// [`for_session`](Self::for_session) wherever a policy exists, or the
+    /// persisted-output block hands the model a path it cannot open.
     pub fn os_default() -> Self {
-        Self(std::env::temp_dir().join(STORAGE_SUBDIR))
+        Self::new(std::env::temp_dir().join(STORAGE_SUBDIR))
+    }
+
+    /// The spill directory for a session that has a workspace policy:
+    /// `<workspace>/.wayland-out/results/` (FerroxLabs/wayland#1097).
+    ///
+    /// Inside the workspace on purpose. The persisted-output block tells the
+    /// model to `Read` the file back, and `Read` honours `ctx.vfs` — a
+    /// `SandboxedFs` rooted at the workspace. The session's writable SCRATCH
+    /// tree would satisfy `readable_roots()` (it is a writable root, and
+    /// readable ⊇ writable) and would STILL fail that read, because the vfs
+    /// jail does not carry it. The workspace is the one location both
+    /// mechanisms agree on.
+    pub fn for_session(policy: Arc<WorkspacePolicy>) -> Self {
+        let dir = policy
+            .root()
+            .join(wcore_config::config::SESSION_OUTPUT_ROOT)
+            .join(RESULTS_SUBDIR);
+        Self::new(dir).with_readback_guard(policy)
+    }
+
+    /// Bind an explicitly-chosen directory to a session's readback check.
+    ///
+    /// [`for_session`](Self::for_session) picks the directory itself and is
+    /// what production uses; this is the same guard for a directory that came
+    /// from somewhere else, so that choosing the location and enforcing that
+    /// the session can read it stay two separate decisions.
+    #[must_use]
+    pub fn with_readback_guard(mut self, policy: Arc<WorkspacePolicy>) -> Self {
+        self.session = Some(policy);
+        self
+    }
+
+    /// [`for_session`](Self::for_session) when the caller has a policy, the OS
+    /// default when it does not.
+    ///
+    /// THE decision, in one place: a session with no policy has no jail on its
+    /// read path either, so the temp tree is not a trap for it.
+    pub fn for_optional_session(policy: Option<Arc<WorkspacePolicy>>) -> Self {
+        match policy {
+            Some(policy) => Self::for_session(policy),
+            None => Self::os_default(),
+        }
+    }
+
+    /// The directory itself.
+    pub fn path(&self) -> &Path {
+        &self.dir
     }
 
     /// Resolve the path for `tool_use_id` underneath this storage dir.
     pub fn path_for(&self, tool_use_id: &str) -> PathBuf {
-        self.0.join(format!("{}.txt", sanitize_id(tool_use_id)))
+        self.dir.join(format!("{}.txt", sanitize_id(tool_use_id)))
+    }
+
+    /// The write-time readback check (FerroxLabs/wayland#1097). `Ok` when this
+    /// storage dir carries no session; otherwise the session's own answer.
+    pub fn ensure_readable(&self, path: &Path) -> Result<(), WriteTargetNotReadable> {
+        match &self.session {
+            Some(policy) => policy.ensure_write_target_readable(path),
+            None => Ok(()),
+        }
     }
 }
 
@@ -271,6 +363,22 @@ fn build_persisted_message(
     msg
 }
 
+/// The replacement content used when the full output could NOT be handed over
+/// as a path: the same bounded preview, plus why the file is not there.
+///
+/// One builder for both reasons (the write failed, or the target was outside
+/// this session's readable roots) so the two cannot drift into saying
+/// different things about the same situation.
+fn inline_truncation(preview: String, original_size: usize, reason: &str) -> String {
+    let mut msg = preview;
+    msg.push_str(&format!(
+        "\n\n[Truncated: tool response was {} chars. \
+         Full output could not be saved to disk: {reason}]",
+        format_with_commas(original_size)
+    ));
+    msg
+}
+
 /// `1234567` -> `1,234,567`. Tiny helper used only inside the
 /// persisted-message header.
 fn format_with_commas(n: usize) -> String {
@@ -364,6 +472,29 @@ pub fn maybe_persist_tool_result(
     let spill_path = storage.path_for(tool_use_id);
     let (preview, has_more) = generate_preview(content, config.preview_size);
 
+    // FerroxLabs/wayland#1097. The replacement block below tells the model the
+    // full output is at `spill_path` and to `Read` it. If this session cannot
+    // read that path back, writing it would produce exactly the trap this
+    // check exists to refuse: work that succeeds and a delivery that fails one
+    // step later. Fall back to the inline truncation instead, and name the
+    // reason — a bounded preview the model can actually use beats a path it
+    // cannot open.
+    if let Err(refusal) = storage.ensure_readable(&spill_path) {
+        tracing::error!(
+            tool = tool_name,
+            tool_use_id = tool_use_id,
+            path = %spill_path.display(),
+            reason = %refusal,
+            "refusing to spill a tool result somewhere this session cannot read back"
+        );
+        return (
+            inline_truncation(preview, len_chars, &refusal.to_string()),
+            PersistOutcome::InlineTruncated {
+                original_size: len_chars,
+            },
+        );
+    }
+
     match write_spill_file(&spill_path, content) {
         Ok(()) => {
             tracing::info!(
@@ -389,14 +520,8 @@ pub fn maybe_persist_tool_result(
                 error = %err,
                 "tool-result spill write failed; falling back to inline truncation"
             );
-            let mut msg = preview;
-            msg.push_str(&format!(
-                "\n\n[Truncated: tool response was {} chars. \
-                 Full output could not be saved to disk.]",
-                format_with_commas(len_chars)
-            ));
             (
-                msg,
+                inline_truncation(preview, len_chars, &err.to_string()),
                 PersistOutcome::InlineTruncated {
                     original_size: len_chars,
                 },
@@ -486,7 +611,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_storage(tmp: &TempDir) -> StorageDir {
-        StorageDir(tmp.path().join("wayland-results"))
+        StorageDir::new(tmp.path().join("wayland-results"))
     }
 
     #[test]
@@ -749,6 +874,107 @@ mod tests {
         assert!(matches!(err, StorageError::Read { .. }));
     }
 
+    // -----------------------------------------------------------------
+    // FerroxLabs/wayland#1097 — the spill target must be one this session
+    // can read back, because the replacement block tells the model to read it.
+    // -----------------------------------------------------------------
+
+    /// The location production picks: inside the workspace, under the session
+    /// output root, and accepted by the session's own write-time check.
+    #[test]
+    fn the_session_spill_directory_is_inside_the_workspace_output_root() {
+        let tmp = TempDir::new().unwrap();
+        let policy = Arc::new(crate::workspace_policy::WorkspacePolicy::contained(
+            tmp.path(),
+        ));
+        let storage = StorageDir::for_session(Arc::clone(&policy));
+        assert_eq!(
+            storage.path(),
+            tmp.path().join(".wayland-out").join("results")
+        );
+        policy
+            .ensure_write_target_readable(&storage.path_for("toolu_01"))
+            .expect("the spill target must be readable by the session that is told to read it");
+    }
+
+    /// The shipped behaviour, as a property: a spill aimed at the host temp
+    /// tree must not produce a file plus a path the session cannot open. It
+    /// refuses, keeps a usable preview, and says why.
+    #[test]
+    fn a_spill_target_outside_the_sessions_readable_roots_is_refused_not_written() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let policy = Arc::new(crate::workspace_policy::WorkspacePolicy::contained(
+            &workspace,
+        ));
+        // Exactly what `StorageDir::os_default()` names, under a tempdir so the
+        // test never touches the real one.
+        let outside = tmp.path().join("host-temp").join(STORAGE_SUBDIR);
+        let storage = StorageDir::new(&outside).with_readback_guard(policy);
+
+        let content = "x".repeat(50_000);
+        let (replacement, outcome) = maybe_persist_tool_result(
+            &content,
+            "Bash",
+            "toolu_outside",
+            &storage,
+            &BudgetConfig::default(),
+            None,
+        );
+
+        assert_eq!(
+            outcome,
+            PersistOutcome::InlineTruncated {
+                original_size: 50_000
+            },
+            "an unreadable target must not be reported as persisted"
+        );
+        assert!(
+            !storage.path_for("toolu_outside").exists(),
+            "the file was written anyway — the session can create it and never read it"
+        );
+        assert!(
+            !replacement.contains("Full output saved to:"),
+            "the model was handed a path it cannot open: {replacement}"
+        );
+        assert!(
+            replacement.contains("is outside this session's readable roots"),
+            "the refusal reason has to reach the model: {replacement}"
+        );
+        assert!(
+            replacement.starts_with(&"x".repeat(100)),
+            "the bounded preview is still the point of the fallback"
+        );
+    }
+
+    /// Positive control for the two assertions above: with a readable target
+    /// the same call still spills and still hands over the path.
+    #[test]
+    fn a_readable_spill_target_still_persists_and_names_the_file() {
+        let tmp = TempDir::new().unwrap();
+        let policy = Arc::new(crate::workspace_policy::WorkspacePolicy::contained(
+            tmp.path(),
+        ));
+        let storage = StorageDir::for_session(policy);
+
+        let content = "y".repeat(50_000);
+        let (replacement, outcome) = maybe_persist_tool_result(
+            &content,
+            "Bash",
+            "toolu_inside",
+            &storage,
+            &BudgetConfig::default(),
+            None,
+        );
+
+        let spill = storage.path_for("toolu_inside");
+        assert!(matches!(outcome, PersistOutcome::Persisted { .. }));
+        assert!(spill.exists(), "the readable target must still be written");
+        assert_eq!(std::fs::read_to_string(&spill).unwrap(), content);
+        assert!(replacement.contains("Full output saved to:"));
+    }
+
     #[test]
     fn sanitize_id_strips_path_traversal() {
         // Path separators and `..` are replaced; the spill file lands
@@ -758,10 +984,10 @@ mod tests {
         let evil = "../../etc/passwd";
         let path = storage.path_for(evil);
         assert!(
-            path.starts_with(&storage.0),
+            path.starts_with(storage.path()),
             "spill path {} must be inside storage dir {}",
             path.display(),
-            storage.0.display()
+            storage.path().display()
         );
         assert!(!path.to_string_lossy().contains(".."));
     }

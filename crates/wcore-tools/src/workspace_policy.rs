@@ -18,7 +18,7 @@
 //! `operator_bash_network` for a sandboxed one). It is never hardcoded here.
 
 use parking_lot::RwLock;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use thiserror::Error;
@@ -211,6 +211,19 @@ pub enum WorkspaceCapabilityGrantError {
     CredentialPath(PathBuf),
     #[error("capability path could not be resolved: {0}")]
     Resolve(#[from] std::io::Error),
+}
+
+/// A write target that the session could create but could never read back.
+///
+/// FerroxLabs/wayland#1097. Write authority and read authority are enforced by
+/// different mechanisms, so a location can be writable and unreadable at the
+/// same time — and the asymmetry only reveals itself at the END of the work,
+/// when the produced path is handed over and the read is refused. This is the
+/// refusal that turns that dead end into a write-time error naming the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{} is outside this session's readable roots", path.display())]
+pub struct WriteTargetNotReadable {
+    pub path: PathBuf,
 }
 
 /// One standing read grant held by a session.
@@ -678,6 +691,47 @@ impl WorkspacePolicy {
         wcore_config::config::user_skill_source_dirs()
             .iter()
             .any(|dir| canon.starts_with(canon_deep(dir)))
+    }
+
+    /// Refuse a write target this session could never read back
+    /// (FerroxLabs/wayland#1097).
+    ///
+    /// The invariant: a path we let an agent WRITE must sit under a root
+    /// [`readable_roots`](Self::readable_roots) also covers. Where it does not,
+    /// the work still succeeds and the delivery fails — the agent finishes
+    /// holding a path it just created and cannot open. Refusing at write time
+    /// costs the same information one step earlier, with the reason named.
+    ///
+    /// Canonicalize-first, exactly like
+    /// [`is_repo_control_path`](Self::is_repo_control_path): the longest
+    /// EXISTING ancestor is resolved (so a target whose directories do not
+    /// exist yet is still judged on where it would really land), which also
+    /// means a `..` segment and a symlinked parent are resolved before the
+    /// prefix match rather than after it.
+    ///
+    /// SCOPE — this is the OS-sandbox answer, which is the WIDER of the two
+    /// answers this codebase has to "can the session read it". `Bash` reads
+    /// through the OS sandbox, whose allow-list IS `readable_roots()`; the file
+    /// tools (`Read`/`Grep`/`Glob`) read through `ctx.vfs`, whose jail is
+    /// rooted at the workspace plus the standing session read grants and does
+    /// NOT include `readable_extra` (toolchain dirs) or the writable scratch
+    /// tree. So passing this check is NECESSARY for a readable-back write and
+    /// is not by itself SUFFICIENT for one the `Read` tool can open: a caller
+    /// that hands its path to the model should keep the target under
+    /// [`root`](Self::root).
+    pub fn ensure_write_target_readable(&self, path: &Path) -> Result<(), WriteTargetNotReadable> {
+        let resolved = canon_existing_ancestor(path);
+        let covered = self
+            .readable_roots()
+            .iter()
+            .any(|root| resolved.starts_with(canon_existing_ancestor(root)));
+        if covered {
+            Ok(())
+        } else {
+            Err(WriteTargetNotReadable {
+                path: path.to_path_buf(),
+            })
+        }
     }
 
     /// #667: opt a `Trusted` policy into the same PROJECT-committed-secret
@@ -1866,6 +1920,51 @@ fn under_project_load_path(path: &Path) -> bool {
         parent_was_marker = name == std::ffi::OsStr::new(".wayland-core");
     }
     false
+}
+
+/// Resolve `path` to where it would ACTUALLY land, component by component,
+/// without requiring any of it to exist yet.
+///
+/// [`canon_for_scope`] resolves at most one missing component, which is enough
+/// for a leaf that does not exist yet but not for a target whose directories
+/// have not been created either (`<root>/.wayland-out/results/x.txt` on a fresh
+/// workspace, which is what every FIRST spill looks like).
+///
+/// Walking DOWN and re-canonicalizing after every component — rather than
+/// canonicalizing the longest existing ancestor once and appending the rest
+/// verbatim — is what keeps the result honest for the two escapes that matter,
+/// both of which appear only when part of the path is missing:
+///
+/// * `<root>/nope/../../outside/x` — a `..` that follows a component which
+///   does not exist. Appended verbatim it stays in the string, and the result
+///   still `starts_with` the root while the real target is outside it.
+/// * `<root>/nope/../link/x` — a symlinked component reached only after such a
+///   `..`. It has to be resolved before the prefix compare, not after.
+///
+/// A `..` is applied lexically (`pop`) because the prefix accumulated so far is
+/// already canonical, so there is no symlink left for it to traverse wrongly.
+fn canon_existing_ancestor(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(name) => out.push(name),
+        }
+        // Resolve as soon as the prefix so far exists, so a symlinked
+        // component is replaced by its target BEFORE any later `..` is
+        // applied to it, and so a `..` that follows a component which does
+        // not exist is still applied instead of being carried into the
+        // comparison verbatim.
+        if let Ok(resolved) = std::fs::canonicalize(&out) {
+            out = resolved;
+        }
+    }
+    out
 }
 
 fn canon(p: PathBuf) -> PathBuf {

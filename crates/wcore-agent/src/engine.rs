@@ -11705,8 +11705,11 @@ impl AgentEngine {
                             // Both target the same oversized blocks and the spills are
                             // idempotent (`maybe_persist_tool_result` skips already-spilled
                             // blocks), so re-runs never re-spill or hot-loop.
-                            let storage =
-                                wcore_tools::tool_result_storage::StorageDir::os_default();
+                            // #1097: the shed writes a file and then tells the model to
+                            // `Read` it back, so the directory has to be one this session
+                            // can read. `ToolRegistry::spill_storage` is the single place
+                            // that decision is taken.
+                            let storage = self.tools.spill_storage();
                             let budget = wcore_tools::tool_result_storage::BudgetConfig::default();
                             // Shed any result whose spill is a NET reduction: the
                             // `<persisted-output>` replacement is the preview (≤
