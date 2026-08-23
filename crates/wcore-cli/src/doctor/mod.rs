@@ -655,9 +655,14 @@ pub(crate) enum CredentialVerdict {
     NoEndpoint,
     /// The provider authenticated the key.
     Accepted,
-    /// The provider refused the key, or the request never completed. Carries
-    /// the reason (`"key rejected (401)"`, `"network error"`, …).
+    /// The provider refused the key — a 401/403, which is evidence about the
+    /// credential itself.
     Refused(String),
+    /// The probe ran but produced no auth answer: any other status, a timeout,
+    /// a transport failure. **Never means the key is bad.** Kept distinct from
+    /// [`CredentialVerdict::Refused`] because condemning a key nobody judged
+    /// would be the same defect this section exists to fix.
+    Inconclusive(String),
 }
 
 /// FerroxLabs/wayland#1079 — the invocation's own provider selection, printed.
@@ -691,7 +696,7 @@ fn print_provider_section(cli_args: &wcore_config::config::CliArgs, probe_provid
     for line in provider_section_lines(
         cli_args,
         probe_provider,
-        &crate::provider_keys::validate_key_blocking,
+        &crate::provider_keys::validate_key_verdict,
     ) {
         println!("{line}");
     }
@@ -711,7 +716,7 @@ fn print_provider_section(cli_args: &wcore_config::config::CliArgs, probe_provid
 fn provider_section_lines(
     cli_args: &wcore_config::config::CliArgs,
     probe_provider: bool,
-    probe: &dyn Fn(crate::provider_keys::Provider, &str) -> crate::provider_keys::ValidationOutcome,
+    probe: &dyn Fn(crate::provider_keys::Provider, &str) -> crate::provider_keys::KeyVerdict,
 ) -> Vec<String> {
     let mut out = vec![String::new(), "Provider (this invocation):".to_string()];
     let cfg = match wcore_config::config::Config::resolve(cli_args) {
@@ -772,7 +777,7 @@ fn provider_section_lines(
 fn credential_verdict(
     cfg: &wcore_config::config::Config,
     probe_provider: bool,
-    probe: &dyn Fn(crate::provider_keys::Provider, &str) -> crate::provider_keys::ValidationOutcome,
+    probe: &dyn Fn(crate::provider_keys::Provider, &str) -> crate::provider_keys::KeyVerdict,
 ) -> CredentialVerdict {
     if cfg.api_key.is_empty() {
         return CredentialVerdict::NoCredential;
@@ -784,15 +789,18 @@ fn credential_verdict(
         return CredentialVerdict::NoEndpoint;
     };
     match probe(provider, &cfg.api_key) {
-        crate::provider_keys::ValidationOutcome::Ok => CredentialVerdict::Accepted,
+        crate::provider_keys::KeyVerdict::Accepted => CredentialVerdict::Accepted,
         // The reason is provider-derived text on its way into output users
         // paste into bug reports, so the credential is stripped from it here
         // rather than trusted not to be there. `validate_key_blocking` builds
         // fixed strings today; this holds even if one day it quotes the
         // request. Redacting at the print boundary is the only place that
         // cannot be bypassed by a new caller.
-        crate::provider_keys::ValidationOutcome::Failed(why) => {
+        crate::provider_keys::KeyVerdict::Rejected(why) => {
             CredentialVerdict::Refused(redact(&why, &cfg.api_key))
+        }
+        crate::provider_keys::KeyVerdict::Inconclusive(why) => {
+            CredentialVerdict::Inconclusive(redact(&why, &cfg.api_key))
         }
     }
 }
@@ -842,6 +850,11 @@ fn verdict_lines(verdict: &CredentialVerdict, cfg: &wcore_config::config::Config
             lines.extend(base_url_caveat(cfg));
             lines
         }
+        CredentialVerdict::Inconclusive(why) => vec![
+            format!("  credential NOT VALIDATED                       ({why})"),
+            "           the provider did not answer the auth question, so this".to_string(),
+            "           says nothing about whether the key itself is good".to_string(),
+        ],
     }
 }
 
@@ -1180,7 +1193,7 @@ mod tests {
     // handed, and every verdict's wording — with no live call.
     // ---------------------------------------------------------------------
 
-    use crate::provider_keys::{Provider, ValidationOutcome};
+    use crate::provider_keys::{KeyVerdict, Provider};
     use std::sync::Mutex;
 
     /// Records what the prober was called with, so a test can assert the
@@ -1218,7 +1231,7 @@ mod tests {
         let spy = ProbeSpy::default();
         let lines = provider_section_lines(&args_with_key(), false, &|p, k| {
             spy.calls.lock().expect("spy lock").push((p, k.to_string()));
-            ValidationOutcome::Ok
+            KeyVerdict::Accepted
         });
 
         assert!(
@@ -1249,7 +1262,7 @@ mod tests {
         let spy = ProbeSpy::default();
         let lines = provider_section_lines(&args_with_key(), true, &|p, k| {
             spy.calls.lock().expect("spy lock").push((p, k.to_string()));
-            ValidationOutcome::Ok
+            KeyVerdict::Accepted
         });
 
         assert_eq!(
@@ -1271,7 +1284,7 @@ mod tests {
     #[test]
     fn probe_provider_reports_a_rejected_key_with_its_reason() {
         let lines = provider_section_lines(&args_with_key(), true, &|_, _| {
-            ValidationOutcome::Failed("key rejected (401)".to_string())
+            KeyVerdict::Rejected("key rejected (401)".to_string())
         });
         assert!(
             lines
@@ -1286,24 +1299,59 @@ mod tests {
         );
     }
 
-    /// A failure that is not an auth rejection must not read as one, and must
-    /// never read as success — the doctor's job is to distinguish "your key is
-    /// bad" from "I could not tell".
+    /// A probe that produced no auth answer must read as neither ACCEPTED nor
+    /// REFUSED — the doctor's job is to distinguish "your key is bad" from "I
+    /// could not tell", and getting that wrong in EITHER direction is the
+    /// defect this section exists to fix.
+    ///
+    /// Not hypothetical: `api.perplexity.ai/models` answers 404 to an
+    /// anonymous request, so folding non-auth statuses into REFUSED would
+    /// condemn every valid Perplexity key — a row that can never pass.
     #[test]
-    fn a_probe_that_never_completed_is_not_reported_as_accepted() {
+    fn a_probe_that_never_answered_is_reported_as_neither_accepted_nor_refused() {
+        for why in ["network error", "unexpected response (404)", "timed out"] {
+            let lines = provider_section_lines(&args_with_key(), true, &|_, _| {
+                KeyVerdict::Inconclusive(why.to_string())
+            });
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("NOT VALIDATED") && l.contains(why)),
+                "{why:?} was not reported at all. lines:\n{lines:#?}"
+            );
+            assert!(
+                !lines.iter().any(|l| l.contains("ACCEPTED")),
+                "#1079: {why:?} rendered as ACCEPTED — a gate that cannot \
+                 fail. lines:\n{lines:#?}"
+            );
+            assert!(
+                !lines.iter().any(|l| l.contains("REFUSED")),
+                "#1079: {why:?} rendered as REFUSED — condemning a key the \
+                 provider never judged. lines:\n{lines:#?}"
+            );
+            // The user must be told the verdict is about the request, not the key.
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("says nothing about whether the key")),
+                "the section did not say this is not a verdict on the key. \
+                 lines:\n{lines:#?}"
+            );
+        }
+    }
+
+    /// NEGATIVE CONTROL for the test above: a real 401 still reaches REFUSED,
+    /// so "never REFUSED" above is about inconclusive outcomes rather than
+    /// about REFUSED having become unreachable.
+    #[test]
+    fn an_auth_rejection_still_reaches_refused() {
         let lines = provider_section_lines(&args_with_key(), true, &|_, _| {
-            ValidationOutcome::Failed("network error".to_string())
+            KeyVerdict::Rejected("key rejected (401)".to_string())
         });
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("REFUSED") && l.contains("network error")),
-            "an unreachable provider was not reported. lines:\n{lines:#?}"
-        );
-        assert!(
-            !lines.iter().any(|l| l.contains("ACCEPTED")),
-            "#1079: a probe that never completed rendered as ACCEPTED — the \
-             gate that cannot fail. lines:\n{lines:#?}"
+            lines.iter().any(|l| l.contains("REFUSED")),
+            "REFUSED is unreachable, so the assertions above are vacuous. \
+             lines:\n{lines:#?}"
         );
     }
 
@@ -1314,7 +1362,7 @@ mod tests {
     fn a_custom_base_url_is_flagged_as_outside_the_verdict() {
         let mut args = args_with_key();
         args.base_url = Some("https://proxy.issue1079.invalid/v1".to_string());
-        let lines = provider_section_lines(&args, true, &|_, _| ValidationOutcome::Ok);
+        let lines = provider_section_lines(&args, true, &|_, _| KeyVerdict::Accepted);
         assert!(
             lines
                 .iter()
@@ -1329,7 +1377,7 @@ mod tests {
     /// otherwise it would fire on every run and mean nothing.
     #[test]
     fn the_default_base_url_draws_no_caveat() {
-        let lines = provider_section_lines(&args_with_key(), true, &|_, _| ValidationOutcome::Ok);
+        let lines = provider_section_lines(&args_with_key(), true, &|_, _| KeyVerdict::Accepted);
         // Positive control: the run really did produce a verdict.
         assert!(
             lines.iter().any(|l| l.contains("ACCEPTED")),
@@ -1347,7 +1395,7 @@ mod tests {
     fn the_probe_section_never_prints_the_credential() {
         for probe_provider in [false, true] {
             let lines = provider_section_lines(&args_with_key(), probe_provider, &|_, _| {
-                ValidationOutcome::Failed(format!("key rejected (401) for {PROBE_KEY}"))
+                KeyVerdict::Rejected(format!("key rejected (401) for {PROBE_KEY}"))
             });
             // Positive control: a credential really did resolve on this run.
             assert!(
@@ -1375,7 +1423,7 @@ mod tests {
             api_key: PROBE_KEY.to_string(),
             ..Default::default()
         };
-        let verdict = credential_verdict(&cfg, true, &|_, _| ValidationOutcome::Ok);
+        let verdict = credential_verdict(&cfg, true, &|_, _| KeyVerdict::Accepted);
         assert_eq!(verdict, CredentialVerdict::NoEndpoint);
         let lines = verdict_lines(&verdict, &cfg);
         assert!(
@@ -1396,7 +1444,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            credential_verdict(&cfg, true, &|_, _| ValidationOutcome::Ok),
+            credential_verdict(&cfg, true, &|_, _| KeyVerdict::Accepted),
             CredentialVerdict::NoCredential
         );
     }
