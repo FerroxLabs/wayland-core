@@ -1726,16 +1726,34 @@ fn is_orphaned_tool_pair_rejection(error: &ProviderError) -> bool {
         return false;
     }
     let message = message.to_ascii_lowercase();
-    if !(message.contains("tool_use") && message.contains("tool_result")) {
-        return false;
-    }
-    // The pairing fault itself, in the shapes providers actually emit:
-    // Anthropic "…ids were found without `tool_result` blocks…", and the
-    // reverse direction "…`tool_result` … when previous message does not
-    // contain any `tool_use` blocks" / "unexpected `tool_result`".
-    message.contains("without")
-        || message.contains("unexpected")
-        || message.contains("does not contain")
+
+    // Anthropic shape — the refusal names BOTH block types AND the pairing
+    // fault: "…ids were found without `tool_result` blocks…", and the reverse
+    // direction "…`tool_result` … when previous message does not contain any
+    // `tool_use` blocks" / "unexpected `tool_result`".
+    let anthropic_shape = message.contains("tool_use")
+        && message.contains("tool_result")
+        && (message.contains("without")
+            || message.contains("unexpected")
+            || message.contains("does not contain"));
+
+    // OpenAI shape — and this is the shape #923 was FILED with, which the
+    // 0.13.5 gate could not match: DeepSeek via Flux refused with
+    //   "messages[25]: missing field `tool_call_id` at line 1 column 114969"
+    // That sentence contains neither `tool_use` nor `tool_result`, so the
+    // Anthropic-shape test above returns false for the ticket's own error and
+    // the repair never engaged on the case that was reported.
+    //
+    // `tool_call_id` / `tool_calls` are the OpenAI wire names for the pairing
+    // itself, but naming them is not enough on its own: "tool_calls is not
+    // supported by this model" is a capability refusal, not a pairing fault,
+    // and re-sending it would be a blind second bill. The refusal must ALSO
+    // be about the request's message array — a positional `messages[N]` /
+    // `messages.N` complaint, or a deserialization `missing field`.
+    let openai_shape = (message.contains("tool_call_id") || message.contains("tool_calls"))
+        && (message.contains("messages") || message.contains("missing field"));
+
+    anthropic_shape || openai_shape
 }
 
 fn is_http_4xx_error(reason: &str) -> bool {
@@ -7011,6 +7029,131 @@ impl AgentEngine {
         }
     }
 
+    /// #923 — an EMPTY tool id, which neither repair above can see.
+    ///
+    /// Both key on id EQUALITY, so an empty `id` on an assistant `tool_use` is
+    /// "satisfied" by an empty `tool_use_id` on the answering `tool_result`,
+    /// and `repair_orphaned_tool_results` puts `""` in its live-id set for the
+    /// same reason. A pair that carries no id at all therefore passes both
+    /// guards untouched and goes on the wire.
+    ///
+    /// It is reachable: `anthropic_shared.rs:489` reads the streamed tool id
+    /// with `block["id"].as_str().unwrap_or("")`, and wayland#170 is the
+    /// report of a router dropping exactly that id from the stream. An empty
+    /// id is invalid everywhere — OpenAI-shape endpoints refuse
+    /// `tool_call_id: ""` (`openai.rs` `strip_empty_tool_call_ids` catches it
+    /// at the serializer, but only for that family), and the Anthropic-shape
+    /// serializer has no equivalent net, so it goes out as-is.
+    ///
+    /// Both halves are demoted to text rather than dropped, so the content
+    /// survives as context — the same contract as
+    /// `neutralize_orphaned_tool_result`. Idempotent: a history with no empty
+    /// ids is left byte-identical. Returns the number of blocks demoted.
+    fn sanitize_empty_tool_ids(&mut self) -> usize {
+        let mut demoted = 0usize;
+        for msg in &mut self.messages {
+            let needs_work = msg.content.iter().any(|b| match b {
+                ContentBlock::ToolUse { id, .. } => id.is_empty(),
+                ContentBlock::ToolResult { tool_use_id, .. } => tool_use_id.is_empty(),
+                _ => false,
+            });
+            if !needs_work {
+                continue;
+            }
+            msg.content = std::mem::take(&mut msg.content)
+                .into_iter()
+                .map(|b| match b {
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } if id.is_empty() => {
+                        demoted += 1;
+                        ContentBlock::Text {
+                            text: format!(
+                                "[tool call `{name}` elided: the provider streamed no call \
+                                 id]\n{input}"
+                            ),
+                        }
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } if tool_use_id.is_empty() => {
+                        demoted += 1;
+                        ContentBlock::Text {
+                            text: format!("[tool result (call id missing)]\n{content}"),
+                        }
+                    }
+                    other => other,
+                })
+                .collect();
+        }
+        demoted
+    }
+
+    /// #923 — the last-resort repair, used ONLY after a provider has served a
+    /// 400 that names a tool-pairing fault in the array we just sent.
+    ///
+    /// By the time that refusal arrives, `repair_all_orphaned_tool_uses`,
+    /// `repair_orphaned_tool_results` and `sanitize_empty_tool_ids` have
+    /// already run against this exact array — they are called unconditionally
+    /// on the send path — and all three are idempotent. Re-running them here
+    /// would rebuild the identical request and earn the identical 400, which
+    /// is precisely why the 0.13.5 repair-and-retry could not help: the second
+    /// send was byte-for-byte the first. The retry is only worth a second bill
+    /// if the array actually CHANGES.
+    ///
+    /// So this demotes every `tool_use` and `tool_result` block in the history
+    /// to plain text. Heavy-handed on purpose: it cannot leave a pairing fault
+    /// of any shape behind, it needs no diagnosis of a root cause nobody has
+    /// captured yet, and no content is lost — the call and its result are both
+    /// carried forward as prose the model can still read. The alternative it
+    /// replaces is the one this ticket reports: abandoning the session and
+    /// losing all of its context.
+    ///
+    /// It mutates `self.messages`, not just the outgoing request, and that is
+    /// deliberate. The reported symptom is RECURRENCE — "retrying always hits
+    /// the same bad message" — which is what a request-only fix would leave
+    /// intact.
+    ///
+    /// Returns the number of blocks demoted. **Zero means a second send would
+    /// be byte-identical to the first**, and the caller must not spend one.
+    fn demote_all_tool_blocks(&mut self) -> usize {
+        const NOTE: &str = "dropped after the provider refused the conversation for a \
+                            tool-pairing fault";
+        let mut demoted = 0usize;
+        for msg in &mut self.messages {
+            let has_tool_block = msg.content.iter().any(|b| {
+                matches!(
+                    b,
+                    ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+                )
+            });
+            if !has_tool_block {
+                continue;
+            }
+            msg.content = std::mem::take(&mut msg.content)
+                .into_iter()
+                .map(|b| match b {
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        demoted += 1;
+                        ContentBlock::Text {
+                            text: format!("[tool call `{name}` ({NOTE})]\n{input}"),
+                        }
+                    }
+                    ContentBlock::ToolResult { content, .. } => {
+                        demoted += 1;
+                        ContentBlock::Text {
+                            text: format!("[tool result ({NOTE})]\n{content}"),
+                        }
+                    }
+                    other => other,
+                })
+                .collect();
+        }
+        demoted
+    }
+
     /// AUDIT A1 / E-C1 / A2 — shared clean-termination path for the
     /// non-natural loop exits (turn cap, budget cap, context ceiling,
     /// host cancel, no-progress loop).
@@ -11254,6 +11397,12 @@ impl AgentEngine {
                     // matching tool_use) are untouched, and only true orphans are
                     // demoted to text.
                     self.repair_orphaned_tool_results();
+                    // #923 — the third shape, which neither repair above can
+                    // see because both key on id EQUALITY: a tool_use/
+                    // tool_result pair that carries an EMPTY id matches itself
+                    // and passes untouched. Run last, so it only ever sees
+                    // pairs the two repairs decided were well-formed.
+                    self.sanitize_empty_tool_ids();
                     // Output-side optimization (Part A): attach fluff stop sequences
                     // only when the route optimizes client-side. On router-optimized
                     // routes the server already trims output, so we leave the Vec
@@ -12705,32 +12854,50 @@ impl AgentEngine {
                         // exactly this reason. The capture is still written
                         // either way, and still named.
                         if !orphan_repair_retried && is_orphaned_tool_pair_rejection(&e) {
-                            orphan_repair_retried = true;
-                            self.output.emit_provider_retry(Some("orphaned_tool_pair"));
-                            let mut retry_note = "provider rejected the request for an \
-                                 orphaned tool_use/tool_result pair — repaired the \
-                                 conversation and retrying once"
-                                .to_string();
-                            if let Some(path) = captured.as_ref() {
-                                retry_note.push_str(&format!(
-                                    " (the refused request was captured to {})",
-                                    path.display()
-                                ));
+                            // The three pre-send guards already ran against
+                            // THIS array and all three are idempotent, so
+                            // re-running them would rebuild the same bytes and
+                            // earn the same 400 — that is why the 0.13.5 retry
+                            // could not help. Escalate straight to the repair
+                            // that is guaranteed to change the array, and
+                            // spend the second send only if it changed
+                            // something.
+                            let demoted = self.demote_all_tool_blocks();
+                            if demoted > 0 {
+                                orphan_repair_retried = true;
+                                self.output.emit_provider_retry(Some("orphaned_tool_pair"));
+                                let mut retry_note = format!(
+                                    "provider rejected the conversation for a tool-pairing \
+                                     fault — demoted {demoted} tool block(s) to text and \
+                                     retrying once; the session keeps its context"
+                                );
+                                if let Some(path) = captured.as_ref() {
+                                    retry_note.push_str(&format!(
+                                        " (the refused request was captured to {})",
+                                        path.display()
+                                    ));
+                                }
+                                self.output.emit_info(&retry_note);
+                                self.settle_failed_turn_provider_attempts(&e.to_string())
+                                    .await;
+                                request.messages = self.messages.clone();
+                                let recount = estimate::estimate_request_tokens(
+                                    &self.messages,
+                                    &request.system,
+                                    &request.tools,
+                                );
+                                request.client_context_tokens = Some(recount);
+                                self.sync_active_journal_conversation().await?;
+                                continue 'stream;
                             }
-                            self.output.emit_info(&retry_note);
-                            self.settle_failed_turn_provider_attempts(&e.to_string())
-                                .await;
-                            self.repair_all_orphaned_tool_uses();
-                            self.repair_orphaned_tool_results();
-                            request.messages = self.messages.clone();
-                            let recount = estimate::estimate_request_tokens(
-                                &self.messages,
-                                &request.system,
-                                &request.tools,
+                            // Nothing to demote: the conversation carries no
+                            // tool blocks at all, so a second send would be
+                            // byte-identical. Say so rather than billing it.
+                            surfaced.push_str(
+                                " The refusal names a tool-pairing fault, but this \
+                                 conversation carries no tool blocks to repair — it was \
+                                 not re-sent, because a second send would be identical.",
                             );
-                            request.client_context_tokens = Some(recount);
-                            self.sync_active_journal_conversation().await?;
-                            continue 'stream;
                         }
                         self.output.emit_error(&surfaced, false);
                         // #923(2) — fail the TURN, not the session. The dispatch
@@ -33932,6 +34099,35 @@ mod issue_923_orphan_repair_gate_tests {
             400,
             "messages.2: unexpected `tool_result` blocks: the previous message does not \
              contain any `tool_use` blocks"
+        )));
+    }
+
+    /// The refusal EXACTLY as pasted into #923, from the route the reporter
+    /// was on (DeepSeek via Flux). It names neither `tool_use` nor
+    /// `tool_result`, so the 0.13.5 gate returned false for the ticket's own
+    /// error and the repair never engaged on the case that was filed.
+    #[test]
+    fn the_reported_openai_shape_400_matches() {
+        assert!(is_orphaned_tool_pair_rejection(&api(
+            400,
+            "Flux.BadRequestError: DeepseekException - {\"error\":{\"message\":\"Failed to \
+             deserialize the JSON body into the target type: messages[25]: missing field \
+             `tool_call_id` at line 1 column 114969\"}}"
+        )));
+    }
+
+    /// The false positive the widened gate could introduce: a refusal that
+    /// names the wire field but complains about CAPABILITY, not pairing.
+    /// Re-sending it would be a blind second bill.
+    #[test]
+    fn a_capability_400_naming_tool_calls_does_not_match() {
+        assert!(!is_orphaned_tool_pair_rejection(&api(
+            400,
+            "tool_calls is not supported by this model"
+        )));
+        assert!(!is_orphaned_tool_pair_rejection(&api(
+            400,
+            "unsupported_value: `tool_choice` requires tool_calls capability"
         )));
     }
 
