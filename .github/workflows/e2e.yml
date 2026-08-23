@@ -84,7 +84,6 @@ jobs:
       # not touched — the operator chose that, and nothing claims they ran.
       - name: Check API key availability
         if: steps.filter.outputs.run == 'true'
-        id: check_key
         env:
           API_KEY: ${{ secrets[matrix.secret_name] }}
         run: |
