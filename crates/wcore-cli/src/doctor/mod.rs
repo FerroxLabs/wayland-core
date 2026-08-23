@@ -102,7 +102,11 @@ pub async fn collect() -> DoctorReport {
 ///
 /// The check rows themselves ([`collect`]) are config-independent and are
 /// deliberately left alone — the TUI `/doctor` surface shares them.
-pub async fn run(probe_mcp: bool, cli_args: &wcore_config::config::CliArgs) -> ExitCode {
+pub async fn run(
+    probe_mcp: bool,
+    probe_provider: bool,
+    cli_args: &wcore_config::config::CliArgs,
+) -> ExitCode {
     let report = collect().await;
     let version = &report.version;
     println!("wayland-core doctor v{version}\n");
@@ -154,7 +158,7 @@ pub async fn run(probe_mcp: bool, cli_args: &wcore_config::config::CliArgs) -> E
     // #1079: what THIS command line resolves to. Printed first of the three
     // sections because it is the config the two below are computed from.
     // Informational only — never flips the exit code below.
-    print_provider_section(cli_args);
+    print_provider_section(cli_args, probe_provider);
 
     // Report whether durable session persistence is on, and if it is off,
     // WHICH of the two very different reasons turned it off. Informational
@@ -632,6 +636,30 @@ fn classify_durable_sessions(session_enabled: bool, replay_unavailable: bool) ->
 /// a degraded capability must be *reportable on demand*, not only printed into
 /// a log nobody kept.
 ///
+/// How far the doctor got in checking the resolved credential.
+///
+/// Pure data, deliberately separate from the code that renders it, so the
+/// gating (`--probe-provider` off means NOT PROBED, never "accepted") and the
+/// wording of every verdict are unit-testable without a network call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CredentialVerdict {
+    /// No credential resolved at all, so there is nothing to validate.
+    NoCredential,
+    /// A credential resolved, but `--probe-provider` was not passed. **This is
+    /// the default**: bare `--doctor` stays side-effect-free, exactly as bare
+    /// `--doctor` does not connect-test MCP servers without `--probe-mcp`.
+    NotProbed,
+    /// The provider has no key-validation endpoint we know of, so the key
+    /// cannot be checked even on request. Reported rather than silently
+    /// skipped — an unrunnable check must not read as a passing one.
+    NoEndpoint,
+    /// The provider authenticated the key.
+    Accepted,
+    /// The provider refused the key, or the request never completed. Carries
+    /// the reason (`"key rejected (401)"`, `"network error"`, …).
+    Refused(String),
+}
+
 /// FerroxLabs/wayland#1079 — the invocation's own provider selection, printed.
 ///
 /// The ticket's headline is `--doctor --api-key <key>` being ignored. Threading
@@ -648,8 +676,9 @@ fn classify_durable_sessions(session_enabled: bool, replay_unavailable: bool) ->
 /// THIS command line, and marks each value with where it came from, so every
 /// config-selecting flag has a visible effect on doctor's output.
 ///
-/// **The credential is never printed** — only whether one resolved and from
-/// which rung. `doctor_never_prints_the_api_key_value` guards that.
+/// **The credential is never printed** — only whether one resolved, from which
+/// rung, and (with `--probe-provider`) whether the provider accepts it.
+/// `doctor_never_prints_the_api_key_value` guards that.
 ///
 /// Printed, deliberately NOT a `CheckResult` row, for exactly the reason given
 /// on [`print_durable_sessions_section`]: the TUI diagnostics surface turns
@@ -658,52 +687,198 @@ fn classify_durable_sessions(session_enabled: bool, replay_unavailable: bool) ->
 ///
 /// Informational only: like the other two sections it can never flip the exit
 /// code.
-fn print_provider_section(cli_args: &wcore_config::config::CliArgs) {
-    println!();
-    println!("Provider (this invocation):");
-    match wcore_config::config::Config::resolve(cli_args) {
+fn print_provider_section(cli_args: &wcore_config::config::CliArgs, probe_provider: bool) {
+    for line in provider_section_lines(
+        cli_args,
+        probe_provider,
+        &crate::provider_keys::validate_key_blocking,
+    ) {
+        println!("{line}");
+    }
+}
+
+/// The body of [`print_provider_section`], returning lines instead of printing
+/// them and taking the credential prober as a parameter.
+///
+/// `probe` is injected for one reason: it is the only part of this section that
+/// touches the network. Passing a fake lets the unit tests below grade the
+/// whole wiring — the `--probe-provider` gate, that the prober is called with
+/// the resolved provider and the resolved key, and every verdict's wording —
+/// with no live call and no flakiness. The single seam left ungraded here is
+/// the binding to the real [`crate::provider_keys::validate_key_blocking`]
+/// above, which carries its own tests (`provider_keys.rs`:
+/// `validate_key_blocking_routes_through_egress_and_classifies_status`).
+fn provider_section_lines(
+    cli_args: &wcore_config::config::CliArgs,
+    probe_provider: bool,
+    probe: &dyn Fn(crate::provider_keys::Provider, &str) -> crate::provider_keys::ValidationOutcome,
+) -> Vec<String> {
+    let mut out = vec![String::new(), "Provider (this invocation):".to_string()];
+    let cfg = match wcore_config::config::Config::resolve(cli_args) {
         Err(e) => {
-            println!("  (config not loaded: {e})");
-            println!("           run `wayland-core --config-path` and check that file");
+            out.push(format!("  (config not loaded: {e})"));
+            out.push("           run `wayland-core --config-path` and check that file".to_string());
+            return out;
         }
-        Ok(cfg) => {
-            let source = |flag: &str, from_flag: bool| {
-                if from_flag {
-                    format!("(from {flag})")
-                } else {
-                    "(from config)".to_string()
-                }
-            };
-            println!(
-                "  provider   {:<38} {}",
-                cfg.provider_label,
-                source("--provider", cli_args.provider.is_some())
-            );
-            println!(
-                "  model      {:<38} {}",
-                cfg.model,
-                source("--model", cli_args.model.is_some())
-            );
-            println!(
-                "  base url   {:<38} {}",
-                cfg.base_url,
-                source("--base-url", cli_args.base_url.is_some())
-            );
-            // State comes from the RESOLVED config, source from the flag: an
-            // explicitly empty `--api-key ""` must not read as "present".
-            let (state, key_source) = if cfg.api_key.is_empty() {
-                ("not set", "(no credential resolved)".to_string())
-            } else if cli_args.api_key.is_some() {
-                ("present", "(from --api-key)".to_string())
-            } else {
-                (
-                    "present",
-                    "(from config, credential store or environment)".to_string(),
-                )
-            };
-            println!("  api key    {state:<38} {key_source}");
+        Ok(cfg) => cfg,
+    };
+
+    let source = |flag: &str, from_flag: bool| {
+        if from_flag {
+            format!("(from {flag})")
+        } else {
+            "(from config)".to_string()
+        }
+    };
+    out.push(format!(
+        "  provider   {:<38} {}",
+        cfg.provider_label,
+        source("--provider", cli_args.provider.is_some())
+    ));
+    out.push(format!(
+        "  model      {:<38} {}",
+        cfg.model,
+        source("--model", cli_args.model.is_some())
+    ));
+    out.push(format!(
+        "  base url   {:<38} {}",
+        cfg.base_url,
+        source("--base-url", cli_args.base_url.is_some())
+    ));
+    // State comes from the RESOLVED config, source from the flag: an
+    // explicitly empty `--api-key ""` must not read as "present".
+    let (state, key_source) = if cfg.api_key.is_empty() {
+        ("not set", "(no credential resolved)".to_string())
+    } else if cli_args.api_key.is_some() {
+        ("present", "(from --api-key)".to_string())
+    } else {
+        (
+            "present",
+            "(from config, credential store or environment)".to_string(),
+        )
+    };
+    out.push(format!("  api key    {state:<38} {key_source}"));
+
+    let verdict = credential_verdict(&cfg, probe_provider, probe);
+    out.extend(verdict_lines(&verdict, &cfg));
+    out
+}
+
+/// Decide what to say about the resolved credential.
+///
+/// The gate is checked FIRST and unconditionally: with `--probe-provider`
+/// absent this returns [`CredentialVerdict::NotProbed`] without calling
+/// `probe`, so bare `--doctor` cannot make an authenticated network call.
+fn credential_verdict(
+    cfg: &wcore_config::config::Config,
+    probe_provider: bool,
+    probe: &dyn Fn(crate::provider_keys::Provider, &str) -> crate::provider_keys::ValidationOutcome,
+) -> CredentialVerdict {
+    if cfg.api_key.is_empty() {
+        return CredentialVerdict::NoCredential;
+    }
+    if !probe_provider {
+        return CredentialVerdict::NotProbed;
+    }
+    let Some(provider) = crate::provider_keys::Provider::from_slug(&cfg.provider_label) else {
+        return CredentialVerdict::NoEndpoint;
+    };
+    match probe(provider, &cfg.api_key) {
+        crate::provider_keys::ValidationOutcome::Ok => CredentialVerdict::Accepted,
+        // The reason is provider-derived text on its way into output users
+        // paste into bug reports, so the credential is stripped from it here
+        // rather than trusted not to be there. `validate_key_blocking` builds
+        // fixed strings today; this holds even if one day it quotes the
+        // request. Redacting at the print boundary is the only place that
+        // cannot be bypassed by a new caller.
+        crate::provider_keys::ValidationOutcome::Failed(why) => {
+            CredentialVerdict::Refused(redact(&why, &cfg.api_key))
         }
     }
+}
+
+/// Replace every occurrence of `secret` in `text` with a placeholder.
+///
+/// An empty `secret` is returned unchanged — `str::replace` with an empty
+/// pattern splices the placeholder between every character, which would both
+/// mangle the message and falsely suggest something was hidden.
+fn redact(text: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        return text.to_string();
+    }
+    text.replace(secret, "<redacted>")
+}
+
+/// Render a [`CredentialVerdict`], including the caveats a user needs in order
+/// to read it correctly.
+fn verdict_lines(verdict: &CredentialVerdict, cfg: &wcore_config::config::Config) -> Vec<String> {
+    match verdict {
+        CredentialVerdict::NoCredential => vec![
+            "  credential NOT VALIDATED                       (no credential to check)".to_string(),
+        ],
+        CredentialVerdict::NotProbed => vec![
+            "  credential NOT VALIDATED                       (run --doctor --probe-provider to \
+             authenticate it)"
+                .to_string(),
+        ],
+        CredentialVerdict::NoEndpoint => vec![format!(
+            "  credential NOT VALIDATED                       (no key-validation endpoint known \
+             for '{}')",
+            cfg.provider_label
+        )],
+        CredentialVerdict::Accepted => {
+            let mut lines = vec![
+                "  credential ACCEPTED                            (the provider authenticated \
+                 this key)"
+                    .to_string(),
+            ];
+            lines.extend(base_url_caveat(cfg));
+            lines
+        }
+        CredentialVerdict::Refused(why) => {
+            let mut lines = vec![format!(
+                "  credential REFUSED                             ({why})"
+            )];
+            lines.extend(base_url_caveat(cfg));
+            lines
+        }
+    }
+}
+
+/// The probe authenticates against the PROVIDER's own key-validation endpoint
+/// (`provider_keys::validation_endpoint`), which is not the configured
+/// `base_url`. When the two differ — a proxy, a gateway, a self-hosted
+/// compatible endpoint — the verdict is about the vendor, not about the
+/// endpoint this invocation would actually call, and saying so is the whole
+/// point of #1079: a diagnostic must not answer a question the user did not
+/// ask and let them read it as the one they did.
+fn base_url_caveat(cfg: &wcore_config::config::Config) -> Vec<String> {
+    let (url, _) = match crate::provider_keys::Provider::from_slug(&cfg.provider_label) {
+        Some(p) => crate::provider_keys::validation_endpoint(p, ""),
+        None => return Vec::new(),
+    };
+    let vendor_host = host_of(&url);
+    if vendor_host.is_empty() || vendor_host == host_of(&cfg.base_url) {
+        return Vec::new();
+    }
+    vec![
+        format!("           checked against {vendor_host}, NOT the base url above —"),
+        "           a proxy or gateway there is not covered by this verdict".to_string(),
+    ]
+}
+
+/// Host portion of a URL, without pulling in a URL parser for one comparison.
+/// Returns `""` when there is no `//` authority to read.
+fn host_of(url: &str) -> &str {
+    let after_scheme = match url.split_once("//") {
+        Some((_, rest)) => rest,
+        None => return "",
+    };
+    let host = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    host.rsplit_once('@').map_or(host, |(_, h)| h)
 }
 
 /// **Printed, deliberately NOT a `CheckResult` row** — the same reason
@@ -995,5 +1170,258 @@ mod tests {
     async fn which_returns_none_for_unlikely_binary() {
         let r = which("definitely-not-a-real-binary-w5-doctor").await;
         assert!(r.is_none());
+    }
+
+    // ---------------------------------------------------------------------
+    // FerroxLabs/wayland#1079 — the credential probe.
+    //
+    // The section's only network-touching part is injected, so these grade the
+    // whole wiring — the `--probe-provider` gate, the arguments the prober is
+    // handed, and every verdict's wording — with no live call.
+    // ---------------------------------------------------------------------
+
+    use crate::provider_keys::{Provider, ValidationOutcome};
+    use std::sync::Mutex;
+
+    /// Records what the prober was called with, so a test can assert the
+    /// doctor probed the RESOLVED provider with the RESOLVED key rather than
+    /// something it made up.
+    #[derive(Default)]
+    struct ProbeSpy {
+        calls: Mutex<Vec<(Provider, String)>>,
+    }
+
+    impl ProbeSpy {
+        fn calls(&self) -> Vec<(Provider, String)> {
+            self.calls.lock().expect("spy lock").clone()
+        }
+    }
+
+    const PROBE_KEY: &str = "sk-issue1079-unit-not-a-real-key";
+
+    fn args_with_key() -> wcore_config::config::CliArgs {
+        wcore_config::config::CliArgs {
+            provider: Some("anthropic".to_string()),
+            api_key: Some(PROBE_KEY.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// THE GATE. Bare `--doctor` must not authenticate anything: the prober is
+    /// never called, and the section says so rather than staying silent.
+    ///
+    /// This is the test that reddens if the `!probe_provider` early return in
+    /// [`credential_verdict`] is dropped — turning a read-only diagnostic into
+    /// one that ships the user's key to the vendor unasked.
+    #[test]
+    fn doctor_does_not_authenticate_the_credential_without_probe_provider() {
+        let spy = ProbeSpy::default();
+        let lines = provider_section_lines(&args_with_key(), false, &|p, k| {
+            spy.calls.lock().expect("spy lock").push((p, k.to_string()));
+            ValidationOutcome::Ok
+        });
+
+        assert!(
+            spy.calls().is_empty(),
+            "#1079: bare --doctor authenticated the credential without \
+             --probe-provider. calls: {:?}",
+            spy.calls()
+        );
+        // Positive control: the section rendered at all, so the absence above
+        // is about the gate and not about an empty section.
+        assert!(
+            lines.iter().any(|l| l.contains("api key")),
+            "no api key row — this test cannot certify the gate. lines:\n{lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("NOT VALIDATED") && l.contains("--probe-provider")),
+            "the section did not say the credential was unvalidated, nor how \
+             to validate it. lines:\n{lines:#?}"
+        );
+    }
+
+    /// With the flag, the prober is called — with the provider the invocation
+    /// resolved and the key the invocation supplied.
+    #[test]
+    fn probe_provider_authenticates_the_resolved_provider_and_key() {
+        let spy = ProbeSpy::default();
+        let lines = provider_section_lines(&args_with_key(), true, &|p, k| {
+            spy.calls.lock().expect("spy lock").push((p, k.to_string()));
+            ValidationOutcome::Ok
+        });
+
+        assert_eq!(
+            spy.calls(),
+            vec![(Provider::Anthropic, PROBE_KEY.to_string())],
+            "#1079: --probe-provider did not probe the invocation's own \
+             provider and key. lines:\n{lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("ACCEPTED")),
+            "a key the provider accepted was not reported as accepted. \
+             lines:\n{lines:#?}"
+        );
+    }
+
+    /// A rejected key must read as REFUSED and carry the provider's reason —
+    /// this is the answer to "let me pass the key explicitly to rule it out",
+    /// which is the consequence #1079 reports.
+    #[test]
+    fn probe_provider_reports_a_rejected_key_with_its_reason() {
+        let lines = provider_section_lines(&args_with_key(), true, &|_, _| {
+            ValidationOutcome::Failed("key rejected (401)".to_string())
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("REFUSED") && l.contains("key rejected (401)")),
+            "#1079: a key the provider REJECTED was not reported as refused. \
+             lines:\n{lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("ACCEPTED")),
+            "a rejected key also rendered as accepted. lines:\n{lines:#?}"
+        );
+    }
+
+    /// A failure that is not an auth rejection must not read as one, and must
+    /// never read as success — the doctor's job is to distinguish "your key is
+    /// bad" from "I could not tell".
+    #[test]
+    fn a_probe_that_never_completed_is_not_reported_as_accepted() {
+        let lines = provider_section_lines(&args_with_key(), true, &|_, _| {
+            ValidationOutcome::Failed("network error".to_string())
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("REFUSED") && l.contains("network error")),
+            "an unreachable provider was not reported. lines:\n{lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("ACCEPTED")),
+            "#1079: a probe that never completed rendered as ACCEPTED — the \
+             gate that cannot fail. lines:\n{lines:#?}"
+        );
+    }
+
+    /// The verdict is about the vendor's endpoint, not the configured
+    /// `base_url`. When they differ the section must say so, or a user behind
+    /// a proxy reads an ACCEPTED for an endpoint they never call.
+    #[test]
+    fn a_custom_base_url_is_flagged_as_outside_the_verdict() {
+        let mut args = args_with_key();
+        args.base_url = Some("https://proxy.issue1079.invalid/v1".to_string());
+        let lines = provider_section_lines(&args, true, &|_, _| ValidationOutcome::Ok);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("api.anthropic.com") && l.contains("NOT the base url")),
+            "a custom --base-url was not flagged as outside the probe's \
+             verdict. lines:\n{lines:#?}"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the caveat above: with no `--base-url` override
+    /// the configured endpoint IS the vendor's, so the caveat must be absent —
+    /// otherwise it would fire on every run and mean nothing.
+    #[test]
+    fn the_default_base_url_draws_no_caveat() {
+        let lines = provider_section_lines(&args_with_key(), true, &|_, _| ValidationOutcome::Ok);
+        // Positive control: the run really did produce a verdict.
+        assert!(
+            lines.iter().any(|l| l.contains("ACCEPTED")),
+            "no verdict at all — this control cannot certify anything. \
+             lines:\n{lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("NOT the base url")),
+            "the caveat fired without a --base-url override. lines:\n{lines:#?}"
+        );
+    }
+
+    /// Neither the probe path nor the unprobed path may print the key itself.
+    #[test]
+    fn the_probe_section_never_prints_the_credential() {
+        for probe_provider in [false, true] {
+            let lines = provider_section_lines(&args_with_key(), probe_provider, &|_, _| {
+                ValidationOutcome::Failed(format!("key rejected (401) for {PROBE_KEY}"))
+            });
+            // Positive control: a credential really did resolve on this run.
+            assert!(
+                lines.iter().any(|l| l.contains("present")),
+                "no credential resolved, so this cannot certify redaction. \
+                 lines:\n{lines:#?}"
+            );
+            // The doctor must not echo a provider-supplied string containing
+            // the key back into its own output.
+            let rendered = lines.join("\n");
+            assert!(
+                !rendered.contains(PROBE_KEY),
+                "#1079: the doctor printed the API key (probe_provider={probe_provider}). \
+                 lines:\n{lines:#?}"
+            );
+        }
+    }
+
+    /// A provider with no known key-validation endpoint must say the check did
+    /// not run. Reporting nothing would be indistinguishable from a pass.
+    #[test]
+    fn a_provider_without_a_validation_endpoint_reports_that_it_was_not_checked() {
+        let cfg = wcore_config::config::Config {
+            provider_label: "issue1079-no-such-provider".to_string(),
+            api_key: PROBE_KEY.to_string(),
+            ..Default::default()
+        };
+        let verdict = credential_verdict(&cfg, true, &|_, _| ValidationOutcome::Ok);
+        assert_eq!(verdict, CredentialVerdict::NoEndpoint);
+        let lines = verdict_lines(&verdict, &cfg);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("NOT VALIDATED") && l.contains("no key-validation endpoint")),
+            "lines:\n{lines:#?}"
+        );
+    }
+
+    /// With no credential at all there is nothing to validate, and the section
+    /// must not offer `--probe-provider` as if it would help.
+    #[test]
+    fn no_credential_means_nothing_to_validate() {
+        let cfg = wcore_config::config::Config {
+            provider_label: "anthropic".to_string(),
+            api_key: String::new(),
+            ..Default::default()
+        };
+        assert_eq!(
+            credential_verdict(&cfg, true, &|_, _| ValidationOutcome::Ok),
+            CredentialVerdict::NoCredential
+        );
+    }
+
+    #[test]
+    fn host_of_reads_the_authority_and_nothing_else() {
+        assert_eq!(
+            host_of("https://api.anthropic.com/v1/models"),
+            "api.anthropic.com"
+        );
+        assert_eq!(host_of("https://api.openai.com"), "api.openai.com");
+        assert_eq!(host_of("https://h.example/v1?key=secret"), "h.example");
+        // Credentials in the authority must not be mistaken for the host.
+        assert_eq!(host_of("https://user:pw@h.example/v1"), "h.example");
+        assert_eq!(host_of("not-a-url"), "");
+    }
+
+    #[test]
+    fn redact_removes_the_secret_and_leaves_an_empty_one_alone() {
+        assert_eq!(
+            redact("key rejected (401) for sk-abc", "sk-abc"),
+            "key rejected (401) for <redacted>"
+        );
+        assert_eq!(redact("sk-abc sk-abc", "sk-abc"), "<redacted> <redacted>");
+        // An empty secret must not splice a placeholder between every char.
+        assert_eq!(redact("network error", ""), "network error");
     }
 }

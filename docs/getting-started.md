@@ -71,7 +71,8 @@ wayland-core [OPTIONS] [PROMPT]...
 | `--toon` | Enable TOON tabular encoding (with `full` compaction) |
 | `--init-config` | Generate a default config file and exit |
 | `--config-path` | Print the config file path and exit |
-| `--doctor` | Run the system-dependency doctor, and report the provider, model, base URL and credential THIS invocation resolves to (it makes no provider call, so it cannot tell you whether a key is valid) |
+| `--doctor` | Run the system-dependency doctor, and report the provider, model, base URL and credential THIS invocation resolves to. Makes no network call on its own — add `--probe-provider` to authenticate the resolved credential |
+| `--doctor --probe-provider` | Additionally ask the provider whether the resolved key is accepted (`ACCEPTED` / `REFUSED`). One read-only request that spends no tokens and never prints the key. The check is made against the provider's own endpoint, so it does not cover a proxy set with `--base-url` — the doctor says so when the two differ |
 
 Diagnostic and replay flags (`--skills-audit`, `--replay`, `--memory-show`,
 `--probe-mcp`, …) are intentionally omitted here — run `wayland-core --help`

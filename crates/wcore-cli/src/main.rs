@@ -482,6 +482,24 @@ struct Cli {
     #[arg(long, requires = "doctor")]
     probe_mcp: bool,
 
+    // FerroxLabs/wayland#1079: without this the doctor can say WHICH key an
+    // invocation selected but not whether it works, so "let me pass the key
+    // explicitly to rule it out" had no answer. Kept as a plain comment, NOT
+    // a doc comment: `///` here becomes user-facing `--help` text, and
+    // `help_no_internal_ids` rejects issue numbers there — correctly.
+    /// When running --doctor, actually AUTHENTICATE the resolved credential
+    /// against the provider's key-validation endpoint, instead of only
+    /// reporting that one resolved. One read-only request; it spends no
+    /// tokens and never prints the key.
+    ///
+    /// Off by default, symmetric with --probe-mcp, so bare --doctor stays
+    /// side-effect-free and never makes an authenticated network call the
+    /// user did not ask for. The request goes to the provider's own
+    /// endpoint, so it does not cover a proxy set with --base-url; the
+    /// doctor says so when the two differ.
+    #[arg(long, requires = "doctor")]
+    probe_provider: bool,
+
     /// macOS only: ask the OS to show the TCC consent prompts that
     /// computer-use needs (Accessibility, Screen Recording), then print
     /// the resulting state.
@@ -1790,7 +1808,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             auto_approve: cli.auto_approve,
             project_dir: cli.project_dir.clone(),
         };
-        return Ok(doctor::run(cli.probe_mcp, &doctor_args).await);
+        return Ok(doctor::run(cli.probe_mcp, cli.probe_provider, &doctor_args).await);
     }
 
     // Issue #114: the explicit, user-initiated TCC prompt. Kept next to

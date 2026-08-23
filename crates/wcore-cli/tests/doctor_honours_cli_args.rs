@@ -364,3 +364,124 @@ fn doctor_without_overrides_reports_none_of_the_flagged_values() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #1079, the consequence clause: "let me pass the key explicitly to rule it
+// out". These grade the `--probe-provider` wiring END TO END through the real
+// binary — that `cli.probe_provider` reaches `doctor::run` — which the unit
+// tests in `doctor/mod.rs` cannot see: they call `provider_section_lines`
+// directly, so hardcoding `false` at the `main.rs` call site would leave every
+// one of them green.
+//
+// Hermetic by construction. `bedrock` is a real provider that resolves a
+// config but has no entry in `provider_keys::Provider`, so the probe path is
+// taken and reports that it cannot check the key WITHOUT making any network
+// call. No live provider is contacted by any test in this file.
+// ---------------------------------------------------------------------------
+
+/// A provider that resolves a config but has no key-validation endpoint.
+const NO_ENDPOINT_PROVIDER: &str = "bedrock";
+
+/// Doctor's own wording for "I did not check this key". Shared by the two
+/// tests below so they cannot silently drift apart.
+const NOT_VALIDATED: &str = "NOT VALIDATED";
+
+/// Bare `--doctor` must not authenticate anything, and must say so — the same
+/// contract `--probe-mcp` has for MCP servers. A diagnostic that quietly ships
+/// the user's credential to a vendor is its own surprise.
+#[test]
+fn doctor_does_not_validate_the_credential_without_probe_provider() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let neutral = tempfile::tempdir().expect("neutral cwd tempdir");
+    let out = run_without_ambient_credentials(
+        home.path(),
+        neutral.path(),
+        &[
+            "--doctor",
+            "--provider",
+            NO_ENDPOINT_PROVIDER,
+            "--api-key",
+            API_KEY_VALUE,
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let row = provider_row(&stdout, "credential");
+
+    assert!(
+        row.contains(NOT_VALIDATED) && row.contains("--probe-provider"),
+        "#1079: bare --doctor did not report the credential as unvalidated, \
+         nor point at the flag that validates it. row: {row:?}\nstdout:\n{stdout}"
+    );
+    // The verdict words must be absent: without the flag there is no verdict.
+    for verdict in ["ACCEPTED", "REFUSED"] {
+        assert!(
+            !stdout.contains(verdict),
+            "bare --doctor rendered a {verdict:?} verdict without probing. \
+             stdout:\n{stdout}"
+        );
+    }
+}
+
+/// RED ARM for the `main.rs` → `doctor::run` wiring of `--probe-provider`.
+///
+/// The flag must change what doctor does. Hardcoding `false` at the call site
+/// — the same one-word regression `api_key: None` is — leaves this row reading
+/// "run --doctor --probe-provider" instead of the endpoint verdict, and only
+/// this test would notice.
+#[test]
+fn probe_provider_reaches_the_doctor_from_the_command_line() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let neutral = tempfile::tempdir().expect("neutral cwd tempdir");
+    let out = run_without_ambient_credentials(
+        home.path(),
+        neutral.path(),
+        &[
+            "--doctor",
+            "--probe-provider",
+            "--provider",
+            NO_ENDPOINT_PROVIDER,
+            "--api-key",
+            API_KEY_VALUE,
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let row = provider_row(&stdout, "credential");
+
+    assert!(
+        row.contains("no key-validation endpoint") && row.contains(NO_ENDPOINT_PROVIDER),
+        "#1079: --probe-provider did not reach the doctor — the credential row \
+         is the unprobed one. row: {row:?}\nstdout:\n{stdout}"
+    );
+    // Positive control that this run took the PROBE path rather than simply
+    // rendering different text: the unprobed row's advice must be gone.
+    assert!(
+        !row.contains("--probe-provider to authenticate"),
+        "the row still advertises the flag that was just passed, so this test \
+         cannot show the flag was honoured. row: {row:?}\nstdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(API_KEY_VALUE),
+        "the doctor printed the API key. stdout:\n{stdout}"
+    );
+}
+
+/// `--probe-provider` is meaningless without `--doctor`, and clap must refuse
+/// it rather than accept a flag that does nothing — the failure mode #1079 is
+/// about.
+#[test]
+fn probe_provider_is_refused_without_doctor() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let neutral = tempfile::tempdir().expect("neutral cwd tempdir");
+    let out = run_without_ambient_credentials(home.path(), neutral.path(), &["--probe-provider"]);
+
+    assert!(
+        !out.status.success(),
+        "--probe-provider without --doctor was accepted. stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--doctor"),
+        "the refusal did not name the flag it requires. stderr:\n{stderr}"
+    );
+}
