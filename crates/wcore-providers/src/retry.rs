@@ -286,6 +286,13 @@ pub const FAILURE_CONNECTION_REFUSED: &str = "connection_refused";
 /// (network unreachable, connect reset, a resolver that answered "try again").
 pub const FAILURE_CONNECTION: &str = "connection";
 
+/// Failure code for a provider that answered HTTP 429.
+///
+/// `provider_failure_code` renders both `ProviderError::RateLimited` and an
+/// `Api { status: 429 }` as this string; naming it keeps the callers that
+/// steer on "was this a rate limit" from each spelling it themselves.
+pub const FAILURE_RATE_LIMITED: &str = "http_429";
+
 /// Split a connect-phase failure by whether another send can plausibly change
 /// the outcome.
 ///

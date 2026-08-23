@@ -68,18 +68,48 @@ fn is_request_fatal(err: &ProviderError) -> bool {
 }
 
 /// True when the circuit was opened because the provider was momentarily
-/// unavailable — it timed out, or it said it was overloaded.
+/// unavailable — it timed out, said it was overloaded, or told the caller to
+/// come back later.
 ///
 /// Deliberately narrow. A cooldown entered because the request was REJECTED
 /// (bad credential, billing, unknown model) must keep refusing without
 /// sending: re-issuing it cannot succeed and every attempt costs a call. Only
 /// the "come back in a moment" reasons are worth an unprotected probe.
+///
+/// ## Why `RateLimit` belongs here — and how a 429 counts
+///
+/// A 429 is the provider WORKING. It received the request, understood it,
+/// and answered with the one status whose entire meaning is "this will
+/// succeed later, here is how long to wait" — usually with a `Retry-After`
+/// saying exactly when. That is the definition of momentary.
+///
+/// It still COUNTS toward the cooldown, and that is deliberate rather than
+/// an omission. Two questions are being answered separately:
+///
+/// * Should other traffic be routed away from this provider? Yes — a
+///   throttled key is a real reason to prefer a fallback, and the cooldown
+///   is how the chain learns that. `record_failure` is unchanged, so with a
+///   fallback configured a rate-limited primary fails over exactly as before.
+/// * Should the cooldown refuse the LAST route? No, and this is the half
+///   that was wrong. With no fallback, refusing protects nothing: there is
+///   nowhere else to send, and the retry loop above already paces its
+///   re-sends on the provider's own `Retry-After`. Refusing merely ends the
+///   run three sends into a ten-send budget — measured, both 429 shapes
+///   stopped at 3 sends on `primary circuit is open and no fallback is
+///   configured` — and reports a circuit to a user whose actual problem is
+///   a quota.
+///
+/// The single-probe lease still applies, so this is not a hole in the
+/// concurrency guard; see [`CooldownTracker::try_acquire_unprotected_probe`].
 fn cooldown_is_momentary(state: CooldownState) -> bool {
     let reason = match state {
         CooldownState::Cooling { reason, .. } | CooldownState::HalfOpen { reason } => reason,
         CooldownState::Ready => return false,
     };
-    matches!(reason, FailoverReason::Timeout | FailoverReason::Overloaded)
+    matches!(
+        reason,
+        FailoverReason::Timeout | FailoverReason::Overloaded | FailoverReason::RateLimit
+    )
 }
 
 fn classify_error(err: &ProviderError) -> FailoverReason {
@@ -470,17 +500,25 @@ impl LlmProvider for ResilientProvider {
                 CircuitState::Open,
                 Some("circuit open; skipping primary"),
             );
-            if self.fallbacks.is_empty() {
-                return Err(ProviderError::NotAttempted {
-                    reason: "primary circuit is open and no fallback is configured".into(),
-                });
-            }
             let reason = match primary_state {
                 CooldownState::Cooling { reason, .. } | CooldownState::HalfOpen { reason } => {
                     reason
                 }
                 CooldownState::Ready => FailoverReason::Unknown,
             };
+            if self.fallbacks.is_empty() {
+                // Name WHY the circuit is open. "primary circuit is open and
+                // no fallback is configured" describes this function's
+                // control flow, not the user's problem: it is the sentence a
+                // rate-limited run used to die on, and a reader has no way to
+                // get from it to "you are over quota". The cause is already
+                // in hand — it is what opened the circuit — so carry it.
+                return Err(ProviderError::NotAttempted {
+                    reason: format!(
+                        "primary circuit is open ({reason}) and no fallback is configured"
+                    ),
+                });
+            }
             receipt =
                 FailoverReceipt::new(reason, self.primary_name.clone(), request.model.clone());
         }
@@ -1226,12 +1264,33 @@ mod tests {
         }
     }
 
-    /// Fail-fast direction, 429. A rate limit is a REJECTED request, not a
-    /// momentary outage, so the open circuit still refuses without sending
-    /// even though there is no fallback: re-issuing burns the same quota that
-    /// is already exhausted.
+    /// REVISED, deliberately. This test used to assert the opposite — "a
+    /// rate limit must keep hard fail-fast even with no fallback", on the
+    /// grounds that re-issuing burns quota that is already exhausted. Two
+    /// things about that were wrong, and both are measured:
+    ///
+    /// * It does not burn quota in the sense that matters. A 429 is refused
+    ///   before the model runs — this crate's own
+    ///   `ProviderError::produced_no_billable_output` returns true for it —
+    ///   so a re-send costs one request against a limiter, not a completion.
+    ///   And the engine's retry loop honours the provider's own
+    ///   `Retry-After` before each one, so the re-send happens when the
+    ///   provider said to come back.
+    /// * It cost the run its budget and told the user the wrong cause.
+    ///   Measured against a 429 endpoint on the shipped tree: both a
+    ///   `Retry-After: 7` shape and a bare 429 stopped at 3 sends against a
+    ///   10-retry budget, ending on `primary circuit is open and no fallback
+    ///   is configured`. The breaker threshold bound before the retry budget
+    ///   ever could, and a user over quota was told about a circuit.
+    ///
+    /// This is the same shape as
+    /// `open_circuit_without_fallback_still_sends_after_a_momentary_outage`
+    /// (job corpus B-2): with nowhere else to route, refusing protects
+    /// nothing. It changes only the no-fallback case — `record_failure` is
+    /// untouched, so a rate-limited primary WITH a fallback still fails over,
+    /// which `open_circuit_fails_over_to_fallback` covers.
     #[tokio::test]
-    async fn open_circuit_without_fallback_refuses_a_rate_limited_request() {
+    async fn open_circuit_without_fallback_still_probes_a_rate_limited_provider() {
         struct AlwaysRateLimited;
         #[async_trait]
         impl LlmProvider for AlwaysRateLimited {
@@ -1261,12 +1320,119 @@ mod tests {
             resilient.stream(&dummy_request()).await,
             Err(ProviderError::RateLimited { .. })
         ));
+        // The circuit is open now (fail_threshold = 1). The second call must
+        // still REACH the provider: the primary's own 429, not a refusal to
+        // try. Anything else and the retry budget above can never be spent on
+        // the one failure class that is defined by "try again later".
         assert!(
             matches!(
                 resilient.stream(&dummy_request()).await,
-                Err(ProviderError::NotAttempted { .. })
+                Err(ProviderError::RateLimited { .. })
             ),
-            "a rate limit must keep hard fail-fast even with no fallback"
+            "an open circuit with nowhere else to route must still probe a \
+             rate-limited provider"
+        );
+    }
+
+    /// The half of `cooldown_is_momentary` that must NOT move. Adding
+    /// `RateLimit` is only safe if the rejected classes still refuse without
+    /// sending — re-issuing a bad credential cannot succeed and every attempt
+    /// costs a call.
+    #[test]
+    fn only_come_back_later_reasons_earn_an_unprotected_probe() {
+        for momentary in [
+            FailoverReason::Timeout,
+            FailoverReason::Overloaded,
+            FailoverReason::RateLimit,
+        ] {
+            assert!(
+                cooldown_is_momentary(CooldownState::Cooling {
+                    retry_at: None,
+                    reason: momentary
+                }),
+                "{momentary} is a come-back-later reason and must earn a probe"
+            );
+            assert!(
+                cooldown_is_momentary(CooldownState::HalfOpen { reason: momentary }),
+                "{momentary} must earn a probe from HalfOpen too"
+            );
+        }
+        // Known-positive controls: the REJECTED classes still refuse. If this
+        // half ever goes green-by-default the test above proves nothing.
+        for rejected in [
+            FailoverReason::Auth,
+            FailoverReason::AuthPermanent,
+            FailoverReason::Billing,
+            FailoverReason::ModelNotFound,
+            FailoverReason::Format,
+            FailoverReason::ContextOverflow,
+            FailoverReason::SessionExpired,
+            FailoverReason::Unknown,
+        ] {
+            assert!(
+                !cooldown_is_momentary(CooldownState::Cooling {
+                    retry_at: None,
+                    reason: rejected
+                }),
+                "{rejected} is a rejection — re-issuing it cannot succeed, so \
+                 the open circuit must keep refusing"
+            );
+        }
+        // A circuit that is not open is not momentarily anything.
+        assert!(!cooldown_is_momentary(CooldownState::Ready));
+    }
+
+    /// The refusal must name WHY the circuit is open. "primary circuit is
+    /// open and no fallback is configured" describes this module's control
+    /// flow; it is the sentence a rate-limited run used to die on, and a
+    /// reader cannot get from it to "you are over quota".
+    ///
+    /// Reached with a REJECTED reason (403 -> `AuthPermanent`), because that
+    /// is the class that still refuses after the change above.
+    #[tokio::test]
+    async fn the_circuit_refusal_names_the_reason_it_opened() {
+        struct AlwaysForbidden;
+        #[async_trait]
+        impl LlmProvider for AlwaysForbidden {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::Api {
+                    status: 403,
+                    message: "forbidden".into(),
+                })
+            }
+        }
+        let resilient = ResilientProvider::new(
+            "primary",
+            Arc::new(AlwaysForbidden),
+            vec![],
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(30),
+                cooldown: Duration::from_secs(60),
+            },
+            Arc::new(NoOpCircuitReporter),
+        );
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::Api { status: 403, .. })
+        ));
+        let refusal = match resilient.stream(&dummy_request()).await {
+            Err(ProviderError::NotAttempted { reason }) => reason,
+            other => panic!("expected a NotAttempted refusal, got {other:?}"),
+        };
+        assert!(
+            refusal.contains(FailoverReason::AuthPermanent.as_str()),
+            "the refusal must name the reason the circuit opened; got: {refusal}"
+        );
+        // Known-positive: the rest of the sentence is still there, so the
+        // assertion above is testing an ADDITION and not a rewrite that lost
+        // the original information.
+        assert!(
+            refusal.contains("no fallback is configured"),
+            "got: {refusal}"
         );
     }
 
