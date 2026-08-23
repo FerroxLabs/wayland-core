@@ -60,6 +60,12 @@ pub enum Turn {
     /// before a `Text`/`ToolUse` turn exercises "fail then succeed" end to
     /// end. (429 is surfaced as `RateLimited` rather than retried inline.)
     HttpError(u16),
+    /// A response body written out verbatim as the SSE payload. The escape
+    /// hatch for wire shapes the typed builders cannot express — e.g. the
+    /// usage-only `message_delta` of FerroxLabs/wayland#1109. Deliberately
+    /// unchecked: the point of scripting a raw body is to serve one the typed
+    /// builders would never produce.
+    RawSse(String),
     /// A plain-text response whose HTTP reply is HELD for `delay_ms` before
     /// any bytes are sent. The engine emits `StreamStart` at turn-submission
     /// (before the provider call), so the turn is "in flight" — and
@@ -83,6 +89,7 @@ impl Turn {
             // status. Never fed through the conformance gate (which only
             // scripts Text/ToolUse), so an empty body here is unreachable there.
             Turn::HttpError(_) => String::new(),
+            Turn::RawSse(body) => body.clone(),
             // A slow turn is a normal text turn whose HTTP reply is just held
             // back; the body is identical to a `Text` turn.
             Turn::SlowText { text, .. } => text_turn_sse(text),
@@ -96,7 +103,9 @@ impl Turn {
     fn reply(&self) -> (u16, String, &'static str, std::time::Duration) {
         let zero = std::time::Duration::ZERO;
         match self {
-            Turn::Text(_) | Turn::ToolUse { .. } => (200, self.to_sse(), "text/event-stream", zero),
+            Turn::Text(_) | Turn::ToolUse { .. } | Turn::RawSse(_) => {
+                (200, self.to_sse(), "text/event-stream", zero)
+            }
             Turn::HttpError(code) => (
                 *code,
                 format!(
@@ -140,6 +149,17 @@ impl MockLlm {
             name: name.into(),
             input,
         });
+        self
+    }
+
+    /// Queue a turn whose SSE body is served verbatim.
+    ///
+    /// FerroxLabs/wayland#1109 needs a stream whose events the typed builders
+    /// cannot emit — specifically a `message_delta` that carries `usage` and no
+    /// `stop_reason`, which the wire format allows and which the parser used to
+    /// read as the end of the turn.
+    pub fn raw_sse(mut self, body: impl Into<String>) -> Self {
+        self.turns.push(Turn::RawSse(body.into()));
         self
     }
 
