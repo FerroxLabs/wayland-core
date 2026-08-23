@@ -9,13 +9,18 @@
 //! block-list loop in `BrowserPolicy::evaluate_navigation_target_with`
 //! — the half that actually stops a rebind — ungraded end to end.
 //!
-//! MEASURED on this tree before this file existed: deleting that loop
-//! (`policy.rs:560-564`, replaced with `let _ = &addrs;`) left all **9** tests
+//! MEASURED before this file existed: deleting that loop — the `for ip in
+//! &addrs` block in `evaluate_navigation_target_with`, replaced with
+//! `let _ = &addrs;` — left all **9** tests
 //! in `tests/dns_resolution_gate_test.rs` GREEN. Positive control for the same
 //! mutation: **4** in-crate tests went red
 //! (`policy::tests::navigation_gate_refuses_a_name_that_resolves_to_the_metadata_endpoint`
 //! and siblings), so the mutation is real and reachable — it was simply
-//! invisible from every seam-level test.
+//! invisible from every seam-level test. Re-measured on this tree with this
+//! file present: the same mutation now reddens **5** of the 9 tests below;
+//! the 3 public-address controls and the fail-closed test stay green. (The loop is named rather than given a
+//! line number on purpose: the first version of this note cited a line that
+//! had already moved by the time it was written.)
 //!
 //! Making a name resolve to a chosen address needs a resolver seam, and that
 //! seam must not be reachable from production code — so it is
@@ -27,11 +32,13 @@
 //!
 //! ## Seams graded here
 //!
-//!   1. pre-flight — `BrowserTool::policy_check` (`tool.rs:353`)
-//!   2. post-navigation landing URL — `CamoufoxBackend::dispatch`
-//!      (`camoufox.rs:306`)
-//!   3. Back / Forward landing URL — `enforce_post_navigation_policy`
-//!      (`camoufox.rs:554`)
+//!   1. pre-flight — `BrowserTool::policy_check`
+//!   2. post-navigation landing URL — the `Navigate` arm of
+//!      `CamoufoxBackend::dispatch`
+//!   3. Back / Forward landing URL — the history arm of
+//!      `CamoufoxBackend::dispatch` via `enforce_post_navigation_policy`,
+//!      including the case where the sidecar withholds the landing URL
+//!      entirely (seam 3 failed OPEN there until the last test in this file)
 //!
 //! Every refusal assertion requires the reason to contain `DNS resolved` —
 //! the wording produced ONLY by `blocked_resolved_ip_reason`. A refusal from
@@ -372,4 +379,49 @@ async fn end_to_end_history_landing_url_that_resolves_to_a_public_address_is_acc
         r.is_ok(),
         "a history landing URL resolving to a public address must pass: {r:?}"
     );
+}
+
+/// gh#1053 seam 3, fail-closed half.
+///
+/// The Navigate arm denies when the sidecar hands back no parseable `url`
+/// (`camoufox.rs`, `navigate_fails_closed_when_url_missing_under_policy`)
+/// and says why in a comment: an `and_then` short-circuit there would SKIP
+/// the policy call and return `Ok`. Back / Forward reached the same landing
+/// URL through `if let (Some(policy), Some(url))` — the exact short-circuit
+/// that comment warns about — so a sidecar that omits `url` from its `/back`
+/// response walked the whole resolution gate for free.
+///
+/// A comment is not a guard, so this is a test. Back is where it matters
+/// most: the landing URL is one the sidecar chose from its own history and
+/// the model never typed, and the sidecar is the party the gate exists to
+/// distrust.
+#[tokio::test]
+async fn end_to_end_history_fails_closed_when_the_sidecar_omits_the_landing_url() {
+    let server = MockServer::start().await;
+    mount_open(&server, "tab-hist-fc").await;
+    // A well-formed 200 that simply has no `url` field.
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-hist-fc/back"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+        .mount(&server)
+        .await;
+
+    let backend = CamoufoxBackend::with_policy(server.uri(), policy());
+    let session = backend.open_session(false).await.unwrap();
+
+    let r = backend.dispatch(&session.ctx, BrowserOp::Back {}).await;
+
+    match r {
+        Err(BrowserOpError::PolicyDenied { reason, .. }) => {
+            assert!(
+                reason.contains("failing closed"),
+                "the denial must be the fail-closed one, got: {reason}"
+            );
+        }
+        other => panic!(
+            "a Back whose landing URL the sidecar withheld skipped the \
+             resolution gate and returned success — the gate is opt-out by \
+             omission. Got {other:?}"
+        ),
+    }
 }
