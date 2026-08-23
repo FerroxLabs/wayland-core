@@ -154,6 +154,11 @@ async fn test_spawn_shares_provider() {
 /// An LLM error event causes the sub-agent result to be marked as an error.
 #[tokio::test]
 async fn test_spawn_agent_error_captured() {
+    // Budget PINNED, not inherited. This test drives a provider that fails
+    // every attempt; the shipped default is 10 retries on the shared backoff
+    // curve (127.5 s of scheduled sleep), and what is under test here is the
+    // failure OUTCOME, not the size of the budget.
+    let _retry_budget = wcore_agent::test_utils::PinnedRetryBudget::pin(2);
     // AUDIT E-C2 — a mid-stream `LlmEvent::Error` is now retryable; the
     // engine fails only after the bounded retry budget (1 + 2) is
     // spent. Every attempt must error so the run fails hard, which the

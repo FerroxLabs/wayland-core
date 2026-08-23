@@ -531,6 +531,11 @@ async fn a_guard_stop_is_not_reported_as_the_turn_cap() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_engine_api_error_handling() {
+    // Budget PINNED, not inherited. This test drives a provider that fails
+    // every attempt; the shipped default is 10 retries on the shared backoff
+    // curve (127.5 s of scheduled sleep), and what is under test here is the
+    // failure OUTCOME, not the size of the budget.
+    let _retry_budget = wcore_agent::test_utils::PinnedRetryBudget::pin(2);
     // 3 turns, each a mid-stream error — exhausts the stream-retry
     // budget so the run fails hard.
     let provider = Arc::new(MockLlmProvider::with_turns(vec![

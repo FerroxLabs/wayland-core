@@ -316,6 +316,11 @@ Workflow(
 
 #[tokio::test]
 async fn fix3_moderate_pipeline_runs_and_preserves_order_with_null_holes() {
+    // Budget PINNED, not inherited. This test drives a provider that fails
+    // every attempt; the shipped default is 10 retries on the shared backoff
+    // curve (127.5 s of scheduled sleep), and what is under test here is the
+    // failure OUTCOME, not the size of the budget.
+    let _retry_budget = wcore_agent::test_utils::PinnedRetryBudget::pin(2);
     // A provider that echoes the item tag for live items, but errors for the
     // item carrying "drop" so that exactly one item becomes a `null` hole.
     struct OrderProvider;

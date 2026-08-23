@@ -1584,15 +1584,33 @@ use wcore_providers::backoff::retry_delay;
 /// Governs ONLY the count-bounded path. A request the provider never served
 /// is bounded by [`UNSERVED_OUTAGE_BUDGET`] — a window, not a count — and is
 /// untouched by this.
-const MAX_STREAM_RETRIES_ENV: &str = "WAYLAND_MAX_STREAM_RETRIES";
+pub(crate) const MAX_STREAM_RETRIES_ENV: &str = "WAYLAND_MAX_STREAM_RETRIES";
 
-/// Default served-failure retry count: 2 retries, so 3 total attempts.
+/// Default served-failure retry count for one LLM turn: 10 retries, so 11
+/// total attempts.
 ///
-/// Bound to the provider layer's own [`wcore_providers::retry::DEFAULT_MAX_RETRIES`]
-/// rather than repeated as a literal. The engine loop is the outer mirror of
-/// that budget (the provider call itself runs under `scope_max_retries(0)`),
-/// and two bare `2`s in two crates drift apart silently.
-const DEFAULT_MAX_STREAM_RETRIES: u32 = wcore_providers::retry::DEFAULT_MAX_RETRIES;
+/// This used to alias [`wcore_providers::retry::DEFAULT_MAX_RETRIES`] so that
+/// two bare `2`s could not drift apart. That alias is deliberately BROKEN
+/// here, because the two numbers answer different questions and only one of
+/// them is about inference:
+///
+/// * `wcore_providers::retry::DEFAULT_MAX_RETRIES` bounds the retry ring
+///   INSIDE one provider HTTP helper. On the streaming path that ring is
+///   clamped to zero (`scope_max_retries(0)`), so what it actually governs is
+///   the non-inference traffic sharing the helper: model-catalog fetches, the
+///   TUI's own GET in `tui::surfaces`, and the Ollama plugin. Those are cheap,
+///   synchronous and user-facing, and on the shared curve ten retries would
+///   park a catalog lookup for over two minutes. It stays at 2.
+/// * This constant bounds re-sends of a whole billed inference turn, where
+///   what is being ridden out is a provider having a bad minute. Two retries
+///   spend 1.5 s and give up — that is not a retry policy, it is a flinch.
+///
+/// Ten, on [`wcore_providers::backoff`], spends 127.5 s of base delay: the
+/// first three attempts land inside two seconds, and the tail spreads to 24 s
+/// steps so an endpoint that is genuinely restarting gets time to come back.
+/// `the_default_budget_is_a_curve_not_a_flinch` pins the pair, so a future
+/// edit that re-aliases them argues with a test rather than with a comment.
+const DEFAULT_MAX_STREAM_RETRIES: u32 = 10;
 
 /// Ceiling on [`MAX_STREAM_RETRIES_ENV`].
 ///
@@ -1600,23 +1618,27 @@ const DEFAULT_MAX_STREAM_RETRIES: u32 = wcore_providers::retry::DEFAULT_MAX_RETR
 /// on this path was SERVED, so each re-send re-bills the whole outbound
 /// context. A user who types an extra zero should get a warning, not a bill.
 ///
-/// Ten, and the derivation moved with the curve rather than being re-invented.
+/// Fifteen — and the derivation is re-stated here rather than inherited,
+/// because both earlier ones are now dead.
 ///
-/// It used to be "the largest N whose cumulative LINEAR backoff fits inside
-/// the breaker cooldown" — 250*N*(N+1) ms, N=10 spends 27.5 s and fits, N=11
-/// spends 33 s and does not. That arithmetic described a schedule this engine
-/// no longer runs: on [`wcore_providers::backoff`] the same ten retries spend
-/// 127.5 s of base delay, so a cooldown-fit derivation would now argue for
-/// N=6, and a budget of 6 is a WORSE outcome for the user than the 10 that
-/// shipped.
+/// It was first "the largest N whose cumulative LINEAR backoff fits inside the
+/// breaker cooldown" (250*N*(N+1) ms; N=10 fits, N=11 does not). That
+/// described a schedule this engine no longer runs. It was then "the last row
+/// of the published curve", which held only while the default was 2 and the
+/// table happened to be written out to ten rows; [`wcore_providers::backoff`]
+/// saturates at 24 s from n=7 onward, so the curve has no last row to point
+/// at — every row past the seventh is the same 24 s step.
 ///
-/// What survives is the reason the ceiling exists at all, which was never the
-/// cooldown: every attempt on this path was SERVED, so each re-send re-bills
-/// the whole outbound context. Ten is where the decided curve stops — the
-/// last row of its published table — and past it the extra attempts stop
-/// being resilience and start being an unbounded bill against one endpoint.
-/// `the_ceiling_is_the_last_row_of_the_published_curve` pins it.
-const MAX_STREAM_RETRIES_CEILING: u32 = 10;
+/// What has always been true is the reason a ceiling exists: every attempt on
+/// this path was SERVED, so each re-send re-bills the whole outbound context,
+/// and a user who types an extra zero should get a warning rather than a bill.
+/// With the default now at [`DEFAULT_MAX_STREAM_RETRIES`] = 10, a ceiling of
+/// 10 would leave the knob able only to LOWER the budget, and a knob that
+/// turns one way is not a knob. Fifteen keeps deliberate headroom for someone
+/// who knows their endpoint is flaky — 247.5 s of base delay, 309.4 s at the
+/// worst jitter draw — while still refusing the typo'd 100.
+/// `the_ceiling_leaves_headroom_above_the_default` pins the arithmetic.
+const MAX_STREAM_RETRIES_CEILING: u32 = 15;
 
 /// One run's served-failure retry budget, plus the value the user asked for
 /// when it had to be clamped — a clamp notice that cannot name the rejected
@@ -26561,8 +26583,15 @@ mod audit_2026_05_22_tests {
     #[tokio::test]
     async fn stream_error_exhausts_retries_then_fails_the_turn() {
         // AUDIT A3 / E-C2 — when every attempt fails the turn ends as a
-        // hard error (NOT a silent empty success). 1 initial + 2
-        // retries = 3 provider calls.
+        // hard error (NOT a silent empty success).
+        //
+        // The budget is PINNED rather than inherited. This test is about the
+        // hard-error outcome, not about the size of the budget, and while it
+        // inherited the default it scripted exactly as many failures as the
+        // default allowed — so raising the default made the mock run out of
+        // failures and the turn SUCCEED, which is the opposite of what the
+        // test is named for.
+        let _budget = crate::test_utils::PinnedRetryBudget::pin(2);
         let provider = Arc::new(ScriptedProvider::new(vec![
             vec![LlmEvent::Error("e1".into())],
             vec![LlmEvent::Error("e2".into())],
@@ -26970,7 +26999,13 @@ mod audit_2026_05_22_tests {
     /// began serving the stream keeps `MAX_STREAM_RETRIES`. Re-sending that one
     /// costs a full context the provider already billed, so the larger budget
     /// must not leak onto it.
-    #[tokio::test]
+    ///
+    /// This one asserts the real default rather than pinning it — that IS the
+    /// property under test — so it runs on a paused clock. At the shipped
+    /// budget the curve it schedules is 127.5 s, and a unit test must not
+    /// spend it.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
     async fn served_stream_err_keeps_the_default_retry_budget() {
         struct MidStreamErrProvider {
             calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -27004,8 +27039,9 @@ mod audit_2026_05_22_tests {
         );
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
-            3,
-            "a served stream keeps 1 initial send plus 2 bounded retries"
+            super::DEFAULT_MAX_STREAM_RETRIES as usize + 1,
+            "a served stream keeps the bounded COUNT budget; the 900 s \
+             unserved outage window must not leak onto it"
         );
     }
 
@@ -34140,17 +34176,22 @@ mod stream_retry_budget_tests {
 
     // --- (a) the retry count is configurable, clamped, and unchanged ------
 
-    /// The whole point of exposing the knob is that exposing it must not move
-    /// the number. A provider that returns a stream and then closes it
-    /// without a `Done` is a SERVED failure, which is the count-bounded path.
-    #[tokio::test]
+    /// The loop has to SPEND the default, not merely resolve it. A provider
+    /// that returns a stream and then closes it without a `Done` is a SERVED
+    /// failure, which is the count-bounded path.
+    ///
+    /// Paused clock on purpose: at the shipped budget this loop schedules
+    /// 127.5 s of backoff and a unit test must not sit through it. The proof
+    /// that the curve is SLEPT rather than merely scheduled is
+    /// `the_backoff_is_real_time_not_just_scheduled_time`.
+    #[tokio::test(start_paused = true)]
     #[serial_test::serial]
-    async fn the_default_served_retry_budget_is_still_two_retries() {
+    async fn the_default_served_retry_budget_is_ten_retries() {
         let (sends, _) = run_against(Vec::new()).await;
         assert_eq!(
-            sends, 3,
-            "the shipped budget is 1 send + 2 retries; exposing it as a knob \
-             must not be a silent behaviour change"
+            sends, 11,
+            "the shipped budget is 1 send + 10 retries; the 2 it replaced \
+             spent 1.5 s before giving up, which is a flinch and not a policy"
         );
         assert_eq!(
             sends,
@@ -34211,33 +34252,73 @@ mod stream_retry_budget_tests {
         );
     }
 
-    /// The ceiling is the last row of the decided curve, and this pins both
-    /// halves of that claim: the budget the engine will spend, and the wall
-    /// clock it costs.
+    /// The ceiling has to leave the knob somewhere to go, and it has to cost
+    /// what its doc comment claims.
     ///
-    /// The derivation it replaces — "the largest budget whose cumulative
-    /// LINEAR backoff fits the breaker cooldown" — described a schedule the
-    /// engine no longer runs. Re-running that arithmetic against the shared
-    /// curve would argue the ceiling down to 6, which would be a smaller
-    /// budget than the one that shipped. The ceiling stayed at 10; only its
-    /// justification moved.
+    /// Two dead derivations are pinned out of the way here. "The largest
+    /// budget whose cumulative LINEAR backoff fits the breaker cooldown"
+    /// described a schedule the engine no longer runs. "The last row of the
+    /// published curve" cannot even be re-derived now: `base_backoff`
+    /// saturates, so every row from the seventh on is the same 24 s step and
+    /// there is no last row to point at. What is left is a spend decision,
+    /// which is what the assertions below actually check.
     #[test]
-    fn the_ceiling_is_the_last_row_of_the_published_curve() {
+    fn the_ceiling_leaves_headroom_above_the_default() {
         use wcore_providers::backoff::{RETRY_JITTER_FRACTION, base_backoff};
         let ceiling = super::MAX_STREAM_RETRIES_CEILING;
-        assert_eq!(ceiling, 10, "the published curve's table ends at n=10");
+        let default = super::DEFAULT_MAX_STREAM_RETRIES;
+        assert_eq!(ceiling, 15);
+        assert_eq!(default, 10);
+        assert!(
+            ceiling > default,
+            "a ceiling equal to the default leaves an env knob that can only \
+             ever LOWER the budget, which is not a knob"
+        );
         let spent = |budget: u32| (1..=budget).map(base_backoff).sum::<std::time::Duration>();
-        // The published arithmetic: 127.5 s of base, 159.4 s at the worst
-        // jitter draw. Assert it rather than describing it, so a change to
-        // the curve that silently moves what this budget COSTS lands here.
-        assert_eq!(spent(ceiling), std::time::Duration::from_millis(127_500));
+        // The published arithmetic for both rows of the doc comment. Assert it
+        // rather than describing it, so a change to the curve that silently
+        // moves what these budgets COST lands here.
+        assert_eq!(spent(default), std::time::Duration::from_millis(127_500));
+        assert_eq!(spent(ceiling), std::time::Duration::from_millis(247_500));
         assert_eq!(
             spent(ceiling).mul_f64(1.0 + RETRY_JITTER_FRACTION),
-            std::time::Duration::from_micros(159_375_000)
+            std::time::Duration::from_micros(309_375_000)
         );
+        // The curve has no "last row" left to derive a ceiling from.
+        assert_eq!(base_backoff(7), base_backoff(ceiling));
         // And the ceiling is a real bound on spend, not a formality: the
         // budget past it costs strictly more.
         assert!(spent(ceiling + 1) > spent(ceiling));
+    }
+
+    /// The default is a DECISION now, not an alias, and this pins the pair:
+    /// the engine's inference budget moved to 10 and the provider crate's
+    /// HTTP-helper budget deliberately did NOT move with it.
+    ///
+    /// The two were bound together precisely so a pair of bare `2`s could not
+    /// drift. Breaking that bond is the change, so a test has to hold its
+    /// shape — otherwise the next reader "repairs" the drift and silently
+    /// hands every model-catalog fetch, TUI GET and Ollama call a two-minute
+    /// retry curve.
+    #[test]
+    fn the_default_budget_is_a_curve_not_a_flinch() {
+        assert_eq!(
+            super::DEFAULT_MAX_STREAM_RETRIES,
+            10,
+            "one billed inference turn is re-sent on the full curve"
+        );
+        assert_eq!(
+            wcore_providers::retry::DEFAULT_MAX_RETRIES,
+            2,
+            "the provider HTTP helper's ring is NOT inference: it carries \
+             model-catalog fetches, the TUI's own GET and the Ollama plugin, \
+             and ten retries on the shared curve would park those for minutes"
+        );
+        assert_ne!(
+            super::DEFAULT_MAX_STREAM_RETRIES,
+            wcore_providers::retry::DEFAULT_MAX_RETRIES,
+            "these were one aliased constant; they are two decisions now"
+        );
     }
 
     /// The clamp has to be AUDIBLE, and it has to be the number the run
@@ -34932,16 +35013,25 @@ mod stream_retry_budget_tests {
     /// a loop that honours the server from one that walks its own schedule.
     /// A 300 ms hint would have been satisfied by the old 500 ms step and
     /// certified nothing.
+    ///
+    /// Pinned to a two-retry budget deliberately. This is the one test in the
+    /// module that spends REAL time, and the default is now 10: at the default
+    /// it would park a unit test for twelve seconds to prove a property that
+    /// two gaps already prove. What is under test is that the sleep is SPENT,
+    /// not how many of them there are.
     #[tokio::test]
+    #[serial_test::serial]
     async fn the_backoff_is_real_time_not_just_scheduled_time() {
         let started = std::time::Instant::now();
-        let gaps =
-            wcore_providers::backoff::scope_jitter(0.0, send_gaps_ms(rate_limited_1200ms)).await;
+        let gaps = with_retry_budget("2", async {
+            wcore_providers::backoff::scope_jitter(0.0, send_gaps_ms(rate_limited_1200ms)).await
+        })
+        .await;
         let elapsed = started.elapsed();
         assert_eq!(
             gaps.len(),
             2,
-            "the default budget is two retries, so two gaps; a 429 that costs \
+            "the pinned budget is two retries, so two gaps; a 429 that costs \
              the run its credential produces none"
         );
         assert!(
