@@ -570,11 +570,33 @@ pub fn parse_sse_data(event_type: &str, data: &str, state: &mut StreamState) -> 
         "message_delta" => {
             let delta = &json["delta"];
             let raw = delta["stop_reason"].as_str();
-            let (stop_reason, finish_reason) = map_anthropic_stop_reason(raw);
 
+            // Usage on a `message_delta` is CUMULATIVE for the message, so it
+            // is absorbed whether or not this delta also ends the turn.
             if let Some(usage) = json.get("usage") {
                 state.output_tokens = usage["output_tokens"].as_u64().unwrap_or(0);
             }
+
+            // FerroxLabs/wayland#1109. `stop_reason` is what makes a
+            // `message_delta` TERMINAL; a delta that carries only `usage` is a
+            // metadata update on a message that is still being generated.
+            // Emitting `Done` for it ended the turn mid-stream with
+            // `FinishReason::Error` and whatever content had arrived so far —
+            // for a delta that precedes the first text block, nothing at all.
+            // That is this issue's title symptom: a turn that ends silently on
+            // an empty provider stream, with the answer the provider went on to
+            // send discarded by the `streaming_active` guard.
+            //
+            // Suppressing the event is safe rather than hang-prone: a stream
+            // that genuinely never carries a `stop_reason` now reaches its end
+            // with no `Done`, which the engine already classifies and RETRIES
+            // as "provider stream closed before a Done event (truncated
+            // response)" (`wcore-agent/src/engine.rs`). A retryable truncation
+            // is strictly better than a silent empty answer.
+            let Some(raw) = raw else {
+                return events;
+            };
+            let (stop_reason, finish_reason) = map_anthropic_stop_reason(Some(raw));
 
             events.push(LlmEvent::Done {
                 stop_reason,
@@ -622,14 +644,27 @@ pub(crate) fn map_anthropic_stop_reason(raw: Option<&str>) -> (StopReason, Finis
         Some("tool_use") => (StopReason::ToolUse, FinishReason::Stop),
         Some("max_tokens") => (StopReason::MaxTokens, FinishReason::Length),
         Some(other) => {
-            eprintln!(
-                "[wcore-providers] anthropic: unrecognized stop_reason {other:?}, mapping to FinishReason::Error"
+            // FerroxLabs/wayland#1109 candidate 3. This was an `eprintln!`,
+            // which in the TUI's alternate screen writes raw bytes over the
+            // rendered frame and is gone on the next repaint — so it neither
+            // told the user anything nor stayed in a log. The user-visible
+            // report for this case is the abnormal-finish banner the TUI
+            // renders from `FinishReason::Error`
+            // (`wcore-cli/src/tui/protocol_bridge.rs`); this line is for the
+            // trace.
+            tracing::warn!(
+                stop_reason = other,
+                "anthropic: unrecognized stop_reason, mapping to FinishReason::Error"
             );
             (StopReason::EndTurn, FinishReason::Error)
         }
         None => {
-            eprintln!(
-                "[wcore-providers] anthropic: message_delta arrived without stop_reason, mapping to FinishReason::Error"
+            // Unreachable from the streaming path since #1109 — a
+            // `message_delta` with no `stop_reason` no longer ends the turn at
+            // all. Kept as the total mapping for any non-streaming caller.
+            tracing::warn!(
+                "anthropic: stop_reason absent where one was required, mapping to \
+                 FinishReason::Error"
             );
             (StopReason::EndTurn, FinishReason::Error)
         }
@@ -1277,6 +1312,28 @@ mod tests {
     fn test_map_anthropic_unknown_to_error() {
         let (_, fr) = map_anthropic_stop_reason(Some("garbage_future_value"));
         assert_eq!(fr, FinishReason::Error);
+    }
+
+    // --- FerroxLabs/wayland#1109: a usage-only `message_delta` ends the turn --
+
+    /// OBSERVE THE DEFECT. Anthropic's wire format carries the terminal
+    /// `stop_reason` on a `message_delta`; a `message_delta` that carries only
+    /// `usage` is a metadata update, not the end of the turn. The parser emits
+    /// `Done` for EVERY `message_delta`, so a usage-only one ends the turn
+    /// mid-stream with `FinishReason::Error` and whatever content had arrived
+    /// so far -- which, for a delta that precedes the first text block, is
+    /// NOTHING. That is issue #1109's title symptom exactly: a turn that ends
+    /// silently on an empty provider stream.
+    #[test]
+    fn red_1109_usage_only_message_delta_ends_the_turn() {
+        let mut state = StreamState::new();
+        let data = r#"{"type":"message_delta","delta":{},"usage":{"output_tokens":7}}"#;
+        let events = parse_sse_data("message_delta", data, &mut state);
+        eprintln!("OBSERVED events = {events:?}");
+        assert!(
+            !events.iter().any(|e| matches!(e, LlmEvent::Done { .. })),
+            "a message_delta with no stop_reason must NOT end the turn; got {events:?}"
+        );
     }
 
     #[test]
