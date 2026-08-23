@@ -27,6 +27,7 @@ pub mod policy;
 pub mod provider;
 pub mod readability;
 pub mod selection;
+pub mod sidecar_prefs;
 pub mod supervisor;
 pub mod tool;
 

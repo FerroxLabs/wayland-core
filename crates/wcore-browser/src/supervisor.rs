@@ -76,6 +76,14 @@ pub struct SupervisorConfig {
     /// launch behind its egress proxy; `true` proceeds with a warning and no
     /// address screening on the sidecar's own requests.
     pub allow_unproxied_sidecar: bool,
+    /// gh#1117 — where Core writes the browser loopback pref
+    /// ([`crate::sidecar_prefs`]).
+    ///
+    /// `None`, the production default, locates the Camoufox install the
+    /// sidecar will actually launch. `Some(dir)` is an explicit override, and
+    /// the seam a test uses so that grading the REFUSAL does not require a
+    /// real 300 MB browser install on the machine running the test.
+    pub loopback_pref_dir: Option<PathBuf>,
 }
 
 impl Default for SupervisorConfig {
@@ -91,6 +99,7 @@ impl Default for SupervisorConfig {
             binary_install_root: home_bin_dir(),
             egress_policy: None,
             allow_unproxied_sidecar: false,
+            loopback_pref_dir: None,
         }
     }
 }
@@ -161,6 +170,28 @@ Opt out: WAYLAND_BROWSER_ALLOW_UNPROXIED_SIDECAR=1, or `allow_unproxied_sidecar 
 (a public name pointing at 169.254.169.254 or into RFC 1918 reaches the browser), TTL=0 \
 intra-navigation rebinding, and any screening at all of sub-resource loads. The navigation URL \
 string checks still apply."
+    )
+}
+
+/// gh#1117 refusal for the loopback half of containment.
+///
+/// Names the exact protection that is missing, what it costs, and the one
+/// opt-out - the same shape as [`unproxied_sidecar_refusal`], because it is
+/// the same class of answer: Core will not report a gate it does not have.
+pub fn unscreened_loopback_refusal(reason: &str) -> String {
+    format!(
+        "Core cannot stop this browser reaching loopback around its egress proxy: {reason}.\n\
+Firefox dials 127.0.0.1 and localhost itself unless \
+network.proxy.allow_hijacking_localhost is true, and the sidecar exposes no seam for browser \
+prefs, so Core sets it by writing one file into the Camoufox install's defaults/pref directory. \
+Without it, a page the agent loads can reach ANY service listening on this machine - a local \
+admin panel, a database, another agent's API - with no policy check at all, because those \
+requests never reach Core's proxy and never pass a navigation gate (gh#1117).\n\
+Fix: make the Camoufox install writable, or point CAMOUFOX_EXECUTABLE_PATH at an install Core \
+can write to. If Camoufox is not installed yet, install it - the sidecar cannot browse without \
+it either.\n\
+Opt out: WAYLAND_BROWSER_ALLOW_UNPROXIED_SIDECAR=1, or allow_unproxied_sidecar = true under \
+[browser] in config. That accepts the unscreened loopback egress described above."
     )
 }
 
@@ -457,6 +488,16 @@ impl BrowserSupervisor {
         if children_map().lock().contains_key(&session_id) {
             let _ = self.on_session_end(&session_id);
         }
+        // gh#1117 loopback half, on the launch path because that is exactly
+        // where Core's guarantee is made: a sidecar CORE LAUNCHED is
+        // contained. The proxy alone only ever sees what the browser agrees
+        // to send it, and Firefox does not agree for loopback unless the pref
+        // is in place before the browser starts. A sidecar Core did not
+        // launch never gets here — it was refused above.
+        if containment_required {
+            self.ensure_loopback_containment()?;
+        }
+
         let pid = self
             .launch_camoufox_program(program, &[], &session_id)
             .await
@@ -518,6 +559,50 @@ Install @askjo/camofox-browser or set WAYLAND_CAMOUFOX_BIN to its executable",
             })?;
         *self.egress_proxy.lock() = Some(proxy);
         Ok(true)
+    }
+
+    /// gh#1117 - put `network.proxy.allow_hijacking_localhost` where Firefox
+    /// reads it, so the browser stops dialling loopback around Core's proxy.
+    ///
+    /// MEASURED: without it, `http://127.0.0.1:PORT/` and
+    /// `http://localhost:PORT/` - page-initiated sub-resources included -
+    /// reach the local service directly and the proxy never sees them. See
+    /// [`crate::sidecar_prefs`] for the A/B that established it on real
+    /// Camoufox.
+    ///
+    /// Failure is a REFUSAL, not a warning, for the same reason an unproxied
+    /// sidecar is: the alternative is reporting a protection Core does not
+    /// have. It shares the one opt-out, whose meaning is "proceed with a
+    /// sidecar Core could not fully contain".
+    ///
+    /// A missing install is not a false alarm about a working setup:
+    /// the sidecar does not fetch Camoufox on demand (it tells the operator
+    /// to fetch it and restart), so a sidecar with no locatable browser
+    /// install cannot browse either way.
+    fn ensure_loopback_containment(&self) -> Result<(), String> {
+        let contained = match self.config.loopback_pref_dir.as_deref() {
+            Some(dir) => crate::sidecar_prefs::write_loopback_pref(dir),
+            None => crate::sidecar_prefs::contain_sidecar_loopback(),
+        };
+        match contained {
+            Ok(path) => {
+                tracing::debug!(
+                    pref_file = %path.display(),
+                    "browser loopback egress is screened by Core's proxy (gh#1117)"
+                );
+                Ok(())
+            }
+            Err(error) if self.config.allow_unproxied_sidecar => {
+                tracing::warn!(
+                    %error,
+                    "the browser will dial loopback around Core's egress proxy: a page can \
+                     reach any service on this machine without passing the policy (gh#1117, \
+                     allowed by allow_unproxied_sidecar)"
+                );
+                Ok(())
+            }
+            Err(error) => Err(unscreened_loopback_refusal(&error)),
+        }
     }
 
     /// The running egress proxy, if any. Test / introspection helper — a test
