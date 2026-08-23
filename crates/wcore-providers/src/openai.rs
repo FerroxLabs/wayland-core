@@ -1430,6 +1430,51 @@ impl StreamState {
         }
         &mut self.tool_calls[index]
     }
+
+    /// Which accumulator a streamed tool-call chunk belongs to.
+    ///
+    /// `index` is the OpenAI wire contract and stays authoritative when it is
+    /// present. It is NOT always present. Google's OpenAI-compatibility
+    /// endpoint (`/v1beta/openai`, which is how every Gemini model reaches this
+    /// provider) omits `index` entirely and distinguishes parallel calls only
+    /// by `id`:
+    ///
+    /// ```text
+    /// {"delta":{"tool_calls":[{"id":"call_3217803","function":{"name":"ToolSearch",
+    ///    "arguments":"{\"query\":\"web search news\",\"max_results\":5}"}}]}}
+    /// {"delta":{"tool_calls":[{"id":"call_3217807","function":{"name":"ToolSearch",
+    ///    "arguments":"{\"query\":\"read file disk\",\"max_results\":5}"}}]}}
+    /// ```
+    ///
+    /// Defaulting the absent index to 0 collapsed both onto one accumulator, so
+    /// `push_str` produced `{...}{...}` and the turn died on
+    /// "tool-call arguments for 'X' did not parse as JSON: trailing characters".
+    /// Every parallel tool call from a Gemini model failed this way.
+    ///
+    /// Returns `None` when a new slot would exceed `MAX_TOOL_CALLS`, so the
+    /// caller can fail closed exactly as it does for an out-of-range index.
+    fn resolve_tool_slot(&mut self, index: Option<usize>, id: Option<&str>) -> Option<usize> {
+        if let Some(index) = index {
+            self.get_or_create_tool(index);
+            return Some(index);
+        }
+        if let Some(id) = id {
+            if let Some(pos) = self.tool_calls.iter().position(|tc| tc.id == id) {
+                return Some(pos);
+            }
+            if self.tool_calls.len() >= MAX_TOOL_CALLS {
+                return None;
+            }
+            let pos = self.tool_calls.len();
+            self.get_or_create_tool(pos);
+            return Some(pos);
+        }
+        // Neither index nor id: a continuation of the call already in flight.
+        if self.tool_calls.is_empty() {
+            self.get_or_create_tool(0);
+        }
+        Some(self.tool_calls.len() - 1)
+    }
 }
 
 #[async_trait]
@@ -2034,20 +2079,32 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
     // Tool calls
     if let Some(tool_calls) = delta["tool_calls"].as_array() {
         for tc in tool_calls {
-            let index = tc["index"].as_u64().unwrap_or(0) as usize;
+            let explicit_index = tc["index"].as_u64().map(|i| i as usize);
             // #136: reject an out-of-range tool-call index BEFORE
             // `get_or_create_tool` grows the accumulator Vec to `index` slots.
             // Fail closed by aborting the stream, mirroring the arg-bytes cap
             // below — a stream claiming an absurd index is buggy or hostile and
             // no tool should run from it.
-            if index >= MAX_TOOL_CALLS {
+            if let Some(index) = explicit_index {
+                if index >= MAX_TOOL_CALLS {
+                    events.push(LlmEvent::Error(format!(
+                        "tool-call index {index} exceeds {MAX_TOOL_CALLS} — \
+                         aborting stream to bound memory"
+                    )));
+                    return events;
+                }
+            }
+            // A provider that omits `index` (Google's OpenAI-compat endpoint)
+            // keys its parallel calls by `id` alone - see `resolve_tool_slot`.
+            let chunk_id = tc["id"].as_str().filter(|value| !value.is_empty());
+            let Some(slot) = state.resolve_tool_slot(explicit_index, chunk_id) else {
                 events.push(LlmEvent::Error(format!(
-                    "tool-call index {index} exceeds {MAX_TOOL_CALLS} — \
+                    "tool-call count exceeds {MAX_TOOL_CALLS} — \
                      aborting stream to bound memory"
                 )));
                 return events;
-            }
-            let acc = state.get_or_create_tool(index);
+            };
+            let acc = &mut state.tool_calls[slot];
 
             if let Some(id) = tc["id"].as_str() {
                 acc.id = id.to_string();
@@ -2612,6 +2669,92 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    // --- parallel tool calls from a provider that omits `index` -----------
+
+    #[test]
+    fn gemini_compat_parallel_tool_calls_are_not_merged_into_one_slot() {
+        // CAPTURED, not invented. These two chunks are the literal bytes
+        // returned by Google's OpenAI-compatibility endpoint
+        // (generativelanguage.googleapis.com/v1beta/openai/chat/completions)
+        // for gemini-3.7-flash asked to issue two ToolSearch calls at once.
+        //
+        // Note what is NOT there: `index`. Google identifies parallel calls by
+        // `id` alone. Reading the absent index as 0 put both calls in slot 0,
+        // `push_str` glued them into
+        //     {"query":"web search news",...}{"query":"read file disk",...}
+        // and the turn died with "did not parse as JSON: trailing characters at
+        // line 1 column 44". Every parallel tool call from a Gemini model
+        // failed this way; the user saw it as a dead chat.
+        let mut state = StreamState::new();
+
+        let first = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_3217803","function":{"name":"ToolSearch","arguments":"{\"query\":\"web search news\",\"max_results\":5}"}}]}}]}"#;
+        let second = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_3217807","function":{"name":"ToolSearch","arguments":"{\"query\":\"read file disk filesystem\",\"max_results\":5}"}}]}}]}"#;
+        let finish = r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
+
+        let mut events = parse_sse_chunk(first, &mut state);
+        events.extend(parse_sse_chunk(second, &mut state));
+
+        assert_eq!(
+            state.tool_calls.len(),
+            2,
+            "two ids must claim two slots, got: {:?}",
+            state
+                .tool_calls
+                .iter()
+                .map(|t| &t.arguments)
+                .collect::<Vec<_>>()
+        );
+
+        events.extend(parse_sse_chunk(finish, &mut state));
+
+        assert!(
+            !events.iter().any(|e| matches!(e, LlmEvent::Error(_))),
+            "parallel Gemini tool calls must not error, got: {events:?}"
+        );
+
+        let uses: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::ToolUse { name, input, .. } => Some((name.clone(), input.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(uses.len(), 2, "both tool calls must survive, got: {uses:?}");
+        assert_eq!(uses[0].0, "ToolSearch");
+        assert_eq!(uses[0].1["query"], "web search news");
+        assert_eq!(uses[1].1["query"], "read file disk filesystem");
+        assert_eq!(uses[1].1["max_results"], 5);
+    }
+
+    #[test]
+    fn tool_call_chunk_without_index_or_id_continues_the_call_in_flight() {
+        // True delta streaming from a provider that omits `index`: the opening
+        // chunk carries the id, later chunks carry only argument fragments.
+        // Those must append to the SAME call, not open a new slot.
+        let mut state = StreamState::new();
+        let open = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_z","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}"#;
+        let rest =
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"weather\"}"}}]}}]}"#;
+        parse_sse_chunk(open, &mut state);
+        parse_sse_chunk(rest, &mut state);
+
+        assert_eq!(state.tool_calls.len(), 1, "a fragment must not open a slot");
+        assert_eq!(state.tool_calls[0].arguments, r#"{"q":"weather"}"#);
+    }
+
+    #[test]
+    fn repeated_id_without_index_appends_to_the_same_slot() {
+        // The same id appearing twice is one call streamed in two pieces.
+        let mut state = StreamState::new();
+        let a = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_same","function":{"name":"f","arguments":"{\"a\":"}}]}}]}"#;
+        let b = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_same","function":{"arguments":"1}"}}]}}]}"#;
+        parse_sse_chunk(a, &mut state);
+        parse_sse_chunk(b, &mut state);
+
+        assert_eq!(state.tool_calls.len(), 1);
+        assert_eq!(state.tool_calls[0].arguments, r#"{"a":1}"#);
     }
 
     // --- is_tools_unsupported_error (#389) --------------------------------
