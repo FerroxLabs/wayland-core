@@ -350,6 +350,13 @@ impl BrowserPolicy {
         // 2. Hostname checks (IP literals + loopback names + legacy IPv4
         //    encodings + IPv4-mapped IPv6).
         if let Some(host) = parsed.host_str() {
+            // ONE host normalisation, ahead of every check below. The trailing
+            // DNS root dot is the caller's to write and `Url::host_str()`
+            // returns it verbatim, so without this `http://localhost./` walks
+            // past the hard-coded loopback block and `http://evil.example./`
+            // walks past a `denied_origins` entry — both measured open on
+            // v0.13.5. See [`strip_root_dot`].
+            let host = strip_root_dot(host);
             let hard_block = blocked_host_reason(host);
 
             // 2a. The loopback capability (gh#911) is the ONE recoverable
@@ -916,8 +923,8 @@ fn parse_legacy_octet(s: &str) -> Option<u64> {
     }
 }
 
-/// Reduce an operator-written origin pattern to the bare host
-/// [`origin_matches`] can actually compare (gh#1075).
+/// Reduce an operator-written origin pattern to the exact host spelling
+/// [`origin_matches`] can compare against (gh#1075).
 ///
 /// The field is named `allowed_ORIGINS`, and an origin in the web-platform
 /// sense is scheme + host + port — so `https://x.example` is the spelling the
@@ -933,10 +940,16 @@ fn parse_legacy_octet(s: &str) -> Option<u64> {
 /// `Deserialize` struct. A fix in `BrowserPolicy::new` alone leaves the serde
 /// path broken.
 ///
-/// Only the two schemes the gate itself accepts are stripped. A pattern
-/// written with a scheme the allow-list refuses outright (`javascript:`,
-/// `file:`, ...) is left verbatim, so it keeps matching nothing: an entry the
-/// gate would never honour must not be resurrected by normalisation.
+/// ## The rule that generates all of these
+///
+/// The request side of the comparison is `Url::host_str()`, which has already
+/// been through the WHATWG host parser: ASCII case-folded, IDN reduced to
+/// punycode, IPv6 compressed and bracketed, legacy IPv4 canonicalised. Any
+/// transformation that parser performs and this function does not is a
+/// spelling that can never match. Rather than re-implement case folding and
+/// IDNA here — a second implementation being a second set of never-matching
+/// spellings — the bare host is handed to the same parser; see
+/// [`canonical_host`].
 ///
 /// A port in the pattern is DROPPED, not honoured. Origin matching in this
 /// policy has always been host-granular — a port never narrowed anything, it
@@ -944,24 +957,104 @@ fn parse_legacy_octet(s: &str) -> Option<u64> {
 /// `x.example` on every port. The one port-scoped control here is the
 /// [`LoopbackCapability`] grant, which is a separate field and is unaffected.
 ///
+/// Returns `None` for a pattern that is not a host at all, which then matches
+/// nothing — the fail-closed answer on the allow side, and on the deny side
+/// no worse than the status quo for an entry that was never a host.
+fn normalize_origin_pattern(pattern: &str) -> Option<(bool, String)> {
+    let (wildcard, host) = strip_pattern_decorations(pattern)?;
+    canonical_host(host).map(|host| (wildcard, host))
+}
+
+/// Textual half of [`normalize_origin_pattern`]: peel the decorations a
+/// URL-shaped spelling carries down to `(is_wildcard, bare_host_text)`.
 /// Borrows rather than allocating — every step is a prefix/suffix trim.
-fn normalize_origin_pattern(pattern: &str) -> &str {
-    let rest = strip_scheme_ci(pattern, "https://")
-        .or_else(|| strip_scheme_ci(pattern, "http://"))
-        .unwrap_or(pattern);
-    // Path first: a host never contains `/`.
+fn strip_pattern_decorations(pattern: &str) -> Option<(bool, &str)> {
+    let rest = pattern.trim();
+    let rest = strip_scheme_ci(rest, "https://")
+        .or_else(|| strip_scheme_ci(rest, "http://"))
+        .unwrap_or(rest);
+    // Only the two schemes the gate itself accepts were stripped above, so
+    // anything still carrying `://` names a scheme this policy refuses at
+    // step 1 (`javascript:`, `file:`, `ftp:`, ...). Such an entry must match
+    // nothing: normalisation must not resurrect a pattern the gate would
+    // never honour into a working allow entry.
+    if rest.contains("://") {
+        return None;
+    }
+    // Path next: a host never contains `/`.
     let rest = rest.split('/').next().unwrap_or(rest);
-    // Then the port. An IPv6 literal keeps its brackets, which is the form
-    // `Url::host_str()` hands the matcher.
-    if rest.starts_with('[') {
-        return match rest.find(']') {
+    // Userinfo. WHATWG takes the LAST `@` as the delimiter, so a userinfo
+    // field containing `@` cannot smuggle a different host past this.
+    let rest = match rest.rsplit_once('@') {
+        Some((_userinfo, host)) => host,
+        None => rest,
+    };
+    // Then the port.
+    let host = if rest.starts_with('[') {
+        // An IPv6 literal keeps its brackets, which is the form
+        // `Url::host_str()` hands the matcher.
+        match rest.find(']') {
             Some(close) => &rest[..=close],
             None => rest,
-        };
+        }
+    } else if rest.matches(':').count() >= 2 {
+        // Two or more colons and no brackets: an IPv6 literal written the way
+        // an operator writes one. `canonical_host` re-adds the brackets.
+        rest
+    } else {
+        match rest.split_once(':') {
+            // A single colon is a port only if what follows it IS a port.
+            // `data:text/html,...` reaches here as `data:text`, and must not
+            // become a working entry for the host `data`.
+            Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host,
+            Some(_) => return None,
+            None => rest,
+        }
+    };
+    Some(match host.strip_prefix("*.") {
+        Some(suffix) => (true, suffix),
+        None => (false, host),
+    })
+}
+
+/// Canonicalise a bare host through the same parser that produced the
+/// request's host, so both sides of the comparison arrive in one spelling.
+///
+/// This is the whole point of the function: ASCII case folding, IDN →
+/// punycode, IPv6 compression and legacy-IPv4 canonicalisation are the
+/// WHATWG host parser's rules, and reproducing them by hand here would only
+/// produce a second, subtly different set of spellings that never match.
+///
+/// An unbracketed IPv6 literal is bracketed first — `Url` requires the
+/// brackets, `host_str()` returns them, and an operator writes neither.
+fn canonical_host(host: &str) -> Option<String> {
+    if host.is_empty() {
+        return None;
     }
-    match rest.split_once(':') {
-        Some((host, _port)) => host,
-        None => rest,
+    let bracketed;
+    let host = if !host.starts_with('[') && host.matches(':').count() >= 2 {
+        bracketed = format!("[{host}]");
+        bracketed.as_str()
+    } else {
+        host
+    };
+    let url = Url::parse(&format!("https://{host}/")).ok()?;
+    Some(strip_root_dot(url.host_str()?).to_string())
+}
+
+/// Drop one trailing DNS root label.
+///
+/// `example.com.` and `example.com` name the same host and resolve
+/// identically, but `Url::host_str()` returns whichever the caller wrote — so
+/// unless both sides are reduced here, `denied_origins = ["evil.example"]` is
+/// walked past by `http://evil.example./`, and the hard-coded loopback block
+/// is walked past by `http://localhost./`. Both were measured open on
+/// v0.13.5. IP literals are unaffected: the WHATWG IPv4 parser already
+/// consumes the trailing dot, so `127.0.0.1.` never reaches here.
+fn strip_root_dot(host: &str) -> &str {
+    match host.strip_suffix('.') {
+        Some(head) if !head.is_empty() => head,
+        _ => host,
     }
 }
 
@@ -973,14 +1066,19 @@ fn strip_scheme_ci<'a>(pattern: &'a str, scheme: &str) -> Option<&'a str> {
 }
 
 /// Suffix-glob match: `*.example.com` matches `foo.example.com` and
-/// `example.com`. Plain `example.com` matches only the exact host. The
-/// pattern is normalized first — see [`normalize_origin_pattern`].
+/// `example.com`. Plain `example.com` matches only the exact host.
+///
+/// `host` is expected to have come from [`BrowserPolicy::evaluate`], which
+/// normalises it once for every check it performs; the pattern is normalised
+/// here — see [`normalize_origin_pattern`].
 fn origin_matches(host: &str, pattern: &str) -> bool {
-    let pattern = normalize_origin_pattern(pattern);
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        host == suffix || host.ends_with(&format!(".{suffix}"))
+    let Some((wildcard, pattern_host)) = normalize_origin_pattern(pattern) else {
+        return false;
+    };
+    if wildcard {
+        host == pattern_host || host.ends_with(&format!(".{pattern_host}"))
     } else {
-        host == pattern
+        host == pattern_host
     }
 }
 
