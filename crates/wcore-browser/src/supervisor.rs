@@ -30,7 +30,6 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -217,11 +216,6 @@ pub struct BrowserSupervisor {
     /// gh#1117 egress proxy, started lazily by `ensure_ready` when
     /// `config.egress_policy` is set. Shut down on `Drop`.
     egress_proxy: Mutex<Option<Arc<PolicyEgressProxy>>>,
-    /// True once THIS supervisor launched a sidecar with the proxy env in
-    /// place. Only such a sidecar is known to be contained — a healthy
-    /// sidecar Core found already running is not, and `/health` does not
-    /// report the browser's proxy configuration, so there is nothing to ask.
-    owns_proxied_sidecar: AtomicBool,
 }
 
 fn sidecar_start_lock() -> &'static tokio::sync::Mutex<()> {
@@ -240,7 +234,6 @@ impl BrowserSupervisor {
             sessions: Arc::new(Mutex::new(Vec::new())),
             reaper_cancel: Mutex::new(None),
             egress_proxy: Mutex::new(None),
-            owns_proxied_sidecar: AtomicBool::new(false),
         }
     }
 
@@ -411,13 +404,14 @@ impl BrowserSupervisor {
         // started, so "this sidecar is not behind the proxy" can never be
         // discovered after a navigation has already gone out.
         let containment_required = self.ensure_egress_proxy().await?;
+        let session_id = format!("camoufox-sidecar-{}", std::process::id());
 
         if self
             .healthcheck(Duration::from_millis(500))
             .await
             .unwrap_or(false)
         {
-            if containment_required && !self.owns_proxied_sidecar.load(Ordering::Acquire) {
+            if containment_required && !owns_live_sidecar(&session_id) {
                 if !self.config.allow_unproxied_sidecar {
                     return Err(unproxied_sidecar_refusal(&self.config.healthcheck_url));
                 }
@@ -434,26 +428,22 @@ impl BrowserSupervisor {
         let resolved_program = self.resolve_sidecar_program(&configured_program).await?;
         let program = resolved_program.as_str();
 
-        let session_id = format!("camoufox-sidecar-{}", std::process::id());
         // A prior owned sidecar may be alive but unhealthy. Remove it before
         // reusing the stable ownership key so inserting the replacement can
         // never detach the old Child handle.
         if children_map().lock().contains_key(&session_id) {
             let _ = self.on_session_end(&session_id);
         }
-        let launched = self
+        let pid = self
             .launch_camoufox_program(program, &[], &session_id)
-            .await;
-        if launched.is_ok() && containment_required {
-            self.owns_proxied_sidecar.store(true, Ordering::Release);
-        }
-        let pid = launched.map_err(|error| {
-            format!(
-                "Camoufox is unavailable at {} and Core could not start `{program}`: {error}. \
+            .await
+            .map_err(|error| {
+                format!(
+                    "Camoufox is unavailable at {} and Core could not start `{program}`: {error}. \
 Install @askjo/camofox-browser or set WAYLAND_CAMOUFOX_BIN to its executable",
-                self.config.healthcheck_url
-            )
-        })?;
+                    self.config.healthcheck_url
+                )
+            })?;
 
         let deadline = tokio::time::Instant::now() + self.config.startup_timeout;
         loop {
@@ -466,14 +456,12 @@ Install @askjo/camofox-browser or set WAYLAND_CAMOUFOX_BIN to its executable",
             }
             if let Some(status) = owned_child_status(&session_id) {
                 let _ = self.on_session_end(&session_id);
-                self.owns_proxied_sidecar.store(false, Ordering::Release);
                 return Err(format!(
                     "Camoufox process {pid} exited before becoming healthy ({status}); run `{program}` directly for diagnostics"
                 ));
             }
             if tokio::time::Instant::now() >= deadline {
                 let _ = self.on_session_end(&session_id);
-                self.owns_proxied_sidecar.store(false, Ordering::Release);
                 return Err(format!(
                     "Camoufox process {pid} did not become healthy at {} within {}ms",
                     self.config.healthcheck_url,
@@ -684,6 +672,30 @@ fn retain_child(
     children_map()
         .lock()
         .insert(session.to_string(), OwnedChild { child, tree_guard });
+}
+
+/// Whether THIS PROCESS launched the sidecar that is answering now, and that
+/// child is still alive.
+///
+/// Derived from the retained `Child` handle rather than from a flag on the
+/// supervisor, because a flag gets both edges wrong:
+///
+///   * the ownership key is process-global, so a SECOND supervisor in the same
+///     process would not know the first one launched the sidecar and would
+///     refuse one that IS contained;
+///   * a flag stays set after the child exits, so an externally started
+///     sidecar appearing afterwards would be reused with no refusal at all.
+///
+/// A sidecar Core did not launch cannot be shown to be contained: `/health`
+/// does not report the browser's proxy configuration, so there is nothing to
+/// ask it.
+fn owns_live_sidecar(session: &str) -> bool {
+    let retained = children_map().lock().contains_key(session);
+    if !retained {
+        return false;
+    }
+    // `Some(status)` means the child has already exited.
+    owned_child_status(session).is_none()
 }
 
 fn owned_child_status(session: &str) -> Option<std::process::ExitStatus> {

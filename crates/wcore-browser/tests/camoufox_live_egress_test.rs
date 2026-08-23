@@ -135,7 +135,7 @@ async fn live_camoufox_egress_goes_through_cores_gate() {
 
     // `BrowserTool` calls `ensure_ready` before EVERY op, and the second call
     // finds the sidecar already healthy — the same branch that refuses a
-    // sidecar Core did not start. Without the ownership flag this refuses
+    // sidecar Core did not start. Without the ownership check this refuses
     // every operation after the first, which would be a worse bug than the one
     // being fixed.
     supervisor
