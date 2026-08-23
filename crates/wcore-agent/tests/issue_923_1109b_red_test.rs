@@ -29,7 +29,7 @@ use wcore_providers::retry::{builder_send_with_retry, scope_max_retries};
 use wcore_providers::{LlmProvider, ProviderError};
 use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::{LlmEvent, LlmRequest};
-use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason, TokenUsage};
 
 use common::{
     RECOVERY_TEST_KEY, configure_persisted_test_session, physical_attempt_server, test_config,
@@ -483,9 +483,23 @@ async fn b_control_an_unsent_call_files_no_capture_and_claims_no_refusal() {
 // #923 — C. one-shot repair-and-retry, narrowly gated
 // ===========================================================================
 
-/// RED. An orphaned-tool-pair 400 is exactly the error the pre-send repair
-/// exists to prevent; seeing one means the repair missed a shape. Repair once
-/// and re-send once.
+/// An orphaned-tool-pair 400 is exactly the error the pre-send repair exists
+/// to prevent; seeing one means the repair missed a shape. Repair once and
+/// re-send once.
+///
+/// CHANGED after 0.13.5, and the reason matters. This test used to run against
+/// the engine's default EMPTY history — no tool blocks anywhere — and still
+/// asserted a repair-and-retry. That could only ever pass vacuously: the
+/// pre-send repairs had already run against that exact array and are
+/// idempotent, so the "repaired" second send was byte-for-byte the first and
+/// re-earned the same 400. The retry was a guaranteed second bill that could
+/// not change the outcome, and this test was what made that look correct.
+///
+/// The retry now happens only when the repair actually changes the array, so
+/// the history seeded here carries a tool pair for the escalation to act on.
+/// `control_c_a_toolless_conversation_is_not_resent` in
+/// `issue_923_recurrence_test.rs` pins the other half: no tool blocks, no
+/// second send.
 #[tokio::test]
 async fn c_orphan_shaped_400_is_repaired_and_retried_once() {
     let mut h = harness(vec![
@@ -493,6 +507,31 @@ async fn c_orphan_shaped_400_is_repaired_and_retried_once() {
         Ok(end_turn_text("recovered")),
     ])
     .await;
+    h.engine.load_conversation(vec![
+        Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "read the config".to_string(),
+            }],
+        ),
+        Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "toolu_01ABC".to_string(),
+                name: "Read".to_string(),
+                input: serde_json::json!({"path": "config.toml"}),
+                extra: None,
+            }],
+        ),
+        Message::new(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_01ABC".to_string(),
+                content: "port = 8080".to_string(),
+                is_error: false,
+            }],
+        ),
+    ]);
     let result = h.engine.run(USER_MARKER, "").await;
     let calls = h.calls.load(Ordering::SeqCst);
     assert!(
