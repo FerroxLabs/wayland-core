@@ -1464,6 +1464,24 @@ fn is_permanent_endpoint_failure(failure_code: &str) -> bool {
     failure_code == wcore_providers::retry::FAILURE_DNS
 }
 
+/// True when the failure code says a response HEAD arrived — the provider
+/// answered, even if the answer was a refusal.
+///
+/// Deliberately separate from [`is_unserved_request_failure`], which answers
+/// the retry question ("can another send get a different result?"). This
+/// answers the billing question ("did we ever hear back?"), and the two
+/// disagree on exactly the codes that matter: `http_503` and `http_529` are
+/// admitted to the outage window AND carry a response head.
+///
+/// Every status-derived code is emitted as `http_<status>` by
+/// `wcore_providers::retry`; the connect- and transport-phase codes
+/// (`dns_failure`, `connection_refused`, `connection`, `transport`) never take
+/// that shape, which is what makes the prefix a sound test rather than a
+/// convenient one.
+fn carried_a_response_head(failure_code: &str) -> bool {
+    failure_code.starts_with("http_")
+}
+
 /// Wall-clock window over which the engine keeps re-issuing a request the
 /// provider never served (see [`is_unserved_request_failure`]).
 ///
@@ -12532,17 +12550,29 @@ impl AgentEngine {
                     None
                 };
                 if let Some(reservation) = failed_provider_reservation {
-                    if provider_result
-                        .as_ref()
-                        .is_err_and(|error| error.was_not_attempted())
-                    {
+                    if provider_result.as_ref().is_err_and(|error| {
+                        error.was_not_attempted() || error.produced_no_billable_output()
+                    }) {
                         reservation
                             .release()
                             .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
                     } else {
                         // The provider outcome is unknown: consume the conservative
                         // reservation rather than pretending a failed transport was
-                        // free. This bounds retry rings even when usage is absent.
+                        // free.
+                        //
+                        // This used to say it also "bounds retry rings even when
+                        // usage is absent", and it did — which was the bug, not the
+                        // feature. Measured on 0.13.5 against a 503 endpoint: 15
+                        // physical sends over 301.9 s, ended not by the outage
+                        // window but by `budget cap 'per_session_output_tokens'
+                        // would be exceeded (limit 1000000, reserved total
+                        // 1024000)` — 16 reservations of 64 000 conservative output
+                        // tokens each, for a turn that generated none. The budget
+                        // was silently acting as the retry policy and telling the
+                        // user the wrong cause. The bound belongs to the retry
+                        // budget and the outage window; this branch is only for
+                        // outcomes we genuinely cannot see.
                         let (input_tokens, output_tokens, cost_usd) =
                             reservation.conservative_charge();
                         if let Err(err) = reservation.settle(input_tokens, output_tokens, cost_usd)
@@ -13346,8 +13376,16 @@ impl AgentEngine {
                 // and billed, so each re-send has a real price and the number
                 // of them is exactly the right thing to cap.
                 let unserved = is_unserved_request_failure(&failure_code);
-                if unserved {
-                    // One physical send that produced no response head.
+                if unserved && !carried_a_response_head(&failure_code) {
+                    // One physical send that produced no response head. The
+                    // disclosure this feeds tells the user the provider "may
+                    // have served and billed it", which is only true when we
+                    // never saw an answer. An HTTP 503 or 529 IS an answer —
+                    // the provider replied, with a refusal — so counting it
+                    // here reported a possible bill that provably did not
+                    // happen. It still rides the outage WINDOW above: how the
+                    // request is retried and whether it was billed are two
+                    // different questions.
                     self.unserved_resends = self.unserved_resends.saturating_add(1);
                 }
                 let retry_admitted = if unserved {
@@ -34520,6 +34558,129 @@ mod stream_retry_budget_tests {
         ProviderError::RateLimited {
             retry_after_ms: 7_000,
         }
+    }
+
+    fn api_503() -> ProviderError {
+        ProviderError::Api {
+            status: 503,
+            message: "deliberate load shedding".into(),
+        }
+    }
+
+    fn connection_lost() -> ProviderError {
+        ProviderError::Connection("connection reset by peer".into())
+    }
+
+    /// Drive one run against a provider that fails every send with `error`,
+    /// under a session budget whose output-token cap is smaller than TWO
+    /// conservative reservations. Returns the physical send count and every
+    /// message the run put on the user's surface.
+    ///
+    /// `max_tokens` is set to 64 so one reservation fits under a cap of 100
+    /// and two cannot: the defect becomes reachable in one step instead of
+    /// the sixteen it took in production.
+    async fn run_under_output_cap(
+        error: fn() -> ProviderError,
+        cap_output_tokens: u64,
+    ) -> (usize, Vec<String>, u64) {
+        let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(TimedFailProvider {
+            error,
+            sends: Arc::clone(&sends),
+        });
+        let sink = TestSink::new();
+        let surface = sink.handle();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(sink),
+        );
+        engine.max_turns = Some(2);
+        engine.max_tokens = 64;
+        // A reservation is only TAKEN when the provider/model pair is priced.
+        // Without these the pair is `/`, the run reports "Pricing unavailable
+        // ... cost is unpriced, not $0", no reservation is held, and the cap
+        // below could never fire for either arm — the control would fail and
+        // the 503 test would pass for free.
+        engine.set_model("claude-opus-4-6");
+        engine.compat = wcore_config::compat::ProviderCompat::anthropic_defaults();
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(cap_output_tokens)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+        let _ = engine.run("task", "m-1").await;
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let charged = tracker.lock().session_totals(&session_id).0;
+        let n = sends.lock().unwrap_or_else(|p| p.into_inner()).len();
+        (n, notices(&surface.snapshot()), charged)
+    }
+
+    /// A 503 must not be charged for output it provably did not generate.
+    ///
+    /// Measured on the shipped 0.13.5 binary against a 503 endpoint: 15
+    /// physical sends over 301.9 s, and the run did NOT end on its 900 s
+    /// outage window — it ended on `budget cap 'per_session_output_tokens'
+    /// would be exceeded (limit 1000000, reserved total 1024000)`. Sixteen
+    /// reservations of 64 000 conservative output tokens, settled one after
+    /// another for a turn that generated none. Two things were wrong at once:
+    /// the session budget was silently acting as the retry policy, and the
+    /// user was told the wrong cause for the stop. At the shipped retry
+    /// budget one failed turn eats 70 % of a 1 000 000-token session.
+    #[tokio::test(start_paused = true)]
+    async fn a_503_releases_its_reservation_instead_of_being_billed_for_it() {
+        let (sends, surface, charged) = run_under_output_cap(api_503, 100).await;
+        assert_eq!(
+            charged, 0,
+            "a 503 generated no tokens, so the session must be charged for \
+             none; it was charged {charged}"
+        );
+        let capped: Vec<&String> = surface
+            .iter()
+            .filter(|m| m.contains("budget cap"))
+            .collect();
+        assert!(
+            capped.is_empty(),
+            "a 503 IS a response head: the provider answered, and answered \
+             with a refusal, so there are no output tokens to charge for. The \
+             run was stopped by the budget instead of by its retry policy: \
+             {capped:?}"
+        );
+        assert!(
+            sends > 2,
+            "the outage window, not the budget, has to be what bounds a 503; \
+             only {sends} send(s) happened"
+        );
+    }
+
+    /// KNOWN-POSITIVE CONTROL for the absence assertion above.
+    ///
+    /// Same harness, same cap, same outage window — the only thing that
+    /// changes is the failure class. A lost socket carries no response head,
+    /// so the conservative charge is right and the cap MUST still be
+    /// reachable. Without this, a fix that simply stopped reserving anything,
+    /// or a harness whose cap could never fire at all, would satisfy the test
+    /// above for free.
+    ///
+    /// It also pins the half of the rule that is easy to over-apply. Measured
+    /// on this workspace: a client-side ECONNRESET against an upstream that
+    /// had answered 200 and billed 102 output tokens. "Nothing was served to
+    /// us" is not "nothing was billed".
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_socket_still_pays_the_conservative_charge() {
+        let (sends, _, charged) = run_under_output_cap(connection_lost, 100).await;
+        assert!(
+            charged > 0,
+            "a lost socket leaves the outcome UNKNOWN, so the conservative \
+             charge has to stand. The session was charged {charged} after \
+             {sends} send(s); a zero here would mean the release rule had \
+             swallowed the whole class, and the 503 test above would prove \
+             nothing"
+        );
     }
 
     fn rate_limited_100ms() -> ProviderError {

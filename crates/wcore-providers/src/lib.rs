@@ -242,6 +242,51 @@ impl ProviderError {
         )
     }
 
+    /// True when the failure carries POSITIVE PROOF that the provider
+    /// generated no completion, so a pre-flight reservation held against it
+    /// must be RELEASED rather than settled at the conservative charge.
+    ///
+    /// This is deliberately not "the request was unserved". Two different
+    /// questions get conflated under that word:
+    ///
+    /// * Should the request be re-sent, and on what budget? An HTTP 503 is
+    ///   load-shedding, so `wcore_agent`'s `is_unserved_request_failure`
+    ///   admits it to the outage window. That is a RETRY question.
+    /// * Did the provider bill anything? That is this question, and it is
+    ///   answered by whether a response head arrived and what it said.
+    ///
+    /// An error status head is proof: the provider answered the request with
+    /// an error document instead of a completion, so there are no output
+    /// tokens to pay for. [`ProviderError::Api`] (every non-2xx the provider
+    /// chain reports), [`ProviderError::RateLimited`] (429) and the 402/409
+    /// entitlement and overflow refusals are exactly those.
+    ///
+    /// [`ProviderError::Connection`] and [`ProviderError::Egress`] transport
+    /// faults are EXCLUDED even though nothing was served to us, and that
+    /// exclusion is the load-bearing half. Measured on this workspace: a
+    /// client-side `ECONNRESET` against an upstream that had answered 200 and
+    /// billed 102 output tokens. A lost socket is not evidence of a free
+    /// request, so those keep the conservative charge.
+    pub fn produced_no_billable_output(&self) -> bool {
+        match self {
+            ProviderError::Api { .. }
+            | ProviderError::RateLimited { .. }
+            | ProviderError::PromptTooLong(_)
+            | ProviderError::PremiumLocked { .. }
+            | ProviderError::UpgradeRequired { .. }
+            | ProviderError::SpendCeilingUnresolved { .. }
+            | ProviderError::ContextOverflow { .. } => true,
+            // No response head, or none we can reason about: the outcome is
+            // unknown and stays conservatively billed.
+            ProviderError::Connection(_)
+            | ProviderError::Egress(_)
+            | ProviderError::Http(_)
+            | ProviderError::Parse(_)
+            | ProviderError::MissingApiKey
+            | ProviderError::NotAttempted { .. } => false,
+        }
+    }
+
     /// True for errors a retry (same request, possibly after backoff) may
     /// resolve.
     ///
@@ -750,5 +795,86 @@ mod create_provider_tests {
         assert_eq!(got, None);
         let got = new_openai_compat("  ", |b| b.map(str::to_string));
         assert_eq!(got, None);
+    }
+}
+
+/// Which failures carry PROOF that nothing was billed.
+///
+/// The engine releases a pre-flight budget reservation on exactly this
+/// predicate, so its polarity is money. Both directions are pinned: a class
+/// wrongly added here refunds a real charge, and a class wrongly removed makes
+/// the session budget behave as a retry policy again.
+#[cfg(test)]
+mod billing_classification_tests {
+    use super::ProviderError;
+
+    #[test]
+    fn an_error_status_head_is_proof_that_no_completion_was_generated() {
+        for error in [
+            ProviderError::Api {
+                status: 503,
+                message: "load shedding".into(),
+            },
+            ProviderError::Api {
+                status: 500,
+                message: "boom".into(),
+            },
+            ProviderError::RateLimited {
+                retry_after_ms: 7_000,
+            },
+            ProviderError::PromptTooLong("too long".into()),
+            ProviderError::ContextOverflow {
+                required_tokens: 9,
+                model_window: 8,
+                routed_model: "m".into(),
+                message: "overflow".into(),
+            },
+        ] {
+            assert!(
+                error.produced_no_billable_output(),
+                "the provider answered with an error document rather than a \
+                 completion, so there are no output tokens to charge: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lost_socket_is_not_proof_that_nothing_was_billed() {
+        // The load-bearing exclusion. Measured on this workspace: a
+        // client-side ECONNRESET against an upstream that answered 200 and
+        // billed 102 output tokens. Being served nothing is not being
+        // charged nothing.
+        assert!(
+            !ProviderError::Connection("connection reset by peer".into())
+                .produced_no_billable_output()
+        );
+        assert!(!ProviderError::Parse("bad frame".into()).produced_no_billable_output());
+        assert!(
+            !ProviderError::NotAttempted {
+                reason: "egress refused".into()
+            }
+            .produced_no_billable_output(),
+            "a request that never left is released by `was_not_attempted`; \
+             this predicate must not also claim it, or the two collapse"
+        );
+    }
+
+    #[test]
+    fn the_two_predicates_answer_different_questions() {
+        // `was_not_attempted` proves the request never left; this predicate
+        // proves the answer that came back was not a completion. A 503 is the
+        // case that separates them, and it is the one the release rule exists
+        // for: not attempted says NO, no-billable-output says YES.
+        let load_shed = ProviderError::Api {
+            status: 503,
+            message: "load shedding".into(),
+        };
+        assert!(!load_shed.was_not_attempted());
+        assert!(load_shed.produced_no_billable_output());
+
+        // And the reverse direction, so the pair cannot collapse into one
+        // predicate: a missing credential never reached a provider at all.
+        assert!(ProviderError::MissingApiKey.was_not_attempted());
+        assert!(!ProviderError::MissingApiKey.produced_no_billable_output());
     }
 }
