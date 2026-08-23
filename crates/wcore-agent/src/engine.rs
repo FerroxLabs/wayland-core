@@ -24260,6 +24260,7 @@ mod approval_bridge_engine_tests {
                 ApprovalOutcome {
                     approved: true,
                     modifications: None,
+                    cancellation: None,
                 },
             )
             .await;
@@ -24357,6 +24358,7 @@ mod approval_bridge_engine_tests {
                     ApprovalOutcome {
                         approved,
                         modifications: modifications.clone(),
+                        cancellation: None,
                     },
                 )
                 .await
@@ -24467,6 +24469,7 @@ mod approval_bridge_engine_tests {
                 ApprovalOutcome {
                     approved: false,
                     modifications: None,
+                    cancellation: None,
                 },
             )
             .await;

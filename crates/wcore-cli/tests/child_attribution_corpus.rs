@@ -645,6 +645,7 @@ fn probe_approval() -> (Attribution, String) {
                 ApprovalOutcome {
                     approved: true,
                     modifications: None,
+                    cancellation: None,
                 },
             )
             .await;

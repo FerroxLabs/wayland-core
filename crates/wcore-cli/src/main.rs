@@ -4338,8 +4338,14 @@ async fn deny_pending_approvals_on_host_eof(
             "host closed the command stream with approvals pending; denied them immediately"
         );
     }
+    // #1083 criterion 3: the bridge does NOT reuse `HOST_EOF_DENY_REASON`. The
+    // cause is stamped onto the outcome the waiter receives (it used to be a
+    // free-form string that was logged and dropped), and
+    // `ApprovalCancelCause::HostStreamClosed` owns the one reason string that
+    // goes with it — distinct from this manager's EOF reason above and from the
+    // TTL reason either store's reaper uses.
     let cancelled = approval_bridge
-        .cancel_all_pending(HOST_EOF_DENY_REASON)
+        .cancel_all_pending(wcore_agent::approval::ApprovalCancelCause::HostStreamClosed)
         .await;
     if cancelled > 0 {
         tracing::warn!(
@@ -6058,6 +6064,7 @@ async fn run_json_stream_mode(
                                         let outcome = wcore_agent::approval::ApprovalOutcome {
                                             approved,
                                             modifications,
+                                            cancellation: None,
                                         };
                                         let resolved =
                                             approval_bridge.resolve(&resume_token, outcome).await;
@@ -6478,6 +6485,7 @@ async fn run_json_stream_mode(
                 let outcome = wcore_agent::approval::ApprovalOutcome {
                     approved,
                     modifications,
+                    cancellation: None,
                 };
                 let resolved = approval_bridge.resolve(&resume_token, outcome).await;
                 let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::ApprovalResume {
@@ -7612,6 +7620,7 @@ mod tests {
                     wcore_agent::approval::ApprovalOutcome {
                         approved: true,
                         modifications: None,
+                        cancellation: None,
                     },
                 )
                 .await;
@@ -7644,6 +7653,142 @@ mod tests {
             "an open stream must deliver the operator's APPROVAL, not an EOF \
              cancellation -- otherwise the red arm above would pass for the \
              wrong reason (everything cancels)"
+        );
+        // #1083 criterion 3 control: a decision the operator actually made
+        // carries NO cancellation cause. If it did, the cause below would be
+        // stamped on everything and would discriminate nothing.
+        assert_eq!(
+            result.cancellation, None,
+            "an operator's answer is not a bridge cancellation"
+        );
+    }
+
+    /// FerroxLabs/wayland#1083 criterion 3, END TO END. The EOF drain must not
+    /// merely resolve the parked bridge approval — it must tell the waiter WHY,
+    /// so a host disconnect is distinguishable from the TTL simply running out.
+    ///
+    /// At released v0.13.5 the waiter got `ApprovalOutcome { approved: false,
+    /// modifications: None }` in both cases, byte for byte; the only
+    /// discriminator was a `tracing::warn!` that never reaches stderr with
+    /// `RUST_LOG` unset. Asserting only `!approved` (as the red arm above does)
+    /// passes for a TTL expiry too, which is why that arm does not cover this.
+    ///
+    /// The 24h `CRUCIBLE_APPROVAL_TTL` and the 2-second timeout are the same
+    /// guards the red arm uses: the reaper cannot be what resolves this.
+    #[tokio::test]
+    async fn host_eof_tells_the_bridge_waiter_that_the_stream_closed() {
+        let approval_manager = Arc::new(ToolApprovalManager::new());
+        let bridge = Arc::new(wcore_agent::approval::ApprovalBridge::new());
+
+        let (_secret, parked_rx) = bridge
+            .request_with_id_and_ttl(
+                "crucible:eof-reason-card".to_string(),
+                bridge_request("crucible:eof-reason-card"),
+                wcore_agent::approval::CRUCIBLE_APPROVAL_TTL,
+            )
+            .await;
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let future = async move {
+            ready_tx.send(()).unwrap();
+            parked_rx.await
+        };
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+        let host = tokio::spawn(async move {
+            ready_rx.await.unwrap();
+            drop(cmd_tx);
+        });
+        let writer = CapturingProtocolEmitter::default();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            drive_active_recovery(
+                future,
+                &mut cmd_rx,
+                approval_manager.as_ref(),
+                bridge.as_ref(),
+                &writer,
+                &|| {},
+            ),
+        )
+        .await
+        .expect("the parked bridge approval must resolve on EOF, not after the 24h TTL");
+        host.await.unwrap();
+
+        let ActiveRecoveryOutcome::Finished(result) = outcome else {
+            panic!("recovery driver stopped unexpectedly");
+        };
+        let result = result.expect("the parked bridge approval must resolve");
+        assert!(!result.approved, "EOF must still fail CLOSED");
+        assert_eq!(
+            result.cancellation,
+            Some(wcore_agent::approval::ApprovalCancelCause::HostStreamClosed),
+            "the waiter must be told the HOST WENT AWAY. \
+             Some(Expired) means the EOF path is reusing the TTL cause and a \
+             consumer still cannot tell a disconnect from a slow operator; \
+             None means no cause reaches the waiter at all"
+        );
+        assert_eq!(
+            result.cancel_reason(),
+            Some(wcore_agent::approval::ApprovalCancelCause::HostStreamClosed.reason())
+        );
+        assert_ne!(
+            result.cancel_reason(),
+            Some(HOST_EOF_DENY_REASON),
+            "#1083 asked the bridge not to reuse #1070's string verbatim"
+        );
+    }
+
+    /// The EOF drain is invoked from BOTH `commands_open = false` sites -- the
+    /// recovery driver (covered end to end above) and the `run_json_stream_mode`
+    /// inner loop, which has no test harness of its own. This grades the shared
+    /// helper both sites call: one approval parked on EACH store, drained
+    /// together, each carrying its own store's distinct reason.
+    #[tokio::test]
+    async fn the_eof_drain_empties_both_stores_with_reasons_that_differ() {
+        use wcore_protocol::events::ToolCategory;
+
+        let approval_manager = ToolApprovalManager::new();
+        let bridge = wcore_agent::approval::ApprovalBridge::new();
+
+        let manager_parked =
+            approval_manager.request_approval("eof-both", &ToolCategory::Exec, "Bash");
+        let (_secret, bridge_parked) = bridge
+            .request_with_id_and_ttl(
+                "crucible:both-card".to_string(),
+                bridge_request("crucible:both-card"),
+                wcore_agent::approval::CRUCIBLE_APPROVAL_TTL,
+            )
+            .await;
+
+        deny_pending_approvals_on_host_eof(&approval_manager, &bridge).await;
+
+        let manager_result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), manager_parked)
+                .await
+                .expect("the manager approval must resolve on EOF")
+                .expect("the manager approval must not be dropped");
+        let bridge_result = tokio::time::timeout(std::time::Duration::from_secs(2), bridge_parked)
+            .await
+            .expect("the bridge approval must resolve on EOF")
+            .expect("the bridge approval must not be dropped");
+
+        assert!(
+            matches!(manager_result, ToolApprovalResult::Denied { ref reason } if reason == HOST_EOF_DENY_REASON),
+            "the ToolApprovalManager half must keep #1070's reason"
+        );
+        assert!(!bridge_result.approved, "the bridge half must fail closed");
+        let bridge_reason = bridge_result
+            .cancel_reason()
+            .expect("the bridge half must carry a reason the waiter can read");
+        assert_eq!(
+            bridge_reason,
+            wcore_agent::approval::ApprovalCancelCause::HostStreamClosed.reason()
+        );
+        assert_ne!(
+            bridge_reason, HOST_EOF_DENY_REASON,
+            "the two stores must not report EOF with the same string (#1083)"
         );
     }
 
@@ -9479,6 +9624,7 @@ mod tests {
                     ApprovalOutcome {
                         approved: true,
                         modifications: None,
+                        cancellation: None,
                     },
                 )
                 .await,

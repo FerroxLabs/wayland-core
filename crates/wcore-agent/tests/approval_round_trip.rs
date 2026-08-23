@@ -92,6 +92,7 @@ async fn script_approval_gate_dispatches_when_approved() {
                     ApprovalOutcome {
                         approved: true,
                         modifications: None,
+                        cancellation: None,
                     },
                 )
                 .await
@@ -146,6 +147,7 @@ async fn script_approval_gate_rejects_when_denied() {
                     ApprovalOutcome {
                         approved: false,
                         modifications: None,
+                        cancellation: None,
                     },
                 )
                 .await

@@ -135,6 +135,7 @@ mod tests {
                                 ApprovalOutcome {
                                     approved: true,
                                     modifications: None,
+                                    cancellation: None,
                                 },
                             )
                             .await;
@@ -166,6 +167,7 @@ mod tests {
                                     modifications: Some(serde_json::json!({
                                         "egress_scope": "always"
                                     })),
+                                    cancellation: None,
                                 },
                             )
                             .await;
