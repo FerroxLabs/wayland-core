@@ -615,6 +615,11 @@ impl wcore_tools::script::ApprovalProducer for ApprovalBridge {
             if let Ok(outcome) = rx.await {
                 let _ = tx_lite.send(wcore_tools::script::ApprovalOutcomeLite {
                     approved: outcome.approved,
+                    // #1083: forward WHY, not just that it was refused. The
+                    // cause is what lets the ScriptTool distinguish a host
+                    // disconnect from a TTL expiry from an actual rejection —
+                    // it used to render "rejected by user" for all three.
+                    cancel_reason: outcome.cancel_reason().map(str::to_string),
                     modifications: outcome.modifications,
                 });
             }

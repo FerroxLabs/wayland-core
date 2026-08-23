@@ -226,6 +226,15 @@ pub trait ApprovalProducer: Send + Sync {
 pub struct ApprovalOutcomeLite {
     pub approved: bool,
     pub modifications: Option<serde_json::Value>,
+    /// FerroxLabs/wayland#1083: set only when the approval store resolved this
+    /// ITSELF with no host answer — the host's command stream closed, or the
+    /// TTL ran out. `None` is what an operator's own decision looks like, and
+    /// that is the distinction this field exists to preserve: without it a
+    /// gated step reported "rejected by user" for a host that had merely
+    /// disconnected. Mirrors `wcore_agent::approval::ApprovalCancelCause`'s
+    /// reason string (that enum owns the wording; this is a value copy, since
+    /// `wcore-tools` must not depend on `wcore-agent`).
+    pub cancel_reason: Option<String>,
 }
 
 /// W7 S4: emit-side trait for the three S4 protocol events.
@@ -415,8 +424,19 @@ impl Tool for ScriptTool {
                     Ok(outcome) if outcome.approved => {
                         // fall through to dispatch
                     }
-                    Ok(_) => {
-                        return error_result(format!("step '{}' rejected by user", step.id));
+                    // #1083: an unapproved step is not automatically a
+                    // REJECTED one. When the bridge cancelled the approval
+                    // itself — the host's command stream closed, or the TTL
+                    // reaper collected it — say which, instead of telling the
+                    // model and the transcript that a user refused something
+                    // no user ever saw the end of.
+                    Ok(outcome) => {
+                        return error_result(match outcome.cancel_reason {
+                            Some(reason) => {
+                                format!("step '{}' was not approved: {reason}", step.id)
+                            }
+                            None => format!("step '{}' rejected by user", step.id),
+                        });
                     }
                     Err(_) => {
                         return error_result(format!("step '{}' approval channel closed", step.id));
