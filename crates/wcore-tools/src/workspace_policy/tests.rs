@@ -1443,3 +1443,109 @@ fn no_prune_survives_the_922_backend_gate() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// FerroxLabs/wayland#1097 — a writable-but-unreadable path is refused at WRITE
+// time, with the reason named, instead of failing at read time.
+// ---------------------------------------------------------------------------
+
+/// The ordinary case the invariant exists to keep true: a target inside the
+/// workspace, in a directory that does not exist yet (which is what every
+/// first spill and every first artifact write looks like).
+#[test]
+fn a_write_target_inside_the_workspace_is_readable_back() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::contained(dir.path());
+    let target = dir
+        .path()
+        .join(".wayland-out")
+        .join("results")
+        .join("toolu_01.txt");
+    assert!(
+        !target.parent().unwrap().exists(),
+        "the point of this case is that the directories are NOT created yet"
+    );
+    policy
+        .ensure_write_target_readable(&target)
+        .expect("a path under the workspace root must be readable back");
+}
+
+/// The shipped defect, stated as a property: the host temp tree is granted to
+/// nothing, so a spill file written there is one the session can never open.
+#[test]
+fn a_write_target_in_the_host_temp_tree_is_refused_by_name() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::contained(dir.path());
+    let target = std::env::temp_dir()
+        .join("wayland-results")
+        .join("toolu_01.txt");
+    let refusal = policy
+        .ensure_write_target_readable(&target)
+        .expect_err("the host temp tree is outside every readable root");
+    assert_eq!(refusal.path, target);
+    let rendered = refusal.to_string();
+    assert!(
+        rendered.ends_with("is outside this session's readable roots"),
+        "the refusal has to name the reason, not just fail: {rendered}"
+    );
+    assert!(
+        rendered.contains("toolu_01.txt"),
+        "the refusal has to name the path: {rendered}"
+    );
+}
+
+/// The check resolves `..` and symlinks BEFORE the prefix match, so a target
+/// that merely starts with the workspace root textually does not pass.
+#[test]
+fn a_traversal_out_of_the_workspace_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let workspace = dir.path().join("ws");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let policy = WorkspacePolicy::contained(&workspace);
+
+    let traversal = workspace.join("..").join("outside").join("loot.txt");
+    policy
+        .ensure_write_target_readable(&traversal)
+        .expect_err("a `..` segment must be resolved before the prefix match");
+
+    let link = workspace.join("escape");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    #[cfg(windows)]
+    let _ = std::os::windows::fs::symlink_dir(&outside, &link);
+    if link.exists() {
+        policy
+            .ensure_write_target_readable(&link.join("loot.txt"))
+            .expect_err("a symlinked parent must be resolved before the prefix match");
+    }
+}
+
+/// A standing read grant is part of `readable_roots()`, so it moves this
+/// answer too — the grant and the write-time check must not disagree about
+/// what the session can read.
+#[test]
+fn a_granted_read_root_makes_a_write_target_acceptable() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let workspace = dir.path().join("ws");
+    let granted = dir.path().join("granted");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&granted).unwrap();
+    // A standing grant is only issuable to a local-operator session; the
+    // property under test is what the grant does to `readable_roots()`, so the
+    // principal is set directly rather than reconstructed through bootstrap.
+    let policy = WorkspacePolicy::contained(&workspace).with_local_operator_principal();
+
+    let target = granted.join("report.html");
+    policy
+        .ensure_write_target_readable(&target)
+        .expect_err("ungranted to start with");
+
+    policy
+        .grant_session_read_root(&granted, false)
+        .expect("grant");
+    policy
+        .ensure_write_target_readable(&target)
+        .expect("the grant is in readable_roots(), so the write target is covered now");
+}

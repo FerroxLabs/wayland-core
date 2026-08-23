@@ -3873,6 +3873,22 @@ pub fn wayland_config_dir() -> PathBuf {
         .join("wayland-core")
 }
 
+/// Workspace-relative root for everything a session PRODUCES.
+///
+/// Defined in the lowest crate both writers depend on, because two crates now
+/// choose paths under it and a second string literal would drift: skill
+/// artifacts (`wcore_skills::paths::skill_output_dir`) and oversized
+/// tool-result spills
+/// (`wcore_tools::tool_result_storage::StorageDir::for_session`).
+///
+/// Deliberately NOT `.wayland-core`. That directory is repository CONTROL
+/// surface — `WorkspacePolicy::is_repo_control_path` write-denies it for every
+/// session — and an output root has to be writable. It must also sit INSIDE
+/// the session workspace, because the workspace is what the session's own
+/// file-tool jail is rooted at: an output written anywhere else is a file the
+/// agent creates and then cannot read back (FerroxLabs/wayland#1096, #1097).
+pub const SESSION_OUTPUT_ROOT: &str = ".wayland-out";
+
 /// Platform-aware app config root.
 ///
 /// - Linux:   `~/.config/wayland-core`  (or `$WAYLAND_HOME` / `$XDG_DATA_HOME`)
