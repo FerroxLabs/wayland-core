@@ -218,6 +218,11 @@ async fn no_barrier_fast_item_finishes_all_stages_before_slow_finishes_stage_one
 /// complete; result length == input length with the hole in the right slot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_stage_failure_drops_exactly_one_item_to_null_preserving_order() {
+    // Budget PINNED, not inherited. This test drives a provider that fails
+    // every attempt; the shipped default is 10 retries on the shared backoff
+    // curve (127.5 s of scheduled sleep), and what is under test here is the
+    // failure OUTCOME, not the size of the budget.
+    let _retry_budget = wcore_agent::test_utils::PinnedRetryBudget::pin(2);
     let provider = Arc::new(FailTagProvider {
         fail_tag: "mid".to_string(),
     });

@@ -2,8 +2,11 @@
 //!
 //! Holds N keys per provider. On each call, returns the `last_good` key first
 //! (stickiness), then rotates round-robin on failure. On success, updates
-//! `last_good`. Cooldown markers keep failed keys out of rotation for
-//! a configurable window.
+//! `last_good`. Cooldown markers DEPRIORITISE a failed key for a configurable
+//! window: it loses to any healthy key, but a pool where everything is cooling
+//! still offers the one closest to recovery rather than reporting itself
+//! empty. See [`KeyPool::next_key`] — the difference is the whole reason a
+//! rate-limited single-key run used to die claiming the user had no API key.
 
 use std::time::{Duration, Instant};
 
@@ -83,8 +86,32 @@ impl KeyPool {
         self.keys.is_empty()
     }
 
-    /// Return the next key to try. Prefers `last_good`, then rotates round-robin
-    /// skipping keys still in cooldown. Returns None if every key is cooling.
+    /// Return the next key to try. Prefers `last_good`, then rotates
+    /// round-robin skipping keys still in cooldown. Returns `None` only when
+    /// no key is CONFIGURED.
+    ///
+    /// # Why a fully-cooling pool still yields a key
+    ///
+    /// Cooldown is a preference among keys, not a block on the pool. It used
+    /// to be a block, and with the single key that is the normal case that
+    /// made a 429 fatal: the 429 demoted the only key, the retry called
+    /// `select_key`, the pool answered `None`, and every provider maps that to
+    /// [`crate::ProviderError::MissingApiKey`]. The user read "No API key. Set
+    /// an api_key via --api-key, the config file, or an API-key environment
+    /// variable" for a transient rate limit, and the turn died after ONE
+    /// physical send with the blame pointed at their credential.
+    ///
+    /// Measured on v0.13.5 against a local server answering 429 with
+    /// `Retry-After: 7`, n=3: exactly one arrival per run, whole run 0.68 s.
+    /// Known-positive control on the same harness, same n: the HTTP 500 arm
+    /// produced 3 arrivals per run. So the pool, not the retry loop, was
+    /// swallowing the rate-limit retry.
+    ///
+    /// When every key is cooling, offer the one closest to leaving cooldown —
+    /// the least recently failed. Rotation is unchanged whenever a healthy key
+    /// exists, and `None` now means exactly what the error it produces says.
+    /// Waiting out the cooldown is the retry loop's job, and it does it on a
+    /// schedule that honours the server's own `Retry-After`.
     pub fn next_key(&mut self) -> Option<&str> {
         if self.keys.is_empty() {
             return None;
@@ -104,7 +131,16 @@ impl KeyPool {
                 return Some(self.keys[idx].key.as_str());
             }
         }
-        None
+
+        // Every key is cooling. Offer the one closest to leaving cooldown
+        // rather than reporting a configured pool as unconfigured.
+        let idx = self
+            .keys
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, state)| state.last_failed_at)
+            .map(|(idx, _)| idx)?;
+        Some(self.keys[idx].key.as_str())
     }
 
     fn is_in_cooldown(&self, idx: usize, now: Instant) -> bool {
@@ -178,12 +214,54 @@ mod tests {
         assert_ne!(p.next_key(), Some("a"));
     }
 
+    /// A pool where every key is cooling still yields a key — the one closest
+    /// to leaving cooldown. `None` is reserved for "nothing configured",
+    /// which is what the `MissingApiKey` it produces actually claims.
+    ///
+    /// This replaces `all_failed_returns_none_until_cooldown`, which pinned
+    /// the behaviour that made a 429 fatal on a single-key pool. See
+    /// [`KeyPool::next_key`] for the measurement.
     #[test]
-    fn all_failed_returns_none_until_cooldown() {
+    fn a_fully_cooling_pool_offers_the_key_closest_to_recovery() {
         let mut p = KeyPool::with_cooldown(vec!["a".into(), "b".into()], Duration::from_secs(60));
         p.mark_failure("a");
+        std::thread::sleep(Duration::from_millis(5));
         p.mark_failure("b");
-        assert!(p.next_key().is_none());
+        assert_eq!(
+            p.next_key(),
+            Some("a"),
+            "with both keys cooling the older failure is closer to recovery"
+        );
+    }
+
+    /// The single-key case the product actually runs, stated on its own: one
+    /// rate-limited key is still the key, because there is nowhere to rotate.
+    #[test]
+    fn a_lone_rate_limited_key_is_still_offered() {
+        let mut p = KeyPool::with_cooldown(vec!["solo".into()], Duration::from_secs(60));
+        assert_eq!(p.next_key(), Some("solo"), "control: the key is configured");
+        p.mark_failure("solo");
+        assert_eq!(
+            p.next_key(),
+            Some("solo"),
+            "a transient failure on the only key must not read as \"no API key\""
+        );
+    }
+
+    /// Control for the two tests above: cooldown must still STEER rotation.
+    /// A fix that simply always returns something would pass them both and
+    /// destroy the reason the pool exists.
+    #[test]
+    fn a_cooling_key_still_loses_to_a_healthy_one() {
+        let mut p = KeyPool::with_cooldown(vec!["a".into(), "b".into()], Duration::from_secs(60));
+        p.mark_failure("a");
+        for _ in 0..4 {
+            assert_eq!(
+                p.next_key(),
+                Some("b"),
+                "a healthy key must win over a cooling one, every time"
+            );
+        }
     }
 
     #[test]

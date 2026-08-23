@@ -176,17 +176,22 @@ where
 
 /// Default TCP+TLS connect timeout for provider clients.
 ///
-/// RE-EXPORTED from `wcore_egress`, not re-declared. The provider streaming
-/// client is built by `EgressClient::streaming_with_read_timeout`, which reads
-/// `wcore_egress::CONNECT_TIMEOUT`; a second `from_secs(30)` here was a COPY
-/// of that deadline, not the deadline. Everything in this module that reasons
-/// about the connect window — [`STREAM_SILENCE_NOTICE_AFTER`], the
+/// RE-EXPORTED from `wcore_egress`, not re-declared, and therefore **ten
+/// seconds** — the value and its full derivation live on
+/// [`wcore_egress::CONNECT_TIMEOUT`].
+///
+/// The provider streaming client is built by
+/// `EgressClient::streaming_with_read_timeout`, which reads the egress
+/// constant; a second `from_secs(..)` here was a COPY of that deadline, not
+/// the deadline. Everything in this module that reasons about the connect
+/// window — [`STREAM_SILENCE_NOTICE_AFTER`], the
 /// `the_silence_threshold_must_beat_the_connect_deadline` guard, and
 /// `wcore_agent`'s silent-stall retry ceiling — would have gone on agreeing
-/// with the copy while the live client used the other number. #1077 asks for
-/// precisely that edit ("consider a shorter connect timeout"), so the two
-/// constants were one such edit away from disagreeing in silence. A re-export
-/// makes the divergence unrepresentable rather than merely tested for.
+/// with the copy while the live client used the other number. Shortening the
+/// connect deadline is exactly the edit #1077 asks for, and it is the edit
+/// that would have split them. A re-export makes the divergence
+/// unrepresentable rather than merely tested for, which is why the two
+/// declarations collapsed into one here rather than being pinned equal.
 pub const CONNECT_TIMEOUT: Duration = wcore_egress::CONNECT_TIMEOUT;
 
 /// Default between-bytes read timeout for provider streams.
@@ -212,10 +217,23 @@ pub const STREAM_SILENCE_NOTICE_ENV: &str = "WAYLAND_STREAM_SILENCE_NOTICE";
 /// latest. The old derivation (`READ_TIMEOUT` / 10) came out at 30 s — exactly
 /// [`CONNECT_TIMEOUT`] — so on the dispatch window the notice was scheduled for
 /// the same instant as the failure it exists to precede and could never reach
-/// the user first. Half the connect deadline leaves a full 15 s of visible
-/// warning before a wedged connect is reported, and is still twenty times
-/// below [`READ_TIMEOUT`], so an established stream that goes quiet is still
-/// announced long before the read timeout would kill it.
+/// the user first.
+///
+/// The derivation, not the number, is the thing worth keeping. When
+/// [`CONNECT_TIMEOUT`] came down from 30 s to 10 s this threshold followed it
+/// from 15 s to 5 s, and that is deliberate: pinning it at 15 s would have
+/// re-created the exact defect above, one worse — a notice scheduled five
+/// seconds AFTER the deadline it exists to precede can never fire on the
+/// dispatch window at all. `the_silence_threshold_must_beat_the_connect_deadline`
+/// refuses that pin.
+///
+/// Five seconds does not nag. This threshold has exactly one production caller
+/// — [`awaiting_first_byte`], wrapping the provider dispatch — so it measures
+/// time-to-first-byte and nothing else, it is latched to at most one line per
+/// dispatch, and measured first-byte latency against real endpoints is under a
+/// quarter second. It is still sixty times below [`READ_TIMEOUT`], so an
+/// established stream that goes quiet is announced long before the read
+/// timeout would kill it.
 ///
 /// It is only a notice: nothing is cancelled, retried or failed, so a
 /// reasoning model that legitimately thinks for four minutes still streams
@@ -504,8 +522,8 @@ mod tests {
     /// `off` has to actually mean off rather than "very soon".
     #[test]
     fn the_silence_threshold_reads_its_configured_override() {
-        // Default: 15s, half the connect deadline it has to precede — and
-        // still far below the read timeout that would kill a quiet stream.
+        // Default: half the connect deadline it has to precede — and still
+        // far below the read timeout that would kill a quiet stream.
         assert_eq!(
             resolve_stream_silence_notice(None),
             Some(CONNECT_TIMEOUT / 2)
@@ -672,6 +690,21 @@ mod tests {
             "the silence signal must PRECEDE the connect deadline, not tie with it: \
              fired after {:?} against a {CONNECT_TIMEOUT:?} connect timeout",
             started.elapsed()
+        );
+    }
+
+    /// The same connect deadline is declared in two crates, because
+    /// `wcore-egress` sits below `wcore-providers` and cannot import it back.
+    /// Two literals is exactly how they drift, and a drift here is invisible
+    /// in use: the two clients would simply give up on the same endpoint at
+    /// different times, and only one of them is on the retrying path.
+    #[test]
+    fn the_two_connect_deadlines_agree() {
+        assert_eq!(
+            CONNECT_TIMEOUT,
+            wcore_egress::CONNECT_TIMEOUT,
+            "the provider client and the egress client must abandon a connect \
+             at the same instant"
         );
     }
 

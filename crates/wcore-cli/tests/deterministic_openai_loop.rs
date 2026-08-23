@@ -208,6 +208,12 @@ async fn packaged_core_recovers_after_a_real_read_timeout() {
 
 #[tokio::test]
 async fn packaged_core_exhausts_a_real_read_timeout() {
+    // Budget STATED, not inherited. This scenario scripts exactly three
+    // stalling provider steps and asserts the run gives up; the shipped
+    // default of 10 retries cannot be exhausted inside the 12 s scenario cap,
+    // so at the default the script ran out of stalls and a fourth request went
+    // through. What is under test is timeout EXHAUSTION, not the budget size.
+    let _retry_budget = wcore_eval_scenarios::tempenv::ScenarioRetryBudget::pin(2);
     let (result, observation) = run_script_with_timeout(
         "packaged_openai_timeout_exhausted",
         std::iter::repeat_with(|| OpenAiStep::stall_before_headers(250)).take(3),

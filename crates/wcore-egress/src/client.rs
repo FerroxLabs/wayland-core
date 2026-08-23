@@ -40,7 +40,16 @@ impl std::fmt::Debug for EgressClient {
 }
 
 /// Default TCP+TLS connect timeout (was `wcore_providers::http_client::CONNECT_TIMEOUT`).
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// Ten seconds. This is the same deadline as
+/// `wcore_providers::http_client::CONNECT_TIMEOUT` and the two are declared
+/// separately only because this crate sits below that one; the full derivation
+/// (measured handshake latencies, and why a connect timeout on a retrying path
+/// is a trigger rather than a failure) lives on that constant.
+///
+/// They must not drift: `wcore-providers` pins them equal in
+/// `the_two_connect_deadlines_agree`.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default between-bytes read timeout for streaming clients
 /// (was `wcore_providers::http_client::READ_TIMEOUT`). 300s tolerates long
