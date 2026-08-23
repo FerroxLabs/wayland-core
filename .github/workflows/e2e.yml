@@ -3,8 +3,12 @@ name: E2E Tests
 # E2E tests call real LLM APIs. They run:
 #   1. Manually via workflow_dispatch (any branch)
 #   2. Automatically on push to main (requires secrets to be configured)
-#   3. On pull_request targeting main (secrets unavailable on forks — tests
-#      gracefully skip themselves when the API key env var is absent)
+#   3. On pull_request targeting main
+#
+# A leg that was asked to run and has no credential FAILS (wayland#1115). It
+# used to set an output, warn, skip its own test step and conclude SUCCESS —
+# a green check whose meaning was "no test ran", indistinguishable in the
+# checks list from one that ran the suite clean.
 
 on:
   workflow_dispatch:
@@ -24,6 +28,7 @@ on:
       - "crates/wcore-types/**"
       - "crates/wcore-skills/**"
       - ".github/workflows/e2e.yml"
+      - ".github/scripts/assert-test-evidence.sh"
   pull_request:
     branches: [main]
     paths:
@@ -33,6 +38,7 @@ on:
       - "crates/wcore-types/**"
       - "crates/wcore-skills/**"
       - ".github/workflows/e2e.yml"
+      - ".github/scripts/assert-test-evidence.sh"
 
 permissions:
   contents: read
@@ -68,37 +74,40 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v6
-        if: steps.filter.outputs.run == 'true'
-
-      - name: Setup vx (installs Rust from vx.toml)
-        if: steps.filter.outputs.run == 'true'
-        uses: loonghao/vx@v0.9.17
-        with:
-          setup: 'true'
-          cache: 'true'
-
-      - name: Install cargo-nextest
-        if: steps.filter.outputs.run == 'true'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
-
+      # FAIL CLOSED. This step used to emit `available=false` and a `::warning`,
+      # which let the job run to a GREEN conclusion having executed no test at
+      # all — the exact state of both legs on PR #315 head ae389c3e, where every
+      # E2E step after this one was skipped and every check was green
+      # (wayland#1115). A leg that was asked to run and cannot is a failure, not
+      # a pass: the credential gap is real and must be visible at the check
+      # level. Out-of-scope legs (a workflow_dispatch naming one provider) are
+      # not touched — the operator chose that, and nothing claims they ran.
       - name: Check API key availability
         if: steps.filter.outputs.run == 'true'
         id: check_key
         env:
           API_KEY: ${{ secrets[matrix.secret_name] }}
         run: |
-          if [ -z "$API_KEY" ]; then
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::${{ matrix.secret_name }} is not set — skipping ${{ matrix.provider }} e2e tests"
-          else
-            echo "available=true" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [ -z "${API_KEY:-}" ]; then
+            echo "::error title=NO E2E CREDENTIAL (${{ matrix.provider }})::${{ matrix.secret_name }} is not configured, so the ${{ matrix.provider }} E2E suite cannot run. This job fails rather than reporting success on zero tests. Configure the repository secret, or dispatch this workflow for the provider that has one. A fork PR cannot see repository secrets, so a maintainer must dispatch it."
+            exit 1
           fi
 
+      - uses: actions/checkout@v6
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       - name: Run E2E tests — ${{ matrix.provider }}
-        if: steps.check_key.outputs.available == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ matrix.provider == 'anthropic' && secrets.ANTHROPIC_API_KEY || '' }}
           OPENAI_API_KEY:    ${{ matrix.provider == 'openai'    && secrets.OPENAI_API_KEY    || '' }}
@@ -111,17 +120,27 @@ jobs:
             --no-fail-fast
 
       - name: Upload E2E JUnit report
-        if: always() && steps.filter.outputs.run == 'true' && steps.check_key.outputs.available == 'true'
+        if: always() && steps.filter.outputs.run == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: e2e-junit-${{ matrix.provider }}
           path: target/nextest/e2e/junit.xml
           if-no-files-found: ignore
 
-  report:
+  # ── Aggregate the E2E result ──────────────────────────────────────────
+  # Named `E2E report`, NOT `report`. Both this workflow and ci.yml used to
+  # define a job with id `report` and no `name:`, so both emitted a check
+  # literally named `report` — and `report` is a required status context on
+  # main. Two workflows racing to satisfy one required context means the name
+  # does not identify what passed; on PR #315 the green one came from here,
+  # having certified nothing (wayland#1115). ci.yml keeps the `report` name and
+  # this one is explicit, so the required context has exactly one producer.
+  e2e_report:
+    name: E2E report
     needs: e2e
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       # NOTE: a job-level `permissions:` block REPLACES the workflow-level
       # one entirely (GHA semantics), so `contents: read` from the
@@ -136,13 +155,57 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # NO `merge-multiple: true`: both legs upload their report under the same
+      # filename (`junit.xml`, the path baked into the `e2e` nextest profile),
+      # and merge-multiple extracts every artifact into ONE directory, so the
+      # second leg clobbers the first. That would cap the evidence count at 1
+      # and leave the assertion below unable to see a half-run suite. ci.yml
+      # removed the same flag for the same reason on 2026-08-02.
       - name: Download E2E JUnit reports
         uses: actions/download-artifact@v8
         with:
           pattern: e2e-junit-*
-          merge-multiple: true
           path: e2e-reports
         continue-on-error: true
+
+      - name: How many legs were in scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_PROVIDER: ${{ github.event.inputs.provider }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DISPATCH_PROVIDER" != "all" ]; then
+            echo "expected=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "expected=2" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A SKIPPED E2E SUITE IS NOT A PASS. Without this the job is green
+      # whenever there is no JUnit at all, because the publish step below is
+      # guarded on `hashFiles(...) != ''` and simply skips — which is how this
+      # check went green on PR #315 with both legs' test steps skipped for a
+      # missing credential (wayland#1115). Second net behind the leg-level
+      # failure above: it also catches a leg that dies after its credential
+      # check but before writing a report. Skipped only on a CANCELLED `e2e` —
+      # a run the user or the concurrency gate stopped was never going to
+      # produce evidence and must not be re-reported as a defect. Deliberately
+      # NOT skipped when `e2e` is itself `skipped`: "no leg ran at all" is the
+      # failure this exists to catch.
+      - name: Assert E2E evidence exists (a skipped suite is not a pass)
+        if: ${{ needs.e2e.result != 'cancelled' }}
+        env:
+          EVIDENCE_DIR: e2e-reports
+          EXPECTED_MIN: ${{ steps.scope.outputs.expected }}
+          LABEL: E2E Tests
+          UPSTREAM_RESULT: ${{ needs.e2e.result }}
+          HINT: >-
+            Check each E2E leg for a NO E2E CREDENTIAL annotation. Configure the
+            repository secret (ANTHROPIC_API_KEY / OPENAI_API_KEY), or dispatch
+            this workflow for the provider that has one; a fork PR cannot see
+            repository secrets, so a maintainer must dispatch it. Do not read
+            this check as green until the suite actually runs.
+        run: bash .github/scripts/assert-test-evidence.sh
 
       - name: Publish E2E test report
         uses: dorny/test-reporter@v3
