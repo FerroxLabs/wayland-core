@@ -1542,38 +1542,19 @@ const UNSERVED_OUTAGE_BUDGET: std::time::Duration = std::time::Duration::from_se
         * wcore_config::config::DEFAULT_FAILURE_THRESHOLD as u64,
 );
 
-/// Ceiling on the gap between two re-sends of an unserved request, and so also
-/// the worst-case delay between the provider healing and the run noticing.
+/// The engine's retry schedule is [`wcore_providers::backoff`], shared with
+/// the provider crate's own retry rings so one curve governs every retryable
+/// class. Two local schedules used to live here — linear `500 ms * n` for
+/// served failures and a separate doubling one for unserved — and they are
+/// indistinguishable at the default budget (0.5 s then 1.0 s either way), so
+/// the split bought nothing where it was observable and diverged into a send
+/// loop where it was not.
 ///
-/// Bound to [`DEFAULT_RECOVERY_TIMEOUT_SECS`] (30 s) — the breaker's own
-/// cooldown base — so the engine never probes a wedged endpoint faster than
-/// the component whose job is to protect it would. Bound rather than copied:
-/// a bare `30` here could drift from the breaker it claims to pace.
-const UNSERVED_RETRY_BACKOFF_CAP: std::time::Duration =
-    std::time::Duration::from_secs(wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS);
-
-/// Backoff before re-issuing a request the provider never served: doubling
-/// from 500 ms, capped at [`UNSERVED_RETRY_BACKOFF_CAP`]. `attempt` is 1-based.
-///
-/// Doubling rather than the linear step used for served failures because this
-/// schedule has to cover a window three orders of magnitude longer than the
-/// first interval without turning it into a send loop.
-fn unserved_retry_backoff(attempt: u32) -> std::time::Duration {
-    let shift = attempt.saturating_sub(1).min(20);
-    std::time::Duration::from_millis(500u64.saturating_mul(1u64 << shift))
-        .min(UNSERVED_RETRY_BACKOFF_CAP)
-}
-
-/// Backoff before re-issuing a request the provider DID serve and that then
-/// failed: linear 500 ms steps. `attempt` is 1-based.
-///
-/// Named rather than inlined for the same reason [`unserved_retry_backoff`]
-/// is: the ceiling on the retry budget is derived from the total this
-/// schedule spends, and a derivation that reads a different expression from
-/// the one the loop runs is not a derivation.
-fn served_retry_backoff(attempt: u32) -> std::time::Duration {
-    std::time::Duration::from_millis(500u64.saturating_mul(attempt as u64))
-}
+/// The unserved cap this replaced carried the promise that a re-send never
+/// outpaces the breaker cooldown. [`wcore_providers::backoff::RETRY_BACKOFF_CAP`]
+/// keeps it, and keeps it exactly: 24 s times the maximum jitter draw is
+/// [`wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS`].
+use wcore_providers::backoff::retry_delay;
 
 /// Environment override for the engine's bounded SERVED-failure retry count.
 ///
@@ -1601,15 +1582,22 @@ const DEFAULT_MAX_STREAM_RETRIES: u32 = wcore_providers::retry::DEFAULT_MAX_RETR
 /// on this path was SERVED, so each re-send re-bills the whole outbound
 /// context. A user who types an extra zero should get a warning, not a bill.
 ///
-/// Derived, not invented. Served retries sleep on [`served_retry_backoff`],
-/// so a budget of N spends 250*N*(N+1) ms waiting. The ceiling is the largest
-/// N whose cumulative backoff still fits inside
-/// [`wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS`] — the cooldown
-/// after which the resilience layer would probe or fail over. Past that point
-/// the extra attempts are not resilience: they pin the run to one broken
-/// endpoint, billed, while the component whose job is failover waits on it.
-/// N=10 spends 27.5 s and fits; N=11 spends 33 s and does not.
-/// `the_ceiling_is_the_largest_budget_that_fits_the_breaker_cooldown` pins it.
+/// Ten, and the derivation moved with the curve rather than being re-invented.
+///
+/// It used to be "the largest N whose cumulative LINEAR backoff fits inside
+/// the breaker cooldown" — 250*N*(N+1) ms, N=10 spends 27.5 s and fits, N=11
+/// spends 33 s and does not. That arithmetic described a schedule this engine
+/// no longer runs: on [`wcore_providers::backoff`] the same ten retries spend
+/// 127.5 s of base delay, so a cooldown-fit derivation would now argue for
+/// N=6, and a budget of 6 is a WORSE outcome for the user than the 10 that
+/// shipped.
+///
+/// What survives is the reason the ceiling exists at all, which was never the
+/// cooldown: every attempt on this path was SERVED, so each re-send re-bills
+/// the whole outbound context. Ten is where the decided curve stops — the
+/// last row of its published table — and past it the extra attempts stop
+/// being resilience and start being an unbounded bill against one endpoint.
+/// `the_ceiling_is_the_last_row_of_the_published_curve` pins it.
 const MAX_STREAM_RETRIES_CEILING: u32 = 10;
 
 /// One run's served-failure retry budget, plus the value the user asked for
@@ -2255,21 +2243,32 @@ mod v0911_engine_recovery_tests {
         assert!(!is_unserved_request_failure(""));
     }
 
+    /// The engine no longer owns a curve; it borrows
+    /// `wcore_providers::backoff`. What still has to hold HERE is the promise
+    /// the deleted `UNSERVED_RETRY_BACKOFF_CAP` carried: however deep an
+    /// outage goes, the gap between two re-sends never outpaces the breaker
+    /// cooldown this engine is paced against.
     #[test]
-    fn unserved_retry_backoff_doubles_from_half_a_second_then_holds_the_cap() {
-        use super::{UNSERVED_RETRY_BACKOFF_CAP, unserved_retry_backoff};
-        let ms = |attempt| unserved_retry_backoff(attempt).as_millis();
-        assert_eq!(ms(1), 500);
-        assert_eq!(ms(2), 1_000);
-        assert_eq!(ms(3), 2_000);
-        assert_eq!(ms(4), 4_000);
-        assert_eq!(ms(5), 8_000);
-        assert_eq!(ms(6), 16_000);
-        // Capped from here on: the window is long, the send rate must not be.
-        assert_eq!(ms(7), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
-        assert_eq!(ms(50), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
-        // No overflow panic however deep the outage goes.
-        assert_eq!(ms(u32::MAX), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
+    fn no_retry_gap_can_outpace_the_breaker_cooldown() {
+        use wcore_providers::backoff::{RETRY_JITTER_FRACTION, base_backoff};
+        let cooldown =
+            std::time::Duration::from_secs(wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS);
+        for attempt in [1u32, 2, 6, 7, 50, u32::MAX] {
+            let worst = base_backoff(attempt).mul_f64(1.0 + RETRY_JITTER_FRACTION);
+            assert!(
+                worst <= cooldown,
+                "attempt {attempt} can wait {worst:?} at the maximum jitter \
+                 draw, past the {cooldown:?} cooldown it must never outpace"
+            );
+        }
+        // Known-positive: the bound is not vacuous — the deepest attempts
+        // really do reach the cooldown rather than sitting far below it.
+        assert_eq!(
+            base_backoff(u32::MAX).mul_f64(1.0 + RETRY_JITTER_FRACTION),
+            cooldown,
+            "the cap must land ON the cooldown; a bound nothing approaches \
+             proves nothing about the schedule"
+        );
     }
 
     #[test]
@@ -11760,7 +11759,8 @@ impl AgentEngine {
             // retry, even though the identical error BEFORE headers
             // would have been retried by the provider's own retry
             // layer. Now the engine re-issues the same request up to
-            // `max_stream_retries` times with linear backoff — resolved once
+            // `max_stream_retries` times on the shared backoff curve
+            // (`wcore_providers::backoff`) — the budget resolved once
             // per run from `WAYLAND_MAX_STREAM_RETRIES`, defaulting to
             // `DEFAULT_MAX_STREAM_RETRIES` and clamped at
             // `MAX_STREAM_RETRIES_CEILING`.
@@ -11820,6 +11820,14 @@ impl AgentEngine {
                 let mut done_seen = false;
                 let mut stream_error: Option<String> = None;
                 let mut stream_failure_code: Option<String> = None;
+                // The `Retry-After` this attempt's provider error carried, as a
+                // NUMBER. Resolved once at the HTTP boundary
+                // (`resolve_retry_after_ms`: header, then nested body, then
+                // the 5 s default) and carried through as `u64` — never
+                // re-parsed out of the rendered "Rate limited, retry after
+                // 7000ms" prose, which is a message for the user and not a
+                // wire format.
+                let mut stream_retry_after_ms: Option<u64> = None;
                 // FluxRouter web_search grounding (contract §5.4): per-attempt
                 // accumulators for the end-of-stream Citations / SearchResults
                 // events. Reset each retry alongside the other accumulators.
@@ -12588,6 +12596,9 @@ impl AgentEngine {
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .clone()
                             .or_else(|| Some(wcore_providers::retry::provider_failure_code(&e)));
+                        if let ProviderError::RateLimited { retry_after_ms } = &e {
+                            stream_retry_after_ms = Some(*retry_after_ms);
+                        }
                         stream_error = Some(e.to_string());
                         // Skip the recv loop; fall through to the
                         // classifier, which retries or fails the turn.
@@ -13413,15 +13424,17 @@ impl AgentEngine {
                     }
                     stream_attempt += 1;
                     self.output.emit_provider_retry(Some(failure_code.as_str()));
-                    // Served failures: linear 500 ms, 1000 ms across the two
-                    // permitted retries. Unserved failures: exponential to
-                    // `UNSERVED_RETRY_BACKOFF_CAP`, so a long window costs few
-                    // sends and a healed provider is noticed within one cap.
-                    let backoff = if unserved {
-                        unserved_retry_backoff(stream_attempt)
-                    } else {
-                        served_retry_backoff(stream_attempt)
-                    };
+                    // One curve for every retryable class, and a server
+                    // instruction outranks it. `stream_retry_after_ms` is the
+                    // number the provider sent; when it is absent but the
+                    // failure was a 429 anyway, the default retry-after acts
+                    // as a floor so an early retry does not hammer a limiter
+                    // at 500 ms. See `wcore_providers::backoff`.
+                    let backoff = retry_delay(
+                        stream_attempt,
+                        stream_retry_after_ms,
+                        failure_code == "http_429",
+                    );
                     let progress = match unserved_deadline.filter(|_| unserved) {
                         Some(deadline) => format!(
                             "attempt {stream_attempt}, {}s of outage budget left",
@@ -26586,7 +26599,10 @@ mod audit_2026_05_22_tests {
         });
         let mut engine = engine_with(provider);
         let started = tokio::time::Instant::now();
-        let result = engine.run("task", "m-1").await;
+        // Pinned draw: this helper predicts a send COUNT from the schedule, so
+        // it has to walk the same schedule the loop does. `sends_the_window_admits`
+        // sums `base_backoff`, which is the curve at draw 0.
+        let result = wcore_providers::backoff::scope_jitter(0.0, engine.run("task", "m-1")).await;
         let elapsed = started.elapsed();
         assert!(
             matches!(result, Err(super::AgentError::ApiError(_))),
@@ -26623,7 +26639,7 @@ mod audit_2026_05_22_tests {
             assert!(
                 elapsed
                     <= super::UNSERVED_OUTAGE_BUDGET
-                        + super::UNSERVED_RETRY_BACKOFF_CAP
+                        + wcore_providers::backoff::RETRY_BACKOFF_CAP
                         + std::time::Duration::from_secs(120),
                 "the {label} outage ran {elapsed:?}, well past the budget — the \
                  deadline is not bounding the loop"
@@ -26672,6 +26688,11 @@ mod audit_2026_05_22_tests {
     /// make the suite red. A prediction derived from the constants needs no
     /// tuning when they move, and is strictly tighter than either bound it
     /// replaces.
+    ///
+    /// Walks `base_backoff` — the curve BEFORE jitter — so every caller must
+    /// run its engine inside `scope_jitter(0.0, …)`. An unpinned draw adds up
+    /// to 25 % per gap, which both shrinks the real count below this
+    /// prediction and makes it differ run to run.
     fn sends_the_window_admits(delay: std::time::Duration) -> usize {
         // The deadline is armed on the FIRST failure, so the window starts at
         // the end of send 1 and each retry is admitted on the clock reading
@@ -26683,7 +26704,7 @@ mod audit_2026_05_22_tests {
             if elapsed >= deadline {
                 return sends;
             }
-            elapsed += super::unserved_retry_backoff(sends as u32) + delay;
+            elapsed += wcore_providers::backoff::base_backoff(sends as u32) + delay;
             sends += 1;
         }
     }
@@ -26722,7 +26743,9 @@ mod audit_2026_05_22_tests {
         let mut engine = engine_with(Arc::new(Overloaded {
             calls: Arc::clone(&calls),
         }));
-        let result = engine.run("task", "m-1").await;
+        // Pinned draw — see `unserved_outage`; the assertion below is an
+        // exact send count derived from the un-jittered curve.
+        let result = wcore_providers::backoff::scope_jitter(0.0, engine.run("task", "m-1")).await;
         assert!(
             matches!(result, Err(super::AgentError::ApiError(_))),
             "a permanent 529 outage must still fail the turn, got {result:?}"
@@ -26793,7 +26816,9 @@ mod audit_2026_05_22_tests {
             delay: std::time::Duration::ZERO,
             calls: Arc::clone(&calls),
         }));
-        let result = engine.run("task", "m-1").await;
+        // Pinned draw — see `unserved_outage`; the precondition below is an
+        // exact send count derived from the un-jittered curve.
+        let result = wcore_providers::backoff::scope_jitter(0.0, engine.run("task", "m-1")).await;
         assert!(
             matches!(result, Err(super::AgentError::ApiError(_))),
             "the outage must still fail the turn, got {result:?}"
@@ -34136,33 +34161,33 @@ mod stream_retry_budget_tests {
         );
     }
 
-    /// The ceiling is derived, not invented, and this pins the derivation:
-    /// the largest retry budget whose cumulative linear backoff still fits
-    /// inside the resilience layer's own recovery cooldown. Past that the
-    /// extra attempts hold the run on a broken endpoint, billed, while the
-    /// component whose job is failover is already waiting.
+    /// The ceiling is the last row of the decided curve, and this pins both
+    /// halves of that claim: the budget the engine will spend, and the wall
+    /// clock it costs.
+    ///
+    /// The derivation it replaces — "the largest budget whose cumulative
+    /// LINEAR backoff fits the breaker cooldown" — described a schedule the
+    /// engine no longer runs. Re-running that arithmetic against the shared
+    /// curve would argue the ceiling down to 6, which would be a smaller
+    /// budget than the one that shipped. The ceiling stayed at 10; only its
+    /// justification moved.
     #[test]
-    fn the_ceiling_is_the_largest_budget_that_fits_the_breaker_cooldown() {
-        let cooldown =
-            std::time::Duration::from_secs(wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS);
-        let spent = |budget: u32| {
-            (1..=budget)
-                .map(super::served_retry_backoff)
-                .sum::<std::time::Duration>()
-        };
+    fn the_ceiling_is_the_last_row_of_the_published_curve() {
+        use wcore_providers::backoff::{RETRY_JITTER_FRACTION, base_backoff};
         let ceiling = super::MAX_STREAM_RETRIES_CEILING;
-        assert!(
-            spent(ceiling) <= cooldown,
-            "the ceiling ({ceiling}) spends {:?} in backoff, past the {cooldown:?} \
-             cooldown it is supposed to fit inside",
-            spent(ceiling)
+        assert_eq!(ceiling, 10, "the published curve's table ends at n=10");
+        let spent = |budget: u32| (1..=budget).map(base_backoff).sum::<std::time::Duration>();
+        // The published arithmetic: 127.5 s of base, 159.4 s at the worst
+        // jitter draw. Assert it rather than describing it, so a change to
+        // the curve that silently moves what this budget COSTS lands here.
+        assert_eq!(spent(ceiling), std::time::Duration::from_millis(127_500));
+        assert_eq!(
+            spent(ceiling).mul_f64(1.0 + RETRY_JITTER_FRACTION),
+            std::time::Duration::from_micros(159_375_000)
         );
-        assert!(
-            spent(ceiling + 1) > cooldown,
-            "one retry past the ceiling still fits in {cooldown:?} ({:?}) — the \
-             ceiling is lower than its own derivation allows",
-            spent(ceiling + 1)
-        );
+        // And the ceiling is a real bound on spend, not a formality: the
+        // budget past it costs strictly more.
+        assert!(spent(ceiling + 1) > spent(ceiling));
     }
 
     /// The clamp has to be AUDIBLE, and it has to be the number the run
@@ -34420,6 +34445,242 @@ mod stream_retry_budget_tests {
                 .iter()
                 .any(|e| e.to_string().contains("Still waiting")),
             "a dispatch that answered immediately must produce no notice, got {events:?}"
+        );
+    }
+
+    // --- retry parity: the shared backoff curve ---------------------------
+
+    /// A provider that fails every send with `error`, recording the instant of
+    /// each send, so a test can read the ACTUAL gaps the engine slept off the
+    /// provider side rather than off a log line.
+    struct TimedFailProvider {
+        error: fn() -> ProviderError,
+        sends: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for TimedFailProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.sends
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(tokio::time::Instant::now());
+            Err((self.error)())
+        }
+    }
+
+    /// Drive one run against a provider that fails every send with `error`.
+    /// Returns the gap between consecutive physical sends, in milliseconds —
+    /// the only observable that distinguishes one backoff curve from another.
+    async fn send_gaps_ms(error: fn() -> ProviderError) -> Vec<u128> {
+        let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(TimedFailProvider {
+            error,
+            sends: Arc::clone(&sends),
+        });
+        let sink = TestSink::new();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(sink),
+        );
+        engine.max_turns = Some(2);
+        let _ = engine.run("task", "m-1").await;
+        let sends = sends.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        sends
+            .windows(2)
+            .map(|w| w[1].duration_since(w[0]).as_millis())
+            .collect()
+    }
+
+    fn served_500() -> ProviderError {
+        ProviderError::Api {
+            status: 500,
+            message: "deliberate".into(),
+        }
+    }
+
+    fn rate_limited_7s() -> ProviderError {
+        ProviderError::RateLimited {
+            retry_after_ms: 7_000,
+        }
+    }
+
+    fn rate_limited_100ms() -> ProviderError {
+        ProviderError::RateLimited {
+            retry_after_ms: 100,
+        }
+    }
+
+    fn rate_limited_1200ms() -> ProviderError {
+        ProviderError::RateLimited {
+            retry_after_ms: 1_200,
+        }
+    }
+
+    /// Run `body` with the stream-retry budget pinned to `budget`, restoring
+    /// whatever was there before. Every caller is `#[serial_test::serial]`.
+    async fn with_retry_budget<F, T>(budget: &str, body: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let prior = std::env::var(super::MAX_STREAM_RETRIES_ENV).ok();
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in
+        // this binary, matching the contract the budget tests above already
+        // carry.
+        unsafe {
+            std::env::set_var(super::MAX_STREAM_RETRIES_ENV, budget);
+        }
+        let out = body.await;
+        unsafe {
+            match prior {
+                Some(prior) => std::env::set_var(super::MAX_STREAM_RETRIES_ENV, prior),
+                None => std::env::remove_var(super::MAX_STREAM_RETRIES_ENV),
+            }
+        }
+        out
+    }
+
+    /// THE CURVE. `base(n) = min(500ms * 2^(n-1), 24s)`.
+    ///
+    /// Measured on 0.13.5 against a real 127.0.0.1 server: an HTTP 500 arm at
+    /// n=3 produced gaps of 0.505 s and 1.006 s — the linear `500ms * n`
+    /// schedule. Linear and exponential are INDISTINGUISHABLE at the default
+    /// budget of 2 retries (0.5, 1.0 either way), which is why this test
+    /// raises the budget: the third and fourth gaps are where a send loop and
+    /// a backoff diverge (linear spends 1.5 s and 2.0 s, the curve spends
+    /// 2.0 s and 4.0 s).
+    ///
+    /// Jitter is pinned to zero so the assertion is exact. The production
+    /// draw is graded separately in `wcore_providers::backoff`, by a test
+    /// that fails if jitter is ever a constant.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn served_retries_double_they_do_not_step_linearly() {
+        let gaps = with_retry_budget("4", async {
+            wcore_providers::backoff::scope_jitter(0.0, send_gaps_ms(served_500)).await
+        })
+        .await;
+        assert_eq!(
+            gaps,
+            vec![500u128, 1_000, 2_000, 4_000],
+            "the gaps between physical sends must walk the doubling curve; \
+             the linear schedule this replaces gives [500, 1000, 1500, 2000]"
+        );
+    }
+
+    /// The cap is 24 s, not 30 s and not unbounded: 24 s times the 1.25 jitter
+    /// ceiling is exactly `DEFAULT_RECOVERY_TIMEOUT_SECS`, the promise the
+    /// unserved backoff cap has always carried.
+    #[test]
+    fn the_curve_caps_at_twenty_four_seconds() {
+        use wcore_providers::backoff::{RETRY_BACKOFF_CAP, base_backoff};
+        assert_eq!(
+            RETRY_BACKOFF_CAP,
+            std::time::Duration::from_secs(24),
+            "the cap is derived: 24 s times 1.25 max jitter = the breaker cooldown"
+        );
+        assert_eq!(
+            RETRY_BACKOFF_CAP.mul_f64(1.25),
+            std::time::Duration::from_secs(wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS),
+            "cap plus maximum jitter must land exactly on the breaker cooldown"
+        );
+        for attempt in 7..=20u32 {
+            assert_eq!(
+                base_backoff(attempt),
+                RETRY_BACKOFF_CAP,
+                "attempt {attempt} must hold the cap"
+            );
+        }
+    }
+
+    /// A `Retry-After` the provider sent must be SLEPT, not merely printed.
+    ///
+    /// Measured on 0.13.5 against a real 127.0.0.1 server, n=3: a 429 carrying
+    /// `Retry-After: 7` rendered "Rate limited, retry after 7000ms" on the
+    /// user surface and the whole run then finished in 0.677 s. The number was
+    /// parsed, carried into the message, and ignored by the loop.
+    ///
+    /// That run also made only ONE physical send, because the 429 demoted the
+    /// only API key into a cooldown and the retry found the pool empty. This
+    /// test can only reach a second attempt because
+    /// `wcore_providers::key_rotation` no longer reports a fully-cooling pool
+    /// as an unconfigured one; `a_lone_rate_limited_key_is_still_offered`
+    /// grades that half, in the crate that owns it.
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limit_hint_is_slept_not_just_printed() {
+        let gaps = wcore_providers::backoff::scope_jitter(0.0, send_gaps_ms(rate_limited_7s)).await;
+        assert!(
+            !gaps.is_empty(),
+            "the provider saw a single send — a 429 must still be retried"
+        );
+        for gap in &gaps {
+            assert!(
+                *gap >= 7_000,
+                "the engine slept {gap} ms after a server that asked for \
+                 7000 ms; the hint outranks the curve, whose first step is \
+                 500 ms. Gaps: {gaps:?}"
+            );
+        }
+    }
+
+    /// The server instruction outranks the curve in BOTH directions: a hint
+    /// far below the curve is honoured too, otherwise "honour Retry-After"
+    /// silently means "take the larger of the two".
+    ///
+    /// Control for the test above: same code path, a hint the curve would
+    /// dwarf. Without this, a loop that slept `max(hint, base(n))` would pass
+    /// the 7 s case while still not honouring the server.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn a_small_hint_is_honoured_even_when_the_curve_would_wait_longer() {
+        let gaps = with_retry_budget("4", async {
+            wcore_providers::backoff::scope_jitter(0.0, send_gaps_ms(rate_limited_100ms)).await
+        })
+        .await;
+        assert_eq!(gaps.len(), 4, "four retries must produce four gaps");
+        // By gap 4 the unhinted curve would be at 4000 ms. The server said
+        // 100 ms, and the server wins.
+        for gap in &gaps {
+            assert!(
+                *gap < 1_000,
+                "a 100 ms server hint was overridden by the curve ({gap} ms); \
+                 gaps: {gaps:?}"
+            );
+        }
+    }
+
+    /// WALL CLOCK. Everything above runs on a paused clock, which proves the
+    /// engine SCHEDULED a sleep — not that it spent one. A curve implemented
+    /// with a zero-duration sleep would satisfy every paused-clock assertion
+    /// in this module and still be a send loop against a real provider.
+    ///
+    /// The hint is 1200 ms deliberately: it is ABOVE the first two steps of
+    /// the curve (500 ms, 1000 ms), so real elapsed time alone distinguishes
+    /// a loop that honours the server from one that walks its own schedule.
+    /// A 300 ms hint would have been satisfied by the old 500 ms step and
+    /// certified nothing.
+    #[tokio::test]
+    async fn the_backoff_is_real_time_not_just_scheduled_time() {
+        let started = std::time::Instant::now();
+        let gaps =
+            wcore_providers::backoff::scope_jitter(0.0, send_gaps_ms(rate_limited_1200ms)).await;
+        let elapsed = started.elapsed();
+        assert_eq!(
+            gaps.len(),
+            2,
+            "the default budget is two retries, so two gaps; a 429 that costs \
+             the run its credential produces none"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(2_400),
+            "two 1200 ms server hints cost {elapsed:?} of REAL time; on a \
+             paused clock every other test in this module would still pass, \
+             which is exactly what this one is here to catch"
         );
     }
 }

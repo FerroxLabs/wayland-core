@@ -123,18 +123,22 @@ fn physical_attempts(evidence: &[wcore_providers::retry::ProviderAttemptEvidence
 }
 
 /// How many sends a peer that fails instantly can see inside
-/// `BROKEN_CONNECTION_RETRY_WINDOW`, given the ring's backoff schedule
-/// (250 ms, then x4 capped at 4 s). Derived from the constants rather than
-/// written down, so the test follows the window instead of pinning a literal
-/// nobody can re-derive — and so that changing the window cannot leave a
-/// green test asserting the old shape.
+/// `BROKEN_CONNECTION_RETRY_WINDOW`, walking the backoff schedule the ring
+/// actually runs. Derived from the constants rather than written down, so the
+/// test follows the window instead of pinning a literal nobody can re-derive
+/// — and so that changing the window or the curve cannot leave a green test
+/// asserting the old shape.
+///
+/// It calls `wcore_providers::backoff::base_backoff`, the same function the
+/// ring calls, rather than restating the schedule. The restated form this
+/// replaces (250 ms, then x4 capped at 4 s) would have survived the move to
+/// the shared curve as a green predictor of ~10 sends for a ring that now
+/// makes 7 — the exact failure the paragraph above claims to prevent.
 fn sends_within_the_window() -> usize {
     let mut elapsed = Duration::ZERO;
-    let mut backoff = Duration::from_millis(250);
-    let mut sends = 1;
+    let mut sends = 1usize;
     while elapsed < BROKEN_CONNECTION_RETRY_WINDOW {
-        elapsed += backoff;
-        backoff = (backoff * 4).min(Duration::from_secs(4));
+        elapsed += wcore_providers::backoff::base_backoff(sends as u32);
         sends += 1;
     }
     sends

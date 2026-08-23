@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod anthropic_shared;
 pub mod attempt_lifecycle;
 pub mod azure_openai;
+pub mod backoff;
 pub mod bedrock;
 pub mod cache_observation;
 // Generic data-driven catalog provider (wraps OpenAIProvider per bundled entry).
