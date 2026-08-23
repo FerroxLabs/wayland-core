@@ -148,10 +148,12 @@ fn configured_allow_unproxied_sidecar() -> bool {
 /// downgrade is the bug class this whole change is about.
 pub fn unproxied_sidecar_refusal(healthcheck_url: &str) -> String {
     format!(
-        "Camoufox is already running at {healthcheck_url} and Core did not start it, so it is \
-NOT behind Core's egress proxy. An unproxied sidecar resolves its own DNS, so Core cannot see \
-or screen the addresses the browser actually dials: the policy would apply to the NAME and not \
-to the destination (gh#1117). Refusing, rather than reporting a protection that does not apply.\n\
+        "Camoufox is already running at {healthcheck_url} and this browser tool did not start it \
+behind its own egress proxy — either nothing in Core started it, or another browser tool in this \
+process did, which means it is wired to THAT tool's policy gate and not to this one. Either way it \
+is not contained by this policy. An unproxied sidecar resolves its own DNS, so Core cannot see or \
+screen the addresses the browser actually dials: the policy would apply to the NAME and not to the \
+destination (gh#1117). Refusing, rather than reporting a protection that does not apply.\n\
 Fix: stop that sidecar and let Core start it — Core passes PROXY_HOST/PROXY_PORT to the sidecar \
 it launches.\n\
 Opt out: WAYLAND_BROWSER_ALLOW_UNPROXIED_SIDECAR=1, or `allow_unproxied_sidecar = true` under \
@@ -404,7 +406,28 @@ impl BrowserSupervisor {
         // started, so "this sidecar is not behind the proxy" can never be
         // discovered after a navigation has already gone out.
         let containment_required = self.ensure_egress_proxy().await?;
-        let session_id = format!("camoufox-sidecar-{}", std::process::id());
+        // The ownership key carries the egress proxy PORT, so "Core launched
+        // it" means "THIS supervisor launched it behind ITS OWN gate".
+        //
+        // `children_map()` is process-global and a process can hold several
+        // supervisors: `HostBrowserRegistrar::reify_all` mints one per
+        // registered browser tool spec, each with its own `BrowserPolicy` and
+        // its own proxy, and they all point at the same sidecar URL. Keyed on
+        // the pid alone, the SECOND supervisor finds the first one's retained
+        // child, concludes it owns the sidecar, and reuses one that is pointed
+        // at the FIRST policy's proxy - its own `denied_origins` and its own
+        // gh#911 port grant silently not applied to anything the browser
+        // dials, with no refusal and no warning. Including the port makes that
+        // sidecar exactly as unownable as an externally started one, which is
+        // what it is.
+        let session_id = match self.egress_proxy.lock().as_ref() {
+            Some(proxy) => format!(
+                "camoufox-sidecar-{}-egress-{}",
+                std::process::id(),
+                proxy.port()
+            ),
+            None => format!("camoufox-sidecar-{}", std::process::id()),
+        };
 
         if self
             .healthcheck(Duration::from_millis(500))
@@ -680,9 +703,9 @@ fn retain_child(
 /// Derived from the retained `Child` handle rather than from a flag on the
 /// supervisor, because a flag gets both edges wrong:
 ///
-///   * the ownership key is process-global, so a SECOND supervisor in the same
-///     process would not know the first one launched the sidecar and would
-///     refuse one that IS contained;
+///   * a flag is per-supervisor, so the SECOND `ensure_ready` call on the same
+///     supervisor - `BrowserTool` makes one before every op - would have to
+///     re-derive it, and a flag that is set once cannot;
 ///   * a flag stays set after the child exits, so an externally started
 ///     sidecar appearing afterwards would be reused with no refusal at all.
 ///

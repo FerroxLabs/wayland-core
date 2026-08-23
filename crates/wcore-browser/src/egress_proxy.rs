@@ -65,6 +65,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
@@ -78,6 +79,10 @@ const MAX_HEAD_BYTES: usize = 16 * 1024;
 const HEAD_READ_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long Core waits for one approved address to accept a connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bound on the dial sample kept for [`PolicyEgressProxy::dialled_addrs`].
+/// A sample, not a log: nothing the proxy does depends on it, and a long-lived
+/// proxy must not accumulate one entry per connection forever.
+const MAX_RECORDED_DIALS: usize = 64;
 
 /// A running loopback proxy. Dropping this does NOT stop it — the accept loop
 /// holds its own `Arc` — so the owner must call [`Self::shutdown`].
@@ -87,6 +92,7 @@ pub struct PolicyEgressProxy {
     cancel: CancellationToken,
     approved: AtomicU64,
     refused: AtomicU64,
+    dialled: Mutex<Vec<SocketAddr>>,
 }
 
 impl PolicyEgressProxy {
@@ -103,6 +109,7 @@ impl PolicyEgressProxy {
             cancel: CancellationToken::new(),
             approved: AtomicU64::new(0),
             refused: AtomicU64::new(0),
+            dialled: Mutex::new(Vec::new()),
         });
         let accept_proxy = Arc::clone(&proxy);
         tokio::spawn(async move {
@@ -148,6 +155,26 @@ impl PolicyEgressProxy {
     /// reach it" reads this, not just the client-side error.
     pub fn refused_count(&self) -> u64 {
         self.refused.load(Ordering::Relaxed)
+    }
+
+    /// The socket addresses this proxy actually opened a connection to, up to
+    /// [`MAX_RECORDED_DIALS`].
+    ///
+    /// gh#1117 is closed only if the proxy connects to an address the gate
+    /// SCREENED instead of looking the name up again itself, and that is the
+    /// one property no refusal assertion can see: a `dial` that ignores the
+    /// screened set and re-resolves the name refuses exactly the same targets
+    /// and tunnels exactly the same ones. This makes the difference
+    /// observable, so the TOCTOU cannot be reopened with the suite still green.
+    pub fn dialled_addrs(&self) -> Vec<SocketAddr> {
+        self.dialled.lock().clone()
+    }
+
+    fn record_dial(&self, addr: SocketAddr) {
+        let mut dialled = self.dialled.lock();
+        if dialled.len() < MAX_RECORDED_DIALS {
+            dialled.push(addr);
+        }
     }
 
     /// Stop the accept loop. In-flight tunnels finish on their own.
@@ -220,7 +247,7 @@ async fn serve_connection(
         }
     };
 
-    let mut upstream = match dial(&host, port, &addrs).await {
+    let mut upstream = match dial(&host, port, &addrs, &proxy).await {
         Ok(s) => s,
         Err(e) => {
             // Not a policy refusal — do not count it as one — but still no
@@ -356,7 +383,12 @@ fn close_framed_head(head: &[u8]) -> Vec<u8> {
 /// IS an IP literal (so dialling by name performs no DNS), or it is a
 /// canonical loopback name under an authorising gh#911 grant, which the
 /// operator asked for by port.
-async fn dial(host: &str, port: u16, addrs: &[IpAddr]) -> io::Result<TcpStream> {
+async fn dial(
+    host: &str,
+    port: u16,
+    addrs: &[IpAddr],
+    proxy: &Arc<PolicyEgressProxy>,
+) -> io::Result<TcpStream> {
     if addrs.is_empty() {
         return match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((host, port))).await {
             Ok(r) => r,
@@ -365,11 +397,9 @@ async fn dial(host: &str, port: u16, addrs: &[IpAddr]) -> io::Result<TcpStream> 
     }
     let mut last: Option<io::Error> = None;
     for ip in addrs {
-        let attempt = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            TcpStream::connect(SocketAddr::new(*ip, port)),
-        )
-        .await;
+        let target = SocketAddr::new(*ip, port);
+        proxy.record_dial(target);
+        let attempt = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(target)).await;
         match attempt {
             Ok(Ok(stream)) => return Ok(stream),
             Ok(Err(e)) => last = Some(e),

@@ -49,6 +49,11 @@ const METADATA_REBIND: &str = "metadata-rebind-probe.example";
 /// Resolves to two public addresses. The control: the proxy must approve it,
 /// and must approve it AT THOSE ADDRESSES.
 const MULTI_A_PUBLIC: &str = "multi-a-probe.example";
+/// Resolves to two addresses in TEST-NET-3 (RFC 5737, guaranteed never
+/// routed). Neither is on the block-list, so the gate approves them; neither
+/// can accept a connection, so the dial fails after being AIMED — which is
+/// the only thing this name is used to observe.
+const DIAL_PROBE: &str = "dial-probe.example";
 
 fn probe_resolver(host: &str) -> Vec<std::net::IpAddr> {
     use std::net::{IpAddr, Ipv4Addr};
@@ -57,6 +62,10 @@ fn probe_resolver(host: &str) -> Vec<std::net::IpAddr> {
         MULTI_A_PUBLIC => vec![
             IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
             IpAddr::V4(Ipv4Addr::new(93, 184, 216, 35)),
+        ],
+        DIAL_PROBE => vec![
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)),
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8)),
         ],
         _ => Vec::new(),
     }
@@ -432,6 +441,115 @@ fn the_proxy_policy_drops_the_allow_list_and_keeps_every_block() {
     ));
 }
 
+/// THE PROPERTY, ON THE PRODUCTION PATH: the proxy connects to an address the
+/// gate handed it, and looks nothing up itself.
+///
+/// Every other test in this file is satisfied by a proxy that screens the
+/// name and then calls `TcpStream::connect((host, port))` — which re-resolves,
+/// and is gh#1117 verbatim. MEASURED: reverting `dial` to that form leaves all
+/// 217 tests in this crate GREEN, live arm included, because a re-resolving
+/// proxy refuses exactly the same targets and tunnels exactly the same ones.
+/// The dial target is the only observable that separates them.
+#[tokio::test]
+async fn the_proxy_dials_a_screened_address_and_never_re_resolves_the_name() {
+    let proxy = PolicyEgressProxy::start(probe_policy().address_gate_only())
+        .await
+        .unwrap();
+
+    let mut client = TcpStream::connect((proxy.host(), proxy.port()))
+        .await
+        .unwrap();
+    client
+        .write_all(format!("CONNECT {DIAL_PROBE}:8443 HTTP/1.1\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+
+    // The dial is recorded before the connect is attempted, so this does not
+    // wait on an unroutable address.
+    let mut dialled = Vec::new();
+    for _ in 0..200 {
+        dialled = proxy.dialled_addrs();
+        if !dialled.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    assert!(
+        !dialled.is_empty(),
+        "the proxy approved {DIAL_PROBE} and then opened no screened \
+         connection at all — it re-resolved the name and dialled whatever \
+         the second lookup returned, which is the TOCTOU gh#1117 is about"
+    );
+    let screened: Vec<std::net::IpAddr> = probe_resolver(DIAL_PROBE);
+    for addr in &dialled {
+        assert!(
+            screened.contains(&addr.ip()),
+            "the proxy dialled {addr}, which is not in the screened set \
+             {screened:?}"
+        );
+        assert_eq!(
+            addr.port(),
+            8443,
+            "the CONNECT port must survive to the dial, or a port-scoped \
+             grant means nothing; got {addr}"
+        );
+    }
+    assert_eq!(
+        dialled[0].ip(),
+        screened[0],
+        "the first screened answer is the first one dialled"
+    );
+    // Nothing was tunnelled and nothing was refused: the target cleared the
+    // gate and then simply could not be reached, which is what makes the dial
+    // record above the whole measurement.
+    assert_eq!(proxy.approved_count(), 0, "{dialled:?}");
+    assert_eq!(proxy.refused_count(), 0, "{dialled:?}");
+
+    proxy.shutdown();
+}
+
+/// CONTROL for the test above: an approval that carries NO addresses (an IP
+/// literal, or a granted loopback name) legitimately dials by name, and must
+/// not be recorded as a screened dial — otherwise "dialled_addrs is non-empty"
+/// would be satisfied by the very code path it exists to detect.
+#[tokio::test]
+async fn a_lookup_free_approval_records_no_screened_dial() {
+    let (port, server) = spawn_pong_server().await;
+    let policy = BrowserPolicy::new(PolicyAction::Deny, vec![], vec![])
+        .with_loopback(LoopbackCapability {
+            enabled: true,
+            schema_version: wcore_browser::policy::LOOPBACK_CAPABILITY_VERSION,
+            session_scope: "gh1117-lookup-free".into(),
+            ports: vec![port],
+        })
+        .with_resolver(probe_resolver);
+    let proxy = PolicyEgressProxy::start(policy.address_gate_only())
+        .await
+        .unwrap();
+
+    let mut client = TcpStream::connect((proxy.host(), proxy.port()))
+        .await
+        .unwrap();
+    client
+        .write_all(format!("CONNECT localhost:{port} HTTP/1.1\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let established = read_head(&mut client).await;
+    assert!(established.starts_with("HTTP/1.1 200"), "{established:?}");
+    assert_eq!(proxy.approved_count(), 1);
+    assert!(
+        proxy.dialled_addrs().is_empty(),
+        "a gh#911 grant approves without a lookup, so there is no screened \
+         address to dial; got {:?}",
+        proxy.dialled_addrs()
+    );
+
+    client.shutdown().await.unwrap();
+    proxy.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(10), server).await;
+}
+
 // ---------------------------------------------------------------------------
 // THE REFUSE PATH, both ways (gh#1117 "option 0").
 // ---------------------------------------------------------------------------
@@ -537,6 +655,86 @@ async fn the_egress_proxy_exists_before_the_sidecar_is_reused() {
 // ---------------------------------------------------------------------------
 // The launch env — the other half of the seam.
 // ---------------------------------------------------------------------------
+
+/// TWO supervisors in ONE process, the shape `HostBrowserRegistrar::reify_all`
+/// produces: one `BrowserTool` per registered browser tool spec, each with its
+/// own `BrowserPolicy` and its own egress proxy, all pointing at the same
+/// sidecar URL.
+///
+/// The retained-child map they consult to answer "did Core launch this?" is
+/// PROCESS-global. Keyed on the pid alone it answers yes for the second
+/// supervisor too, so it reuses a sidecar wired to the FIRST policy gate and
+/// its own `denied_origins` / gh#911 port grant never reach anything the
+/// browser dials — silently, with no refusal and no warning. A sidecar this
+/// supervisor cannot contain is exactly what the refusal is for, whoever
+/// started it.
+///
+/// Unix-only because it needs a long-lived argument-free program to stand in
+/// for the sidecar process; the ownership rule it grades is platform-neutral.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_second_supervisor_does_not_inherit_the_first_ones_sidecar() {
+    let server = MockServer::start().await;
+    // Down for the first supervisor probe, up from then on: that is what makes
+    // supervisor A LAUNCH a child instead of reusing something, which is the
+    // state the ownership answer is read out of.
+    Mock::given(method("GET"))
+        .and(path("/health"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/health"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let cfg = |policy: BrowserPolicy| SupervisorConfig {
+        healthcheck_url: format!("{}/health", server.uri()),
+        // `yes` writes to a null stdout and stays alive, so the retained child
+        // is genuinely running when the second supervisor asks.
+        sidecar_program: Some("yes".into()),
+        startup_timeout: Duration::from_secs(5),
+        egress_policy: Some(policy),
+        allow_unproxied_sidecar: false,
+        ..SupervisorConfig::default()
+    };
+
+    let first = Arc::new(BrowserSupervisor::with_config(cfg(probe_policy())));
+    first
+        .ensure_ready()
+        .await
+        .expect("the first supervisor launches its own contained sidecar");
+    let first_proxy = first.egress_proxy().expect("first proxy");
+
+    // Same supervisor, second call — `BrowserTool` does this before every op.
+    first
+        .ensure_ready()
+        .await
+        .expect("a supervisor must keep recognising the sidecar IT launched");
+
+    let second = Arc::new(BrowserSupervisor::with_config(cfg(probe_policy())));
+    let outcome = second.ensure_ready().await;
+    let second_proxy = second.egress_proxy().expect("second proxy");
+    assert_ne!(
+        first_proxy.port(),
+        second_proxy.port(),
+        "the two supervisors must have distinct gates, or this proves nothing"
+    );
+
+    let error = outcome.expect_err(
+        "the live sidecar is wired to the FIRST supervisor's gate; reusing it \
+         applies a policy this supervisor never configured",
+    );
+    assert!(error.contains("gh#1117"), "got: {error}");
+    assert!(
+        error.contains("WAYLAND_BROWSER_ALLOW_UNPROXIED_SIDECAR"),
+        "got: {error}"
+    );
+}
 
 /// The sidecar is pointed at Core's proxy, and the ambient environment cannot
 /// steer it anywhere else.
