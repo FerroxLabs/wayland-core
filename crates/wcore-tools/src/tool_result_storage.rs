@@ -416,12 +416,44 @@ fn sanitize_id(id: &str) -> String {
 }
 
 /// Write `content` to `path`, creating parent dirs as needed.
+/// Make a spill directory ignore itself.
+///
+/// FerroxLabs/wayland#1097 moved these files from `$TMPDIR/wayland-results`
+/// into `<workspace>/.wayland-out/results/`, because the workspace is the only
+/// place the producing session can read them back. The price of that move is
+/// that the spill now lands INSIDE the user's project: a file holding the FULL,
+/// untruncated output of a command — which is where an `env` dump or a fetched
+/// response ends up — shows as untracked in `git status`, and is swept up by
+/// `git add -A`. In the temp tree it was ephemeral and outside the repo.
+///
+/// `wayland-core` gitignored its own copy of this path, which fixes it for one
+/// repository. A `.gitignore` written INSIDE the directory fixes it for every
+/// repository, the way cargo self-ignores `target/`, without editing a file the
+/// user owns.
+///
+/// Best effort on purpose: failing to write it must never fail the spill, and
+/// nothing here should overwrite a file the user put there.
+fn mark_directory_ignored(dir: &Path) {
+    let marker = dir.join(".gitignore");
+    if marker.exists() {
+        return;
+    }
+    if let Err(error) = std::fs::write(&marker, "*\n") {
+        tracing::debug!(
+            path = %marker.display(),
+            %error,
+            "could not mark the spill directory ignored"
+        );
+    }
+}
+
 pub fn write_spill_file(path: &Path, content: &str) -> Result<(), StorageError> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|source| StorageError::CreateDir {
             dir: dir.to_path_buf(),
             source,
         })?;
+        mark_directory_ignored(dir);
     }
     std::fs::write(path, content).map_err(|source| StorageError::Write {
         path: path.to_path_buf(),
@@ -973,6 +1005,78 @@ mod tests {
         assert!(spill.exists(), "the readable target must still be written");
         assert_eq!(std::fs::read_to_string(&spill).unwrap(), content);
         assert!(replacement.contains("Full output saved to:"));
+    }
+
+    /// The spill now lands inside the user's project (#1097 moved it there so
+    /// the session can read it back), so it has to keep itself out of their
+    /// commits: a spill file holds the FULL untruncated output of a command.
+    /// The directory ignores itself, the way cargo self-ignores `target/`,
+    /// rather than editing a `.gitignore` the user owns.
+    #[test]
+    fn the_spill_directory_ignores_itself_so_a_spill_is_not_committed() {
+        let tmp = TempDir::new().unwrap();
+        let policy = Arc::new(crate::workspace_policy::WorkspacePolicy::contained(
+            tmp.path(),
+        ));
+        let storage = StorageDir::for_session(policy);
+
+        // CONTROL: nothing is created before a spill happens.
+        assert!(
+            !storage.path().exists(),
+            "CONTROL BROKEN: the spill directory existed before any spill"
+        );
+
+        let content = "z".repeat(50_000);
+        let (_, outcome) = maybe_persist_tool_result(
+            &content,
+            "Bash",
+            "toolu_ignored",
+            &storage,
+            &BudgetConfig::default(),
+            None,
+        );
+        assert!(
+            matches!(outcome, PersistOutcome::Persisted { .. }),
+            "CONTROL BROKEN: nothing was spilled, so nothing needed ignoring"
+        );
+
+        let marker = storage.path().join(".gitignore");
+        assert!(
+            marker.exists(),
+            "the spill directory must ignore itself: {} holds full command \
+             output inside the user project",
+            storage.path().display()
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "*\n");
+    }
+
+    /// A marker the user put there is theirs. Writing a spill must not
+    /// overwrite it.
+    #[test]
+    fn an_existing_ignore_marker_is_left_alone() {
+        let tmp = TempDir::new().unwrap();
+        let policy = Arc::new(crate::workspace_policy::WorkspacePolicy::contained(
+            tmp.path(),
+        ));
+        let storage = StorageDir::for_session(policy);
+        std::fs::create_dir_all(storage.path()).unwrap();
+        std::fs::write(storage.path().join(".gitignore"), "# mine\n").unwrap();
+
+        let content = "z".repeat(50_000);
+        let (_, outcome) = maybe_persist_tool_result(
+            &content,
+            "Bash",
+            "toolu_keepmine",
+            &storage,
+            &BudgetConfig::default(),
+            None,
+        );
+        assert!(matches!(outcome, PersistOutcome::Persisted { .. }));
+        assert_eq!(
+            std::fs::read_to_string(storage.path().join(".gitignore")).unwrap(),
+            "# mine\n",
+            "the spill overwrote a marker the user owns"
+        );
     }
 
     #[test]
