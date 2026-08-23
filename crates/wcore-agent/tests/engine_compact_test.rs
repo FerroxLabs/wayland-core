@@ -966,8 +966,16 @@ async fn tc_2_6_context_overflow_sheds_tool_output_and_continues() {
     let mut registry = ToolRegistry::new();
     // ~120k tokens (480k chars @ ~4 chars/token) — far over the 40k ceiling, but
     // ONE oversized ToolResult, so the mechanical shed brings it back under.
+    //
+    // The result cap MUST be lifted above 480k. `MockTool`'s 50k default made
+    // the registry truncate this output to ~12.5k tokens, under the 40k
+    // ceiling, so the guard never fired and this test passed while shedding
+    // NOTHING — measured at 0 occurrences of the engine's "shed N large tool
+    // output(s)" notice.
     let huge = "x".repeat(480_000);
-    registry.register(Box::new(common::MockTool::new("mock_tool", &huge, false)));
+    registry.register(Box::new(
+        common::MockTool::new("mock_tool", &huge, false).with_max_result_size(600_000),
+    ));
     let output = silent_output();
 
     let mut engine = AgentEngine::new_with_provider(provider.clone(), config, registry, output);
