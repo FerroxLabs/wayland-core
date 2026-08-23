@@ -3884,6 +3884,42 @@ pub fn app_config_dir() -> Option<PathBuf> {
     Some(wayland_config_dir())
 }
 
+/// Leaf name, under the app config root, that skills are LOADED from.
+///
+/// FerroxLabs/wayland#1096. This is the one piece of skill-layout knowledge two
+/// crates on different branches of the graph both need and neither may take
+/// from the other: `wcore-skills` resolves these to build its load paths
+/// (`paths::user_skills_dir` / `user_commands_dir`), and `wcore-tools` needs
+/// the same set to refuse a WRITE aimed at one. Defining it in the crate both
+/// already depend on keeps a single source of truth instead of a copied pair of
+/// string literals that can drift apart silently.
+pub const SKILLS_DIR_NAME: &str = "skills";
+
+/// Leaf name of the legacy per-command load directory. See
+/// [`SKILLS_DIR_NAME`].
+pub const COMMANDS_DIR_NAME: &str = "commands";
+
+/// Both load-path leaf names, for callers that treat them alike — the write
+/// refusal does, the loaders address them individually. Built FROM the two
+/// named constants rather than repeating the literals, so the pair can never
+/// disagree with the names.
+pub const SKILL_SOURCE_DIR_NAMES: [&str; 2] = [SKILLS_DIR_NAME, COMMANDS_DIR_NAME];
+
+/// The user-level skill / legacy-command SOURCE directories:
+/// `<config_dir>/skills` and `<config_dir>/commands`.
+///
+/// Empty only when the config root cannot be resolved at all.
+#[must_use]
+pub fn user_skill_source_dirs() -> Vec<PathBuf> {
+    match app_config_dir() {
+        Some(root) => SKILL_SOURCE_DIR_NAMES
+            .iter()
+            .map(|name| root.join(name))
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 /// The OS-native config root (`dirs::config_dir()`), deliberately NOT
 /// `WAYLAND_HOME`-scoped. This is the single sanctioned bypass of
 /// [`wayland_config_dir`], and it exists for call sites that must address a

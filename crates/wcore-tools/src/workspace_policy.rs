@@ -620,10 +620,64 @@ impl WorkspacePolicy {
     /// business, and a benign-named symlink into the control surface resolves
     /// before the prefix match so it cannot be used to smuggle a write through.
     pub fn is_repo_control_path(&self, path: &Path) -> bool {
-        let canon = canon_for_scope(path);
+        // `canon_deep`, not `canon_for_scope`: the root is canonicalized at
+        // construction, so a candidate that resolves to something shallower
+        // never matches it. `canon_for_scope` resolves only the IMMEDIATE
+        // parent and returns the RAW path when that parent is missing —
+        // which is exactly the shape of a NEW control file
+        // (`.wayland-core/skills/<new>/SKILL.md`, `.git/<new>/hook`), and
+        // exactly the write this guard exists to refuse. Measured on this
+        // tree before the change: with the workspace addressed through a
+        // symlink, `Write` of `<link>/.git/hooks/pre-commit` (parent not yet
+        // created) reported `Created`, while the same write addressed through
+        // the real root was refused. See
+        // `crates/wcore-tools/tests/repo_control_symlink.rs`.
+        let canon = canon_deep(path);
         REPO_CONTROL_DIRS
             .iter()
             .any(|dir| canon.starts_with(self.root.join(dir)))
+    }
+
+    /// True when `path` names a directory skills are LOADED from — this
+    /// workspace's (or any ancestor's) `.wayland-core/skills` and
+    /// `.wayland-core/commands`, or the user-level `<config_dir>/skills` and
+    /// `<config_dir>/commands`.
+    ///
+    /// FerroxLabs/wayland#1096, suggested direction 2. A load path is not an
+    /// output path, and the everyday failure is not malice: a skill produces a
+    /// report and puts it next to its own `SKILL.md`, which lives in the global
+    /// config dir, OUTSIDE the session workspace. The file is then unreachable
+    /// to the session that made it — the dead end the 2026-08-19 UAT hit, and
+    /// reproduced through the live binary in
+    /// `wcore-cli/tests/skill_source_write_live.rs`.
+    ///
+    /// Strictly WIDER than [`is_repo_control_path`](Self::is_repo_control_path),
+    /// and that is the whole point of it being separate. Repo-control is
+    /// workspace-scoped (`<root>/.wayland-core`), because a `.git` elsewhere on
+    /// the host is not this policy's business. A skill LOAD path is: the
+    /// user-level directory is read into every future session on the machine no
+    /// matter where the workspace sits, and `project_skills_dirs()` walks
+    /// ANCESTORS of the cwd, so a `.wayland-core/skills` above the workspace
+    /// root is loaded too. Both are refused here; neither is reachable from the
+    /// workspace-scoped predicate.
+    ///
+    /// Not a read deny. The loader reads these paths on every boot and the model
+    /// may inspect a skill it is about to run; only AUTHORING them is refused.
+    /// Also deliberately narrow inside the config dir — session state, memory
+    /// and plugin data live there too and stay writable.
+    ///
+    /// Refuses the model's TOOLS, not the engine. The auto-skill drafter
+    /// (`wcore_agent::auto_skill::drafter`) and the `skills` CLI verbs write
+    /// their `SKILL.md` files through `wcore_config::atomic_write` / `std::fs`,
+    /// never the tool VFS, so skill installation and drafting are unaffected.
+    pub fn is_skill_source_path(&self, path: &Path) -> bool {
+        let canon = canon_deep(path);
+        if under_project_load_path(&canon) {
+            return true;
+        }
+        wcore_config::config::user_skill_source_dirs()
+            .iter()
+            .any(|dir| canon.starts_with(canon_deep(dir)))
     }
 
     /// #667: opt a `Trusted` policy into the same PROJECT-committed-secret
@@ -1756,6 +1810,62 @@ pub(crate) fn canon_for_scope(path: &Path) -> PathBuf {
             .unwrap_or_else(|_| path.to_path_buf()),
         _ => path.to_path_buf(),
     }
+}
+
+/// Canonicalize as much of `path` as exists and keep the remainder verbatim.
+///
+/// [`canon_for_scope`] resolves only the IMMEDIATE parent and falls back to the
+/// raw path when that parent is missing. For a deny predicate that is a hole on
+/// any host whose config or temp root is itself a symlink (`/var` ->
+/// `/private/var` on macOS): the deny list resolves, the candidate does not, and
+/// the prefix comparison misses. The miss lands on exactly the case
+/// [`WorkspacePolicy::is_skill_source_path`] exists to catch — writing
+/// `<config_dir>/skills/<new-skill>/report.html` creates BOTH missing
+/// components, so "the parent exists" is false precisely when it matters.
+fn canon_deep(path: &Path) -> PathBuf {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return resolved;
+    }
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path;
+    while let (Some(parent), Some(name)) = (cursor.parent(), cursor.file_name()) {
+        trailing.push(name.to_os_string());
+        if let Ok(base) = std::fs::canonicalize(parent) {
+            let mut resolved = base;
+            resolved.extend(trailing.iter().rev());
+            return resolved;
+        }
+        cursor = parent;
+    }
+    path.to_path_buf()
+}
+
+/// True when any ancestor of `path` is a `.wayland-core/skills` or
+/// `.wayland-core/commands` directory.
+///
+/// Walks components rather than joining a root, because
+/// `wcore_skills::paths::project_skills_dirs()` walks UP from the cwd: a
+/// `.wayland-core/skills` in an ancestor of the workspace is a load path for
+/// this session, and one in a sibling checkout is a load path for that one. A
+/// component walk covers all of them with no root to be wrong about.
+fn under_project_load_path(path: &Path) -> bool {
+    use std::path::Component;
+    let mut parent_was_marker = false;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            parent_was_marker = false;
+            continue;
+        };
+        if parent_was_marker
+            && wcore_config::config::SKILL_SOURCE_DIR_NAMES
+                .iter()
+                .any(|leaf| name == std::ffi::OsStr::new(leaf))
+        {
+            return true;
+        }
+        parent_was_marker = name == std::ffi::OsStr::new(".wayland-core");
+    }
+    false
 }
 
 fn canon(p: PathBuf) -> PathBuf {

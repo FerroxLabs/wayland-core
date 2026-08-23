@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use wcore_config::config::app_config_dir;
+use wcore_config::config::{COMMANDS_DIR_NAME, SKILLS_DIR_NAME, app_config_dir};
 
 // ---------------------------------------------------------------------------
 // User-level directories (<config_dir>/wayland-core/)
@@ -10,12 +10,12 @@ use wcore_config::config::app_config_dir;
 ///
 /// Returns `None` if the platform config directory cannot be determined.
 pub fn user_skills_dir() -> Option<PathBuf> {
-    app_config_dir().map(|d| d.join("skills"))
+    app_config_dir().map(|d| d.join(SKILLS_DIR_NAME))
 }
 
 /// Return the user-level legacy commands directory: `<config_dir>/wayland-core/commands/`
 pub fn user_commands_dir() -> Option<PathBuf> {
-    app_config_dir().map(|d| d.join("commands"))
+    app_config_dir().map(|d| d.join(COMMANDS_DIR_NAME))
 }
 
 /// Return the `$WAYLAND_HOME`-rooted skill directories the auto-skill
