@@ -213,6 +213,19 @@ pub enum WorkspaceCapabilityGrantError {
     Resolve(#[from] std::io::Error),
 }
 
+/// A write target that the session could create but could never read back.
+///
+/// FerroxLabs/wayland#1097. Write authority and read authority are enforced by
+/// different mechanisms, so a location can be writable and unreadable at the
+/// same time — and the asymmetry only reveals itself at the END of the work,
+/// when the produced path is handed over and the read is refused. This is the
+/// refusal that turns that dead end into a write-time error naming the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{} is outside this session's readable roots", path.display())]
+pub struct WriteTargetNotReadable {
+    pub path: PathBuf,
+}
+
 /// One standing read grant held by a session.
 ///
 /// Capability-derived roots (`grant_session_capability`) and host path grants
@@ -624,6 +637,47 @@ impl WorkspacePolicy {
         REPO_CONTROL_DIRS
             .iter()
             .any(|dir| canon.starts_with(self.root.join(dir)))
+    }
+
+    /// Refuse a write target this session could never read back
+    /// (FerroxLabs/wayland#1097).
+    ///
+    /// The invariant: a path we let an agent WRITE must sit under a root
+    /// [`readable_roots`](Self::readable_roots) also covers. Where it does not,
+    /// the work still succeeds and the delivery fails — the agent finishes
+    /// holding a path it just created and cannot open. Refusing at write time
+    /// costs the same information one step earlier, with the reason named.
+    ///
+    /// Canonicalize-first, exactly like
+    /// [`is_repo_control_path`](Self::is_repo_control_path): the longest
+    /// EXISTING ancestor is resolved (so a target whose directories do not
+    /// exist yet is still judged on where it would really land), which also
+    /// means a `..` segment and a symlinked parent are resolved before the
+    /// prefix match rather than after it.
+    ///
+    /// SCOPE — this is the OS-sandbox answer, which is the WIDER of the two
+    /// answers this codebase has to "can the session read it". `Bash` reads
+    /// through the OS sandbox, whose allow-list IS `readable_roots()`; the file
+    /// tools (`Read`/`Grep`/`Glob`) read through `ctx.vfs`, whose jail is
+    /// rooted at the workspace plus the standing session read grants and does
+    /// NOT include `readable_extra` (toolchain dirs) or the writable scratch
+    /// tree. So passing this check is NECESSARY for a readable-back write and
+    /// is not by itself SUFFICIENT for one the `Read` tool can open: a caller
+    /// that hands its path to the model should keep the target under
+    /// [`root`](Self::root).
+    pub fn ensure_write_target_readable(&self, path: &Path) -> Result<(), WriteTargetNotReadable> {
+        let resolved = canon_existing_ancestor(path);
+        let covered = self
+            .readable_roots()
+            .iter()
+            .any(|root| resolved.starts_with(canon_existing_ancestor(root)));
+        if covered {
+            Ok(())
+        } else {
+            Err(WriteTargetNotReadable {
+                path: path.to_path_buf(),
+            })
+        }
     }
 
     /// #667: opt a `Trusted` policy into the same PROJECT-committed-secret
@@ -1729,6 +1783,34 @@ pub(crate) fn canon_for_scope(path: &Path) -> PathBuf {
             .map(|p| p.join(name))
             .unwrap_or_else(|_| path.to_path_buf()),
         _ => path.to_path_buf(),
+    }
+}
+
+/// Canonicalize the longest EXISTING ancestor of `path` and re-append the rest.
+///
+/// [`canon_for_scope`] resolves at most one missing component, which is enough
+/// for a leaf that does not exist yet but not for a target whose directories
+/// have not been created either (`<root>/.wayland-out/results/x.txt` on a fresh
+/// workspace). Walking all the way up keeps the two properties that matter:
+/// every `..` and every symlinked ancestor is resolved before any prefix
+/// comparison, and a target under a directory that does not exist yet is still
+/// judged on where it would actually land.
+fn canon_existing_ancestor(path: &Path) -> PathBuf {
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path;
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(cursor) {
+            let mut out = resolved;
+            out.extend(trailing.iter().rev());
+            return out;
+        }
+        match (cursor.parent(), cursor.file_name()) {
+            (Some(parent), Some(name)) => {
+                trailing.push(name.to_os_string());
+                cursor = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
     }
 }
 

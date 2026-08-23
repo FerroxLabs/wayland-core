@@ -166,6 +166,19 @@ impl ToolRegistry {
         self.workspace_policy.clone()
     }
 
+    /// Where this session's oversized tool results are spilled
+    /// (FerroxLabs/wayland#1097).
+    ///
+    /// THE decision, taken here rather than at the engine's shed site, because
+    /// the registry is what holds the two facts it depends on — the session's
+    /// workspace policy and the fact that the same session's file tools read
+    /// through [`tool_vfs`](Self::tool_vfs). A spill directory chosen without
+    /// them is a file the engine writes and then tells the model to `Read`
+    /// from outside its own jail.
+    pub fn spill_storage(&self) -> crate::tool_result_storage::StorageDir {
+        crate::tool_result_storage::StorageDir::for_optional_session(self.workspace_policy())
+    }
+
     pub fn set_sandbox_runtime(&mut self, runtime: Arc<wcore_sandbox::SandboxRegistry>) {
         self.sandbox_runtime = runtime;
     }

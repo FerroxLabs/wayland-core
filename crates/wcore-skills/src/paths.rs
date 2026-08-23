@@ -61,7 +61,11 @@ pub fn wayland_home_skills_dirs() -> Vec<PathBuf> {
 /// session, trusted and contained alike, because its contents are obeyed
 /// rather than merely read. An output root has to be writable, so it gets its
 /// own name.
-pub const SKILL_OUTPUT_ROOT: &str = ".wayland-out";
+///
+/// The name itself lives in `wcore_config` because the tool-result spill
+/// directory is chosen under the same root from `wcore-tools`, which does not
+/// depend on this crate (FerroxLabs/wayland#1097).
+pub const SKILL_OUTPUT_ROOT: &str = wcore_config::config::SESSION_OUTPUT_ROOT;
 
 /// Where a skill puts the files it produces: `<cwd>/.wayland-out/skills/<session>/`.
 ///
