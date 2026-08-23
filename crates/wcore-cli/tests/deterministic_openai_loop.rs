@@ -181,9 +181,29 @@ async fn packaged_core_recovers_after_a_bounded_429() {
     assert_eq!(result.execution.provider_typed_failures, ["http_429"]);
     let delay_ms = observation.inter_request_delays_ms()[0];
     assert!(delay_ms >= 8, "retry ignored the 10 ms hint: {delay_ms} ms");
+    // The ceiling is DERIVED, and it has to be: the bound this replaces was a
+    // flat 1_000 ms, and honouring the hint can legitimately take longer than
+    // that. `retry_delay` adds `RETRY_AFTER_JITTER` — U[0, 1 s], additive, so
+    // a herd handed the same hint does not return in the same millisecond —
+    // on top of the value the server sent, so the honoured-hint path spans
+    // 10 ms to 1_010 ms before any scheduling overhead. Measured on a loaded
+    // box: 1_164 ms on a high draw, 3 failures in 9 matched runs, and 0 in 9
+    // on v0.13.5 where that jitter did not yet exist. The test was failing on
+    // a correct delay.
+    //
+    // What it actually wants to assert is "the hint was honoured, NOT the
+    // fallback curve". Those are separated by a wide gap rather than by a
+    // magic number: with no usable hint a 429 floors at
+    // `DEFAULT_RETRY_AFTER_MS`, so any fallback delay is >= 5_000 ms while
+    // the honoured hint cannot exceed 1_010 ms. Bound it at the fallback
+    // floor and the assertion becomes both un-flaky and strictly stronger
+    // than a hand-tuned ceiling — it moves with the constants.
+    let fallback_floor_ms = u128::from(wcore_providers::retry::DEFAULT_RETRY_AFTER_MS);
     assert!(
-        delay_ms < 1_000,
-        "retry used a fallback delay instead of the fixture hint: {delay_ms} ms"
+        u128::from(delay_ms) < fallback_floor_ms,
+        "retry used a fallback delay instead of the fixture hint: {delay_ms} ms \
+         (a hintless 429 floors at {fallback_floor_ms} ms; an honoured 10 ms hint \
+         cannot exceed 10 ms + RETRY_AFTER_JITTER)"
     );
 }
 
