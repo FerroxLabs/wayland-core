@@ -58,9 +58,21 @@ jobs:
           - provider: anthropic
             secret_name: ANTHROPIC_API_KEY
             filter: "test(anthropic)"
+            # REQUIRED, not optional. Every file under tests/e2e/ opens with
+            # `#![cfg(feature = "live-...")]`, so without this the `e2e` test
+            # binary compiles to ZERO tests and the filter below matches
+            # nothing. Measured on addb4f48: `cargo nextest list -p wcore-agent
+            # --profile e2e --test e2e -E 'test(anthropic)'` listed 0 tests
+            # without the feature and 2 with it; the run form exited 4 ("no
+            # tests to run") while still writing a junit.xml with tests="0".
+            # That artifact satisfied the file-count evidence gate, so E2E
+            # would have reported green over an empty suite the moment the
+            # secrets were configured (wayland#1115).
+            features: live-anthropic
           - provider: openai
             secret_name: OPENAI_API_KEY
             filter: "test(openai)"
+            features: live-openai
 
     steps:
       - name: Check provider filter
@@ -93,26 +105,39 @@ jobs:
             exit 1
           fi
 
+      # `steps.filter.outputs.run` guards every step below, as it did before
+      # the fail-closed credential change: a `workflow_dispatch` naming ONE
+      # provider must leave the other leg alone. Dropping these guards made the
+      # out-of-scope leg check out, install a toolchain and run nextest — which
+      # exits 4 on an empty filter match, so an anthropic-only dispatch painted
+      # `E2E (openai)` RED for a suite the operator never asked to run.
+      # A bare `if:` still implies `success()`, so a leg whose credential check
+      # failed above stops here rather than running the suite without a key.
       - uses: actions/checkout@v6
+        if: steps.filter.outputs.run == 'true'
 
       - name: Setup vx (installs Rust from vx.toml)
+        if: steps.filter.outputs.run == 'true'
         uses: loonghao/vx@v0.9.17
         with:
           setup: 'true'
           cache: 'true'
 
       - name: Install cargo-nextest
+        if: steps.filter.outputs.run == 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
 
       - name: Run E2E tests — ${{ matrix.provider }}
+        if: steps.filter.outputs.run == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ matrix.provider == 'anthropic' && secrets.ANTHROPIC_API_KEY || '' }}
           OPENAI_API_KEY:    ${{ matrix.provider == 'openai'    && secrets.OPENAI_API_KEY    || '' }}
         run: |
           vx cargo nextest run \
             -p wcore-agent \
+            --features ${{ matrix.features }} \
             --profile e2e \
             --test e2e \
             -E '${{ matrix.filter }}' \
@@ -196,6 +221,10 @@ jobs:
         env:
           EVIDENCE_DIR: e2e-reports
           EXPECTED_MIN: ${{ steps.scope.outputs.expected }}
+          # A junit.xml is written even when the filter matched nothing, so the
+          # file count alone cannot tell "ran clean" from "ran nothing" — the
+          # very distinction wayland#1115 asks for. Require real test cases.
+          MIN_TESTS: 1
           LABEL: E2E Tests
           UPSTREAM_RESULT: ${{ needs.e2e.result }}
           HINT: >-

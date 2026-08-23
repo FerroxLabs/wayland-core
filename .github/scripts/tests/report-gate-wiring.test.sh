@@ -67,6 +67,26 @@ fi
 # A credential-less leg must fail rather than conclude success on zero tests.
 want_grep "a missing E2E credential fails its leg" "$E2E" "NO E2E CREDENTIAL"
 
+# ...and a CREDENTIALLED leg must actually have tests to run. Every file under
+# tests/e2e/ is `#![cfg(feature = "live-...")]`, so an invocation without the
+# feature compiles an EMPTY test binary, matches nothing, and still writes a
+# junit.xml — evidence by file count, nothing by test count.
+want_grep "the e2e run passes the live-* cargo feature" \
+  "$E2E" "--features \${{ matrix.features }}"
+want_grep "the anthropic leg names its feature" "$E2E" "features: live-anthropic"
+want_grep "the openai leg names its feature" "$E2E" "features: live-openai"
+
+# The evidence gate must be told to require test cases, not just files.
+want_grep "the e2e evidence gate requires real test cases" "$E2E" "MIN_TESTS: 1"
+
+# Out-of-scope legs must stay out of scope: a single-provider dispatch must not
+# check out, build and run the other provider's suite.
+if [ "$(grep -cF -- "if: steps.filter.outputs.run == 'true'" "$E2E")" -ge 5 ]; then
+  ok "every e2e work step is guarded by the provider filter"
+else
+  bad "every e2e work step is guarded by the provider filter (found $(grep -cF -- "if: steps.filter.outputs.run == 'true'" "$E2E"), need 5)"
+fi
+
 # Control: the same matchers must be capable of reporting absence, or every
 # want_no_grep above would pass vacuously.
 if grep -qF -- "definitely-not-in-this-file-$$" "$E2E"; then
