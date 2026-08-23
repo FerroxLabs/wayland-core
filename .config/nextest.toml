@@ -411,54 +411,56 @@ test-group = 'native-windows-live'
 filter = 'package(wcore-swarm)'
 threads-required = 4
 
-# ── PTY/TUI tests: reserve capacity so the READER THREAD is not starved ──────
+# ── PTY/TUI tests: no retry mask, and a starvation claim the tree refutes ────
 #
-# MEASURED, 2026-08-21, GitHub-hosted `macos-latest`:
-#   * `wcore-cli::path_boundary_tui_pty approving_once_leaves_the_read_refused_by_the_sandbox`
-#     failed 3/3 inside the full 14,882-test `--profile ci` run, each try burning
-#     the whole 30s deadline.
-#   * The SAME COMMIT, same runner image, that test ALONE: 3/3 PASS in
-#     2.12s / 1.90s / 1.67s. Run 32437602830.
-#   * When it passes inside the suite it also takes ~1.4s. So the deadline has a
-#     ~20x margin and this is not a slow test; it is a test that stops being
-#     SCHEDULED.
+# THIS BLOCK USED TO SAY the failures below were reader-thread starvation
+# producing a STALE FRAME, and that `threads-required = 4` was the remedy.
+# Both halves are refuted by the runs they were written from. Recorded rather
+# than deleted, because "flaky under load" is exactly the place a real defect
+# hides (see the wcore-swarm block above, which makes the same warning).
 #
-# WHY THESE TESTS SPECIFICALLY. `tests/support/pty.rs` spawns the real CLI on a
-# pty and feeds a `vt100` parser from a dedicated reader thread (`_reader`,
-# pty.rs:131). Every assertion is `wait_for(|screen| ...)`, which polls
-# `screen_text()` every 30ms. Starve the reader thread and the PARSER falls
-# behind the child: the test then polls a stale frame and never observes output
-# the child already produced. The failure surfaces as a timeout whose captured
-# "last screen" looks like the turn ended, because the screen is simply old.
-# Nothing in the product or the test's logic is wrong; the test just has to be
-# scheduled to see what it is watching. This is the same failure shape, and the
-# same remedy, as the wcore-swarm heartbeat override above.
+# WHAT WAS MEASURED, GitHub-hosted `macos-latest`:
+#   * v0.13.4 `main`, run 32442806629 job 96656678340:
+#     `wcore-cli::path_boundary_tui_pty approving_once_leaves_the_read_refused_by_the_sandbox`
+#     TRY 1/2/3 FAIL at 31.096s / 30.698s / 30.915s. Run conclusion: failure.
+#   * v0.13.5 `main` (addb4f48), run 32613130982 job 97129254675, WITH this
+#     override already in the tree: TRY 1 FAIL 30.996s, TRY 2 FAIL 30.956s,
+#     TRY 3 PASS 1.567s. Run conclusion: SUCCESS.
+#   * The sibling `a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds`
+#     PASSED in 1.656s inside that same failing run.
 #
-# `threads-required` is again the correct lever rather than a test-group:
-# `max-threads` bounds concurrency WITHIN a group, and the pressure here comes
-# from the other ~14,800 tests in the run. `threads-required` reserves slots
-# from the global pool for the test's duration, which is the contended resource.
-# 4 matches the existing precedent; on a 3-4 core hosted runner that amounts to
-# "run this essentially alone", which is exactly the intent, and on a 96-core
-# host it is close to free because these binaries finish in seconds.
+# WHY "STALE FRAME" IS WRONG. The captured screen from that failing try renders
+# the status bar as `... | $0.00 + unpriced | 29s`. That last field is
+# `format_duration(app.session.turn_started_at.elapsed())`
+# (crates/wcore-cli/src/tui/widgets/statusbar.rs) — a value only a LIVE repaint
+# can produce, ~29s into a test that died at 30s. The same frame carries the
+# IDLE keybar (`Tab next tab  ...`), which
+# `crates/wcore-cli/src/tui/surfaces/workspace.rs` renders only when the run is
+# no longer streaming. A vt100 parser 30s behind the child cannot show a clock
+# reading 29s. The harness was watching a CURRENT frame of a session that had
+# genuinely produced no answer.
 #
-# HONESTY NOTE, per the warning on the override above: "flaky under load" must
-# not become a place to hide a real bug. Two things are therefore recorded
-# rather than absorbed. (1) The correlation with the repo-control write guard is
-# real — trees carrying it failed 6/6 tries, trees without it 1/13 — which is
-# consistent with the extra VFS layer adding enough work to widen an
-# already-open scheduling window, and is NOT evidence that the guard is
-# functionally wrong: the same tree passes 3/3 when the test is scheduled.
-# (2) The TUI drops `finish_reason` when destructuring `StreamEnd`, so a turn
-# that ended in error with an empty buffer would render as nothing. That is a
-# genuine observability gap, it is filed separately, and it is NOT what this
-# override is papering over — it was inferred by elimination BEFORE the
-# run-alone measurement, and the stale-frame mechanism explains the same
-# evidence without it.
+# WHY `threads-required` IS NOT THE REMEDY. It was already in the tree for the
+# v0.13.5 run above and the test still burned two full 30s deadlines there. A
+# mitigation that does not move the failure rate must not be described as one.
+# It is KEPT — reserving capacity for a test that drives a real binary on a pty
+# is right on its own terms and costs nothing on a 96-core host — but it is no
+# longer offered as an explanation.
 #
-# This is a SCHEDULING change only. No test, assertion, timeout, or selector is
-# added, removed, or loosened. A starved test still fails; it just is not
-# starved by our own runner. If any of these fails again, that failure is real.
+# WHY `retries` IS 0 HERE, and only here. `[profile.ci] retries = 2` is why this
+# survived into a shipped release: nextest reports a run as SUCCESS when a
+# retry passes, so run 32613130982 read green while this test failed twice at
+# ~31s inside it. `status-level = "retry"` keeps the `TRY n FAIL` lines in the
+# log, but the run CONCLUSION is what release gates, dashboards and humans
+# read, and that conclusion was wrong. Retries are the right default for a
+# 15,000-test suite; they are the wrong default for a small, named set of
+# end-to-end binaries whose flake IS the bug under investigation. Scoped to
+# exactly the binaries in the filter — every other test keeps `retries = 2`.
+#
+# Consequence, stated plainly: this makes the macOS leg go RED while
+# FerroxLabs/wayland#1109 is open, instead of green-with-a-buried-TRY-line.
+# That is the intent. Do not raise it back to hide the failure.
 [[profile.ci.overrides]]
 filter = 'binary(path_boundary_tui_pty) + binary(goal_control_tui_pty) + binary(smoke_p0) + binary(config_unknown_keys_visible) + binary(p2_open_admission_entry_points) + binary(f21_02_01_child_tool_authority) + binary(f21_02_child_budget_live)'
 threads-required = 4
+retries = 0
