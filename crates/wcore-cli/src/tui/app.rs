@@ -736,6 +736,33 @@ pub struct SessionView {
     /// tool cards with assistant text instead of piling them up at the
     /// end of the transcript.
     pub in_flight_turn_idx: Option<usize>,
+    /// FerroxLabs/wayland#1109 — "is this RUN still going", as distinct from
+    /// [`SessionView::streaming_active`], which is "should the spinner be on".
+    ///
+    /// The two were one flag, and the engine emits `ProtocolEvent::Error` for
+    /// NON-terminal advisories as well as for failures (`Failed to persist
+    /// first message`, and every other `emit_error(..., false)` the run
+    /// continues past). The `Error` arm clears `streaming_active` so the
+    /// spinner cannot stick — correct — but `TextDelta` was gated on the same
+    /// flag, so from that advisory onward EVERY delta for the rest of the run
+    /// was silently discarded and the answer rendered as nothing at all.
+    ///
+    /// `StreamStart` sets this; only `StreamEnd` (real or synthetic, which is
+    /// what a cancel sends) clears it. That keeps the AUDIT-D D7 guard the
+    /// delta gate was written for — a cancelled turn's last late delta is
+    /// still dropped — while an advisory can no longer eat the answer.
+    pub run_live: bool,
+    /// #1109 — did this run put anything readable in front of the user?
+    ///
+    /// Set when a delta is accepted or an assistant turn is flushed. Read once
+    /// at `StreamEnd`: a run that ends having shown the user NO answer and NO
+    /// error is the exact silent no-op this issue reports, and the TUI now says
+    /// so instead of returning to an idle prompt with nothing on screen.
+    pub run_showed_answer: bool,
+    /// #1109 — did this run already report a failure to the user? Set by the
+    /// `Error` arm, read at `StreamEnd` so the "nothing happened" notice is
+    /// never a second banner for a failure already named.
+    pub run_reported_error: bool,
     /// v0.9.2 W6 (SPEC §4): per-turn nonce that seeds the single verb pick
     /// for the streaming-status widget — the `useState(|| sample(pool))`
     /// equivalent. Set once at `StreamStart` so the verb is stable for the
@@ -765,6 +792,10 @@ impl Default for SessionView {
             compact_tool_output: true,
             // v0.9.1.2 F12: no in-flight assistant turn between sessions.
             in_flight_turn_idx: None,
+            // #1109: no run in flight between sessions.
+            run_live: false,
+            run_showed_answer: false,
+            run_reported_error: false,
             // v0.9.2 W6: no verb seed between turns; set at StreamStart.
             turn_verb_seed: 0,
         }
@@ -785,6 +816,9 @@ impl SessionView {
         self.streaming.clear();
         self.thinking.clear();
         self.streaming_active = false;
+        self.run_live = false;
+        self.run_showed_answer = false;
+        self.run_reported_error = false;
         self.in_flight_turn_idx = None;
     }
 
