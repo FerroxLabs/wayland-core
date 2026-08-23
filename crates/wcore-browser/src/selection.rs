@@ -4,7 +4,8 @@
 //!   1. If `ProviderHint::Browserbase` AND `BROWSERBASE_*` env present → Browserbase.
 //!   2. If `ProviderHint::Camoufox` or `Auto` → Camoufox (it's a sidecar; assume
 //!      reachable; the first op gets a typed error if not).
-//!   3. If `chromium` feature is on → fall through to Chromium.
+//!   3. If `ProviderHint::Chromium` AND the `chromium` feature is on AND no
+//!      `BrowserPolicy` is in force → Chromium.
 //!   4. Otherwise default Camoufox.
 //!
 //! The function returns a `Box<dyn BrowserProvider>` so the tool layer is
@@ -99,7 +100,29 @@ pub fn select_provider(inputs: SelectionInputs) -> Arc<dyn BrowserProvider> {
     #[cfg(feature = "chromium")]
     {
         if matches!(inputs.hint, ProviderHint::Chromium) {
-            return Arc::new(ChromiumBackend::new()) as Arc<dyn BrowserProvider>;
+            // gh#1112: `ChromiumBackend` enforces NO part of `BrowserPolicy`
+            // — it calls `page.goto(url)` raw, with no pre-flight check, no
+            // allow/deny lists, no loopback-capability gate, no RFC1918 /
+            // metadata / loopback refusal and no post-navigation landing-URL
+            // re-check. Selecting it under a policy silently drops every
+            // guarantee the policy is documented to provide.
+            //
+            // Same shape as the Browserbase arm above, for the same reason:
+            // when a policy is in force we refuse the backend that cannot
+            // enforce it and fall through to Camoufox, which can. Only
+            // `policy == None` (the legacy "no enforcement expectation" mode)
+            // still honours the hint.
+            if inputs.policy.is_some() {
+                tracing::warn!(
+                    "ProviderHint::Chromium requested with a BrowserPolicy set, but the \
+                     Chromium backend enforces none of it (no URL policy check on \
+                     navigation, no post-navigation re-check). Refusing Chromium and \
+                     falling back to Camoufox so the policy is enforced. Clear the policy \
+                     to use Chromium."
+                );
+            } else {
+                return Arc::new(ChromiumBackend::new()) as Arc<dyn BrowserProvider>;
+            }
         }
     }
     // 2b. Chromium requested but feature compiled out: surface the

@@ -632,6 +632,15 @@ Returns a single image URL or data URL. Display it via markdown: ![desc](URL)."
 
 #[cfg(test)]
 mod tests {
+    // Fixtures use a literal public IP, never a hostname.
+    //
+    // The tool path runs `url_safety::is_safe_url`, which performs a REAL DNS
+    // resolution and fails closed when it returns no addresses, so a hostname
+    // fixture makes these tests depend on the runner's resolver. A literal IP
+    // takes the `parse::<IpAddr>()` fast path and skips resolution entirely.
+    // Hostname resolution is covered hermetically in `url_safety`'s own tests
+    // via `is_safe_url_with(.., fake_resolver)`. Same convention as
+    // `transcription_tools`.
     use super::*;
 
     fn ok_response(image: &str) -> ImageGenerationResponse {
@@ -710,7 +719,7 @@ mod tests {
     #[tokio::test]
     async fn capturing_backend_happy_path() {
         let backend = Arc::new(CapturingImageGenerationBackend::new(ok_response(
-            "https://example.com/img.png",
+            "https://93.184.216.34/img.png",
         )));
         let tool = ImageGenerationTool::with_backend(backend.clone());
         let result = tool
@@ -722,7 +731,7 @@ mod tests {
         assert!(!result.is_error, "happy path must not be an error");
         let v = parse(&result.content);
         assert_eq!(v["success"], json!(true));
-        assert_eq!(v["image"], json!("https://example.com/img.png"));
+        assert_eq!(v["image"], json!("https://93.184.216.34/img.png"));
         assert_eq!(v["usedProvider"], json!("OpenAI gpt-image-1"));
         assert_eq!(v["freeFallbackUsed"], json!(false));
         assert_eq!(v["width"], json!(1536));

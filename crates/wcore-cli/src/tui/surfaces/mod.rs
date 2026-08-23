@@ -2148,6 +2148,7 @@ impl Router {
                             Some("approve") => TuiRecoveryAction::Approve,
                             Some("deny") => TuiRecoveryAction::Deny,
                             Some("reconcile") => TuiRecoveryAction::Reconcile,
+                            Some("abandon") => TuiRecoveryAction::Abandon,
                             Some("resolve") => {
                                 let input = match parse_operator_resolution(line) {
                                     Ok(input) => input,
@@ -2907,7 +2908,9 @@ fn render_recovery(recovery: &TuiRecoveryView) -> String {
 }
 
 fn recovery_usage() -> String {
-    "Usage: /recover json|continue|approve|deny|reconcile|cancel\n\
+    "Usage: /recover json|continue|approve|deny|reconcile|abandon|cancel\n\
+     abandon: give up on the interrupted turn, recording that its provider \
+     request's outcome was never observed\n\
      Operator evidence: /recover resolve <succeeded|failed|not_started> \
      <operator_id> <tool_receipt|provider_receipt|process_observation|external_system_record> \
      <tool_execution_id> <reference_id> <sha256:digest>"

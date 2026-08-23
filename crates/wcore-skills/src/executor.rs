@@ -1,6 +1,8 @@
+use std::path::Path;
+
 use crate::context_modifier::effort_to_string;
 use crate::shell::{ShellExecutionError, execute_shell_commands};
-use crate::substitution::substitute_arguments;
+use crate::substitution::{substitute_arguments, substitute_output_dir};
 use crate::types::{ExecutionContext, SkillMetadata};
 use wcore_types::spawner::{ChildOrigin, ForkOverrides, Spawner, SubAgentConfig};
 
@@ -22,26 +24,55 @@ pub fn render_shell_input(
     args: Option<&str>,
     session_id: Option<&str>,
 ) -> String {
+    render_shell_input_in(skill, args, session_id, None)
+}
+
+/// [`render_shell_input`] with the session CWD, which is what lets the composed
+/// body name an output destination (FerroxLabs/wayland#1096).
+///
+/// Two things depend on the CWD and nothing else does, which is why this is a
+/// separate entry point rather than a wider signature on the three-argument
+/// form: the `Output directory` header line, and the
+/// `${WCORE_SKILL_OUTPUT_DIR}` expansion. Callers that only need to SCAN a body
+/// before dispatch (the cron pre-dispatch denylist) pass `None` and get the
+/// pre-#1096 bytes exactly.
+///
+/// `cwd = None` is byte-for-byte identical to the previous behaviour.
+pub fn render_shell_input_in(
+    skill: &SkillMetadata,
+    args: Option<&str>,
+    session_id: Option<&str>,
+    cwd: Option<&Path>,
+) -> String {
+    let output_dir = cwd.map(|c| crate::paths::skill_output_dir(c, session_id));
+
     // Prepend base directory header so the model can resolve relative paths
     // (e.g. `./schemas/foo.json`). Matches TS `processPromptSlashCommand`.
-    let base = match skill.skill_root.as_deref() {
-        Some(root) => {
-            let normalized = normalize_path_separators(root);
-            format!(
-                "Base directory for this skill: {normalized}\n\n{}",
-                skill.content
-            )
-        }
-        None => skill.content.clone(),
-    };
+    let mut base = String::with_capacity(skill.content.len() + 160);
+    if let Some(root) = skill.skill_root.as_deref() {
+        base.push_str(&format!(
+            "Base directory for this skill: {}\n\n",
+            crate::paths::normalize_path_separators(root)
+        ));
+    }
+    // #1096: a skill body that produces a file previously had NO stated
+    // destination, so the nearest plausible one -- its own source directory
+    // under the global config dir -- is what got picked, outside the session
+    // workspace and unreadable to the session that made it. State the
+    // destination for every skill, not only for skills that know the token.
+    if let Some(dir) = output_dir.as_deref() {
+        base.push_str(&output_dir_header(dir));
+    }
+    base.push_str(&skill.content);
 
-    substitute_arguments(
+    let substituted = substitute_arguments(
         &base,
         args,
         &skill.argument_names,
         skill.skill_root.as_deref(),
         session_id,
-    )
+    );
+    substitute_output_dir(&substituted, output_dir.as_deref())
 }
 
 /// Prepare skill content for inline execution.
@@ -62,18 +93,18 @@ pub async fn prepare_inline_content(
     session_id: Option<&str>,
     cwd: &str,
 ) -> Result<String, ShellExecutionError> {
-    let substituted = render_shell_input(skill, args, session_id);
+    let substituted = render_shell_input_in(skill, args, session_id, Some(Path::new(cwd)));
     execute_shell_commands(&substituted, skill.loaded_from, cwd).await
 }
 
-/// Normalize path separators to forward slashes.
-/// On non-Windows platforms this is a no-op; included for portability.
-fn normalize_path_separators(path: &str) -> String {
-    if cfg!(windows) {
-        path.replace('\\', "/")
-    } else {
-        path.to_owned()
-    }
+/// The one spelling of the output-directory line, so the tests that strip it
+/// cannot drift from the code that writes it.
+fn output_dir_header(dir: &Path) -> String {
+    format!(
+        "Write any files this skill produces under: {} \
+         (create it if it does not exist)\n\n",
+        crate::paths::normalize_path_separators(&dir.to_string_lossy())
+    )
 }
 
 /// Check whether a skill can be executed in inline mode.
@@ -148,6 +179,21 @@ mod tests {
     use super::*;
     use crate::types::{ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
 
+    /// #1096 states the output destination at the top of every composed body.
+    /// These tests are about SUBSTITUTION, so strip that line and assert on
+    /// what the skill itself contributed; `output_dir_header_names_the_session_dir`
+    /// pins the line itself.
+    fn body(rendered: &str) -> String {
+        match rendered.split_once("(create it if it does not exist)\n\n") {
+            Some((head, rest))
+                if head.starts_with("Write any files this skill produces under: ") =>
+            {
+                rest.to_string()
+            }
+            _ => rendered.to_string(),
+        }
+    }
+
     fn make_skill(content: &str, skill_root: Option<&str>) -> SkillMetadata {
         SkillMetadata {
             name: "test".to_string(),
@@ -179,13 +225,43 @@ mod tests {
         }
     }
 
+    /// #1096 — the line that gives an undeclared output somewhere to go. A
+    /// skill that never heard of `${WCORE_SKILL_OUTPUT_DIR}` is the case that
+    /// produced the UAT dead end, so the destination has to be stated whether
+    /// the author asked for it or not.
+    #[tokio::test]
+    async fn output_dir_header_names_the_session_dir() {
+        let skill = make_skill("Produce a report.", None);
+        let rendered = prepare_inline_content(&skill, None, Some("sess-9"), "/work")
+            .await
+            .unwrap();
+        assert!(
+            rendered.starts_with("Write any files this skill produces under: "),
+            "got: {rendered}"
+        );
+        assert!(
+            rendered.contains("/work/.wayland-out/skills/sess-9"),
+            "got: {rendered}"
+        );
+        assert!(rendered.ends_with("Produce a report."), "got: {rendered}");
+    }
+
+    /// `render_shell_input`'s three-argument form has no CWD and must stay
+    /// byte-identical to its pre-#1096 output: the cron pre-dispatch scan uses
+    /// it, and a scan that sees different bytes than the shell is worthless.
+    #[test]
+    fn the_cwd_less_render_is_unchanged() {
+        let skill = make_skill("body $ARGUMENTS", None);
+        assert_eq!(render_shell_input(&skill, Some("x"), None), "body x");
+    }
+
     #[tokio::test]
     async fn test_prepare_inline_no_args() {
         let skill = make_skill("Do the thing.", None);
         let result = prepare_inline_content(&skill, None, None, "/tmp")
             .await
             .unwrap();
-        assert_eq!(result, "Do the thing.");
+        assert_eq!(body(&result), "Do the thing.");
     }
 
     #[tokio::test]
@@ -207,7 +283,7 @@ mod tests {
         let result = prepare_inline_content(&skill, Some("foo"), None, "/tmp")
             .await
             .unwrap();
-        assert_eq!(result, "Target: foo");
+        assert_eq!(body(&result), "Target: foo");
     }
 
     #[tokio::test]
@@ -252,6 +328,21 @@ mod tests {
 mod supplemental_tests {
     use super::*;
     use crate::types::{ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
+
+    /// #1096 states the output destination at the top of every composed body.
+    /// These tests are about SUBSTITUTION, so strip that line and assert on
+    /// what the skill itself contributed; `output_dir_header_names_the_session_dir`
+    /// pins the line itself.
+    fn body(rendered: &str) -> String {
+        match rendered.split_once("(create it if it does not exist)\n\n") {
+            Some((head, rest))
+                if head.starts_with("Write any files this skill produces under: ") =>
+            {
+                rest.to_string()
+            }
+            _ => rendered.to_string(),
+        }
+    }
 
     fn make_skill_full(
         name: &str,
@@ -303,7 +394,7 @@ mod supplemental_tests {
         let result = prepare_inline_content(&skill, Some("rust"), None, "/tmp")
             .await
             .unwrap();
-        assert_eq!(result, "Search rust");
+        assert_eq!(body(&result), "Search rust");
     }
 
     // TC-10.2: no args, no placeholder → content unchanged
@@ -313,7 +404,7 @@ mod supplemental_tests {
         let result = prepare_inline_content(&skill, None, None, "/tmp")
             .await
             .unwrap();
-        assert_eq!(result, "Just content.");
+        assert_eq!(body(&result), "Just content.");
     }
 
     // TC-10.3: skill_root causes base directory header to be prepended
@@ -349,7 +440,7 @@ mod supplemental_tests {
         let result = prepare_inline_content(&skill, None, Some("sess-xyz"), "/tmp")
             .await
             .unwrap();
-        assert_eq!(result, "sess-xyz");
+        assert_eq!(body(&result), "sess-xyz");
     }
 
     // TC-10.x: argument_names from metadata are used
@@ -366,7 +457,7 @@ mod supplemental_tests {
         let result = prepare_inline_content(&skill, Some("main function"), None, "/tmp")
             .await
             .unwrap();
-        assert_eq!(result, "Find main in codebase");
+        assert_eq!(body(&result), "Find main in codebase");
     }
 
     // TC-10.x: fork context check
@@ -461,7 +552,8 @@ mod supplemental_tests {
             .unwrap();
         // MCP skill: shell command NOT executed, syntax remains
         assert_eq!(
-            result, "run !`pwd` here",
+            body(&result),
+            "run !`pwd` here",
             "MCP skill should preserve shell syntax: {result}"
         );
     }
@@ -515,6 +607,21 @@ mod supplemental_tests {
 #[cfg(test)]
 mod phase7_tests {
     use std::sync::Mutex;
+
+    /// #1096 states the output destination at the top of every composed body.
+    /// These tests are about SUBSTITUTION, so strip that line and assert on
+    /// what the skill itself contributed; `output_dir_header_names_the_session_dir`
+    /// pins the line itself.
+    fn body(rendered: &str) -> String {
+        match rendered.split_once("(create it if it does not exist)\n\n") {
+            Some((head, rest))
+                if head.starts_with("Write any files this skill produces under: ") =>
+            {
+                rest.to_string()
+            }
+            _ => rendered.to_string(),
+        }
+    }
 
     use async_trait::async_trait;
 
@@ -702,7 +809,8 @@ mod phase7_tests {
         let config = spawner.take_config();
         // Variable substitution should have replaced $ARGUMENTS with "rust"
         assert_eq!(
-            config.prompt, "Search rust",
+            body(&config.prompt),
+            "Search rust",
             "prompt should contain substituted content"
         );
     }
@@ -730,7 +838,11 @@ mod phase7_tests {
             "empty content should not cause error: {result:?}"
         );
         let config = spawner.take_config();
-        assert_eq!(config.prompt, "");
+        assert_eq!(
+            body(&config.prompt),
+            "",
+            "an empty skill contributes nothing beyond the output-dir line"
+        );
     }
 
     // TC-7.41: MCP fork skill behaves the same as regular fork skill

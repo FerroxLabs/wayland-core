@@ -554,6 +554,15 @@ impl Tool for VisionAnalyzeTool {
 
 #[cfg(test)]
 mod tests {
+    // Fixtures use a literal public IP, never a hostname.
+    //
+    // The tool path runs `url_safety::is_safe_url`, which performs a REAL DNS
+    // resolution and fails closed when it returns no addresses, so a hostname
+    // fixture makes these tests depend on the runner's resolver. A literal IP
+    // takes the `parse::<IpAddr>()` fast path and skips resolution entirely.
+    // Hostname resolution is covered hermetically in `url_safety`'s own tests
+    // via `is_safe_url_with(.., fake_resolver)`. Same convention as
+    // `transcription_tools`.
     use super::*;
     use std::fs;
     use tempfile::tempdir;
@@ -601,8 +610,8 @@ mod tests {
 
     #[test]
     fn validate_image_url_accepts_http_and_https() {
-        assert!(validate_image_url("http://example.com/img.png").is_ok());
-        assert!(validate_image_url("https://example.com/img.jpg").is_ok());
+        assert!(validate_image_url("http://93.184.216.34/img.png").is_ok());
+        assert!(validate_image_url("https://93.184.216.34/img.jpg").is_ok());
     }
 
     #[test]
@@ -631,7 +640,7 @@ mod tests {
         let result = must_exec(
             &tool,
             json!({
-                "image_url": "https://example.com/cat.png",
+                "image_url": "https://93.184.216.34/cat.png",
                 "question": "What animal is this?",
             }),
         );
@@ -667,7 +676,7 @@ mod tests {
         let result = must_exec(
             &tool,
             json!({
-                "image_url": "https://example.com/photo.jpg",
+                "image_url": "https://93.184.216.34/photo.jpg",
                 "question": "describe",
             }),
         );
@@ -868,7 +877,7 @@ mod tests {
         let r = must_exec(
             &tool,
             json!({
-                "image_url": "https://example.com/x.png",
+                "image_url": "https://93.184.216.34/x.png",
                 "question": "?",
             }),
         );
@@ -888,7 +897,7 @@ mod tests {
         let r = must_exec(
             &tool,
             json!({
-                "image_url": "https://example.com/x.png",
+                "image_url": "https://93.184.216.34/x.png",
                 "question": "?",
             }),
         );
@@ -934,7 +943,7 @@ mod tests {
         let r = must_exec(
             &tool,
             json!({
-                "image_url": "https://example.com/page.html",
+                "image_url": "https://93.184.216.34/page.html",
                 "question": "?",
             }),
         );
@@ -980,7 +989,7 @@ mod tests {
         let r = must_exec(
             &tool,
             json!({
-                "image_url": "https://example.com/huge.png",
+                "image_url": "https://93.184.216.34/huge.png",
                 "question": "?",
             }),
         );

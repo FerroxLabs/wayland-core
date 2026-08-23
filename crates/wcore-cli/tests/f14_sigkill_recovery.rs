@@ -2567,22 +2567,55 @@ async fn stop_during_active_host_continue_preserves_unknown_provider_authority()
     assert_eq!(terminal["finish_reason"], "stop");
     let lifecycle = process.next_type("turn_recovery_lifecycle").await;
     assert_eq!(lifecycle["turn_id"], turn_id);
-    assert_eq!(
-        lifecycle["lifecycle"], "suspended",
-        "accepted host cancellation cannot claim a terminal cancellation after a provider request was physically dispatched"
-    );
-    assert_eq!(
-        lifecycle["reconcile_reason"], "provider_outcome_unknown",
-        "the lifecycle receipt must publish the post-cancel durable recovery authority"
-    );
+    // The TURN is terminally cancelled: the host asked to stop and it stopped.
+    // What must never be claimed is that the physically dispatched REQUEST was
+    // cancelled — that is asserted on the durable receipt below, which is where
+    // the claim actually lives. This used to read "suspended", which kept the
+    // distinction only by never closing the turn at all, and so left the
+    // session refusing every later message for the rest of its life.
+    assert_eq!(lifecycle["lifecycle"], "cancelled");
 
     let after = resync_current(&mut process, session_id, "continue-stop-after").await;
-    assert_eq!(after["lifecycle"], "suspended");
     assert_eq!(
-        after["pending_turn"]["reconcile_reason"],
-        "provider_outcome_unknown"
+        after["lifecycle"], "ready",
+        "a stopped turn must leave the session able to accept the next message"
     );
+    assert!(after["pending_turn"].is_null());
     assert_ne!(after["cursor"], before["cursor"]);
+
+    // THE INVARIANT THIS TEST EXISTS FOR, and the reason the assertions above
+    // could be relaxed without relaxing it: an accepted provider request is
+    // never recorded as cancelled or as never-started. Its receipt says the
+    // outcome was not observed, in words, and carries the digest of exactly the
+    // bytes that did arrive.
+    let events = journal_events(env.home(), session_id);
+    let receipt = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event["type"] == "provider_attempt_finished_v2"
+                || event["type"] == "provider_attempt_finished"
+        })
+        .unwrap_or_else(|| {
+            panic!("the dispatched attempt must take a durable receipt: {events:?}")
+        });
+    assert_eq!(
+        receipt["outcome"]["status"], "failed",
+        "a dispatched request must never be recorded as cancelled or not-started: {receipt}"
+    );
+    assert!(
+        receipt["outcome"]["error"].as_str().is_some_and(
+            |error| error.contains("may have served it in full, in part, or not at all")
+        ),
+        "the receipt must say in words that the provider's outcome is unknown: {receipt}"
+    );
+    assert!(
+        receipt["response_digest"].is_string(),
+        "a partial capture must pin the bytes it captured: {receipt}"
+    );
+
+    // And the stopped turn must not have re-dispatched: the fixture's second
+    // step is never consumed.
     assert_provider_request_count_stable(&fixture, 1).await;
     let _diagnostics = process.sigkill().await;
 }

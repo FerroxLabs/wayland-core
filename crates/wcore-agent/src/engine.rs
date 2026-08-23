@@ -61,6 +61,36 @@ fn delivery_origin_belongs_to_turn(origin: &DeliveryOrigin, turn_id: &str) -> bo
     matches!(origin, DeliveryOrigin::Turn { turn_id: origin_turn } if origin_turn == turn_id)
 }
 
+/// How many times to re-derive an abandonment receipt whose digest a
+/// concurrent stream batch invalidated. See
+/// [`AgentEngine::abandon_unobserved_provider_attempts`] for why a couple of
+/// passes is already more than the race can use.
+const ABANDONMENT_RECEIPT_PASSES: usize = 8;
+
+/// Digest of exactly the provider bytes `attempt_id` durably captured, or
+/// `None` when it captured none.
+///
+/// This is the same value the reducer recomputes when it checks a terminal
+/// receipt, derived the same way from the same batches, so a receipt built
+/// from it validates against the journal instead of being refused by it.
+fn durable_attempt_response_digest(
+    state: &crate::session_journal::ReducedSessionState,
+    attempt_id: &str,
+) -> Result<Option<String>, AgentError> {
+    let events = state
+        .streams
+        .values()
+        .filter(|stream| stream.attempt_id == attempt_id)
+        .flat_map(|stream| stream.batches.iter().flatten().cloned())
+        .collect::<Vec<_>>();
+    if events.is_empty() {
+        return Ok(None);
+    }
+    crate::provider_recovery::provider_response_digest(&events)
+        .map(Some)
+        .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+}
+
 #[cfg(test)]
 mod durable_session_authority_tests {
     use std::sync::Arc;
@@ -1534,6 +1564,89 @@ fn unserved_retry_backoff(attempt: u32) -> std::time::Duration {
         .min(UNSERVED_RETRY_BACKOFF_CAP)
 }
 
+/// Backoff before re-issuing a request the provider DID serve and that then
+/// failed: linear 500 ms steps. `attempt` is 1-based.
+///
+/// Named rather than inlined for the same reason [`unserved_retry_backoff`]
+/// is: the ceiling on the retry budget is derived from the total this
+/// schedule spends, and a derivation that reads a different expression from
+/// the one the loop runs is not a derivation.
+fn served_retry_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(500u64.saturating_mul(attempt as u64))
+}
+
+/// Environment override for the engine's bounded SERVED-failure retry count.
+///
+/// Same shape as the two engine guards above it (`WAYLAND_MAX_REPEATED_TOOL_CALLS`,
+/// `WAYLAND_MAX_CONSECUTIVE_TOOL_FAILURES`): a `WAYLAND_MAX_*` integer read
+/// once per run with a documented default. Unlike those two it is CLAMPED —
+/// see [`MAX_STREAM_RETRIES_CEILING`].
+///
+/// Governs ONLY the count-bounded path. A request the provider never served
+/// is bounded by [`UNSERVED_OUTAGE_BUDGET`] — a window, not a count — and is
+/// untouched by this.
+const MAX_STREAM_RETRIES_ENV: &str = "WAYLAND_MAX_STREAM_RETRIES";
+
+/// Default served-failure retry count: 2 retries, so 3 total attempts.
+///
+/// Bound to the provider layer's own [`wcore_providers::retry::DEFAULT_MAX_RETRIES`]
+/// rather than repeated as a literal. The engine loop is the outer mirror of
+/// that budget (the provider call itself runs under `scope_max_retries(0)`),
+/// and two bare `2`s in two crates drift apart silently.
+const DEFAULT_MAX_STREAM_RETRIES: u32 = wcore_providers::retry::DEFAULT_MAX_RETRIES;
+
+/// Ceiling on [`MAX_STREAM_RETRIES_ENV`].
+///
+/// An unbounded value here is not a preference, it is a spend: every attempt
+/// on this path was SERVED, so each re-send re-bills the whole outbound
+/// context. A user who types an extra zero should get a warning, not a bill.
+///
+/// Derived, not invented. Served retries sleep on [`served_retry_backoff`],
+/// so a budget of N spends 250*N*(N+1) ms waiting. The ceiling is the largest
+/// N whose cumulative backoff still fits inside
+/// [`wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS`] — the cooldown
+/// after which the resilience layer would probe or fail over. Past that point
+/// the extra attempts are not resilience: they pin the run to one broken
+/// endpoint, billed, while the component whose job is failover waits on it.
+/// N=10 spends 27.5 s and fits; N=11 spends 33 s and does not.
+/// `the_ceiling_is_the_largest_budget_that_fits_the_breaker_cooldown` pins it.
+const MAX_STREAM_RETRIES_CEILING: u32 = 10;
+
+/// One run's served-failure retry budget, plus the value the user asked for
+/// when it had to be clamped — a clamp notice that cannot name the rejected
+/// number tells the user nothing.
+struct StreamRetryBudget {
+    retries: u32,
+    clamped_from: Option<u32>,
+}
+
+/// Decision half of [`MAX_STREAM_RETRIES_ENV`], split from the `std::env`
+/// read so the default and the clamp are testable without a process-global.
+fn resolve_max_stream_retries(raw: Option<&str>) -> StreamRetryBudget {
+    let requested = raw
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| raw.parse::<u32>().ok());
+    match requested {
+        // Absent, blank, or unparsable all mean the same thing: nobody
+        // successfully asked for anything. A typo must not silently change
+        // the retry budget, and must not fail the run either.
+        None => StreamRetryBudget {
+            retries: DEFAULT_MAX_STREAM_RETRIES,
+            clamped_from: None,
+        },
+        Some(requested) if requested > MAX_STREAM_RETRIES_CEILING => StreamRetryBudget {
+            retries: MAX_STREAM_RETRIES_CEILING,
+            clamped_from: Some(requested),
+        },
+        // Zero is a real answer: "do not re-send a served failure at all".
+        Some(requested) => StreamRetryBudget {
+            retries: requested,
+            clamped_from: None,
+        },
+    }
+}
+
 /// Does this provider failure say, in words rather than in a status line, that
 /// the credential was rejected?
 ///
@@ -1589,6 +1702,41 @@ const AUTH_FAILURE_REMEDY: &str = "The provider rejected this API key — not re
      `wayland-core auth add <provider> <key>` (stored in the OS keyring or the \
      encrypted vault), pass --api-key for a one-off, or set an environment \
      variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).";
+
+/// #923(3) — does this provider refusal name an orphaned `tool_use` /
+/// `tool_result` pair?
+///
+/// This is the ONE client-error shape the engine may re-send after repairing,
+/// because it is the exact shape the unconditional pre-send repair
+/// (`repair_all_orphaned_tool_uses` / `repair_orphaned_tool_results`) exists to
+/// prevent: seeing it means the repair missed a path, and re-running the repair
+/// against the live history has a real chance of producing a request that is
+/// accepted.
+///
+/// The gate is deliberately narrow. Every other 400 — an invalid key above all
+/// — fails identically on a second send, so a wider match would silently bill
+/// the user twice for every malformed request. Both block names must appear
+/// AND the sentence must describe a pairing fault; a message that merely
+/// mentions tools does not qualify.
+fn is_orphaned_tool_pair_rejection(error: &ProviderError) -> bool {
+    let ProviderError::Api { status, message } = error else {
+        return false;
+    };
+    if *status != 400 {
+        return false;
+    }
+    let message = message.to_ascii_lowercase();
+    if !(message.contains("tool_use") && message.contains("tool_result")) {
+        return false;
+    }
+    // The pairing fault itself, in the shapes providers actually emit:
+    // Anthropic "…ids were found without `tool_result` blocks…", and the
+    // reverse direction "…`tool_result` … when previous message does not
+    // contain any `tool_use` blocks" / "unexpected `tool_result`".
+    message.contains("without")
+        || message.contains("unexpected")
+        || message.contains("does not contain")
+}
 
 fn is_http_4xx_error(reason: &str) -> bool {
     /// Returns true if the first 3 bytes of `s` are ASCII digits and
@@ -7344,8 +7492,38 @@ impl AgentEngine {
             recovery.disposition,
             crate::recovery::RecoveryDisposition::Ready
         ) {
+            // Name a remedy that can actually lift THIS refusal. The old text
+            // listed three verbs that all refuse when the blocker is an
+            // unobserved provider outcome — cancel said resume, resume said
+            // reconcile, reconcile said only the engine may — so the reader was
+            // sent round a closed loop with no exit named anywhere in it.
+            //
+            // Name a remedy for EVERY surface this string reaches, not only the
+            // terminal UI. This error is handed verbatim to the `--json-stream`
+            // host, whose recovery vocabulary is continue|reconcile|cancel —
+            // measured: an `"action":"abandon"` on that wire is refused with
+            // "unknown variant `abandon`". A reader there who is told only to
+            // run `/recover abandon` has been sent round a second closed loop,
+            // this one built by the message itself. Relaunching the session with
+            // `--resume` settles it on any surface (the resume path calls
+            // `settle_interrupted_turn_for_resume` before the first prompt), so
+            // that is the exit every reader can actually take.
+            let remedy = match &recovery.disposition {
+                crate::recovery::RecoveryDisposition::Blocked {
+                    reason: crate::recovery::RecoveryBlocker::ProviderOutcomeUnknown,
+                    ..
+                } => {
+                    "its request was still in flight and no reply was ever seen, so nothing can \
+                     honestly claim an outcome for it — which is why continuing, reconciling and \
+                     cancelling all refuse. Abandon the turn instead: that records the outcome as \
+                     unknown, which is true, and lets the session carry on. In the terminal UI \
+                     run `/recover abandon`; from any other surface, relaunching this session \
+                     with `--resume` abandons it for you"
+                }
+                _ => "resume, reconcile, or cancel it before starting a new message",
+            };
             return Err(AgentError::SessionAuthority(format!(
-                "session has an interrupted turn at journal cursor {:?}; resume, reconcile, or cancel it before starting a new message",
+                "session has an interrupted turn at journal cursor {:?}: {remedy}",
                 recovery.journal_sequence
             )));
         }
@@ -7424,15 +7602,30 @@ impl AgentEngine {
         // Close only effects whose physical boundary provably was not crossed.
         // Unknown/running descendants retain durable reconciliation authority
         // and the original UserAborted result.
-        if matches!(result, Err(AgentError::UserAborted))
-            && matches!(
+        // The user pressed Esc. THIS engine watched the request leave and
+        // watched itself stop reading, so it is the only party that can write
+        // the attempt's one true receipt — that no outcome was ever observed —
+        // and it must do so before the turn unwinds. Skipping it left the
+        // attempt `Unknown`, a nonterminal state; the turn then reached no
+        // terminal event at all, `RecoveryPlan` reported
+        // `Blocked{ProviderOutcomeUnknown}`, and the pre-turn gate below
+        // refused every later message for the rest of the session's life. The
+        // wedge was manufactured here, at interrupt time — an advertised
+        // "interrupt" that ended the session instead.
+        //
+        // Tools, children and deliveries are untouched and still block: see
+        // `abandon_unobserved_provider_attempts` for why the provider case is
+        // the one that can be released safely.
+        if matches!(result, Err(AgentError::UserAborted)) {
+            self.abandon_unobserved_provider_attempts(&turn_id).await?;
+            if matches!(
                 self.close_not_started_descendants_for_cancellation(&turn_id)
                     .await?,
                 CancellationDescendantClosure::ReconciliationRequired
-            )
-        {
-            self.active_journal_turn_id = None;
-            return result;
+            ) {
+                self.active_journal_turn_id = None;
+                return result;
+            }
         }
         let sync_result = if matches!(result, Err(AgentError::UserAborted)) {
             self.prepare_durable_conversation().await
@@ -7790,15 +7983,19 @@ impl AgentEngine {
         // Apply the same safe closure rule as a fresh run: pending/prepared
         // descendants are cancelled, but started unknown effects keep the
         // interrupted turn open for reconciliation.
-        if matches!(result, Err(AgentError::UserAborted))
-            && matches!(
+        if matches!(result, Err(AgentError::UserAborted)) {
+            // Same rule as a fresh turn: abandon the unobserved request with
+            // its ignorance recorded, then let started tool/child effects keep
+            // the turn open for reconciliation.
+            self.abandon_unobserved_provider_attempts(turn_id).await?;
+            if matches!(
                 self.close_not_started_descendants_for_cancellation(turn_id)
                     .await?,
                 CancellationDescendantClosure::ReconciliationRequired
-            )
-        {
-            self.active_journal_turn_id = None;
-            return result;
+            ) {
+                self.active_journal_turn_id = None;
+                return result;
+            }
         }
         let sync_result = if matches!(result, Err(AgentError::UserAborted)) {
             self.prepare_durable_conversation().await
@@ -8865,10 +9062,11 @@ impl AgentEngine {
     /// `Unknown` — the interruption the crash left implicit — and then resolves
     /// `Failed` with an error that says the effect may have landed. A PREPARED
     /// tool or attempt takes the not-started receipt the journal already proves
-    /// (there is no start event). An UNKNOWN provider attempt takes the
-    /// `Cancelled` completion the reducer accepts for an attempt with no
-    /// stream. None of these claims an outcome; each records that this process
-    /// never saw one.
+    /// (there is no start event). An UNKNOWN provider attempt is handed to
+    /// [`Self::abandon_unobserved_provider_attempts`], which records `Failed`
+    /// with [`crate::recovery::PROVIDER_OUTCOME_ABANDONED_UNOBSERVED`] and the
+    /// digest of the bytes actually captured. None of these claims an outcome;
+    /// each records that this process never saw one.
     ///
     /// Children and deliveries are deliberately not admitted here: no measured
     /// interruption has left one nonterminal, and inventing a receipt for a
@@ -8933,48 +9131,133 @@ impl AgentEngine {
             let Some((attempt_id, attempt)) =
                 state.provider_attempts.iter().find(|(_, attempt)| {
                     attempt.turn_id == turn_id
-                        && matches!(
-                            attempt.effect,
-                            ExternalEffectState::Prepared | ExternalEffectState::Unknown
-                        )
+                        && matches!(attempt.effect, ExternalEffectState::Prepared)
                 })
             else {
                 break;
             };
             let attempt_id = attempt_id.clone();
             let dispatch_id = attempt.dispatch_id.clone();
-            let event = match (&attempt.effect, dispatch_id) {
-                (ExternalEffectState::Prepared, None) => SessionEvent::ProviderAttemptNotStarted {
-                    attempt_id,
-                    reason: ProviderAttemptNotStartedReason::Cancelled {
-                        reason: "interrupted before the request was dispatched".to_string(),
-                    },
-                },
-                (ExternalEffectState::Prepared, Some(dispatch_id)) => {
-                    SessionEvent::ProviderAttemptNotStartedV2 {
-                        attempt_id,
-                        dispatch_id,
-                        reason: ProviderAttemptNotStartedReason::Cancelled {
-                            reason: "interrupted before the request was dispatched".to_string(),
-                        },
-                    }
-                }
-                (_, None) => SessionEvent::ProviderAttemptFinished {
-                    attempt_id,
-                    outcome: crate::session_journal::CompletionOutcome::Cancelled,
-                    response_digest: None,
-                },
-                (_, Some(dispatch_id)) => SessionEvent::ProviderAttemptFinishedV2 {
+            let reason = ProviderAttemptNotStartedReason::Cancelled {
+                reason: "interrupted before the request was dispatched".to_string(),
+            };
+            let event = match dispatch_id {
+                None => SessionEvent::ProviderAttemptNotStarted { attempt_id, reason },
+                Some(dispatch_id) => SessionEvent::ProviderAttemptNotStartedV2 {
                     attempt_id,
                     dispatch_id,
-                    outcome: crate::session_journal::CompletionOutcome::Cancelled,
-                    response_digest: None,
+                    reason,
                 },
             };
             self.append_journal_event(event).await?;
         }
 
+        // A DISPATCHED attempt is a different question from a prepared one and
+        // takes the receipt that says so. It used to take `Cancelled` with no
+        // digest, which the reducer accepts only for an attempt that streamed
+        // nothing — so the moment an interruption caught a reply part-way, the
+        // one routine meant to settle it was refused
+        // ("provider attempt ... has durable events without a response
+        // digest") and the session stayed unsettleable for the rest of its life.
+        self.abandon_unobserved_provider_attempts(turn_id).await?;
+
         Ok(())
+    }
+
+    /// Write the honest terminal receipt for every provider attempt of
+    /// `turn_id` whose outcome this process never observed, and report whether
+    /// there was one.
+    ///
+    /// This is the fourth thing an interrupted turn can do with an in-flight
+    /// request, alongside continuing it, reconciling it against evidence, and
+    /// proving it never started: ABANDON it, with the fact that its outcome is
+    /// unknown written down rather than assumed away. It is honest for the
+    /// same reason the other three are not available here — it asserts
+    /// nothing about what the provider did. The receipt records this engine's
+    /// outcome (`Failed` — no usable reply), the reason
+    /// ([`crate::recovery::PROVIDER_OUTCOME_ABANDONED_UNOBSERVED`], which says
+    /// in words that the request may have been served and billed), and the
+    /// digest of exactly the bytes that were durably captured, so the claim
+    /// stays checkable against the journal's own stream.
+    ///
+    /// What it deliberately does NOT do is mark the stream finished. A
+    /// correlated stream may only be finished once its events carry a terminal
+    /// `Done`, and this one never will — so it stays open forever, which is
+    /// the durable record that the reply was cut off mid-flight.
+    ///
+    /// PROVIDER attempts only. A running tool or child keeps blocking the
+    /// turn, and must: its unobserved effect can be a booked shipment, and
+    /// releasing the next turn as though it were settled is how one
+    /// interruption becomes two charges. An unserved provider request has no
+    /// such twin — the cost it may have incurred is recorded here and no later
+    /// turn repeats it.
+    async fn abandon_unobserved_provider_attempts(
+        &self,
+        turn_id: &str,
+    ) -> Result<bool, AgentError> {
+        let mut abandoned = false;
+        loop {
+            let journal = self.session_journal.as_ref().ok_or_else(|| {
+                AgentError::SessionAuthority("session journal is not initialized".to_string())
+            })?;
+            let mut last_error = None;
+            let mut wrote = false;
+            // Re-derive the receipt if a stream batch lands between reading the
+            // state and appending, which would leave the digest describing a
+            // stream that has since grown. The window is one append wide and it
+            // shuts permanently: once the receipt lands the attempt is no longer
+            // `Unknown`, and the reducer refuses every later batch on it. Only
+            // the forwarder task can re-open it, and once the engine has dropped
+            // its receiver that task commits at most one more batch before its
+            // next send fails and it returns. Two passes would do.
+            for _ in 0..ABANDONMENT_RECEIPT_PASSES {
+                let state = journal
+                    .state()
+                    .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                let Some((attempt_id, attempt)) =
+                    state.provider_attempts.iter().find(|(_, attempt)| {
+                        attempt.turn_id == turn_id
+                            && matches!(attempt.effect, ExternalEffectState::Unknown)
+                    })
+                else {
+                    return Ok(abandoned);
+                };
+                let attempt_id = attempt_id.clone();
+                let dispatch_id = attempt.dispatch_id.clone();
+                let response_digest = durable_attempt_response_digest(&state, &attempt_id)?;
+                let outcome = crate::session_journal::CompletionOutcome::Failed {
+                    error: crate::recovery::PROVIDER_OUTCOME_ABANDONED_UNOBSERVED.to_string(),
+                };
+                let event = match dispatch_id {
+                    None => SessionEvent::ProviderAttemptFinished {
+                        attempt_id,
+                        outcome,
+                        response_digest,
+                    },
+                    Some(dispatch_id) => SessionEvent::ProviderAttemptFinishedV2 {
+                        attempt_id,
+                        dispatch_id,
+                        outcome,
+                        response_digest,
+                    },
+                };
+                match self.append_journal_event(event).await {
+                    Ok(()) => {
+                        wrote = true;
+                        break;
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            if !wrote {
+                return Err(last_error.unwrap_or_else(|| {
+                    AgentError::SessionAuthority(
+                        "an interrupted provider attempt could not be abandoned".to_string(),
+                    )
+                }));
+            }
+            abandoned = true;
+        }
     }
 
     /// Tool execution ids of `turn_id` whose durable effect matches `wanted`,
@@ -10611,6 +10894,24 @@ impl AgentEngine {
             Some(checkpoint) => FailureGuard::restore(&checkpoint.failure_guard)?,
             None => FailureGuard::from_env(),
         };
+        // Served-failure retry budget for this run. Read here beside the
+        // other per-run `WAYLAND_MAX_*` guards so one run cannot have the
+        // budget change under it between turns.
+        let StreamRetryBudget {
+            retries: max_stream_retries,
+            clamped_from: retry_budget_clamped_from,
+        } = resolve_max_stream_retries(std::env::var(MAX_STREAM_RETRIES_ENV).ok().as_deref());
+        if let Some(requested) = retry_budget_clamped_from {
+            // On the user's surface, not through `warn!`: with `RUST_LOG`
+            // unset only ERROR reaches stderr, so a log line here reaches
+            // nobody and the user silently runs a budget they did not ask
+            // for. Same channel the retry notice below uses.
+            self.output.emit_info(&format!(
+                "{MAX_STREAM_RETRIES_ENV}={requested} is above the ceiling of \
+                 {MAX_STREAM_RETRIES_CEILING}; using {MAX_STREAM_RETRIES_CEILING} \
+                 provider retries for this run."
+            ));
+        }
         let mut turn = match resume_checkpoint.as_ref() {
             Some(checkpoint) => usize::try_from(checkpoint.turn_index).map_err(|_| {
                 AgentError::SessionAuthority(
@@ -10689,6 +10990,15 @@ impl AgentEngine {
             // recovery contract. Worst case after a mid-turn resume is one
             // further retry — still bounded, never a loop.
             let mut output_truncation_retried = false;
+            // #923(3) ORPHAN-REPAIR GATE: bounds the repair-and-retry of an
+            // orphaned tool-pair 400 to ONE extra provider send per turn.
+            // Deliberately NOT carried on the recovery checkpoint, for the same
+            // reason as `output_truncation_retried` above: a resumed turn
+            // re-dispatches from scratch and widening the checkpoint schema for
+            // a per-turn guard would couple this fix to the recovery contract.
+            // Worst case after a mid-turn resume is one further retry — still
+            // bounded, never a loop.
+            let mut orphan_repair_retried = false;
             let mut resumed_provider_dispatch = false;
             let mut resumed_dispatch_id = None;
             let (mut request, effective_model, mut input_token_estimate, mut last_routed_model) =
@@ -11450,14 +11760,16 @@ impl AgentEngine {
             // retry, even though the identical error BEFORE headers
             // would have been retried by the provider's own retry
             // layer. Now the engine re-issues the same request up to
-            // `MAX_STREAM_RETRIES` times with linear backoff.
+            // `max_stream_retries` times with linear backoff — resolved once
+            // per run from `WAYLAND_MAX_STREAM_RETRIES`, defaulting to
+            // `DEFAULT_MAX_STREAM_RETRIES` and clamped at
+            // `MAX_STREAM_RETRIES_CEILING`.
             //
             // A truncated stream (channel closes with no `Done` event)
             // is likewise treated as a failed attempt and retried; if
             // every attempt is exhausted the turn ends as an ERROR
             // verdict (not the old silent "successful empty turn" that
             // poisoned the SkillRouter / auto-skill learning).
-            const MAX_STREAM_RETRIES: u32 = 2;
             // T3: appended to the OUTBOUND system prompt for the single
             // output-cap retry (never persisted). Re-sending byte-identical
             // context after a truncation just buys the same cut again.
@@ -12071,41 +12383,80 @@ impl AgentEngine {
                     (None, _) => Arc::clone(&self.provider),
                 };
                 let provider_cancel = self.cancel_token.clone();
-                let provider_result = tokio::select! {
-                    biased;
-                    _ = provider_cancel.cancelled() => {
-                        {
-                            let mut fallback_state = fallback_budget_state
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            if let Some(reservation) = fallback_state.current.take() {
-                                // Cancellation may race a physical send. Once the
-                                // provider future has been polled, its outcome is
-                                // unknown; consume the conservative reservation so
-                                // the session neither understates possible spend
-                                // nor leaves an in-flight reservation stranded.
-                                let (input_tokens, output_tokens, cost_usd) =
-                                    reservation.conservative_charge();
-                                let _ = reservation.settle(input_tokens, output_tokens, cost_usd);
-                            }
-                        }
-                        if journal_turn_id.is_none() {
-                            self.prepare_durable_conversation().await?;
-                            self.save_session_mirror();
-                        }
-                        self.output.emit_info("Run cancelled while waiting for the provider.");
-                        return Err(AgentError::UserAborted);
-                    }
-                    result = wcore_providers::retry::scope_configured_fallback_admitter(
-                        fallback_admitter,
-                        wcore_providers::retry::scope_max_retries(
-                            0,
-                            wcore_providers::retry::observe_provider_attempts(
-                                attempt_observer,
-                                attempt_provider.stream(&request),
+                // #1077 — the DISPATCH window: request sent, response head not
+                // back yet. Measured at 30.076s of complete silence against a
+                // blackholed endpoint, which from here is indistinguishable
+                // from a hang. `awaiting_first_byte` owns the timer; this
+                // channel is how its notice reaches the user.
+                //
+                // It has to be drained CONCURRENTLY with the dispatch, which is
+                // why the select became a loop: a notice delivered after the
+                // dispatch resolved is a notice about a wait that is already
+                // over. Only the dispatch arm breaks the loop, so the notice
+                // can never shorten or cancel the request it reports on.
+                //
+                // Scoped in a block of its own so the pinned dispatch future is
+                // dropped the moment the loop ends. `tokio::select!` used to
+                // drop it with the expression; a `loop` + `pin!` would instead
+                // hold its borrow of `request` to the end of the enclosing
+                // block, where the retry paths below need `&mut request`.
+                let provider_result = {
+                    let (silence_tx, mut silence_rx) = tokio::sync::mpsc::channel::<LlmEvent>(4);
+                    let dispatch = wcore_providers::http_client::awaiting_first_byte(
+                        wcore_providers::retry::scope_configured_fallback_admitter(
+                            fallback_admitter,
+                            wcore_providers::retry::scope_max_retries(
+                                0,
+                                wcore_providers::retry::observe_provider_attempts(
+                                    attempt_observer,
+                                    attempt_provider.stream(&request),
+                                ),
                             ),
                         ),
-                    ) => result,
+                        &silence_tx,
+                    );
+                    tokio::pin!(dispatch);
+                    loop {
+                        tokio::select! {
+                        biased;
+                        _ = provider_cancel.cancelled() => {
+                            {
+                                let mut fallback_state = fallback_budget_state
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                if let Some(reservation) = fallback_state.current.take() {
+                                    // Cancellation may race a physical send. Once the
+                                    // provider future has been polled, its outcome is
+                                    // unknown; consume the conservative reservation so
+                                    // the session neither understates possible spend
+                                    // nor leaves an in-flight reservation stranded.
+                                    let (input_tokens, output_tokens, cost_usd) =
+                                        reservation.conservative_charge();
+                                    let _ = reservation.settle(input_tokens, output_tokens, cost_usd);
+                                }
+                            }
+                            if journal_turn_id.is_none() {
+                                self.prepare_durable_conversation().await?;
+                                self.save_session_mirror();
+                            }
+                            self.output.emit_info("Run cancelled while waiting for the provider.");
+                            return Err(AgentError::UserAborted);
+                        }
+                        result = &mut dispatch => break result,
+                        // The same signal the stream-poll path already emits, and
+                        // rendered with the same words: from the user's side the
+                        // two windows are one wait. The provider crate carries the
+                        // fact, this layer owns the prose.
+                        Some(event) = silence_rx.recv() => {
+                            if let LlmEvent::StreamSilent { silent_for } = event {
+                                self.output.emit_info(&format!(
+                                    "Still waiting on the provider - no output for {}s.",
+                                    silent_for.as_secs()
+                                ));
+                            }
+                        }
+                        }
+                    }
                 };
                 let (current_attempt_provider, current_attempt_model, fallback_admission_failure) = {
                     let mut fallback_state = fallback_budget_state
@@ -12262,6 +12613,23 @@ impl AgentEngine {
                             "context overflow on {routed_model} ({required_tokens} tokens > \
                              {model_window} window) — compacted and retrying"
                         ));
+                        // #923(2) — the overflowing send left a nonterminal
+                        // physical attempt, exactly as the retryable arm below
+                        // does. Settle it BEFORE the compaction, so both exits
+                        // of this arm are covered: the compaction failure
+                        // return just below, and the `continue` at the bottom
+                        // whose retry may SUCCEED — and a turn still holding a
+                        // nonterminal attempt cannot take `TurnCommitted`
+                        // either (`require_turn_descendants_terminal`), so the
+                        // recovered answer would be replaced by the reducer
+                        // InvalidTransition. Same convention as the orphaned
+                        // tool-pair repair arm below, which settles before its
+                        // own `continue` for this reason.
+                        self.settle_failed_turn_provider_attempts(&format!(
+                            "context overflow on {routed_model}: {required_tokens} tokens \
+                             exceeds the {model_window} token window"
+                        ))
+                        .await;
                         if let Err(e) = self.run_compaction().await {
                             self.prepare_durable_conversation().await?;
                             self.fire_on_session_end(turn).await;
@@ -12285,6 +12653,97 @@ impl AgentEngine {
                     Err(e) => {
                         let failure = wcore_providers::retry::provider_failure_code(&e);
                         self.output.emit_provider_failure(&failure);
+                        // #923(1) — capture the evidence. This arm is the only
+                        // place that holds BOTH halves of a malformed-request
+                        // failure: the `messages` array exactly as it went out,
+                        // and the provider's own sentence naming what was wrong
+                        // with it. Everything below this point discards them.
+                        //
+                        // Only a SERVED refusal has a request to capture or a
+                        // refusal to report. `MissingApiKey` and
+                        // `NotAttempted` are non-retryable and land in this same
+                        // arm, and nothing was ever sent for either — the budget
+                        // reservation above is released for exactly that reason.
+                        // Filing "the exact request that was refused" for one
+                        // would be a record of something that did not happen,
+                        // and "Provider rejected this request" would be a claim
+                        // about a provider that was never asked.
+                        let served_refusal = matches!(e, ProviderError::Api { .. });
+                        let captured = if served_refusal {
+                            self.capture_rejected_provider_request(&request, &failure, &e)
+                        } else {
+                            None
+                        };
+                        let mut surfaced = if served_refusal {
+                            format!("Provider rejected this request: {e}")
+                        } else {
+                            format!("The provider call failed with no response: {e}")
+                        };
+                        if let Some(path) = captured.as_ref() {
+                            surfaced.push_str(&format!(
+                                " The exact request that was refused was captured to {} — \
+                                 attach it when reporting this.",
+                                path.display()
+                            ));
+                        }
+                        // #923(3) — an orphaned tool_use/tool_result pair is the
+                        // one client error worth a second send: it is exactly
+                        // what the unconditional pre-send repair exists to
+                        // prevent, so a 400 naming one means the repair missed a
+                        // path. Repair again from the live history and re-send
+                        // ONCE. `is_orphaned_tool_pair_rejection` keeps this off
+                        // every other 400 — an auth refusal fails identically on
+                        // a second send and must never be billed twice.
+                        //
+                        // This gate is checked BEFORE `emit_error`: a refusal
+                        // that is about to be retried is not the run's outcome,
+                        // and a turn that goes on to succeed must not leave a
+                        // hard error on the host's channel — the host renders
+                        // it, and the SkillRouter/auto-skill observers record a
+                        // FAILURE for a turn that produced an answer. The
+                        // sibling ContextOverflow retry arm above emits info for
+                        // exactly this reason. The capture is still written
+                        // either way, and still named.
+                        if !orphan_repair_retried && is_orphaned_tool_pair_rejection(&e) {
+                            orphan_repair_retried = true;
+                            self.output.emit_provider_retry(Some("orphaned_tool_pair"));
+                            let mut retry_note = "provider rejected the request for an \
+                                 orphaned tool_use/tool_result pair — repaired the \
+                                 conversation and retrying once"
+                                .to_string();
+                            if let Some(path) = captured.as_ref() {
+                                retry_note.push_str(&format!(
+                                    " (the refused request was captured to {})",
+                                    path.display()
+                                ));
+                            }
+                            self.output.emit_info(&retry_note);
+                            self.settle_failed_turn_provider_attempts(&e.to_string())
+                                .await;
+                            self.repair_all_orphaned_tool_uses();
+                            self.repair_orphaned_tool_results();
+                            request.messages = self.messages.clone();
+                            let recount = estimate::estimate_request_tokens(
+                                &self.messages,
+                                &request.system,
+                                &request.tools,
+                            );
+                            request.client_context_tokens = Some(recount);
+                            self.sync_active_journal_conversation().await?;
+                            continue 'stream;
+                        }
+                        self.output.emit_error(&surfaced, false);
+                        // #923(2) — fail the TURN, not the session. The dispatch
+                        // left this turn's provider attempt nonterminal, and the
+                        // reducer will not let a turn holding one take ANY
+                        // terminal receipt: `sync_journal_conversation` then
+                        // fails with `InvalidTransition` and that authority
+                        // error becomes the error the caller sees, in place of
+                        // the provider's own words. Settle the attempt with the
+                        // honest failure receipt first, so the provider error is
+                        // what propagates and the session stays usable.
+                        self.settle_failed_turn_provider_attempts(&e.to_string())
+                            .await;
                         return Err(e.into());
                     }
                 };
@@ -12383,6 +12842,21 @@ impl AgentEngine {
                             // `tool_calls`: running a call whose arguments
                             // stop mid-value is worse than not running it.
                             attempt_truncated_tool_calls.push((name, partial_arg_bytes));
+                        }
+                        LlmEvent::StreamSilent { silent_for } => {
+                            // The provider accepted the request and has sent
+                            // nothing since. NOT a failure: the read timeout
+                            // has not fired and this turn is still live, so
+                            // the attempt is not touched. Say it out loud
+                            // anyway — from the user's side a healthy silent
+                            // stream and a hung one look identical, and the
+                            // product used to say nothing for up to five
+                            // minutes. Rendering lives here because the
+                            // provider crate carries the fact, not the prose.
+                            self.output.emit_info(&format!(
+                                "Still waiting on the provider - no output for {}s.",
+                                silent_for.as_secs()
+                            ));
                         }
                         LlmEvent::Error(e) => {
                             if crate::journal_provider::is_journal_authority_error(&e) {
@@ -12801,6 +13275,36 @@ impl AgentEngine {
                 let failure_code =
                     stream_failure_code.unwrap_or_else(|| "stream_truncated".to_string());
                 self.output.emit_provider_failure(&failure_code);
+                // #923(2), second half — settle the physical attempt that
+                // just failed HERE, at the one point every failed attempt
+                // passes through, rather than at one of the exits below.
+                // The retryable dispatch arm above (`Err(e) if e.is_retryable()`)
+                // leaves its attempt nonterminal, and
+                // `require_turn_descendants_terminal` refuses ANY terminal
+                // receipt — `TurnCommitted` included — for a turn still
+                // holding one. Settling only on the retry-EXHAUSTED exit
+                // leaves the common case broken: a 500 whose RETRY SUCCEEDS
+                // still cannot commit its turn, and the caller is handed the
+                // reducer InvalidTransition in place of the answer the
+                // provider actually produced. Every other exit out of this
+                // failure block — the output-stall gate, the budget
+                // cancellation, the backoff cancellation and the exhausted
+                // budget — is downstream of this line for the same reason.
+                //
+                // The receipt carries `reason`, the provider error observed on
+                // THIS attempt, exactly as the dispatch arm settles with
+                // `e.to_string()`: the journal records what the provider said,
+                // not what we told the user about it. Settling per attempt
+                // here also keeps each receipt carrying its own error rather
+                // than the last one for the whole turn.
+                //
+                // No stream forwarder can be racing this. `forward_durable_stream`
+                // writes its terminal receipt BEFORE it sends the `Error` / `Done`
+                // event that ends the recv loop above, and its one deliberate
+                // leave-it-`Unknown` exit (`tx.closed()`) fires only once the
+                // receiver has already been dropped. Every attempt reaching here
+                // is therefore already terminal or permanently abandoned.
+                self.settle_failed_turn_provider_attempts(&reason).await;
                 // v0.9.1.1 B6: HTTP 4xx errors (especially 400
                 // `invalid_request_error`) are NOT transient — retrying
                 // sends the same malformed request and burns the retry
@@ -12841,7 +13345,7 @@ impl AgentEngine {
                     });
                     tokio::time::Instant::now() < deadline
                 } else {
-                    stream_attempt < MAX_STREAM_RETRIES
+                    stream_attempt < max_stream_retries
                 };
                 if !is_client_error && !permanent_endpoint && retry_admitted {
                     // Spec v1 Task 5 (clean retry): a retry re-sends the whole
@@ -12916,7 +13420,7 @@ impl AgentEngine {
                     let backoff = if unserved {
                         unserved_retry_backoff(stream_attempt)
                     } else {
-                        std::time::Duration::from_millis(500 * stream_attempt as u64)
+                        served_retry_backoff(stream_attempt)
                     };
                     let progress = match unserved_deadline.filter(|_| unserved) {
                         Some(deadline) => format!(
@@ -12925,7 +13429,7 @@ impl AgentEngine {
                                 .saturating_duration_since(tokio::time::Instant::now())
                                 .as_secs()
                         ),
-                        None => format!("attempt {stream_attempt}/{MAX_STREAM_RETRIES}"),
+                        None => format!("attempt {stream_attempt}/{max_stream_retries}"),
                     };
                     self.output.emit_info(&format!(
                         "Provider stream failed ({reason}); retrying ({progress})…"
@@ -12949,7 +13453,6 @@ impl AgentEngine {
                 // billed nothing usable; surface a hard error so the
                 // host (and the SkillRouter / auto-skill observers)
                 // record a FAILURE, not a silent empty success.
-                //
                 // Fail SAFELY first. Everything this run has already done —
                 // the instructions the user gave once at the start, every tool
                 // result, the assistant turns that produced the files now
@@ -13204,7 +13707,13 @@ impl AgentEngine {
             // host shows nothing and the user can't tell what went wrong.
             // Surface a visible, non-retryable error instead of the silent
             // no-op. (Genuine content/tool-call/thinking turns are unaffected.)
-            if assistant_content.is_empty() {
+            //
+            // #1109b widens the guard from "no content at all" to "nothing the
+            // user can read and nothing left to run". A turn carrying ONLY
+            // reasoning has non-empty `assistant_content` and so escaped this
+            // guard entirely: the run returned Ok with an empty answer and
+            // nothing on any channel — literally nothing happened.
+            if assistant_text.is_empty() && tool_calls.is_empty() {
                 // T3: `finish_reason=length` is a KNOWN cause of an empty
                 // turn — the model spent its whole output budget (typically
                 // on reasoning tokens) and was cut off before emitting
@@ -13216,6 +13725,25 @@ impl AgentEngine {
                     "The model was cut off by the provider's output token limit before it \
                      produced any content — this turn is TRUNCATED, not complete. Raise \
                      this model's max_tokens, or ask for the work in smaller pieces."
+                } else if finish_reason == FinishReason::Error {
+                    // #1109b: the same argument that carved out `Length`.
+                    // `Error` means the PROVIDER signalled a failure (or sent a
+                    // stop signal the mapper could not classify) — a fact about
+                    // this response, not evidence about the wire format. Report
+                    // the fact; do not send the user to verify an endpoint that
+                    // is answering.
+                    "The provider ended this turn with an error stop signal and produced no \
+                     content. That is the provider reporting a failure on this request, not \
+                     a wire-format mismatch — check the provider's own error detail (and any \
+                     content filter or safety stop) for it."
+                } else if !assistant_content.is_empty() {
+                    // Reasoning, and nothing else. The model thought and then
+                    // said nothing; the thinking is not an answer and on most
+                    // hosts is not even displayed.
+                    "The model produced only reasoning — no answer text and no tool calls — \
+                     so this turn ended with nothing to show. Ask again, or raise this \
+                     model's max_tokens if its reasoning is consuming the whole output \
+                     budget."
                 } else {
                     "Provider returned an empty response — no content and no tool calls. \
                      The endpoint or model may be incompatible (verify it speaks the OpenAI \
@@ -17262,6 +17790,165 @@ impl AgentEngine {
     /// Bootstrap calls this when the M2 audit log is wired.
     pub fn set_audit_log(&mut self, log: Arc<wcore_memory::audit::AuditLog>) {
         self.audit_log = Some(log);
+    }
+
+    /// #923(1) — write the exact provider request that was refused, and the
+    /// provider's own reason for refusing it, beside the session it belongs to.
+    ///
+    /// Best-effort by construction: a capture that cannot be written must never
+    /// replace the provider error as the cause of the stop, so every failure
+    /// here is logged and swallowed. Returns the path written, or `None` when
+    /// this engine has no session directory of its own to write into.
+    fn capture_rejected_provider_request(
+        &self,
+        request: &LlmRequest,
+        failure_code: &str,
+        error: &ProviderError,
+    ) -> Option<std::path::PathBuf> {
+        // No session manager means no session directory this engine owns; an
+        // ephemeral run has nowhere to put this that its user would ever find.
+        self.session_manager.as_ref()?;
+        let session_id = self
+            .current_session_id()
+            .unwrap_or_else(|| "unidentified-session".to_string());
+        let directory =
+            std::path::Path::new(self.config.session.directory.as_str()).join("rejected-requests");
+        if let Err(err) = std::fs::create_dir_all(&directory) {
+            tracing::warn!(
+                error = %err,
+                "could not create the rejected-request capture directory"
+            );
+            return None;
+        }
+        let now = chrono::Utc::now();
+        let path = directory.join(format!(
+            "{session_id}-{stamp}-{unique}.json",
+            stamp = now.format("%Y%m%dT%H%M%S%3fZ"),
+            unique = uuid::Uuid::new_v4().simple(),
+        ));
+        let record = serde_json::json!({
+            "captured_at": now.to_rfc3339(),
+            "session_id": session_id,
+            "turn_id": self.active_journal_turn_id,
+            "provider_failure_code": failure_code,
+            "provider_error": error.to_string(),
+            "model": request.model,
+            "system": request.system,
+            "tools": request
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            "messages": request.messages,
+        });
+        let bytes = match serde_json::to_vec_pretty(&record) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not serialize the rejected provider request");
+                return None;
+            }
+        };
+        match std::fs::write(&path, bytes) {
+            Ok(()) => Some(path),
+            Err(err) => {
+                tracing::warn!(error = %err, "could not write the rejected provider request");
+                None
+            }
+        }
+    }
+
+    /// #923(2) — settle every provider attempt of the ACTIVE journal turn that
+    /// a failed dispatch left nonterminal, so the turn itself can take a
+    /// terminal receipt.
+    ///
+    /// `require_turn_descendants_terminal` (`session_journal/reducer.rs`)
+    /// refuses ANY terminal transition for a turn that still holds a `Prepared`
+    /// or `Unknown` provider attempt. Without this, a provider error returned
+    /// straight out of the dispatch arm makes the turn unclosable, and the
+    /// reducer's `InvalidTransition` — raised much later, in
+    /// `sync_journal_conversation` — becomes the error the caller sees INSTEAD
+    /// of the provider's own words.
+    ///
+    /// Nothing here claims an outcome that was not observed. A `Prepared`
+    /// attempt has no durable start event, so it takes the not-started receipt
+    /// the journal already proves; an attempt that was dispatched takes
+    /// `Failed` carrying the provider's error, which is precisely what this
+    /// process saw. Failures are logged and swallowed: this routine exists to
+    /// stop one error masking another and must never become the mask itself.
+    async fn settle_failed_turn_provider_attempts(&self, error: &str) {
+        let Some(turn_id) = self.active_journal_turn_id.clone() else {
+            return;
+        };
+        if self.session_journal.is_none() {
+            return;
+        }
+        loop {
+            let Some(journal) = self.session_journal.as_ref() else {
+                return;
+            };
+            let state = match journal.state() {
+                Ok(state) => state,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "could not read journal state to settle a failed turn's provider attempts"
+                    );
+                    return;
+                }
+            };
+            let Some((attempt_id, attempt)) =
+                state.provider_attempts.iter().find(|(_, attempt)| {
+                    attempt.turn_id == turn_id
+                        && matches!(
+                            attempt.effect,
+                            ExternalEffectState::Prepared | ExternalEffectState::Unknown
+                        )
+                })
+            else {
+                return;
+            };
+            let attempt_id = attempt_id.clone();
+            let dispatch_id = attempt.dispatch_id.clone();
+            let event = match (&attempt.effect, dispatch_id) {
+                (ExternalEffectState::Prepared, None) => SessionEvent::ProviderAttemptNotStarted {
+                    attempt_id,
+                    reason: ProviderAttemptNotStartedReason::Cancelled {
+                        reason: format!("the provider call failed before dispatch: {error}"),
+                    },
+                },
+                (ExternalEffectState::Prepared, Some(dispatch_id)) => {
+                    SessionEvent::ProviderAttemptNotStartedV2 {
+                        attempt_id,
+                        dispatch_id,
+                        reason: ProviderAttemptNotStartedReason::Cancelled {
+                            reason: format!("the provider call failed before dispatch: {error}"),
+                        },
+                    }
+                }
+                (_, None) => SessionEvent::ProviderAttemptFinished {
+                    attempt_id,
+                    outcome: crate::session_journal::CompletionOutcome::Failed {
+                        error: error.to_owned(),
+                    },
+                    response_digest: None,
+                },
+                (_, Some(dispatch_id)) => SessionEvent::ProviderAttemptFinishedV2 {
+                    attempt_id,
+                    dispatch_id,
+                    outcome: crate::session_journal::CompletionOutcome::Failed {
+                        error: error.to_owned(),
+                    },
+                    response_digest: None,
+                },
+            };
+            if let Err(err) = self.append_journal_event(event).await {
+                tracing::warn!(
+                    error = %err,
+                    "could not settle a nonterminal provider attempt after a failed dispatch"
+                );
+                return;
+            }
+        }
     }
 
     async fn prepare_durable_conversation(&mut self) -> Result<(), AgentError> {
@@ -29089,12 +29776,15 @@ mod audit_2026_05_22_tests {
         );
         assert!(
             matches!(
-                state.provider_attempts["attempt-1"].effect,
+                &state.provider_attempts["attempt-1"].effect,
                 crate::session_journal::ExternalEffectState::Completed {
-                    outcome: crate::session_journal::CompletionOutcome::Cancelled
-                }
+                    outcome: crate::session_journal::CompletionOutcome::Failed { error }
+                } if error == crate::recovery::PROVIDER_OUTCOME_ABANDONED_UNOBSERVED
             ),
-            "an in-flight provider attempt takes the cancelled receipt: {:?}",
+            "an in-flight provider attempt terminalizes as UNOBSERVED, held to the same \
+             standard as the interrupted tool above: never succeeded, never not-started, and \
+             not merely `Cancelled` either — the request left this machine and may have been \
+             served and charged for, which the receipt has to say rather than imply: {:?}",
             state.provider_attempts["attempt-1"].effect
         );
         assert_eq!(
@@ -33201,5 +33891,535 @@ mod crucible_error_card_tests {
             result.text
         );
         drop(redactor);
+    }
+}
+
+/// #923(3) — the gate that decides whether a client error may be re-sent.
+///
+/// The POSITIVE case is covered end-to-end by
+/// `tests/issue_923_1109b_red_test.rs`; what is pinned here is the NEGATIVE
+/// half, because that is the half whose failure is silent. A gate that matched
+/// too widely would turn every malformed request into two billed sends and
+/// nothing in the output would say so.
+#[cfg(test)]
+mod issue_923_orphan_repair_gate_tests {
+    use super::is_orphaned_tool_pair_rejection;
+    use wcore_providers::ProviderError;
+
+    fn api(status: u16, message: &str) -> ProviderError {
+        ProviderError::Api {
+            status,
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn anthropic_orphaned_tool_use_400_matches() {
+        assert!(is_orphaned_tool_pair_rejection(&api(
+            400,
+            "messages.1: `tool_use` ids were found without `tool_result` blocks immediately \
+             after: toolu_01ABC. Each `tool_use` block must have a corresponding `tool_result` \
+             block in the next message."
+        )));
+    }
+
+    #[test]
+    fn reverse_direction_orphaned_tool_result_400_matches() {
+        assert!(is_orphaned_tool_pair_rejection(&api(
+            400,
+            "messages.2: unexpected `tool_result` blocks: the previous message does not \
+             contain any `tool_use` blocks"
+        )));
+    }
+
+    #[test]
+    fn auth_400_is_never_repair_retried() {
+        // The one that stops this becoming a blind second send of every client
+        // error: an invalid key fails identically on attempt two.
+        assert!(!is_orphaned_tool_pair_rejection(&api(
+            400,
+            "invalid x-api-key"
+        )));
+        assert!(!is_orphaned_tool_pair_rejection(&api(
+            400,
+            "authentication_error: invalid bearer token"
+        )));
+    }
+
+    #[test]
+    fn unrelated_400s_do_not_match() {
+        // Mentions tools, but names no pairing fault.
+        assert!(!is_orphaned_tool_pair_rejection(&api(
+            400,
+            "tool_use is not supported by this model; drop `tool_result` handling"
+        )));
+        // Names a pairing fault, but is not a request-shape refusal we can
+        // repair — the model, not the array, is wrong.
+        assert!(!is_orphaned_tool_pair_rejection(&api(
+            404,
+            "model not found: `tool_use` / `tool_result` without a route"
+        )));
+    }
+
+    #[test]
+    fn non_api_errors_do_not_match() {
+        assert!(!is_orphaned_tool_pair_rejection(
+            &ProviderError::MissingApiKey
+        ));
+        assert!(!is_orphaned_tool_pair_rejection(
+            &ProviderError::Connection("tool_use tool_result without".to_string())
+        ));
+    }
+}
+
+/// Lane `engine-retry-budget`. Two things are under test here, and they are
+/// the same defect seen from two ends: the engine spends the user's money and
+/// the user's time on provider retries, and until now it neither let them say
+/// how much nor told them while it was happening.
+///
+/// (a) the served-failure retry count is a tunable with a CLAMP, and its
+///     default is byte-for-byte what it was.
+/// (b) a provider stream that has gone quiet is announced on the user's
+///     surface — the same `emit_info` channel the retry notice already uses.
+#[cfg(test)]
+mod stream_retry_budget_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    use crate::test_utils::TestSink;
+
+    /// A provider that replays the SAME script on every call and counts the
+    /// calls, so a test can read the engine's retry budget off the number of
+    /// physical sends the provider saw.
+    struct RepeatProvider {
+        script: Vec<LlmEvent>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RepeatProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let script = self.script.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                for ev in script {
+                    let _ = tx.send(ev).await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    fn done_endturn() -> LlmEvent {
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: TokenUsage::default(),
+        }
+    }
+
+    /// Every message the engine put on the user's surface, in order.
+    fn notices(events: &[serde_json::Value]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| {
+                event
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    /// Drive one run against a provider replaying `script`. Returns the
+    /// physical sends the provider saw and every protocol event the engine
+    /// emitted.
+    async fn run_against(script: Vec<LlmEvent>) -> (usize, Vec<serde_json::Value>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(RepeatProvider {
+            script,
+            calls: Arc::clone(&calls),
+        });
+        let sink = TestSink::new();
+        let surface = sink.handle();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(sink),
+        );
+        engine.max_turns = Some(2);
+        let _ = engine.run("task", "m-1").await;
+        (calls.load(Ordering::SeqCst), surface.snapshot())
+    }
+
+    // --- (a) the retry count is configurable, clamped, and unchanged ------
+
+    /// The whole point of exposing the knob is that exposing it must not move
+    /// the number. A provider that returns a stream and then closes it
+    /// without a `Done` is a SERVED failure, which is the count-bounded path.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_default_served_retry_budget_is_still_two_retries() {
+        let (sends, _) = run_against(Vec::new()).await;
+        assert_eq!(
+            sends, 3,
+            "the shipped budget is 1 send + 2 retries; exposing it as a knob \
+             must not be a silent behaviour change"
+        );
+        assert_eq!(
+            sends,
+            super::DEFAULT_MAX_STREAM_RETRIES as usize + 1,
+            "the loop must spend exactly the resolved budget, not a literal \
+             that can drift away from it"
+        );
+    }
+
+    #[test]
+    fn an_absent_or_unreadable_override_keeps_the_default() {
+        for raw in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("lots"),
+            Some("-1"),
+            Some("2.5"),
+        ] {
+            let resolved = super::resolve_max_stream_retries(raw);
+            assert_eq!(
+                resolved.retries,
+                super::DEFAULT_MAX_STREAM_RETRIES,
+                "{raw:?} must leave the budget at its default"
+            );
+            assert_eq!(resolved.clamped_from, None, "{raw:?} clamped nothing");
+        }
+    }
+
+    #[test]
+    fn an_override_inside_the_ceiling_is_honoured_including_zero() {
+        for requested in [0u32, 1, 5, super::MAX_STREAM_RETRIES_CEILING] {
+            let resolved = super::resolve_max_stream_retries(Some(&requested.to_string()));
+            assert_eq!(
+                resolved.retries, requested,
+                "a budget at or under the ceiling is the user's to choose"
+            );
+            assert_eq!(resolved.clamped_from, None);
+        }
+    }
+
+    /// The clamp is the reason this is not just `unwrap_or(2)`. An unbounded
+    /// value here is not a preference, it is a spend: every attempt on this
+    /// path was served, so each re-send re-bills the whole outbound context.
+    #[test]
+    fn an_override_above_the_ceiling_is_clamped_and_the_user_is_told_which() {
+        let resolved = super::resolve_max_stream_retries(Some("500"));
+        assert_eq!(
+            resolved.retries,
+            super::MAX_STREAM_RETRIES_CEILING,
+            "an over-ceiling request must not be honoured"
+        );
+        assert_eq!(
+            resolved.clamped_from,
+            Some(500),
+            "the clamp must carry what was ASKED for — a notice that cannot \
+             name the rejected value tells the user nothing"
+        );
+    }
+
+    /// The ceiling is derived, not invented, and this pins the derivation:
+    /// the largest retry budget whose cumulative linear backoff still fits
+    /// inside the resilience layer's own recovery cooldown. Past that the
+    /// extra attempts hold the run on a broken endpoint, billed, while the
+    /// component whose job is failover is already waiting.
+    #[test]
+    fn the_ceiling_is_the_largest_budget_that_fits_the_breaker_cooldown() {
+        let cooldown =
+            std::time::Duration::from_secs(wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS);
+        let spent = |budget: u32| {
+            (1..=budget)
+                .map(super::served_retry_backoff)
+                .sum::<std::time::Duration>()
+        };
+        let ceiling = super::MAX_STREAM_RETRIES_CEILING;
+        assert!(
+            spent(ceiling) <= cooldown,
+            "the ceiling ({ceiling}) spends {:?} in backoff, past the {cooldown:?} \
+             cooldown it is supposed to fit inside",
+            spent(ceiling)
+        );
+        assert!(
+            spent(ceiling + 1) > cooldown,
+            "one retry past the ceiling still fits in {cooldown:?} ({:?}) — the \
+             ceiling is lower than its own derivation allows",
+            spent(ceiling + 1)
+        );
+    }
+
+    /// The clamp has to be AUDIBLE, and it has to be the number the run
+    /// actually spends. Wiring, not function: a resolver that knows it
+    /// clamped is worth nothing if the run never says so — and this is the
+    /// only test that reads the real `std::env` path end to end.
+    ///
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn a_clamped_override_is_announced_and_is_the_budget_actually_spent() {
+        let prior = std::env::var(super::MAX_STREAM_RETRIES_ENV).ok();
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test
+        // in this binary, and every test in this module that reads the budget
+        // carries the same attribute.
+        unsafe {
+            std::env::set_var(super::MAX_STREAM_RETRIES_ENV, "500");
+        }
+        let (sends, events) = run_against(Vec::new()).await;
+        unsafe {
+            match prior {
+                Some(prior) => std::env::set_var(super::MAX_STREAM_RETRIES_ENV, prior),
+                None => std::env::remove_var(super::MAX_STREAM_RETRIES_ENV),
+            }
+        }
+
+        let messages = notices(&events);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("500") && m.contains("ceiling")),
+            "the clamp must be announced on the user's surface, naming what \
+             they asked for; surface carried {messages:?}"
+        );
+        assert_eq!(
+            sends,
+            super::MAX_STREAM_RETRIES_CEILING as usize + 1,
+            "the run must spend the CLAMPED budget, not the 500 it was asked \
+             for and not the default it would have used without the override"
+        );
+    }
+
+    /// Wiring, not function — and the direction the whole cost argument for
+    /// this knob points in.
+    ///
+    /// `an_override_inside_the_ceiling_is_honoured_including_zero` proves the
+    /// RESOLVER honours a budget at or below the default; it cannot prove the
+    /// loop spends it, and the clamp test only ever pushes the budget UP.
+    /// Verified by mutation on this tree: flooring the loop bound at the
+    /// default (`max_stream_retries.max(DEFAULT_MAX_STREAM_RETRIES)`) silently
+    /// discarded every budget a user lowered and left all eight other tests in
+    /// this module green. A budget the user cut and the loop ignored is the
+    /// same silent lie the clamp exists to prevent, pointed the other way —
+    /// and it is the direction that costs money.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn a_below_default_budget_is_spent_by_the_loop_not_just_resolved() {
+        for (requested, expected_sends) in [("0", 1usize), ("1", 2usize)] {
+            let prior = std::env::var(super::MAX_STREAM_RETRIES_ENV).ok();
+            // SAFETY: same contract as the clamp test above — every test in
+            // this module that reads the budget is `#[serial_test::serial]`.
+            unsafe {
+                std::env::set_var(super::MAX_STREAM_RETRIES_ENV, requested);
+            }
+            let (sends, events) = run_against(Vec::new()).await;
+            unsafe {
+                match prior {
+                    Some(prior) => std::env::set_var(super::MAX_STREAM_RETRIES_ENV, prior),
+                    None => std::env::remove_var(super::MAX_STREAM_RETRIES_ENV),
+                }
+            }
+
+            assert_eq!(
+                sends,
+                expected_sends,
+                "{}={requested} must cost exactly {expected_sends} physical \
+                 send(s); the loop, not just the resolver, has to spend the \
+                 budget the user set",
+                super::MAX_STREAM_RETRIES_ENV
+            );
+            // The user-visible half: the retry notices they read must match
+            // the sends the provider actually saw.
+            let messages = notices(&events);
+            let retry_notices = messages
+                .iter()
+                .filter(|m| m.contains("Provider stream failed"))
+                .count();
+            assert_eq!(
+                retry_notices,
+                expected_sends - 1,
+                "one retry notice per re-send and no more; surface carried \
+                 {messages:?}"
+            );
+        }
+    }
+
+    // --- (b) a silent provider stream is announced ------------------------
+
+    /// The defect: the provider has accepted the request and sent nothing,
+    /// the read timeout has not fired, and the product says nothing at all
+    /// for up to five minutes. A `warn!` does not fix it — with `RUST_LOG`
+    /// unset only ERROR reaches stderr. It has to land on the same surface
+    /// the retry notice lands on.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_silent_provider_stream_is_announced_on_the_users_surface() {
+        let (_, events) = run_against(vec![
+            LlmEvent::StreamSilent {
+                silent_for: std::time::Duration::from_secs(30),
+            },
+            LlmEvent::TextDelta("late but fine".into()),
+            done_endturn(),
+        ])
+        .await;
+        let messages = notices(&events);
+        let announced: Vec<&String> = messages
+            .iter()
+            .filter(|m| m.contains("Still waiting on the provider"))
+            .collect();
+        assert_eq!(
+            announced.len(),
+            1,
+            "exactly one silence notice must reach the user; surface carried \
+             {messages:?}"
+        );
+        assert!(
+            announced[0].contains("30"),
+            "the notice must say how long it has been quiet, got {:?}",
+            announced[0]
+        );
+    }
+
+    /// Negative control. A stream that answers immediately must add nothing —
+    /// a notice on every healthy turn is noise, and noise is how a real
+    /// warning stops being read. The known-positive is in the same
+    /// assertion: the harness DID observe this run's output.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_normal_fast_stream_produces_no_silence_notice() {
+        let (sends, events) = run_against(vec![
+            LlmEvent::TextDelta("immediate".into()),
+            done_endturn(),
+        ])
+        .await;
+        assert_eq!(sends, 1, "a served, complete stream is sent exactly once");
+        // Known-positive: the harness really did observe this run. Without it
+        // an empty capture would satisfy the absence check below for free.
+        assert!(
+            !events.is_empty(),
+            "the sink captured nothing at all — the absence below proves nothing"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.to_string().contains("Still waiting")),
+            "a healthy turn must produce no silence notice, got {events:?}"
+        );
+    }
+
+    // --- (c) a STALLED DISPATCH is announced ------------------------------
+
+    /// A provider whose `stream()` FUTURE stalls before it has produced a
+    /// channel at all — the blackholed-connect shape from #1077.
+    ///
+    /// `RepeatProvider` cannot express this: it returns its receiver
+    /// immediately, so every wait it models is a wait on an ALREADY
+    /// ESTABLISHED stream, which is the window that already worked.
+    struct StallingDispatchProvider {
+        stall: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StallingDispatchProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            tokio::time::sleep(self.stall).await;
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta("answered".into())).await;
+                let _ = tx.send(done_endturn()).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    /// Drive one run whose dispatch stalls for `stall` before it answers.
+    async fn run_against_stalling_dispatch(stall: std::time::Duration) -> Vec<serde_json::Value> {
+        let provider = Arc::new(StallingDispatchProvider { stall });
+        let sink = TestSink::new();
+        let surface = sink.handle();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(sink),
+        );
+        engine.max_turns = Some(2);
+        let _ = engine.run("task", "m-1").await;
+        surface.snapshot()
+    }
+
+    /// WIRING, not function.
+    ///
+    /// `wcore_providers::http_client::awaiting_first_byte` closing the
+    /// dispatch window is worth nothing unless this file calls it, and that
+    /// call site was graded by nothing else: with the wiring reverted the
+    /// whole wcore-agent suite still passed 3539/3539 while #1077 was fully
+    /// reintroduced. Measured on this host, not assumed.
+    ///
+    /// The two tests above cover the ESTABLISHED-stream window and neither can
+    /// fail for a stalled dispatch: both are handed a provider that has
+    /// already returned its channel.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn a_stalled_dispatch_is_announced_on_the_users_surface() {
+        let threshold = wcore_providers::http_client::stream_silence_notice_after()
+            .expect("the silence notice is enabled by default");
+        let events = run_against_stalling_dispatch(threshold * 2).await;
+        let messages = notices(&events);
+        let announced: Vec<&String> = messages
+            .iter()
+            .filter(|m| m.contains("Still waiting on the provider"))
+            .collect();
+        assert_eq!(
+            announced.len(),
+            1,
+            "a dispatch stalled past {threshold:?} must reach the user exactly \
+             once — the provider had not yet produced a channel, so the \
+             stream-poll notice cannot cover it; surface carried {messages:?}"
+        );
+        assert!(
+            announced[0].contains(&threshold.as_secs().to_string()),
+            "the notice must say how long it has been quiet, got {:?}",
+            announced[0]
+        );
+    }
+
+    /// Negative control for the test above, on the SAME provider and the same
+    /// paused clock — where an over-eager timer WOULD get its chance to fire.
+    /// A dispatch that answers at once must stay silent; without this the test
+    /// above would also pass against a notice that fired unconditionally.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn a_fast_dispatch_produces_no_silence_notice() {
+        let events = run_against_stalling_dispatch(std::time::Duration::ZERO).await;
+        // Known-positive: the harness really did observe this run. Without it
+        // an empty capture would satisfy the absence check below for free.
+        assert!(
+            !events.is_empty(),
+            "the sink captured nothing at all — the absence below proves nothing"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.to_string().contains("Still waiting")),
+            "a dispatch that answered immediately must produce no notice, got {events:?}"
+        );
     }
 }

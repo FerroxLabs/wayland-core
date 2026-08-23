@@ -8,7 +8,7 @@ use crate::spawner::Spawner;
 use wcore_config::hooks::HooksConfig;
 use wcore_protocol::events::ToolCategory;
 use wcore_skills::context_modifier::ContextModifier;
-use wcore_skills::executor::{execute_fork, prepare_inline_content, render_shell_input};
+use wcore_skills::executor::{execute_fork, prepare_inline_content, render_shell_input_in};
 use wcore_skills::hooks::{parse_skill_hooks, to_hook_defs};
 use wcore_skills::permissions::{SkillPermission, SkillPermissionChecker};
 use wcore_skills::refs::SkillCatalog;
@@ -21,6 +21,8 @@ use wcore_types::tool::{JsonSchema, ToolResult};
 
 use wcore_tools::Tool;
 use wcore_tools::context::ToolContext;
+use wcore_tools::vfs::{RealFs, RepoControlDenyFs, VirtualFs};
+use wcore_tools::workspace_policy::WorkspacePolicy;
 
 /// A tool that allows the LLM to invoke named skills.
 ///
@@ -181,12 +183,66 @@ impl SkillTool {
         self.catalog.visible_names().join(", ")
     }
 
+    /// One telemetry event per call, whatever early-return path fires, with
+    /// the session filesystem the artifact writer must be contained by.
+    ///
+    /// Both `Tool::execute` and `Tool::execute_with_ctx` funnel through here.
+    /// The split exists because `execute` has no `ToolContext` and therefore no
+    /// session vfs, and #1097 is precisely the class of bug where one entry
+    /// point is guarded and the other is not.
+    async fn dispatch(&self, input: Value, vfs: &Arc<dyn VirtualFs>) -> ToolResult {
+        let start = Instant::now();
+        let (skill_name_opt, result) = self.execute_inner(input, vfs).await;
+        if let Some(name) = skill_name_opt {
+            let outcome = if result.is_error {
+                SkillOutcome::Failure
+            } else {
+                SkillOutcome::Success
+            };
+            let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let ts_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            self.telemetry_sink.record(SkillTelemetryEvent {
+                skill_name: name,
+                session_id: self.session_id.clone(),
+                outcome,
+                latency_ms,
+                ts_secs,
+            });
+        }
+        result
+    }
+
+    /// The containment an artifact write gets when SkillTool is driven through
+    /// the bare `Tool::execute` entry point, which carries no `ToolContext`.
+    ///
+    /// That is not a test-only path: the cron skill sink builds a transient
+    /// SkillTool and calls `execute()` on it directly, with no dispatcher
+    /// between. Falling back to a bare `RealFs` would leave exactly one
+    /// ungraded call site for the defect this change closes, so the fallback
+    /// is the guard bootstrap installs for EVERY session — the
+    /// repository-control write deny, rooted at this tool's own cwd. It is not
+    /// the session's jail (a contained session's `execute_with_ctx` supplies
+    /// that), but it is never weaker than the everyday trusted-local profile.
+    fn fallback_artifact_vfs(&self) -> Arc<dyn VirtualFs> {
+        let policy = Arc::new(WorkspacePolicy::trusted_local(std::path::Path::new(
+            &self.cwd,
+        )));
+        Arc::new(RepoControlDenyFs::new(RealFs, policy))
+    }
+
     /// v0.7.0 1.D.5 — body of `execute()`. Returns `(skill_name_opt,
     /// result)` so the outer `execute()` can emit telemetry once after
     /// every dispatch path. `skill_name_opt` is `None` only when the
     /// caller omitted the `skill` parameter entirely; every other path
     /// has a resolved (or attempted-resolve) skill name to attribute.
-    async fn execute_inner(&self, input: Value) -> (Option<String>, ToolResult) {
+    async fn execute_inner(
+        &self,
+        input: Value,
+        vfs: &Arc<dyn VirtualFs>,
+    ) -> (Option<String>, ToolResult) {
         let Some(skill_name) = input["skill"].as_str() else {
             return (
                 None,
@@ -301,8 +357,15 @@ impl SkillTool {
         if !skill.artifacts.is_empty() {
             let args_map = build_args_map(args, &skill.argument_names);
             let root = std::path::Path::new(&self.cwd);
-            if let Err(e) =
-                wcore_skills::artifacts::write_artifacts(&skill.artifacts, &args_map, root).await
+            let sink = VfsArtifactSink(Arc::clone(vfs));
+            if let Err(e) = wcore_skills::artifacts::write_artifacts(
+                &skill.artifacts,
+                &args_map,
+                root,
+                skill.skill_root.as_deref().map(std::path::Path::new),
+                &sink,
+            )
+            .await
             {
                 return (
                     Some(skill.name.clone()),
@@ -323,7 +386,12 @@ impl SkillTool {
         // dispatch if the execution-boundary denylist trips. This neutralizes a
         // `!shell:` directive that only became dangerous AFTER `args` were
         // spliced in.
-        let composed = render_shell_input(&skill, args, self.session_id.as_deref());
+        let composed = render_shell_input_in(
+            &skill,
+            args,
+            self.session_id.as_deref(),
+            Some(std::path::Path::new(&self.cwd)),
+        );
         let raw_args = serde_json::to_string(&input["args"]).unwrap_or_default();
         for chunk in [composed.as_str(), raw_args.as_str()] {
             if let Some(reason) = wcore_cron::runner::scan_target_text(chunk) {
@@ -428,34 +496,8 @@ impl Tool for SkillTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        // v0.7.0 1.D.5 — wrap the existing dispatch in `execute_inner`
-        // so we can emit one telemetry event per call regardless of
-        // which early-return path fires. Inner returns `(Option<String>,
-        // ToolResult)`: the optional resolved skill name is `None` only
-        // when the caller didn't pass the `skill` param (no name to
-        // attribute the event to).
-        let start = Instant::now();
-        let (skill_name_opt, result) = self.execute_inner(input).await;
-        if let Some(name) = skill_name_opt {
-            let outcome = if result.is_error {
-                SkillOutcome::Failure
-            } else {
-                SkillOutcome::Success
-            };
-            let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let ts_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            self.telemetry_sink.record(SkillTelemetryEvent {
-                skill_name: name,
-                session_id: self.session_id.clone(),
-                outcome,
-                latency_ms,
-                ts_secs,
-            });
-        }
-        result
+        let vfs = self.fallback_artifact_vfs();
+        self.dispatch(input, &vfs).await
     }
 
     fn context_modifier_for(&self, input: &serde_json::Value) -> Option<ContextModifier> {
@@ -537,8 +579,32 @@ impl Tool for SkillTool {
                 content: "Skill execution cancelled.".to_string(),
                 is_error: true,
             },
-            r = self.execute(input) => r,
+            // #1097: the session's own filesystem containment travels with
+            // `ctx.vfs`. Handing it to the dispatch is what puts a declared
+            // artifact under the same jail, repo-control write guard and
+            // secret deny as an ordinary `Write`.
+            r = self.dispatch(input, &ctx.vfs) => r,
         }
+    }
+
+    /// The streaming entry point carries the same containment as the ordinary
+    /// one.
+    ///
+    /// `SkillTool` does not advertise streaming, and the one dispatch site that
+    /// can reach this method gates on `tool.supports_streaming()`
+    /// (`orchestration/mod.rs:2319`), so today nothing routes here. It is
+    /// overridden anyway because the TRAIT DEFAULT discards `ctx` and falls
+    /// through to `execute(input)` — whoever makes skills streaming later would
+    /// silently drop the session vfs and reopen #1097 at a new entry point,
+    /// with every existing test still green. A comment saying so would not stop
+    /// them; this does.
+    async fn execute_streaming_with_ctx(
+        &self,
+        input: Value,
+        ctx: &ToolContext,
+        _sink: &dyn wcore_tools::ToolOutputSink,
+    ) -> ToolResult {
+        self.execute_with_ctx(input, ctx).await
     }
 
     fn describe(&self, input: &Value) -> String {
@@ -547,6 +613,22 @@ impl Tool for SkillTool {
             Some(args) if !args.is_empty() => format!("Skill {name} {args}"),
             _ => format!("Skill {name}"),
         }
+    }
+}
+
+/// Binds `wcore_skills`'s artifact writer to the session's `VirtualFs`
+/// (FerroxLabs/wayland#1097).
+///
+/// `VirtualFs::write` on the `RealFs` leaf already creates parent directories
+/// and performs the atomic temp-file-plus-rename that `write_artifacts` used to
+/// do for itself, so routing through the jail costs no durability — it only
+/// adds the containment checks the write was previously skipping.
+struct VfsArtifactSink(Arc<dyn VirtualFs>);
+
+#[async_trait]
+impl wcore_skills::artifacts::ArtifactSink for VfsArtifactSink {
+    async fn write(&self, path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+        self.0.write(path, bytes).await.map_err(|e| e.to_string())
     }
 }
 
@@ -579,6 +661,19 @@ fn build_args_map(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// #1096 states the output destination at the top of every composed body.
+    /// Strip it so these assertions stay about the thing they were written for.
+    fn body(rendered: &str) -> String {
+        match rendered.split_once("(create it if it does not exist)\n\n") {
+            Some((head, rest))
+                if head.starts_with("Write any files this skill produces under: ") =>
+            {
+                rest.to_string()
+            }
+            _ => rendered.to_string(),
+        }
+    }
     use wcore_skills::permissions::SkillPermissionChecker;
     use wcore_skills::types::{ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
 
@@ -682,7 +777,7 @@ mod tests {
             .execute(json!({ "skill": "greet", "args": "world" }))
             .await;
         assert!(!result.is_error);
-        assert_eq!(result.content, "Hello world!");
+        assert_eq!(body(&result.content), "Hello world!");
     }
 
     #[tokio::test]
@@ -798,6 +893,19 @@ mod tests {
 #[cfg(test)]
 mod supplemental_tests {
     use std::sync::Arc;
+
+    /// #1096 states the output destination at the top of every composed body.
+    /// Strip it so these assertions stay about the thing they were written for.
+    fn body(rendered: &str) -> String {
+        match rendered.split_once("(create it if it does not exist)\n\n") {
+            Some((head, rest))
+                if head.starts_with("Write any files this skill produces under: ") =>
+            {
+                rest.to_string()
+            }
+            _ => rendered.to_string(),
+        }
+    }
 
     use serde_json::json;
 
@@ -929,7 +1037,7 @@ mod supplemental_tests {
             .execute(json!({"skill": "my-skill", "args": "foo"}))
             .await;
         assert!(!result.is_error);
-        assert_eq!(result.content, "Run foo");
+        assert_eq!(body(&result.content), "Run foo");
     }
 
     #[tokio::test]
@@ -967,7 +1075,7 @@ mod supplemental_tests {
         let tool = tool_with(vec![make_skill("my-skill", "Just content.")]);
         let result = tool.execute(json!({"skill": "my-skill"})).await;
         assert!(!result.is_error);
-        assert_eq!(result.content, "Just content.");
+        assert_eq!(body(&result.content), "Just content.");
     }
 
     #[tokio::test]
@@ -1346,6 +1454,19 @@ mod permission_tests {
 mod phase7_tests {
     use std::sync::{Arc, Mutex};
 
+    /// #1096 states the output destination at the top of every composed body.
+    /// Strip it so these assertions stay about the thing they were written for.
+    fn body(rendered: &str) -> String {
+        match rendered.split_once("(create it if it does not exist)\n\n") {
+            Some((head, rest))
+                if head.starts_with("Write any files this skill produces under: ") =>
+            {
+                rest.to_string()
+            }
+            _ => rendered.to_string(),
+        }
+    }
+
     use async_trait::async_trait;
     use serde_json::json;
 
@@ -1542,7 +1663,7 @@ mod phase7_tests {
             "inline skill should succeed: {}",
             result.content
         );
-        assert_eq!(result.content, "inline content");
+        assert_eq!(body(&result.content), "inline content");
         // spawn_fork should NOT have been called
         assert!(
             spawner.captured_config.lock().unwrap().is_none(),
@@ -1593,7 +1714,7 @@ mod phase7_tests {
             "benign substitution must not be blocked: {}",
             result.content
         );
-        assert_eq!(result.content, "Summarize the meeting notes please");
+        assert_eq!(body(&result.content), "Summarize the meeting notes please");
     }
 
     // TC-7.21: fork skill takes fork path — spawner IS called

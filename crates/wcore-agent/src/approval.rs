@@ -438,6 +438,51 @@ impl ApprovalBridge {
         resolved
     }
 
+    /// FerroxLabs/wayland#1083 — bulk-cancel EVERY pending approval, whatever
+    /// its TTL, and return how many were resolved.
+    ///
+    /// The bridge had no bulk escape before this. Its only automatic exit was
+    /// [`reap_now`](Self::reap_now), which needs the entry's `expires_at` to
+    /// have passed and only runs on a 30-second reaper tick — and a Crucible
+    /// proposal card is minted with [`CRUCIBLE_APPROVAL_TTL`], 86,400 seconds.
+    /// So when the host's command stream reached EOF with a card parked here,
+    /// the awaiting tool sat for up to 24 HOURS. (`ToolApprovalManager`, the
+    /// other approval store, has had `deny_all_pending` since #1070; this is
+    /// the missing half.)
+    ///
+    /// Fails CLOSED: every waiter is handed
+    /// [`ApprovalOutcome::cancelled`] (`approved: false`), matching the reaper
+    /// and the `ToolApprovalManager` EOF path. `reason` is logged, not
+    /// returned — [`ApprovalOutcome`] carries no reason field, and every
+    /// consumer of a cancelled outcome already renders its own refusal text.
+    ///
+    /// Both indexes are cleared together under the single `pending` lock, so
+    /// no `by_corr` mapping can dangle to a freed secret token (GHSA-8r7g).
+    pub async fn cancel_all_pending(&self, reason: &str) -> usize {
+        let count = {
+            let mut map = self.pending.lock().await;
+            map.by_corr.clear();
+            let drained: Vec<Pending> = map.by_token.drain().map(|(_, p)| p).collect();
+            let count = drained.len();
+            for pending in drained {
+                // An `Err` here means the requester already went away; that is
+                // exactly the case the reaper's `sender.is_closed()` arm
+                // handles, and it is harmless.
+                let _ = pending.sender.send(ApprovalOutcome::cancelled());
+            }
+            count
+        };
+        if count > 0 {
+            tracing::warn!(
+                cancelled = count,
+                reason,
+                "cancelled every pending bridge approval"
+            );
+            self.refresh_redactor().await;
+        }
+        count
+    }
+
     /// Snapshot of currently-pending correlation ids. Consumed by
     /// `protocol_sink::redact_tokens` to scrub active tokens from
     /// streaming tool output (defense-in-depth — the wire surface
@@ -698,6 +743,83 @@ mod tests {
         assert!(active.contains(&cid_a));
         assert!(active.contains(&cid_b));
         assert_eq!(active.len(), 2);
+    }
+
+    /// FerroxLabs/wayland#1083 — the bulk escape the bridge never had.
+    ///
+    /// The long-TTL entry is the point: it is minted with
+    /// [`CRUCIBLE_APPROVAL_TTL`] (86,400s), so [`ApprovalBridge::reap_now`]
+    /// cannot be what resolves it inside this test. The `reap_now() == 0`
+    /// assertion is the POSITIVE CONTROL for that claim — without it, a
+    /// passing test could be explained by the reaper rather than the new
+    /// bulk-cancel.
+    #[tokio::test]
+    async fn cancel_all_pending_resolves_even_a_crucible_ttl_entry() {
+        let bridge = ApprovalBridge::new();
+        let (_short_tok, short_rx) = bridge
+            .request_with_id(
+                "egress:example.com".into(),
+                ApprovalRequest {
+                    call_id: "egress:example.com".into(),
+                    reason: "egress consent".into(),
+                    context: "".into(),
+                },
+            )
+            .await;
+        let (_long_tok, long_rx) = bridge
+            .request_with_id_and_ttl(
+                "crucible:card".into(),
+                ApprovalRequest {
+                    call_id: "crucible:card".into(),
+                    reason: "proposal card".into(),
+                    context: "".into(),
+                },
+                CRUCIBLE_APPROVAL_TTL,
+            )
+            .await;
+
+        // POSITIVE CONTROL: neither entry is reapable, so the reaper cannot
+        // account for the resolutions asserted below.
+        assert_eq!(
+            bridge.reap_now().await,
+            0,
+            "an unexpired entry must not be reapable, or this test proves \
+             nothing about cancel_all_pending"
+        );
+
+        assert_eq!(bridge.cancel_all_pending("host EOF").await, 2);
+        assert!(
+            !short_rx
+                .await
+                .expect("the egress waiter must be resolved")
+                .approved,
+            "a bulk cancel must fail CLOSED"
+        );
+        assert!(
+            !long_rx
+                .await
+                .expect("the 24h-TTL Crucible waiter must be resolved")
+                .approved,
+            "a bulk cancel must fail CLOSED"
+        );
+
+        assert_eq!(bridge.pending_count().await, 0);
+        // GHSA-8r7g: the secondary index must be purged with the primary, or a
+        // `by_corr` mapping dangles to a freed secret token.
+        assert!(
+            bridge.secret_for_correlation("crucible:card").is_none(),
+            "the correlation → secret mirror still holds a cancelled entry"
+        );
+        assert!(bridge.active_tokens().await.is_empty());
+    }
+
+    /// A bulk cancel on an empty bridge is a no-op returning 0. The EOF path
+    /// runs it unconditionally on every host disconnect, including the common
+    /// case where nothing was ever parked.
+    #[tokio::test]
+    async fn cancel_all_pending_on_an_empty_bridge_is_a_no_op() {
+        let bridge = ApprovalBridge::new();
+        assert_eq!(bridge.cancel_all_pending("host EOF").await, 0);
     }
 
     #[test]

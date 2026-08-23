@@ -152,6 +152,13 @@ pub fn disabled_by_default_hint() -> String {
 /// specific gate that refused (no grant / wrong `schema_version` / empty
 /// `session_scope` / ungranted port). This wraps it with the real setting to
 /// change, so the message a user reads always names a control that exists.
+///
+/// gh#1053 changed what the last paragraph is allowed to say. The host IS now
+/// re-checked after DNS resolution on the executed path, so the old "NOT
+/// re-checked" sentence became false — but the gate is still not total, and
+/// saying it were would be gh#826 all over again (a message naming a
+/// protection the reader does not have). Both halves are stated: what the gate
+/// closes, and the residual sidecar/TTL gap it cannot.
 pub fn loopback_blocked_hint(refusal: &str) -> String {
     format!(
         "{refusal}\n\n\
@@ -162,8 +169,14 @@ pub fn loopback_blocked_hint(refusal: &str) -> String {
          {ENABLE_LOOPBACK_TOML}\n\
          Only the ports listed above become reachable. Private (RFC 1918), \
          link-local and cloud-metadata addresses stay blocked when they appear \
-         literally in the URL. The host is NOT re-checked after DNS resolution, \
-         so do not rely on this gate to stop a name that resolves inward.",
+         literally in the URL, and any other host is re-checked after DNS \
+         resolution — a name that resolves inward is refused, and one that \
+         resolves to nothing at all is refused too.\n\n\
+         One gap remains, and it is not closable from here: the browser runs as \
+         a separate sidecar process and performs its own DNS resolution, so a \
+         record served with TTL=0 can still be re-answered inside a single \
+         navigation. Do not rely on this gate against an attacker who controls \
+         the authoritative zone.",
         config_target_block()
     )
 }
@@ -265,27 +278,45 @@ mod tests {
         );
     }
 
-    /// The hint must not promise DNS-rebinding protection while
-    /// `BrowserPolicy::check_resolved_host` has no production caller.
+    /// INVERTED for gh#1053 (this guard was written to be inverted -- see the
+    /// last line of its previous doc comment, "If the guard is ever wired into
+    /// the live navigation path, update the hint AND this test together").
     ///
-    /// The guard exists and is unit-tested, but every call site is in
-    /// `#[cfg(test)]` or `tests/` -- so on the executed path a public hostname
-    /// that resolves to a loopback or private address is never re-checked.
-    /// Claiming otherwise in a refusal message tells the operator they are
-    /// protected by something that does not run. If the guard is ever wired
-    /// into the live navigation path, update the hint AND this test together.
+    /// Before: the hint had to promise NOTHING, because `check_resolved_host`
+    /// had zero production callers and every claim would have been false.
+    /// After: the resolution gate exists on the executed path, so the hint has
+    /// to say so -- and, just as importantly, has to say what it still does
+    /// NOT cover. Camoufox is a SIDECAR: Firefox resolves DNS in its own
+    /// process and we cannot pin the addresses it dials. The gate closes
+    /// static DNS SSRF; it does not close TTL=0 intra-navigation rebinding.
+    ///
+    /// An overclaiming hint is the exact failure gh#826 was: a message naming
+    /// a protection the reader does not actually have.
     #[test]
     fn loopback_hint_claims_no_protection_the_live_path_does_not_have() {
         let hint = loopback_blocked_hint("loopback hostname blocked: localhost");
         let lowered = hint.to_ascii_lowercase();
         assert!(
-            !lowered.contains("rebinding"),
-            "the hint promises DNS-rebinding protection, but check_resolved_host \
-             has no production caller, so nothing re-checks the resolved host:\n{hint}"
+            !lowered.contains("not re-checked after dns resolution"),
+            "the resolution gate now runs on the executed path; the hint still \
+             tells the operator it does not:\n{hint}"
         );
         assert!(
-            lowered.contains("not re-checked after dns resolution"),
-            "the hint must state the real boundary so an operator is not misled:\n{hint}"
+            lowered.contains("re-checked after dns resolution"),
+            "the hint must state that the host IS re-checked after resolution, \
+             or an operator cannot tell this build from one without the gate:\n{hint}"
+        );
+        assert!(
+            lowered.contains("ttl"),
+            "the hint must name the residual gap it does NOT close -- a sidecar \
+             resolving with TTL=0 can still rebind inside a single navigation. \
+             Claiming the gate is total is gh#826 all over again:\n{hint}"
+        );
+        assert!(
+            lowered.contains("sidecar"),
+            "the hint must say WHY the residual gap exists (the browser is a \
+             separate process doing its own resolution), not just that it \
+             exists:\n{hint}"
         );
     }
 

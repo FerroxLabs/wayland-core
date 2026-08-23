@@ -369,6 +369,15 @@ pub fn register_web_fetch_tool(
 
 #[cfg(test)]
 mod tests {
+    // Fixtures use a literal public IP, never a hostname.
+    //
+    // The tool path runs `url_safety::is_safe_url`, which performs a REAL DNS
+    // resolution and fails closed when it returns no addresses, so a hostname
+    // fixture makes these tests depend on the runner's resolver. A literal IP
+    // takes the `parse::<IpAddr>()` fast path and skips resolution entirely.
+    // Hostname resolution is covered hermetically in `url_safety`'s own tests
+    // via `is_safe_url_with(.., fake_resolver)`. Same convention as
+    // `transcription_tools`.
     use super::*;
     use wcore_types::tool::ToolEffectKind;
 
@@ -384,7 +393,9 @@ mod tests {
     #[tokio::test]
     async fn null_backend_returns_fail_loud_error() {
         let tool = WebFetchTool::default();
-        let r = tool.execute(json!({ "url": "https://example.com" })).await;
+        let r = tool
+            .execute(json!({ "url": "https://93.184.216.34" }))
+            .await;
         assert!(r.is_error);
         assert!(
             r.content.contains("No fetch backend configured"),
@@ -440,11 +451,11 @@ mod tests {
             content_type: "text/html".into(),
             text: "trending: rust-lang/rust\ntrending: torvalds/linux".into(),
             truncated: false,
-            final_url: "https://github.com/trending".into(),
+            final_url: "https://93.184.216.34/trending".into(),
         }));
         let tool = WebFetchTool::new(backend.clone());
         let r = tool
-            .execute(json!({ "url": "https://github.com/trending" }))
+            .execute(json!({ "url": "https://93.184.216.34/trending" }))
             .await;
         assert!(!r.is_error, "unexpected error: {}", r.content);
         assert!(r.content.contains("rust-lang/rust"));
@@ -452,7 +463,7 @@ mod tests {
         assert!(r.content.contains("\"truncated\":false"));
         let captured = backend.snapshot();
         assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0].url, "https://github.com/trending");
+        assert_eq!(captured[0].url, "https://93.184.216.34/trending");
         assert!(captured[0].readable);
         assert_eq!(captured[0].timeout_ms, WEB_FETCH_DEFAULT_TIMEOUT_MS);
     }
@@ -464,12 +475,12 @@ mod tests {
             content_type: "text/plain".into(),
             text: String::new(),
             truncated: false,
-            final_url: "https://example.com/".into(),
+            final_url: "https://93.184.216.34/".into(),
         }));
         let tool = WebFetchTool::new(backend.clone());
         let _ = tool
             .execute(json!({
-                "url": "https://example.com/",
+                "url": "https://93.184.216.34/",
                 "timeout_ms": 999_999_999u64
             }))
             .await;
@@ -483,20 +494,12 @@ mod tests {
             content_type: "application/json".into(),
             text: "{\"ok\":true}".into(),
             truncated: false,
-            final_url: "https://example.com/v1".into(),
+            final_url: "https://93.184.216.34/v1".into(),
         }));
         let tool = WebFetchTool::new(backend.clone());
         let r = tool
-            .execute(json!({ "url": "https://example.com/v1", "readable": false }))
+            .execute(json!({ "url": "https://93.184.216.34/v1", "readable": false }))
             .await;
-        // is_safe_url does a real DNS lookup; in sandboxed / offline test
-        // environments that resolution may fail. Skip the assertion if so
-        // (the policy gate is exercised by the dedicated loopback /
-        // metadata tests above; this one is asserting the `readable` flag
-        // threads through, not the SSRF gate).
-        if r.is_error && r.content.contains("private or internal network") {
-            return;
-        }
         assert!(!r.is_error, "unexpected error: {}", r.content);
         let snap = backend.snapshot();
         assert_eq!(snap.len(), 1, "backend was not called");
@@ -511,7 +514,7 @@ mod tests {
         }));
         let tool = WebFetchTool::new(backend);
         let r = tool
-            .execute(json!({ "url": "https://example.com/missing" }))
+            .execute(json!({ "url": "https://93.184.216.34/missing" }))
             .await;
         assert!(r.is_error);
         assert!(r.content.contains("404"));

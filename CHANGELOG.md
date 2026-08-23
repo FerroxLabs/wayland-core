@@ -1,5 +1,136 @@
 # Changelog
 
+## [0.13.5](https://github.com/FerroxLabs/wayland-core/compare/v0.13.4...v0.13.5) (2026-08-22)
+
+**Release highlights.** Twenty-one fixes with one subject: a guard that exists is
+not a guard that runs. Most of what changed here was already written, already
+tested, and already correct — and did not reach the path you were actually on.
+The rate limiter that stops an agent talking to itself forever was never
+consulted on the desktop. The session-saving repair covered one failure arm out
+of six, and the arm it missed was the common one. The skill containment guard
+was workspace-scoped, so it never reached the directory the escape used. In each
+case the unit test passed, because the unit was fine. The second subject is
+silence: several things the product knew, it did not say. No breaking changes;
+the protocol contract stays at minor 16.
+
+**A retry that succeeded no longer fails your turn.** This is the most serious
+one. When a provider errored and the retry then worked — the answer generated,
+the content returned — the turn could still be handed back as a journal
+authority error, because the failed attempt was never marked terminal and the
+commit path checks that with the same predicate the failure path uses. So a
+recovery was rendered as a failure. There are now four settle points where there
+were two, covering the retry arm, the retry-exhausted exit, and the
+compact-and-resend arm, and each has its own test rather than sharing one.
+
+**The product stops going quiet on you.** Two silences, and they were not the
+same bug. A request whose connect never completes — a blackholed endpoint, or a
+typo in your `base_url` — used to produce thirty seconds of nothing at all
+before the first retry line appeared, because the notice was armed inside the
+stream loop and every provider builds its channel only after the connect
+returns 2xx. There was not even a channel to notice on. A request that *does*
+connect and then produces no bytes had a channel, but could stay quiet for the
+full five-minute read timeout. Both are announced now, on your surface rather
+than a log you do not have enabled. The threshold moved from thirty seconds to
+fifteen, and had to: thirty was exactly the connect deadline, so the notice was
+scheduled for the same instant as the failure it exists to precede and could
+never arrive first. It is only a notice — measured against a blackholed
+endpoint, the retry sequence and total wall time are unchanged within about
+fifty milliseconds. Relatedly, a connect deadline that expired was being
+classified as a generic connection failure rather than a timeout, which routed
+it into a fifteen-minute outage budget it was never meant to have. That one was
+live, not theoretical: the same failure renders two ways, and the spelling that
+contains no "timed out" anywhere accounted for 281 of 300 measured connect
+timeouts — so a typo in your `base_url` bought the full window about fifteen
+times in sixteen, and failed fast the other time. That is the nine-hundred-second
+hang and the thirty-six-send storm seen in testing. It fails fast now, on all
+three spellings including the Windows one, with a control proving genuine
+refusals and DNS failures keep their own class.
+
+**The stream retry budget is yours to set.** It was a constant compiled into a
+function. It is now configurable with a ceiling, and if you ask for more than the
+ceiling the product clamps it *and tells you which number it is actually using* —
+an unreported clamp is a quieter lie than the one it replaces. The default is
+unchanged, and there is a test asserting the default is unchanged, because a
+silent change to everyone's retry behaviour would be worse than the limitation.
+
+**Rate limiting reaches the desktop.** Under host-delegated sending — how the
+desktop app sends — the tool kept a transport that consulted no limiter at all,
+so agent-to-agent reply loops were entirely unthrottled there. The throttle now
+reaches the model as an error result rather than only a log line, on both
+delivering transports. The human and operator paths remain unthrottled, which is
+deliberate and pinned by its own test.
+
+**Skill output has a destination, and artifact writes go through the jail.**
+These two shipped together because fixing either alone relocates the problem
+rather than closing it: closing the output convention alone moves the escape to
+the repo-control surface through frontmatter, and closing the write path alone
+leaves the guard scoped to the workspace so it never reaches the global config
+directory. One thing that shipped after: the same feature rendered that
+directory two ways. The header telling a skill where to write normalised the
+path to forward slashes and the `{output_dir}` token did not, so on Windows a
+skill body could carry `F:\Temp\...\containment/brief.html` — mixed separators
+in model-facing prose the model then puts into a shell command, where a
+backslash is an escape character. Both sites now go through one normaliser.
+
+**The workspace boundary walk can be interrupted, and it is faster.** The
+per-execution secret-deny walk sat outside both cancellation points, so neither
+Ctrl-C nor your own `timeout` parameter bounded it — the parameter did not do
+what it said. Both call sites are fixed. The walk itself is now parallel, which
+on a large contained workspace is roughly five times faster, with the resulting
+deny set proven byte-identical to the serial one across symlink loops,
+execute-only directories, and nested roots. Worth stating plainly: an earlier
+report of a 76-second stall was a Windows measurement for a path already fixed
+in 0.13.1. The real cost on Linux was about nine tenths of a second warm, and
+one and four tenths cold, on a ninety-thousand-entry tree. The defect was that
+you could not interrupt it, not that it was slow.
+
+**Browser DNS resolution is checked, and the claim about it is honest.** The
+resolution gate did not exist — the browser crate never resolved a hostname
+anywhere — so it was built. Static DNS-based SSRF is now closed. What is *not*
+closed is intra-navigation rebinding against a zero-TTL record, because the
+browser resolves in its own process; the operator hint and the README now say
+that instead of implying otherwise. A pin-first-answer cache was written and
+then removed after measuring real DNS: across eleven re-queries over about a
+minute, the answer set for `s3.amazonaws.com` was completely disjoint from its
+first answer eleven times out of eleven, and `cdn.jsdelivr.net` eight times out
+of eleven, against a `www.wikipedia.org` control that stayed stable on all
+eleven. Pinning would have refused ordinary hosts for the rest of a session
+while buying nothing.
+
+**Smaller, but each one is a thing that lied to you.** Pending approvals are now
+cancelled when the host command stream ends, instead of stalling until a
+twenty-four-hour token expiry. `doctor` honours `--profile` and `--project-dir`
+rather than discarding them and reporting on a configuration you did not ask
+about. A turn that ended because it hit a length limit, a turn limit, or an
+error is now distinguishable from one that ended cleanly. A chain exhausted on a
+server error keeps its failure class instead of being flattened into a
+connection error and granted a retry window the engine deliberately withholds
+from server errors.
+
+**Esc no longer ends the conversation.** Pressing Esc during an in-flight turn —
+the key the in-turn keybar advertises as `interrupt` — stopped the stream and
+then left that conversation permanently unusable. The composer still took text
+and the cursor still blinked, but every further message was refused, and the
+recovery paths formed a closed loop: cancel pointed at resume, resume pointed at
+reconcile, and reconcile said only the engine could. Twelve times out of twelve
+in testing, and 0.13.4 behaves the same way. The cause sat above every one of
+those refusals. The interrupt path wrote no terminal receipt of any kind — no
+stream end, no provider attempt outcome, no turn commit — where a Ctrl-C or a
+clean finish wrote two of each, read back through the same journal reader. The
+turn was left at an outcome nothing could resolve, so each refusal was a correct
+guard reacting to a hole punched above it. The fix does not open that guard. A
+request that left this machine and never came back genuinely has no knowable
+outcome, so claiming it succeeded, failed, or never started stays refused. What
+was missing is the fourth option, and it is here now: the turn can be abandoned,
+recording the outcome as unknown — including that the provider may have served
+the request in full, in part, or not at all, and that anything it charged is not
+accounted for — alongside the digest of exactly the bytes that were captured. It
+is written at interrupt time by the live engine, the only party that can, so
+there is no wedge left to recover from afterwards. The way out is named on every
+surface the refusal reaches: `/recover abandon` in the terminal UI, and
+relaunching the session with `--resume` anywhere else, including the JSON stream
+host, whose recovery vocabulary never had an `abandon` verb to offer.
+
 ## [0.13.4](https://github.com/FerroxLabs/wayland-core/compare/v0.13.3...v0.13.4) (2026-08-21)
 
 **Release highlights.** One new capability and four fixes, and they share a

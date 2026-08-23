@@ -19,7 +19,7 @@
 
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use thiserror::Error;
 use wcore_protocol::PathGrantSink;
@@ -860,9 +860,37 @@ impl WorkspacePolicy {
             // `Bash cat` read it happily, and the two layers would disagree
             // about what is readable — which is how a boundary quietly stops
             // being one.
-            for granted in self.session_read_grant_roots() {
+            // Each granted root is walked ONCE, and only when its subtree is
+            // not already covered by a walk that has run. `grant_capacity`
+            // refuses a grant UNDER a live grant but never compares one against
+            // the workspace root, so granting the workspace itself (a host's
+            // "always allow this folder" on the project directory) bought a
+            // second full walk of the same tree for a byte-identical answer —
+            // measured at 2.01x in `tests/walk_parallel_identity_test.rs`.
+            //
+            // Skipping a covered grant cannot narrow the deny set. A secret it
+            // would emit has a canonical path starting with the covering walk
+            // root, and the covering walk's own scope admits exactly that:
+            // `readable_canon` for the workspace root (which `writable_roots`
+            // puts in it), and the grant itself for a granted root. Coverage is
+            // also checked for REACHABILITY, not just prefix — see
+            // `walk_root_is_covered`.
+            let mut walked = vec![canon(self.root.clone())];
+            let mut granted_roots = self.session_read_grant_roots();
+            // An ancestor sorts before its descendants, so one greedy pass
+            // retains the covering root and drops what it covers whatever order
+            // the grants were minted in.
+            granted_roots.sort();
+            for granted in granted_roots {
+                if walked
+                    .iter()
+                    .any(|covering| walk_root_is_covered(covering, &granted))
+                {
+                    continue;
+                }
                 let scope = vec![granted.clone()];
                 out.extend(project_committed_secrets(&granted, &scope));
+                walked.push(granted);
             }
         }
         out.extend(self.authority_read_deny.iter().cloned());
@@ -1488,6 +1516,9 @@ fn compute_secret_deny(
 /// under a readable/mounted root. Shared by `compute_secret_deny` (Contained)
 /// and `WorkspacePolicy::with_project_secret_deny` (#667, Full/remote Trusted)
 /// so the two paths cannot drift.
+///
+/// The returned list is SORTED. A big tree is walked in parallel (below), and a
+/// security boundary must not vary with thread scheduling.
 fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<PathBuf> {
     let system_roots: Vec<PathBuf> = SYSTEM_CREDENTIAL_STORES.iter().map(PathBuf::from).collect();
     let under_mounted = |p: &Path| {
@@ -1495,7 +1526,6 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
             || system_roots.iter().any(|r| p.starts_with(r))
     };
 
-    let mut out: Vec<PathBuf> = Vec::new();
     // NO directory prune: the file tools' `is_project_secret` predicate covers a
     // secret ANYWHERE under root, so this list must too — pruning `node_modules`/
     // `target`/`.wcache` would deny a committed secret to Read/Edit/Grep while
@@ -1510,40 +1540,156 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
     // list. #922's fix declines to COMPUTE this walk on a backend that discards
     // it; it must never become a reason to PRUNE it, because a prune is a
     // permanent stale-negative against the in-process predicate above.
-    let walker = ignore::WalkBuilder::new(root)
-        .standard_filters(false) // a .gitignore'd .env must still be denied
-        .hidden(false)
-        .follow_links(false)
-        .build();
-    for entry in walker.flatten() {
-        let path = entry.path();
-        let is_symlink = entry.path_is_symlink();
-        if !is_symlink {
-            // Regular file: cheap lexical check on the raw name FIRST; only a
-            // secret-named file is worth the canonicalize syscall.
-            if !entry.file_type().is_some_and(|t| t.is_file()) || !is_secret_path_static(path) {
-                continue;
+    let builder = || {
+        let mut walker = ignore::WalkBuilder::new(root);
+        walker
+            .standard_filters(false) // a .gitignore'd .env must still be denied
+            .hidden(false)
+            .follow_links(false);
+        walker
+    };
+
+    // What the prefilter leaves behind is `readdir` over the whole tree, and on
+    // a big workspace that IS the cost — #1113 measured ~90 ms per exec on a
+    // 90k-entry tree, paid by every sub-agent because the spawner runs them
+    // `contained`. Threads are the fix, but they are not free to start
+    // (measured on a 96-core host: 0.07 ms for a serial walk of an empty tree
+    // versus a ~1.7 ms floor for a parallel one, whatever the thread count), so
+    // a small workspace must not have to pay for them. Walk serially until the
+    // tree proves it is big enough to be worth a thread pool.
+    {
+        let mut out: Vec<PathBuf> = Vec::new();
+        let mut visited = 0usize;
+        let mut oversized = false;
+        for result in builder().build() {
+            visited += 1;
+            if visited > SERIAL_WALK_BUDGET {
+                oversized = true;
+                break;
             }
-            if let Ok(canon) = std::fs::canonicalize(path)
-                && under_mounted(&canon)
+            if let Ok(entry) = result
+                && let Some(secret) = secret_entry(&entry, &under_mounted)
             {
-                out.push(canon);
+                out.push(secret);
             }
-            continue;
         }
-        // Symlink (rare): resolve the target and deny the link's own canonical
-        // path if the TARGET is a secret, masking a benign-named link to a secret
-        // (`notes.txt` → `.env`). Must canonicalize regardless of the link's name.
-        // External-target residual (target not under a mounted root) is documented
-        // in the plan — backstopped by network-Deny.
-        if let Ok(canon) = std::fs::canonicalize(path)
-            && is_secret_path_static(&canon)
-            && under_mounted(&canon)
-        {
-            out.push(canon);
+        if !oversized {
+            out.sort();
+            return out;
         }
     }
+
+    // Oversized: start again in parallel. The prefix above is re-walked, but it
+    // is bounded by `SERIAL_WALK_BUDGET` and every entry in it is already in
+    // the page cache, so it costs a fraction of the threads it just justified.
+    //
+    // Threads change the ORDER entries are visited in and which thread a
+    // `canonicalize` lands on — never WHICH entries are visited: `WalkParallel`
+    // applies the same filters as `Walk`, and both arms classify through the
+    // same `secret_entry`. Sorting below removes the arrival order, so the
+    // answer is identical run to run and identical to the serial arm's. Pinned
+    // by `tests/walk_parallel_identity_test.rs`.
+    let found = Mutex::new(Vec::<PathBuf>::new());
+    builder().build_parallel().run(|| {
+        Box::new(|result| {
+            // An unreadable directory is skipped here exactly as the serial
+            // arm's `Err` skips it.
+            if let Ok(entry) = result
+                && let Some(secret) = secret_entry(&entry, &under_mounted)
+            {
+                found.lock().expect(POISONED).push(secret);
+            }
+            ignore::WalkState::Continue
+        })
+    });
+    let mut out = found.into_inner().expect(POISONED);
+    out.sort();
     out
+}
+
+/// Entries the serial arm of [`project_committed_secrets`] will visit before it
+/// hands the tree to the parallel one.
+///
+/// A tree this size finishes serially in less time than a thread pool takes to
+/// start; a bigger one pays this budget twice over to win multiples back. NOT
+/// load-bearing for correctness — both arms return the same set — only for
+/// which one pays less. Swept on this host against
+/// `secret_deny_paths_dynamic`, median of 7, warm:
+///
+/// ```text
+///   budget    empty   100 files   3000 dirs   15k files   134k entries
+///      128   0.136ms     0.490ms     11.95ms     10.33ms       117.7ms
+///      256   0.137ms     0.488ms     13.75ms     10.59ms       120.5ms
+///     1024   0.137ms     0.487ms     17.26ms     14.30ms       130.2ms
+/// ```
+///
+/// `pub` ONLY so `tests/walk_parallel_identity_test.rs` can prove its parallel
+/// fixture actually crosses this threshold. A fixture that silently sits under
+/// it grades the serial arm twice and leaves the parallel arm ungraded.
+#[doc(hidden)]
+pub const SERIAL_WALK_BUDGET: usize = 256;
+
+/// The lock is taken only to push a path that has already been canonicalized,
+/// so nothing that can panic runs while it is held and this cannot fire.
+const POISONED: &str = "secret-deny walk mutex poisoned";
+
+/// The per-entry decision of [`project_committed_secrets`], shared verbatim by
+/// its serial and parallel arms so the two cannot answer differently.
+fn secret_entry(
+    entry: &ignore::DirEntry,
+    under_mounted: &impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let path = entry.path();
+    if !entry.path_is_symlink() {
+        // Regular file: cheap lexical check on the raw name FIRST; only a
+        // secret-named file is worth the canonicalize syscall.
+        if !entry.file_type().is_some_and(|t| t.is_file()) || !is_secret_path_static(path) {
+            return None;
+        }
+        return std::fs::canonicalize(path)
+            .ok()
+            .filter(|canon| under_mounted(canon));
+    }
+    // Symlink (rare): resolve the target and deny the link's own canonical
+    // path if the TARGET is a secret, masking a benign-named link to a secret
+    // (`notes.txt` → `.env`). Must canonicalize regardless of the link's name.
+    // External-target residual (target not under a mounted root) is documented
+    // in the plan — backstopped by network-Deny.
+    std::fs::canonicalize(path)
+        .ok()
+        .filter(|canon| is_secret_path_static(canon) && under_mounted(canon))
+}
+
+/// Is `candidate`'s subtree already visited in full by a walk rooted at
+/// `covering`?
+///
+/// Prefix containment alone is NOT the question. The covering walk descends by
+/// `readdir`, so a directory between the two that it cannot LIST hides
+/// `candidate` from it — an execute-only `0o111` directory is traversable, so
+/// `candidate`'s own walk would still find everything under it. Answering
+/// `false` there keeps the deduplication a pure win: an unreachable subtree is
+/// walked exactly as it is today. Both paths are canonical (grants are
+/// canonicalized when minted, the workspace root by `canon`), so this is a
+/// component comparison with no symlink left to resolve.
+fn walk_root_is_covered(covering: &Path, candidate: &Path) -> bool {
+    let Ok(rest) = candidate.strip_prefix(covering) else {
+        return false;
+    };
+    let mut dir = covering.to_path_buf();
+    let mut components = rest.components().peekable();
+    loop {
+        // `read_dir` only opens the directory handle; it does not enumerate.
+        if std::fs::read_dir(&dir).is_err() {
+            return false;
+        }
+        match components.next() {
+            // The last component is `candidate` itself: whether IT can be
+            // listed constrains both walks equally, so it is not checked here.
+            Some(_) if components.peek().is_none() => return true,
+            Some(component) => dir.push(component),
+            None => return true,
+        }
+    }
 }
 
 /// Git CONTENT stores under `root` that must be OS-sandbox-denied for reads in a

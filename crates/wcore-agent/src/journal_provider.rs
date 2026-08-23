@@ -290,7 +290,18 @@ async fn forward_durable_stream(
             break;
         };
         let journal_event = match provider_stream_event(&event) {
-            Ok(event) => event,
+            Ok(Some(event)) => event,
+            // An ephemeral progress signal (`StreamSilent`). It carries no
+            // provider output, so it must not consume a stream ordinal or
+            // enter the response digest — a journal that replayed it would
+            // fabricate bytes the provider never sent. Forward it live and
+            // journal nothing.
+            Ok(None) => {
+                if tx.send(event).await.is_err() {
+                    return;
+                }
+                continue;
+            }
             Err(error) => {
                 let _ = finish_attempt(
                     &journal,
@@ -570,8 +581,14 @@ async fn surface_authority_error(tx: &mpsc::Sender<LlmEvent>, error: &ProviderEr
         .await;
 }
 
-fn provider_stream_event(event: &LlmEvent) -> Result<ProviderStreamEvent, ProviderError> {
-    Ok(match event {
+/// Map one live stream event onto its durable journal form.
+///
+/// `Ok(None)` for an event that is deliberately NOT journaled: an ephemeral
+/// progress signal is not provider output and has no place in a record whose
+/// digest stands for what the provider sent.
+fn provider_stream_event(event: &LlmEvent) -> Result<Option<ProviderStreamEvent>, ProviderError> {
+    Ok(Some(match event {
+        LlmEvent::StreamSilent { .. } => return Ok(None),
         LlmEvent::TextDelta(text) => ProviderStreamEvent::TextDelta { text: text.clone() },
         LlmEvent::ToolUse {
             id,
@@ -663,7 +680,7 @@ fn provider_stream_event(event: &LlmEvent) -> Result<ProviderStreamEvent, Provid
                 })?,
             }
         }
-    })
+    }))
 }
 
 #[derive(serde::Serialize)]
