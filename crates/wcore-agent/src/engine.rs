@@ -1612,6 +1612,61 @@ const DEFAULT_MAX_STREAM_RETRIES: u32 = wcore_providers::retry::DEFAULT_MAX_RETR
 /// `the_ceiling_is_the_largest_budget_that_fits_the_breaker_cooldown` pins it.
 const MAX_STREAM_RETRIES_CEILING: u32 = 10;
 
+/// Ceiling on the served-failure retry budget after a SILENT STALL — an
+/// attempt that produced nothing at all and burned a full connect deadline
+/// doing it.
+///
+/// #1077. The count budget is justified by cost, in the words of the comment
+/// at its own call site: those attempts "were served and billed, so each
+/// re-send has a real price and the number of them is exactly the right thing
+/// to cap". A stalled connect is the other shape entirely — nothing was
+/// served, nothing was billed, and the price is thirty seconds of the user's
+/// wall clock, paid again in full on every re-send. A count does not bound
+/// that; it multiplies it.
+///
+/// MEASURED on hetzner-dsm against a blackholed `base_url`
+/// (`http://192.0.2.1:9999`, TEST-NET-1, packets dropped) on the released
+/// v0.13.5 binary: 3 attempts x 30 s = **92.4 s** end to end. That is the
+/// figure this ticket reports as the shape users call "it froze".
+///
+/// ONE re-send, not zero: a routing blip that heals inside the next thirty
+/// seconds is real, and riding it out costs a socket. Not three: the first
+/// attempt's own connect window already contains the kernel's whole SYN
+/// retransmit ladder (`tcp_syn_retries` = 6 on this host), so a third full
+/// budget re-asks a question the first two answered identically and charges
+/// thirty more seconds for the answer.
+///
+/// Deliberately NOT a shorter [`wcore_providers::http_client::CONNECT_TIMEOUT`]
+/// — which is what #1077 suggests. The connect deadline is the only lever here
+/// that can spuriously fail a legitimately slow network, and it buys 30 s
+/// where this buys 31 s.
+const SILENT_STALL_MAX_STREAM_RETRIES: u32 = 1;
+
+/// The served-failure retry budget still in force after an attempt that failed
+/// the way the arguments describe.
+///
+/// A CEILING, never a floor: a user who set `WAYLAND_MAX_STREAM_RETRIES` below
+/// [`SILENT_STALL_MAX_STREAM_RETRIES`] keeps their own lower number, and a run
+/// that has produced output keeps the full configured budget.
+///
+/// The elapsed threshold is [`wcore_providers::http_client::CONNECT_TIMEOUT`]
+/// itself rather than a number of its own: the attempt this exists to stop
+/// costs exactly one connect deadline, so anything cheaper than that is a
+/// different failure and keeps the ordinary budget. A refused connection
+/// (measured: 1 ms) is unaffected, which is the point — #1077 argues refusals
+/// should become terminal and `is_permanent_endpoint_failure` deliberately
+/// declines; this changes nothing about them.
+fn stream_retry_budget_after_attempt(
+    configured: u32,
+    attempt_produced_output: bool,
+    attempt_elapsed: std::time::Duration,
+) -> u32 {
+    if attempt_produced_output || attempt_elapsed < wcore_providers::http_client::CONNECT_TIMEOUT {
+        return configured;
+    }
+    configured.min(SILENT_STALL_MAX_STREAM_RETRIES)
+}
+
 /// One run's served-failure retry budget, plus the value the user asked for
 /// when it had to be clamped — a clamp notice that cannot name the rejected
 /// number tells the user nothing.
@@ -11805,6 +11860,11 @@ impl AgentEngine {
             // retry; this guard bounds it so the turn can never loop. After
             // the single retry a recurring wedge is a clean terminal error.
             'stream: loop {
+                // #1077: when this attempt fails, how long it took is part of
+                // what its re-send will cost. Started here, so it spans the
+                // whole attempt and excludes the backoff that precedes the
+                // next one.
+                let attempt_started = tokio::time::Instant::now();
                 // Reset per-attempt accumulators so a retry never
                 // double-commits text/tool-calls from a failed attempt.
                 assistant_text.clear();
@@ -13339,13 +13399,27 @@ impl AgentEngine {
                     // One physical send that produced no response head.
                     self.unserved_resends = self.unserved_resends.saturating_add(1);
                 }
+                let produced_output = !assistant_text.is_empty()
+                    || !thinking_text.is_empty()
+                    || !tool_calls.is_empty()
+                    || attempt_usage.output_tokens > 0;
+                // #1077: an attempt that produced nothing and spent a whole
+                // connect deadline doing it has already been answered; the
+                // count budget above prices re-sends in tokens, and this one
+                // is priced in the user's wall clock. See
+                // `SILENT_STALL_MAX_STREAM_RETRIES`.
+                let stream_retry_budget = stream_retry_budget_after_attempt(
+                    max_stream_retries,
+                    produced_output,
+                    attempt_started.elapsed(),
+                );
                 let retry_admitted = if unserved {
                     let deadline = *unserved_deadline.get_or_insert_with(|| {
                         tokio::time::Instant::now() + UNSERVED_OUTAGE_BUDGET
                     });
                     tokio::time::Instant::now() < deadline
                 } else {
-                    stream_attempt < max_stream_retries
+                    stream_attempt < stream_retry_budget
                 };
                 if !is_client_error && !permanent_endpoint && retry_admitted {
                     // Spec v1 Task 5 (clean retry): a retry re-sends the whole
@@ -13368,10 +13442,6 @@ impl AgentEngine {
                     // error instead of burning another full-input bill. (The
                     // tool round is constant within one turn's retry loop, so
                     // "same failing tool" holds by construction.)
-                    let produced_output = !assistant_text.is_empty()
-                        || !thinking_text.is_empty()
-                        || !tool_calls.is_empty()
-                        || attempt_usage.output_tokens > 0;
                     self.midflight_monitor
                         .record_stream_attempt(!failed_tools.is_empty(), produced_output);
                     match self.midflight_monitor.tick_provider() {
@@ -13429,7 +13499,11 @@ impl AgentEngine {
                                 .saturating_duration_since(tokio::time::Instant::now())
                                 .as_secs()
                         ),
-                        None => format!("attempt {stream_attempt}/{max_stream_retries}"),
+                        // The budget IN FORCE, not the configured one: after a
+                        // silent stall the ceiling has cut it, and "attempt
+                        // 1/2" would promise a third attempt that will not
+                        // happen.
+                        None => format!("attempt {stream_attempt}/{stream_retry_budget}"),
                     };
                     self.output.emit_info(&format!(
                         "Provider stream failed ({reason}); retrying ({progress})…"
@@ -26595,6 +26669,81 @@ mod audit_2026_05_22_tests {
         (calls.load(std::sync::atomic::Ordering::SeqCst), elapsed)
     }
 
+    /// Drive one turn against a provider whose every attempt stalls for a
+    /// full connect deadline and then reports an expired one — the blackholed
+    /// `base_url` of #1077, in the shape the engine sees it. Returns the
+    /// physical sends and the wall clock the turn consumed.
+    ///
+    /// `deadline has elapsed` is the exact rendering measured for 281 of 300
+    /// blackholed connects on this host; v0.13.5 classifies it `timeout`,
+    /// which is retryable, is NOT admitted to the unserved outage window, and
+    /// therefore lands on the count-bounded path this test grades.
+    async fn silent_connect_stall() -> (usize, std::time::Duration) {
+        /// A provider that answers nothing for a whole connect deadline and
+        /// then reports an expired one.
+        struct StalledConnectProvider {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl LlmProvider for StalledConnectProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(wcore_providers::http_client::CONNECT_TIMEOUT).await;
+                Err(ProviderError::Connection(
+                    "error sending request: deadline has elapsed".into(),
+                ))
+            }
+        }
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(StalledConnectProvider {
+            calls: Arc::clone(&calls),
+        });
+        let mut engine = engine_with(provider);
+        let started = tokio::time::Instant::now();
+        let result = engine.run("task", "m-1").await;
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(result, Err(super::AgentError::ApiError(_))),
+            "an endpoint that never answers must still fail the turn, got {result:?}"
+        );
+        (calls.load(std::sync::atomic::Ordering::SeqCst), elapsed)
+    }
+
+    /// #1077, the WIRING. The function above knows the budget; this proves the
+    /// loop spends it.
+    ///
+    /// Reverting the ceiling at the call site — putting `max_stream_retries`
+    /// back in `retry_admitted` — leaves every pure-function test green and
+    /// reopens the defect at product level, so this is the test standing
+    /// between a refactor of that call site and a silent return to 92 s.
+    ///
+    /// Runs on a paused clock, so three 30 s deadlines cost no real time.
+    #[tokio::test(start_paused = true)]
+    async fn a_blackholed_endpoint_is_not_dialled_a_third_time() {
+        let (sends, elapsed) = silent_connect_stall().await;
+        let connect = wcore_providers::http_client::CONNECT_TIMEOUT;
+        assert_eq!(
+            sends, 2,
+            "a stalled endpoint was dialled {sends} times at {connect:?} each;              the measured 92.4 s of #1077 is exactly what 3 buys"
+        );
+        assert!(
+            elapsed < connect * 3,
+            "the turn spent {elapsed:?}, at or past the three full connect              deadlines this ceiling exists to stop"
+        );
+        // KNOWN-POSITIVE CONTROL for the bound above: an assertion that the
+        // turn took LESS than something is satisfied for free by a turn that
+        // did not dial at all. Require the two attempts to actually be there
+        // in the wall clock.
+        assert!(
+            elapsed >= connect * 2,
+            "control: two full connect deadlines must be IN this {elapsed:?} —              otherwise the bound above is measuring a turn that never dialled"
+        );
+    }
+
     /// The headline of round 2. The budget for a request the provider never
     /// served is an outage WINDOW, not a send count.
     ///
@@ -34162,6 +34311,97 @@ mod stream_retry_budget_tests {
             "one retry past the ceiling still fits in {cooldown:?} ({:?}) — the \
              ceiling is lower than its own derivation allows",
             spent(ceiling + 1)
+        );
+    }
+
+    /// #1077, the arithmetic. An attempt that produced nothing and spent a
+    /// whole connect deadline doing it must not buy a THIRD full deadline.
+    ///
+    /// MEASURED on the released v0.13.5 binary (`addb4f48`) against a
+    /// blackholed `base_url` — `http://192.0.2.1:9999`, TEST-NET-1, packets
+    /// dropped, HOME-isolated, unpiped: 92.36 s end to end, attempts at
+    /// +30 s / +60 s / +91 s. This asserts the budget that produced it, in the
+    /// units the loop actually spends.
+    #[test]
+    fn a_silent_stall_must_not_buy_a_third_full_connect_deadline() {
+        let connect = wcore_providers::http_client::CONNECT_TIMEOUT;
+        let budget = super::stream_retry_budget_after_attempt(
+            super::DEFAULT_MAX_STREAM_RETRIES,
+            false,
+            connect,
+        );
+        assert!(
+            budget < super::DEFAULT_MAX_STREAM_RETRIES,
+            "a stalled attempt still gets the full {} retries: that is              {:?} of wall clock for an endpoint that has already answered              the same way — the measured 92.4 s of #1077",
+            super::DEFAULT_MAX_STREAM_RETRIES,
+            connect * (super::DEFAULT_MAX_STREAM_RETRIES + 1),
+        );
+        assert_eq!(
+            budget,
+            super::SILENT_STALL_MAX_STREAM_RETRIES,
+            "the stall ceiling must be the budget in force"
+        );
+    }
+
+    /// NEGATIVE CONTROL — the ceiling must be scoped to the SLOW failure.
+    ///
+    /// A refused connection is measured at 1 ms and #1077's own request to
+    /// make it terminal was deliberately declined
+    /// (`is_permanent_endpoint_failure`). Nothing here may change it: a fast
+    /// failure keeps every retry it had.
+    #[test]
+    fn a_fast_failure_keeps_the_full_retry_budget() {
+        assert_eq!(
+            super::stream_retry_budget_after_attempt(
+                super::DEFAULT_MAX_STREAM_RETRIES,
+                false,
+                std::time::Duration::from_millis(1),
+            ),
+            super::DEFAULT_MAX_STREAM_RETRIES,
+            "a 1 ms refusal must keep the ordinary budget"
+        );
+        // The boundary itself: one tick under the connect deadline is still
+        // the ordinary budget, so the threshold is the deadline and not
+        // "anything slow-ish".
+        assert_eq!(
+            super::stream_retry_budget_after_attempt(
+                super::DEFAULT_MAX_STREAM_RETRIES,
+                false,
+                wcore_providers::http_client::CONNECT_TIMEOUT - std::time::Duration::from_millis(1),
+            ),
+            super::DEFAULT_MAX_STREAM_RETRIES,
+            "the threshold must be the connect deadline, not merely 'slow'"
+        );
+    }
+
+    /// NEGATIVE CONTROL — a long attempt that DID produce output is a slow
+    /// generation, not a stall. Truncating its retries would punish exactly
+    /// the extended-thinking case `READ_TIMEOUT` was raised to 300 s for.
+    #[test]
+    fn a_slow_attempt_that_produced_output_keeps_the_full_retry_budget() {
+        assert_eq!(
+            super::stream_retry_budget_after_attempt(
+                super::DEFAULT_MAX_STREAM_RETRIES,
+                true,
+                wcore_providers::http_client::CONNECT_TIMEOUT * 100,
+            ),
+            super::DEFAULT_MAX_STREAM_RETRIES,
+            "a long attempt that streamed output is a slow generation, not a stall"
+        );
+    }
+
+    /// A CEILING, never a floor. `WAYLAND_MAX_STREAM_RETRIES=0` is a real
+    /// answer ("do not re-send at all") and this must not raise it back up.
+    #[test]
+    fn the_stall_ceiling_never_raises_a_users_lower_budget() {
+        assert_eq!(
+            super::stream_retry_budget_after_attempt(
+                0,
+                false,
+                wcore_providers::http_client::CONNECT_TIMEOUT,
+            ),
+            0,
+            "a user who asked for no retries must not be given one"
         );
     }
 
