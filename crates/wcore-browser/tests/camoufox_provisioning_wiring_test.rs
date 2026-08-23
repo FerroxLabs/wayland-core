@@ -101,6 +101,7 @@ fn cfg(port: u16, tmp: &std::path::Path, download: CamoufoxDownloadConfig) -> Su
         startup_timeout: Duration::from_secs(20),
         camoufox_download: download,
         binary_install_root: tmp.join("bin"),
+        ..SupervisorConfig::default()
     }
 }
 

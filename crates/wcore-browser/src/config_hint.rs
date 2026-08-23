@@ -172,11 +172,18 @@ pub fn loopback_blocked_hint(refusal: &str) -> String {
          literally in the URL, and any other host is re-checked after DNS \
          resolution — a name that resolves inward is refused, and one that \
          resolves to nothing at all is refused too.\n\n\
-         One gap remains, and it is not closable from here: the browser runs as \
-         a separate sidecar process and performs its own DNS resolution, so a \
-         record served with TTL=0 can still be re-answered inside a single \
-         navigation. Do not rely on this gate against an attacker who controls \
-         the authoritative zone.",
+         The browser runs as a separate sidecar process and does its own DNS, \
+         so a record served with TTL=0 could be re-answered inside a single \
+         navigation. Core closes that by dialling for it: a sidecar Core \
+         launches is pointed at a loopback proxy Core runs, which screens and \
+         resolves every connection the browser opens and connects to the \
+         address it screened. A sidecar Core did not launch is refused, \
+         because that guarantee does not hold for it.\n\n\
+         One gap remains, and it is not closable from here: MEASURED against \
+         real Camoufox, the browser bypasses a configured proxy for loopback \
+         destinations, so a loaded page's own requests to 127.0.0.1 or \
+         localhost are not screened. Navigating there is still refused unless \
+         a grant above authorises the port.",
         config_target_block()
     )
 }

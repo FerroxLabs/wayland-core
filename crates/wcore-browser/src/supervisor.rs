@@ -30,10 +30,14 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
+
+use crate::egress_proxy::PolicyEgressProxy;
+use crate::policy::BrowserPolicy;
 
 #[derive(Debug, Clone)]
 pub struct SupervisorConfig {
@@ -56,6 +60,23 @@ pub struct SupervisorConfig {
     pub camoufox_download: wcore_config::browser::CamoufoxDownloadConfig,
     /// Install root for auto-provisioned browser binaries.
     pub binary_install_root: PathBuf,
+    /// gh#1117 — the policy Core enforces on the sidecar's OWN egress.
+    ///
+    /// `Some(policy)` makes containment a precondition: `ensure_ready` starts
+    /// a loopback [`PolicyEgressProxy`] carrying
+    /// [`BrowserPolicy::address_gate_only`] of this policy, points every
+    /// sidecar it launches at it, and refuses a sidecar it did not launch
+    /// (see [`SupervisorConfig::allow_unproxied_sidecar`]).
+    ///
+    /// `None` is the pre-gh#1117 behaviour and stays the default, so an
+    /// observe-only supervisor and every existing construction site are
+    /// unchanged. The production Camoufox path sets it in
+    /// [`crate::adapter::from_spec`].
+    pub egress_policy: Option<BrowserPolicy>,
+    /// gh#1117 opt-out. `false` (default) refuses a sidecar Core did not
+    /// launch behind its egress proxy; `true` proceeds with a warning and no
+    /// address screening on the sidecar's own requests.
+    pub allow_unproxied_sidecar: bool,
 }
 
 impl Default for SupervisorConfig {
@@ -69,6 +90,8 @@ impl Default for SupervisorConfig {
             startup_timeout: Duration::from_secs(15),
             camoufox_download: wcore_config::browser::CamoufoxDownloadConfig::default(),
             binary_install_root: home_bin_dir(),
+            egress_policy: None,
+            allow_unproxied_sidecar: false,
         }
     }
 }
@@ -91,9 +114,53 @@ impl SupervisorConfig {
                     .unwrap_or_else(|_| "camofox-browser".to_string()),
             ),
             camoufox_download: configured_camoufox_download(),
+            allow_unproxied_sidecar: configured_allow_unproxied_sidecar(),
             ..Self::default()
         }
     }
+}
+
+/// The operator's gh#1117 opt-out, read from the environment first and the
+/// config file second.
+///
+/// The env var wins because it is the escape hatch an operator reaches for
+/// when the refusal is already in front of them. Absent both, the answer is
+/// `false` — refuse — and a config file that cannot be read yields `false`
+/// too, so an unreadable config can never silently disable containment.
+fn configured_allow_unproxied_sidecar() -> bool {
+    if let Ok(raw) = std::env::var("WAYLAND_BROWSER_ALLOW_UNPROXIED_SIDECAR") {
+        let value = raw.trim().to_ascii_lowercase();
+        if !value.is_empty() {
+            return matches!(value.as_str(), "1" | "true" | "yes" | "on");
+        }
+    }
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        wcore_config::config::load_merged_config_file(None)
+            .map(|file| file.browser.allow_unproxied_sidecar)
+            .unwrap_or(false)
+    })
+}
+
+/// gh#1117 refusal text.
+///
+/// Names the protection that is missing AND the exact opt-out with exactly
+/// what it costs. A refusal that names neither is a dead end, and a silent
+/// downgrade is the bug class this whole change is about.
+pub fn unproxied_sidecar_refusal(healthcheck_url: &str) -> String {
+    format!(
+        "Camoufox is already running at {healthcheck_url} and Core did not start it, so it is \
+NOT behind Core's egress proxy. An unproxied sidecar resolves its own DNS, so Core cannot see \
+or screen the addresses the browser actually dials: the policy would apply to the NAME and not \
+to the destination (gh#1117). Refusing, rather than reporting a protection that does not apply.\n\
+Fix: stop that sidecar and let Core start it — Core passes PROXY_HOST/PROXY_PORT to the sidecar \
+it launches.\n\
+Opt out: WAYLAND_BROWSER_ALLOW_UNPROXIED_SIDECAR=1, or `allow_unproxied_sidecar = true` under \
+[browser] in config. That gives up, for every request the sidecar makes: the DNS resolution gate \
+(a public name pointing at 169.254.169.254 or into RFC 1918 reaches the browser), TTL=0 \
+intra-navigation rebinding, and any screening at all of sub-resource loads. The navigation URL \
+string checks still apply."
+    )
 }
 
 /// The operator's `[browser.camoufox_download]` block, read once per process.
@@ -147,6 +214,14 @@ pub struct BrowserSupervisor {
     /// Cancellation handle for the reaper task (when started). The handle
     /// is dropped on `Drop` so an unstarted supervisor leaks nothing.
     reaper_cancel: Mutex<Option<CancellationToken>>,
+    /// gh#1117 egress proxy, started lazily by `ensure_ready` when
+    /// `config.egress_policy` is set. Shut down on `Drop`.
+    egress_proxy: Mutex<Option<Arc<PolicyEgressProxy>>>,
+    /// True once THIS supervisor launched a sidecar with the proxy env in
+    /// place. Only such a sidecar is known to be contained — a healthy
+    /// sidecar Core found already running is not, and `/health` does not
+    /// report the browser's proxy configuration, so there is nothing to ask.
+    owns_proxied_sidecar: AtomicBool,
 }
 
 fn sidecar_start_lock() -> &'static tokio::sync::Mutex<()> {
@@ -164,6 +239,8 @@ impl BrowserSupervisor {
             config,
             sessions: Arc::new(Mutex::new(Vec::new())),
             reaper_cancel: Mutex::new(None),
+            egress_proxy: Mutex::new(None),
+            owns_proxied_sidecar: AtomicBool::new(false),
         }
     }
 
@@ -329,11 +406,28 @@ impl BrowserSupervisor {
         };
 
         let _startup_guard = sidecar_start_lock().lock().await;
+
+        // gh#1117: containment is established BEFORE anything is reused or
+        // started, so "this sidecar is not behind the proxy" can never be
+        // discovered after a navigation has already gone out.
+        let containment_required = self.ensure_egress_proxy().await?;
+
         if self
             .healthcheck(Duration::from_millis(500))
             .await
             .unwrap_or(false)
         {
+            if containment_required && !self.owns_proxied_sidecar.load(Ordering::Acquire) {
+                if !self.config.allow_unproxied_sidecar {
+                    return Err(unproxied_sidecar_refusal(&self.config.healthcheck_url));
+                }
+                tracing::warn!(
+                    healthcheck_url = %self.config.healthcheck_url,
+                    "using a Camoufox sidecar Core did not start: it resolves its own DNS, so \
+                     the browser policy is NOT enforced on the addresses it dials (gh#1117, \
+                     allowed by allow_unproxied_sidecar)"
+                );
+            }
             return Ok(());
         }
 
@@ -347,16 +441,19 @@ impl BrowserSupervisor {
         if children_map().lock().contains_key(&session_id) {
             let _ = self.on_session_end(&session_id);
         }
-        let pid = self
+        let launched = self
             .launch_camoufox_program(program, &[], &session_id)
-            .await
-            .map_err(|error| {
-                format!(
-                    "Camoufox is unavailable at {} and Core could not start `{program}`: {error}. \
+            .await;
+        if launched.is_ok() && containment_required {
+            self.owns_proxied_sidecar.store(true, Ordering::Release);
+        }
+        let pid = launched.map_err(|error| {
+            format!(
+                "Camoufox is unavailable at {} and Core could not start `{program}`: {error}. \
 Install @askjo/camofox-browser or set WAYLAND_CAMOUFOX_BIN to its executable",
-                    self.config.healthcheck_url
-                )
-            })?;
+                self.config.healthcheck_url
+            )
+        })?;
 
         let deadline = tokio::time::Instant::now() + self.config.startup_timeout;
         loop {
@@ -369,12 +466,14 @@ Install @askjo/camofox-browser or set WAYLAND_CAMOUFOX_BIN to its executable",
             }
             if let Some(status) = owned_child_status(&session_id) {
                 let _ = self.on_session_end(&session_id);
+                self.owns_proxied_sidecar.store(false, Ordering::Release);
                 return Err(format!(
                     "Camoufox process {pid} exited before becoming healthy ({status}); run `{program}` directly for diagnostics"
                 ));
             }
             if tokio::time::Instant::now() >= deadline {
                 let _ = self.on_session_end(&session_id);
+                self.owns_proxied_sidecar.store(false, Ordering::Release);
                 return Err(format!(
                     "Camoufox process {pid} did not become healthy at {} within {}ms",
                     self.config.healthcheck_url,
@@ -383,6 +482,38 @@ Install @askjo/camofox-browser or set WAYLAND_CAMOUFOX_BIN to its executable",
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// Start the gh#1117 egress proxy if this supervisor is configured to
+    /// contain its sidecar. Returns whether containment is required at all.
+    ///
+    /// Fail-closed: a proxy that cannot bind is an error, never a quiet
+    /// fallback to an uncontained sidecar.
+    async fn ensure_egress_proxy(self: &Arc<Self>) -> Result<bool, String> {
+        let Some(policy) = self.config.egress_policy.clone() else {
+            return Ok(false);
+        };
+        let already = self.egress_proxy.lock().is_some();
+        if already {
+            return Ok(true);
+        }
+        let proxy = PolicyEgressProxy::start(policy.address_gate_only())
+            .await
+            .map_err(|error| {
+                format!(
+                    "could not start the browser egress proxy on loopback: {error}. Refusing to \
+                     use a sidecar that would resolve its own DNS (gh#1117)"
+                )
+            })?;
+        *self.egress_proxy.lock() = Some(proxy);
+        Ok(true)
+    }
+
+    /// The running egress proxy, if any. Test / introspection helper — a test
+    /// asserting "the sidecar could not reach it" reads the proxy's refusal
+    /// counter, not just the client-side error.
+    pub fn egress_proxy(&self) -> Option<Arc<PolicyEgressProxy>> {
+        self.egress_proxy.lock().clone()
     }
 
     /// The executable [`Self::ensure_ready`] will actually spawn.
@@ -455,6 +586,10 @@ Install @askjo/camofox-browser or set WAYLAND_CAMOUFOX_BIN to its executable",
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // gh#1117 — every sidecar Core launches goes out through Core's gate.
+        if let Some(proxy) = self.egress_proxy.lock().clone() {
+            apply_egress_env(&mut cmd, &proxy);
+        }
         wcore_sandbox::backends::process_tree::isolate(&mut cmd);
         let child = cmd.spawn().map_err(|e| format!("spawn camoufox: {e}"))?;
         let pid = child.id().ok_or_else(|| "no child PID".to_string())?;
@@ -474,10 +609,40 @@ Install @askjo/camofox-browser or set WAYLAND_CAMOUFOX_BIN to its executable",
     }
 }
 
+/// Point a sidecar command at Core's egress proxy.
+///
+/// `@askjo/camofox-browser` reads these in `lib/config.js` and hands the
+/// resulting `http://host:port` to the browser as its launch proxy.
+/// VERIFIED live 2026-08-23 against `@askjo/camofox-browser@1.13.1` on real
+/// Camoufox: with these set, Firefox sent `CONNECT api.ipify.org:443` and
+/// `GET http://example.com/ HTTP/1.1` to the proxy — the HOSTNAME, resolved
+/// by nobody but the proxy.
+///
+/// `PROXY_PORTS` is pinned as well as `PROXY_PORT` because the sidecar's own
+/// parser lets `PROXY_PORTS` WIN; an ambient `PROXY_PORTS` in the operator's
+/// environment would otherwise send the browser's egress to a port Core does
+/// not serve. `PROXY_STRATEGY` is pinned for the same reason: an ambient
+/// `backconnect` ignores host/port entirely and would route the browser
+/// through a third party.
+pub fn apply_egress_env(cmd: &mut tokio::process::Command, proxy: &PolicyEgressProxy) {
+    let port = proxy.port().to_string();
+    cmd.env("PROXY_STRATEGY", "round_robin")
+        .env("PROXY_HOST", proxy.host())
+        .env("PROXY_PORT", &port)
+        .env("PROXY_PORTS", &port)
+        .env("PROXY_USERNAME", "")
+        .env("PROXY_PASSWORD", "")
+        .env_remove("PROXY_BACKCONNECT_HOST")
+        .env_remove("PROXY_BACKCONNECT_PORT");
+}
+
 impl Drop for BrowserSupervisor {
     fn drop(&mut self) {
         if let Some(c) = self.reaper_cancel.lock().take() {
             c.cancel();
+        }
+        if let Some(proxy) = self.egress_proxy.lock().take() {
+            proxy.shutdown();
         }
         // Kill only processes for which this process retained a Child handle.
         // Recovered PID-file entries are not safe to signal here because the

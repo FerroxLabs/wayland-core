@@ -94,10 +94,34 @@
 //! `check_resolved_host` itself is unchanged and still available to a caller
 //! that resolves once and dials that exact address.
 //!
-//! **What the gate does not close.** Camoufox is a SIDECAR: Firefox performs
-//! its own DNS resolution in another process, so the addresses it actually
-//! dials are not the ones checked here. This closes static DNS SSRF. It does
-//! NOT close TTL=0 intra-navigation rebinding.
+//! **What this gate alone does not close, and what does.** Camoufox is a
+//! SIDECAR: Firefox performs its own DNS resolution in another process, so the
+//! addresses it dials are not the ones checked here. This gate closes static
+//! DNS SSRF; on its own it does NOT close TTL=0 intra-navigation rebinding.
+//!
+//! gh#1117 closes that separately, by making Core the one that dials:
+//! [`crate::egress_proxy::PolicyEgressProxy`] runs on loopback, the sidecar is
+//! launched pointing at it, and every connection the browser opens is screened
+//! through [`BrowserPolicy::approve_dial_target`] — the SAME
+//! `screen_navigation_target` below — and then connected to one of the
+//! addresses that screening returned. There is no second lookup for a TTL=0
+//! answer to win. A sidecar Core cannot contain is REFUSED
+//! (`SupervisorConfig::allow_unproxied_sidecar` is the named opt-out).
+//!
+//! **The residual, measured.** On hetzner-dsm 2026-08-23 against
+//! `@askjo/camofox-browser@1.13.1` on real Camoufox, with Core's proxy in
+//! place: `http://example.com/`, `http://10.0.0.7/`, `http://192.168.1.1/`,
+//! `http://169.254.169.254/` and a name resolving to the metadata endpoint all
+//! reached the proxy and were screened. `http://127.0.0.1:PORT/` and
+//! `http://localhost:PORT/` did NOT — Firefox bypasses a configured proxy for
+//! loopback destinations (`network.proxy.allow_hijacking_localhost` is false
+//! and `@askjo/camofox-browser` exposes no seam for browser prefs), and the
+//! local server received those requests directly. So PAGE-INITIATED requests
+//! to the HOST'S OWN loopback ports are still unscreened. That is not a
+//! regression — nothing screened a sub-resource before this — and navigations
+//! to loopback are still refused by the gate below unless a gh#911 grant
+//! authorises the port. It is graded, so that it is noticed if it changes, by
+//! `camoufox_live_egress_test::live_camoufox_egress_goes_through_cores_gate (phase 3)`.
 //!
 //! ## Redirect re-check
 //!
@@ -262,6 +286,18 @@ pub struct BrowserPolicy {
     pub loopback: LoopbackCapability,
     #[serde(skip)]
     dns_cache: Arc<Mutex<HashMap<String, IpAddr>>>,
+    /// Name-to-address resolver. Production is [`system_resolver`]; the ONLY
+    /// other way to set it is [`with_resolver`](Self::with_resolver).
+    ///
+    /// It is a field rather than a parameter because gh#1053 could not
+    /// otherwise be graded end to end. `.invalid` (RFC 6761 - resolves to
+    /// nothing) is the only resolution outcome an integration test can reach
+    /// hermetically, and grading only that leaves the block-list loop in
+    /// [`screen_navigation_target`](Self::screen_navigation_target) - the code
+    /// that actually stops a rebind - passing every test with the loop
+    /// deleted.
+    #[serde(skip, default = "default_resolver")]
+    resolver: Resolver,
 }
 
 impl Default for BrowserPolicy {
@@ -275,6 +311,7 @@ impl Default for BrowserPolicy {
             denied_origins: Vec::new(),
             loopback: LoopbackCapability::default(),
             dns_cache: Arc::new(Mutex::new(HashMap::new())),
+            resolver: system_resolver,
         }
     }
 }
@@ -302,6 +339,7 @@ impl BrowserPolicy {
             denied_origins,
             loopback: LoopbackCapability::default(),
             dns_cache: Arc::new(Mutex::new(HashMap::new())),
+            resolver: system_resolver,
         }
     }
 
@@ -311,6 +349,46 @@ impl BrowserPolicy {
     pub fn with_loopback(mut self, loopback: LoopbackCapability) -> Self {
         self.loopback = loopback;
         self
+    }
+
+    /// TEST SEAM - replace the name resolver.
+    ///
+    /// NOT `#[cfg(test)]`, deliberately: integration tests are separate
+    /// crates and cannot see a `cfg(test)` item, and the case gh#1053 is
+    /// actually about - a host that RESOLVES TO A DENIED ADDRESS - cannot be
+    /// produced hermetically any other way. Nothing else on the path is
+    /// stubbed by this: the gate, the tool, the backend and the egress proxy
+    /// are all the production code, and the production constructors all pass
+    /// [`system_resolver`].
+    #[doc(hidden)]
+    pub fn with_resolver(mut self, resolver: Resolver) -> Self {
+        self.resolver = resolver;
+        self
+    }
+
+    /// This policy's HARD ADDRESS GATE alone - what
+    /// [`crate::egress_proxy::PolicyEgressProxy`] enforces on every connection
+    /// the sidecar opens.
+    ///
+    /// Keeps: the scheme allowlist, the hardcoded block-list, the gh#911
+    /// loopback grant, `denied_origins` (an explicit block applies
+    /// everywhere), the shared DNS cache and the resolver.
+    ///
+    /// Drops: `allowed_origins` and `default_action`. Those are a NAVIGATION
+    /// policy - an operator writes `*.example.com` to say where the agent may
+    /// browse, not to say that example.com may not load its own fonts - and
+    /// they keep applying in full at the three navigation seams. Dropping
+    /// them here can only ever refuse MORE than the previous behaviour, never
+    /// less: before the proxy existed, nothing screened a sub-resource at all.
+    pub fn address_gate_only(&self) -> Self {
+        Self {
+            default_action: PolicyAction::Allow,
+            allowed_origins: Vec::new(),
+            denied_origins: self.denied_origins.clone(),
+            loopback: self.loopback.clone(),
+            dns_cache: Arc::clone(&self.dns_cache),
+            resolver: self.resolver,
+        }
     }
 
     /// Check a URL. Convenience wrapper returning `Result<(), PolicyError>`
@@ -470,7 +548,7 @@ impl BrowserPolicy {
     /// this cannot close (the sidecar resolves DNS itself, so TTL=0
     /// intra-navigation rebinding stays open).
     pub fn evaluate_navigation_target(&self, url_str: &str) -> PolicyOutcome {
-        self.evaluate_navigation_target_with(url_str, system_resolver)
+        self.evaluate_navigation_target_with(url_str, self.resolver)
     }
 
     /// Async form of
@@ -499,23 +577,40 @@ impl BrowserPolicy {
     /// Private on purpose: the public surface passes the system resolver, and
     /// only the in-crate tests get to choose the answers.
     fn evaluate_navigation_target_with(&self, url_str: &str, resolve: Resolver) -> PolicyOutcome {
+        match self.screen_navigation_target(url_str, resolve) {
+            ScreenedTarget::Direct | ScreenedTarget::Resolved(_) => PolicyOutcome::Allow,
+            ScreenedTarget::Denied(reason) => PolicyOutcome::Deny { reason },
+            ScreenedTarget::Suspend(url) => PolicyOutcome::Suspend { url },
+        }
+    }
+
+    /// Screen a navigation target and SAY WHAT WAS RESOLVED.
+    ///
+    /// This is the one implementation of the gate. Both the navigation seams
+    /// (through [`evaluate_navigation_target`](Self::evaluate_navigation_target),
+    /// which throws the addresses away) and the sidecar egress proxy (through
+    /// [`approve_dial_target`](Self::approve_dial_target), which DIALS them)
+    /// come through here, so there is exactly one block-list loop to keep
+    /// correct - and exactly one to mutate when grading it.
+    fn screen_navigation_target(&self, url_str: &str, resolve: Resolver) -> ScreenedTarget {
         // 1. String-only gate first.
         match self.evaluate(url_str) {
             PolicyOutcome::Allow => {}
-            other => return other,
+            PolicyOutcome::Deny { reason } => return ScreenedTarget::Denied(reason),
+            PolicyOutcome::Suspend { url } => return ScreenedTarget::Suspend(url),
         }
 
         let Ok(parsed) = Url::parse(url_str) else {
             // Not reachable in practice — `evaluate` denies an unparseable URL
             // before this point — but fail closed rather than assume.
-            return PolicyOutcome::Deny {
-                reason: format!("invalid URL at the DNS resolution gate: {url_str}"),
-            };
+            return ScreenedTarget::Denied(format!(
+                "invalid URL at the DNS resolution gate: {url_str}"
+            ));
         };
         let Some(host) = parsed.host_str() else {
             // No host to resolve (and nothing for an attacker to point
             // anywhere); `evaluate` already had the final say.
-            return PolicyOutcome::Allow;
+            return ScreenedTarget::Direct;
         };
 
         // 2. IP literal — nothing to resolve. Brackets stripped the same way
@@ -525,7 +620,7 @@ impl BrowserPolicy {
             .and_then(|s| s.strip_suffix(']'))
             .unwrap_or(host);
         if IpAddr::from_str(bare).is_ok() {
-            return PolicyOutcome::Allow;
+            return ScreenedTarget::Direct;
         }
 
         // 3. gh#911 — a granted canonical loopback host is exempt from
@@ -536,23 +631,21 @@ impl BrowserPolicy {
                 .authorize(parsed.port_or_known_default())
                 .is_ok()
         {
-            return PolicyOutcome::Allow;
+            return ScreenedTarget::Direct;
         }
 
         // 4/5. Resolve, and require the whole answer set to clear the gate.
         let addrs = resolve(host);
         if addrs.is_empty() {
-            return PolicyOutcome::Deny {
-                reason: format!(
-                    "{host} resolved to no address at all; refused because the \
-                     policy cannot tell where the request would land \
-                     (DNS resolution gate)"
-                ),
-            };
+            return ScreenedTarget::Denied(format!(
+                "{host} resolved to no address at all; refused because the \
+                 policy cannot tell where the request would land \
+                 (DNS resolution gate)"
+            ));
         }
         for ip in &addrs {
             if let Some(reason) = blocked_resolved_ip_reason(host, *ip) {
-                return PolicyOutcome::Deny { reason };
+                return ScreenedTarget::Denied(reason);
             }
         }
 
@@ -560,7 +653,47 @@ impl BrowserPolicy {
         //    section in the module header. The loop above is the check that
         //    stops a rebind; a pin on top of it stops nothing extra and,
         //    measured, refuses real hosts.
-        PolicyOutcome::Allow
+        ScreenedTarget::Resolved(addrs)
+    }
+
+    /// Screen a target the SIDECAR wants to dial, and hand back the addresses
+    /// it may be dialled at.
+    ///
+    /// gh#1117: Firefox resolves in its own process, so the address it dials
+    /// was never the address Core checked. The egress proxy calls this and
+    /// then connects to one of `addrs` ITSELF - there is no second lookup for
+    /// a TTL=0 answer to win.
+    ///
+    /// An empty `addrs` on an `Approved` result means the gate approved
+    /// without a lookup: the host is an IP literal (dialling by name performs
+    /// no DNS), or a canonical loopback name under an authorising gh#911
+    /// grant, which the operator asked for by port.
+    pub fn approve_dial_target(&self, url_str: &str) -> DialApproval {
+        let Ok(parsed) = Url::parse(url_str) else {
+            return DialApproval::Denied {
+                reason: format!("unparseable proxy target: {url_str}"),
+            };
+        };
+        let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) else {
+            return DialApproval::Denied {
+                reason: format!("proxy target names no host or no port: {url_str}"),
+            };
+        };
+        let host = host
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(host)
+            .to_string();
+        match self.screen_navigation_target(url_str, self.resolver) {
+            ScreenedTarget::Direct => DialApproval::Approved {
+                host,
+                port,
+                addrs: Vec::new(),
+            },
+            ScreenedTarget::Resolved(addrs) => DialApproval::Approved { host, port, addrs },
+            ScreenedTarget::Denied(reason) => DialApproval::Denied { reason },
+            ScreenedTarget::Suspend(url) => DialApproval::Suspend { url },
+        }
     }
 
     /// DNS-rebinding TOFU check. Call this when the *resolved* IP for a
@@ -616,6 +749,7 @@ impl BrowserPolicy {
             denied_origins: self.denied_origins.clone(),
             loopback: self.loopback.clone(),
             dns_cache: Arc::clone(&self.dns_cache),
+            resolver: self.resolver,
         };
         reqwest::redirect::Policy::custom(move |attempt| {
             let url = attempt.url().to_string();
@@ -643,7 +777,48 @@ impl BrowserPolicy {
 /// `wcore_tools::url_safety::safe_url_pinned_ips` is NOT reused here: it
 /// embeds url_safety's own block-list, which refuses loopback
 /// unconditionally, and would delete the gh#911 loopback grant.
-type Resolver = fn(&str) -> Vec<IpAddr>;
+pub type Resolver = fn(&str) -> Vec<IpAddr>;
+
+/// Default for the [`BrowserPolicy::resolver`] field across serde and every
+/// production constructor.
+fn default_resolver() -> Resolver {
+    system_resolver
+}
+
+/// What the gate decided, and what it resolved while deciding.
+///
+/// Internal: the public surfaces are [`PolicyOutcome`] (navigation seams) and
+/// [`DialApproval`] (egress proxy).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScreenedTarget {
+    /// Approved WITHOUT a lookup - an IP literal, a host-less URL, or a
+    /// canonical loopback host under an authorising gh#911 grant.
+    Direct,
+    /// Approved after resolution. Every address in here cleared the
+    /// block-list, and these are the only addresses the target may be
+    /// dialled at.
+    Resolved(Vec<IpAddr>),
+    Denied(String),
+    Suspend(String),
+}
+
+/// Result of screening a connection the sidecar wants to open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialApproval {
+    Approved {
+        host: String,
+        port: u16,
+        /// Screened addresses. Empty means "approved without a lookup" - see
+        /// [`BrowserPolicy::approve_dial_target`].
+        addrs: Vec<IpAddr>,
+    },
+    Denied {
+        reason: String,
+    },
+    Suspend {
+        url: String,
+    },
+}
 
 /// The system resolver. Port 0 — only the addresses matter, not connectivity.
 fn system_resolver(host: &str) -> Vec<IpAddr> {
@@ -823,7 +998,7 @@ fn ipv4_mapped(v6: Ipv6Addr) -> Option<Ipv4Addr> {
 /// resolved-IP denials are distinguishable in logs.
 fn blocked_resolved_ip_reason(host: &str, ip: IpAddr) -> Option<String> {
     blocked_ip_literal_reason(host, ip)
-        .map(|reason| format!("DNS resolved {host} to blocked IP: {reason}"))
+        .map(|reason| format!("DNS resolved {host} to blocked IP {ip}: {reason}"))
 }
 
 /// Parse legacy IPv4 encodings that browsers accept but `IpAddr::from_str`

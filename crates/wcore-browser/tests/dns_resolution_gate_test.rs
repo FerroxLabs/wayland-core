@@ -429,3 +429,292 @@ async fn loopback_outside_the_granted_ports_is_still_refused() {
         r.content
     );
 }
+
+// ---------------------------------------------------------------------------
+// gh#1053 — A HOST THAT RESOLVES TO A DENIED ADDRESS, end to end.
+//
+// Everything above grades "resolves to NOTHING" (RFC 6761 `.invalid`), which
+// is the fail-closed arm. It does NOT grade the block-list loop in
+// `policy.rs::screen_navigation_target` — the code that actually stops a
+// rebind. MEASURED 2026-08-22 and re-measured on this branch: deleting that
+// loop left all eight tests above GREEN.
+//
+// The loop needs a host that resolves to a DENIED address, and `.invalid` is
+// the only resolution outcome an integration test can reach hermetically
+// without saying what the answer is. So the answer is injected, through
+// `BrowserPolicy::with_resolver`, and NOTHING ELSE on the path is stubbed:
+// `BrowserTool::execute`, `BrowserTool::policy_check`,
+// `CamoufoxBackend::dispatch` and the gate itself are the production code, and
+// every production constructor passes the system resolver.
+//
+// The system-resolver arm is graded too, against a real name that really
+// resolves to 169.254.169.254 — see `live_system_resolver_refuses_a_real_name_pointing_at_metadata`
+// at the bottom of this file.
+// ---------------------------------------------------------------------------
+
+/// Resolves to the cloud-metadata endpoint. The name is public and carries
+/// nothing objectionable in its string, which is the whole point.
+const METADATA_REBIND: &str = "metadata-rebind-probe.example";
+/// Resolves into RFC 1918.
+const PRIVATE_REBIND: &str = "private-rebind-probe.example";
+/// Resolves to a PUBLIC address first and a private one second — the answer an
+/// attacker orders to walk past a first-address-only gate.
+const SPLIT_ANSWER: &str = "split-answer-probe.example";
+/// Resolves to a single public address. The negative control for every
+/// assertion in this section.
+const PUBLIC_NAME: &str = "public-probe.example";
+
+/// The injected answers. A `fn` pointer, the same shape
+/// `wcore_tools::url_safety` already uses for this job.
+fn rebinding_resolver(host: &str) -> Vec<std::net::IpAddr> {
+    use std::net::{IpAddr, Ipv4Addr};
+    match host {
+        METADATA_REBIND => vec![IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))],
+        PRIVATE_REBIND => vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7))],
+        SPLIT_ANSWER => vec![
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)),
+        ],
+        PUBLIC_NAME => vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+        _ => Vec::new(),
+    }
+}
+
+fn rebinding_policy() -> BrowserPolicy {
+    BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]).with_resolver(rebinding_resolver)
+}
+
+/// THE gh#1053 TEST. A public name that resolves to the cloud-metadata
+/// endpoint must be refused at the pre-flight seam, and the sidecar must never
+/// see it.
+///
+/// This is the test that fails when the `blocked_resolved_ip_reason` loop in
+/// `policy.rs::screen_navigation_target` is deleted. The landing URL the mock
+/// hands back is a clean public literal, so the post-navigation gate cannot
+/// refuse it either — the loop at the pre-flight seam is the only thing left.
+#[tokio::test]
+async fn preflight_refuses_a_public_name_that_resolves_to_cloud_metadata() {
+    let server = MockServer::start().await;
+    mount_open(&server, "tab-md").await;
+    mount_navigate(
+        &server,
+        "tab-md",
+        &format!("http://{PUBLIC_LITERAL}/landed"),
+    )
+    .await;
+
+    let t = tool(server.uri(), rebinding_policy());
+    let input =
+        json!({ "op": { "kind": "navigate", "url": format!("http://{METADATA_REBIND}/") } });
+
+    use wcore_tools::Tool;
+    let r = t.execute(input).await;
+
+    assert!(
+        r.is_error,
+        "a public name resolving to 169.254.169.254 is the textbook rebinding \
+         attack and must be refused before the op reaches the sidecar; got a \
+         success: {}",
+        r.content
+    );
+    assert!(
+        r.content.contains("169.254.169.254"),
+        "the refusal must name the address that failed the block-list, or an \
+         operator cannot tell a rebind from an allow-list miss; got: {}",
+        r.content
+    );
+}
+
+/// NEGATIVE CONTROL, paired with the test above and with the two below. Same
+/// resolver, same seam, same policy — an ordinary public answer must still be
+/// permitted, so none of them can be satisfied by refusing everything.
+#[tokio::test]
+async fn preflight_allows_a_name_that_resolves_to_a_public_address() {
+    let server = MockServer::start().await;
+    mount_open(&server, "tab-pub").await;
+    mount_navigate(
+        &server,
+        "tab-pub",
+        &format!("http://{PUBLIC_LITERAL}/landed"),
+    )
+    .await;
+
+    let t = tool(server.uri(), rebinding_policy());
+    let input = json!({ "op": { "kind": "navigate", "url": format!("http://{PUBLIC_NAME}/") } });
+
+    use wcore_tools::Tool;
+    let r = t.execute(input).await;
+    assert!(
+        !r.is_error,
+        "a name resolving to a public address must still be reachable: {}",
+        r.content
+    );
+}
+
+/// EVERY answer has to clear the gate, not just the first. A first-address-only
+/// gate is one an attacker picks their way past by ordering the answer, and
+/// this is the test that fails if the loop is replaced by a check of
+/// `addrs[0]`.
+#[tokio::test]
+async fn preflight_refuses_when_only_the_second_answer_is_private() {
+    let server = MockServer::start().await;
+    mount_open(&server, "tab-split").await;
+    mount_navigate(
+        &server,
+        "tab-split",
+        &format!("http://{PUBLIC_LITERAL}/landed"),
+    )
+    .await;
+
+    let t = tool(server.uri(), rebinding_policy());
+    let input = json!({ "op": { "kind": "navigate", "url": format!("http://{SPLIT_ANSWER}/") } });
+
+    use wcore_tools::Tool;
+    let r = t.execute(input).await;
+    assert!(
+        r.is_error,
+        "the first A record is public and the second is 10.0.0.7; refusing only \
+         on the first address is a gate an attacker reorders their way past: {}",
+        r.content
+    );
+    assert!(
+        r.content.contains("10.0.0.7"),
+        "the refusal must name the offending address: {}",
+        r.content
+    );
+}
+
+/// THE SECOND PRODUCTION SEAM, same case. A 3xx chain the sidecar followed in
+/// its own process lands on a name that resolves into RFC 1918.
+/// `CamoufoxBackend::dispatch` is the only thing that can refuse it, and it
+/// has to refuse it for the resolved ADDRESS, not for the string.
+#[tokio::test]
+async fn landing_url_that_resolves_into_rfc1918_is_refused() {
+    let server = MockServer::start().await;
+    mount_open(&server, "tab-land-rb").await;
+    mount_navigate(
+        &server,
+        "tab-land-rb",
+        &format!("http://{PRIVATE_REBIND}/landed"),
+    )
+    .await;
+
+    let backend = CamoufoxBackend::with_policy(server.uri(), rebinding_policy());
+    let session = backend.open_session(false).await.unwrap();
+
+    let r = backend
+        .dispatch(
+            &session.ctx,
+            BrowserOp::Navigate {
+                url: format!("http://{PUBLIC_LITERAL}/start"),
+                wait_until_loaded: true,
+            },
+        )
+        .await;
+
+    match r {
+        Err(BrowserOpError::PolicyDenied { url, reason }) => {
+            assert!(
+                url.contains(PRIVATE_REBIND),
+                "the denial must name the landing URL, got {url}"
+            );
+            assert!(
+                reason.contains("10.0.0.7"),
+                "the denial must name the resolved address that failed the \
+                 block-list, got {reason}"
+            );
+        }
+        other => panic!(
+            "a landing URL resolving into RFC 1918 escaped the resolution gate, got {other:?}"
+        ),
+    }
+}
+
+/// THE THIRD PRODUCTION SEAM, same case: `enforce_post_navigation_policy`, the
+/// Back/Forward landing URL the sidecar chose out of its own history.
+#[tokio::test]
+async fn history_landing_url_that_resolves_to_metadata_is_refused() {
+    let server = MockServer::start().await;
+    mount_open(&server, "tab-hist-rb").await;
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-hist-rb/back"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({ "ok": true, "url": format!("http://{METADATA_REBIND}/previous") }),
+        ))
+        .mount(&server)
+        .await;
+
+    let backend = CamoufoxBackend::with_policy(server.uri(), rebinding_policy());
+    let session = backend.open_session(false).await.unwrap();
+
+    let r = backend.dispatch(&session.ctx, BrowserOp::Back {}).await;
+
+    match r {
+        Err(BrowserOpError::PolicyDenied { url, reason }) => {
+            assert!(url.contains(METADATA_REBIND), "got {url}");
+            assert!(reason.contains("169.254.169.254"), "got {reason}");
+        }
+        other => panic!("Back landed on a metadata rebind and was allowed, got {other:?}"),
+    }
+}
+
+/// THE SYSTEM-RESOLVER ARM. Everything above injects the answer; this one uses
+/// the resolver production uses, against a name that really does answer
+/// `169.254.169.254` (nip.io encodes the address in the label).
+///
+/// `#[ignore]` because it needs working DNS and a resolver that does not
+/// rewrite the answer — a CI box without either would report a false green on
+/// the refusal and a false red on the control. Run it with
+/// `cargo nextest run -E 'binary(dns_resolution_gate_test)' --run-ignored all`.
+///
+/// MEASURED on hetzner-dsm 2026-08-23: `getent hosts 169-254-169-254.nip.io`
+/// answered `169.254.169.254`, and `getent hosts 93-184-216-34.nip.io`
+/// answered `93.184.216.34` — the control, which proves the harness can report
+/// "allowed" and the refusal below is not simply "every nip.io name fails".
+#[tokio::test]
+#[ignore = "needs live DNS; the injected-resolver tests above are the hermetic arm"]
+async fn live_system_resolver_refuses_a_real_name_pointing_at_metadata() {
+    let server = MockServer::start().await;
+    mount_open(&server, "tab-live").await;
+    mount_navigate(
+        &server,
+        "tab-live",
+        &format!("http://{PUBLIC_LITERAL}/landed"),
+    )
+    .await;
+
+    // Production policy: NO injected resolver anywhere in this test.
+    let t = tool(
+        server.uri(),
+        BrowserPolicy::new(PolicyAction::Allow, vec![], vec![]),
+    );
+
+    use wcore_tools::Tool;
+
+    // Control first: a nip.io name resolving to a PUBLIC address must pass.
+    // Without it a refusal below proves only that nip.io is unreachable.
+    let control = t
+        .execute(json!({ "op": { "kind": "navigate", "url": "http://93-184-216-34.nip.io/" } }))
+        .await;
+    assert!(
+        !control.is_error,
+        "CONTROL FAILED — 93-184-216-34.nip.io did not resolve to a public \
+         address on this host, so the refusal below would prove nothing: {}",
+        control.content
+    );
+
+    let r = t
+        .execute(json!({ "op": { "kind": "navigate", "url": "http://169-254-169-254.nip.io/" } }))
+        .await;
+    assert!(
+        r.is_error,
+        "the SYSTEM resolver answers 169.254.169.254 for this name and the gate \
+         must refuse it: {}",
+        r.content
+    );
+    assert!(
+        r.content.contains("169.254.169.254"),
+        "the refusal must name the address: {}",
+        r.content
+    );
+}
