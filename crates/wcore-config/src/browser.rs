@@ -161,6 +161,13 @@ pub struct BrowserConfig {
     /// screening of sub-resource loads; the navigation URL string checks
     /// still apply. `WAYLAND_BROWSER_ALLOW_UNPROXIED_SIDECAR=1` overrides
     /// this at runtime.
+    ///
+    /// It covers the LOOPBACK half of the same guarantee too. Firefox dials
+    /// `127.0.0.1` and `localhost` around a configured proxy unless Core can
+    /// write `network.proxy.allow_hijacking_localhost` into the Camoufox
+    /// install; when it cannot, this switch is the difference between
+    /// refusing to start the browser and starting one whose pages can reach
+    /// any service on this machine unscreened.
     pub allow_unproxied_sidecar: bool,
 }
 

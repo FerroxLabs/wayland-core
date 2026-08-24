@@ -108,20 +108,23 @@
 //! answer to win. A sidecar Core cannot contain is REFUSED
 //! (`SupervisorConfig::allow_unproxied_sidecar` is the named opt-out).
 //!
-//! **The residual, measured.** On hetzner-dsm 2026-08-23 against
-//! `@askjo/camofox-browser@1.13.1` on real Camoufox, with Core's proxy in
-//! place: `http://example.com/`, `http://10.0.0.7/`, `http://192.168.1.1/`,
-//! `http://169.254.169.254/` and a name resolving to the metadata endpoint all
-//! reached the proxy and were screened. `http://127.0.0.1:PORT/` and
-//! `http://localhost:PORT/` did NOT — Firefox bypasses a configured proxy for
-//! loopback destinations (`network.proxy.allow_hijacking_localhost` is false
-//! and `@askjo/camofox-browser` exposes no seam for browser prefs), and the
-//! local server received those requests directly. So PAGE-INITIATED requests
-//! to the HOST'S OWN loopback ports are still unscreened. That is not a
-//! regression — nothing screened a sub-resource before this — and navigations
-//! to loopback are still refused by the gate below unless a gh#911 grant
-//! authorises the port. It is graded, so that it is noticed if it changes, by
-//! `camoufox_live_egress_test::live_camoufox_egress_goes_through_cores_gate (phase 3)`.
+//! **The loopback half.** Firefox dials loopback around a configured proxy
+//! unless `network.proxy.allow_hijacking_localhost` is true, and
+//! `@askjo/camofox-browser` exposes no seam for browser prefs. Core sets it
+//! where Firefox reads it regardless - one file in the Camoufox install's
+//! `defaults/pref` directory ([`crate::sidecar_prefs`]) - and REFUSES to
+//! launch a sidecar when it cannot. MEASURED on hetzner-dsm 2026-08-24
+//! against real Camoufox: with the pref absent, `http://127.0.0.1:PORT/` and
+//! `http://localhost:PORT/` reached the local server directly and the proxy
+//! saw nothing; with it present, every one of those requests - the favicon
+//! sub-resource included - arrived at the proxy, and the local server
+//! received nothing at all. Graded by
+//! `camoufox_live_egress_test::live_camoufox_egress_goes_through_cores_gate`
+//! phase 3, which asserted the GAP until 0.13.6 and now asserts the fix.
+//!
+//! **What is still open.** A sidecar Core did not launch cannot be contained
+//! and is refused rather than screened, and the named opt-out
+//! (`allow_unproxied_sidecar`) gives up both halves at once.
 //!
 //! ## Redirect re-check
 //!

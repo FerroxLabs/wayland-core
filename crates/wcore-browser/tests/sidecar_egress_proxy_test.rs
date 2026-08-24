@@ -692,6 +692,7 @@ async fn a_second_supervisor_does_not_inherit_the_first_ones_sidecar() {
         .mount(&server)
         .await;
 
+    let pref_dir = tempfile::tempdir().unwrap();
     let cfg = |policy: BrowserPolicy| SupervisorConfig {
         healthcheck_url: format!("{}/health", server.uri()),
         // `yes` writes to a null stdout and stays alive, so the retained child
@@ -700,6 +701,11 @@ async fn a_second_supervisor_does_not_inherit_the_first_ones_sidecar() {
         startup_timeout: Duration::from_secs(5),
         egress_policy: Some(policy),
         allow_unproxied_sidecar: false,
+        // gh#1117: this test LAUNCHES, and the launch path requires Core to
+        // have written the browser loopback pref. Point it at a scratch
+        // directory so what is graded here stays sidecar OWNERSHIP, and does
+        // not silently become "is a 300 MB Camoufox install present".
+        loopback_pref_dir: Some(pref_dir.path().to_path_buf()),
         ..SupervisorConfig::default()
     };
 

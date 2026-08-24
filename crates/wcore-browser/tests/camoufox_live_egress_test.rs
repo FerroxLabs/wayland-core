@@ -24,6 +24,14 @@
 //! the cloud-metadata endpoint. The control is `example.com`, which must still
 //! load — a proxy that refuses everything proves nothing.
 //!
+//! ## Phase 3 is the loopback half
+//!
+//! Firefox dials loopback around a configured proxy unless
+//! `network.proxy.allow_hijacking_localhost` is true. Core sets it in the
+//! browser install (`sidecar_prefs`), with no cooperation from the sidecar.
+//! Phase 3 is what proves that took effect on the real browser: the local
+//! service must receive nothing at all.
+//!
 //! ## One test, three phases, on purpose
 //!
 //! All three phases share ONE sidecar. Core refuses a sidecar it did not
@@ -188,38 +196,68 @@ async fn live_camoufox_egress_goes_through_cores_gate() {
         "metadata content reached the page: {probe_text:?}"
     );
 
-    // ── PHASE 3, THE MEASURED RESIDUAL. Firefox bypasses a configured HTTP
-    //    proxy for loopback destinations (`network.proxy.allow_hijacking_localhost`
-    //    is false), and `@askjo/camofox-browser` exposes no seam for browser
-    //    prefs — only `PROXY_*` — so Core cannot turn it on from here.
+    // ── PHASE 3, THE LOOPBACK HALF. Firefox dials loopback around a
+    //    configured proxy unless `network.proxy.allow_hijacking_localhost` is
+    //    true, and `@askjo/camofox-browser` exposes no seam for browser
+    //    prefs. Core sets it where Firefox reads it without the launcher's
+    //    help — `sidecar_prefs`, called from `ensure_ready` above — so these
+    //    requests now arrive at Core's gate like any other.
     //
-    //    MEASURED on hetzner-dsm 2026-08-23 with Core's proxy in place:
-    //    `http://10.0.0.7/`, `http://192.168.1.1/`, `http://169.254.169.254/`,
-    //    the metadata NAME above and `http://example.com/` ALL reached the
-    //    proxy; `http://127.0.0.1:PORT/` and `http://localhost:PORT/` did not,
-    //    and the local server received them directly.
-    //
-    //    This asserts the GAP, not the fix. If it starts failing, the browser
-    //    has begun proxying loopback and the residual documented in
-    //    `policy.rs`, `config_hint.rs` and the README has CLOSED — tighten
-    //    those claims rather than this assertion.
-    let counters_before = (proxy.approved_count(), proxy.refused_count());
-    let _ = navigate(
-        &client,
-        &tab,
-        &format!("http://127.0.0.1:{loopback_port}/probe"),
-    )
-    .await;
-    assert!(
-        loopback_hits.load(Ordering::Relaxed) > 0,
-        "the browser did not reach the loopback server at all, so this phase \
-         reports nothing about HOW it got there"
-    );
+    //    This phase asserted the GAP until 0.13.6. It now asserts the FIX:
+    //    the local service must receive NOTHING, and the refusal must come
+    //    from Core.
+    // Both request forms Firefox sends a proxy, on both loopback spellings:
+    // absolute-form GET for http, and CONNECT for https. The https arm needs
+    // no TLS server — if the browser bypassed the proxy it would open a raw
+    // connection to the plain-HTTP listener below, and that is what
+    // `loopback_hits` counts.
+    for (label, scheme, host) in [
+        ("http ip literal", "http", "127.0.0.1"),
+        ("http name", "http", "localhost"),
+        ("https ip literal (CONNECT)", "https", "127.0.0.1"),
+        ("https name (CONNECT)", "https", "localhost"),
+    ] {
+        let refused_before = proxy.refused_count();
+        let approved_before = proxy.approved_count();
+        let direct_before = loopback_hits.load(Ordering::Relaxed);
+
+        let _ = navigate(
+            &client,
+            &tab,
+            &format!("{scheme}://{host}:{loopback_port}/probe"),
+        )
+        .await
+        .clone();
+
+        // CONTROL for the assertion below: a counter that did not move at all
+        // would mean the browser never tried, and "the local server got
+        // nothing" would then be reporting nothing.
+        assert!(
+            proxy.refused_count() + proxy.approved_count() > refused_before + approved_before,
+            "{label}: the browser did not reach Core's proxy at all, so this \
+             phase measures nothing about where the request went"
+        );
+        assert!(
+            proxy.refused_count() > refused_before,
+            "{label}: loopback reached the proxy but was not refused by the \
+             address gate"
+        );
+        assert_eq!(
+            loopback_hits.load(Ordering::Relaxed),
+            direct_before,
+            "{label}: the browser reached the loopback service directly, \
+             around Core's proxy — the gh#1117 loopback hole is open"
+        );
+    }
+
+    // The whole point of the phase above: across all of it, the local service
+    // was never touched. Stated once, absolutely, so a future reader does not
+    // have to add up deltas.
     assert_eq!(
-        (proxy.approved_count(), proxy.refused_count()),
-        counters_before,
-        "THE RESIDUAL HAS CLOSED: loopback traffic now goes through Core's \
-         proxy. Update the residual wording in policy.rs, config_hint.rs and \
-         the README instead of this assertion."
+        loopback_hits.load(Ordering::Relaxed),
+        0,
+        "the loopback service was reached {} time(s) by a browser that is \
+         supposed to have no route to it except Core's gate",
+        loopback_hits.load(Ordering::Relaxed)
     );
 }

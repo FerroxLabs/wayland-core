@@ -179,11 +179,12 @@ pub fn loopback_blocked_hint(refusal: &str) -> String {
          resolves every connection the browser opens and connects to the \
          address it screened. A sidecar Core did not launch is refused, \
          because that guarantee does not hold for it.\n\n\
-         One gap remains, and it is not closable from here: MEASURED against \
-         real Camoufox, the browser bypasses a configured proxy for loopback \
-         destinations, so a loaded page's own requests to 127.0.0.1 or \
-         localhost are not screened. Navigating there is still refused unless \
-         a grant above authorises the port.",
+         Loopback is included. Firefox would otherwise dial 127.0.0.1 and \
+         localhost around any configured proxy, so Core sets \
+         network.proxy.allow_hijacking_localhost in the Camoufox install \
+         before starting the sidecar, and refuses to start one when it \
+         cannot. A loaded page's own requests to this machine reach the same \
+         gate, and are refused unless a grant above authorises the port.",
         config_target_block()
     )
 }
