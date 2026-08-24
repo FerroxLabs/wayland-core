@@ -210,10 +210,7 @@ impl StorageDir {
     /// jail does not carry it. The workspace is the one location both
     /// mechanisms agree on.
     pub fn for_session(policy: Arc<WorkspacePolicy>) -> Self {
-        let dir = policy
-            .root()
-            .join(wcore_config::config::SESSION_OUTPUT_ROOT)
-            .join(RESULTS_SUBDIR);
+        let dir = policy.session_output_root().join(RESULTS_SUBDIR);
         Self::new(dir).with_readback_guard(policy)
     }
 
@@ -920,9 +917,30 @@ mod tests {
             tmp.path(),
         ));
         let storage = StorageDir::for_session(Arc::clone(&policy));
+        // Compared against the workspace as the POLICY resolved it, not as the
+        // tempdir spelled it. `WorkspacePolicy` canonicalizes its root, and on
+        // the two platforms where a directory has more than one pathname that
+        // is a different string from the one `TempDir` handed us — macOS
+        // resolves `/var` to `/private/var`, Windows resolves to the verbatim
+        // `\\?\` form. Asserting on one spelling would grade the host's
+        // symlink layout rather than the choice of directory; the subdirectory
+        // names are what this test is about and they are still pinned exactly.
+        let workspace = dunce::canonicalize(tmp.path()).unwrap();
         assert_eq!(
             storage.path(),
-            tmp.path().join(".wayland-out").join("results")
+            workspace.join(".wayland-out").join("results")
+        );
+        // #1097 in the spelling as well as the location: this path is handed to
+        // the model with an instruction to `Read` it back, and every legacy file
+        // tool gates on `validate_user_path`, which refuses Windows' verbatim
+        // `\\?\` namespace (#644). Joining onto the canonicalized root produced
+        // exactly that path and the session's own `Read` refused it — MEASURED
+        // on Windows 11 26200. Revert `session_output_root` to `root()` and this
+        // reddens there while staying green on Unix, which is why the assertion
+        // is on the validator rather than on a literal prefix.
+        crate::path_validation::validate_user_path(&storage.path_for("toolu_01")).expect(
+            "the spill path is handed to the model; it must survive the same \
+             validation the Read tool applies to it",
         );
         policy
             .ensure_write_target_readable(&storage.path_for("toolu_01"))

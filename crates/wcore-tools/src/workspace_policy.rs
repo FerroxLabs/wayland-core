@@ -567,6 +567,32 @@ impl WorkspacePolicy {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// `<workspace>/.wayland-out` — the session's output root, in the one
+    /// spelling a path may be HANDED OUT in.
+    ///
+    /// [`root`](Self::root) is `canonicalize`d at construction, which on
+    /// Windows is the verbatim `\\?\C:\…` form. That is the correct spelling to
+    /// ENFORCE with — every prefix match in this module compares against it —
+    /// and the wrong one to hand over. `path_validation::validate_user_path`
+    /// refuses the verbatim namespace outright (#644), and the legacy file
+    /// tools all gate on it, so a path built by joining onto `root()` and then
+    /// given to the model is a path the producing session's own `Read` refuses.
+    /// MEASURED on Windows 11 26200 before this existed: `Refused to read
+    /// \\?\F:\…\.wayland-out\results\toolu_01.txt: path uses a Windows device /
+    /// verbatim namespace`. That is the FerroxLabs/wayland#1097 dead end again,
+    /// reached by a different route — the file is written, the path is handed
+    /// over, and the read is refused.
+    ///
+    /// `dunce::simplified` is the same reduction `wcore_agent`'s
+    /// `canonical_workspace` already applies before the workspace reaches the
+    /// system prompt, so the path the model is told to read back and the
+    /// `Working directory:` it was given are one spelling rather than two. A
+    /// pure string operation, and a plain no-op on Unix.
+    #[must_use]
+    pub fn session_output_root(&self) -> PathBuf {
+        dunce::simplified(&self.root).join(wcore_config::config::SESSION_OUTPUT_ROOT)
+    }
     pub fn writable_roots(&self) -> Vec<PathBuf> {
         let mut v = Vec::with_capacity(1 + self.writable_extra.len());
         v.push(self.root.clone());

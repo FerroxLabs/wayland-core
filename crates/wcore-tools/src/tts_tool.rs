@@ -452,10 +452,7 @@ impl TtsTool {
         // agree on — the same `.wayland-out` output root the tool-result
         // spill (#1097) and skill artifacts (#1096) use.
         let mut p = match workspace {
-            Some(policy) => policy
-                .root()
-                .join(wcore_config::config::SESSION_OUTPUT_ROOT)
-                .join(AUDIO_SUBDIR),
+            Some(policy) => policy.session_output_root().join(AUDIO_SUBDIR),
             None => self.output_dir.clone(),
         };
         p.push(format!("tts_{}.{}", provider.as_str(), format.extension()));
@@ -787,9 +784,23 @@ mod tests {
         policy
             .ensure_write_target_readable(&produced)
             .unwrap_or_else(|e| panic!("the model was handed a path it cannot read: {e}"));
+        // `file_path` goes to the model, and the model's file tools gate on
+        // `validate_user_path`, which refuses Windows' verbatim `\\?\`
+        // namespace (#644). Building the default by joining onto the
+        // canonicalized policy root produced precisely that, so the tool
+        // reported a file the same session could not open — MEASURED on
+        // Windows 11 26200. Readable-back has to mean readable in the spelling
+        // it was handed over in.
+        crate::path_validation::validate_user_path(&produced).unwrap_or_else(|e| {
+            panic!("the model was handed a path its own file tools refuse: {e}")
+        });
+        // Against the workspace as the policy resolved it: the root is
+        // canonicalized, and on macOS (`/var` -> `/private/var`) and Windows
+        // that is a different string from the one `TempDir` reported.
+        let workspace = dunce::canonicalize(ws.path()).unwrap();
         assert!(
             produced.starts_with(
-                ws.path()
+                workspace
                     .join(wcore_config::config::SESSION_OUTPUT_ROOT)
                     .join(AUDIO_SUBDIR)
             ),
