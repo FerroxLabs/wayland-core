@@ -2818,21 +2818,41 @@ fn build_tool_registry(
     // parent's, which had a human in it. A posture stricter than the parent's is
     // the right shape here; it is only the price that had to be checked.
     //
-    // THE PRICE, measured on hetzner-dsm at v0.13.5 (`addb4f48`) through the
-    // production entry point `secret_deny_paths_for_backend(true)`, interleaved
-    // arms, median of 7, tree size taken AFTER timing:
-    //   entries    contained    trusted_local
-    //     8,359      12.9 ms         0.19 ms
-    //    16,813      17.4 ms         0.18 ms
-    //    54,004      52.3 ms         0.19 ms
-    //   100,981      94.4 ms         0.26 ms
-    // #1113 was filed against v0.13.4 (`0ccaa90b`) with 896 ms warm on a
-    // 91,633-entry tree — 9.8 us/entry. It is now 0.93 us/entry: a 10.5x
-    // reduction that landed in v0.13.5 with the lexical prefilter and the
-    // parallel walk arm in `workspace_policy::project_committed_secrets`, which
-    // is the remedy #1113 itself proposed for the case where `contained` stays.
-    // So the standing cost of this decision is ~94 ms per exec on a 100k-entry
-    // tree, not ~900 ms, and a 50-turn child run pays ~4.7 s, not ~45 s.
+    // THE PRICE. Measured on hetzner-dsm through the production entry point
+    // `secret_deny_paths_for_backend(true)` — the one `bash.rs` calls exactly
+    // once per exec — arms strictly interleaved with the CHILD arm first every
+    // rep so the cheap arm can never be the one that warms the cache, and tree
+    // size counted AFTER all timing. v0.13.4 (`0ccaa90b`) is built from the
+    // same instrument on the SAME trees, because comparing absolute
+    // milliseconds across two differently-shaped trees confounds the change
+    // with the tree:
+    //
+    //   entries   tree                        v0.13.4    v0.13.5   parent
+    //     8,348   this repo, one checkout     23.10 ms    8.52 ms  0.146 ms
+    //   100,177   twelve copies of it        296.05 ms   48.80 ms  0.385 ms
+    //
+    // (medians of n=7 / n=9. The parent arm is `trusted_local` on the SAME
+    // root and is flat at ~0.15-0.39 ms in every row of both releases.)
+    //
+    // So the walk got 2.7x cheaper on a small tree and 6.1x cheaper on a
+    // 100k-entry one — the parallel arm buys more the bigger the tree. That
+    // reduction landed in v0.13.5 with the lexical prefilter and the parallel
+    // walk in `workspace_policy::project_committed_secrets`, which is the
+    // remedy #1113 itself proposed for the case where `contained` stays.
+    //
+    // #1113 was filed at 896 ms warm / 1,369 ms cold on a 91,633-entry tree at
+    // v0.13.4. The cold arm reproduces here (1,637 ms first rep on 100,177
+    // entries); the warm figure is 6.1x stale, so the standing cost of this
+    // decision is tens of milliseconds per exec, not ~900 ms, and a 50-turn
+    // child run pays ~2.4 s on a 100k-entry tree rather than the ~45 s the
+    // issue's Impact section computes.
+    //
+    // WHAT IS NOT FIXED, deliberately. The residual is the walk itself, and it
+    // cannot be removed without one of the three things #1113 rules out:
+    // memoisation (`readable_roots()` filters grants against
+    // `SystemTime::now()`, so any cache key without "now" in it is wrong),
+    // pruning (`no_prune_survives_the_922_backend_gate`), or dropping the
+    // posture — this decision. It is a ratified residual, not an open task.
     //
     // Pinned by `a_sub_agent_stays_contained_however_trusted_its_parent_is`, so
     // this is a guard and not a paragraph.
@@ -5241,27 +5261,30 @@ mod phase7_tests {
             "control: the trusted profile shares the operator's global caches"
         );
 
-        // (1) write scope: inheriting would hand the child write access to
-        // roots outside its own workspace. Compared as a set difference so the
-        // test does not depend on which of the operator's cache dirs happen to
-        // exist on this host.
+        // (1) write scope. Graded the only way that is not a tautology: name the
+        // roots the TRUSTED profile grants OUTSIDE the workspace — the
+        // operator's own `~/.cargo/registry` and friends, the supply-chain write
+        // this decision exists to refuse — and require that none of them reached
+        // the child. Deriving the list as "trusted minus child" instead would
+        // make the follow-up assertion true by construction.
         let child_writable = child.writable_roots();
-        let widened: Vec<_> = parent_if_trusted
+        let widened_outside_workspace: Vec<_> = parent_if_trusted
             .writable_roots()
             .into_iter()
-            .filter(|root| !child_writable.contains(root))
+            .filter(|granted| !granted.starts_with(parent_if_trusted.root()))
             .collect();
         assert!(
-            !widened.is_empty(),
-            "control: if the two profiles had the same write scope, this \
-             decision would be costing a walk for nothing and would need \
-             re-taking; child={child_writable:?}"
+            !widened_outside_workspace.is_empty(),
+            "control: the trusted profile must grant something outside the \
+             workspace, or this decision would be costing a walk for nothing \
+             and would need re-taking; trusted={:?}",
+            parent_if_trusted.writable_roots()
         );
-        for root in &widened {
+        for granted in &widened_outside_workspace {
             assert!(
-                !child_writable.contains(root),
+                !child_writable.contains(granted),
                 "a root only the trusted profile grants leaked into the child: {}",
-                root.display()
+                granted.display()
             );
         }
     }

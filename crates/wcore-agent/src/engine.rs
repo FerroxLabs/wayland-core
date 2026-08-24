@@ -1652,6 +1652,40 @@ fn carried_a_response_head(failure_code: &str) -> bool {
     failure_code.starts_with("http_")
 }
 
+/// True when the failure is positive proof that NO request bytes were ever put
+/// in front of a server, so there is nothing any provider could have billed.
+///
+/// #1077. A failed provider dispatch settles its pre-flight reservation at the
+/// CONSERVATIVE charge unless the error proves the request never left. That
+/// default is right for an outcome we cannot see — a socket lost mid-stream is
+/// not a free request: measured on this workspace, a client-side ECONNRESET
+/// against an upstream that answered 200 and billed 102 output tokens. It is
+/// wrong for a connect-phase refusal or an unresolvable name, where the failure
+/// happened BEFORE any request bytes existed on the wire:
+///
+/// * `dns_failure` — no socket was ever opened. There is no server.
+/// * `connection_refused` — the peer answered the SYN with a RST. The TCP
+///   handshake never completed, so not one byte of the request was delivered.
+///
+/// `connection` is deliberately NOT here even though it covers a connect
+/// deadline expiring, because the same code also covers a socket that died
+/// after the request was sent; the class is mixed and the product cannot tell
+/// the two apart, so it keeps the conservative charge.
+///
+/// MEASURED, v0.13.5 (`addb4f48`), `--base-url http://127.0.0.1:1` with
+/// `WAYLAND_MAX_STREAM_RETRIES=10` (the engine's own documented ceiling):
+/// the run died after five retries on
+/// `budget cap 'per_session_usd' would be exceeded (limit $25.0000, reserved
+/// total $29.2682)`. Six conservative reservations charged for six connections
+/// that were refused at the handshake — and the user was told their BUDGET was
+/// the problem when their `base_url` was. That is #1077's "the user sees retry
+/// churn instead of `connection refused, nothing is listening on <host>:<port>`"
+/// in its worst form: churn, and then a false cause.
+fn delivered_no_request_bytes(failure_code: &str) -> bool {
+    failure_code == wcore_providers::retry::FAILURE_DNS
+        || failure_code == wcore_providers::retry::FAILURE_CONNECTION_REFUSED
+}
+
 /// Wall-clock window over which the engine keeps re-issuing a request the
 /// provider never served (see [`is_unserved_request_failure`]).
 ///
@@ -13148,8 +13182,26 @@ impl AgentEngine {
                     None
                 };
                 if let Some(reservation) = failed_provider_reservation {
+                    // Three independent proofs that the reservation was never
+                    // spent, ORed because each covers a different phase and none
+                    // subsumes another:
+                    //   * `was_not_attempted` - the send never happened at all.
+                    //   * `delivered_no_request_bytes` (#1077) - connect-phase:
+                    //     DNS never resolved, or the peer RST the SYN, so not one
+                    //     request byte reached a server.
+                    //   * `produced_no_billable_output` - a response HEAD arrived
+                    //     carrying an error status, so the provider answered with
+                    //     a refusal document rather than a completion.
+                    // `Connection`/`Egress` transport faults are in NONE of them,
+                    // and that exclusion is the load-bearing half: measured on this
+                    // workspace, a client-side ECONNRESET against an upstream that
+                    // answered 200 and billed 102 output tokens.
                     if provider_result.as_ref().is_err_and(|error| {
-                        error.was_not_attempted() || error.produced_no_billable_output()
+                        error.was_not_attempted()
+                            || error.produced_no_billable_output()
+                            || delivered_no_request_bytes(
+                                &wcore_providers::retry::provider_failure_code(error),
+                            )
                     }) {
                         reservation
                             .release()
@@ -13159,18 +13211,20 @@ impl AgentEngine {
                         // reservation rather than pretending a failed transport was
                         // free.
                         //
-                        // This used to say it also "bounds retry rings even when
-                        // usage is absent", and it did — which was the bug, not the
-                        // feature. Measured on 0.13.5 against a 503 endpoint: 15
-                        // physical sends over 301.9 s, ended not by the outage
-                        // window but by `budget cap 'per_session_output_tokens'
-                        // would be exceeded (limit 1000000, reserved total
-                        // 1024000)` — 16 reservations of 64 000 conservative output
-                        // tokens each, for a turn that generated none. The budget
-                        // was silently acting as the retry policy and telling the
-                        // user the wrong cause. The bound belongs to the retry
-                        // budget and the outage window; this branch is only for
-                        // outcomes we genuinely cannot see.
+                        // It used to also say this "bounds retry rings even when
+                        // usage is absent". It did, and that was the bug rather
+                        // than the feature: bounding the ring is the retry
+                        // budget's job, and a budget cap standing in for it stops
+                        // the run with the wrong cause. Measured on 0.13.5 against
+                        // a 503 endpoint: 15 physical sends over 301.9 s, ended
+                        // not by the outage window but by `budget cap
+                        // 'per_session_output_tokens' would be exceeded (limit
+                        // 1000000, reserved total 1024000)` - 16 reservations of
+                        // 64 000 conservative output tokens each, for a turn that
+                        // generated none. See the three release predicates above
+                        // for what is released instead, and for why `connection`
+                        // is not one of them. This branch is now only for outcomes
+                        // we genuinely cannot see.
                         let (input_tokens, output_tokens, cost_usd) =
                             reservation.conservative_charge();
                         if let Err(err) = reservation.settle(input_tokens, output_tokens, cost_usd)
@@ -28185,6 +28239,169 @@ mod audit_2026_05_22_tests {
             "a clean Done without usage must not refund the reservation to zero"
         );
         assert_eq!(tracker.lock().reserved_totals(&session_id), (0, 0.0));
+    }
+
+    /// A provider whose every send fails at the CONNECT phase with a chosen
+    /// rendered cause, so a test can pick the failure class and change nothing
+    /// else. `ProviderError::Connection` is the shape a real connect failure
+    /// arrives in — `provider_error_from_reqwest` collapses connect/timeout
+    /// reqwest errors into it — so classification here runs the same
+    /// `classify_connect_chain` the product runs.
+    struct ConnectFailureProvider {
+        message: String,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl ConnectFailureProvider {
+        fn new(message: &str) -> Self {
+            Self {
+                message: message.to_string(),
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+        fn call_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+            Arc::clone(&self.calls)
+        }
+    }
+    #[async_trait]
+    impl LlmProvider for ConnectFailureProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::Connection(self.message.clone()))
+        }
+    }
+
+    /// #1077 — a connection refused at the TCP handshake must not be charged
+    /// for, because nothing was ever sent to charge for.
+    ///
+    /// Graded at the WIRING, not at `delivered_no_request_bytes`: the run goes
+    /// through the real dispatch/retry loop and the assertion is on the budget
+    /// tracker the user's cap is read from. Reverting the release rule alone —
+    /// leaving the predicate intact — must fail this.
+    #[tokio::test]
+    async fn a_refused_connection_releases_the_reservation_it_never_spent() {
+        const REFUSED: &str = "error sending request: Connection refused (os error 111)";
+        // The classification is asserted, not assumed: if this message stopped
+        // mapping to `connection_refused` the test below would be grading a
+        // different class and could pass for the wrong reason.
+        assert_eq!(
+            wcore_providers::retry::provider_failure_code(&ProviderError::Connection(
+                REFUSED.to_string()
+            )),
+            wcore_providers::retry::FAILURE_CONNECTION_REFUSED
+        );
+
+        let provider = Arc::new(ConnectFailureProvider::new(REFUSED));
+        let calls = provider.call_counter();
+        let mut engine = engine_with(provider);
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(1_000_000)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let _ = engine.run("task", "m-1").await;
+
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let tracker = tracker.lock();
+        assert!(
+            calls.load(std::sync::atomic::Ordering::SeqCst) > 1,
+            "the run must actually have retried, or there is nothing to charge"
+        );
+        assert_eq!(
+            tracker.session_totals(&session_id),
+            (0, 0.0),
+            "a handshake the peer refused delivered no request bytes and must \
+             cost the session nothing"
+        );
+        assert_eq!(tracker.reserved_totals(&session_id), (0, 0.0));
+    }
+
+    /// The known-positive control for the test above, and the load-bearing half
+    /// of the rule: a transport failure that is NOT proof the request never
+    /// left keeps the conservative charge.
+    ///
+    /// Measured on this workspace: a client-side ECONNRESET against an upstream
+    /// that answered 200 and billed 102 output tokens. `connection` is a mixed
+    /// class and the product cannot tell the two apart, so it pays.
+    // Paused clock: `connection` is admitted to the 900 s unserved-outage
+    // window, so on a real clock this control takes 901 s. The window is not
+    // what is being graded here; the charge is.
+    #[tokio::test(start_paused = true)]
+    async fn a_socket_lost_mid_stream_still_pays_the_conservative_charge() {
+        const LOST: &str = "error sending request: connection reset by peer";
+        assert_eq!(
+            wcore_providers::retry::provider_failure_code(&ProviderError::Connection(
+                LOST.to_string()
+            )),
+            wcore_providers::retry::FAILURE_CONNECTION,
+            "control: this message must classify as the MIXED class, or the \
+             assertion below proves nothing"
+        );
+
+        let provider = Arc::new(ConnectFailureProvider::new(LOST));
+        let mut engine = engine_with(provider);
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(1_000_000)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let _ = engine.run("task", "m-1").await;
+
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let tracker = tracker.lock();
+        let (charged_tokens, _) = tracker.session_totals(&session_id);
+        assert!(
+            charged_tokens > 0,
+            "an outcome the product cannot see must still consume its \
+             conservative reservation"
+        );
+        assert_eq!(tracker.reserved_totals(&session_id), (0, 0.0));
+    }
+
+    /// The other half of the release rule, and the cheaper one to get wrong: a
+    /// name that does not resolve never opened a socket at all.
+    #[tokio::test]
+    async fn an_unresolvable_name_releases_the_reservation_it_never_spent() {
+        const NXDOMAIN: &str = "error sending request: dns error: failed to lookup address information: \
+             Name or service not known";
+        assert_eq!(
+            wcore_providers::retry::provider_failure_code(&ProviderError::Connection(
+                NXDOMAIN.to_string()
+            )),
+            wcore_providers::retry::FAILURE_DNS
+        );
+
+        let provider = Arc::new(ConnectFailureProvider::new(NXDOMAIN));
+        let mut engine = engine_with(provider);
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(1_000_000)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let _ = engine.run("task", "m-1").await;
+
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let tracker = tracker.lock();
+        assert_eq!(
+            tracker.session_totals(&session_id),
+            (0, 0.0),
+            "a name that does not resolve opened no socket and must cost nothing"
+        );
+        assert_eq!(tracker.reserved_totals(&session_id), (0, 0.0));
     }
 
     #[tokio::test]
