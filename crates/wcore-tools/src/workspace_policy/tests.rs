@@ -1695,3 +1695,58 @@ fn a_dangling_symlink_out_of_the_workspace_is_refused() {
     std::os::unix::fs::symlink(&a, &b).unwrap();
     let _ = policy.ensure_write_target_readable(&a);
 }
+
+/// The same guard, with the workspace reached THROUGH a symlinked directory.
+///
+/// `ensure_write_target_readable` compares a resolved write target against a
+/// readable root that has been through `canonicalize`. When the target is a
+/// dangling symlink the resolver follows it by hand, and it used to return
+/// that target verbatim -- so if the workspace itself sat under a symlink, the
+/// two sides were spelled differently and a legitimate in-workspace write was
+/// REFUSED.
+///
+/// macOS hits this on every run without arranging anything, because `TMPDIR`
+/// is under `/var/folders` and `/var` is a symlink to `/private/var`; CI run
+/// 32700730900 failed exactly here. Nothing about the defect is macOS-specific
+/// though -- any workspace reached through a symlink has it -- so this builds
+/// the topology explicitly and grades it on every platform that has symlinks.
+#[cfg(unix)]
+#[test]
+fn a_workspace_reached_through_a_symlink_still_accepts_its_own_dangling_writes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(real.join("ws")).unwrap();
+    std::fs::create_dir_all(real.join("outside")).unwrap();
+
+    // The workspace is addressed through `link`, never through `real`.
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let workspace = link.join("ws");
+    let outside = link.join("outside");
+
+    let policy = WorkspacePolicy::contained(&workspace);
+
+    // CONTROL: an ordinary target under the symlinked workspace is accepted,
+    // so a green below cannot come from the whole policy being permissive.
+    policy
+        .ensure_write_target_readable(&workspace.join("plain.txt"))
+        .expect("CONTROL: an ordinary in-workspace target must be accepted");
+
+    // THE DEFECT: a dangling link landing back inside the workspace. Before the
+    // fix the resolver returned the raw `<tmp>/link/ws/not_yet.txt` while the
+    // readable root had canonicalized to `<tmp>/real/ws`, so `starts_with`
+    // failed and this was refused.
+    let inside_link = workspace.join("inside_link.txt");
+    std::os::unix::fs::symlink(workspace.join("not_yet.txt"), &inside_link).unwrap();
+    policy
+        .ensure_write_target_readable(&inside_link)
+        .expect("a dangling link landing back inside the workspace stays writable");
+
+    // CONTROL, and the one that must never regress: the containment itself
+    // still holds through the symlinked spelling.
+    let escaping = workspace.join("escape.txt");
+    std::os::unix::fs::symlink(outside.join("loot.txt"), &escaping).unwrap();
+    policy
+        .ensure_write_target_readable(&escaping)
+        .expect_err("CONTROL: a dangling link pointing OUT of the workspace is still refused");
+}

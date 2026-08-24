@@ -2245,16 +2245,17 @@ fn resolve_prefix(mut out: PathBuf) -> PathBuf {
         if let Ok(resolved) = std::fs::canonicalize(&out) {
             return resolved;
         }
-        // Not a symlink (or gone entirely): an ordinary
-        // does-not-exist-yet component, which stays as it is.
+        // Not a symlink (or gone entirely): an ordinary does-not-exist-yet
+        // component. Its EXISTING ancestors still have to be canonicalized --
+        // see `canon_ancestor_only`.
         let Ok(meta) = std::fs::symlink_metadata(&out) else {
-            return out;
+            return canon_ancestor_only(out);
         };
         if !meta.file_type().is_symlink() {
-            return out;
+            return canon_ancestor_only(out);
         }
         let Ok(target) = std::fs::read_link(&out) else {
-            return out;
+            return canon_ancestor_only(out);
         };
         out = if target.is_absolute() {
             lexical_normalize(target)
@@ -2265,7 +2266,50 @@ fn resolve_prefix(mut out: PathBuf) -> PathBuf {
             lexical_normalize(base)
         };
     }
-    out
+    canon_ancestor_only(out)
+}
+
+/// Canonicalize the deepest EXISTING ancestor of `path` and re-append the
+/// components below it.
+///
+/// A dangling symlink's target is followed by hand in [`resolve_prefix`], and
+/// the result of that walk is a path whose leaf does not exist -- so
+/// `std::fs::canonicalize` cannot be applied to it as a whole. Returning it
+/// verbatim was wrong: the readable root it is about to be compared against
+/// went through `canonicalize`, and on any host where the workspace sits under
+/// a symlinked directory the two spellings disagree.
+///
+/// macOS guarantees that disagreement, because `TMPDIR` lives under
+/// `/var/folders` and `/var` is a symlink to `/private/var`. A dangling link
+/// landing back INSIDE the workspace then compared as `/var/...` against a
+/// root of `/private/var/...`, failed `starts_with`, and a legitimate write
+/// was refused -- the control arm of
+/// `a_dangling_symlink_out_of_the_workspace_is_refused`, on CI run
+/// 32700730900. It is not macOS-only: any workspace reached through a symlink
+/// hits it.
+///
+/// This does NOT follow symlinks itself -- it canonicalizes only the part that
+/// already exists -- so it is safe to call from inside [`resolve_prefix`]
+/// without recursing back into the hop walk.
+fn canon_ancestor_only(path: PathBuf) -> PathBuf {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path.clone();
+    loop {
+        if let Ok(base) = std::fs::canonicalize(&cursor) {
+            let mut resolved = base;
+            for name in tail.iter().rev() {
+                resolved.push(name);
+            }
+            return resolved;
+        }
+        let Some(name) = cursor.file_name() else {
+            return path;
+        };
+        tail.push(name.to_os_string());
+        if !cursor.pop() {
+            return path;
+        }
+    }
 }
 
 /// Apply `.` and `..` textually. The caller re-canonicalizes wherever the
