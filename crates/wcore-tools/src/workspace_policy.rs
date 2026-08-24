@@ -1960,8 +1960,69 @@ fn canon_existing_ancestor(path: &Path) -> PathBuf {
         // applied to it, and so a `..` that follows a component which does
         // not exist is still applied instead of being carried into the
         // comparison verbatim.
+        out = resolve_prefix(out);
+    }
+    out
+}
+
+/// A symlink chain is followed at most this many hops before the walk gives
+/// up. Only a cycle reaches the bound; the write that follows it then fails
+/// with the OS ELOOP of its own.
+const MAX_SYMLINK_HOPS: usize = 16;
+
+/// Resolve one accumulated prefix as far as the filesystem allows.
+///
+/// `std::fs::canonicalize` fails on a DANGLING symlink -- one whose target
+/// does not exist yet. Leaving such a component verbatim makes the prefix
+/// compare in [`WorkspacePolicy::ensure_write_target_readable`] judge where
+/// the LINK sits instead of where the write would land, and `std::fs::write`
+/// follows the link. Measured on hetzner-dsm before this change, with three
+/// controls beside it: a dangling `<workspace>/out.txt -> <outside>/loot.txt`
+/// was ACCEPTED and the bytes landed outside, while the same link with an
+/// EXISTING target was refused. So a dangling link is followed by hand, one
+/// hop at a time, and the result re-canonicalized.
+fn resolve_prefix(mut out: PathBuf) -> PathBuf {
+    for _ in 0..MAX_SYMLINK_HOPS {
         if let Ok(resolved) = std::fs::canonicalize(&out) {
-            out = resolved;
+            return resolved;
+        }
+        // Not a symlink (or gone entirely): an ordinary
+        // does-not-exist-yet component, which stays as it is.
+        let Ok(meta) = std::fs::symlink_metadata(&out) else {
+            return out;
+        };
+        if !meta.file_type().is_symlink() {
+            return out;
+        }
+        let Ok(target) = std::fs::read_link(&out) else {
+            return out;
+        };
+        out = if target.is_absolute() {
+            lexical_normalize(target)
+        } else {
+            let mut base = out;
+            base.pop();
+            base.push(target);
+            lexical_normalize(base)
+        };
+    }
+    out
+}
+
+/// Apply `.` and `..` textually. The caller re-canonicalizes wherever the
+/// result exists, so this only has to keep an unresolvable symlink target
+/// honest rather than be a full resolver.
+fn lexical_normalize(path: PathBuf) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(name) => out.push(name),
         }
     }
     out

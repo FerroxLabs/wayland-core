@@ -1622,3 +1622,76 @@ fn a_symlink_reached_after_a_missing_component_is_refused() {
         .ensure_write_target_readable(&traversal)
         .expect_err("a symlink reached after a missing component must be resolved");
 }
+
+/// The escape the shipped check let through, MEASURED before this test existed:
+/// a symlink whose target does not exist yet.
+///
+/// `std::fs::canonicalize` fails on a DANGLING link, so the component stayed in
+/// the comparison verbatim, the prefix compare judged where the LINK sits
+/// rather than where the write lands, and `std::fs::write` followed it out of
+/// the workspace. Observed with its controls in the same run:
+///
+/// ```text
+///   CONTROL plain-outside    : Err(WriteTargetNotReadable)
+///   CONTROL plain-inside     : Ok(())
+///   CONTROL live-symlink-out : Err(WriteTargetNotReadable)   <-- target EXISTS
+///   PROBE   dangling-symlink : Ok(())                        <-- accepted
+///   ESCAPE: outside target exists = true, content = "escaped"
+/// ```
+///
+/// The two writers this check is the ONLY containment for — the tool-result
+/// spill and `text_to_speech` — both write with bare `std::fs::write`, so the
+/// gap was reachable by anything that could plant a link in the workspace.
+///
+/// The controls are carried IN this test so a change that refused everything
+/// (which would also make the probe pass) fails here instead of looking green.
+#[test]
+#[cfg(unix)]
+fn a_dangling_symlink_out_of_the_workspace_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let workspace = dir.path().join("ws");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let policy = WorkspacePolicy::contained(&workspace);
+
+    // CONTROL: an ordinary in-workspace target is still accepted, so a check
+    // that refused everything cannot pass this test.
+    policy
+        .ensure_write_target_readable(&workspace.join("fine.txt"))
+        .expect("an ordinary in-workspace target must still be accepted");
+
+    // CONTROL: the same link shape with an EXISTING target was already refused
+    // before this fix, so a green here has to come from the dangling case.
+    let live_target = outside.join("live.txt");
+    std::fs::write(&live_target, b"x").unwrap();
+    let live_link = workspace.join("live_link.txt");
+    std::os::unix::fs::symlink(&live_target, &live_link).unwrap();
+    policy
+        .ensure_write_target_readable(&live_link)
+        .expect_err("CONTROL: a symlink with an existing target outside must be refused");
+
+    // THE DEFECT: the target does not exist yet.
+    let dangling_target = outside.join("loot.txt");
+    let dangling = workspace.join("out.txt");
+    std::os::unix::fs::symlink(&dangling_target, &dangling).unwrap();
+    policy
+        .ensure_write_target_readable(&dangling)
+        .expect_err("a DANGLING symlink pointing out of the workspace must be refused");
+
+    // CONTROL: a dangling link that stays INSIDE the workspace is a legitimate
+    // write target and must still be accepted — the fix resolves the link, it
+    // does not blanket-refuse unresolvable ones.
+    let inside_link = workspace.join("inside_link.txt");
+    std::os::unix::fs::symlink(workspace.join("not_yet.txt"), &inside_link).unwrap();
+    policy
+        .ensure_write_target_readable(&inside_link)
+        .expect("CONTROL: a dangling link landing back inside the workspace stays writable");
+
+    // A symlink CYCLE must terminate rather than spin.
+    let a = workspace.join("cycle_a");
+    let b = workspace.join("cycle_b");
+    std::os::unix::fs::symlink(&b, &a).unwrap();
+    std::os::unix::fs::symlink(&a, &b).unwrap();
+    let _ = policy.ensure_write_target_readable(&a);
+}

@@ -72,11 +72,19 @@ use wcore_protocol::events::ToolCategory;
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::context::ToolContext;
+use crate::workspace_policy::WorkspacePolicy;
 
 /// Hard upper bound on text length passed to the backend. Mirrors the
 /// Python `MAX_TEXT_LENGTH = 4000`. Inputs longer than this are
 /// truncated (not rejected) — matches Python behaviour.
 pub const MAX_TEXT_LENGTH: usize = 4000;
+
+/// FerroxLabs/wayland#1097 — the sub-directory of the session output root
+/// (`.wayland-out`) that generated audio lands in when the caller did not name
+/// a path. Sibling of the tool-result spill's `results/` and the skill
+/// artifact writer's `skills/`.
+const AUDIO_SUBDIR: &str = "audio";
 
 /// Default provider used when the input omits one or supplies an
 /// unrecognised value. Mirrors Python `DEFAULT_PROVIDER = "edge"`.
@@ -420,6 +428,7 @@ impl TtsTool {
         raw: Option<&str>,
         format: TtsFormat,
         provider: TtsProvider,
+        workspace: Option<&WorkspacePolicy>,
     ) -> PathBuf {
         if let Some(p) = raw {
             let trimmed = p.trim();
@@ -431,7 +440,24 @@ impl TtsTool {
         // override output_dir to a tempdir for hermeticity. The Python
         // version timestamps; we keep it stable so a second invocation
         // overwrites rather than littering tempdirs.
-        let mut p = self.output_dir.clone();
+        //
+        // FerroxLabs/wayland#1097 — WHERE that file lands is the trap. The
+        // default base is `std::env::temp_dir()` and this doc says the host
+        // "MUST replace" it before registering the tool; `bootstrap.rs`
+        // registers `TtsTool::with_backend(b)` and never does. The result
+        // envelope then hands the model `file_path`, and in a session with a
+        // workspace policy the same session's `Read` goes through a
+        // `SandboxedFs` rooted at the workspace and refuses it. So when a
+        // policy exists, the default lands in the one place both mechanisms
+        // agree on — the same `.wayland-out` output root the tool-result
+        // spill (#1097) and skill artifacts (#1096) use.
+        let mut p = match workspace {
+            Some(policy) => policy
+                .root()
+                .join(wcore_config::config::SESSION_OUTPUT_ROOT)
+                .join(AUDIO_SUBDIR),
+            None => self.output_dir.clone(),
+        };
         p.push(format!("tts_{}.{}", provider.as_str(), format.extension()));
         p
     }
@@ -440,6 +466,141 @@ impl TtsTool {
     /// format. Mirrors the Python `voice_compatible` flag.
     fn is_voice_compatible(format: TtsFormat) -> bool {
         matches!(format, TtsFormat::Opus)
+    }
+
+    /// The whole of `text_to_speech`, parameterised on the session's
+    /// workspace policy (FerroxLabs/wayland#1097). `None` is the ctx-less
+    /// entry point and keeps the pre-#1097 behaviour exactly.
+    async fn run(&self, input: Value, workspace: Option<&WorkspacePolicy>) -> ToolResult {
+        // --- text required + truncate ---
+        let raw_text = match input.get("text").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                return error_result("text is required");
+            }
+        };
+        if raw_text.trim().is_empty() {
+            return error_result("text is required");
+        }
+        // Snap to char boundary on truncation so we never split a UTF-8
+        // sequence — Python slices bytes here; we slice chars.
+        let text = if raw_text.chars().count() > MAX_TEXT_LENGTH {
+            let mut s = String::with_capacity(MAX_TEXT_LENGTH);
+            for (i, ch) in raw_text.chars().enumerate() {
+                if i >= MAX_TEXT_LENGTH {
+                    break;
+                }
+                s.push(ch);
+            }
+            tracing::warn!(
+                "TTS text too long ({} chars), truncating to {}",
+                raw_text.chars().count(),
+                MAX_TEXT_LENGTH
+            );
+            s
+        } else {
+            raw_text.to_string()
+        };
+
+        // --- provider ---
+        let provider = input
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .map(TtsProvider::parse_or_default)
+            .unwrap_or(DEFAULT_PROVIDER);
+
+        // --- format ---
+        let format = match input.get("format").and_then(|v| v.as_str()) {
+            Some(raw) => match TtsFormat::parse_strict(raw) {
+                Ok(fmt) => fmt,
+                Err(msg) => return error_result(&msg),
+            },
+            None => DEFAULT_FORMAT,
+        };
+
+        // --- output_path ---
+        let output_path = self.resolve_output_path(
+            input.get("output_path").and_then(|v| v.as_str()),
+            format,
+            provider,
+            workspace,
+        );
+
+        // FerroxLabs/wayland#1097 — refuse the write rather than fail the
+        // read. Checked BEFORE the parent directory is created and before the
+        // backend runs, so a refused target leaves nothing behind and costs no
+        // provider call. `None` (a session with no policy) has no jail on its
+        // read path either, so nothing is refused there.
+        if let Some(policy) = workspace
+            && let Err(refusal) = policy.ensure_write_target_readable(&output_path)
+        {
+            return error_result(&format!("{refusal}"));
+        }
+
+        // Ensure parent dir exists — matches Python `file_path.parent.mkdir`.
+        if let Some(parent) = output_path.parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return error_result(&format!(
+                "Could not create output directory '{}': {e}",
+                parent.display()
+            ));
+        }
+
+        // --- voice / model / speed (optional, passthrough) ---
+        let voice = input
+            .get("voice")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+        let model = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+        let speed = input
+            .get("speed")
+            .and_then(|v| v.as_f64())
+            .map(|f| f as f32);
+
+        let request = TtsRequest {
+            text,
+            provider,
+            voice,
+            model,
+            format,
+            output_path: output_path.clone(),
+            speed,
+        };
+
+        match self.backend.synthesize(request).await {
+            Ok(resp) => {
+                // Defensive post-check: the Python original verifies
+                // the file exists and is non-empty.
+                let on_disk = std::fs::metadata(&resp.path).map(|m| m.len()).unwrap_or(0);
+                if on_disk == 0 {
+                    return error_result(&format!(
+                        "TTS generation produced no output (provider: {})",
+                        resp.provider.as_str()
+                    ));
+                }
+
+                let payload = json!({
+                    "success": true,
+                    "file_path": resp.path.to_string_lossy(),
+                    "provider": resp.provider.as_str(),
+                    "format": resp.format.extension(),
+                    "bytes_written": resp.bytes_written,
+                    "voice_compatible": Self::is_voice_compatible(resp.format),
+                });
+                ToolResult {
+                    content: payload.to_string(),
+                    is_error: false,
+                }
+            }
+            Err(e) => error_result(&format!("{e}")),
+        }
     }
 }
 
@@ -526,125 +687,15 @@ output formats."
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        // --- text required + truncate ---
-        let raw_text = match input.get("text").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                return error_result("text is required");
-            }
-        };
-        if raw_text.trim().is_empty() {
-            return error_result("text is required");
-        }
-        // Snap to char boundary on truncation so we never split a UTF-8
-        // sequence — Python slices bytes here; we slice chars.
-        let text = if raw_text.chars().count() > MAX_TEXT_LENGTH {
-            let mut s = String::with_capacity(MAX_TEXT_LENGTH);
-            for (i, ch) in raw_text.chars().enumerate() {
-                if i >= MAX_TEXT_LENGTH {
-                    break;
-                }
-                s.push(ch);
-            }
-            tracing::warn!(
-                "TTS text too long ({} chars), truncating to {}",
-                raw_text.chars().count(),
-                MAX_TEXT_LENGTH
-            );
-            s
-        } else {
-            raw_text.to_string()
-        };
-
-        // --- provider ---
-        let provider = input
-            .get("provider")
-            .and_then(|v| v.as_str())
-            .map(TtsProvider::parse_or_default)
-            .unwrap_or(DEFAULT_PROVIDER);
-
-        // --- format ---
-        let format = match input.get("format").and_then(|v| v.as_str()) {
-            Some(raw) => match TtsFormat::parse_strict(raw) {
-                Ok(fmt) => fmt,
-                Err(msg) => return error_result(&msg),
-            },
-            None => DEFAULT_FORMAT,
-        };
-
-        // --- output_path ---
-        let output_path = self.resolve_output_path(
-            input.get("output_path").and_then(|v| v.as_str()),
-            format,
-            provider,
-        );
-
-        // Ensure parent dir exists — matches Python `file_path.parent.mkdir`.
-        if let Some(parent) = output_path.parent()
-            && !parent.as_os_str().is_empty()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            return error_result(&format!(
-                "Could not create output directory '{}': {e}",
-                parent.display()
-            ));
-        }
-
-        // --- voice / model / speed (optional, passthrough) ---
-        let voice = input
-            .get("voice")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty());
-        let model = input
-            .get("model")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty());
-        let speed = input
-            .get("speed")
-            .and_then(|v| v.as_f64())
-            .map(|f| f as f32);
-
-        let request = TtsRequest {
-            text,
-            provider,
-            voice,
-            model,
-            format,
-            output_path: output_path.clone(),
-            speed,
-        };
-
-        match self.backend.synthesize(request).await {
-            Ok(resp) => {
-                // Defensive post-check: the Python original verifies
-                // the file exists and is non-empty.
-                let on_disk = std::fs::metadata(&resp.path).map(|m| m.len()).unwrap_or(0);
-                if on_disk == 0 {
-                    return error_result(&format!(
-                        "TTS generation produced no output (provider: {})",
-                        resp.provider.as_str()
-                    ));
-                }
-
-                let payload = json!({
-                    "success": true,
-                    "file_path": resp.path.to_string_lossy(),
-                    "provider": resp.provider.as_str(),
-                    "format": resp.format.extension(),
-                    "bytes_written": resp.bytes_written,
-                    "voice_compatible": Self::is_voice_compatible(resp.format),
-                });
-                ToolResult {
-                    content: payload.to_string(),
-                    is_error: false,
-                }
-            }
-            Err(e) => error_result(&format!("{e}")),
-        }
+        self.run(input, None).await
     }
 
+    /// FerroxLabs/wayland#1097 — the entry point production dispatch uses.
+    /// Carries the session's `WorkspacePolicy`, which is what decides where an
+    /// unspecified output lands and whether an explicit one can be read back.
+    async fn execute_with_ctx(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        self.run(input, ctx.workspace.as_deref()).await
+    }
     fn category(&self) -> ToolCategory {
         // Generates a side-effect (writes an audio file to disk);
         // classify with Edit-family tools rather than Info.
@@ -693,6 +744,135 @@ mod tests {
 
     fn parse_json(s: &str) -> Value {
         serde_json::from_str(s).expect("tool returned non-JSON")
+    }
+
+    // --- FerroxLabs/wayland#1097: a path this session cannot read back ---
+    //
+    // `text_to_speech` writes with `std::fs::write` and hands the model the
+    // path in `file_path`. It never consulted `ctx.vfs` and never consulted
+    // the session's `WorkspacePolicy`, and `bootstrap.rs` registers it with
+    // the DEFAULT `output_dir` — `std::env::temp_dir()` — which this module's
+    // own doc says the host "MUST replace". So in a contained session the
+    // tool produced an audio file at a path the same session's `Read` refuses.
+    // That is #1097's sentence exactly: "any location we let an agent write to
+    // but cannot read back is a trap".
+
+    fn contained_session(root: &std::path::Path) -> ToolContext {
+        let mut ctx = ToolContext::test_default();
+        ctx.workspace = Some(Arc::new(WorkspacePolicy::contained(root)));
+        ctx
+    }
+
+    /// OBSERVE THE DEFECT / prove the fix: with a session policy installed and
+    /// no `output_path` given, the file must land somewhere that session's own
+    /// readable roots cover. Reverting the `workspace` arm of
+    /// `resolve_output_path` puts it back in the host temp tree and reddens
+    /// the `ensure_write_target_readable` assertion below.
+    #[tokio::test]
+    async fn the_default_output_is_readable_by_the_session_that_produced_it() {
+        let ws = TempDir::new().unwrap();
+        let backend = Arc::new(CapturingTtsBackend::default());
+        // Host temp default, exactly as `bootstrap.rs` registers it.
+        let t = TtsTool::with_backend(backend.clone());
+        let ctx = contained_session(ws.path());
+        let res = t.execute_with_ctx(json!({"text": "hi"}), &ctx).await;
+        assert!(!res.is_error, "unexpected error: {}", res.content);
+        let v = parse_json(&res.content);
+        let produced = std::path::PathBuf::from(v["file_path"].as_str().unwrap());
+        assert!(
+            produced.exists(),
+            "the tool claimed a file it did not write"
+        );
+        let policy = ctx.workspace.as_ref().unwrap();
+        policy
+            .ensure_write_target_readable(&produced)
+            .unwrap_or_else(|e| panic!("the model was handed a path it cannot read: {e}"));
+        assert!(
+            produced.starts_with(
+                ws.path()
+                    .join(wcore_config::config::SESSION_OUTPUT_ROOT)
+                    .join(AUDIO_SUBDIR)
+            ),
+            "expected the session output root, got {}",
+            produced.display()
+        );
+    }
+
+    /// The refusal the issue asks for: refuse the WRITE, naming the reason,
+    /// rather than producing a file and failing the later read. Nothing is
+    /// written and the backend is never called, so a refused target costs no
+    /// provider request either.
+    #[tokio::test]
+    async fn an_output_path_the_session_cannot_read_is_refused_not_written() {
+        let ws = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("loot.mp3");
+        let backend = Arc::new(CapturingTtsBackend::default());
+        let t = TtsTool::with_backend(backend.clone());
+        let ctx = contained_session(ws.path());
+        let res = t
+            .execute_with_ctx(
+                json!({"text": "hi", "output_path": target.to_string_lossy()}),
+                &ctx,
+            )
+            .await;
+        assert!(res.is_error, "expected a refusal, got {}", res.content);
+        let v = parse_json(&res.content);
+        let err = v["error"].as_str().unwrap();
+        assert!(
+            err.contains("outside this session's readable roots"),
+            "the refusal must name the reason, got: {err}"
+        );
+        assert!(
+            !target.exists(),
+            "a refused write must leave nothing behind"
+        );
+        assert_eq!(
+            backend.calls().len(),
+            0,
+            "a refused target must not cost a provider call"
+        );
+    }
+
+    /// KNOWN-POSITIVE CONTROL for the test above: the same tool, the same
+    /// session, an explicit path INSIDE the workspace still writes and is
+    /// still handed back. Without this, a check that refused everything would
+    /// pass.
+    #[tokio::test]
+    async fn an_output_path_inside_the_workspace_is_still_written() {
+        let ws = TempDir::new().unwrap();
+        let target = ws.path().join("speech").join("out.mp3");
+        let backend = Arc::new(CapturingTtsBackend::default());
+        let t = TtsTool::with_backend(backend.clone());
+        let ctx = contained_session(ws.path());
+        let res = t
+            .execute_with_ctx(
+                json!({"text": "hi", "output_path": target.to_string_lossy()}),
+                &ctx,
+            )
+            .await;
+        assert!(!res.is_error, "unexpected error: {}", res.content);
+        assert!(target.exists(), "an accepted write must produce the file");
+        assert_eq!(backend.calls().len(), 1);
+    }
+
+    /// CONTROL: a session with no policy has no jail on its read path either,
+    /// so nothing is refused and nothing is relocated — the ctx-less entry
+    /// point behaves exactly as it did before #1097.
+    #[tokio::test]
+    async fn a_session_without_a_policy_keeps_the_host_output_dir() {
+        let tmp = TempDir::new().unwrap();
+        let backend = Arc::new(CapturingTtsBackend::default());
+        let t = TtsTool::with_backend(backend.clone()).with_output_dir(tmp.path().to_path_buf());
+        let res = t.execute(json!({"text": "hi"})).await;
+        assert!(!res.is_error, "unexpected error: {}", res.content);
+        let v = parse_json(&res.content);
+        let produced = std::path::PathBuf::from(v["file_path"].as_str().unwrap());
+        assert!(
+            produced.starts_with(tmp.path()),
+            "expected the host output dir, got {}",
+            produced.display()
+        );
     }
 
     // --- enum parsing ---
