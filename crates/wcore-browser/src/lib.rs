@@ -26,6 +26,8 @@ pub mod config_hint;
 /// module header.
 #[cfg(test)]
 mod dns_gate_e2e;
+
+pub mod egress_proxy;
 pub mod liveness;
 pub mod op;
 pub mod policy;

@@ -5564,6 +5564,13 @@ fn merge_config_files_with_trust(
         } else {
             global.browser.camoufox_download
         },
+        // gh#1117 opt-out. A bool whose only non-default value is `true`, so
+        // "project overrides when non-default" and OR are the same rule the
+        // loopback grant above uses. An UNTRUSTED project cannot reach this:
+        // `restrict_untrusted_project_config` builds from
+        // `ConfigFile::default()` and never forwards `browser` at all.
+        allow_unproxied_sidecar: project.browser.allow_unproxied_sidecar
+            || global.browser.allow_unproxied_sidecar,
     };
 
     // Crucible: project overrides global when it set a non-default council
