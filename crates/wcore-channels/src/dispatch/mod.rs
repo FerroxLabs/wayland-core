@@ -38,8 +38,8 @@ pub use pairing::{
     DEFAULT_CODE_TTL_MS, PAIRING_DENY_REASON, PairedSender, PairingBook, PairingState, PairingStore,
 };
 pub use rate_limit::{
-    AutoReplyRateLimiter, DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP,
-    DEFAULT_MAX_AUTO_REPLIES,
+    AutoReplyOutcome, AutoReplyRateLimiter, DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP,
+    DEFAULT_MAX_AUTO_REPLIES, RATE_LIMIT_NOTICE,
 };
 pub use session_key::build_session_key;
 

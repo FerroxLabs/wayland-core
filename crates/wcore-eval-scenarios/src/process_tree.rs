@@ -491,6 +491,25 @@ pub(crate) struct UnixProcessGroup {
     id: libc::pid_t,
 }
 
+/// Why [`UnixProcessGroup::wait_empty`] declined to certify a group empty.
+///
+/// There are exactly TWO correct refusals and they are not interchangeable:
+/// the gate either SAW a survivor, or could not see well enough to say. Both
+/// are the gate working. #1114: the negative-control test used to match one of
+/// the two rendered sentences, so a run that legitimately took the other arm
+/// failed a test whose actual property — "a live group does not prove itself
+/// empty" — had held. The category is what the contract is about; the sentence
+/// is for the human reading the log.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) enum EmptinessRefusal {
+    /// The group still held this many live members when the deadline expired.
+    StillOccupied(usize),
+    /// Emptiness could not be ESTABLISHED — the census could not see. Never to
+    /// be read as "empty": that is the direction that fakes containment.
+    Unprovable(String),
+}
+
 #[cfg(unix)]
 impl UnixProcessGroup {
     pub(crate) fn from_pid(pid: u32) -> io::Result<Self> {
@@ -576,22 +595,39 @@ impl UnixProcessGroup {
     /// down — so a group that is not yet empty is not yet a failure. A group
     /// that is *still* not empty at the deadline is.
     pub(crate) async fn wait_empty(&self, timeout: Duration) -> io::Result<()> {
+        match self.wait_empty_outcome(timeout).await {
+            Ok(()) => Ok(()),
+            Err(EmptinessRefusal::Unprovable(why)) => Err(io::Error::other(format!(
+                "cannot prove process group {} is empty: {why}",
+                self.id
+            ))),
+            Err(EmptinessRefusal::StillOccupied(n)) => Err(io::Error::other(format!(
+                "process group {} still held {n} live member(s) {:?} after SIGKILL; \
+                 containment is NOT proven empty",
+                self.id, timeout
+            ))),
+        }
+    }
+
+    /// [`Self::wait_empty`] before its refusal is flattened into a sentence.
+    ///
+    /// Callers that only propagate the failure want the message; a test that
+    /// grades the gate wants the CATEGORY, because both categories are correct
+    /// refusals and which one a given run takes is not this gate's promise
+    /// (#1114).
+    pub(crate) async fn wait_empty_outcome(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), EmptinessRefusal> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             match self.live_members() {
                 ProcessGroupCensus::Live(0) => return Ok(()),
                 ProcessGroupCensus::Indeterminate(why) => {
-                    return Err(io::Error::other(format!(
-                        "cannot prove process group {} is empty: {why}",
-                        self.id
-                    )));
+                    return Err(EmptinessRefusal::Unprovable(why));
                 }
                 ProcessGroupCensus::Live(n) if std::time::Instant::now() >= deadline => {
-                    return Err(io::Error::other(format!(
-                        "process group {} still held {n} live member(s) {:?} after SIGKILL; \
-                         containment is NOT proven empty",
-                        self.id, timeout
-                    )));
+                    return Err(EmptinessRefusal::StillOccupied(n));
                 }
                 ProcessGroupCensus::Live(_) => {}
             }
@@ -2519,14 +2555,30 @@ mod unix_process_group_tests {
 
         // A live member must defeat the emptiness proof. If this ever passes,
         // the containment gate has no reachable fail state.
-        let error = group
-            .wait_empty(Duration::from_millis(200))
+        //
+        // #1114: the property is THAT it refused, not which of its two correct
+        // refusals it chose. Pinning the rendered "live member" sentence made
+        // this test red whenever the census legitimately answered
+        // `Indeterminate` instead -- observed under full-suite load as
+        // `/proc/<pid>/stat could not be read (No such process)`, i.e. an
+        // UNRELATED process exiting inside the scan. That cause is fixed at
+        // source in `wcore_types::process_liveness` (ESRCH now reads as "the
+        // task is gone", like ENOENT), so this arm should no longer be taken
+        // here at all -- but the assertion is widened to the category anyway,
+        // because a gate with two correct answers must not be graded on which
+        // sentence it printed. The anti-vacuity control is the block below:
+        // the same call must FLIP to success once the group is really dead.
+        let refusal = group
+            .wait_empty_outcome(Duration::from_millis(200))
             .await
             .expect_err("a group holding a LIVE process must NOT prove itself empty");
-        assert!(
-            error.to_string().contains("live member"),
-            "unexpected failure text: {error}"
-        );
+        match &refusal {
+            EmptinessRefusal::StillOccupied(n) => assert!(
+                *n >= 1,
+                "an occupied-group refusal must name at least one survivor: {refusal:?}"
+            ),
+            EmptinessRefusal::Unprovable(_) => {}
+        }
 
         // Now clean it for real and show the same call flips to success — the
         // proof tracks the world rather than always answering one way.

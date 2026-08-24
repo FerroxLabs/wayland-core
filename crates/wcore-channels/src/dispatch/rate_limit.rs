@@ -31,6 +31,13 @@
 //! today. The check still does not live in `SendMessageTool` itself,
 //! however, so a THIRD transport added later would start unthrottled.
 //!
+//! On suppression the `run_turn` seam also emits a single channel-side
+//! notice ([`RATE_LIMIT_NOTICE`]) so a human on an interactive channel is not
+//! left staring at silence (wayland#585 criterion 1). The notice is claimed
+//! through [`AutoReplyRateLimiter::check_and_record_with_notice`], which hands
+//! it out at most once per conversation per window — so the notice itself can
+//! never become the runaway it is reporting.
+//!
 //! Human/operator-initiated sends are NOT gated: cron and direct
 //! [`crate::ChannelManager::send_to`] take a different code path and never
 //! reach this limiter. That is deliberate — `send_to` is shared with the
@@ -56,9 +63,9 @@ use std::time::{Duration, Instant};
 /// threat channel (email) a human never approaches this rate. Suppression logs
 /// at WARN (operator-visible) on both seams, and on the tool seam it is also
 /// returned to the model as an `is_error` tool result — a `warn!` alone reaches
-/// nobody with `RUST_LOG` unset and so can never end a model-driven loop. It
-/// still does not surface a channel-side notice to the remote party; that
-/// remains a tracked follow-up.
+/// nobody with `RUST_LOG` unset and so can never end a model-driven loop. The `run_turn` seam additionally
+/// emits one [`RATE_LIMIT_NOTICE`] per conversation per window on the channel
+/// itself, so a human never just sees silence.
 pub const DEFAULT_MAX_AUTO_REPLIES: usize = 30;
 
 /// Default rolling window for [`DEFAULT_MAX_AUTO_REPLIES`].
@@ -68,6 +75,48 @@ pub const DEFAULT_AUTO_REPLY_WINDOW: Duration = Duration::from_secs(600);
 /// Bounds memory under a flood of distinct conversation ids; least-recently
 /// active conversations are evicted first (their history would age out anyway).
 pub const DEFAULT_CONVERSATION_CAP: usize = 4096;
+
+/// Channel-side text delivered when a conversation's autonomous replies start
+/// being suppressed. A `tracing::warn!` reaches the operator, not the person in
+/// the chat — on an interactive channel (Slack/Discord DM) the human would
+/// otherwise watch the agent go silent with no signal at all (wayland#585).
+///
+/// Emission is rationed by [`AutoReplyRateLimiter::check_and_record_with_notice`]
+/// to at most once per conversation per window, so this adds at most ONE extra
+/// outbound message per window — it cannot itself sustain a ping-pong.
+pub const RATE_LIMIT_NOTICE: &str = "Auto-replies are rate-limited on this conversation, so I am pausing \
+automatic replies for a few minutes. Your messages are still being received.";
+
+/// What the limiter decided for one autonomous send.
+///
+/// The `notify` flag exists because "suppressed" and "tell the human we are
+/// suppressing" are different rates: suppression is per send, the notice is
+/// once per window. Callers that only need the boolean keep using
+/// [`AutoReplyRateLimiter::check_and_record`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoReplyOutcome {
+    /// The send is permitted and has been recorded against the window.
+    Allowed,
+    /// The send must be dropped. `notify` is `true` on the FIRST suppression in
+    /// this conversation's window — and only then — meaning the caller should
+    /// deliver [`RATE_LIMIT_NOTICE`] on the channel.
+    Suppressed {
+        /// Emit the one-per-window channel notice for this suppression.
+        notify: bool,
+    },
+}
+
+/// Per-conversation limiter state: the rolling send history plus when this
+/// conversation last had a channel notice claimed for it.
+#[derive(Debug, Clone, Default)]
+struct ConversationState {
+    /// Ascending timestamps of recent recorded autonomous sends.
+    sends: VecDeque<Instant>,
+    /// When the last [`RATE_LIMIT_NOTICE`] was claimed, if ever. Never cleared
+    /// by an allowed send: rationing is strictly per window, so an alternating
+    /// allow/suppress pattern at the cap still yields at most one notice.
+    notified_at: Option<Instant>,
+}
 
 /// Per-conversation rolling-window rate limiter for autonomous sends.
 ///
@@ -86,8 +135,8 @@ pub struct AutoReplyRateLimiter {
     window: Duration,
     /// Upper bound on tracked conversations. `0` disables capping.
     cap: usize,
-    /// conversation id -> ascending timestamps of its recent recorded sends.
-    conversations: HashMap<String, VecDeque<Instant>>,
+    /// conversation id -> rolling send history + notice bookkeeping.
+    conversations: HashMap<String, ConversationState>,
 }
 
 impl AutoReplyRateLimiter {
@@ -111,31 +160,72 @@ impl AutoReplyRateLimiter {
     /// sends within the rolling `window` — in which case nothing is recorded and
     /// the caller must suppress the send. A disabled limiter (`window ==
     /// Duration::ZERO`) always returns `true`.
+    ///
+    /// This form never claims a channel notice; use
+    /// [`Self::check_and_record_with_notice`] on a seam that can deliver one.
     pub fn check_and_record(&mut self, conversation: &str, now: Instant) -> bool {
+        matches!(
+            self.evaluate(conversation, now, false),
+            AutoReplyOutcome::Allowed
+        )
+    }
+
+    /// As [`Self::check_and_record`], but a suppressed send also reports
+    /// whether the caller should deliver [`RATE_LIMIT_NOTICE`] on the channel.
+    ///
+    /// `notify` is `true` at most once per conversation per `window`: the first
+    /// suppression claims the notice and stamps the conversation, and every
+    /// later suppression within that window reports `notify: false`. That bound
+    /// is what keeps the notice from becoming a second ping-pong.
+    pub fn check_and_record_with_notice(
+        &mut self,
+        conversation: &str,
+        now: Instant,
+    ) -> AutoReplyOutcome {
+        self.evaluate(conversation, now, true)
+    }
+
+    /// Shared body of the two public entry points. `claim_notice` gates BOTH
+    /// the returned flag and the state write, so the bool-only caller can never
+    /// silently burn a notice the notice-capable caller was owed.
+    fn evaluate(
+        &mut self,
+        conversation: &str,
+        now: Instant,
+        claim_notice: bool,
+    ) -> AutoReplyOutcome {
         // Disabled: no window means no limiting.
         if self.window.is_zero() {
-            return true;
+            return AutoReplyOutcome::Allowed;
         }
 
         let window = self.window;
         let max_sends = self.max_sends;
-        let history = self
+        let state = self
             .conversations
             .entry(conversation.to_string())
             .or_default();
-        Self::prune(history, now, window);
+        Self::prune(&mut state.sends, now, window);
 
-        let allowed = if history.len() >= max_sends {
-            false
+        let outcome = if state.sends.len() >= max_sends {
+            let notify = claim_notice
+                && match state.notified_at {
+                    Some(at) => now.saturating_duration_since(at) >= window,
+                    None => true,
+                };
+            if notify {
+                state.notified_at = Some(now);
+            }
+            AutoReplyOutcome::Suppressed { notify }
         } else {
-            history.push_back(now);
-            true
+            state.sends.push_back(now);
+            AutoReplyOutcome::Allowed
         };
 
         // Bound the number of tracked conversations, never evicting the one we
         // just touched. Runs after recording so `conversation` is retained.
         self.enforce_cap(conversation);
-        allowed
+        outcome
     }
 
     /// Drop timestamps at the front older than `window` (history is ascending,
@@ -160,14 +250,16 @@ impl AutoReplyRateLimiter {
         if self.cap == 0 || self.conversations.len() <= self.cap {
             return;
         }
-        // Empty histories carry no live rate state — reclaim them first.
-        self.conversations.retain(|k, h| k == keep || !h.is_empty());
+        // Fully drained conversations carry no live state (no in-window
+        // sends AND no notice stamp to honour) — reclaim those first.
+        self.conversations
+            .retain(|k, s| k == keep || !s.sends.is_empty() || s.notified_at.is_some());
         while self.conversations.len() > self.cap {
             let victim = self
                 .conversations
                 .iter()
                 .filter(|(k, _)| k.as_str() != keep)
-                .min_by_key(|(_, h)| h.back().copied())
+                .min_by_key(|(_, s)| s.sends.back().copied().or(s.notified_at))
                 .map(|(k, _)| k.clone());
             match victim {
                 Some(v) => {
@@ -292,6 +384,99 @@ mod tests {
                 "tracked conversations must stay within the cap"
             );
         }
+    }
+
+    /// wayland#585 criterion 1: the channel notice is rationed to once per
+    /// conversation per window, so the notice cannot itself become the loop.
+    #[test]
+    fn the_notice_is_claimed_once_per_window() {
+        let mut rl = AutoReplyRateLimiter::new(1, Duration::from_secs(600), 1024);
+        let t = base();
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", t),
+            AutoReplyOutcome::Allowed
+        );
+        // First suppression claims the notice.
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 1)),
+            AutoReplyOutcome::Suppressed { notify: true }
+        );
+        // Every later suppression in the same window is silent.
+        for i in 2..10 {
+            assert_eq!(
+                rl.check_and_record_with_notice("conv", after(t, i)),
+                AutoReplyOutcome::Suppressed { notify: false },
+                "only the first suppression in a window notifies"
+            );
+        }
+    }
+
+    /// The notice re-arms once a full window has passed, so a conversation that
+    /// runs away again later is announced again rather than silently throttled.
+    #[test]
+    fn a_later_window_re_arms_the_notice() {
+        let mut rl = AutoReplyRateLimiter::new(1, Duration::from_secs(600), 1024);
+        let t = base();
+        assert!(rl.check_and_record("conv", t));
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 1)),
+            AutoReplyOutcome::Suppressed { notify: true }
+        );
+        // At t+600 the first send ages out, so this one is allowed and recorded.
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 600)),
+            AutoReplyOutcome::Allowed
+        );
+        // Suppressed again, and now a full window has passed since the notice.
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 601)),
+            AutoReplyOutcome::Suppressed { notify: true }
+        );
+    }
+
+    /// An allowed send does NOT re-arm the notice inside the same window.
+    /// Without this, a conversation sitting at the cap alternates
+    /// allow/suppress as sends age out and would emit a notice per allowed
+    /// send — exactly the unbounded chatter the rationing exists to prevent.
+    #[test]
+    fn an_allowed_send_does_not_re_arm_the_notice_mid_window() {
+        let mut rl = AutoReplyRateLimiter::new(2, Duration::from_secs(600), 1024);
+        let t = base();
+        assert!(rl.check_and_record("conv", t));
+        assert!(rl.check_and_record("conv", after(t, 300)));
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 301)),
+            AutoReplyOutcome::Suppressed { notify: true }
+        );
+        // The t+0 send ages out at t+600, freeing a slot: allowed again.
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 600)),
+            AutoReplyOutcome::Allowed
+        );
+        // Suppressed once more, still inside the notice window (t+301..t+901).
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 601)),
+            AutoReplyOutcome::Suppressed { notify: false },
+            "an allowed send must not re-arm the notice inside its window"
+        );
+    }
+
+    /// The bool API is used by the two tool-driven send seams, which have no
+    /// channel to deliver a notice on. It must never consume the notice a
+    /// notice-capable caller on the same limiter would be owed.
+    #[test]
+    fn the_bool_api_never_burns_the_notice() {
+        let mut rl = AutoReplyRateLimiter::new(1, Duration::from_secs(600), 1024);
+        let t = base();
+        assert!(rl.check_and_record("conv", t));
+        // Several suppressions through the bool API...
+        assert!(!rl.check_and_record("conv", after(t, 1)));
+        assert!(!rl.check_and_record("conv", after(t, 2)));
+        // ...leave the notice unclaimed.
+        assert_eq!(
+            rl.check_and_record_with_notice("conv", after(t, 3)),
+            AutoReplyOutcome::Suppressed { notify: true }
+        );
     }
 
     #[test]

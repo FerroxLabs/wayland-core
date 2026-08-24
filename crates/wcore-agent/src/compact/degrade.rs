@@ -298,7 +298,7 @@ mod tests {
 
     fn test_storage() -> (TempDir, StorageDir) {
         let dir = TempDir::new().expect("tempdir");
-        let storage = StorageDir(dir.path().join("results"));
+        let storage = StorageDir::new(dir.path().join("results"));
         (dir, storage)
     }
 

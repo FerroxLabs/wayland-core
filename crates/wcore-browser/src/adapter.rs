@@ -52,9 +52,13 @@ pub fn from_spec(spec: BrowserToolSpec) -> Arc<BrowserTool> {
         policy: Some(spec.policy.clone()),
     });
     let supervisor = if provider.backend_name() == "camoufox" {
-        BrowserSupervisor::with_config(crate::supervisor::SupervisorConfig::local_camoufox(
-            &camoufox_url,
-        ))
+        // gh#1117: the Camoufox sidecar resolves DNS in its own process, so
+        // the policy only reaches the addresses it dials if Core is the one
+        // dialling. Handing the supervisor the policy here is what makes
+        // containment a precondition of using the sidecar at all.
+        let mut config = crate::supervisor::SupervisorConfig::local_camoufox(&camoufox_url);
+        config.egress_policy = Some(spec.policy.clone());
+        BrowserSupervisor::with_config(config)
     } else {
         BrowserSupervisor::new()
     };

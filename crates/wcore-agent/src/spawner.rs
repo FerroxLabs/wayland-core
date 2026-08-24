@@ -911,6 +911,15 @@ pub struct AgentSpawner {
     /// [`AgentSpawner::narrow_parent_tool_authority`]. See
     /// [`ParentToolAuthority`] for why this is never an `Option`.
     parent_tool_authority: ParentToolAuthority,
+    /// #1118 — the parent session's own shell principal, shared by `Arc` with
+    /// every clone for the same reason `parent_tool_authority` is: the spawner
+    /// is `Arc`-wrapped and handed to `SpawnTool`/`DelegateTool` before the
+    /// parent's `WorkspacePolicy` is built, so the value has to arrive through a
+    /// shared cell rather than a constructor argument.
+    ///
+    /// FAIL-SAFE DEFAULT `false`, exactly as `WorkspacePolicy`'s own field is: a
+    /// construction path that never declares a principal keeps the strict one.
+    parent_shell_principal: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Provider-spend, execution, and cancellation authority inherited by a
@@ -1012,7 +1021,25 @@ impl AgentSpawner {
                 wcore_swarm::MAX_CONCURRENT_WORKERS,
             )),
             parent_tool_authority: ParentToolAuthority::unrestricted(),
+            parent_shell_principal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// #1118 — declare the parent session's shell principal, so a delegated
+    /// child inherits it instead of falling to the strict default.
+    ///
+    /// Takes `&self` for the same reason `narrow_parent_tool_authority` does:
+    /// by the time bootstrap has built the parent `WorkspacePolicy`, this
+    /// spawner is already `Arc`-wrapped and clones of it are held by the spawn
+    /// tools. The cell is shared, so one call reaches every clone.
+    ///
+    /// The argument is the PARENT's answer, never a fresh decision — see
+    /// [`wcore_tools::workspace_policy::WorkspacePolicy::with_inherited_shell_principal`].
+    pub fn inherit_shell_principal(&self, parent_is_local_operator: bool) {
+        self.parent_shell_principal.store(
+            parent_is_local_operator,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     /// F21-02-01 — narrow this spawner's parent tool authority to the tool
@@ -1252,6 +1279,8 @@ impl AgentSpawner {
             &launch.authority_read_deny,
             Arc::clone(&self.sandbox_runtime),
             parent_tool_authority,
+            self.parent_shell_principal
+                .load(std::sync::atomic::Ordering::Relaxed),
         )
     }
 
@@ -2538,6 +2567,9 @@ impl AgentSpawner {
             // property for its (now deleted) `OnceLock`; sharing this one cell
             // gives both child-authority layers that guarantee from one field.
             parent_tool_authority: self.parent_tool_authority.clone(),
+            // #1118: SHARE the cell, like the authority above. A clone taken
+            // before bootstrap declares the principal must still observe it.
+            parent_shell_principal: Arc::clone(&self.parent_shell_principal),
         }
     }
 
@@ -2781,6 +2813,7 @@ fn build_tool_registry(
     authority_read_deny: &[PathBuf],
     sandbox_runtime: Arc<wcore_sandbox::SandboxRegistry>,
     parent_tool_authority: &BTreeSet<String>,
+    parent_shell_principal: bool,
 ) -> ToolRegistry {
     let all: &[(&str, ToolFactory)] = &[
         ("Read", || Box::new(ReadTool::new(None))),
@@ -2793,11 +2826,80 @@ fn build_tool_registry(
 
     let mut registry = ToolRegistry::new();
     registry.set_sandbox_runtime(sandbox_runtime);
+    // #1113 — `contained` is a DECISION for sub-agents, not a default nobody
+    // took. It was an unexplained literal, and the question it answers by
+    // omission is a security one, so it is answered here in full.
+    //
+    // THE QUESTION. `bootstrap.rs` gives the PARENT session `trusted_local`
+    // whenever the workspace is trust-granted and version-controlled, and
+    // `contained` otherwise. A sub-agent gets `contained` either way. Should it
+    // instead inherit, so that a child of a trusted session is also trusted?
+    //
+    // THE ANSWER: no. Inheriting is not "skip a walk" — the two profiles differ
+    // in three ways, and only one of them is the cost:
+    //   1. WRITE SCOPE. `trusted_local` widens writable roots to the operator's
+    //      own `~/.cache`, `~/.cargo/registry`, `~/.cargo/git`, `~/.npm/_cacache`.
+    //      A sub-agent writing the operator's cargo registry is a supply-chain
+    //      write, and nothing about the parent being trusted makes that
+    //      something the child was asked to do.
+    //   2. CACHE REDIRECT. `contained` points the cache env into
+    //      `<root>/.wcache`; `trusted_local` shares the operator's global caches.
+    //   3. PROJECT-SECRET READ DENY — the one that costs. It is what makes the
+    //      child's `SecretDenyFs` and the OS-level `fs_read_deny` list non-empty.
+    // A sub-agent also runs unattended on a prompt composed by a model out of
+    // tool output, so its instruction provenance is strictly worse than the
+    // parent's, which had a human in it. A posture stricter than the parent's is
+    // the right shape here; it is only the price that had to be checked.
+    //
+    // THE PRICE. Measured on hetzner-dsm through the production entry point
+    // `secret_deny_paths_for_backend(true)` — the one `bash.rs` calls exactly
+    // once per exec — arms strictly interleaved with the CHILD arm first every
+    // rep so the cheap arm can never be the one that warms the cache, and tree
+    // size counted AFTER all timing. v0.13.4 (`0ccaa90b`) is built from the
+    // same instrument on the SAME trees, because comparing absolute
+    // milliseconds across two differently-shaped trees confounds the change
+    // with the tree:
+    //
+    //   entries   tree                        v0.13.4    v0.13.5   parent
+    //     8,348   this repo, one checkout     23.10 ms    8.52 ms  0.146 ms
+    //   100,177   twelve copies of it        296.05 ms   48.80 ms  0.385 ms
+    //
+    // (medians of n=7 / n=9. The parent arm is `trusted_local` on the SAME
+    // root and is flat at ~0.15-0.39 ms in every row of both releases.)
+    //
+    // So the walk got 2.7x cheaper on a small tree and 6.1x cheaper on a
+    // 100k-entry one — the parallel arm buys more the bigger the tree. That
+    // reduction landed in v0.13.5 with the lexical prefilter and the parallel
+    // walk in `workspace_policy::project_committed_secrets`, which is the
+    // remedy #1113 itself proposed for the case where `contained` stays.
+    //
+    // #1113 was filed at 896 ms warm / 1,369 ms cold on a 91,633-entry tree at
+    // v0.13.4. The cold arm reproduces here (1,637 ms first rep on 100,177
+    // entries); the warm figure is 6.1x stale, so the standing cost of this
+    // decision is tens of milliseconds per exec, not ~900 ms, and a 50-turn
+    // child run pays ~2.4 s on a 100k-entry tree rather than the ~45 s the
+    // issue's Impact section computes.
+    //
+    // WHAT IS NOT FIXED, deliberately. The residual is the walk itself, and it
+    // cannot be removed without one of the three things #1113 rules out:
+    // memoisation (`readable_roots()` filters grants against
+    // `SystemTime::now()`, so any cache key without "now" in it is wrong),
+    // pruning (`no_prune_survives_the_922_backend_gate`), or dropping the
+    // posture — this decision. It is a ratified residual, not an open task.
+    //
+    // Pinned by `a_sub_agent_stays_contained_however_trusted_its_parent_is`, so
+    // this is a guard and not a paragraph.
     let workspace_policy = Arc::new(
         WorkspacePolicy::contained(workspace_root)
             .with_authority_read_deny(authority_read_deny.iter().cloned())
             .with_authority_write_deny(authority_read_deny.iter().cloned())
-            .with_git_authority_env_deny(),
+            .with_git_authority_env_deny()
+            // #1118 — the child's shell principal is the parent's, intersected.
+            // Omitting this left `local_operator_principal` false for EVERY
+            // sub-agent while the operator's own session held it, so
+            // `bash.rs`'s exec-time gate refused the child's shell (and only
+            // the child's) on any backend that cannot enforce OS read-deny.
+            .with_inherited_shell_principal(parent_shell_principal),
     );
     let jail = SandboxedFs::new(
         SecretDenyFs::new(RealFs, Arc::clone(&workspace_policy)),
@@ -5055,6 +5157,150 @@ mod phase7_tests {
         names.iter().map(|name| (*name).to_owned()).collect()
     }
 
+    /// #1118 — the composed decorator stack, not a comment about it.
+    ///
+    /// Builds a delegated child's registry through the SAME production
+    /// `build_tool_registry` the spawner uses, takes the policy that registry
+    /// installed, and drives the child's real `Bash` tool against the real
+    /// Windows session-default backend. The verdict is taken from the
+    /// FILESYSTEM: a refusal must leave zero bytes and an admitted shell must
+    /// leave a real file, so "reported as refused" and "actually refused"
+    /// cannot be confused.
+    ///
+    /// `WindowsJobObjectBackend` compiles and really spawns on every target (it
+    /// delegates to `NoSandboxBackend`), so this runs the same assertions on
+    /// Linux, macOS and Windows — which is what makes the Linux run evidence
+    /// about the Windows default at all.
+    async fn child_shell_verdict(
+        parent_shell_principal: bool,
+        root: &std::path::Path,
+    ) -> (String, bool, Option<u64>) {
+        use wcore_sandbox::backends::SandboxBackend;
+        use wcore_sandbox::backends::windows_job_object::WindowsJobObjectBackend;
+
+        let backend = Arc::new(WindowsJobObjectBackend::new());
+        assert!(
+            !backend.enforces_read_deny(),
+            "precondition: the Windows session default must NOT claim OS \
+             read-deny, or this test proves nothing about the gate"
+        );
+
+        let registry = build_tool_registry(
+            &["Bash".to_owned()],
+            RequestedChildWorkspace::IsolatedMutation,
+            root,
+            // The authority roots a real delegated mutation always carries —
+            // `prepare_child_workspace` sets them to the parent workspace and
+            // the git common dir, so a child WITHOUT them is not the shape that
+            // reaches this seam in production.
+            &[root.join("parent-authority")],
+            test_sandbox_runtime(),
+            &unrestricted_parent(),
+            parent_shell_principal,
+        );
+        let bash = registry.get("Bash").expect("delegated child holds Bash");
+        let policy = registry
+            .workspace_policy()
+            .expect("child registry installs a workspace policy");
+        let requires = policy.shell_requires_os_read_deny();
+
+        let ctx = wcore_tools::context::ToolContext::test_default()
+            .with_sandbox(Arc::new(wcore_sandbox::SandboxRegistry::new(backend)))
+            .with_workspace(policy);
+        // `echo` and `>` are builtins of both `sh` and `cmd`, and this is
+        // deliberately space-free so a Windows `cmd /C` quoting defect cannot
+        // fail a shell-gate test for an unrelated reason.
+        let result = bash
+            .execute_with_ctx(
+                serde_json::json!({ "command": "echo>child_shell_ran.txt" }),
+                &ctx,
+            )
+            .await;
+        let bytes = std::fs::metadata(root.join("child_shell_ran.txt"))
+            .ok()
+            .map(|m| m.len());
+        (result.content, requires, bytes)
+    }
+
+    /// #1118 THE DEFECT. A sub-agent of a local-operator session was refused its
+    /// shell on the Windows session default while the parent's shell ran, on the
+    /// same machine, for the same operator.
+    #[tokio::test]
+    async fn f1118_sub_agent_shell_is_not_refused_when_the_parent_holds_the_principal() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let (content, requires, bytes) = child_shell_verdict(true, &root).await;
+
+        assert!(
+            !requires,
+            "a child of a local-operator parent must not demand OS read-deny \
+             that this backend cannot supply"
+        );
+        assert!(
+            !content.contains("Refused: shell is unavailable"),
+            "the sub-agent's shell was refused: {content}"
+        );
+        let bytes = bytes.expect("the child's shell must leave a real file on disk");
+        assert!(bytes > 0, "marker file exists but is empty");
+    }
+
+    /// #1118 THE SAFETY NET, and the half that must NOT move. A parent with no
+    /// local-operator principal — a channel/remote engine, or any session under
+    /// a Managed execution floor — still yields a child that is refused, with
+    /// ZERO bytes written. Inheritance is an intersection, never a grant.
+    #[tokio::test]
+    async fn f1118_sub_agent_shell_is_still_refused_when_the_parent_lacks_the_principal() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let (content, requires, bytes) = child_shell_verdict(false, &root).await;
+
+        assert!(
+            requires,
+            "a child of a channel/remote or Managed parent must still require \
+             OS read-deny"
+        );
+        assert!(
+            content.contains("Refused: shell is unavailable"),
+            "the refusal must survive for a non-operator parent: {content}"
+        );
+        assert!(
+            bytes.is_none(),
+            "a REPORTED refusal that still wrote {bytes:?} bytes is not a refusal"
+        );
+    }
+
+    /// #1118's headline asymmetry, stated as an assertion: parent and child on
+    /// the same workspace must not disagree about whether the shell is available.
+    #[test]
+    fn f1118_parent_and_child_agree_on_the_shell_principal() {
+        use wcore_tools::workspace_policy::WorkspacePolicy;
+        let root = tempfile::tempdir().unwrap();
+
+        // The operator's own session, built the way `bootstrap` builds it.
+        let operator = WorkspacePolicy::contained(root.path()).with_shell_principal(false, false);
+        assert!(!operator.shell_requires_os_read_deny());
+
+        let registry = build_tool_registry(
+            &["Bash".to_owned()],
+            RequestedChildWorkspace::IsolatedMutation,
+            root.path(),
+            &[],
+            test_sandbox_runtime(),
+            &unrestricted_parent(),
+            operator.local_operator_principal(),
+        );
+        let child = registry.workspace_policy().unwrap();
+        assert_eq!(
+            child.shell_requires_os_read_deny(),
+            operator.shell_requires_os_read_deny(),
+            "parent and child disagreed about shell availability on the same \
+             workspace — that disagreement IS #1118"
+        );
+        // The requirement itself is untouched: this is a principal, not a
+        // dropped secret-deny posture.
+        assert!(child.secret_read_deny_required());
+    }
+
     #[test]
     fn tc_7_1_fork_overrides_default_values() {
         let o = ForkOverrides::default();
@@ -5109,6 +5355,7 @@ mod phase7_tests {
             &[],
             test_sandbox_runtime(),
             &unrestricted_parent(),
+            false,
         );
         // Read-only tools ARE registered.
         for name in &["Read", "Grep", "Glob"] {
@@ -5126,6 +5373,110 @@ mod phase7_tests {
         }
     }
 
+    /// #1113 — the sub-agent workspace posture, pinned as a decision.
+    ///
+    /// The literal at the construction site was the whole of the reasoning
+    /// before this test existed, and a comment is not a guard. What is graded
+    /// here is not "contained is spelled here" but the three properties the
+    /// choice actually buys, each against a `trusted_local` control on the SAME
+    /// root so a green cannot come from every policy answering the same way.
+    #[test]
+    fn a_sub_agent_stays_contained_however_trusted_its_parent_is() {
+        use wcore_tools::workspace_policy::{WorkspacePolicy, WorkspaceTrust};
+
+        let root = tempfile::tempdir().unwrap();
+        let registry = build_tool_registry(
+            &["Bash".to_string()],
+            RequestedChildWorkspace::IsolatedMutation,
+            root.path(),
+            &[],
+            test_sandbox_runtime(),
+            &unrestricted_parent(),
+            // The shell-principal inheritance c2-bash added is orthogonal to the
+            // workspace posture this test grades; `false` is the production default
+            // (`AtomicBool::new(false)`) and what every other test call site passes.
+            false,
+        );
+        let child = registry
+            .workspace_policy()
+            .expect("a child registry always carries a workspace policy");
+
+        // The control: this is the profile the PARENT gets on a trust-granted,
+        // version-controlled workspace. Every assertion below is a difference
+        // from it, so none of them can pass for free.
+        let parent_if_trusted = WorkspacePolicy::trusted_local(root.path());
+
+        assert_eq!(
+            child.trust(),
+            WorkspaceTrust::Contained,
+            "a sub-agent's workspace posture is contained by decision"
+        );
+        assert_eq!(
+            parent_if_trusted.trust(),
+            WorkspaceTrust::Trusted,
+            "control"
+        );
+
+        // (3) project-secret read deny — the property that costs the per-exec
+        // walk, and the one #1113 asked about.
+        assert!(
+            child.secret_read_deny_required(),
+            "the child denies the workspace's own committed secrets"
+        );
+        assert!(
+            !parent_if_trusted.secret_read_deny_required(),
+            "control: a trusted parent does NOT, so the assertion above is a \
+             property of the choice and not of every policy"
+        );
+
+        // (2) cache redirect: the child's caches live inside its own workspace
+        // rather than in the operator's global ones.
+        let redirected = child.cache_env();
+        assert!(
+            !redirected.is_empty()
+                && redirected
+                    .iter()
+                    .any(|(_, value)| std::path::Path::new(value)
+                        .starts_with(child.root().join(".wcache"))),
+            "the child's cache env must be redirected under its workspace: {redirected:?}"
+        );
+        assert!(
+            parent_if_trusted
+                .cache_env()
+                .iter()
+                .all(|(_, value)| !std::path::Path::new(value)
+                    .starts_with(parent_if_trusted.root().join(".wcache"))),
+            "control: the trusted profile shares the operator's global caches"
+        );
+
+        // (1) write scope. Graded the only way that is not a tautology: name the
+        // roots the TRUSTED profile grants OUTSIDE the workspace — the
+        // operator's own `~/.cargo/registry` and friends, the supply-chain write
+        // this decision exists to refuse — and require that none of them reached
+        // the child. Deriving the list as "trusted minus child" instead would
+        // make the follow-up assertion true by construction.
+        let child_writable = child.writable_roots();
+        let widened_outside_workspace: Vec<_> = parent_if_trusted
+            .writable_roots()
+            .into_iter()
+            .filter(|granted| !granted.starts_with(parent_if_trusted.root()))
+            .collect();
+        assert!(
+            !widened_outside_workspace.is_empty(),
+            "control: the trusted profile must grant something outside the \
+             workspace, or this decision would be costing a walk for nothing \
+             and would need re-taking; trusted={:?}",
+            parent_if_trusted.writable_roots()
+        );
+        for granted in &widened_outside_workspace {
+            assert!(
+                !child_writable.contains(granted),
+                "a root only the trusted profile grants leaked into the child: {}",
+                granted.display()
+            );
+        }
+    }
+
     // Security audit H-7: destructive tools are reachable ONLY when explicitly
     // named in `allowed` (the opt-in path).
     #[test]
@@ -5138,6 +5489,7 @@ mod phase7_tests {
             &[],
             test_sandbox_runtime(),
             &unrestricted_parent(),
+            false,
         );
         assert!(
             registry.get("Bash").is_some(),
@@ -5166,6 +5518,7 @@ mod phase7_tests {
             &[],
             test_sandbox_runtime(),
             &unrestricted_parent(),
+            false,
         );
         assert!(registry.get("Bash").is_some());
         assert!(registry.get("Read").is_some());
@@ -5195,6 +5548,7 @@ mod phase7_tests {
             &[],
             test_sandbox_runtime(),
             &parent,
+            false,
         );
 
         assert!(
@@ -5224,6 +5578,7 @@ mod phase7_tests {
             &[],
             test_sandbox_runtime(),
             &parent,
+            false,
         );
 
         assert!(
@@ -5252,6 +5607,7 @@ mod phase7_tests {
             &[],
             test_sandbox_runtime(),
             &unrestricted_parent(),
+            false,
         );
         let mut built: Vec<String> = registry.tool_names();
         built.sort();
@@ -5279,6 +5635,7 @@ mod phase7_tests {
             &[],
             test_sandbox_runtime(),
             &unrestricted_parent(),
+            false,
         );
 
         assert!(registry.get("Read").is_some());
@@ -5298,6 +5655,7 @@ mod phase7_tests {
             &[],
             Arc::clone(&runtime),
             &unrestricted_parent(),
+            false,
         );
 
         assert!(Arc::ptr_eq(&runtime, &registry.sandbox_runtime()));

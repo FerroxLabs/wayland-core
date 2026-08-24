@@ -400,6 +400,46 @@ where
 /// B8-1: routed through the `wcore_egress::EgressClient` chokepoint (see
 /// [`egress_get_status`]); there is no bare `reqwest::blocking::Client` here.
 pub fn validate_key_blocking(provider: Provider, key: &str) -> ValidationOutcome {
+    // A pure re-wrap of [`validate_key_verdict`]: the onboarding wizard only
+    // needs works / does-not-work, and every message string below is the one
+    // it rendered before the three-way verdict existed.
+    match validate_key_verdict(provider, key) {
+        KeyVerdict::Accepted => ValidationOutcome::Ok,
+        KeyVerdict::Rejected(why) | KeyVerdict::Inconclusive(why) => ValidationOutcome::Failed(why),
+    }
+}
+
+/// Whether the provider actually answered the question "is this key good?".
+///
+/// [`ValidationOutcome`] collapses "the provider refused your key" and "I never
+/// got an answer" into one `Failed`, which is fine for the onboarding wizard —
+/// either way the key cannot be used yet. It is NOT fine for a diagnostic:
+/// reporting REFUSED for a key nobody judged is the same class of defect as
+/// FerroxLabs/wayland#1079 itself, an answer to a question the user did not ask
+/// presented as the one they did.
+///
+/// The distinction is load-bearing and measurable. `api.perplexity.ai/models`
+/// answers 404 to an anonymous request as readily as to an authenticated one,
+/// so a perfectly good Perplexity key would render REFUSED forever — a row that
+/// can never pass. Only 401/403 is evidence about the KEY; every other status,
+/// a timeout and a transport failure are evidence about the REQUEST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyVerdict {
+    /// The provider accepted the key (2xx).
+    Accepted,
+    /// The provider refused the key (401/403) — evidence about the key itself.
+    Rejected(String),
+    /// No auth answer was obtained. Carries why; never means the key is bad.
+    Inconclusive(String),
+}
+
+/// Probe `key` against `provider`'s key-validation endpoint and say what was
+/// actually learned. See [`KeyVerdict`] for why the three-way split matters.
+///
+/// One read-only GET through the `wcore_egress::EgressClient` chokepoint (see
+/// [`egress_get_status`]), bounded by `VALIDATE_TIMEOUT`. Spends no tokens and
+/// never writes the key.
+pub fn validate_key_verdict(provider: Provider, key: &str) -> KeyVerdict {
     let (url, auth) = validation_endpoint(provider, key);
     // Own the key for the worker thread; the request builder consumes it.
     let key = key.to_string();
@@ -415,18 +455,24 @@ pub fn validate_key_blocking(provider: Provider, key: &str) -> ValidationOutcome
         }
     });
 
+    classify_validation_status(status)
+}
+
+/// The status → verdict rule, split out so it can be graded without a network
+/// call or a mock server.
+fn classify_validation_status(status: EgressGetStatus) -> KeyVerdict {
     match status {
-        EgressGetStatus::Status(code) if (200..300).contains(&code) => ValidationOutcome::Ok,
+        EgressGetStatus::Status(code) if (200..300).contains(&code) => KeyVerdict::Accepted,
         EgressGetStatus::Status(code @ (401 | 403)) => {
-            ValidationOutcome::Failed(format!("key rejected ({code})"))
+            KeyVerdict::Rejected(format!("key rejected ({code})"))
         }
         EgressGetStatus::Status(code) => {
-            ValidationOutcome::Failed(format!("unexpected response ({code})"))
+            KeyVerdict::Inconclusive(format!("unexpected response ({code})"))
         }
         EgressGetStatus::Timeout => {
-            ValidationOutcome::Failed("timed out — check your connection".to_string())
+            KeyVerdict::Inconclusive("timed out — check your connection".to_string())
         }
-        EgressGetStatus::Failed => ValidationOutcome::Failed("network error".to_string()),
+        EgressGetStatus::Failed => KeyVerdict::Inconclusive("network error".to_string()),
     }
 }
 
@@ -757,5 +803,71 @@ mod tests {
             matches!(status, EgressGetStatus::Failed | EgressGetStatus::Timeout),
             "an unreachable host must classify as Failed/Timeout, not a status"
         );
+    }
+
+    /// Only 401/403 is evidence about the KEY. Every other outcome is evidence
+    /// about the REQUEST and must not condemn the credential.
+    ///
+    /// The 404 case is not hypothetical: `api.perplexity.ai/models` answers 404
+    /// to an anonymous request, so classifying it as a rejection would make a
+    /// valid Perplexity key permanently unusable-looking.
+    #[test]
+    fn only_an_auth_status_is_evidence_about_the_key() {
+        assert_eq!(
+            classify_validation_status(EgressGetStatus::Status(200)),
+            KeyVerdict::Accepted
+        );
+        for code in [401u16, 403] {
+            assert_eq!(
+                classify_validation_status(EgressGetStatus::Status(code)),
+                KeyVerdict::Rejected(format!("key rejected ({code})")),
+                "{code} is an auth answer and must read as a rejection"
+            );
+        }
+        for code in [400u16, 404, 429, 500, 503] {
+            assert!(
+                matches!(
+                    classify_validation_status(EgressGetStatus::Status(code)),
+                    KeyVerdict::Inconclusive(_)
+                ),
+                "{code} says nothing about the key and must not read as a rejection"
+            );
+        }
+        assert!(matches!(
+            classify_validation_status(EgressGetStatus::Timeout),
+            KeyVerdict::Inconclusive(_)
+        ));
+        assert!(matches!(
+            classify_validation_status(EgressGetStatus::Failed),
+            KeyVerdict::Inconclusive(_)
+        ));
+    }
+
+    /// The onboarding wizard's two-way outcome must be unchanged by the
+    /// three-way split above — same verdicts, same message strings.
+    #[test]
+    fn the_two_way_outcome_still_reads_exactly_as_before() {
+        let rewrap = |s| match classify_validation_status(s) {
+            KeyVerdict::Accepted => ValidationOutcome::Ok,
+            KeyVerdict::Rejected(w) | KeyVerdict::Inconclusive(w) => ValidationOutcome::Failed(w),
+        };
+        assert!(matches!(
+            rewrap(EgressGetStatus::Status(200)),
+            ValidationOutcome::Ok
+        ));
+        for (status, expected) in [
+            (EgressGetStatus::Status(401), "key rejected (401)"),
+            (EgressGetStatus::Status(404), "unexpected response (404)"),
+            (
+                EgressGetStatus::Timeout,
+                "timed out — check your connection",
+            ),
+            (EgressGetStatus::Failed, "network error"),
+        ] {
+            match rewrap(status) {
+                ValidationOutcome::Failed(w) => assert_eq!(w, expected),
+                ValidationOutcome::Ok => panic!("{expected} must not classify as Ok"),
+            }
+        }
     }
 }

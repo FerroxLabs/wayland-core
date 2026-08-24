@@ -46,6 +46,9 @@ parking_lot.workspace = true
 # executing it (bootstrap.rs's `<command> --help` preflight note). `which` is
 # PATHEXT-aware on Windows; same version wcore-sandbox already pins.
 which = "6"
+# gh#1117 - locating the Camoufox install to write the loopback egress pref
+# into. Same crate the plugin manifest loader already uses for HOME.
+dirs.workspace = true
 
 # F7 — archive extraction for the opt-in Camoufox binary provisioning path.
 # Format is chosen by magic bytes, so both are needed on every platform.

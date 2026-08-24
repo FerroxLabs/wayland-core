@@ -669,8 +669,13 @@ mod tests {
             // UNSERVED, and since 7d6b5384 the engine rides an unserved outage out for
             // `UNSERVED_OUTAGE_BUDGET` (900 s) rather than `MAX_STREAM_RETRIES` - measured
             // 901.58 s for one such test. These tests need a PERSISTENT stage failure, not a
-            // provider outage; an HTTP 500 is persistent, is retried the bounded number of
-            // times, and reaches the same failure path in ~1.5 s.
+            // provider outage; an HTTP 500 is persistent and is retried the bounded number
+            // of times.
+            //
+            // "Bounded" was doing unstated work here: the ~1.5 s this used to cost was the
+            // old default of 2 retries, and the default is now 10 (127.5 s of curve). The
+            // callers pin the budget rather than relying on it being small, so this stays a
+            // fast persistent-failure fixture instead of a timing accident.
             Err(wcore_providers::ProviderError::Api {
                 status: 500,
                 message: "counting".into(),
@@ -698,6 +703,11 @@ mod tests {
     // no more than 2 may stream at once even though all four are spawned together.
     #[tokio::test]
     async fn same_route_bounds_concurrent_spawns() {
+        // Budget PINNED, not inherited. This test drives a provider that fails
+        // every attempt; the shipped default is 10 retries on the shared backoff
+        // curve (127.5 s of scheduled sleep), and what is under test here is the
+        // failure OUTCOME, not the size of the budget.
+        let _retry_budget = crate::test_utils::PinnedRetryBudget::pin(2);
         let dir = tempfile::tempdir().unwrap();
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let max = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -743,6 +753,11 @@ mod tests {
     // the two members are NOT throttled against each other — they can overlap.
     #[tokio::test]
     async fn distinct_routes_have_independent_pools() {
+        // Budget PINNED, not inherited. This test drives a provider that fails
+        // every attempt; the shipped default is 10 retries on the shared backoff
+        // curve (127.5 s of scheduled sleep), and what is under test here is the
+        // failure OUTCOME, not the size of the budget.
+        let _retry_budget = crate::test_utils::PinnedRetryBudget::pin(2);
         let dir = tempfile::tempdir().unwrap();
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let max = Arc::new(std::sync::atomic::AtomicUsize::new(0));

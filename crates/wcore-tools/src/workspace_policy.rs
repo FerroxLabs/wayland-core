@@ -18,7 +18,8 @@
 //! `operator_bash_network` for a sandboxed one). It is never hardcoded here.
 
 use parking_lot::RwLock;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use thiserror::Error;
@@ -199,6 +200,53 @@ pub struct WorkspacePolicy {
     /// lifetime. This is interior-mutable so an already-running Bash tool sees
     /// the grant on its next call without replacing the session sandbox.
     session_read_grants: Arc<RwLock<Vec<SessionReadGrant>>>,
+    /// #1111 — the memoised exec-path deny set, with the stamp that proves it
+    /// is still what a fresh walk would produce. Interior-mutable and shared by
+    /// `Arc` for the same reason `session_read_grants` is: `bash.rs` holds the
+    /// policy behind an `Arc` and cannot replace it between executions.
+    deny_cache: Arc<RwLock<Option<DenyCache>>>,
+    /// #1111 — how many times this policy has actually recomputed the dynamic
+    /// deny set from the filesystem. Read by
+    /// [`secret_deny_walk_count`](Self::secret_deny_walk_count); it is the
+    /// injected counter #1111 asks the repeated-walk assertion to be made with,
+    /// so the grade does not rest on a wall clock.
+    deny_walks: Arc<AtomicU64>,
+}
+
+/// #1111 — one memoised deny set plus everything needed to decide whether it is
+/// stale.
+#[derive(Debug)]
+struct DenyCache {
+    /// Everything about the POLICY (as opposed to the tree) that changes the
+    /// answer — see [`WorkspacePolicy::deny_cache_key`]. A difference here is an
+    /// outright miss and no directory is stat'ed.
+    key: u64,
+    /// The instant the walk that produced `paths` started.
+    stamped_at: SystemTime,
+    /// Every directory that walk descended into, with its modification time.
+    dirs: Vec<(PathBuf, SystemTime)>,
+    paths: Vec<PathBuf>,
+}
+
+/// #1111 — a tree with more directories than this keeps today's per-exec walk
+/// rather than growing an unbounded stamp. Remembering a directory costs a
+/// `PathBuf` and revalidating it costs one `stat`, so past some size the memo
+/// stops paying for itself and starts costing memory instead.
+const DENY_CACHE_MAX_DIRS: usize = 100_000;
+
+/// #667/#1118 — THE shell-principal predicate, in one place.
+///
+/// True when the ONLY principal that can drive a shell built from this decision
+/// is the local operator at their own keyboard. Read directly by seams that must
+/// derive a principal without building a policy first (a one-shot CLI driver's
+/// spawner); [`WorkspacePolicy::with_shell_principal`] is the same question
+/// asked of a policy, so the two cannot drift.
+#[must_use]
+pub fn local_operator_shell_principal(
+    channel_posture_present: bool,
+    managed_execution_floor: bool,
+) -> bool {
+    !(channel_posture_present || managed_execution_floor)
 }
 
 #[derive(Debug, Error)]
@@ -211,6 +259,19 @@ pub enum WorkspaceCapabilityGrantError {
     CredentialPath(PathBuf),
     #[error("capability path could not be resolved: {0}")]
     Resolve(#[from] std::io::Error),
+}
+
+/// A write target that the session could create but could never read back.
+///
+/// FerroxLabs/wayland#1097. Write authority and read authority are enforced by
+/// different mechanisms, so a location can be writable and unreadable at the
+/// same time — and the asymmetry only reveals itself at the END of the work,
+/// when the produced path is handed over and the read is refused. This is the
+/// refusal that turns that dead end into a write-time error naming the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{} is outside this session's readable roots", path.display())]
+pub struct WriteTargetNotReadable {
+    pub path: PathBuf,
 }
 
 /// One standing read grant held by a session.
@@ -338,6 +399,8 @@ impl WorkspacePolicy {
             local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(developer_capabilities)),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
+            deny_cache: Arc::new(RwLock::new(None)),
+            deny_walks: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -388,6 +451,8 @@ impl WorkspacePolicy {
             local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(Vec::new())),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
+            deny_cache: Arc::new(RwLock::new(None)),
+            deny_walks: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -491,6 +556,8 @@ impl WorkspacePolicy {
             local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(Vec::new())),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
+            deny_cache: Arc::new(RwLock::new(None)),
+            deny_walks: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -499,6 +566,32 @@ impl WorkspacePolicy {
     }
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// `<workspace>/.wayland-out` — the session's output root, in the one
+    /// spelling a path may be HANDED OUT in.
+    ///
+    /// [`root`](Self::root) is `canonicalize`d at construction, which on
+    /// Windows is the verbatim `\\?\C:\…` form. That is the correct spelling to
+    /// ENFORCE with — every prefix match in this module compares against it —
+    /// and the wrong one to hand over. `path_validation::validate_user_path`
+    /// refuses the verbatim namespace outright (#644), and the legacy file
+    /// tools all gate on it, so a path built by joining onto `root()` and then
+    /// given to the model is a path the producing session's own `Read` refuses.
+    /// MEASURED on Windows 11 26200 before this existed: `Refused to read
+    /// \\?\F:\…\.wayland-out\results\toolu_01.txt: path uses a Windows device /
+    /// verbatim namespace`. That is the FerroxLabs/wayland#1097 dead end again,
+    /// reached by a different route — the file is written, the path is handed
+    /// over, and the read is refused.
+    ///
+    /// `dunce::simplified` is the same reduction `wcore_agent`'s
+    /// `canonical_workspace` already applies before the workspace reaches the
+    /// system prompt, so the path the model is told to read back and the
+    /// `Working directory:` it was given are one spelling rather than two. A
+    /// pure string operation, and a plain no-op on Unix.
+    #[must_use]
+    pub fn session_output_root(&self) -> PathBuf {
+        dunce::simplified(&self.root).join(wcore_config::config::SESSION_OUTPUT_ROOT)
     }
     pub fn writable_roots(&self) -> Vec<PathBuf> {
         let mut v = Vec::with_capacity(1 + self.writable_extra.len());
@@ -620,10 +713,105 @@ impl WorkspacePolicy {
     /// business, and a benign-named symlink into the control surface resolves
     /// before the prefix match so it cannot be used to smuggle a write through.
     pub fn is_repo_control_path(&self, path: &Path) -> bool {
-        let canon = canon_for_scope(path);
+        // `canon_deep`, not `canon_for_scope`: the root is canonicalized at
+        // construction, so a candidate that resolves to something shallower
+        // never matches it. `canon_for_scope` resolves only the IMMEDIATE
+        // parent and returns the RAW path when that parent is missing —
+        // which is exactly the shape of a NEW control file
+        // (`.wayland-core/skills/<new>/SKILL.md`, `.git/<new>/hook`), and
+        // exactly the write this guard exists to refuse. Measured on this
+        // tree before the change: with the workspace addressed through a
+        // symlink, `Write` of `<link>/.git/hooks/pre-commit` (parent not yet
+        // created) reported `Created`, while the same write addressed through
+        // the real root was refused. See
+        // `crates/wcore-tools/tests/repo_control_symlink.rs`.
+        let canon = canon_deep(path);
         REPO_CONTROL_DIRS
             .iter()
             .any(|dir| canon.starts_with(self.root.join(dir)))
+    }
+
+    /// True when `path` names a directory skills are LOADED from — this
+    /// workspace's (or any ancestor's) `.wayland-core/skills` and
+    /// `.wayland-core/commands`, or the user-level `<config_dir>/skills` and
+    /// `<config_dir>/commands`.
+    ///
+    /// FerroxLabs/wayland#1096, suggested direction 2. A load path is not an
+    /// output path, and the everyday failure is not malice: a skill produces a
+    /// report and puts it next to its own `SKILL.md`, which lives in the global
+    /// config dir, OUTSIDE the session workspace. The file is then unreachable
+    /// to the session that made it — the dead end the 2026-08-19 UAT hit, and
+    /// reproduced through the live binary in
+    /// `wcore-cli/tests/skill_source_write_live.rs`.
+    ///
+    /// Strictly WIDER than [`is_repo_control_path`](Self::is_repo_control_path),
+    /// and that is the whole point of it being separate. Repo-control is
+    /// workspace-scoped (`<root>/.wayland-core`), because a `.git` elsewhere on
+    /// the host is not this policy's business. A skill LOAD path is: the
+    /// user-level directory is read into every future session on the machine no
+    /// matter where the workspace sits, and `project_skills_dirs()` walks
+    /// ANCESTORS of the cwd, so a `.wayland-core/skills` above the workspace
+    /// root is loaded too. Both are refused here; neither is reachable from the
+    /// workspace-scoped predicate.
+    ///
+    /// Not a read deny. The loader reads these paths on every boot and the model
+    /// may inspect a skill it is about to run; only AUTHORING them is refused.
+    /// Also deliberately narrow inside the config dir — session state, memory
+    /// and plugin data live there too and stay writable.
+    ///
+    /// Refuses the model's TOOLS, not the engine. The auto-skill drafter
+    /// (`wcore_agent::auto_skill::drafter`) and the `skills` CLI verbs write
+    /// their `SKILL.md` files through `wcore_config::atomic_write` / `std::fs`,
+    /// never the tool VFS, so skill installation and drafting are unaffected.
+    pub fn is_skill_source_path(&self, path: &Path) -> bool {
+        let canon = canon_deep(path);
+        if under_project_load_path(&canon) {
+            return true;
+        }
+        wcore_config::config::user_skill_source_dirs()
+            .iter()
+            .any(|dir| canon.starts_with(canon_deep(dir)))
+    }
+
+    /// Refuse a write target this session could never read back
+    /// (FerroxLabs/wayland#1097).
+    ///
+    /// The invariant: a path we let an agent WRITE must sit under a root
+    /// [`readable_roots`](Self::readable_roots) also covers. Where it does not,
+    /// the work still succeeds and the delivery fails — the agent finishes
+    /// holding a path it just created and cannot open. Refusing at write time
+    /// costs the same information one step earlier, with the reason named.
+    ///
+    /// Canonicalize-first, exactly like
+    /// [`is_repo_control_path`](Self::is_repo_control_path): the longest
+    /// EXISTING ancestor is resolved (so a target whose directories do not
+    /// exist yet is still judged on where it would really land), which also
+    /// means a `..` segment and a symlinked parent are resolved before the
+    /// prefix match rather than after it.
+    ///
+    /// SCOPE — this is the OS-sandbox answer, which is the WIDER of the two
+    /// answers this codebase has to "can the session read it". `Bash` reads
+    /// through the OS sandbox, whose allow-list IS `readable_roots()`; the file
+    /// tools (`Read`/`Grep`/`Glob`) read through `ctx.vfs`, whose jail is
+    /// rooted at the workspace plus the standing session read grants and does
+    /// NOT include `readable_extra` (toolchain dirs) or the writable scratch
+    /// tree. So passing this check is NECESSARY for a readable-back write and
+    /// is not by itself SUFFICIENT for one the `Read` tool can open: a caller
+    /// that hands its path to the model should keep the target under
+    /// [`root`](Self::root).
+    pub fn ensure_write_target_readable(&self, path: &Path) -> Result<(), WriteTargetNotReadable> {
+        let resolved = canon_existing_ancestor(path);
+        let covered = self
+            .readable_roots()
+            .iter()
+            .any(|root| resolved.starts_with(canon_existing_ancestor(root)));
+        if covered {
+            Ok(())
+        } else {
+            Err(WriteTargetNotReadable {
+                path: path.to_path_buf(),
+            })
+        }
     }
 
     /// #667: opt a `Trusted` policy into the same PROJECT-committed-secret
@@ -685,10 +873,39 @@ impl WorkspacePolicy {
         channel_posture_present: bool,
         managed_execution_floor: bool,
     ) -> Self {
-        if channel_posture_present || managed_execution_floor {
-            self
-        } else {
+        if local_operator_shell_principal(channel_posture_present, managed_execution_floor) {
             self.with_local_operator_principal()
+        } else {
+            self
+        }
+    }
+
+    /// #1118 — a DELEGATED CHILD's shell principal is its parent's, and can
+    /// never be wider.
+    ///
+    /// The sub-agent seam has no channel scope of its own to inspect: it is
+    /// reached only from a parent session that already made this decision at a
+    /// seam that could see one ([`with_shell_principal`](Self::with_shell_principal)).
+    /// Before this existed the spawner made no decision at all, so every child
+    /// fell to the fail-safe `false` while its parent — same operator, same
+    /// machine, same workspace — held `true`, and `bash.rs` refused the child's
+    /// shell on any backend that cannot enforce OS read-deny (the Windows
+    /// session default) while running the parent's.
+    ///
+    /// This is principal DERIVATION, not a profile relaxation:
+    /// `secret_read_deny_required` is untouched, the deny LIST is still computed
+    /// and still handed to the backend, and a backend that can enforce it (Linux
+    /// `bwrap`, macOS `sandbox_exec`, `docker`) still enforces every path in it
+    /// — including the delegating parent's own workspace. What changes is
+    /// confined to backends that were going to enforce nothing either way, where
+    /// the refusal removed the child's shell without removing anything a parent
+    /// shell on the same machine could not already reach.
+    #[must_use]
+    pub fn with_inherited_shell_principal(self, parent_is_local_operator: bool) -> Self {
+        if parent_is_local_operator {
+            self.with_local_operator_principal()
+        } else {
+            self
         }
     }
 
@@ -831,6 +1048,35 @@ impl WorkspacePolicy {
     /// secret cannot be reconstructed from `.git/objects` via `Bash("git show
     /// HEAD:.env")` and friends — the sibling of the typed-GitTool drop (MF1).
     pub fn secret_deny_paths_dynamic(&self) -> Vec<PathBuf> {
+        self.secret_deny_paths_stamped().0
+    }
+
+    /// #1111 — how many times this policy has recomputed the deny set from the
+    /// filesystem. The injected counter the repeated-walk acceptance is graded
+    /// with; a wall clock cannot tell a skipped walk from a fast one.
+    #[doc(hidden)]
+    pub fn secret_deny_walk_count(&self) -> u64 {
+        self.deny_walks.load(Ordering::Relaxed)
+    }
+
+    /// [`secret_deny_paths_dynamic`](Self::secret_deny_paths_dynamic) plus the
+    /// stamp a later call needs to decide whether that answer is still current.
+    ///
+    /// The stamp is every DIRECTORY the walk descended into with its mtime, and
+    /// the instant the walk started. Secrecy is decided by NAME
+    /// ([`secret_entry`]), never by content, so the only events that can change
+    /// this answer are an entry being created, renamed, deleted or re-pointed —
+    /// and every one of those updates the containing directory's mtime. A stamp
+    /// over directories therefore detects every change that matters, WHOEVER
+    /// made it: this process, the operator's editor, a `git checkout`, or an
+    /// unrelated program. That is strictly stronger than invalidating on writes
+    /// through our own VFS, which sees only the first of those.
+    fn secret_deny_paths_stamped(&self) -> (Vec<PathBuf>, Vec<(PathBuf, SystemTime)>, SystemTime) {
+        // Taken BEFORE the walk: anything modified from here on is inside the
+        // walk's own window and must not be trusted by a later revalidation.
+        let stamped_at = SystemTime::now();
+        self.deny_walks.fetch_add(1, Ordering::Relaxed);
+        let mut dirs: Vec<(PathBuf, SystemTime)> = Vec::new();
         // Recompute the base deny set against the CURRENT readable roots. A
         // desktop capability grant can add a read-only runtime mount after
         // bootstrap; using the construction-time cache here would expose any
@@ -850,9 +1096,13 @@ impl WorkspacePolicy {
         } else {
             self.trust
         };
-        let mut out = compute_secret_deny(base_trust, &self.root, &readable_canon);
+        let mut out = compute_secret_deny(base_trust, &self.root, &readable_canon, &mut dirs);
         if self.secret_read_deny_required {
-            out.extend(project_committed_secrets(&self.root, &readable_canon));
+            out.extend(project_committed_secrets(
+                &self.root,
+                &readable_canon,
+                &mut dirs,
+            ));
             out.extend(git_content_stores(&self.root));
             // A granted folder is a mounted root the child can reach, so it
             // needs the same secret walk the workspace gets. Without this the
@@ -889,14 +1139,63 @@ impl WorkspacePolicy {
                     continue;
                 }
                 let scope = vec![granted.clone()];
-                out.extend(project_committed_secrets(&granted, &scope));
+                out.extend(project_committed_secrets(&granted, &scope, &mut dirs));
                 walked.push(granted);
             }
         }
         out.extend(self.authority_read_deny.iter().cloned());
         out.sort();
         out.dedup();
-        out
+        (out, dirs, stamped_at)
+    }
+
+    /// #1111 — everything about the POLICY that changes the deny answer. A
+    /// difference here misses outright, before a single directory is stat'ed.
+    ///
+    /// `readable_roots` already folds in the network posture, the developer
+    /// capability roots and the LIVE session read grants (expiry included),
+    /// which is the whole of what moves the walk's scope.
+    fn deny_cache_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.root.hash(&mut hasher);
+        matches!(self.trust, WorkspaceTrust::Contained).hash(&mut hasher);
+        self.secret_read_deny_required.hash(&mut hasher);
+        self.authority_read_deny.hash(&mut hasher);
+        self.readable_roots().hash(&mut hasher);
+        self.session_read_grant_roots().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// #1111 — the memoised answer, but ONLY if a fresh walk would produce the
+    /// same one.
+    ///
+    /// Every stamped directory must still report the exact mtime the walk saw.
+    /// Any failure to read one, any difference, any sentinel and any mtime at or
+    /// after the walk's own start instant is a miss — the cache is never trusted
+    /// through a hole in its stamp.
+    fn deny_cache_hit(&self, key: u64) -> Option<Vec<PathBuf>> {
+        let guard = self.deny_cache.read();
+        let cache = guard.as_ref()?;
+        if cache.key != key {
+            return None;
+        }
+        for (dir, seen) in &cache.dirs {
+            // The sentinel `dir_stamp` records for a directory whose mtime the
+            // platform would not report. It can never match, so an unstampable
+            // directory disables the memo instead of punching a hole in it.
+            if *seen == SystemTime::UNIX_EPOCH {
+                return None;
+            }
+            let now = std::fs::symlink_metadata(dir).ok()?.modified().ok()?;
+            // `>= stamped_at` is the timestamp-granularity guard: a write that
+            // landed in the same clock tick as the walk leaves an mtime the
+            // equality test above cannot distinguish from the one recorded.
+            if now != *seen || now >= cache.stamped_at {
+                return None;
+            }
+        }
+        Some(cache.paths.clone())
     }
 
     /// #922 R1: the OS read-deny list, computed only for a backend that will
@@ -936,7 +1235,28 @@ impl WorkspacePolicy {
             // The backend discards this field; producing it is pure cost.
             return Vec::new();
         }
-        self.secret_deny_paths_dynamic()
+        // #1111: this is the EXEC path — one call per `Bash` execution, for the
+        // life of the session, over a tree that is usually identical to the one
+        // the last execution walked. `secret_deny_paths_dynamic` itself stays
+        // uncached, so the determinism and identity contracts that grade the
+        // walk keep grading a real walk every time they ask for one.
+        let key = self.deny_cache_key();
+        if let Some(hit) = self.deny_cache_hit(key) {
+            return hit;
+        }
+        let (paths, dirs, stamped_at) = self.secret_deny_paths_stamped();
+        // An empty stamp means no walk happened (a `Trusted` policy with no
+        // project-secret denial), so there is nothing to memoise and nothing
+        // that could go stale; storing it would be a cache that can only ever
+        // be wrong.
+        *self.deny_cache.write() =
+            (!dirs.is_empty() && dirs.len() <= DENY_CACHE_MAX_DIRS).then(|| DenyCache {
+                key,
+                stamped_at,
+                dirs,
+                paths: paths.clone(),
+            });
+        paths
     }
 
     /// #667 (F2): true when `Bash` must be REFUSED on a backend that cannot
@@ -1434,6 +1754,7 @@ fn compute_secret_deny(
     trust: WorkspaceTrust,
     root: &Path,
     readable_canon: &[PathBuf],
+    dirs: &mut Vec<(PathBuf, SystemTime)>,
 ) -> Vec<PathBuf> {
     // Always-on system credential mounts (unconditionally granted by backends).
     let system_roots: Vec<PathBuf> = SYSTEM_CREDENTIAL_STORES.iter().map(PathBuf::from).collect();
@@ -1501,12 +1822,36 @@ fn compute_secret_deny(
     // #667: `with_project_secret_deny` reuses `project_committed_secrets` to
     // apply the SAME denial to a `Full`-posture channel/remote `Trusted` policy.
     if trust == WorkspaceTrust::Contained {
-        out.extend(project_committed_secrets(root, readable_canon));
+        out.extend(project_committed_secrets(root, readable_canon, dirs));
     }
 
     out.sort();
     out.dedup();
     out
+}
+
+thread_local! {
+    /// #1111 acceptance 1 asked for the walk to be counted "via an injected
+    /// counter, not wall-clock". This is that counter. It is THREAD-LOCAL on
+    /// purpose: `cargo test` runs one binary as threads in a single process, so
+    /// a process-global would be corrupted by any concurrent test that also
+    /// walks and the count would quietly stop meaning anything. Every
+    /// `project_committed_secrets` call runs on the thread that asked for it.
+    static WALK_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of full workspace secret walks ([`project_committed_secrets`])
+/// performed **on the calling thread** since the process started.
+///
+/// Read it either side of an operation to assert how many walks that operation
+/// really cost. It counts WALKS, not entries: one call that starts serial and
+/// restarts in parallel above `SERIAL_WALK_BUDGET` is one walk, because the
+/// question #1111 asks is whether a walk is repeated.
+///
+/// Graded by `tests/secret_walk_call_count_test.rs`, which also carries the
+/// executable evidence for why this walk is deliberately NOT memoised.
+pub fn walk_calls() -> u64 {
+    WALK_CALLS.with(|c| c.get())
 }
 
 /// Absolute, canonicalized paths of the workspace's OWN committed secrets
@@ -1519,7 +1864,13 @@ fn compute_secret_deny(
 ///
 /// The returned list is SORTED. A big tree is walked in parallel (below), and a
 /// security boundary must not vary with thread scheduling.
-fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<PathBuf> {
+fn project_committed_secrets(
+    root: &Path,
+    readable_canon: &[PathBuf],
+    dirs: &mut Vec<(PathBuf, SystemTime)>,
+) -> Vec<PathBuf> {
+    WALK_CALLS.with(|c| c.set(c.get() + 1));
+
     let system_roots: Vec<PathBuf> = SYSTEM_CREDENTIAL_STORES.iter().map(PathBuf::from).collect();
     let under_mounted = |p: &Path| {
         readable_canon.iter().any(|r| p.starts_with(r))
@@ -1559,6 +1910,11 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
     // tree proves it is big enough to be worth a thread pool.
     {
         let mut out: Vec<PathBuf> = Vec::new();
+        // #1111: held aside rather than appended straight to `dirs`, because the
+        // oversized arm below abandons this prefix and re-walks it in parallel —
+        // and a stamp that listed the same directory twice would still be
+        // correct but would pay for it on every revalidation.
+        let mut stamp: Vec<(PathBuf, SystemTime)> = Vec::new();
         let mut visited = 0usize;
         let mut oversized = false;
         for result in builder().build() {
@@ -1567,14 +1923,18 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
                 oversized = true;
                 break;
             }
-            if let Ok(entry) = result
-                && let Some(secret) = secret_entry(&entry, &under_mounted)
-            {
-                out.push(secret);
+            if let Ok(entry) = result {
+                if let Some(stamped) = dir_stamp(&entry) {
+                    stamp.push(stamped);
+                }
+                if let Some(secret) = secret_entry(&entry, &under_mounted) {
+                    out.push(secret);
+                }
             }
         }
         if !oversized {
             out.sort();
+            dirs.append(&mut stamp);
             return out;
         }
     }
@@ -1590,21 +1950,54 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
     // answer is identical run to run and identical to the serial arm's. Pinned
     // by `tests/walk_parallel_identity_test.rs`.
     let found = Mutex::new(Vec::<PathBuf>::new());
+    let walked = Mutex::new(Vec::<(PathBuf, SystemTime)>::new());
     builder().build_parallel().run(|| {
         Box::new(|result| {
             // An unreadable directory is skipped here exactly as the serial
             // arm's `Err` skips it.
-            if let Ok(entry) = result
-                && let Some(secret) = secret_entry(&entry, &under_mounted)
-            {
-                found.lock().expect(POISONED).push(secret);
+            if let Ok(entry) = result {
+                if let Some(stamped) = dir_stamp(&entry) {
+                    walked.lock().expect(POISONED).push(stamped);
+                }
+                if let Some(secret) = secret_entry(&entry, &under_mounted) {
+                    found.lock().expect(POISONED).push(secret);
+                }
             }
             ignore::WalkState::Continue
         })
     });
     let mut out = found.into_inner().expect(POISONED);
     out.sort();
+    dirs.extend(walked.into_inner().expect(POISONED));
     out
+}
+
+/// #1111 — the directory half of the walk's stamp.
+///
+/// `None` for anything that is not a directory. A directory whose mtime the
+/// platform will not report is stamped with `UNIX_EPOCH`, a value
+/// [`WorkspacePolicy::deny_cache_hit`] refuses to match: an unstampable
+/// directory must DISABLE the memo, never sit inside a stamp as a hole that
+/// revalidation silently steps over.
+fn dir_stamp(entry: &ignore::DirEntry) -> Option<(PathBuf, SystemTime)> {
+    if !entry.file_type().is_some_and(|t| t.is_dir()) {
+        return None;
+    }
+    // `std::fs::symlink_metadata`, NOT `entry.metadata()`, and the difference is
+    // load-bearing rather than stylistic: revalidation reads the mtime with
+    // `symlink_metadata`, and a stamp is only meaningful if both sides use the
+    // SAME instrument. On Windows they are not interchangeable — a walk's
+    // `DirEntry` carries the timestamps the parent directory's enumeration
+    // returned, and NTFS updates that cached copy lazily, so the enumerated
+    // value routinely differs from the one an open of the directory reports.
+    // Stamping from the enumeration made every revalidation mismatch and the
+    // memo never hit on Windows; caught by `two_execs_perform_exactly_one_walk`
+    // running on a real Windows host, not by reading this code.
+    let mtime = std::fs::symlink_metadata(entry.path())
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    Some((entry.path().to_path_buf(), mtime))
 }
 
 /// Entries the serial arm of [`project_committed_secrets`] will visit before it
@@ -1730,6 +2123,212 @@ pub(crate) fn canon_for_scope(path: &Path) -> PathBuf {
             .unwrap_or_else(|_| path.to_path_buf()),
         _ => path.to_path_buf(),
     }
+}
+
+/// Canonicalize as much of `path` as exists and keep the remainder verbatim.
+///
+/// [`canon_for_scope`] resolves only the IMMEDIATE parent and falls back to the
+/// raw path when that parent is missing. For a deny predicate that is a hole on
+/// any host whose config or temp root is itself a symlink (`/var` ->
+/// `/private/var` on macOS): the deny list resolves, the candidate does not, and
+/// the prefix comparison misses. The miss lands on exactly the case
+/// [`WorkspacePolicy::is_skill_source_path`] exists to catch — writing
+/// `<config_dir>/skills/<new-skill>/report.html` creates BOTH missing
+/// components, so "the parent exists" is false precisely when it matters.
+fn canon_deep(path: &Path) -> PathBuf {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return resolved;
+    }
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path;
+    while let (Some(parent), Some(name)) = (cursor.parent(), cursor.file_name()) {
+        trailing.push(name.to_os_string());
+        if let Ok(base) = std::fs::canonicalize(parent) {
+            let mut resolved = base;
+            resolved.extend(trailing.iter().rev());
+            return resolved;
+        }
+        cursor = parent;
+    }
+    path.to_path_buf()
+}
+
+/// True when any ancestor of `path` is a `.wayland-core/skills` or
+/// `.wayland-core/commands` directory.
+///
+/// Walks components rather than joining a root, because
+/// `wcore_skills::paths::project_skills_dirs()` walks UP from the cwd: a
+/// `.wayland-core/skills` in an ancestor of the workspace is a load path for
+/// this session, and one in a sibling checkout is a load path for that one. A
+/// component walk covers all of them with no root to be wrong about.
+fn under_project_load_path(path: &Path) -> bool {
+    use std::path::Component;
+    let mut parent_was_marker = false;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            parent_was_marker = false;
+            continue;
+        };
+        if parent_was_marker
+            && wcore_config::config::SKILL_SOURCE_DIR_NAMES
+                .iter()
+                .any(|leaf| name == std::ffi::OsStr::new(leaf))
+        {
+            return true;
+        }
+        parent_was_marker = name == std::ffi::OsStr::new(".wayland-core");
+    }
+    false
+}
+
+/// Resolve `path` to where it would ACTUALLY land, component by component,
+/// without requiring any of it to exist yet.
+///
+/// [`canon_for_scope`] resolves at most one missing component, which is enough
+/// for a leaf that does not exist yet but not for a target whose directories
+/// have not been created either (`<root>/.wayland-out/results/x.txt` on a fresh
+/// workspace, which is what every FIRST spill looks like).
+///
+/// Walking DOWN and re-canonicalizing after every component — rather than
+/// canonicalizing the longest existing ancestor once and appending the rest
+/// verbatim — is what keeps the result honest for the two escapes that matter,
+/// both of which appear only when part of the path is missing:
+///
+/// * `<root>/nope/../../outside/x` — a `..` that follows a component which
+///   does not exist. Appended verbatim it stays in the string, and the result
+///   still `starts_with` the root while the real target is outside it.
+/// * `<root>/nope/../link/x` — a symlinked component reached only after such a
+///   `..`. It has to be resolved before the prefix compare, not after.
+///
+/// A `..` is applied lexically (`pop`) because the prefix accumulated so far is
+/// already canonical, so there is no symlink left for it to traverse wrongly.
+fn canon_existing_ancestor(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(name) => out.push(name),
+        }
+        // Resolve as soon as the prefix so far exists, so a symlinked
+        // component is replaced by its target BEFORE any later `..` is
+        // applied to it, and so a `..` that follows a component which does
+        // not exist is still applied instead of being carried into the
+        // comparison verbatim.
+        out = resolve_prefix(out);
+    }
+    out
+}
+
+/// A symlink chain is followed at most this many hops before the walk gives
+/// up. Only a cycle reaches the bound; the write that follows it then fails
+/// with the OS ELOOP of its own.
+const MAX_SYMLINK_HOPS: usize = 16;
+
+/// Resolve one accumulated prefix as far as the filesystem allows.
+///
+/// `std::fs::canonicalize` fails on a DANGLING symlink -- one whose target
+/// does not exist yet. Leaving such a component verbatim makes the prefix
+/// compare in [`WorkspacePolicy::ensure_write_target_readable`] judge where
+/// the LINK sits instead of where the write would land, and `std::fs::write`
+/// follows the link. Measured on hetzner-dsm before this change, with three
+/// controls beside it: a dangling `<workspace>/out.txt -> <outside>/loot.txt`
+/// was ACCEPTED and the bytes landed outside, while the same link with an
+/// EXISTING target was refused. So a dangling link is followed by hand, one
+/// hop at a time, and the result re-canonicalized.
+fn resolve_prefix(mut out: PathBuf) -> PathBuf {
+    for _ in 0..MAX_SYMLINK_HOPS {
+        if let Ok(resolved) = std::fs::canonicalize(&out) {
+            return resolved;
+        }
+        // Not a symlink (or gone entirely): an ordinary does-not-exist-yet
+        // component. Its EXISTING ancestors still have to be canonicalized --
+        // see `canon_ancestor_only`.
+        let Ok(meta) = std::fs::symlink_metadata(&out) else {
+            return canon_ancestor_only(out);
+        };
+        if !meta.file_type().is_symlink() {
+            return canon_ancestor_only(out);
+        }
+        let Ok(target) = std::fs::read_link(&out) else {
+            return canon_ancestor_only(out);
+        };
+        out = if target.is_absolute() {
+            lexical_normalize(target)
+        } else {
+            let mut base = out;
+            base.pop();
+            base.push(target);
+            lexical_normalize(base)
+        };
+    }
+    canon_ancestor_only(out)
+}
+
+/// Canonicalize the deepest EXISTING ancestor of `path` and re-append the
+/// components below it.
+///
+/// A dangling symlink's target is followed by hand in [`resolve_prefix`], and
+/// the result of that walk is a path whose leaf does not exist -- so
+/// `std::fs::canonicalize` cannot be applied to it as a whole. Returning it
+/// verbatim was wrong: the readable root it is about to be compared against
+/// went through `canonicalize`, and on any host where the workspace sits under
+/// a symlinked directory the two spellings disagree.
+///
+/// macOS guarantees that disagreement, because `TMPDIR` lives under
+/// `/var/folders` and `/var` is a symlink to `/private/var`. A dangling link
+/// landing back INSIDE the workspace then compared as `/var/...` against a
+/// root of `/private/var/...`, failed `starts_with`, and a legitimate write
+/// was refused -- the control arm of
+/// `a_dangling_symlink_out_of_the_workspace_is_refused`, on CI run
+/// 32700730900. It is not macOS-only: any workspace reached through a symlink
+/// hits it.
+///
+/// This does NOT follow symlinks itself -- it canonicalizes only the part that
+/// already exists -- so it is safe to call from inside [`resolve_prefix`]
+/// without recursing back into the hop walk.
+fn canon_ancestor_only(path: PathBuf) -> PathBuf {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path.clone();
+    loop {
+        if let Ok(base) = std::fs::canonicalize(&cursor) {
+            let mut resolved = base;
+            for name in tail.iter().rev() {
+                resolved.push(name);
+            }
+            return resolved;
+        }
+        let Some(name) = cursor.file_name() else {
+            return path;
+        };
+        tail.push(name.to_os_string());
+        if !cursor.pop() {
+            return path;
+        }
+    }
+}
+
+/// Apply `.` and `..` textually. The caller re-canonicalizes wherever the
+/// result exists, so this only has to keep an unresolvable symlink target
+/// honest rather than be a full resolver.
+fn lexical_normalize(path: PathBuf) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(name) => out.push(name),
+        }
+    }
+    out
 }
 
 fn canon(p: PathBuf) -> PathBuf {

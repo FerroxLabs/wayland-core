@@ -1443,3 +1443,310 @@ fn no_prune_survives_the_922_backend_gate() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// FerroxLabs/wayland#1097 — a writable-but-unreadable path is refused at WRITE
+// time, with the reason named, instead of failing at read time.
+// ---------------------------------------------------------------------------
+
+/// The ordinary case the invariant exists to keep true: a target inside the
+/// workspace, in a directory that does not exist yet (which is what every
+/// first spill and every first artifact write looks like).
+#[test]
+fn a_write_target_inside_the_workspace_is_readable_back() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::contained(dir.path());
+    let target = dir
+        .path()
+        .join(".wayland-out")
+        .join("results")
+        .join("toolu_01.txt");
+    assert!(
+        !target.parent().unwrap().exists(),
+        "the point of this case is that the directories are NOT created yet"
+    );
+    policy
+        .ensure_write_target_readable(&target)
+        .expect("a path under the workspace root must be readable back");
+}
+
+/// The shipped defect, stated as a property: the host temp tree is granted to
+/// nothing, so a spill file written there is one the session can never open.
+#[test]
+fn a_write_target_in_the_host_temp_tree_is_refused_by_name() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::contained(dir.path());
+    let target = std::env::temp_dir()
+        .join("wayland-results")
+        .join("toolu_01.txt");
+    let refusal = policy
+        .ensure_write_target_readable(&target)
+        .expect_err("the host temp tree is outside every readable root");
+    assert_eq!(refusal.path, target);
+    let rendered = refusal.to_string();
+    assert!(
+        rendered.ends_with("is outside this session's readable roots"),
+        "the refusal has to name the reason, not just fail: {rendered}"
+    );
+    assert!(
+        rendered.contains("toolu_01.txt"),
+        "the refusal has to name the path: {rendered}"
+    );
+}
+
+/// The check resolves `..` and symlinks BEFORE the prefix match, so a target
+/// that merely starts with the workspace root textually does not pass.
+#[test]
+fn a_traversal_out_of_the_workspace_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let workspace = dir.path().join("ws");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let policy = WorkspacePolicy::contained(&workspace);
+
+    let traversal = workspace.join("..").join("outside").join("loot.txt");
+    policy
+        .ensure_write_target_readable(&traversal)
+        .expect_err("a `..` segment must be resolved before the prefix match");
+
+    let link = workspace.join("escape");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    #[cfg(windows)]
+    let _ = std::os::windows::fs::symlink_dir(&outside, &link);
+    if link.exists() {
+        policy
+            .ensure_write_target_readable(&link.join("loot.txt"))
+            .expect_err("a symlinked parent must be resolved before the prefix match");
+    }
+}
+
+/// A standing read grant is part of `readable_roots()`, so it moves this
+/// answer too — the grant and the write-time check must not disagree about
+/// what the session can read.
+#[test]
+fn a_granted_read_root_makes_a_write_target_acceptable() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let workspace = dir.path().join("ws");
+    let granted = dir.path().join("granted");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&granted).unwrap();
+    // A standing grant is only issuable to a local-operator session; the
+    // property under test is what the grant does to `readable_roots()`, so the
+    // principal is set directly rather than reconstructed through bootstrap.
+    let policy = WorkspacePolicy::contained(&workspace).with_local_operator_principal();
+
+    let target = granted.join("report.html");
+    policy
+        .ensure_write_target_readable(&target)
+        .expect_err("ungranted to start with");
+
+    policy
+        .grant_session_read_root(&granted, false)
+        .expect("grant");
+    policy
+        .ensure_write_target_readable(&target)
+        .expect("the grant is in readable_roots(), so the write target is covered now");
+}
+
+/// The escape the FIRST form of this check let through, kept as a standing
+/// case: a `..` that follows a component which does not exist yet.
+///
+/// This is not a hypothetical shape — a spill target's own directories
+/// (`<root>/.wayland-out/results/`) do not exist before the first spill, so
+/// "part of the path is missing" is the ordinary state, not the edge case.
+/// Resolving only the longest existing ancestor and appending the rest
+/// verbatim leaves the `..` in the string: the result still `starts_with` the
+/// workspace root while the real target is outside it.
+#[test]
+fn a_traversal_through_a_directory_that_does_not_exist_yet_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let workspace = dir.path().join("ws");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let policy = WorkspacePolicy::contained(&workspace);
+
+    let missing = workspace.join("nope");
+    assert!(
+        !missing.exists(),
+        "the point of this case is that this component is absent"
+    );
+
+    let traversal = missing
+        .join("..")
+        .join("..")
+        .join("outside")
+        .join("loot.txt");
+    policy
+        .ensure_write_target_readable(&traversal)
+        .expect_err("a `..` after a missing component must still be applied");
+
+    // Known-positive control: the identical shape that lands back INSIDE the
+    // workspace is still accepted, so the case is not passing merely because
+    // anything containing a `..` is refused.
+    let inside = missing.join("..").join(".wayland-out").join("results.txt");
+    policy
+        .ensure_write_target_readable(&inside)
+        .expect("a `..` that lands back inside the workspace is fine");
+}
+
+/// The same missing-component path, but the escape is a SYMLINK reached only
+/// after the `..`. It has to be resolved before the prefix compare, which is
+/// only true if resolution re-runs as the path is walked down.
+#[test]
+fn a_symlink_reached_after_a_missing_component_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let workspace = dir.path().join("ws");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let policy = WorkspacePolicy::contained(&workspace);
+
+    let link = workspace.join("escape");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    #[cfg(windows)]
+    let _ = std::os::windows::fs::symlink_dir(&outside, &link);
+    if !link.exists() {
+        return;
+    }
+
+    let traversal = workspace
+        .join("nope")
+        .join("..")
+        .join("escape")
+        .join("loot.txt");
+    policy
+        .ensure_write_target_readable(&traversal)
+        .expect_err("a symlink reached after a missing component must be resolved");
+}
+
+/// The escape the shipped check let through, MEASURED before this test existed:
+/// a symlink whose target does not exist yet.
+///
+/// `std::fs::canonicalize` fails on a DANGLING link, so the component stayed in
+/// the comparison verbatim, the prefix compare judged where the LINK sits
+/// rather than where the write lands, and `std::fs::write` followed it out of
+/// the workspace. Observed with its controls in the same run:
+///
+/// ```text
+///   CONTROL plain-outside    : Err(WriteTargetNotReadable)
+///   CONTROL plain-inside     : Ok(())
+///   CONTROL live-symlink-out : Err(WriteTargetNotReadable)   <-- target EXISTS
+///   PROBE   dangling-symlink : Ok(())                        <-- accepted
+///   ESCAPE: outside target exists = true, content = "escaped"
+/// ```
+///
+/// The two writers this check is the ONLY containment for — the tool-result
+/// spill and `text_to_speech` — both write with bare `std::fs::write`, so the
+/// gap was reachable by anything that could plant a link in the workspace.
+///
+/// The controls are carried IN this test so a change that refused everything
+/// (which would also make the probe pass) fails here instead of looking green.
+#[test]
+#[cfg(unix)]
+fn a_dangling_symlink_out_of_the_workspace_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let workspace = dir.path().join("ws");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let policy = WorkspacePolicy::contained(&workspace);
+
+    // CONTROL: an ordinary in-workspace target is still accepted, so a check
+    // that refused everything cannot pass this test.
+    policy
+        .ensure_write_target_readable(&workspace.join("fine.txt"))
+        .expect("an ordinary in-workspace target must still be accepted");
+
+    // CONTROL: the same link shape with an EXISTING target was already refused
+    // before this fix, so a green here has to come from the dangling case.
+    let live_target = outside.join("live.txt");
+    std::fs::write(&live_target, b"x").unwrap();
+    let live_link = workspace.join("live_link.txt");
+    std::os::unix::fs::symlink(&live_target, &live_link).unwrap();
+    policy
+        .ensure_write_target_readable(&live_link)
+        .expect_err("CONTROL: a symlink with an existing target outside must be refused");
+
+    // THE DEFECT: the target does not exist yet.
+    let dangling_target = outside.join("loot.txt");
+    let dangling = workspace.join("out.txt");
+    std::os::unix::fs::symlink(&dangling_target, &dangling).unwrap();
+    policy
+        .ensure_write_target_readable(&dangling)
+        .expect_err("a DANGLING symlink pointing out of the workspace must be refused");
+
+    // CONTROL: a dangling link that stays INSIDE the workspace is a legitimate
+    // write target and must still be accepted — the fix resolves the link, it
+    // does not blanket-refuse unresolvable ones.
+    let inside_link = workspace.join("inside_link.txt");
+    std::os::unix::fs::symlink(workspace.join("not_yet.txt"), &inside_link).unwrap();
+    policy
+        .ensure_write_target_readable(&inside_link)
+        .expect("CONTROL: a dangling link landing back inside the workspace stays writable");
+
+    // A symlink CYCLE must terminate rather than spin.
+    let a = workspace.join("cycle_a");
+    let b = workspace.join("cycle_b");
+    std::os::unix::fs::symlink(&b, &a).unwrap();
+    std::os::unix::fs::symlink(&a, &b).unwrap();
+    let _ = policy.ensure_write_target_readable(&a);
+}
+
+/// The same guard, with the workspace reached THROUGH a symlinked directory.
+///
+/// `ensure_write_target_readable` compares a resolved write target against a
+/// readable root that has been through `canonicalize`. When the target is a
+/// dangling symlink the resolver follows it by hand, and it used to return
+/// that target verbatim -- so if the workspace itself sat under a symlink, the
+/// two sides were spelled differently and a legitimate in-workspace write was
+/// REFUSED.
+///
+/// macOS hits this on every run without arranging anything, because `TMPDIR`
+/// is under `/var/folders` and `/var` is a symlink to `/private/var`; CI run
+/// 32700730900 failed exactly here. Nothing about the defect is macOS-specific
+/// though -- any workspace reached through a symlink has it -- so this builds
+/// the topology explicitly and grades it on every platform that has symlinks.
+#[cfg(unix)]
+#[test]
+fn a_workspace_reached_through_a_symlink_still_accepts_its_own_dangling_writes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(real.join("ws")).unwrap();
+    std::fs::create_dir_all(real.join("outside")).unwrap();
+
+    // The workspace is addressed through `link`, never through `real`.
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let workspace = link.join("ws");
+    let outside = link.join("outside");
+
+    let policy = WorkspacePolicy::contained(&workspace);
+
+    // CONTROL: an ordinary target under the symlinked workspace is accepted,
+    // so a green below cannot come from the whole policy being permissive.
+    policy
+        .ensure_write_target_readable(&workspace.join("plain.txt"))
+        .expect("CONTROL: an ordinary in-workspace target must be accepted");
+
+    // THE DEFECT: a dangling link landing back inside the workspace. Before the
+    // fix the resolver returned the raw `<tmp>/link/ws/not_yet.txt` while the
+    // readable root had canonicalized to `<tmp>/real/ws`, so `starts_with`
+    // failed and this was refused.
+    let inside_link = workspace.join("inside_link.txt");
+    std::os::unix::fs::symlink(workspace.join("not_yet.txt"), &inside_link).unwrap();
+    policy
+        .ensure_write_target_readable(&inside_link)
+        .expect("a dangling link landing back inside the workspace stays writable");
+
+    // CONTROL, and the one that must never regress: the containment itself
+    // still holds through the symlinked spelling.
+    let escaping = workspace.join("escape.txt");
+    std::os::unix::fs::symlink(outside.join("loot.txt"), &escaping).unwrap();
+    policy
+        .ensure_write_target_readable(&escaping)
+        .expect_err("CONTROL: a dangling link pointing OUT of the workspace is still refused");
+}

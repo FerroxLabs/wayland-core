@@ -148,6 +148,11 @@ async fn spawn_one_emits_spawned_first_message_and_completed() {
 /// Engine-level error -> Errored event instead of Completed.
 #[tokio::test]
 async fn spawn_one_emits_errored_on_provider_failure() {
+    // Budget PINNED, not inherited. This test drives a provider that fails
+    // every attempt; the shipped default is 10 retries on the shared backoff
+    // curve (127.5 s of scheduled sleep), and what is under test here is the
+    // failure OUTCOME, not the size of the budget.
+    let _retry_budget = wcore_agent::test_utils::PinnedRetryBudget::pin(2);
     let bus = Arc::new(AgentBus::new(64));
     let mut rx = bus.subscribe();
 

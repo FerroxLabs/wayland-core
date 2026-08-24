@@ -402,34 +402,36 @@ jobs:
         with:
           tool: nextest
 
-      # Dependency-only cache, macOS ONLY and deliberately so.
+      # NO dependency cache on this leg. A `Swatinem/rust-cache@v2` step lived
+      # here from v0.13.4 (#312) and was removed in v0.13.6 on its own measured
+      # acceptance test. Recorded so it is not re-added from the same reasoning:
       #
-      # WHY macOS: workflow wall time is max(all jobs), and this job and
-      # `CI (linux-containerized)` are CO-BOTTLENECKS that trade places
-      # (measured: 67.1/61.7 on one run, 50.0/54.4 on the next). Speeding up
-      # either one alone moves the wall clock by ~0-5 minutes, because the
-      # other becomes the critical path. macOS is the leg with no cache at all.
+      # IT WORKED, AND THAT WAS NOT ENOUGH. Warm run 32613130982 (addb4f48):
+      # restore 29s, macOS compile steps 26.4m -> 14.4m, job total 61.2m ->
+      # 47.4m. The cache did its job.
       #
-      # WHY NOT the self-hosted Windows runner: it already keeps `target/` warm
-      # between runs (see the matrix comment above), so a cache layer there
-      # would upload and re-download artifacts the box already has on disk.
+      # WHY IT WAS REMOVED ANYWAY: workflow wall time is max(all jobs), and this
+      # job is not the max. Measured over the eight `main` CI runs to
+      # 2026-08-23, `CI (linux-containerized)` is the longest job in 5 of 8, and
+      # in the 3 where `CI (macos-latest)` led it led by 0.4, 1.0 and 3.9
+      # minutes. So even a ZERO-SECOND macOS leg moves workflow wall clock by a
+      # median of 0.0 min and a mean of 0.66 min. That is an upper bound
+      # computed from measured job durations, not an estimate, and it is far
+      # under the >=10 min median the step's own PR set as its revert
+      # condition. No amount of cache tuning can reach it.
       #
-      # WHY dependency-only: `rust-cache` excludes workspace crates by default
-      # and prunes stale artifacts, so what it stores is third-party deps —
-      # single-digit GB — NOT this workspace's full `target/`, which measures
-      # 69-190 GB and would blow past the cache allowance, thrash on eviction,
-      # and cost more in transfer than it saves in compile.
+      # AND IT WAS NOT FREE: the entry measured 1.576 GB, the second-largest in
+      # the repository, against GitHub's 10 GB per-repo Actions cache cap that
+      # was already exceeded at 10.53 GB / 24 entries -- so it bought its 0.0
+      # median minutes by evicting co-tenants, among them the seven
+      # `v0-rust-release-*` caches that feed the shipped-binary build.
       #
-      # `save-if` restricts writes to the default branch: PR runs restore but
-      # never populate, so an untrusted PR cannot poison the cache other jobs
-      # read. That is a security property, not a tuning knob.
-      - name: Cache Rust dependencies (macOS)
-        if: runner.os == 'macOS'
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-macos
-          cache-on-failure: 'true'
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # IF YOU WANT THE WALL CLOCK: the lever is `CI (linux-containerized)`,
+      # which is the actual critical path. Adding a cache step there changes no
+      # job name and so costs no required-status-context churn -- but that job
+      # is the one with documented disk pressure (see its own comments), so
+      # restoring gigabytes into it must be MEASURED before it is trusted, not
+      # copied across from here.
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2
@@ -1997,6 +1999,13 @@ jobs:
 
   # ── Annotate PR / commit with test results ────────────────────────────
   report:
+    # EXPLICIT, because `report` is a required status context on main and a job
+    # id doubles as the check name only until someone renames the job. e2e.yml
+    # used to define a second job with id `report` and no `name:`, so two
+    # workflows emitted the same check name and the required context did not
+    # identify what had passed (wayland#1115). That one is now `E2E report`;
+    # this is the sole producer of `report` and says so.
+    name: report
     needs: ci
     if: always()
     runs-on: ubuntu-latest
@@ -2059,20 +2068,27 @@ jobs:
       # rather than quieter. It is skipped only on a CANCELLED `ci` — a run the
       # user or the concurrency gate stopped was never going to produce evidence
       # and should not be re-reported as a defect.
+      #
+      # The body now lives in .github/scripts/assert-test-evidence.sh and is
+      # shared with e2e.yml's report job. It was inline here and simply ABSENT
+      # there, which is how e2e.yml's identically named `report` check went
+      # green on a suite that never ran (wayland#1115). One implementation, two
+      # callers, no room to diverge again. EXPECTED_MIN stays at 1 — the same
+      # "zero reports is a failure" rule this step has always enforced; the ci
+      # matrix legs are conditioned per platform, so a per-leg count would be a
+      # different (and riskier) gate than the one being preserved here.
       - name: Assert test evidence exists (a skipped test step is not a pass)
         if: ${{ needs.ci.result != 'cancelled' && needs.ci.result != 'skipped' }}
-        run: |
-          set -euo pipefail
-          mkdir -p junit-reports
-          FOUND=$(find junit-reports -type f -name '*.xml' | sort)
-          COUNT=$(printf '%s' "$FOUND" | grep -c . || true)
-          echo "ci job result      : ${{ needs.ci.result }}"
-          echo "junit report count : $COUNT"
-          printf '%s\n' "$FOUND"
-          if [ "$COUNT" -eq 0 ]; then
-            echo "::error title=NO TEST SIGNAL::The ci matrix produced zero nextest JUnit reports, so no test ran on any leg. The ci job result was '${{ needs.ci.result }}'. A leg that dies before its test step (for example at the Clippy step) leaves no artifact, and without this check the report job would have gone GREEN on zero tests. See .planning/lanes/fix-clippy-gate/NOTES.md."
-            exit 1
-          fi
+        env:
+          EVIDENCE_DIR: junit-reports
+          EXPECTED_MIN: 1
+          LABEL: ci matrix (unit + integration)
+          UPSTREAM_RESULT: ${{ needs.ci.result }}
+          HINT: >-
+            A leg that dies before its test step (for example at the Clippy
+            step) leaves no artifact. See
+            .planning/lanes/fix-clippy-gate/NOTES.md.
+        run: bash .github/scripts/assert-test-evidence.sh
 
       - name: Publish test report
         uses: dorny/test-reporter@v3

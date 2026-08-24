@@ -1123,6 +1123,7 @@ impl TurnEngine for EngineTurnEngine {
                 approved: decision.approved,
                 modifications: egress_scope
                     .map(|scope| serde_json::json!({ "egress_scope": scope })),
+                cancellation: None,
             };
             if session.approval_bridge.resolve(token, outcome).await {
                 return Ok(());

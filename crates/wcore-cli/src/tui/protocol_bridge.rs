@@ -137,6 +137,12 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         // ── Streaming lifecycle ──────────────────────────────────────
         ProtocolEvent::StreamStart { .. } => {
             app.session.streaming_active = true;
+            // #1109: the RUN is live from here until a `StreamEnd`. Distinct
+            // from `streaming_active`, which a non-terminal `Error` advisory
+            // clears to stop the spinner. See `SessionView::run_live`.
+            app.session.run_live = true;
+            app.session.run_showed_answer = false;
+            app.session.run_reported_error = false;
             app.session.streaming.clear();
             app.session.thinking.clear();
             // D037: mark how many files the session had already touched when
@@ -187,13 +193,29 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             // (`abort()` is asynchronous — AUDIT-D D7); appending it here
             // would leave a stale fragment in `streaming` that no
             // `StreamEnd` flushes. Dropping it keeps the cancel clean.
-            if app.session.streaming_active {
+            // #1109: gated on `run_live`, NOT `streaming_active`. Both are
+            // false after a real `StreamEnd`, so the AUDIT-D D7 case this
+            // guard exists for — a cancelled turn's task emitting one last
+            // delta after the synthetic `StreamEnd` — still drops. What no
+            // longer drops is the rest of a LIVE run after a non-terminal
+            // engine advisory (`emit_error(..., false)`) cleared the spinner
+            // flag: that used to discard every remaining delta and render the
+            // whole answer as nothing.
+            if app.session.run_live {
                 // Route the delta through the per-session reasoning
                 // filter so `<think>`/`<reasoning>`/`<thinking>` blocks
                 // emitted by raw open-weights models (DeepSeek-R1, etc.)
                 // never reach the visible streaming buffer. The filter
                 // handles tags that split across token-chunk boundaries.
                 let filtered = app.session.reasoning_filter.process(&text);
+                // #1109: only VISIBLE text counts as "the user got an answer".
+                // A delta the reasoning filter swallows whole is a `<think>`
+                // block, which is exactly the reasoning-only turn the notice
+                // below exists to name — crediting it here would make the
+                // notice vacuous for the case it was written for.
+                if !filtered.is_empty() {
+                    app.session.run_showed_answer = true;
+                }
                 app.session.streaming.push_str(&filtered);
                 // W3 D3: any visible delta transitions the phase to
                 // Drafting (resets WrappingUp if a stalled stream resumed)
@@ -207,8 +229,9 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             }
         }
         ProtocolEvent::Thinking { text, .. } => {
-            // Same late-event guard as `TextDelta` (AUDIT-D D7).
-            if app.session.streaming_active {
+            // Same late-event guard as `TextDelta` (AUDIT-D D7), and #1109
+            // moves it to the same flag for the same reason.
+            if app.session.run_live {
                 app.session.thinking.push_str(&text);
                 // W3 D3: only re-enter Thinking from Idle — a stray Thinking
                 // event mid-drafting should not flip the label back.
@@ -322,6 +345,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 let body = std::mem::take(&mut app.session.streaming);
                 let urls = collect_turn_urls(&body, &app.session.tool_cards);
                 if !body.is_empty() {
+                    app.session.run_showed_answer = true;
                     app.session.turns[idx]
                         .elements
                         .push(TurnElement::Markdown(body));
@@ -407,11 +431,40 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             // Pushed after the assistant turn so it reads as that turn's
             // footer, and through the same `push_system` surface the engine
             // `Error` arm uses, so the two can never disagree in style.
+            let ended_abnormally = abnormal_finish.is_some();
             if let Some(notice) = abnormal_finish {
                 push_system(app, notice);
             }
+            // #1109: THE reported symptom, closed at the surface that owns it.
+            // A run can end having put nothing readable in front of the user
+            // and having reported no failure — the transcript then shows the
+            // prompt, maybe some advisories, and then simply stops, with the
+            // idle keybar back and no way to tell whether anything ran. That
+            // is indistinguishable from a hang and is what #1109 reports.
+            //
+            // Whatever upstream cause produced it (a provider stream that
+            // yielded nothing, a delta dropped between the engine and here, a
+            // finish the mapper could not classify), the user-visible defect is
+            // the same and is fixed here: a run that showed nothing SAYS it
+            // showed nothing. Gated on `run_reported_error` so a failure
+            // already named never gets a second banner, and on `abnormal_finish`
+            // for the same reason.
+            if !app.session.run_showed_answer
+                && !app.session.run_reported_error
+                && !ended_abnormally
+            {
+                push_system(
+                    app,
+                    "This turn ended without producing any answer — no text, and \
+                     nothing further to run. Nothing was lost on your side; the \
+                     model returned an empty response for it. Ask again, or check \
+                     the provider/model in /config if it repeats."
+                        .to_string(),
+                );
+            }
             app.session.thinking.clear();
             app.session.streaming_active = false;
+            app.session.run_live = false;
             // W3 D3: terminal phase → Idle (the widget reads Idle as "do
             // not render the working line at all").
             app.session.phase = StreamingPhase::Idle;
@@ -976,6 +1029,12 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             }
             app.session.thinking.clear();
             app.session.streaming_active = false;
+            // #1109: the user HAS been told something went wrong, so the
+            // end-of-run "nothing happened" notice must not fire a second
+            // banner for it. `run_live` is deliberately NOT cleared here: an
+            // engine `Error` is not always terminal, and clearing it is what
+            // used to swallow the rest of the run.
+            app.session.run_reported_error = true;
             // W3 D3: error is terminal — return to Idle so the working
             // line disappears together with the cleared streaming flag.
             app.session.phase = StreamingPhase::Idle;
@@ -2663,6 +2722,192 @@ mod tests {
         assert!(turns.is_empty() && cards.is_empty());
     }
 
+    // ── FerroxLabs/wayland#1109 — a run must never render as nothing ────────
+
+    /// The whole transcript as one string, system notices included. #1109 is
+    /// about what the USER can read, so the assertions read the same surface.
+    fn transcript(app: &App) -> String {
+        app.session
+            .turns
+            .iter()
+            .map(TurnView::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn stream_start(app: &mut App) {
+        apply_event(
+            app,
+            ProtocolEvent::StreamStart {
+                msg_id: "m1".into(),
+            },
+        );
+    }
+
+    fn stream_end(app: &mut App, finish_reason: wcore_protocol::events::FinishReason) {
+        apply_event(
+            app,
+            ProtocolEvent::StreamEnd {
+                msg_id: "m1".into(),
+                finish_reason,
+                usage: None,
+                usage_delta: None,
+                agent_run_id: None,
+            },
+        );
+    }
+
+    fn advisory_error(app: &mut App, message: &str) {
+        apply_event(
+            app,
+            ProtocolEvent::Error {
+                msg_id: None,
+                error: wcore_protocol::events::ErrorInfo {
+                    code: "engine_error".into(),
+                    message: message.into(),
+                    retryable: false,
+                },
+            },
+        );
+    }
+
+    fn text_delta(app: &mut App, text: &str) {
+        apply_event(
+            app,
+            ProtocolEvent::TextDelta {
+                text: text.into(),
+                msg_id: "m1".into(),
+            },
+        );
+    }
+
+    /// THE defect. The engine emits `ProtocolEvent::Error` for advisories the
+    /// run CONTINUES past (`emit_error(..., false)` — "Failed to persist first
+    /// message", the fallback-admission notices, and others). The `Error` arm
+    /// clears `streaming_active` so the spinner cannot stick; `TextDelta` was
+    /// gated on that same flag, so from the advisory onward every delta for the
+    /// rest of the run was discarded and the answer rendered as NOTHING.
+    ///
+    /// On the unfixed tree this fails with the transcript holding only the
+    /// advisory (measured: `rendered = "Error: advisory: the run continues"`).
+    #[test]
+    fn a_midrun_advisory_error_does_not_swallow_the_answer() {
+        let mut app = App::new();
+        stream_start(&mut app);
+        advisory_error(&mut app, "advisory: the run continues");
+        text_delta(&mut app, "THE ANSWER");
+        stream_end(&mut app, wcore_protocol::events::FinishReason::Stop);
+
+        let rendered = transcript(&app);
+        assert!(
+            rendered.contains("THE ANSWER"),
+            "an advisory must not discard the rest of the run; transcript was:\n{rendered}"
+        );
+    }
+
+    /// The same shape one layer up: the advisory lands BETWEEN two turns of a
+    /// multi-turn run (tool round, advisory, closing answer). `StreamStart` is
+    /// emitted once per RUN, not per turn, so nothing re-arms the flag in
+    /// between — this is the path a real tool-using session takes.
+    #[test]
+    fn an_advisory_between_turns_does_not_swallow_the_closing_answer() {
+        let mut app = App::new();
+        stream_start(&mut app);
+        text_delta(&mut app, "let me look");
+        advisory_error(&mut app, "advisory: something the run recovered from");
+        text_delta(&mut app, "CLOSING ANSWER");
+        stream_end(&mut app, wcore_protocol::events::FinishReason::Stop);
+
+        let rendered = transcript(&app);
+        assert!(
+            rendered.contains("CLOSING ANSWER"),
+            "the closing answer must survive a mid-run advisory; transcript was:\n{rendered}"
+        );
+    }
+
+    /// AUDIT-D D7 must still hold: a delta that arrives AFTER the run's
+    /// terminal `StreamEnd` (the shape a cancel produces — `abort()` is
+    /// asynchronous, so the turn task can emit one last delta after the
+    /// synthetic end) is still dropped. Without this the fix above would
+    /// resurrect the stale-fragment bug the old gate existed to prevent.
+    #[test]
+    fn a_delta_after_the_terminal_stream_end_is_still_dropped() {
+        let mut app = App::new();
+        stream_start(&mut app);
+        text_delta(&mut app, "first");
+        stream_end(&mut app, wcore_protocol::events::FinishReason::Stop);
+        text_delta(&mut app, "LATE FRAGMENT");
+
+        assert!(
+            app.session.streaming.is_empty(),
+            "a post-StreamEnd delta must not reopen the streaming buffer"
+        );
+        assert!(
+            !transcript(&app).contains("LATE FRAGMENT"),
+            "a post-StreamEnd delta must not reach the transcript"
+        );
+    }
+
+    /// THE FILED SYMPTOM, at the surface that owns it. A run that ends having
+    /// put NO answer and NO failure in front of the user is the silent no-op
+    /// #1109 reports: the transcript stops, the idle keybar comes back, and
+    /// nothing says whether anything ran. Say so instead.
+    #[test]
+    fn a_run_that_produced_nothing_says_so_instead_of_ending_silently() {
+        let mut app = App::new();
+        stream_start(&mut app);
+        stream_end(&mut app, wcore_protocol::events::FinishReason::Stop);
+
+        let rendered = transcript(&app);
+        assert!(
+            rendered.contains("ended without producing any answer"),
+            "an empty run must be named, not silent; transcript was:\n{rendered}"
+        );
+    }
+
+    /// CONTROL for the notice: a normal answered turn must NOT be told it
+    /// produced nothing. Without this the test above would pass on a build
+    /// that printed the notice unconditionally.
+    #[test]
+    fn a_normal_answered_turn_gets_no_empty_run_notice() {
+        let mut app = App::new();
+        stream_start(&mut app);
+        text_delta(&mut app, "here is the answer");
+        stream_end(&mut app, wcore_protocol::events::FinishReason::Stop);
+
+        let rendered = transcript(&app);
+        assert!(
+            rendered.contains("here is the answer"),
+            "transcript was:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("ended without producing any answer"),
+            "an answered turn must not be called empty; transcript was:\n{rendered}"
+        );
+    }
+
+    /// CONTROL for the de-duplication: a run whose failure was already
+    /// reported gets ONE banner, not two. This is what keeps the notice from
+    /// becoming noise on every cancelled or failed turn (cancel routes through
+    /// `Error` + `StreamEnd`).
+    #[test]
+    fn a_run_whose_failure_was_reported_gets_no_second_banner() {
+        let mut app = App::new();
+        stream_start(&mut app);
+        advisory_error(&mut app, "the provider refused this request");
+        stream_end(&mut app, wcore_protocol::events::FinishReason::Error);
+
+        let rendered = transcript(&app);
+        assert!(
+            rendered.contains("the provider refused this request"),
+            "transcript was:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("ended without producing any answer"),
+            "a reported failure must not get a second banner; transcript was:\n{rendered}"
+        );
+    }
+
     #[test]
     fn streaming_lifecycle_flushes_into_an_assistant_turn() {
         let mut app = App::new();
@@ -2840,9 +3085,28 @@ mod tests {
         // Per the above: the `Thinking` event path is independent of the
         // capture buffer; with no `TextDelta` containing `<think>` tags,
         // the buffer is empty and no turn is pushed.
+        //
+        // #1109 narrowed this from "no turn at all" to "no ASSISTANT turn".
+        // A run that ends having shown the user no answer now says so, and
+        // that notice is a SYSTEM turn -- which is the point: a turn whose
+        // only product was ephemeral live-state thinking left the user with
+        // literally nothing on screen, and that is the reported symptom. In
+        // production the engine reports the reasoning-only case itself and the
+        // notice de-duplicates against it; this fixture sends no such error,
+        // so the notice is the only report and must be present.
         assert!(
-            app.session.turns.is_empty(),
-            "ProtocolEvent::Thinking alone must not flush a turn"
+            !app.session
+                .turns
+                .iter()
+                .any(|turn| turn.role == TurnRole::Assistant),
+            "ProtocolEvent::Thinking alone must not flush an assistant turn"
+        );
+        assert!(
+            app.session
+                .turns
+                .iter()
+                .any(|turn| turn.text().contains("ended without producing any answer")),
+            "a run that showed the user nothing must say so"
         );
     }
 

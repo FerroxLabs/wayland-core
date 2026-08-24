@@ -92,6 +92,51 @@ fn tool_result_text(bodies: &[Value]) -> String {
     out
 }
 
+/// What the mock provider has actually been sent, in one line, for the moment
+/// a `wait_for` gives up.
+///
+/// FerroxLabs/wayland#1109: the harness can see the terminal and nothing else,
+/// so a timeout could not distinguish "the engine never dispatched the
+/// follow-up turn" from "the provider answered and the answer never reached
+/// the screen". Those are different components. This is the fact that
+/// separates them, and it is read out of the mock server itself rather than
+/// off a log line.
+fn provider_traffic(rt: &tokio::runtime::Runtime, server: &wiremock::MockServer) -> String {
+    let bodies: Vec<Value> = rt
+        .block_on(support::mock_llm::received_requests(server))
+        .into_iter()
+        .map(|r| r.body)
+        .collect();
+    let with_tool_result = bodies
+        .iter()
+        .filter(|b| {
+            b.get("messages")
+                .and_then(Value::as_array)
+                .is_some_and(|messages| {
+                    messages.iter().any(|m| {
+                        m.get("content")
+                            .and_then(Value::as_array)
+                            .is_some_and(|blocks| {
+                                blocks.iter().any(|blk| {
+                                    blk.get("type").and_then(Value::as_str) == Some("tool_result")
+                                })
+                            })
+                    })
+                })
+        })
+        .count();
+    format!(
+        "mock provider received {} request(s); {} of them carried a tool_result.\n\
+         0 requests = the engine never dispatched a turn at all.\n\
+         1 request with no tool_result = the first turn was dispatched and the tool has not \
+         been answered yet.\n\
+         A request carrying a tool_result = the engine posted the follow-up turn, so the \
+         provider answered and the answer is what failed to reach the screen.",
+        bodies.len(),
+        with_tool_result
+    )
+}
+
 /// THE proof. A model asks to read a file outside the workspace; the card
 /// offers the containing folder by name; `a` grants it; the read succeeds.
 ///
@@ -134,10 +179,11 @@ fn a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds() {
 
     // 1. The gate is FORCED even though `Read` is on the default auto-approve
     //    allow-list — that allow-list grants the tool, not the path.
-    pty.wait_for(
+    pty.wait_for_ctx(
         |s| s.contains("approve") && s.contains("deny"),
         Duration::from_secs(30),
         "the approval card to render for the out-of-workspace Read",
+        || provider_traffic(&rt, &server),
     );
 
     // 2. The affordance under test: the card must name the folder `a` grants.
@@ -155,10 +201,11 @@ fn a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds() {
     pty.send(b"a");
 
     // 4. The turn continues — which only happens once a tool_result is POSTed.
-    pty.wait_for(
+    pty.wait_for_ctx(
         |s| s.contains(DONE_TOKEN),
         Duration::from_secs(30),
         "the turn to continue after the granted read",
+        || provider_traffic(&rt, &server),
     );
     let after = pty.screen_text();
     println!("--- after the grant ---\n{after}\n--- end ---");
@@ -190,6 +237,22 @@ fn a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds() {
 /// approval, not that it works *because of the folder grant*. It also pins the
 /// honesty of the docs: `once` does NOT run the call, and the protocol spec
 /// must not promise that it does.
+/// macOS-only quarantine, FerroxLabs/wayland#1109. This test times out at 30 s
+/// on the macOS leg and passes in ~0.9 s on Linux at the same commit, so the
+/// failure is platform-specific and not a property of what it asserts.
+/// Measured per-attempt failure rate on macOS: 5 of 6. Run 32613130982 job
+/// 97129254675 went TRY 1 FAIL 30.996s / TRY 2 FAIL 30.956s / TRY 3 PASS and
+/// the run reported SUCCESS; run 32442806629 failed all three attempts.
+///
+/// `retries = 0` on the pty/tui binaries deliberately removed the mask that was
+/// laundering that into a green, so this is quarantined WHERE it is broken and
+/// left running everywhere else — do not widen it to a bare `#[ignore]`, and do
+/// not restore the retries. Delete this attribute only with a macOS run that
+/// shows it passing.
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "FerroxLabs/wayland#1109: 30s timeout on the macOS leg only"
+)]
 #[test]
 fn approving_once_leaves_the_read_refused_by_the_sandbox() {
     let home = TempDir::new().expect("tempdir");
@@ -217,16 +280,18 @@ fn approving_once_leaves_the_read_refused_by_the_sandbox() {
         "TUI to render the chrome wordmark and Workspace tab",
     );
     pty.send(b"read the quarterly report\r");
-    pty.wait_for(
+    pty.wait_for_ctx(
         |s| s.contains("approve") && s.contains("deny"),
         Duration::from_secs(30),
         "the approval card to render for the out-of-workspace Read",
+        || provider_traffic(&rt, &server),
     );
     pty.send(b"y");
-    pty.wait_for(
+    pty.wait_for_ctx(
         |s| s.contains(DONE_TOKEN),
         Duration::from_secs(30),
         "the turn to continue after the once-approved read",
+        || provider_traffic(&rt, &server),
     );
     println!(
         "--- after approve-once ---\n{}\n--- end ---",

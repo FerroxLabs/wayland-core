@@ -71,6 +71,20 @@ pub enum VfsError {
          Use the Bash tool and a git command if this write is genuinely intended."
     )]
     RepoControlDenied { path: PathBuf },
+    /// FerroxLabs/wayland#1096 direction 2 — a write aimed at a place skills
+    /// are LOADED from. Distinct from [`Self::RepoControlDenied`] because the
+    /// generic repo-control refusal names no destination, and the destination
+    /// is the entire point: the model has produced a file and needs to be told
+    /// where it belongs, not merely that this is not it.
+    #[error(
+        "refused: {path:?} is inside a skill SOURCE directory. Skills are \
+         LOADED from there and never written to: a file left there sits outside \
+         the session workspace, so the session that produced it cannot read it \
+         back, and a SKILL.md left there is instruction injection into the next \
+         session. Write files a skill produces to ${{WCORE_SKILL_OUTPUT_DIR}} \
+         instead (<cwd>/.wayland-out/skills/<session_id>/)."
+    )]
+    SkillSourceDenied { path: PathBuf },
 }
 
 /// Strong content identity used by conditional filesystem mutations.
@@ -1848,6 +1862,16 @@ impl<F: VirtualFs> RepoControlDenyFs<F> {
         Self { inner, policy }
     }
     fn guard(&self, path: &Path) -> Result<(), VfsError> {
+        // Skill-source FIRST: `<root>/.wayland-core/skills` satisfies both
+        // predicates, and of the two refusals only this one tells the author
+        // where the file should have gone (#1096 direction 2). Checking
+        // repo-control first would leave the project-level load path with a
+        // message that names no destination.
+        if self.policy.is_skill_source_path(path) {
+            return Err(VfsError::SkillSourceDenied {
+                path: path.to_path_buf(),
+            });
+        }
         if self.policy.is_repo_control_path(path) {
             return Err(VfsError::RepoControlDenied {
                 path: path.to_path_buf(),

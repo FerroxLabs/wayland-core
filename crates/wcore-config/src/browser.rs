@@ -150,11 +150,44 @@ pub struct BrowserConfig {
     /// Opt-in auto-download of the Camoufox sidecar binary
     /// (`[browser.camoufox_download]`). Disabled by default.
     pub camoufox_download: CamoufoxDownloadConfig,
+    /// gh#1117 opt-out: use a Camoufox sidecar that is NOT behind Core's
+    /// egress proxy.
+    ///
+    /// **Default `false`, which REFUSES such a sidecar.** An unproxied
+    /// sidecar resolves its own DNS, so Core cannot screen the addresses the
+    /// browser actually dials and the browser policy applies to the name
+    /// rather than to the destination. Turning this on gives up the DNS
+    /// resolution gate, TTL=0 intra-navigation rebinding protection, and any
+    /// screening of sub-resource loads; the navigation URL string checks
+    /// still apply. `WAYLAND_BROWSER_ALLOW_UNPROXIED_SIDECAR=1` overrides
+    /// this at runtime.
+    ///
+    /// It covers the LOOPBACK half of the same guarantee too. Firefox dials
+    /// `127.0.0.1` and `localhost` around a configured proxy unless Core can
+    /// write `network.proxy.allow_hijacking_localhost` into the Camoufox
+    /// install; when it cannot, this switch is the difference between
+    /// refusing to start the browser and starting one whose pages can reach
+    /// any service on this machine unscreened.
+    pub allow_unproxied_sidecar: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gh#1117 — the opt-out must default OFF. A `true` default would mean
+    /// every operator silently runs with the sidecar's egress unscreened,
+    /// which is the state this whole change exists to end.
+    #[test]
+    fn the_unproxied_sidecar_opt_out_defaults_off_and_round_trips() {
+        let cfg: BrowserConfig = toml::from_str("").unwrap();
+        assert!(!cfg.allow_unproxied_sidecar);
+
+        let cfg: BrowserConfig = toml::from_str("allow_unproxied_sidecar = true").unwrap();
+        assert!(cfg.allow_unproxied_sidecar);
+        let round_tripped: BrowserConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert!(round_tripped.allow_unproxied_sidecar);
+    }
 
     #[test]
     fn default_provider_is_auto() {
@@ -177,6 +210,7 @@ mod tests {
             download_dir: Some("/tmp/downloads".into()),
             persist_profile: false,
             camoufox_download: CamoufoxDownloadConfig::default(),
+            allow_unproxied_sidecar: false,
         };
         let s = toml::to_string(&cfg).unwrap();
         let parsed: BrowserConfig = toml::from_str(&s).unwrap();

@@ -187,10 +187,12 @@ impl AzureOpenAIProvider {
 
     /// Select the API key to authenticate the next request, when in API-key
     /// mode. Delegates to [`KeyPool::next_key`] (prefers the last-good key,
-    /// rotates round-robin on failure, skips keys in cooldown). Returns
-    /// `Ok(None)` for AAD bearer mode (no static key to rotate), and
-    /// [`ProviderError::MissingApiKey`] when API-key mode is configured but the
-    /// pool is empty or every key is cooling.
+    /// rotates round-robin on failure, deprioritises keys in cooldown).
+    /// Returns `Ok(None)` for AAD bearer mode (no static key to rotate), and
+    /// [`ProviderError::MissingApiKey`] when API-key mode is configured but no
+    /// key is CONFIGURED. A pool where every key is cooling still yields one,
+    /// so a 429 cannot read as a missing credential; see
+    /// [`crate::key_rotation::KeyPool::next_key`].
     fn select_key(&self) -> Result<Option<String>, ProviderError> {
         match &self.auth {
             AzureAuth::ApiKey(pool) => {

@@ -72,6 +72,7 @@ async fn bridge_resolve_only_succeeds_with_correct_correlation_id() {
             wcore_agent::approval::ApprovalOutcome {
                 approved: true,
                 modifications: None,
+                cancellation: None,
             },
         )
         .await;
@@ -83,6 +84,7 @@ async fn bridge_resolve_only_succeeds_with_correct_correlation_id() {
             wcore_agent::approval::ApprovalOutcome {
                 approved: true,
                 modifications: None,
+                cancellation: None,
             },
         )
         .await;
@@ -158,6 +160,7 @@ async fn redactor_releases_id_after_resolve() {
             wcore_agent::approval::ApprovalOutcome {
                 approved: true,
                 modifications: None,
+                cancellation: None,
             },
         )
         .await;

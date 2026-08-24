@@ -158,3 +158,330 @@ fn doctor_without_project_dir_does_not_report_the_project_scoped_server() {
          cannot attribute a pass to the flag. stdout:\n{stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1079's HEADLINE flag, and the three that share its mechanism.
+//
+// The threading fix above is graded by `--project-dir` alone. `--api-key`,
+// `--provider`, `--model` and `--base-url` reach `Config::resolve` through the
+// same `CliArgs` literal at `main.rs:1781`, but until the provider section
+// existed they changed nothing a test could read: doctor printed no provider
+// row at all. Measured on this tree before the section landed — with
+// `api_key: cli.api_key.clone()` mutated to `api_key: None`, which restores the
+// exact reported symptom, `cargo nextest -E 'binary(doctor_honours_cli_args) +
+// binary(doctor_smoke)'` reported 7 tests run, 7 passed. Each test below
+// reddens under the loss of its OWN field.
+// ---------------------------------------------------------------------------
+
+/// The built-in default provider is `anthropic` (`wcore-config` `config.rs`
+/// `default_provider`), so asking for `openai` is observable: if `--provider`
+/// is dropped the row falls back to `anthropic`.
+const FLAG_PROVIDER: &str = "openai";
+/// Strings no config on any host could produce, so their presence in doctor's
+/// output is attributable to these flags alone.
+const MODEL_MARKER: &str = "issue1079-model-marker";
+const BASE_URL_MARKER: &str = "https://issue1079-base-url.invalid/v1";
+/// Never a real credential — nothing is ever sent anywhere with it. Doctor
+/// makes no provider call; the value exists only so a key RESOLVES.
+const API_KEY_VALUE: &str = "sk-issue1079-not-a-real-key";
+
+/// Positive control for every assertion in this block, the same role
+/// [`MCP_SECTION_HEADER`] plays above.
+const PROVIDER_SECTION_HEADER: &str = "Provider (this invocation):";
+
+/// Every env var `resolve_api_key_from_env` consults for the two providers in
+/// play here, plus the provider-agnostic `API_KEY` — which is honoured as a
+/// credential for ANY provider, so a CI runner that sets it for an unrelated
+/// service would otherwise resolve a config in the no-flag control and make it
+/// vacuous.
+const CREDENTIAL_ENV: &[&str] = &["API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"];
+
+/// Like [`run`], but additionally strips every ambient credential so the only
+/// key in play is the one the flags carry.
+fn run_without_ambient_credentials(home: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new(bin());
+    cmd.args(args).env("WAYLAND_HOME", home).current_dir(cwd);
+    for var in CREDENTIAL_ENV {
+        cmd.env_remove(var);
+    }
+    cmd.output().expect("spawn wayland-core")
+}
+
+/// All four config-selecting flags at once, on an isolated home and a neutral
+/// CWD. One invocation serves every test below; each asserts on its own row.
+fn doctor_with_all_overrides() -> (String, String) {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let neutral = tempfile::tempdir().expect("neutral cwd tempdir");
+    let out = run_without_ambient_credentials(
+        home.path(),
+        neutral.path(),
+        &[
+            "--doctor",
+            "--provider",
+            FLAG_PROVIDER,
+            "--api-key",
+            API_KEY_VALUE,
+            "--model",
+            MODEL_MARKER,
+            "--base-url",
+            BASE_URL_MARKER,
+        ],
+    );
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// The row labelled `label` inside the provider section, or a panic naming what
+/// was actually printed. Asserting on the whole row rather than a bare
+/// `contains` keeps a value from matching somewhere else in doctor's output.
+///
+/// Panicking when the section header is missing is the POSITIVE CONTROL: a run
+/// that produced no provider section must fail loudly rather than report a
+/// missing value, which would be indistinguishable from a regression.
+fn provider_row(stdout: &str, label: &str) -> String {
+    let section = stdout
+        .split_once(PROVIDER_SECTION_HEADER)
+        .unwrap_or_else(|| {
+            panic!("no {PROVIDER_SECTION_HEADER:?} in doctor output — every assertion against it would be vacuous. stdout:\n{stdout}")
+        })
+        .1;
+    section
+        .lines()
+        // `split_once` leaves the remainder of the header LINE as the first
+        // element (empty); the rows start after it.
+        .skip(1)
+        .take_while(|l| !l.trim().is_empty())
+        .find(|l| l.trim_start().starts_with(label))
+        .unwrap_or_else(|| panic!("no {label:?} row in the provider section. section:\n{section}"))
+        .to_string()
+}
+
+/// RED ARM for `--provider`.
+#[test]
+fn doctor_reports_the_provider_the_invocation_selected() {
+    let (stdout, _) = doctor_with_all_overrides();
+    let row = provider_row(&stdout, "provider");
+    assert!(
+        row.contains(FLAG_PROVIDER) && row.contains("(from --provider)"),
+        "#1079: --doctor did not resolve against the invocation's --provider. \
+         row: {row:?}\nstdout:\n{stdout}"
+    );
+}
+
+/// RED ARM for `--model`.
+#[test]
+fn doctor_reports_the_model_the_invocation_selected() {
+    let (stdout, _) = doctor_with_all_overrides();
+    let row = provider_row(&stdout, "model");
+    assert!(
+        row.contains(MODEL_MARKER) && row.contains("(from --model)"),
+        "#1079: --doctor did not resolve against the invocation's --model. \
+         row: {row:?}\nstdout:\n{stdout}"
+    );
+}
+
+/// RED ARM for `--base-url`.
+#[test]
+fn doctor_reports_the_base_url_the_invocation_selected() {
+    let (stdout, _) = doctor_with_all_overrides();
+    let row = provider_row(&stdout, "base url");
+    assert!(
+        row.contains(BASE_URL_MARKER) && row.contains("(from --base-url)"),
+        "#1079: --doctor did not resolve against the invocation's --base-url. \
+         row: {row:?}\nstdout:\n{stdout}"
+    );
+}
+
+/// RED ARM for `--api-key` — the flag in the ticket's title. Reddens under the
+/// one-word regression the fix cannot prevent by construction: changing
+/// `api_key: cli.api_key.clone()` to `api_key: None` in `main.rs` compiles.
+#[test]
+fn doctor_honours_the_api_key_the_invocation_supplied() {
+    let (stdout, _) = doctor_with_all_overrides();
+    let row = provider_row(&stdout, "api key");
+    assert!(
+        row.contains("present") && row.contains("(from --api-key)"),
+        "#1079: --doctor ignored --api-key; no credential from the command \
+         line reached Config::resolve. row: {row:?}\nstdout:\n{stdout}"
+    );
+}
+
+/// The section must report the credential's PRESENCE, never its value —
+/// doctor output is what users paste into bug reports.
+///
+/// The `present` assertion is the positive control: it proves a key really did
+/// resolve on this run, so the absence assertion is about redaction rather than
+/// about there being no key at all.
+#[test]
+fn doctor_never_prints_the_api_key_value() {
+    let (stdout, stderr) = doctor_with_all_overrides();
+    let row = provider_row(&stdout, "api key");
+    assert!(
+        row.contains("present"),
+        "no credential resolved, so this test cannot certify redaction. \
+         row: {row:?}\nstdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(API_KEY_VALUE) && !stderr.contains(API_KEY_VALUE),
+        "the doctor printed the API key itself.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+/// NEGATIVE CONTROL for all four tests above. With no override flags and no
+/// ambient credential, none of the flagged values may appear — otherwise a
+/// passing red arm could be explained by ambient config rather than by the
+/// flags being honoured.
+#[test]
+fn doctor_without_overrides_reports_none_of_the_flagged_values() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let neutral = tempfile::tempdir().expect("neutral cwd tempdir");
+    let out = run_without_ambient_credentials(home.path(), neutral.path(), &["--doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains(PROVIDER_SECTION_HEADER),
+        "no provider section at all — this control cannot certify anything. \
+         stdout:\n{stdout}"
+    );
+    for marker in [MODEL_MARKER, BASE_URL_MARKER, API_KEY_VALUE] {
+        assert!(
+            !stdout.contains(marker),
+            "{marker:?} appeared without the flag that carries it, so the red \
+             arms above cannot attribute a pass to their flags. stdout:\n{stdout}"
+        );
+    }
+    for attribution in [
+        "(from --provider)",
+        "(from --model)",
+        "(from --base-url)",
+        "(from --api-key)",
+    ] {
+        assert!(
+            !stdout.contains(attribution),
+            "{attribution:?} appeared with no flag passed. stdout:\n{stdout}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #1079, the consequence clause: "let me pass the key explicitly to rule it
+// out". These grade the `--probe-provider` wiring END TO END through the real
+// binary — that `cli.probe_provider` reaches `doctor::run` — which the unit
+// tests in `doctor/mod.rs` cannot see: they call `provider_section_lines`
+// directly, so hardcoding `false` at the `main.rs` call site would leave every
+// one of them green.
+//
+// Hermetic by construction. `bedrock` is a real provider that resolves a
+// config but has no entry in `provider_keys::Provider`, so the probe path is
+// taken and reports that it cannot check the key WITHOUT making any network
+// call. No live provider is contacted by any test in this file.
+// ---------------------------------------------------------------------------
+
+/// A provider that resolves a config but has no key-validation endpoint.
+const NO_ENDPOINT_PROVIDER: &str = "bedrock";
+
+/// Doctor's own wording for "I did not check this key". Shared by the two
+/// tests below so they cannot silently drift apart.
+const NOT_VALIDATED: &str = "NOT VALIDATED";
+
+/// Bare `--doctor` must not authenticate anything, and must say so — the same
+/// contract `--probe-mcp` has for MCP servers. A diagnostic that quietly ships
+/// the user's credential to a vendor is its own surprise.
+#[test]
+fn doctor_does_not_validate_the_credential_without_probe_provider() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let neutral = tempfile::tempdir().expect("neutral cwd tempdir");
+    let out = run_without_ambient_credentials(
+        home.path(),
+        neutral.path(),
+        &[
+            "--doctor",
+            "--provider",
+            NO_ENDPOINT_PROVIDER,
+            "--api-key",
+            API_KEY_VALUE,
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let row = provider_row(&stdout, "credential");
+
+    assert!(
+        row.contains(NOT_VALIDATED) && row.contains("--probe-provider"),
+        "#1079: bare --doctor did not report the credential as unvalidated, \
+         nor point at the flag that validates it. row: {row:?}\nstdout:\n{stdout}"
+    );
+    // The verdict words must be absent: without the flag there is no verdict.
+    for verdict in ["ACCEPTED", "REFUSED"] {
+        assert!(
+            !stdout.contains(verdict),
+            "bare --doctor rendered a {verdict:?} verdict without probing. \
+             stdout:\n{stdout}"
+        );
+    }
+}
+
+/// RED ARM for the `main.rs` → `doctor::run` wiring of `--probe-provider`.
+///
+/// The flag must change what doctor does. Hardcoding `false` at the call site
+/// — the same one-word regression `api_key: None` is — leaves this row reading
+/// "run --doctor --probe-provider" instead of the endpoint verdict, and only
+/// this test would notice.
+#[test]
+fn probe_provider_reaches_the_doctor_from_the_command_line() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let neutral = tempfile::tempdir().expect("neutral cwd tempdir");
+    let out = run_without_ambient_credentials(
+        home.path(),
+        neutral.path(),
+        &[
+            "--doctor",
+            "--probe-provider",
+            "--provider",
+            NO_ENDPOINT_PROVIDER,
+            "--api-key",
+            API_KEY_VALUE,
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let row = provider_row(&stdout, "credential");
+
+    assert!(
+        row.contains("no key-validation endpoint") && row.contains(NO_ENDPOINT_PROVIDER),
+        "#1079: --probe-provider did not reach the doctor — the credential row \
+         is the unprobed one. row: {row:?}\nstdout:\n{stdout}"
+    );
+    // Positive control that this run took the PROBE path rather than simply
+    // rendering different text: the unprobed row's advice must be gone.
+    assert!(
+        !row.contains("--probe-provider to authenticate"),
+        "the row still advertises the flag that was just passed, so this test \
+         cannot show the flag was honoured. row: {row:?}\nstdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(API_KEY_VALUE),
+        "the doctor printed the API key. stdout:\n{stdout}"
+    );
+}
+
+/// `--probe-provider` is meaningless without `--doctor`, and clap must refuse
+/// it rather than accept a flag that does nothing — the failure mode #1079 is
+/// about.
+#[test]
+fn probe_provider_is_refused_without_doctor() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let neutral = tempfile::tempdir().expect("neutral cwd tempdir");
+    let out = run_without_ambient_credentials(home.path(), neutral.path(), &["--probe-provider"]);
+
+    assert!(
+        !out.status.success(),
+        "--probe-provider without --doctor was accepted. stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--doctor"),
+        "the refusal did not name the flag it requires. stderr:\n{stderr}"
+    );
+}

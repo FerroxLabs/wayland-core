@@ -39,6 +39,15 @@ worktrees/
 # wayland-core session data
 .wayland-core/
 
+# Oversized tool results the context-overflow shed spills
+# (FerroxLabs/wayland#1097). They live inside the workspace because that
+# is the only place the producing session can read them back, so running
+# wayland-core on wayland-core drops them into this tree. Machine spill,
+# never a deliverable, and it can carry whatever a command printed.
+# `.wayland-out/skills/` is deliberately NOT ignored: those artifacts are
+# what the user asked the skill to produce.
+.wayland-out/results/
+
 # Debug artifacts
 *.pdb
 *.dSYM/

@@ -437,10 +437,23 @@ impl BrowserProvider for CamoufoxBackend {
                         &json!({ "userId": &identity.user_id }),
                     )
                     .await?;
-                if let (Some(policy), Some(url)) = (
-                    self.policy.as_ref(),
-                    response.get("url").and_then(|value| value.as_str()),
-                ) {
+                if let Some(policy) = self.policy.as_ref() {
+                    // FAIL CLOSED, exactly as the Navigate arm above does.
+                    // gh#1053: an `if let` over BOTH halves is the `and_then`
+                    // short-circuit the Navigate arm's comment warns about — a
+                    // sidecar that simply omits `url` from its /back response
+                    // would skip the resolution gate and get Ok. The landing
+                    // URL here is one the SIDECAR chose from its own history,
+                    // and the sidecar is the party this gate exists to
+                    // distrust, so "it did not say" can never mean "allowed".
+                    let Some(url) = response.get("url").and_then(|value| value.as_str()) else {
+                        return Err(BrowserOpError::PolicyDenied {
+                            url: format!("history {endpoint}"),
+                            reason: "post-navigation url missing/unparseable; \
+                                     failing closed to enforce the resolution gate"
+                                .to_string(),
+                        });
+                    };
                     enforce_post_navigation_policy(policy, url).await?;
                 }
                 Ok(OpResult::Ok)

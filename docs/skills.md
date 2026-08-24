@@ -119,7 +119,8 @@ Inside the skill body, the following variables are replaced at runtime:
 |----------|---------------|
 | `$ARGUMENTS` | The full argument string passed to the skill invocation |
 | `$0` | The skill name itself |
-| `${WCORE_SKILL_DIR}` | Absolute path to the directory containing this skill's `SKILL.md` |
+| `${WCORE_SKILL_DIR}` | Absolute path to the directory containing this skill's `SKILL.md` (a LOAD path — read from it, never write to it) |
+| `${WCORE_SKILL_OUTPUT_DIR}` | Absolute path this skill should write the files it produces to: `<cwd>/.wayland-out/skills/<session_id>/` |
 | `${WCORE_SESSION_ID}` | Current session ID (when sessions are enabled) |
 
 `${AIONRS_SKILL_DIR}` and `${AIONRS_SESSION_ID}` are kept as backward-compat
@@ -138,6 +139,29 @@ Run the test suite for module: $ARGUMENTS
 
 Working directory: ${WCORE_SKILL_DIR}
 ```
+
+## Where a skill puts what it produces
+
+A skill's own directory is a **load path, not an output path**. Every resolver
+in `wcore-skills` treats `<config_dir>/skills/<name>/` and
+`.wayland-core/skills/<name>/` as places to *find* a skill, and the config dir
+sits outside the session workspace entirely — a report written next to its own
+`SKILL.md` is somewhere the producing session's own tools cannot read back and
+the user browsing their project will never find.
+
+Write produced files to `${WCORE_SKILL_OUTPUT_DIR}` instead. It resolves to
+`<cwd>/.wayland-out/skills/<session_id>/`, is inside the session workspace, and
+is both writable and readable by the session that produced it. Every composed
+skill body is told the path whether or not the author asks for it, so an
+undeclared output has an obvious correct destination.
+
+Writes aimed at a load path are refused by name rather than silently succeeding:
+the file tools may READ `<config_dir>/skills`, `<config_dir>/commands` and any
+`.wayland-core/skills` / `.wayland-core/commands` (the loader does so on every
+boot), but a write to one returns an error that points at
+`${WCORE_SKILL_OUTPUT_DIR}`. Installing or drafting a skill still writes there —
+that goes through the `skills` CLI verbs and the auto-drafter, not the agent's
+file tools.
 
 ## Shell Command Expansion
 

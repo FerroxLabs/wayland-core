@@ -11,9 +11,10 @@ use crate::attempt_lifecycle::{
     finish_physical_attempt, start_physical_attempt,
 };
 
-/// Default retry policy for provider HTTP calls: 3 attempts, 250 ms → 1 s → 4 s.
-pub const DEFAULT_MAX_RETRIES: u32 = 2; // 1 initial + 2 retries = 3 total attempts
-pub const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+/// Default retry budget for provider HTTP calls: 1 initial attempt + 2
+/// retries. The delays between them come from [`crate::backoff`], the one
+/// curve every retryable class in this workspace waits on.
+pub const DEFAULT_MAX_RETRIES: u32 = 2;
 
 /// Wall-clock window over which a connection that was established and then
 /// destroyed before any response head arrived (peer reset / abort / broken
@@ -30,7 +31,10 @@ pub const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 /// balancer dropping connections through a rollover, a keep-alive raced to
 /// close. The window has to contain at least one full re-establishment of the
 /// connection, and the product already states how long that may take:
-/// [`crate::http_client::CONNECT_TIMEOUT`] is 30 s. Anything longer than one
+/// [`crate::http_client::CONNECT_TIMEOUT`], now 10 s. The window is left at
+/// 30 s rather than tracked down with it — the requirement is "at least one
+/// re-establishment", which 30 s over-satisfies at three, and shrinking a
+/// window costs the outages it exists to ride out. Anything longer than one
 /// re-establishment is not a blip and belongs to the OUTER bound — the
 /// engine's per-turn unserved-request budget, which is an order of magnitude
 /// longer and rebuilds the whole request.
@@ -282,6 +286,13 @@ pub const FAILURE_CONNECTION_REFUSED: &str = "connection_refused";
 /// (network unreachable, connect reset, a resolver that answered "try again").
 pub const FAILURE_CONNECTION: &str = "connection";
 
+/// Failure code for a provider that answered HTTP 429.
+///
+/// `provider_failure_code` renders both `ProviderError::RateLimited` and an
+/// `Api { status: 429 }` as this string; naming it keeps the callers that
+/// steer on "was this a rate limit" from each spelling it themselves.
+pub const FAILURE_RATE_LIMITED: &str = "http_429";
+
 /// Split a connect-phase failure by whether another send can plausibly change
 /// the outcome.
 ///
@@ -515,7 +526,6 @@ where
     Fut: Future<Output = Result<T, ProviderError>>,
 {
     let max_retries = effective_max_retries(max_retries);
-    let mut backoff = INITIAL_BACKOFF;
     for attempt in 0..=max_retries {
         match f().await {
             Ok(val) => return Ok(val),
@@ -529,23 +539,26 @@ where
                     error = %e,
                     "provider call failed; retrying"
                 );
-                // AF3 Risk 2: honour the server's retry-after hint on 429s instead
-                // of the exponential backoff schedule.  Cap at 60 s to guard against
-                // unreasonably large server hints.
+                // AF3 Risk 2: honour the server's retry-after hint on a 429
+                // instead of walking the backoff schedule. The hint is passed
+                // as the NUMBER the provider sent — never re-parsed out of the
+                // rendered error — and `crate::backoff::retry_delay` decides,
+                // capping the actual sleep at
+                // `crate::backoff::RETRY_AFTER_SLEEP_CAP` (60 s).
                 //
-                // NOTE on the 60s cap vs `RETRY_AFTER_CAP_MS` (5 min) in the extractor:
-                // the extractor's larger ceiling is for logging/scheduling — recording
-                // what the server asked for. This loop caps the *actual* sleep at 60s
-                // because a retry that would block more than a minute should fail-fast
-                // instead, surfacing the rate-limit upstream where the caller can pick
-                // a fallback provider or back off itself.
-                let sleep_ms = if let ProviderError::RateLimited { retry_after_ms } = &e {
-                    (*retry_after_ms).min(60_000)
-                } else {
-                    backoff.as_millis() as u64
+                // That 60 s is deliberately smaller than the extractor's own
+                // `RETRY_AFTER_CAP_MS` (5 min): the larger ceiling bounds the
+                // value RECORDED, this one bounds the value SLEPT, because a
+                // retry that would block for more than a minute should
+                // fail-fast and surface the rate limit upstream where the
+                // caller can pick a fallback provider.
+                let rate_limited = matches!(&e, ProviderError::RateLimited { .. });
+                let hint = match &e {
+                    ProviderError::RateLimited { retry_after_ms } => Some(*retry_after_ms),
+                    _ => None,
                 };
-                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
-                backoff = (backoff * 4).min(Duration::from_secs(4));
+                tokio::time::sleep(crate::backoff::retry_delay(attempt + 1, hint, rate_limited))
+                    .await;
             }
             Err(e) => return Err(e),
         }
@@ -611,11 +624,68 @@ fn provider_error_from_reqwest(e: reqwest::Error) -> ProviderError {
         || e.is_body()
         || e.is_decode()
         || is_broken_established_connection(&e);
+    // Read the endpoint BEFORE `without_url()` takes it away. Only the
+    // transport classes below can be attributed to an endpoint at all; a
+    // decode failure names a body, not a socket.
+    let endpoint = (e.is_connect() || e.is_timeout())
+        .then(|| e.url().and_then(dialled_endpoint))
+        .flatten();
     let e = e.without_url();
     if is_transient {
-        ProviderError::Connection(with_transport_cause(&e))
+        ProviderError::Connection(with_endpoint(with_transport_cause(&e), endpoint))
     } else {
         ProviderError::Http(e)
+    }
+}
+
+/// The `host:port` a request was actually dialled at, or `None` when the URL
+/// carries no host (a `data:`/`file:` URL cannot be a provider endpoint).
+///
+/// #1077: every connect-phase failure rendered the same sentence — `error
+/// sending request: Connection refused (os error 111)` for a wrong port, and
+/// `error sending request: failed to lookup address information` for a wrong
+/// host — and neither named the endpoint. For a `base_url` typo, which is the
+/// reported cause, the endpoint IS the diagnosis.
+///
+/// H-2 / secrets-26: `provider_error_from_reqwest` strips the URL because a
+/// provider may put a credential in it (Gemini's old `?key=` query form).
+/// This puts back the two components of the authority that provably cannot
+/// hold one — `Url::host_str` excludes userinfo, and a port is a number — and
+/// nothing else. Pinned by
+/// `naming_the_endpoint_must_not_reintroduce_the_url`, which drives a URL
+/// carrying userinfo, a path and a `?key=` secret and requires every one of
+/// them to stay out.
+///
+/// The port is resolved rather than echoed, so an implicit `https://host/v1`
+/// still reports the 443 it dialled instead of leaving the operator to assume
+/// it.
+fn dialled_endpoint(url: &reqwest::Url) -> Option<String> {
+    let host = url.host_str()?;
+    match url.port_or_known_default() {
+        Some(port) => Some(format!("{host}:{port}")),
+        None => Some(host.to_string()),
+    }
+}
+
+/// Append the dialled endpoint to a rendered transport failure.
+///
+/// APPENDED, not substituted: the OS cause says WHAT happened and is what
+/// `provider_failure_code` classifies on, so replacing the message with a
+/// friendlier sentence would both lose the diagnosis and re-merge the failure
+/// classes that `classify_connect_chain` exists to keep apart.
+///
+/// The appended text is user-supplied — a `base_url` is configuration — and
+/// it becomes input to that same substring classifier, so it must not be able
+/// to move a failure between classes. It cannot: every marker
+/// `classify_connect_chain` and [`is_timeout_rendering`] match on either
+/// contains a space (`dns error`, `connection refused`, `timed out`, `try
+/// again`, `deadline has elapsed`) or the literal `(os error `, and a host and
+/// a port number can contain neither. Pinned by
+/// `the_endpoint_text_cannot_change_the_failure_class`.
+fn with_endpoint(message: String, endpoint: Option<String>) -> String {
+    match endpoint {
+        Some(endpoint) => format!("{message} (endpoint {endpoint})"),
+        None => message,
     }
 }
 
@@ -797,7 +867,6 @@ pub async fn builder_send_with_retry(
     // count bound" when none is.
     let broken_connection_attempt_cap = effective_max_retries(u32::MAX);
     let broken_connection_deadline = tokio::time::Instant::now() + BROKEN_CONNECTION_RETRY_WINDOW;
-    let mut backoff = INITIAL_BACKOFF;
     let mut last_err: Option<ProviderError> = None;
     for attempt in 0u32.. {
         // M2: a non-cloneable body cannot be retried — send the original
@@ -898,8 +967,10 @@ pub async fn builder_send_with_retry(
                         status,
                         "transient HTTP status; retrying"
                     );
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 4).min(Duration::from_secs(4));
+                    // A transient status carries no usable hint here (429 is
+                    // deliberately surfaced rather than retried, see above), so
+                    // this is the plain curve.
+                    tokio::time::sleep(crate::backoff::retry_delay(attempt + 1, None, false)).await;
                     last_err = Some(ProviderError::Api {
                         status,
                         message: format!("transient HTTP {status}"),
@@ -963,8 +1034,7 @@ pub async fn builder_send_with_retry(
                         error = %provider_err,
                         "connection error; retrying"
                     );
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 4).min(Duration::from_secs(4));
+                    tokio::time::sleep(crate::backoff::retry_delay(attempt + 1, None, false)).await;
                     last_err = Some(provider_err);
                     continue;
                 }
@@ -1392,6 +1462,57 @@ mod tests {
         // Non-retryable errors should fail immediately without retrying
         assert!(result.is_err());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    /// The provider-layer loop walks the same curve as the engine, and this
+    /// grades the gap it actually sleeps rather than the function it calls.
+    ///
+    /// Deliberately paired with
+    /// `test_rate_limited_uses_retry_after_ms_not_exponential_backoff`: that
+    /// one pins the HINT path, this one pins the CURVE path. Before the move
+    /// to `crate::backoff` this loop stepped 250 ms then 1 s then 4 s, so a
+    /// regression to the old schedule fails on the very first gap.
+    ///
+    /// Jitter is pinned to zero for an exact assertion; that the production
+    /// draw is genuinely random is graded in `crate::backoff`.
+    #[tokio::test(start_paused = true)]
+    async fn a_retryable_failure_without_a_hint_walks_the_shared_curve() {
+        let gaps = Arc::new(std::sync::Mutex::new(Vec::<u128>::new()));
+        let seen = Arc::clone(&gaps);
+        let last = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
+        let clock = Arc::clone(&last);
+
+        let result: Result<(), ProviderError> = crate::backoff::scope_jitter(0.0, async move {
+            with_retry(3, || {
+                let seen = Arc::clone(&seen);
+                let clock = Arc::clone(&clock);
+                async move {
+                    let now = tokio::time::Instant::now();
+                    let mut previous = clock.lock().unwrap();
+                    seen.lock()
+                        .unwrap()
+                        .push(now.duration_since(*previous).as_millis());
+                    *previous = now;
+                    Err(ProviderError::Connection("deliberate".into()))
+                }
+            })
+            .await
+        })
+        .await;
+
+        assert!(
+            result.is_err(),
+            "every attempt failed, so the call must fail"
+        );
+        let gaps = gaps.lock().unwrap().clone();
+        // First entry is the gap before attempt 1 (zero); the rest are the
+        // sleeps between the four attempts.
+        assert_eq!(
+            &gaps[1..],
+            &[500u128, 1_000, 2_000],
+            "the loop must walk 500/1000/2000 ms; the schedule this replaced \
+             gave 250/1000/4000. Observed: {gaps:?}"
+        );
     }
 
     /// AF3 Risk 2: a 429 with retry_after_ms=500 must use the server hint,

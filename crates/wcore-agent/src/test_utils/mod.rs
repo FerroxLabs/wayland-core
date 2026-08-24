@@ -328,6 +328,55 @@ pub struct SyntheticTurnOutput {
     pub turns: usize,
 }
 
+/// Pin the engine's served-failure retry budget for the duration of a test,
+/// restoring whatever was there before on drop.
+///
+/// The shipped default is `DEFAULT_MAX_STREAM_RETRIES` — ten retries on the
+/// shared backoff curve, which schedules 127.5 s of real sleep before a
+/// persistently failing provider gives up. That is the right production
+/// policy and a useless test budget: a test whose provider fails EVERY
+/// attempt is asking what happens when the budget is EXHAUSTED, not how large
+/// the budget is.
+///
+/// It is a correctness guard as much as a speed one. While the default was 3,
+/// a family of tests scripted exactly three failing turns and asserted the run
+/// failed. Those tests do not depend on the number 3 on purpose — they inherit
+/// it — so when the policy moved to 10 they began passing for the WRONG
+/// reason: the mock ran out of scripted failures and started answering
+/// successfully. Pinning turns an inherited assumption into a stated one.
+///
+/// `std::env` is process-global. `cargo nextest` runs each test in its own
+/// process, so this is sound there; under plain `cargo test` a caller sharing
+/// a binary with other budget-reading tests must be `#[serial_test::serial]`.
+pub struct PinnedRetryBudget {
+    prior: Option<String>,
+}
+
+impl PinnedRetryBudget {
+    /// Pin the budget to `retries` for as long as the returned guard lives.
+    pub fn pin(retries: u32) -> Self {
+        let prior = std::env::var(crate::engine::MAX_STREAM_RETRIES_ENV).ok();
+        // SAFETY: documented above — nextest gives one process per test, and
+        // in-process callers serialize with `#[serial_test::serial]`.
+        unsafe {
+            std::env::set_var(crate::engine::MAX_STREAM_RETRIES_ENV, retries.to_string());
+        }
+        Self { prior }
+    }
+}
+
+impl Drop for PinnedRetryBudget {
+    fn drop(&mut self) {
+        // SAFETY: as above.
+        unsafe {
+            match self.prior.take() {
+                Some(prior) => std::env::set_var(crate::engine::MAX_STREAM_RETRIES_ENV, prior),
+                None => std::env::remove_var(crate::engine::MAX_STREAM_RETRIES_ENV),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

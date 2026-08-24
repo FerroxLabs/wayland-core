@@ -636,6 +636,11 @@ Workflow(
 ///    partial result — prior completed stages are preserved, not discarded.
 #[tokio::test]
 async fn stage_failure_surfaces_typed_error_with_partial_results() {
+    // Budget PINNED, not inherited. This test drives a provider that fails
+    // every attempt; the shipped default is 10 retries on the shared backoff
+    // curve (127.5 s of scheduled sleep), and what is under test here is the
+    // failure OUTCOME, not the size of the budget.
+    let _retry_budget = wcore_agent::test_utils::PinnedRetryBudget::pin(2);
     // 3-stage linear chain; the 2nd LLM call (turn index 1, the `review`
     // stage) fails, so `ingest` should already be recorded as partial.
     let provider = Arc::new(FailAtProvider {
@@ -933,6 +938,11 @@ impl LlmProvider for FailNamedProvider {
 /// sibling, discarding any sibling processed after it in the same wave.
 #[tokio::test]
 async fn parallel_wave_failing_sibling_preserves_successful_siblings() {
+    // Budget PINNED, not inherited. This test drives a provider that fails
+    // every attempt; the shipped default is 10 retries on the shared backoff
+    // curve (127.5 s of scheduled sleep), and what is under test here is the
+    // failure OUTCOME, not the size of the budget.
+    let _retry_budget = wcore_agent::test_utils::PinnedRetryBudget::pin(2);
     // 3-branch fan-out (<= FLEET_FANOUT_THRESHOLD = 10) → relay path. The
     // `loser` branch fails; `winner_a` / `winner_b` succeed and must survive in
     // the partial.

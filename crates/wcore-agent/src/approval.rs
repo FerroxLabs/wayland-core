@@ -66,20 +66,81 @@ pub enum ApprovalDisposition {
     Cancelled,
 }
 
+/// FerroxLabs/wayland#1083 — why the bridge resolved a pending approval with
+/// no host answer.
+///
+/// Before this, every self-resolution sent the same cancelled outcome — bare
+/// `approved: false` with nothing else — so a waiter (the egress-consent doorbell, a
+/// Crucible proposal card) received a BYTE-IDENTICAL outcome whether the host
+/// had disconnected or the TTL had merely run out, and could only render one
+/// generic refusal for both. The single discriminator was a `tracing::warn!`,
+/// which with `RUST_LOG` unset never reaches stderr.
+///
+/// Each cause owns exactly ONE reason string, so what a log line says and what
+/// a waiter can render can never drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalCancelCause {
+    /// The TTL reaper collected the entry: the host may well still be
+    /// connected, it just did not answer in time. Also covers a requester that
+    /// dropped its receiver (`sender.is_closed()`).
+    Expired,
+    /// The host's command stream reached EOF with this approval parked. No
+    /// decision can EVER arrive now — the wait is pointless, not merely slow.
+    HostStreamClosed,
+}
+
+impl ApprovalCancelCause {
+    /// The reason string for this cause.
+    ///
+    /// #1083 asks that a bridge cancellation stay distinguishable from a TTL
+    /// expiry, and that the bridge not reuse either string the
+    /// `ToolApprovalManager` path already owns — #1070's "host closed the
+    /// command stream while this approval was pending" or that manager's
+    /// reaper string "approval timed out (no host response)".
+    /// `bridge_cancel_reasons_do_not_reuse_the_tool_manager_strings` pins all
+    /// four apart.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Expired => "bridge approval expired with no host answer (TTL reaper)",
+            Self::HostStreamClosed => {
+                "bridge approval abandoned: the host command stream closed while it was parked"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ApprovalOutcome {
     pub approved: bool,
     pub modifications: Option<serde_json::Value>,
+    /// #1083: `Some` only when the BRIDGE resolved this itself with no host
+    /// answer. `None` on every outcome a host or operator actually decided —
+    /// which is what keeps the discriminator meaningful.
+    pub cancellation: Option<ApprovalCancelCause>,
 }
 
 impl ApprovalOutcome {
     /// Cancelled / auto-expired outcome — used by the TTL reaper when
     /// no host response arrived in time.
     pub fn cancelled() -> Self {
+        Self::cancelled_because(ApprovalCancelCause::Expired)
+    }
+
+    /// #1083: a cancelled outcome that says WHY, so the waiter can tell a host
+    /// disconnect from a TTL expiry instead of rendering one generic refusal
+    /// for both. Always fails closed (`approved: false`).
+    pub fn cancelled_because(cause: ApprovalCancelCause) -> Self {
         Self {
             approved: false,
             modifications: None,
+            cancellation: Some(cause),
         }
+    }
+
+    /// The reason a waiter can log or render. `None` when a host/operator
+    /// decided this outcome — only a bridge self-resolution carries one.
+    pub fn cancel_reason(&self) -> Option<&'static str> {
+        self.cancellation.map(ApprovalCancelCause::reason)
     }
 }
 
@@ -271,9 +332,21 @@ impl ApprovalBridge {
                     // so it can react. For requester-crashed entries
                     // the receiver has already been dropped, so the
                     // send returns Err — that's expected and harmless.
-                    let _ = p.sender.send(ApprovalOutcome::cancelled());
+                    //
+                    // #1083: stamped `Expired`, which is what makes it
+                    // distinguishable from the host-EOF bulk cancel below.
+                    let _ = p.sender.send(ApprovalOutcome::cancelled_because(
+                        ApprovalCancelCause::Expired,
+                    ));
                 }
             }
+            // #1083: the reaper logged NOTHING, so even an operator with
+            // `RUST_LOG` turned up could not tell an expiry from an EOF cancel.
+            tracing::warn!(
+                expired = count,
+                reason = ApprovalCancelCause::Expired.reason(),
+                "reaped expired bridge approvals"
+            );
         }
         count
     }
@@ -451,14 +524,18 @@ impl ApprovalBridge {
     /// the missing half.)
     ///
     /// Fails CLOSED: every waiter is handed
-    /// [`ApprovalOutcome::cancelled`] (`approved: false`), matching the reaper
-    /// and the `ToolApprovalManager` EOF path. `reason` is logged, not
-    /// returned — [`ApprovalOutcome`] carries no reason field, and every
-    /// consumer of a cancelled outcome already renders its own refusal text.
+    /// [`ApprovalOutcome::cancelled_because`] (`approved: false`), matching the
+    /// reaper and the `ToolApprovalManager` EOF path.
+    ///
+    /// `cause` is stamped ONTO the outcome, not merely logged: a waiter reading
+    /// `outcome.cancellation` can tell a host disconnect from a TTL expiry, and
+    /// `cause.reason()` gives it one canonical string to render. (It used to
+    /// take a free-form `&str` that was logged and dropped, which left every
+    /// waiter with a byte-identical outcome for both cases — #1083 criterion 3.)
     ///
     /// Both indexes are cleared together under the single `pending` lock, so
     /// no `by_corr` mapping can dangle to a freed secret token (GHSA-8r7g).
-    pub async fn cancel_all_pending(&self, reason: &str) -> usize {
+    pub async fn cancel_all_pending(&self, cause: ApprovalCancelCause) -> usize {
         let count = {
             let mut map = self.pending.lock().await;
             map.by_corr.clear();
@@ -468,14 +545,17 @@ impl ApprovalBridge {
                 // An `Err` here means the requester already went away; that is
                 // exactly the case the reaper's `sender.is_closed()` arm
                 // handles, and it is harmless.
-                let _ = pending.sender.send(ApprovalOutcome::cancelled());
+                let _ = pending
+                    .sender
+                    .send(ApprovalOutcome::cancelled_because(cause));
             }
             count
         };
         if count > 0 {
             tracing::warn!(
                 cancelled = count,
-                reason,
+                cause = ?cause,
+                reason = cause.reason(),
                 "cancelled every pending bridge approval"
             );
             self.refresh_redactor().await;
@@ -535,6 +615,11 @@ impl wcore_tools::script::ApprovalProducer for ApprovalBridge {
             if let Ok(outcome) = rx.await {
                 let _ = tx_lite.send(wcore_tools::script::ApprovalOutcomeLite {
                     approved: outcome.approved,
+                    // #1083: forward WHY, not just that it was refused. The
+                    // cause is what lets the ScriptTool distinguish a host
+                    // disconnect from a TTL expiry from an actual rejection —
+                    // it used to render "rejected by user" for all three.
+                    cancel_reason: outcome.cancel_reason().map(str::to_string),
                     modifications: outcome.modifications,
                 });
             }
@@ -596,6 +681,7 @@ mod tests {
                     ApprovalOutcome {
                         approved: true,
                         modifications: None,
+                        cancellation: None,
                     },
                 )
                 .await
@@ -655,7 +741,8 @@ mod tests {
                     &tok_long,
                     ApprovalOutcome {
                         approved: true,
-                        modifications: None
+                        modifications: None,
+                        cancellation: None,
                     }
                 )
                 .await,
@@ -673,7 +760,8 @@ mod tests {
                     "nope",
                     ApprovalOutcome {
                         approved: false,
-                        modifications: None
+                        modifications: None,
+                        cancellation: None,
                     }
                 )
                 .await
@@ -696,6 +784,7 @@ mod tests {
                 ApprovalOutcome {
                     approved: false,
                     modifications: None,
+                    cancellation: None,
                 },
             )
             .await;
@@ -787,7 +876,12 @@ mod tests {
              nothing about cancel_all_pending"
         );
 
-        assert_eq!(bridge.cancel_all_pending("host EOF").await, 2);
+        assert_eq!(
+            bridge
+                .cancel_all_pending(ApprovalCancelCause::HostStreamClosed)
+                .await,
+            2
+        );
         assert!(
             !short_rx
                 .await
@@ -819,7 +913,12 @@ mod tests {
     #[tokio::test]
     async fn cancel_all_pending_on_an_empty_bridge_is_a_no_op() {
         let bridge = ApprovalBridge::new();
-        assert_eq!(bridge.cancel_all_pending("host EOF").await, 0);
+        assert_eq!(
+            bridge
+                .cancel_all_pending(ApprovalCancelCause::HostStreamClosed)
+                .await,
+            0
+        );
     }
 
     #[test]
@@ -831,5 +930,165 @@ mod tests {
         };
         let req2 = req.clone();
         assert_eq!(req.call_id, req2.call_id);
+    }
+
+    // ------------------------------------------------------------------
+    // FerroxLabs/wayland#1083 criterion 3 — an EOF cancellation must stay
+    // distinguishable from a TTL expiry, in logs AND in host handling.
+    //
+    // Observed red before this change, on released v0.13.5 (addb4f48): the two
+    // outcomes formatted identically —
+    //   left:  "ApprovalOutcome { approved: false, modifications: None }"
+    //   right: "ApprovalOutcome { approved: false, modifications: None }"
+    // so no waiter could branch on the difference and every consumer rendered
+    // the same generic refusal.
+
+    /// The discriminator itself. Both arms fail closed, and BOTH are driven
+    /// through the real paths — a genuine `reap_now` collection for the TTL arm,
+    /// `cancel_all_pending` for the EOF arm.
+    ///
+    /// The EOF arm parks a `CRUCIBLE_APPROVAL_TTL` (86,400s) entry and asserts
+    /// `reap_now() == 0` first: that POSITIVE CONTROL rules out the reaper as
+    /// the explanation for the EOF arm resolving at all.
+    #[tokio::test]
+    async fn an_eof_cancellation_is_distinguishable_from_a_ttl_expiry() {
+        // EOF arm.
+        let eof_bridge = ApprovalBridge::new();
+        let (_eof_tok, eof_rx) = eof_bridge
+            .request_with_id_and_ttl(
+                "crucible:card".into(),
+                ApprovalRequest {
+                    call_id: "crucible:card".into(),
+                    reason: "proposal card".into(),
+                    context: "".into(),
+                },
+                CRUCIBLE_APPROVAL_TTL,
+            )
+            .await;
+        assert_eq!(
+            eof_bridge.reap_now().await,
+            0,
+            "positive control: a 24h entry is not reapable, so the reaper \
+             cannot be what resolves the EOF arm below"
+        );
+        assert_eq!(
+            eof_bridge
+                .cancel_all_pending(ApprovalCancelCause::HostStreamClosed)
+                .await,
+            1
+        );
+        let eof = eof_rx.await.expect("the EOF waiter must be resolved");
+
+        // TTL arm — a real reaper collection, not a simulated one.
+        let ttl_bridge = ApprovalBridge::with_ttl(Duration::from_millis(20));
+        let (_ttl_tok, ttl_rx) = ttl_bridge
+            .request(ApprovalRequest {
+                call_id: "c-ttl".into(),
+                reason: "".into(),
+                context: "".into(),
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            ttl_bridge.reap_now().await,
+            1,
+            "the entry must have expired"
+        );
+        let ttl = ttl_rx.await.expect("the TTL waiter must be resolved");
+
+        // Both still fail CLOSED — the distinction must not weaken that.
+        assert!(!eof.approved, "EOF must fail closed");
+        assert!(!ttl.approved, "TTL expiry must fail closed");
+
+        assert_eq!(
+            eof.cancellation,
+            Some(ApprovalCancelCause::HostStreamClosed),
+            "a host disconnect must say so on the outcome, not only in a log \
+             line that never reaches stderr with RUST_LOG unset"
+        );
+        assert_eq!(
+            ttl.cancellation,
+            Some(ApprovalCancelCause::Expired),
+            "a TTL expiry must keep its own cause, or the EOF stamp means \
+             nothing (everything would be HostStreamClosed)"
+        );
+        assert_ne!(
+            eof.cancel_reason(),
+            ttl.cancel_reason(),
+            "the two reason strings a waiter can render must differ"
+        );
+        assert_ne!(
+            format!("{eof:?}"),
+            format!("{ttl:?}"),
+            "the outcomes were byte-identical at v0.13.5; that is the defect"
+        );
+    }
+
+    /// #1083 asked the bridge NOT to reuse either string the
+    /// `ToolApprovalManager` path already owns. Pin all four apart so a later
+    /// edit cannot quietly collapse them back together.
+    #[test]
+    fn bridge_cancel_reasons_do_not_reuse_the_tool_manager_strings() {
+        // #1070's `HOST_EOF_DENY_REASON`, and the `ToolApprovalManager` reaper
+        // string (wcore-protocol/src/lib.rs). Copied deliberately: this test's
+        // whole job is to assert the bridge's strings are NOT these.
+        const MANAGER_EOF: &str = "host closed the command stream while this approval was pending";
+        const MANAGER_TTL: &str = "approval timed out (no host response)";
+
+        for cause in [
+            ApprovalCancelCause::HostStreamClosed,
+            ApprovalCancelCause::Expired,
+        ] {
+            assert!(!cause.reason().is_empty(), "{cause:?} has no reason string");
+            assert_ne!(
+                cause.reason(),
+                MANAGER_EOF,
+                "{cause:?} reuses #1070's string"
+            );
+            assert_ne!(
+                cause.reason(),
+                MANAGER_TTL,
+                "{cause:?} reuses the reaper's string"
+            );
+        }
+        assert_ne!(
+            ApprovalCancelCause::HostStreamClosed.reason(),
+            ApprovalCancelCause::Expired.reason(),
+            "EOF and TTL must not share one string on the bridge either"
+        );
+    }
+
+    /// CONTROL for both tests above: an outcome a host actually DECIDED carries
+    /// no cancellation cause. Without this the discriminator could pass by
+    /// stamping everything.
+    #[tokio::test]
+    async fn a_host_answered_outcome_carries_no_cancellation_cause() {
+        let bridge = ApprovalBridge::new();
+        let (token, rx) = bridge
+            .request(ApprovalRequest {
+                call_id: "c-live".into(),
+                reason: "".into(),
+                context: "".into(),
+            })
+            .await;
+        assert!(
+            bridge
+                .resolve(
+                    &token,
+                    ApprovalOutcome {
+                        approved: true,
+                        modifications: None,
+                        cancellation: None,
+                    }
+                )
+                .await
+        );
+        let outcome = rx.await.expect("the answered waiter must resolve");
+        assert!(outcome.approved);
+        assert_eq!(
+            outcome.cancellation, None,
+            "an operator decision is not a cancellation"
+        );
+        assert_eq!(outcome.cancel_reason(), None);
     }
 }

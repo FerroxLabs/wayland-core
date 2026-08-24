@@ -121,6 +121,7 @@ async fn explicit_resolve_after_expiry_returns_false() {
             wcore_agent::approval::ApprovalOutcome {
                 approved: true,
                 modifications: None,
+                cancellation: None,
             },
         )
         .await;

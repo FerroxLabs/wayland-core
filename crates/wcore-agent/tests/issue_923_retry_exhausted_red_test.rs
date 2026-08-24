@@ -265,6 +265,11 @@ async fn harness(script: Vec<Result<Vec<LlmEvent>, ProviderError>>) -> Harness {
 /// `InvalidTransition` instead of the provider's own words.
 #[tokio::test]
 async fn an_exhausted_retry_budget_settles_the_turns_provider_attempts() {
+    // Budget PINNED, not inherited. This test drives a provider that fails
+    // every attempt; the shipped default is 10 retries on the shared backoff
+    // curve (127.5 s of scheduled sleep), and what is under test here is the
+    // failure OUTCOME, not the size of the budget.
+    let _retry_budget = wcore_agent::test_utils::PinnedRetryBudget::pin(2);
     let mut h = harness(vec![
         Err(api_error(500, SERVED_5XX_BODY)),
         Err(api_error(500, SERVED_5XX_BODY)),
