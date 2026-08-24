@@ -969,10 +969,48 @@ mod tests {
 
     // -- #1114: how procfs spells "the task is gone" ------------------------
 
+    /// The half of the classifier that holds on EVERY platform, graded by
+    /// MEANING rather than by a number: an error that already says `NotFound`
+    /// is gone, and one that says the entry could not be looked at is not.
+    ///
+    /// Split out from the errno table below because `io::Error`'s raw OS code
+    /// is an errno only on unix. On Windows it is a Win32 status, and the two
+    /// spaces disagree about the very value this classifier turns on — raw `3`
+    /// is `ESRCH` on unix and `ERROR_PATH_NOT_FOUND` on Windows. Grading this
+    /// half by `ErrorKind` keeps the classifier under test on Windows without
+    /// asserting a `/proc` fact there.
+    #[test]
+    fn a_not_found_is_gone_and_an_unreadable_entry_is_not() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(proc_stat_read_error_means_gone(&Error::from(
+            ErrorKind::NotFound
+        )));
+        assert!(
+            !proc_stat_read_error_means_gone(&Error::from(ErrorKind::PermissionDenied)),
+            "an entry that could not be LOOKED at must never be reported as absent"
+        );
+    }
+
     /// The classifier that both `/proc` readers share. Graded here rather than
     /// at either call site because a race between `open` and `read` cannot be
     /// forced on demand — so the decision is made in one testable place and the
     /// two call sites do nothing but ask it.
+    ///
+    /// `#[cfg(unix)]`, and the gate is about the INPUT, not about the
+    /// classifier. Every number below is an errno, and `Error::from_raw_os_error`
+    /// reads its argument in the platform's own error space: on Windows those
+    /// five values are Win32 statuses naming different conditions entirely, and
+    /// `3` — the whole subject of this test — is `ERROR_PATH_NOT_FOUND`, which
+    /// really IS `ErrorKind::NotFound` there. So on Windows the `assert_ne!`
+    /// below asserted a falsehood about an error the classifier cannot receive:
+    /// `proc_stat_read_error_means_gone` is called only from
+    /// `#[cfg(target_os = "linux")] mod platform`, and only with an error from
+    /// reading `/proc`. macOS is deliberately kept IN rather than merely
+    /// tolerated — it shares the errno space and spells `ESRCH` 3 as well, so
+    /// the classifier stays gradable without a Linux host, which is the reason
+    /// `PROC_STAT_TASK_GONE_ERRNO` is compiled off Linux at all.
+    #[cfg(unix)]
     #[test]
     fn a_vanished_task_is_gone_however_procfs_spells_it() {
         use std::io::{Error, ErrorKind};

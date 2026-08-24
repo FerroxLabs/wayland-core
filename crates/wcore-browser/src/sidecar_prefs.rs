@@ -228,7 +228,42 @@ mod tests {
         let _guard = EnvGuard::set("CAMOUFOX_EXECUTABLE_PATH", exe.to_str().unwrap());
 
         let found = default_pref_dir().expect("an install with the marker must be found");
-        assert_eq!(found, tmp.path().join("defaults").join("pref"));
+
+        // Compared in the spelling the PRODUCT produces, not in `TempDir`'s.
+        // `install_roots` canonicalizes the operator's executable so that
+        // `.parent()` is the real install directory rather than whatever alias
+        // the operator typed — and on two of the three platforms that is a
+        // different STRING for the same directory: macOS resolves `/var` to
+        // `/private/var`, Windows resolves to the verbatim `\\?\D:\...` form.
+        // Asserting on one platform's rendering failed on Windows 11 26200 for
+        // a locator that had found exactly the right directory, and would fail
+        // on macOS for the same reason. Both sides are now produced the same
+        // way instead of one being converted to agree with the other.
+        assert_eq!(
+            std::fs::canonicalize(&found).unwrap(),
+            std::fs::canonicalize(tmp.path().join("defaults").join("pref")).unwrap(),
+            "the override must decide the install, however this platform spells it"
+        );
+
+        // ...and the spelling the locator hands back has to be one the WRITE
+        // accepts, end to end. A located directory Core cannot actually write
+        // into is gh#1117's loopback hole with an `Ok` in front of it, so the
+        // assertion is not that the string looks right: the pref is written
+        // THROUGH the located path and then read back through the RAW tempdir
+        // path, which is the one Firefox's own install sits at.
+        let written = write_loopback_pref(&found).expect("the located directory must be writable");
+        assert_eq!(
+            std::fs::read_to_string(
+                tmp.path()
+                    .join("defaults")
+                    .join("pref")
+                    .join(PREF_FILE_NAME)
+            )
+            .expect("the pref must land where Firefox reads it"),
+            pref_file_contents(),
+            "written through {}",
+            written.display()
+        );
     }
 
     /// KNOWN-POSITIVE CONTROL for the test above, and the point of locating

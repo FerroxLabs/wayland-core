@@ -185,6 +185,44 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 filter = 'binary(packaged_driver_gate)'
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# `walk_parallel_identity_test`'s two TIMING cases build a 15,000-file fixture
+# before they measure anything (`a_disjoint_grant_really_does_cost_a_second_walk`
+# builds two), and on NTFS that CONSTRUCTION, not the measurement, is the whole
+# cost.
+#
+# MEASURED on SEANDESKTOP (Windows 11 26200, real msvc), the binary alone with
+# nothing else scheduled, arms INTERLEAVED across v0.13.5 (addb4f48) and this
+# branch so a load ramp lands on both:
+#     redundant_walk_root_is_not_walked_twice      base 17.04s, 17.14s   i136 19.43s
+#     a_disjoint_grant_really_does_cost_a_second_walk
+#                                                  base 34.40s, 40.47s   i136 36.27s
+# and the WALK those tests actually grade, from their own eprintln in the same
+# runs:
+#     redundant, baseline median   base 20.09 ms, 21.08 ms   i136 18.94 ms
+#     disjoint,  baseline median   base 19.62 ms, 22.85 ms   i136 21.91 ms
+#
+# So ~20 ms of subject sits underneath 17-40 s of fixture; the fixture cost
+# moves 6 s between consecutive runs of the SAME binary on the SAME tree; and
+# the #1111 deny-set memo did NOT slow the walk -- this branch's medians land
+# inside v0.13.5's own spread, and both assertions are RATIOS between two
+# policies over one tree, which no constant factor can move in either direction.
+#
+# Under `--profile ci` (90s x 2 = 180s) both cases pass on both trees. Under
+# this stricter default profile (30s x 2 = 60s) the disjoint case ALREADY died
+# at v0.13.5 inside the full Windows suite, and both died on this branch -- a
+# cap crossed by fixture construction under full-suite load, not by anything
+# either test asserts. This aligns the local budget with the CI one for these
+# two rather than loosening either: 60s x 3 = 180s is exactly the CI ceiling,
+# and `period` is deliberately set BELOW the measured worst case so nextest
+# still prints the "running for over 60 seconds" notice and the cost stays
+# visible in the log instead of being silently absorbed.
+#
+# Scoped to the binary, so nothing else's budget moves and a genuinely hung
+# walk still dies.
+[[profile.default.overrides]]
+filter = 'binary(walk_parallel_identity_test)'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
 # ── CI profile ─────────────────────────────────────────────────────────────
 [profile.ci]
 # In CI: always show output for failed tests, machine-readable JUnit
