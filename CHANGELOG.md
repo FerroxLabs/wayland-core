@@ -1,5 +1,102 @@
 # Changelog
 
+## [0.13.6](https://github.com/FerroxLabs/wayland-core/compare/v0.13.5...v0.13.6) (2026-08-24)
+
+**Release highlights.** 0.13.5 shipped a retry knob and left the retry policy
+alone. This ships the policy. The second subject is paths: a value the product
+produced in one spelling and then refused in another, in four separate places,
+including the one seam that holds the browser sidecar inside its own gate. No
+breaking changes; the protocol contract stays at minor 16.
+
+**Retries now behave like a retry.** The default budget goes from 2 to 10, every
+retryable class waits on one curve — 500ms doubling per attempt, capped at 24s,
+with 0-25% jitter added upward only so parallel workers cannot re-send in
+lockstep — and a `Retry-After` the provider actually sent now outranks the curve
+instead of being parsed, printed and discarded. Alongside it the connect deadline
+drops from 30s to 10s, because ten attempts against a 30s deadline is worse than
+two. Measured on the shipped binaries, three runs each:
+
+| what happened | 0.13.5 | 0.13.6 |
+|---|---|---|
+| blackholed endpoint | 91.7s, 2 attempts, first word at 30.2s | 20.8s, first word at 10.2s |
+| typo in `base_url` (refused) | 1.7s | 1.8s, names the endpoint and the next wait |
+| endpoint that is not an API | 1.7s | 4.0s |
+| HTTP 500 | 1.7s, 2 attempts | 144.6s, 10 attempts |
+| rate limited, `Retry-After: 7` | 0.7s, **1 attempt**, then failed | 75.8s, 10 attempts, honouring the hint |
+| rate limited, no header | 0.7s, 1 attempt | 55.7s, 10 attempts |
+| hostname does not resolve | 0.2s | 0.2s, still no retry |
+
+Read the fifth row first: 0.13.5 gave up on a rate limit after one attempt in
+0.7 seconds and then blamed your API key, because a 429 put the only key into a
+60-second cooldown and the retry found no key left to use. Read the fourth row
+too, and price it: a fully-failed turn now re-sends up to eleven times, and each
+re-send re-bills the full outbound context. On a 100k-token context that is the
+difference between roughly one and roughly eleven times the input cost of a turn
+that ultimately fails. Every wait is announced before it is taken, `attempt N/M`
+counts against the budget actually in force, and Ctrl-C out of a backoff sleep
+returns in 15-17ms. A connection that is refused keeps a short budget of its own,
+about two seconds, because a typo should not cost you two minutes.
+
+**Every parallel tool call from a Gemini-family model used to die.** Google's
+OpenAI-compatible endpoint omits the call index and keys parallel calls by id;
+the parser defaulted the missing index to slot zero, concatenated two calls'
+arguments into one string, and failed the JSON parse — deterministically, on
+every parallel call. Worse when it did not fail: if either call had empty
+arguments the concatenation was valid JSON and one call silently vanished. Slots
+are now keyed by id when there is no index, a late id adopts the call already in
+flight, and an unlabelled fragment is refused rather than appended to whichever
+call opened most recently. The fix came from the Wayland Desktop lane.
+
+**A spilled tool result the model could not read back.** When a result was too
+large to keep in context the engine wrote it to disk and told the model to read
+the file — and on Windows the path it handed over was the verbatim extended-length
+form, which the product's own path validator refuses. So it spilled a file and
+then refused to open it. The same mismatch was live in the text-to-speech default
+output path, in the preference file that pins the browser sidecar behind Core's
+proxy, and in three tests comparing two spellings of the same directory.
+
+**The browser sidecar can no longer step around its own gate.** Core screens an
+address and then dials that address itself, so there is no second name lookup to
+diverge from the first — proven against a nameserver that deliberately answers
+differently on the second query. Firefox also bypasses a configured proxy for
+loopback, which left `127.0.0.1` reachable while every other blocked address was
+refused; Core now writes that preference into the browser install itself and
+refuses to launch the sidecar if it cannot.
+
+**Deny rules that silently did nothing.** An origin entry written with any
+capital letter never matched, so the rule failed open and the request went
+through. The same held for a trailing dot, an internationalised hostname against
+its punycode form, uppercase in a wildcard prefix, userinfo before the host, and
+mixed-case IPv6. A loopback address written with a trailing dot walked straight
+past the loopback block. Host comparison is now case-insensitive on both the
+allow and the deny side, and every case has a deny-side test.
+
+**A required CI check that went green having run nothing.** The gate certifying
+that the end-to-end suite ran counted report files, and an empty report is still
+a file. It now counts test cases, and it has been watched failing on a report
+holding zero of them.
+
+**A 400 that killed sessions unrecoverably.** A provider rejecting a request for
+a missing tool-call id left the conversation in a state that reproduced the same
+rejection on every subsequent turn. The repair now happens before the send and
+escalates on retry, and a session already in that state continues rather than
+being lost.
+
+**Smaller things you would have felt.** A turn that ended with a usage-only
+stream event rendered as nothing at all, and one non-terminal advisory could
+swallow the rest of an answer. The per-execution secret scan no longer re-walks
+your whole workspace on every command. Sub-agents can run a shell on backends
+where the parent already could. A path that is writable but not readable is
+refused at write time instead of failing later at read time.
+
+**Two things named honestly.** `--doctor` now reports the provider, model and
+base URL the invocation actually selected, and an approval that ends because the
+host disconnected says so instead of reporting that a user rejected it — both
+were already behaving correctly, and what changed is what they tell you. And one
+test that guards sandbox behaviour through a terminal is quarantined on macOS
+only, where it times out for reasons tracked in FerroxLabs/wayland#1109; it runs
+everywhere else, and the retry masking that had been hiding it is gone.
+
 ## [0.13.5](https://github.com/FerroxLabs/wayland-core/compare/v0.13.4...v0.13.5) (2026-08-22)
 
 **Release highlights.** Twenty-one fixes with one subject: a guard that exists is

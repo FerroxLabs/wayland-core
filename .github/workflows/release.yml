@@ -32,22 +32,6 @@ env:
   CARGO_HTTP_TIMEOUT: "600"
   CARGO_NET_RETRY: "10"
 
-  # ── TEMPORARY ESCAPE HATCH — DELETE ONCE THE AZURE CREDENTIALS EXIST ───────
-  # The Windows Authenticode gate in `build` is fail-closed: every run of this
-  # workflow IS a release build (it only fires on a release tag, a
-  # workflow_dispatch with a tag, or a workflow_call), so with no signing
-  # credentials it stops the build rather than publishing an unsigned
-  # wayland-core.exe. Those credentials do not exist in this repo yet — the
-  # secrets today are NPM_TOKEN and WAYLAND_RELEASE_ACCEPTANCE_SEED — so arming
-  # the gate without this switch would brick the very next Core release.
-  #
-  #   "1" -> publish Windows binaries UNSIGNED, with a loud ::warning.
-  #   "0" or line removed -> the gate is live and a credential-less tag FAILS.
-  #
-  # To close this out: provision AZURE_TENANT_ID / AZURE_CLIENT_ID plus either
-  # AZURE_SUBSCRIPTION_ID (OIDC federation, preferred) or AZURE_CLIENT_SECRET,
-  # then delete this line and the comment above it.
-  WAYLAND_ALLOW_UNSIGNED_WINDOWS: "1"
 
 jobs:
   prepare-release:
