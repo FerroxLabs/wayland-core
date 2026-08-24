@@ -385,23 +385,41 @@ test-group = 'native-windows-live'
 #     crates/wcore-swarm/src/worktree_tests/linux.rs -- it now polls for a
 #     parseable PID. That fix, not this override, is what closed it.
 #
-#   * worker_writes_heartbeat_during_long_running_task IS genuine starvation, and
-#     is why this override exists. It polls every 40ms and must observe >=3
-#     DISTINCT heartbeats from a worker emitting them 150ms apart over a ~450ms
-#     life. Miss enough 40ms ticks and the observation count comes up short even
-#     though the worker behaved perfectly. Nothing in the test's logic is wrong;
-#     it just has to be scheduled to see what it is watching.
+#   * worker_writes_heartbeat_during_long_running_task was read as genuine
+#     starvation, and that reading is what this override was written for. It
+#     was described as: polls every 40ms, must observe >=3 DISTINCT heartbeats
+#     from a worker emitting them 150ms apart over a ~450ms life, so missing
+#     enough 40ms ticks makes the count come up short even though the worker
+#     behaved perfectly.
 #
-# `threads-required` is the lever that matches THAT cause. A test-group with
-# `max-threads` would not: groups bound concurrency WITHIN the group, and the
-# pressure comes from the other ~13,450 tests in the run. `threads-required`
-# reserves slots from the global pool for the test's duration, which is exactly
-# the contended resource.
+# CORRECTION, 2026-08-23 (wayland#1114). That mechanism is no longer real, and
+# a comment describing a mechanism that is not real is worse than no comment.
+# `695ce601` -- test(swarm): rendezvous the heartbeat e2e instead of sampling it
+# (#286), an ancestor of the current main -- rewrote the test. The worker now
+# BLOCKS on an ack file the observer writes after reading each heartbeat, and
+# the observer polls at 10ms, not 40ms. No heartbeat can be emitted inside a
+# poll gap any more, however badly either side is scheduled, so the sample-and-
+# hope window the paragraph above describes cannot open. The test file says so
+# itself, in the comment beside the ack loop.
 #
-# Scoped to the whole package deliberately. wcore-swarm is 150 tests that finish
-# in 2.2s, so reserving capacity across all of them is close to free, and this
-# crate is where the observe-a-live-process tests live. Cheaper than a gate people
-# learn to re-run until it is green.
+# So BOTH failures recorded above are now fixed at source, and neither of them
+# is evidence for this override today. Note also what was never measured: no
+# scheduler delay was ever observed. "Passes alone, fails in the suite" is
+# equally consistent with any load-widened window -- which is exactly what the
+# sibling failure turned out to be.
+#
+# The override is KEPT, and this is the reason, stated as what it is rather than
+# borrowed from a dead diagnosis: removing it is itself an unmeasured scheduling
+# change, and it costs almost nothing. Measured on hetzner-dsm at v0.13.5:
+# wcore-swarm alone is 157 tests in 4.1s, all passing. `threads-required`
+# reserves slots from the global pool for the test's duration (a test-group with
+# `max-threads` would not -- groups bound concurrency WITHIN the group, and the
+# pressure comes from the other ~13,450 tests in the run).
+#
+# TRIGGER FOR REMOVAL, so this does not just decay into permanence: delete this
+# override the next time anyone runs the full `--profile ci` suite three times
+# with it removed and sees wcore-swarm clean in all three. That is a smaller
+# experiment than the one that installed it.
 #
 # This is a SCHEDULING change only. No test, assertion, timeout, or selector is
 # added, removed, or loosened -- a starved test still fails, it just is not

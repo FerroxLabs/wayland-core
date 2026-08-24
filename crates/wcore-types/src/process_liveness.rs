@@ -127,6 +127,48 @@ pub fn proc_stat_state_is_corpse(state: char) -> bool {
     matches!(state, 'Z' | 'X' | 'x')
 }
 
+/// The errno procfs answers a *read* with once the task behind an already-open
+/// `/proc/<pid>/stat` has exited. Spelled out rather than taken from `libc`
+/// because this classifier is compiled on every platform so it can be unit
+/// tested without a Linux host, exactly like [`proc_stat_state_char`];
+/// `esrch_is_the_value_libc_names` pins the literal against `libc::ESRCH` on
+/// every unix build.
+const PROC_STAT_TASK_GONE_ERRNO: i32 = 3; // ESRCH
+
+/// Does an error from reading `/proc/<pid>/stat` mean the task is **gone**, as
+/// opposed to present but unreadable?
+///
+/// Reading that file is `open` followed by `read`, and the two syscalls report
+/// a vanished task with DIFFERENT errnos:
+///
+/// | when the task went away | syscall that fails | errno | `ErrorKind` |
+/// |---|---|---|---|
+/// | before `open` | `open` | `ENOENT` (2) | `NotFound` |
+/// | between `open` and `read` | `read` | `ESRCH` (3) | **not** `NotFound` |
+///
+/// Only the first is `ErrorKind::NotFound`, so an `ErrorKind`-only test misses
+/// the second — and the second is the one a caller enumerating a busy `/proc`
+/// actually hits, because it opens and reads every entry in turn while
+/// unrelated processes on the host are exiting. #1114: classifying `ESRCH` as
+/// "could not look" made [`process_group_census`] return `Indeterminate` — a
+/// hard refusal that no retry softens — whenever ANY process exited inside its
+/// scan, so the containment gate refused for a reason that had nothing to do
+/// with the group it was asked about.
+///
+/// Everything else — `EACCES` (`hidepid`), `EPERM`, `EIO` — is genuinely
+/// "could not look" and must NOT be classified as gone. Skipping an unreadable
+/// entry can only UNDERcount, and undercounting is the direction that fakes an
+/// empty group.
+///
+/// `ESRCH` cannot come back for a task that still exists: an unreaped zombie
+/// still has a readable `stat` (that is how its `Z` state is observed at all),
+/// so the errno appears only once the task struct is freed. Treating it as
+/// gone therefore cannot hide a live member.
+pub fn proc_stat_read_error_means_gone(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        || error.raw_os_error() == Some(PROC_STAT_TASK_GONE_ERRNO)
+}
+
 /// Extract `(state, pgrp)` from a Linux `/proc/<pid>/stat` line.
 ///
 /// Same right-to-left scan as [`proc_stat_state_char`], for the same reason:
@@ -194,11 +236,27 @@ pub fn process_group_census(pgid: u32) -> ProcessGroupCensus {
 #[cfg(target_os = "linux")]
 mod platform {
     use super::{
-        ProcessGroupCensus, ProcessLiveness, proc_stat_state_and_pgrp, proc_stat_state_char,
-        proc_stat_state_is_corpse,
+        ProcessGroupCensus, ProcessLiveness, proc_stat_read_error_means_gone,
+        proc_stat_state_and_pgrp, proc_stat_state_char, proc_stat_state_is_corpse,
     };
 
     pub(super) fn liveness(pid: u32) -> ProcessLiveness {
+        liveness_with(pid, |pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        })
+    }
+
+    /// [`liveness`] with the `/proc/<pid>/stat` read supplied by the caller.
+    ///
+    /// The seam exists because the failure this function has to classify — the
+    /// task exiting between the `open` and the `read` — cannot be scheduled on
+    /// demand from outside the process. Without it the errno classification is
+    /// gradeable but its WIRING here is not, and a guard that is unit-tested
+    /// while its call site is not is how #1114 shipped in the first place.
+    pub(super) fn liveness_with(
+        pid: u32,
+        read_stat: impl Fn(u32) -> std::io::Result<String>,
+    ) -> ProcessLiveness {
         // Step 1: does the pid resolve to anything at all?
         //
         // SAFETY: signal 0 delivers nothing; it performs only the kernel's
@@ -214,7 +272,7 @@ mod platform {
 
         // Step 2: it resolves — but `kill` says 0 for a zombie too, so the
         // state character is the part that actually answers the question.
-        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        match read_stat(pid) {
             Ok(stat) => match proc_stat_state_char(&stat) {
                 Some(state) if proc_stat_state_is_corpse(state) => ProcessLiveness::Dead,
                 Some(_) => ProcessLiveness::Live,
@@ -224,10 +282,11 @@ mod platform {
                 // guess is a measurement.
                 None => ProcessLiveness::Indeterminate,
             },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // Reaped between the two syscalls.
-                ProcessLiveness::Dead
-            }
+            // Gone between the `kill(pid, 0)` above and this read: `ENOENT` if
+            // `open` lost the race, `ESRCH` if `read` did. Both mean the task
+            // no longer exists, and only the first is `ErrorKind::NotFound` —
+            // see `proc_stat_read_error_means_gone` (#1114).
+            Err(error) if proc_stat_read_error_means_gone(&error) => ProcessLiveness::Dead,
             // `hidepid`, a restricted /proc mount, or a PID namespace we
             // cannot see into: the process exists, its state does not.
             Err(_) => ProcessLiveness::Indeterminate,
@@ -235,6 +294,20 @@ mod platform {
     }
 
     pub(super) fn group_census(pgid: u32) -> ProcessGroupCensus {
+        group_census_with(pgid, |pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        })
+    }
+
+    /// [`group_census`] with the per-entry `/proc/<pid>/stat` read supplied by
+    /// the caller. See [`liveness_with`] for why the seam exists: the race this
+    /// classifies cannot be scheduled from outside the process, so the only way
+    /// to grade the CALL SITE — rather than just the classifier it calls — is
+    /// to hand it the error the kernel would have produced.
+    pub(super) fn group_census_with(
+        pgid: u32,
+        read_stat: impl Fn(&str) -> std::io::Result<String>,
+    ) -> ProcessGroupCensus {
         let entries = match std::fs::read_dir("/proc") {
             Ok(entries) => entries,
             Err(error) => {
@@ -260,12 +333,17 @@ mod platform {
             if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
                 continue;
             }
-            let stat = match std::fs::read_to_string(format!("/proc/{name}/stat")) {
+            let stat = match read_stat(name) {
                 Ok(stat) => stat,
-                // Exited and was reaped between `read_dir` and this read. A
-                // process that no longer exists is not a containment failure.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                // ANY other error is "could not look", and must never be
+                // Exited between `read_dir` and this read. A process that no
+                // longer exists is not a containment failure — and on a busy
+                // host it is the NORMAL outcome of scanning every `/proc`
+                // entry, because unrelated processes exit while the scan runs.
+                // `ENOENT` when `open` lost the race, `ESRCH` when `read` did;
+                // an `ErrorKind::NotFound` test alone sees only the first and
+                // sent the second down the refusal arm below (#1114).
+                Err(error) if proc_stat_read_error_means_gone(&error) => continue,
+                // Every REMAINING error is "could not look", and must never be
                 // recorded as "nothing was there".
                 //
                 // This is the exact shape the whole module exists to refuse.
@@ -887,6 +965,202 @@ mod tests {
             process_group_census(0),
             ProcessGroupCensus::Indeterminate(_)
         ));
+    }
+
+    // -- #1114: how procfs spells "the task is gone" ------------------------
+
+    /// The classifier that both `/proc` readers share. Graded here rather than
+    /// at either call site because a race between `open` and `read` cannot be
+    /// forced on demand — so the decision is made in one testable place and the
+    /// two call sites do nothing but ask it.
+    #[test]
+    fn a_vanished_task_is_gone_however_procfs_spells_it() {
+        use std::io::{Error, ErrorKind};
+
+        // `open` lost the race: the /proc/<pid> directory was already gone.
+        let enoent = Error::from_raw_os_error(2);
+        assert_eq!(enoent.kind(), ErrorKind::NotFound);
+        assert!(proc_stat_read_error_means_gone(&enoent));
+
+        // `read` lost the race: the descriptor was opened while the task was
+        // alive and the task exited before the read. THIS is the one an
+        // `ErrorKind::NotFound` test misses, and the one #1114 was filed for.
+        let esrch = Error::from_raw_os_error(PROC_STAT_TASK_GONE_ERRNO);
+        assert_ne!(
+            esrch.kind(),
+            ErrorKind::NotFound,
+            "if ESRCH ever became NotFound this classifier could be simplified — \
+             until then, an ErrorKind-only test is incomplete by construction"
+        );
+        assert!(proc_stat_read_error_means_gone(&esrch));
+
+        // Present but unreadable. Classifying any of these as gone would let a
+        // census UNDERcount, which is the direction that fakes an empty group.
+        for (errno, why) in [(13, "EACCES / hidepid"), (1, "EPERM"), (5, "EIO")] {
+            let error = Error::from_raw_os_error(errno);
+            assert!(
+                !proc_stat_read_error_means_gone(&error),
+                "{why} means the entry could not be LOOKED at, not that it was absent"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn esrch_is_the_value_libc_names() {
+        // The literal exists so the classifier compiles on Windows too. It is
+        // still the platform's number.
+        assert_eq!(PROC_STAT_TASK_GONE_ERRNO, libc::ESRCH);
+    }
+
+    /// The platform fact the fix rests on, measured rather than assumed: a
+    /// task that exits under an already-open `/proc/<pid>/stat` fails the READ
+    /// with `ESRCH`, and `ESRCH` is not `ErrorKind::NotFound`.
+    ///
+    /// This reproduces the exact error `process_group_census` receives when an
+    /// unrelated process exits inside its scan — the failure reported in #1114
+    /// (`/proc/1624588/stat could not be read (No such process)`). The product
+    /// reads with `fs::read_to_string`, which is this same `open` then `read`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_task_that_exits_under_an_open_proc_stat_answers_esrch_not_not_found() {
+        use std::io::Read;
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a task to hold open");
+        let mut held = std::fs::File::open(format!("/proc/{}/stat", child.id()))
+            .expect("the live task's stat must open");
+        child.kill().expect("kill");
+        child.wait().expect("reap");
+
+        let mut buf = String::new();
+        let error = held
+            .read_to_string(&mut buf)
+            .expect_err("a reaped task cannot still answer its own stat read");
+
+        assert_eq!(
+            error.raw_os_error(),
+            Some(libc::ESRCH),
+            "the kernel answers a post-exit stat read with ESRCH; got {error:?}"
+        );
+        assert_ne!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "this is precisely why an ErrorKind::NotFound guard missed it"
+        );
+        assert!(
+            proc_stat_read_error_means_gone(&error),
+            "the classifier must recognise the real error the kernel produces, \
+             not only the synthetic one built from a raw errno"
+        );
+    }
+
+    /// Both `/proc` call sites, graded with the error the kernel would have
+    /// produced. The race itself cannot be scheduled from outside the process,
+    /// so the read is injected instead — see `liveness_with` /
+    /// `group_census_with`.
+    ///
+    /// Each assertion is paired with its opposite polarity: `ESRCH` must be
+    /// absorbed and `EACCES` must still refuse. Widening one without pinning
+    /// the other is how a census stops being able to report a survivor.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn both_proc_call_sites_absorb_esrch_and_still_refuse_an_unreadable_entry() {
+        use super::platform::{group_census_with, liveness_with};
+
+        let real = |pid: u32| std::fs::read_to_string(format!("/proc/{pid}/stat"));
+        let me = std::process::id();
+
+        // CONTROL: with the real reader this pid is alive, so a `Dead` below is
+        // the injected error being classified and not a broken probe.
+        assert_eq!(liveness_with(me, real), ProcessLiveness::Live);
+
+        // `read` lost the race with an exit. The task is gone.
+        assert_eq!(
+            liveness_with(me, |_| Err(std::io::Error::from_raw_os_error(
+                PROC_STAT_TASK_GONE_ERRNO
+            ))),
+            ProcessLiveness::Dead,
+            "ESRCH from the stat read means the task struct was freed"
+        );
+        // `hidepid` / EACCES is NOT gone: the process is there and unreadable.
+        assert_eq!(
+            liveness_with(me, |_| Err(std::io::Error::from_raw_os_error(13))),
+            ProcessLiveness::Indeterminate,
+            "an unreadable entry must never be reported as absent"
+        );
+
+        // SAFETY: `getpgid(0)` reads the caller's own group id, no pointers.
+        let mine = unsafe { libc::getpgid(0) } as u32;
+        let real_group = |pid: &str| std::fs::read_to_string(format!("/proc/{pid}/stat"));
+
+        // CONTROL: the group is measurable, and holds at least this process.
+        let baseline = match group_census_with(mine, real_group) {
+            ProcessGroupCensus::Live(n) if n >= 1 => n,
+            other => panic!("control: our own group must census as Live(>=1), got {other:?}"),
+        };
+
+        // One UNRELATED entry vanishes mid-read. This is the whole of #1114:
+        // the census enumerates all of /proc, so any process on the host
+        // exiting inside the scan lands here, and before the fix it turned a
+        // perfectly good measurement into a refusal.
+        let victim = pick_a_pid_outside(mine);
+        let vanishing = |pid: &str| {
+            if pid == victim {
+                return Err(std::io::Error::from_raw_os_error(PROC_STAT_TASK_GONE_ERRNO));
+            }
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        };
+        assert_eq!(
+            group_census_with(mine, vanishing),
+            ProcessGroupCensus::Live(baseline),
+            "an unrelated pid exiting mid-scan must not defeat the census"
+        );
+
+        // The paired negative control: an entry that could not be LOOKED at
+        // still refuses, because skipping it could only undercount.
+        let unreadable = |pid: &str| {
+            if pid == victim {
+                return Err(std::io::Error::from_raw_os_error(13));
+            }
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        };
+        assert!(
+            matches!(
+                group_census_with(mine, unreadable),
+                ProcessGroupCensus::Indeterminate(_)
+            ),
+            "an entry that cannot be read must still defeat the census"
+        );
+    }
+
+    /// A real `/proc` entry that is neither this process nor in `exclude_group`,
+    /// so injecting a failure for it cannot change the group's own count.
+    #[cfg(target_os = "linux")]
+    fn pick_a_pid_outside(exclude_group: u32) -> String {
+        let me = std::process::id();
+        for entry in std::fs::read_dir("/proc").expect("read /proc").flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Ok(pid) = name.parse::<u32>() else {
+                continue;
+            };
+            if pid == me {
+                continue;
+            }
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                continue;
+            };
+            let Some((_, group)) = proc_stat_state_and_pgrp(&stat) else {
+                continue;
+            };
+            if group != i64::from(exclude_group) {
+                return name.to_owned();
+            }
+        }
+        panic!("no /proc entry outside group {exclude_group}; the fixture cannot be built");
     }
 
     #[test]
