@@ -2327,8 +2327,15 @@ fn workspace_whose_walk_costs_at_least(
     let policy = std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::contained(root));
 
     for batch in 0..24usize {
+        // #1111: each sample walks through a FRESH policy. The exec path is
+        // memoised now, so re-asking the SAME policy would report ~0 for every
+        // sample after the first, this loop would grow the tree for ever, and
+        // the callers' latency budgets would be derived from a walk cost that
+        // does not exist. A fresh policy is also the honest instrument: what
+        // these tests bound is the COLD walk a first execution pays.
         let started = std::time::Instant::now();
-        let deny = policy.secret_deny_paths_for_backend(true);
+        let deny = crate::workspace_policy::WorkspacePolicy::contained(root)
+            .secret_deny_paths_for_backend(true);
         let walk = started.elapsed();
         // Known-positive control on the instrument itself: if the walk stopped
         // finding the planted `.env`, a cheap `walk` would mean "the walk was
@@ -2360,7 +2367,8 @@ fn workspace_whose_walk_costs_at_least(
             let mut floor = walk;
             for _ in 0..2 {
                 let started = std::time::Instant::now();
-                let deny = policy.secret_deny_paths_for_backend(true);
+                let deny = crate::workspace_policy::WorkspacePolicy::contained(root)
+                    .secret_deny_paths_for_backend(true);
                 floor = floor.min(started.elapsed());
                 assert!(
                     deny.iter().any(|p| p.ends_with(".env")),

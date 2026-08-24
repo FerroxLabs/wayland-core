@@ -335,6 +335,17 @@ pub fn govern_standalone_spawner(
     // unwired site. `declare_root_parent_tool_authority` cannot widen, so a
     // spawner that arrives here already narrowed keeps its tighter envelope.
     spawner.declare_root_parent_tool_authority();
+    // #1118 — a one-shot CLI driver (`crucible`, `workflow run`, an Anvil seat)
+    // is the local operator at their own keyboard: it has no channel/remote
+    // posture to carry. Derived from the SAME predicate the session path uses,
+    // so the standalone lane and the session lane cannot drift, and still
+    // withheld under a Managed execution floor.
+    spawner.inherit_shell_principal(
+        wcore_tools::workspace_policy::local_operator_shell_principal(
+            false,
+            config.execution_policy.is_managed(),
+        ),
+    );
     durable_authority.bind_fresh(active.journal, &session_id)?;
     Ok(spawner)
 }
@@ -3228,6 +3239,14 @@ impl AgentBootstrap {
                     ),
                 ));
             }
+            // #1118 — hand the spawner the principal this policy just decided,
+            // so a delegated child inherits it instead of falling to the strict
+            // default and losing its shell on a backend that enforces nothing.
+            // Inside this block on purpose: when another layer installed the
+            // policy first (channel tools, a nested spawner) this never runs and
+            // the spawner keeps `false`, which is the correct answer for exactly
+            // those shapes.
+            spawner.inherit_shell_principal(policy.local_operator_principal());
             registry.set_workspace_policy(policy);
         }
 
