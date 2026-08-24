@@ -117,6 +117,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The CI gates guard the product; this guards the gates. `report` is a
+      # required status context and it used to go GREEN on a suite that never
+      # ran (wayland#1115), so the evidence gate and its wiring get tests of
+      # their own — cheap, no toolchain, and they fail fast if someone deletes
+      # the step or renames a report job back into a collision.
+      - name: Self-test the CI evidence gates
+        run: |
+          bash .github/scripts/tests/assert-test-evidence.test.sh
+          bash .github/scripts/tests/report-gate-wiring.test.sh
+
       # Same disk reclaim the ci.yml Linux legs use — a full --all-targets
       # clippy of this 54-crate workspace does not fit in the default free space.
       - name: Free disk space (drop unused preinstalled toolchains)

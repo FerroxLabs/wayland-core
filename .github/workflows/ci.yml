@@ -1997,6 +1997,13 @@ jobs:
 
   # ── Annotate PR / commit with test results ────────────────────────────
   report:
+    # EXPLICIT, because `report` is a required status context on main and a job
+    # id doubles as the check name only until someone renames the job. e2e.yml
+    # used to define a second job with id `report` and no `name:`, so two
+    # workflows emitted the same check name and the required context did not
+    # identify what had passed (wayland#1115). That one is now `E2E report`;
+    # this is the sole producer of `report` and says so.
+    name: report
     needs: ci
     if: always()
     runs-on: ubuntu-latest
@@ -2059,20 +2066,27 @@ jobs:
       # rather than quieter. It is skipped only on a CANCELLED `ci` — a run the
       # user or the concurrency gate stopped was never going to produce evidence
       # and should not be re-reported as a defect.
+      #
+      # The body now lives in .github/scripts/assert-test-evidence.sh and is
+      # shared with e2e.yml's report job. It was inline here and simply ABSENT
+      # there, which is how e2e.yml's identically named `report` check went
+      # green on a suite that never ran (wayland#1115). One implementation, two
+      # callers, no room to diverge again. EXPECTED_MIN stays at 1 — the same
+      # "zero reports is a failure" rule this step has always enforced; the ci
+      # matrix legs are conditioned per platform, so a per-leg count would be a
+      # different (and riskier) gate than the one being preserved here.
       - name: Assert test evidence exists (a skipped test step is not a pass)
         if: ${{ needs.ci.result != 'cancelled' && needs.ci.result != 'skipped' }}
-        run: |
-          set -euo pipefail
-          mkdir -p junit-reports
-          FOUND=$(find junit-reports -type f -name '*.xml' | sort)
-          COUNT=$(printf '%s' "$FOUND" | grep -c . || true)
-          echo "ci job result      : ${{ needs.ci.result }}"
-          echo "junit report count : $COUNT"
-          printf '%s\n' "$FOUND"
-          if [ "$COUNT" -eq 0 ]; then
-            echo "::error title=NO TEST SIGNAL::The ci matrix produced zero nextest JUnit reports, so no test ran on any leg. The ci job result was '${{ needs.ci.result }}'. A leg that dies before its test step (for example at the Clippy step) leaves no artifact, and without this check the report job would have gone GREEN on zero tests. See .planning/lanes/fix-clippy-gate/NOTES.md."
-            exit 1
-          fi
+        env:
+          EVIDENCE_DIR: junit-reports
+          EXPECTED_MIN: 1
+          LABEL: ci matrix (unit + integration)
+          UPSTREAM_RESULT: ${{ needs.ci.result }}
+          HINT: >-
+            A leg that dies before its test step (for example at the Clippy
+            step) leaves no artifact. See
+            .planning/lanes/fix-clippy-gate/NOTES.md.
+        run: bash .github/scripts/assert-test-evidence.sh
 
       - name: Publish test report
         uses: dorny/test-reporter@v3
