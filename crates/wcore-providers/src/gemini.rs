@@ -93,8 +93,10 @@ impl GeminiProvider {
 
     /// Select the API key to authenticate the next request. Delegates to
     /// [`KeyPool::next_key`] (prefers the last-good key, rotates round-robin on
-    /// failure, skips keys in cooldown). Returns [`ProviderError::MissingApiKey`]
-    /// when no key is configured or every key is cooling.
+    /// failure, deprioritises keys in cooldown). Returns
+    /// [`ProviderError::MissingApiKey`] only when no key is CONFIGURED — a
+    /// pool where every key is cooling still yields one, so a 429 cannot read
+    /// as a missing credential. See [`crate::key_rotation::KeyPool::next_key`].
     fn select_key(&self) -> Result<String, ProviderError> {
         // F19: recover the guard on poison instead of cascade-panicking —
         // KeyPool stays valid across a prior panic, so a transient fault must

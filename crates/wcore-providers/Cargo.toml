@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 wcore-types.workspace  = true
 wcore-config.workspace = true
+rand.workspace        = true
 
 tokio.workspace        = true
 futures.workspace      = true

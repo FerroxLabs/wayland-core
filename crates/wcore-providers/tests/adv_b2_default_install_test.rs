@@ -108,10 +108,20 @@ async fn default_install_rejected_request_still_fails_fast() {
     );
 }
 
-/// Rate limit (429), default install. A 429 is a rejected request: re-issuing
-/// burns the same quota that is already exhausted.
+/// Rate limit (429), default install. REVISED with
+/// `resilient::tests::open_circuit_without_fallback_still_probes_a_rate_limited_provider`:
+/// this used to assert that a 429 fails fast, on the grounds that re-issuing
+/// burns exhausted quota. A 429 is refused before the model runs, the engine
+/// waits out the provider's own `Retry-After` between sends, and failing fast
+/// here cost the run its retry budget three sends in — measured, both 429
+/// shapes stopped at 3 sends against a budget of 10 and reported an open
+/// circuit to a user who was over quota.
+///
+/// `default_install_rejected_request_still_fails_fast` (403) is the control
+/// directly above: the genuinely REJECTED classes must still refuse, so this
+/// change is scoped to "come back later" and not a removal of fail-fast.
 #[tokio::test(flavor = "multi_thread")]
-async fn default_install_rate_limit_still_fails_fast() {
+async fn default_install_rate_limit_keeps_probing() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(429).set_body_string("{\"error\":\"rate limit\"}"))
@@ -125,9 +135,24 @@ async fn default_install_rate_limit_still_fails_fast() {
         .iter()
         .filter(|r| matches!(r, Err(ProviderError::NotAttempted { .. })))
         .count();
-    assert!(
-        not_attempted > 0,
-        "a 429 must still fail fast on a default install; saw {results:?}"
+    assert_eq!(
+        not_attempted, 0,
+        "an open circuit with nowhere else to route must keep probing a \
+         rate-limited provider rather than refusing; saw {results:?}"
+    );
+    // Known-positive: the drive really did meet 429s, so the assertion above
+    // is not passing on an empty result set.
+    let rate_limited = results
+        .iter()
+        .filter(|r| {
+            matches!(r, Err(ProviderError::RateLimited { .. }))
+                || matches!(r, Err(ProviderError::Api { status: 429, .. }))
+        })
+        .count();
+    assert_eq!(
+        rate_limited,
+        results.len(),
+        "every drive must have come back rate-limited; saw {results:?}"
     );
 }
 

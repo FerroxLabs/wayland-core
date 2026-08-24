@@ -1457,11 +1457,199 @@ fn is_unserved_request_failure(failure_code: &str) -> bool {
 ///
 /// Scoped to name resolution alone. `connection_refused` is NOT here — a port
 /// that refuses today can accept in a second (a provider rolling a listener) —
-/// it is merely no longer admitted to the outage WINDOW, so it keeps the
-/// ordinary bounded `MAX_STREAM_RETRIES`. Anything unrecognised keeps the old
-/// generous behaviour; see `wcore_providers::retry::connect_failure_code`.
+/// it is not permanent, it is merely CHEAP to give up on: see
+/// [`is_refused_endpoint_failure`] and [`REFUSED_ENDPOINT_MAX_RETRIES`].
+/// Anything unrecognised keeps the ordinary budget; see
+/// `wcore_providers::retry::connect_failure_code`.
 fn is_permanent_endpoint_failure(failure_code: &str) -> bool {
     failure_code == wcore_providers::retry::FAILURE_DNS
+}
+
+/// True when the configured endpoint actively REFUSED the connection: the
+/// host resolved, the route worked, and something at the other end answered
+/// the SYN with a RST.
+///
+/// A refusal is not permanent — [`is_permanent_endpoint_failure`] is the
+/// right home for a fact that cannot change, and a listener being rolled
+/// (Ollama restarting, a dev proxy re-execing) refuses for a second or two
+/// and then accepts. It gets its own SHORT budget rather than no budget:
+/// [`REFUSED_ENDPOINT_MAX_RETRIES`].
+fn is_refused_endpoint_failure(failure_code: &str) -> bool {
+    failure_code == wcore_providers::retry::FAILURE_CONNECTION_REFUSED
+}
+
+/// Retries admitted for an actively refused connection, in place of the
+/// configured [`DEFAULT_MAX_STREAM_RETRIES`].
+///
+/// ## Why this class needs its own number
+///
+/// A retry budget buys the chance that the next send gets a different answer.
+/// What it costs is wall-clock the user spends staring at a stalled prompt,
+/// and that price is set by how FAST the class fails. A refused connection
+/// fails in about a millisecond, so essentially the entire budget is spent
+/// asleep in the backoff curve: at the shipped budget of 10 the run is
+/// silent for a measured 142.9 s across 11 sends, and 142.5 s of that is
+/// sleep. Every other retryable class pays for its wall-clock with a real
+/// network attempt.
+///
+/// The chance being bought is also the thinnest in the retryable set. A RST
+/// is a definite answer from the machine at the far end: nothing is
+/// listening on that port. That heals only if a listener starts, which is a
+/// second-scale event (a process restarting) or a never event (the port in
+/// `base_url` is wrong). Two retries cover the first; no budget covers the
+/// second, and the overwhelmingly common trigger — measured against this
+/// product's own defaults, a `base_url` typo — is the second.
+///
+/// ## Why 2, and why it is not a reclassification
+///
+/// 2 retries = 3 sends, spanning `0.5 s + 1.0 s` of curve — a measured 1.9 s.
+/// That is the behaviour v0.13.5 shipped for this shape (1.8 s / 3 sends),
+/// chosen deliberately then and preserved here. The change that made it
+/// intolerable was the retry budget going 2 -> 10, which moved the cost of
+/// this one class by 80x while leaving its benefit exactly where it was.
+///
+/// The alternative — adding `connection_refused` to
+/// [`is_permanent_endpoint_failure`] — is refused on the evidence: it would
+/// send ONCE, and a local provider restarting really does recover inside
+/// two retries. Keeping the class retryable and bounding it separately is
+/// the honest encoding of "cheap to abandon, not impossible to recover".
+const REFUSED_ENDPOINT_MAX_RETRIES: u32 = 2;
+
+/// The sentence the run ends on when the provider retry budget is spent.
+///
+/// Leads with the fault the USER can act on. "Provider stream failed after
+/// retries: API error 500" reads as a provider outage; for an auth refusal it
+/// is the key that is wrong and the 500 is incidental. The provider's own
+/// words are kept, in parentheses, because they are the evidence for the
+/// claim.
+///
+/// The ordering is by specificity, and every branch above the fallback exists
+/// because a real run ended on a sentence that named a CONSEQUENCE instead of
+/// a cause — a rate limit reported as an open circuit, a rate limit reported
+/// as a missing API key, a `base_url` typo reported as a provider outage.
+fn exhausted_provider_remedy(
+    failure_code: &str,
+    reason: &str,
+    sends: u32,
+    permanent_endpoint: bool,
+    is_auth_failure: bool,
+) -> String {
+    if permanent_endpoint {
+        // Name the remedy, in the shape the no-API-key error already uses:
+        // what is wrong, and the exact setting to change. The URL itself is
+        // deliberately NOT echoed — a provider may carry its credential in
+        // the query string (H-2), and the config key is what the user edits
+        // anyway.
+        format!(
+            "Cannot reach the configured provider: the endpoint host name does not resolve. \
+             That is a permanent failure — every re-send gets the same answer — so the run \
+             stopped after {sends} attempt(s) instead of spending the {budget}s \
+             provider-outage budget on it. Check `base_url` for the selected provider in your \
+             wayland-core config (or the `--base-url` you passed), then check DNS on this \
+             host. The session has been saved — resume it once the endpoint is right. \
+             (underlying error: {reason})",
+            budget = UNSERVED_OUTAGE_BUDGET.as_secs(),
+        )
+    } else if is_auth_failure {
+        format!("{AUTH_FAILURE_REMEDY} The provider reported: {reason}")
+    } else if is_refused_endpoint_failure(failure_code) {
+        // Same shape as the DNS remedy above: name the fault, the setting
+        // that carries it, and why the run stopped early rather than
+        // spending the full budget.
+        format!(
+            "Cannot reach the configured provider: the endpoint refused the connection. The \
+             host resolved and the route worked, so something answered — nothing is listening \
+             on that port. The run stopped after {sends} attempt(s) rather than spending the \
+             full retry budget on it, because a refusal is answered in a millisecond and \
+             re-sending mostly buys silence. Check the port in `base_url` for the selected \
+             provider in your wayland-core config (or the `--base-url` you passed), and check \
+             that the provider is running if it is a local one. The session has been saved — \
+             resume it once the endpoint is right. (underlying error: {reason})"
+        )
+    } else if failure_code == wcore_providers::retry::FAILURE_RATE_LIMITED {
+        // Name the RATE LIMIT. Everything downstream of a 429 — the breaker
+        // opening, the budget running out — is a consequence, and a user
+        // told about a consequence has no idea what to change. This is the
+        // same defect class as the 429 that used to end the run claiming
+        // there was no API key.
+        format!(
+            "The provider rate-limited this request (HTTP 429) and was still rate-limiting it \
+             after {sends} attempt(s), honouring the wait it asked for each time. This is not \
+             an outage and nothing is misconfigured — the account or key is over its quota. \
+             Wait for the limit to reset, use a key with more headroom, or configure a \
+             fallback provider so the run can route around a throttled one. The session has \
+             been saved — resume it to continue from here rather than starting over. (the \
+             provider reported: {reason})"
+        )
+    } else {
+        format!(
+            "Provider stream failed after retries: {reason}. The session has been saved — \
+             resume it to continue from here rather than starting over."
+        )
+    }
+}
+
+/// Count bound in force for ONE failure class, given the configured budget.
+///
+/// Every class keeps `configured` except an actively refused connection,
+/// which is capped at [`REFUSED_ENDPOINT_MAX_RETRIES`]. The `min` matters:
+/// a user who LOWERED the budget must never be handed a larger one by this
+/// branch, and a naive `if refused { 2 }` would do exactly that at
+/// `WAYLAND_MAX_STREAM_RETRIES=0`.
+fn class_retry_budget(failure_code: &str, configured: u32) -> u32 {
+    if is_refused_endpoint_failure(failure_code) {
+        configured.min(REFUSED_ENDPOINT_MAX_RETRIES)
+    } else {
+        configured
+    }
+}
+
+/// Whether one more engine retry is admitted.
+///
+/// Two bounds, ANDed, and they no longer fight because they bound different
+/// failure SHAPES.
+///
+/// The COUNT bounds a class that fails fast: an `http_503` answers in
+/// milliseconds, so with only the window in force, 900 s admits as many
+/// sends as fit — a measured 39 against a stated budget of 10, while every
+/// notice printed a budget it was not counting against. "attempt N/10" has
+/// to mean what it says.
+///
+/// The WINDOW bounds a class that fails SLOWLY: a `transport` failure can
+/// take a full `READ_TIMEOUT` to surface, and ten of those is fifty minutes.
+///
+/// The earlier design note argued a count was simply the wrong unit here,
+/// and against the budget it was written for that was true:
+/// `MAX_STREAM_RETRIES` was 2 and spanned 1.5 s, shorter than one TCP
+/// re-establishment, so a count could not express "ride out an outage" at
+/// all. The curve in `wcore_providers::backoff` dissolved that objection —
+/// at a budget of 10 the count spans ~143 s of backoff on its own. Whichever
+/// bound fires first wins; neither is redundant.
+fn stream_retry_admitted(
+    unserved: bool,
+    stream_attempt: u32,
+    class_max_retries: u32,
+    outage_window_open: bool,
+) -> bool {
+    stream_attempt < class_max_retries && (!unserved || outage_window_open)
+}
+
+/// True when the failure code says a response HEAD arrived — the provider
+/// answered, even if the answer was a refusal.
+///
+/// Deliberately separate from [`is_unserved_request_failure`], which answers
+/// the retry question ("can another send get a different result?"). This
+/// answers the billing question ("did we ever hear back?"), and the two
+/// disagree on exactly the codes that matter: `http_503` and `http_529` are
+/// admitted to the outage window AND carry a response head.
+///
+/// Every status-derived code is emitted as `http_<status>` by
+/// `wcore_providers::retry`; the connect- and transport-phase codes
+/// (`dns_failure`, `connection_refused`, `connection`, `transport`) never take
+/// that shape, which is what makes the prefix a sound test rather than a
+/// convenient one.
+fn carried_a_response_head(failure_code: &str) -> bool {
+    failure_code.starts_with("http_")
 }
 
 /// Wall-clock window over which the engine keeps re-issuing a request the
@@ -1542,38 +1730,19 @@ const UNSERVED_OUTAGE_BUDGET: std::time::Duration = std::time::Duration::from_se
         * wcore_config::config::DEFAULT_FAILURE_THRESHOLD as u64,
 );
 
-/// Ceiling on the gap between two re-sends of an unserved request, and so also
-/// the worst-case delay between the provider healing and the run noticing.
+/// The engine's retry schedule is [`wcore_providers::backoff`], shared with
+/// the provider crate's own retry rings so one curve governs every retryable
+/// class. Two local schedules used to live here — linear `500 ms * n` for
+/// served failures and a separate doubling one for unserved — and they are
+/// indistinguishable at the default budget (0.5 s then 1.0 s either way), so
+/// the split bought nothing where it was observable and diverged into a send
+/// loop where it was not.
 ///
-/// Bound to [`DEFAULT_RECOVERY_TIMEOUT_SECS`] (30 s) — the breaker's own
-/// cooldown base — so the engine never probes a wedged endpoint faster than
-/// the component whose job is to protect it would. Bound rather than copied:
-/// a bare `30` here could drift from the breaker it claims to pace.
-const UNSERVED_RETRY_BACKOFF_CAP: std::time::Duration =
-    std::time::Duration::from_secs(wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS);
-
-/// Backoff before re-issuing a request the provider never served: doubling
-/// from 500 ms, capped at [`UNSERVED_RETRY_BACKOFF_CAP`]. `attempt` is 1-based.
-///
-/// Doubling rather than the linear step used for served failures because this
-/// schedule has to cover a window three orders of magnitude longer than the
-/// first interval without turning it into a send loop.
-fn unserved_retry_backoff(attempt: u32) -> std::time::Duration {
-    let shift = attempt.saturating_sub(1).min(20);
-    std::time::Duration::from_millis(500u64.saturating_mul(1u64 << shift))
-        .min(UNSERVED_RETRY_BACKOFF_CAP)
-}
-
-/// Backoff before re-issuing a request the provider DID serve and that then
-/// failed: linear 500 ms steps. `attempt` is 1-based.
-///
-/// Named rather than inlined for the same reason [`unserved_retry_backoff`]
-/// is: the ceiling on the retry budget is derived from the total this
-/// schedule spends, and a derivation that reads a different expression from
-/// the one the loop runs is not a derivation.
-fn served_retry_backoff(attempt: u32) -> std::time::Duration {
-    std::time::Duration::from_millis(500u64.saturating_mul(attempt as u64))
-}
+/// The unserved cap this replaced carried the promise that a re-send never
+/// outpaces the breaker cooldown. [`wcore_providers::backoff::RETRY_BACKOFF_CAP`]
+/// keeps it, and keeps it exactly: 24 s times the maximum jitter draw is
+/// [`wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS`].
+use wcore_providers::backoff::retry_delay;
 
 /// Environment override for the engine's bounded SERVED-failure retry count.
 ///
@@ -1585,15 +1754,33 @@ fn served_retry_backoff(attempt: u32) -> std::time::Duration {
 /// Governs ONLY the count-bounded path. A request the provider never served
 /// is bounded by [`UNSERVED_OUTAGE_BUDGET`] — a window, not a count — and is
 /// untouched by this.
-const MAX_STREAM_RETRIES_ENV: &str = "WAYLAND_MAX_STREAM_RETRIES";
+pub(crate) const MAX_STREAM_RETRIES_ENV: &str = "WAYLAND_MAX_STREAM_RETRIES";
 
-/// Default served-failure retry count: 2 retries, so 3 total attempts.
+/// Default served-failure retry count for one LLM turn: 10 retries, so 11
+/// total attempts.
 ///
-/// Bound to the provider layer's own [`wcore_providers::retry::DEFAULT_MAX_RETRIES`]
-/// rather than repeated as a literal. The engine loop is the outer mirror of
-/// that budget (the provider call itself runs under `scope_max_retries(0)`),
-/// and two bare `2`s in two crates drift apart silently.
-const DEFAULT_MAX_STREAM_RETRIES: u32 = wcore_providers::retry::DEFAULT_MAX_RETRIES;
+/// This used to alias [`wcore_providers::retry::DEFAULT_MAX_RETRIES`] so that
+/// two bare `2`s could not drift apart. That alias is deliberately BROKEN
+/// here, because the two numbers answer different questions and only one of
+/// them is about inference:
+///
+/// * `wcore_providers::retry::DEFAULT_MAX_RETRIES` bounds the retry ring
+///   INSIDE one provider HTTP helper. On the streaming path that ring is
+///   clamped to zero (`scope_max_retries(0)`), so what it actually governs is
+///   the non-inference traffic sharing the helper: model-catalog fetches, the
+///   TUI's own GET in `tui::surfaces`, and the Ollama plugin. Those are cheap,
+///   synchronous and user-facing, and on the shared curve ten retries would
+///   park a catalog lookup for over two minutes. It stays at 2.
+/// * This constant bounds re-sends of a whole billed inference turn, where
+///   what is being ridden out is a provider having a bad minute. Two retries
+///   spend 1.5 s and give up — that is not a retry policy, it is a flinch.
+///
+/// Ten, on [`wcore_providers::backoff`], spends 127.5 s of base delay: the
+/// first three attempts land inside two seconds, and the tail spreads to 24 s
+/// steps so an endpoint that is genuinely restarting gets time to come back.
+/// `the_default_budget_is_a_curve_not_a_flinch` pins the pair, so a future
+/// edit that re-aliases them argues with a test rather than with a comment.
+const DEFAULT_MAX_STREAM_RETRIES: u32 = 10;
 
 /// Ceiling on [`MAX_STREAM_RETRIES_ENV`].
 ///
@@ -1601,16 +1788,27 @@ const DEFAULT_MAX_STREAM_RETRIES: u32 = wcore_providers::retry::DEFAULT_MAX_RETR
 /// on this path was SERVED, so each re-send re-bills the whole outbound
 /// context. A user who types an extra zero should get a warning, not a bill.
 ///
-/// Derived, not invented. Served retries sleep on [`served_retry_backoff`],
-/// so a budget of N spends 250*N*(N+1) ms waiting. The ceiling is the largest
-/// N whose cumulative backoff still fits inside
-/// [`wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS`] — the cooldown
-/// after which the resilience layer would probe or fail over. Past that point
-/// the extra attempts are not resilience: they pin the run to one broken
-/// endpoint, billed, while the component whose job is failover waits on it.
-/// N=10 spends 27.5 s and fits; N=11 spends 33 s and does not.
-/// `the_ceiling_is_the_largest_budget_that_fits_the_breaker_cooldown` pins it.
-const MAX_STREAM_RETRIES_CEILING: u32 = 10;
+/// Fifteen — and the derivation is re-stated here rather than inherited,
+/// because both earlier ones are now dead.
+///
+/// It was first "the largest N whose cumulative LINEAR backoff fits inside the
+/// breaker cooldown" (250*N*(N+1) ms; N=10 fits, N=11 does not). That
+/// described a schedule this engine no longer runs. It was then "the last row
+/// of the published curve", which held only while the default was 2 and the
+/// table happened to be written out to ten rows; [`wcore_providers::backoff`]
+/// saturates at 24 s from n=7 onward, so the curve has no last row to point
+/// at — every row past the seventh is the same 24 s step.
+///
+/// What has always been true is the reason a ceiling exists: every attempt on
+/// this path was SERVED, so each re-send re-bills the whole outbound context,
+/// and a user who types an extra zero should get a warning rather than a bill.
+/// With the default now at [`DEFAULT_MAX_STREAM_RETRIES`] = 10, a ceiling of
+/// 10 would leave the knob able only to LOWER the budget, and a knob that
+/// turns one way is not a knob. Fifteen keeps deliberate headroom for someone
+/// who knows their endpoint is flaky — 247.5 s of base delay, 309.4 s at the
+/// worst jitter draw — while still refusing the typo'd 100.
+/// `the_ceiling_leaves_headroom_above_the_default` pins the arithmetic.
+const MAX_STREAM_RETRIES_CEILING: u32 = 15;
 
 /// Ceiling on the served-failure retry budget after a SILENT STALL — an
 /// attempt that produced nothing at all and burned a full connect deadline
@@ -2308,6 +2506,200 @@ mod v0911_engine_recovery_tests {
         assert!(!is_unserved_request_failure(FAILURE_DNS));
     }
 
+    /// Correction 1. A `base_url` typo must not cost two and a half minutes.
+    ///
+    /// Measured on this harness: `connection_refused` against
+    /// `http://127.0.0.1:9` ran 145.5 s over 11 sends, of which ~145 s was
+    /// backoff sleep — the failure itself is answered in about a
+    /// millisecond. v0.13.5 spent 1.8 s / 3 sends on the same shape. Nothing
+    /// about the BENEFIT of retrying a refusal changed between those two
+    /// numbers; only the budget did, from 2 to 10.
+    #[test]
+    fn a_refused_connection_gets_a_short_budget_of_its_own() {
+        use wcore_providers::backoff::base_backoff;
+        use wcore_providers::retry::{
+            FAILURE_CONNECTION, FAILURE_CONNECTION_REFUSED, FAILURE_DNS, FAILURE_RATE_LIMITED,
+        };
+
+        assert_eq!(
+            class_retry_budget(FAILURE_CONNECTION_REFUSED, DEFAULT_MAX_STREAM_RETRIES),
+            REFUSED_ENDPOINT_MAX_RETRIES
+        );
+
+        // Known-positive controls: every other class still gets the whole
+        // configured budget. Without these, capping EVERYTHING at 2 would
+        // pass the assertion above while silently undoing the parity work.
+        for other in [
+            FAILURE_CONNECTION,
+            FAILURE_DNS,
+            FAILURE_RATE_LIMITED,
+            "transport",
+            "http_500",
+            "http_503",
+            "http_529",
+            "timeout",
+            "stream_truncated",
+            "",
+        ] {
+            assert_eq!(
+                class_retry_budget(other, DEFAULT_MAX_STREAM_RETRIES),
+                DEFAULT_MAX_STREAM_RETRIES,
+                "{other} must keep the configured budget"
+            );
+        }
+
+        // The `min`: a user who LOWERED the budget must never be handed a
+        // larger one by this branch. A bare `if refused { 2 }` fails here.
+        for configured in [0u32, 1, 2] {
+            assert_eq!(
+                class_retry_budget(FAILURE_CONNECTION_REFUSED, configured),
+                configured,
+                "a configured budget of {configured} must not be RAISED to \
+                 {REFUSED_ENDPOINT_MAX_RETRIES}"
+            );
+        }
+
+        // The number is chosen against the real curve, so grade it against
+        // the real curve rather than against itself: the short budget must
+        // be seconds and the full budget must be minutes. This is the
+        // 80x cost move that reopened the decision, asserted.
+        let spent = |retries: u32| -> std::time::Duration { (1..=retries).map(base_backoff).sum() };
+        assert!(
+            spent(REFUSED_ENDPOINT_MAX_RETRIES) <= std::time::Duration::from_secs(2),
+            "a refused endpoint must be abandoned in about the ~1.8 s v0.13.5 \
+             took, not {:?}",
+            spent(REFUSED_ENDPOINT_MAX_RETRIES)
+        );
+        assert!(
+            spent(DEFAULT_MAX_STREAM_RETRIES) >= std::time::Duration::from_secs(100),
+            "control: the full budget really is the expensive one this class \
+             is being excused from ({:?})",
+            spent(DEFAULT_MAX_STREAM_RETRIES)
+        );
+
+        // It is a SHORT budget, not zero, and not permanence. A local
+        // provider being restarted refuses for a second and then accepts, so
+        // the class must still get at least one re-send.
+        assert!(
+            class_retry_budget(FAILURE_CONNECTION_REFUSED, DEFAULT_MAX_STREAM_RETRIES) >= 1,
+            "a refused endpoint must still be retried at least once — a \
+             listener that is being restarted comes back"
+        );
+        assert!(!is_permanent_endpoint_failure(FAILURE_CONNECTION_REFUSED));
+    }
+
+    /// Correction 2. Thirty-nine sends against a stated budget of 10 means
+    /// the count bound was not applying to the unserved class at all.
+    ///
+    /// Measured on the shipped tree: an `http_503` endpoint ran 904.5 s over
+    /// 39 sends while every retry notice named an outage window and none
+    /// named a count. The two bounds are now ANDed.
+    #[test]
+    fn the_count_bound_applies_to_the_unserved_class_too() {
+        const MAX: u32 = 10;
+
+        // THE regression. The window is wide open and the count is spent:
+        // admission must be refused. Before the fix this returned true, and
+        // kept returning true for 29 more sends.
+        assert!(
+            !stream_retry_admitted(true, MAX, MAX, true),
+            "an unserved failure must stop at the retry budget even with the \
+             outage window wide open"
+        );
+        for attempt in MAX..MAX + 30 {
+            assert!(!stream_retry_admitted(true, attempt, MAX, true));
+        }
+
+        // Known-positive: below the count, an open window still admits. If
+        // this failed, the assertion above would be passing because nothing
+        // is ever admitted rather than because the count binds.
+        for attempt in 0..MAX {
+            assert!(
+                stream_retry_admitted(true, attempt, MAX, true),
+                "attempt {attempt} of {MAX} must still be admitted"
+            );
+        }
+
+        // The window is still a real bound, not decoration: it closes the
+        // door on a class that fails slowly enough to outlast it.
+        assert!(!stream_retry_admitted(true, 0, MAX, false));
+
+        // ...and it is gated on `unserved`. A SERVED failure must be judged
+        // by the count alone; letting a closed window bind it would silently
+        // shrink every other class to zero retries once one unserved failure
+        // had armed the clock earlier in the same turn.
+        assert!(stream_retry_admitted(false, 0, MAX, false));
+        assert!(!stream_retry_admitted(false, MAX, MAX, false));
+
+        // A budget of zero admits nothing, in either class.
+        assert!(!stream_retry_admitted(true, 0, 0, true));
+        assert!(!stream_retry_admitted(false, 0, 0, true));
+    }
+
+    /// Correction 3(b), and the DNS/auth remedies it must not disturb. A user
+    /// reading the last line of a failed run has to learn what to CHANGE.
+    #[test]
+    fn the_sentence_a_run_dies_on_names_the_cause_not_a_consequence() {
+        use wcore_providers::retry::{
+            FAILURE_CONNECTION, FAILURE_CONNECTION_REFUSED, FAILURE_RATE_LIMITED,
+        };
+        let remedy = |code: &str, reason: &str, permanent, auth| {
+            exhausted_provider_remedy(code, reason, 11, permanent, auth)
+        };
+
+        // A rate limit names the rate limit — and never the circuit that is
+        // merely how the old build happened to stop.
+        let rate = remedy(
+            FAILURE_RATE_LIMITED,
+            "Rate limited, retry after 7000ms",
+            false,
+            false,
+        );
+        assert!(rate.contains("rate-limited"), "{rate}");
+        assert!(rate.contains("429"), "{rate}");
+        assert!(rate.contains("quota"), "{rate}");
+        assert!(
+            !rate.contains("circuit"),
+            "the user's problem is a quota, not our breaker: {rate}"
+        );
+        // The provider's own words survive as the evidence for the claim.
+        assert!(rate.contains("retry after 7000ms"), "{rate}");
+
+        // A refusal names the port and says why it stopped early, so the
+        // short budget does not read as a truncated one.
+        let refused = remedy(
+            FAILURE_CONNECTION_REFUSED,
+            "Connection error: Connection refused (os error 111)",
+            false,
+            false,
+        );
+        assert!(refused.contains("refused the connection"), "{refused}");
+        assert!(refused.contains("port"), "{refused}");
+        assert!(refused.contains("11 attempt(s)"), "{refused}");
+
+        // Untouched neighbours. Permanence outranks the code, an auth
+        // failure outranks everything below it, and anything unrecognised
+        // still gets the generic sentence.
+        let dns = remedy("dns_failure", "no such host", true, false);
+        assert!(dns.contains("does not resolve"), "{dns}");
+        let auth = remedy("http_500", "Invalid proxy server token", false, true);
+        assert!(auth.starts_with(AUTH_FAILURE_REMEDY), "{auth}");
+        let generic = remedy(FAILURE_CONNECTION, "connection reset", false, false);
+        assert!(
+            generic.starts_with("Provider stream failed after retries"),
+            "{generic}"
+        );
+        // Specificity ordering: a permanent endpoint wins over the refusal
+        // branch even when the code would match it.
+        let both = remedy(FAILURE_CONNECTION_REFUSED, "x", true, false);
+        assert!(both.contains("does not resolve"), "{both}");
+
+        // Every remedy tells the user the work was not lost.
+        for sentence in [&rate, &refused, &dns, &generic] {
+            assert!(sentence.contains("session has been saved"), "{sentence}");
+        }
+    }
+
     #[test]
     fn only_unserved_requests_get_the_larger_retry_budget() {
         // The provider never did the work: the cheapest class to retry, and
@@ -2328,21 +2720,32 @@ mod v0911_engine_recovery_tests {
         assert!(!is_unserved_request_failure(""));
     }
 
+    /// The engine no longer owns a curve; it borrows
+    /// `wcore_providers::backoff`. What still has to hold HERE is the promise
+    /// the deleted `UNSERVED_RETRY_BACKOFF_CAP` carried: however deep an
+    /// outage goes, the gap between two re-sends never outpaces the breaker
+    /// cooldown this engine is paced against.
     #[test]
-    fn unserved_retry_backoff_doubles_from_half_a_second_then_holds_the_cap() {
-        use super::{UNSERVED_RETRY_BACKOFF_CAP, unserved_retry_backoff};
-        let ms = |attempt| unserved_retry_backoff(attempt).as_millis();
-        assert_eq!(ms(1), 500);
-        assert_eq!(ms(2), 1_000);
-        assert_eq!(ms(3), 2_000);
-        assert_eq!(ms(4), 4_000);
-        assert_eq!(ms(5), 8_000);
-        assert_eq!(ms(6), 16_000);
-        // Capped from here on: the window is long, the send rate must not be.
-        assert_eq!(ms(7), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
-        assert_eq!(ms(50), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
-        // No overflow panic however deep the outage goes.
-        assert_eq!(ms(u32::MAX), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
+    fn no_retry_gap_can_outpace_the_breaker_cooldown() {
+        use wcore_providers::backoff::{RETRY_JITTER_FRACTION, base_backoff};
+        let cooldown =
+            std::time::Duration::from_secs(wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS);
+        for attempt in [1u32, 2, 6, 7, 50, u32::MAX] {
+            let worst = base_backoff(attempt).mul_f64(1.0 + RETRY_JITTER_FRACTION);
+            assert!(
+                worst <= cooldown,
+                "attempt {attempt} can wait {worst:?} at the maximum jitter \
+                 draw, past the {cooldown:?} cooldown it must never outpace"
+            );
+        }
+        // Known-positive: the bound is not vacuous — the deepest attempts
+        // really do reach the cooldown rather than sitting far below it.
+        assert_eq!(
+            base_backoff(u32::MAX).mul_f64(1.0 + RETRY_JITTER_FRACTION),
+            cooldown,
+            "the cap must land ON the cooldown; a bound nothing approaches \
+             proves nothing about the schedule"
+        );
     }
 
     #[test]
@@ -11967,7 +12370,8 @@ impl AgentEngine {
             // retry, even though the identical error BEFORE headers
             // would have been retried by the provider's own retry
             // layer. Now the engine re-issues the same request up to
-            // `max_stream_retries` times with linear backoff — resolved once
+            // `max_stream_retries` times on the shared backoff curve
+            // (`wcore_providers::backoff`) — the budget resolved once
             // per run from `WAYLAND_MAX_STREAM_RETRIES`, defaulting to
             // `DEFAULT_MAX_STREAM_RETRIES` and clamped at
             // `MAX_STREAM_RETRIES_CEILING`.
@@ -12032,6 +12436,14 @@ impl AgentEngine {
                 let mut done_seen = false;
                 let mut stream_error: Option<String> = None;
                 let mut stream_failure_code: Option<String> = None;
+                // The `Retry-After` this attempt's provider error carried, as a
+                // NUMBER. Resolved once at the HTTP boundary
+                // (`resolve_retry_after_ms`: header, then nested body, then
+                // the 5 s default) and carried through as `u64` — never
+                // re-parsed out of the rendered "Rate limited, retry after
+                // 7000ms" prose, which is a message for the user and not a
+                // wire format.
+                let mut stream_retry_after_ms: Option<u64> = None;
                 // FluxRouter web_search grounding (contract §5.4): per-attempt
                 // accumulators for the end-of-stream Citations / SearchResults
                 // events. Reset each retry alongside the other accumulators.
@@ -12736,17 +13148,29 @@ impl AgentEngine {
                     None
                 };
                 if let Some(reservation) = failed_provider_reservation {
-                    if provider_result
-                        .as_ref()
-                        .is_err_and(|error| error.was_not_attempted())
-                    {
+                    if provider_result.as_ref().is_err_and(|error| {
+                        error.was_not_attempted() || error.produced_no_billable_output()
+                    }) {
                         reservation
                             .release()
                             .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
                     } else {
                         // The provider outcome is unknown: consume the conservative
                         // reservation rather than pretending a failed transport was
-                        // free. This bounds retry rings even when usage is absent.
+                        // free.
+                        //
+                        // This used to say it also "bounds retry rings even when
+                        // usage is absent", and it did — which was the bug, not the
+                        // feature. Measured on 0.13.5 against a 503 endpoint: 15
+                        // physical sends over 301.9 s, ended not by the outage
+                        // window but by `budget cap 'per_session_output_tokens'
+                        // would be exceeded (limit 1000000, reserved total
+                        // 1024000)` — 16 reservations of 64 000 conservative output
+                        // tokens each, for a turn that generated none. The budget
+                        // was silently acting as the retry policy and telling the
+                        // user the wrong cause. The bound belongs to the retry
+                        // budget and the outage window; this branch is only for
+                        // outcomes we genuinely cannot see.
                         let (input_tokens, output_tokens, cost_usd) =
                             reservation.conservative_charge();
                         if let Err(err) = reservation.settle(input_tokens, output_tokens, cost_usd)
@@ -12800,6 +13224,9 @@ impl AgentEngine {
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .clone()
                             .or_else(|| Some(wcore_providers::retry::provider_failure_code(&e)));
+                        if let ProviderError::RateLimited { retry_after_ms } = &e {
+                            stream_retry_after_ms = Some(*retry_after_ms);
+                        }
                         stream_error = Some(e.to_string());
                         // Skip the recv loop; fall through to the
                         // classifier, which retries or fails the turn.
@@ -13565,32 +13992,63 @@ impl AgentEngine {
                 // and billed, so each re-send has a real price and the number
                 // of them is exactly the right thing to cap.
                 let unserved = is_unserved_request_failure(&failure_code);
-                if unserved {
-                    // One physical send that produced no response head.
+                if unserved && !carried_a_response_head(&failure_code) {
+                    // One physical send that produced no response head. The
+                    // disclosure this feeds tells the user the provider "may
+                    // have served and billed it", which is only true when we
+                    // never saw an answer. An HTTP 503 or 529 IS an answer —
+                    // the provider replied, with a refusal — so counting it
+                    // here reported a possible bill that provably did not
+                    // happen. It still rides the outage WINDOW above: how the
+                    // request is retried and whether it was billed are two
+                    // different questions.
                     self.unserved_resends = self.unserved_resends.saturating_add(1);
                 }
                 let produced_output = !assistant_text.is_empty()
                     || !thinking_text.is_empty()
                     || !tool_calls.is_empty()
                     || attempt_usage.output_tokens > 0;
-                // #1077: an attempt that produced nothing and spent a whole
-                // connect deadline doing it has already been answered; the
-                // count budget above prices re-sends in tokens, and this one
-                // is priced in the user's wall clock. See
-                // `SILENT_STALL_MAX_STREAM_RETRIES`.
-                let stream_retry_budget = stream_retry_budget_after_attempt(
-                    max_stream_retries,
-                    produced_output,
-                    attempt_started.elapsed(),
+                // TWO narrowings of the same budget, composed with `min` so
+                // neither can hand a run more attempts than the other allows.
+                //
+                //  * `class_retry_budget` (#1109) prices re-sends by FAILURE
+                //    CLASS: a refused endpoint is not going to start listening,
+                //    so it gets 2 rather than the configured 10.
+                //  * `stream_retry_budget_after_attempt` (#1077) prices them in
+                //    the user's WALL CLOCK: an attempt that produced nothing
+                //    and spent a whole connect deadline doing it has already
+                //    been answered. See `SILENT_STALL_MAX_STREAM_RETRIES`.
+                //
+                // INTEGRATION NOTE (0.13.6). These two landed on separate lanes
+                // and disagree on the blackhole shape: measured alone, the class
+                // budget gives a blackholed endpoint 11 sends over 252 s, and the
+                // silent-stall ceiling gives it 2 over ~20 s. The ceiling wins
+                // here deliberately — 92 s of unexplained churn against an
+                // endpoint that answers nothing IS #1077, and a bigger budget
+                // makes it worse, not better. The classes that can actually
+                // recover (429, 5xx) produce output or fail fast, so they never
+                // reach the ceiling and keep the full budget.
+                let class_max_retries = class_retry_budget(&failure_code, max_stream_retries).min(
+                    stream_retry_budget_after_attempt(
+                        max_stream_retries,
+                        produced_output,
+                        attempt_started.elapsed(),
+                    ),
                 );
-                let retry_admitted = if unserved {
+                // The window is armed lazily, on the first unserved failure of
+                // the turn, so a turn that never sees one never starts a clock.
+                let outage_window_open = !unserved || {
                     let deadline = *unserved_deadline.get_or_insert_with(|| {
                         tokio::time::Instant::now() + UNSERVED_OUTAGE_BUDGET
                     });
                     tokio::time::Instant::now() < deadline
-                } else {
-                    stream_attempt < stream_retry_budget
                 };
+                let retry_admitted = stream_retry_admitted(
+                    unserved,
+                    stream_attempt,
+                    class_max_retries,
+                    outage_window_open,
+                );
                 if !is_client_error && !permanent_endpoint && retry_admitted {
                     // Spec v1 Task 5 (clean retry): a retry re-sends the whole
                     // outbound context. When the most recent tool round
@@ -13653,30 +14111,49 @@ impl AgentEngine {
                     }
                     stream_attempt += 1;
                     self.output.emit_provider_retry(Some(failure_code.as_str()));
-                    // Served failures: linear 500 ms, 1000 ms across the two
-                    // permitted retries. Unserved failures: exponential to
-                    // `UNSERVED_RETRY_BACKOFF_CAP`, so a long window costs few
-                    // sends and a healed provider is noticed within one cap.
-                    let backoff = if unserved {
-                        unserved_retry_backoff(stream_attempt)
-                    } else {
-                        served_retry_backoff(stream_attempt)
-                    };
+                    // One curve for every retryable class, and a server
+                    // instruction outranks it. `stream_retry_after_ms` is the
+                    // number the provider sent; when it is absent but the
+                    // failure was a 429 anyway, the default retry-after acts
+                    // as a floor so an early retry does not hammer a limiter
+                    // at 500 ms. See `wcore_providers::backoff`.
+                    let backoff = retry_delay(
+                        stream_attempt,
+                        stream_retry_after_ms,
+                        failure_code == wcore_providers::retry::FAILURE_RATE_LIMITED,
+                    );
+                    // Both bounds, whenever both apply. Printing only the
+                    // window on the unserved class is what let 39 sends go
+                    // past while every notice claimed a budget it was not
+                    // counting against.
                     let progress = match unserved_deadline.filter(|_| unserved) {
                         Some(deadline) => format!(
-                            "attempt {stream_attempt}, {}s of outage budget left",
+                            "attempt {stream_attempt}/{class_max_retries}, {}s of outage \
+                             budget left",
                             deadline
                                 .saturating_duration_since(tokio::time::Instant::now())
                                 .as_secs()
                         ),
-                        // The budget IN FORCE, not the configured one: after a
-                        // silent stall the ceiling has cut it, and "attempt
-                        // 1/2" would promise a third attempt that will not
-                        // happen.
-                        None => format!("attempt {stream_attempt}/{stream_retry_budget}"),
+                        // The budget IN FORCE, not the configured one: after
+                        // a silent stall or on a refused endpoint the ceiling
+                        // has cut it, and "attempt 1/10" would promise attempts
+                        // that will not happen.
+                        None => format!("attempt {stream_attempt}/{class_max_retries}"),
+                    };
+                    // Name the wait. The later steps of the curve run
+                    // 16-30 s and NOTHING else speaks during them: the silence
+                    // notice is armed on a provider dispatch, not on this
+                    // sleep, so an unannounced gap that long reads as a hang.
+                    // Measured on this host at a budget of 10 — the shipped
+                    // ceiling — four consecutive 24-29 s gaps with no output
+                    // at all between them.
+                    let wait = if backoff >= std::time::Duration::from_secs(1) {
+                        format!("{:.1}s", backoff.as_secs_f64())
+                    } else {
+                        format!("{}ms", backoff.as_millis())
                     };
                     self.output.emit_info(&format!(
-                        "Provider stream failed ({reason}); retrying ({progress})…"
+                        "Provider stream failed ({reason}); retrying in {wait} ({progress})…"
                     ));
                     let backoff_cancel = self.cancel_token.clone();
                     tokio::select! {
@@ -13721,37 +14198,13 @@ impl AgentEngine {
                 }
                 self.save_session_mirror();
                 let sends = stream_attempt.saturating_add(1);
-                // Lead with the fault the user can act on. "Provider stream
-                // failed after retries: API error 500" reads as a provider
-                // outage; for an auth refusal it is the key that is wrong, the
-                // 500 is incidental, and there were no retries to speak of.
-                // The provider's own words are kept, in parentheses, because
-                // they are the evidence for the claim.
-                let final_error = if permanent_endpoint {
-                    // Name the remedy, in the shape the no-API-key error
-                    // already uses: what is wrong, and the exact setting to
-                    // change. The URL itself is deliberately NOT echoed — a
-                    // provider may carry its credential in the query string
-                    // (H-2), and the config key is what the user edits anyway.
-                    format!(
-                        "Cannot reach the configured provider: the endpoint host name does not \
-                         resolve. That is a permanent failure — every re-send gets the same \
-                         answer — so the run stopped after {sends} attempt(s) instead of \
-                         spending the {budget}s provider-outage budget on it. Check `base_url` \
-                         for the selected provider in your wayland-core config (or the \
-                         `--base-url` you passed), then check DNS on this host. The session has \
-                         been saved — resume it once the endpoint is right. (underlying error: \
-                         {reason})",
-                        budget = UNSERVED_OUTAGE_BUDGET.as_secs(),
-                    )
-                } else if is_auth_failure {
-                    format!("{AUTH_FAILURE_REMEDY} The provider reported: {reason}")
-                } else {
-                    format!(
-                        "Provider stream failed after retries: {reason}. The session has been \
-                         saved — resume it to continue from here rather than starting over."
-                    )
-                };
+                let final_error = exhausted_provider_remedy(
+                    &failure_code,
+                    &reason,
+                    sends,
+                    permanent_endpoint,
+                    is_auth_failure,
+                );
                 self.output
                     .emit_error(&final_error, !is_client_error && !permanent_endpoint);
                 return Err(AgentError::ApiError(final_error));
@@ -26745,8 +27198,15 @@ mod audit_2026_05_22_tests {
     #[tokio::test]
     async fn stream_error_exhausts_retries_then_fails_the_turn() {
         // AUDIT A3 / E-C2 — when every attempt fails the turn ends as a
-        // hard error (NOT a silent empty success). 1 initial + 2
-        // retries = 3 provider calls.
+        // hard error (NOT a silent empty success).
+        //
+        // The budget is PINNED rather than inherited. This test is about the
+        // hard-error outcome, not about the size of the budget, and while it
+        // inherited the default it scripted exactly as many failures as the
+        // default allowed — so raising the default made the mock run out of
+        // failures and the turn SUCCEED, which is the opposite of what the
+        // test is named for.
+        let _budget = crate::test_utils::PinnedRetryBudget::pin(2);
         let provider = Arc::new(ScriptedProvider::new(vec![
             vec![LlmEvent::Error("e1".into())],
             vec![LlmEvent::Error("e2".into())],
@@ -26833,7 +27293,10 @@ mod audit_2026_05_22_tests {
         });
         let mut engine = engine_with(provider);
         let started = tokio::time::Instant::now();
-        let result = engine.run("task", "m-1").await;
+        // Pinned draw: this helper predicts a send COUNT from the schedule, so
+        // it has to walk the same schedule the loop does. `sends_the_window_admits`
+        // sums `base_backoff`, which is the curve at draw 0.
+        let result = wcore_providers::backoff::scope_jitter(0.0, engine.run("task", "m-1")).await;
         let elapsed = started.elapsed();
         assert!(
             matches!(result, Err(super::AgentError::ApiError(_))),
@@ -26917,74 +27380,90 @@ mod audit_2026_05_22_tests {
         );
     }
 
-    /// The headline of round 2. The budget for a request the provider never
-    /// served is an outage WINDOW, not a send count.
+    /// REVISED — this test used to assert that an unserved request is bounded
+    /// by the outage WINDOW and deliberately NOT by a send count. That was
+    /// the design, and shipping it produced the defect this replaces:
+    /// measured against a 503 endpoint, 904.5 s over 39 physical sends while
+    /// every retry notice named a budget of 10 and none of them counted.
     ///
-    /// The discriminating measurement is the pair: the same code, the same
-    /// budget, two outages that differ only in how fast each attempt fails.
-    /// A count-bounded budget gives both arms the identical number of sends
-    /// and wildly different wall clocks; a window-bounded budget does the
-    /// opposite, which is what "ride out an outage" actually means. Any
-    /// reversion to a fixed count collapses the two arms together and fails
-    /// here.
+    /// The contract now is TWO bounds, ANDed, each binding a different
+    /// failure shape — and this is still a discriminating pair, just on the
+    /// other axis. Same code, same constants, two outages differing only in
+    /// how fast each attempt fails:
     ///
-    /// Runs on a paused clock, so the 300 s window costs no real time.
+    /// * fail instantly -> the COUNT binds. Eleven sends, and the run stops
+    ///   far inside the window rather than filling it.
+    /// * fail after a full `READ_TIMEOUT` -> the WINDOW binds, well before
+    ///   the count is spent. This is the half that keeps ten slow attempts
+    ///   from parking a run for the better part of an hour.
+    ///
+    /// Collapse either bound and one arm goes wrong: drop the count and the
+    /// fast arm runs the window out again; drop the window and the slow arm
+    /// runs ten full timeouts.
+    ///
+    /// Runs on a paused clock, so neither arm costs real time.
     #[tokio::test(start_paused = true)]
-    async fn an_unserved_outage_is_bounded_by_wall_clock_not_by_a_send_count() {
+    async fn an_unserved_outage_is_bounded_by_the_count_and_by_the_window() {
+        let slow_step = wcore_providers::http_client::READ_TIMEOUT;
         let (fast_sends, fast_elapsed) = unserved_outage(std::time::Duration::ZERO).await;
-        let (slow_sends, slow_elapsed) = unserved_outage(std::time::Duration::from_secs(60)).await;
+        let (slow_sends, slow_elapsed) = unserved_outage(slow_step).await;
 
-        // Both arms are held open for the whole window and then stop. Without
-        // a deadline this loop never ends; with the old count it stopped in
-        // ~10 s of wall clock however long the outage actually lasted.
-        for (label, elapsed) in [("fast", fast_elapsed), ("slow", slow_elapsed)] {
-            assert!(
-                elapsed >= super::UNSERVED_OUTAGE_BUDGET,
-                "the {label} outage gave up after {elapsed:?}, inside the budget"
-            );
-            assert!(
-                elapsed
-                    <= super::UNSERVED_OUTAGE_BUDGET
-                        + super::UNSERVED_RETRY_BACKOFF_CAP
-                        + std::time::Duration::from_secs(120),
-                "the {label} outage ran {elapsed:?}, well past the budget — the \
-                 deadline is not bounding the loop"
-            );
-        }
-
-        // Both are far past the served-failure budget.
-        assert!(
-            fast_sends > 3 && slow_sends > 3,
-            "an unserved failure must outlast MAX_STREAM_RETRIES: fast={fast_sends} \
-             slow={slow_sends}"
-        );
-        // A fixed COUNT would make these equal. Time does not — and the
-        // strong form of that claim is not a multiplier between the arms but
-        // an EXACT prediction for each arm, computed from the same two
-        // constants the loop uses. A count bound cannot satisfy both.
+        // Exact predictions from the same two constants the loop uses.
         for (label, delay, observed) in [
             ("fast", std::time::Duration::ZERO, fast_sends),
-            ("slow", std::time::Duration::from_secs(60), slow_sends),
+            ("slow", slow_step, slow_sends),
         ] {
-            let predicted = sends_the_window_admits(delay);
             assert_eq!(
-                observed, predicted,
-                "the {label} arm must fit exactly the sends the window admits \
-                 at {delay:?} per attempt: predicted {predicted}, saw {observed}"
+                observed,
+                sends_the_budget_admits(delay),
+                "the {label} arm must fit exactly the sends the two bounds \
+                 admit at {delay:?} per attempt: saw {observed}"
             );
         }
-        // And the two arms must genuinely differ, which is the part a count
-        // bound fails outright.
-        assert!(
-            fast_sends > slow_sends,
-            "a fast-failing outage must fit more sends into the same window \
-             than a slow-failing one (fast={fast_sends} slow={slow_sends}); \
-             equal counts mean the bound is still a count"
+
+        // The fast arm is COUNT-bound: it spends the configured budget and
+        // stops, without filling the window. Before the fix it ran the whole
+        // window out and sent 39 times against a budget of 10.
+        assert_eq!(
+            fast_sends,
+            super::DEFAULT_MAX_STREAM_RETRIES as usize + 1,
+            "a fast-failing outage must stop at the configured budget"
         );
+        assert!(
+            fast_elapsed < super::UNSERVED_OUTAGE_BUDGET,
+            "the fast arm ran {fast_elapsed:?} — it is still filling the \
+             window, so the count is not binding"
+        );
+
+        // The slow arm is WINDOW-bound: it stops before the count is spent,
+        // which is what keeps ten `READ_TIMEOUT`s from parking the run.
+        assert!(
+            slow_sends <= super::DEFAULT_MAX_STREAM_RETRIES as usize,
+            "the slow arm sent {slow_sends} times — the window is not \
+             bounding it, so ten full timeouts can still be spent"
+        );
+        assert!(
+            slow_elapsed >= super::UNSERVED_OUTAGE_BUDGET
+                && slow_elapsed
+                    <= super::UNSERVED_OUTAGE_BUDGET
+                        + slow_step
+                        + wcore_providers::backoff::RETRY_BACKOFF_CAP,
+            "the slow arm ran {slow_elapsed:?}, which is not the window"
+        );
+
+        // Both still far outlast the two-retry budget the class was given
+        // before any of this work.
+        assert!(fast_sends > 3 && slow_sends > 3);
     }
 
-    /// How many sends [`super::UNSERVED_OUTAGE_BUDGET`] admits when every
-    /// attempt fails after `delay`, walking the real backoff schedule.
+    /// How many sends the unserved class admits when every attempt fails
+    /// after `delay`, walking the real backoff schedule against BOTH bounds.
+    ///
+    /// It used to walk the window alone, and that is the shape of the defect
+    /// it now guards: with only the window in force an `http_503` endpoint
+    /// ran a measured 904.5 s over 39 sends while the configured budget said
+    /// 10. `stream_retry_admitted` ANDs the count in; this walks the same
+    /// two bounds so the prediction stays derived rather than tuned.
     ///
     /// This replaces two hand-tuned numbers that used to guard this test: a
     /// `fast_sends > slow_sends * 3` ratio and a `budget / cap + 12` ceiling.
@@ -26994,7 +27473,12 @@ mod audit_2026_05_22_tests {
     /// make the suite red. A prediction derived from the constants needs no
     /// tuning when they move, and is strictly tighter than either bound it
     /// replaces.
-    fn sends_the_window_admits(delay: std::time::Duration) -> usize {
+    ///
+    /// Walks `base_backoff` — the curve BEFORE jitter — so every caller must
+    /// run its engine inside `scope_jitter(0.0, …)`. An unpinned draw adds up
+    /// to 25 % per gap, which both shrinks the real count below this
+    /// prediction and makes it differ run to run.
+    fn sends_the_budget_admits(delay: std::time::Duration) -> usize {
         // The deadline is armed on the FIRST failure, so the window starts at
         // the end of send 1 and each retry is admitted on the clock reading
         // taken when it fails.
@@ -27002,10 +27486,16 @@ mod audit_2026_05_22_tests {
         let mut sends = 1usize;
         let mut elapsed = delay;
         loop {
+            // `stream_attempt` — the retries already taken — is `sends - 1`,
+            // and admission needs it strictly below the budget. That is
+            // `sends > budget`, which is the form clippy insists on.
+            if sends > super::DEFAULT_MAX_STREAM_RETRIES as usize {
+                return sends;
+            }
             if elapsed >= deadline {
                 return sends;
             }
-            elapsed += super::unserved_retry_backoff(sends as u32) + delay;
+            elapsed += wcore_providers::backoff::base_backoff(sends as u32) + delay;
             sends += 1;
         }
     }
@@ -27018,13 +27508,26 @@ mod audit_2026_05_22_tests {
     /// not on the small served-failure count.
     ///
     /// 529 is the status Anthropic and OpenAI use for "overloaded". It means
-    /// the provider explicitly did not do the work, so re-sending is free and
-    /// the window is the right budget — but only if the classification wiring
-    /// actually carries the status that far, which is what this measures.
+    /// the provider explicitly did not do the work, so it belongs to the
+    /// unserved class — but only if the classification wiring actually
+    /// carries the status that far, which is what this measures.
+    ///
+    /// The discriminator had to change with the bounds. It used to be "more
+    /// sends than the served count allows", and that worked while the served
+    /// count was 2. Both classes now share the same count, so a fast 529 and
+    /// a fast 500 produce identical send counts and that assertion can no
+    /// longer fail — it would be a test that cannot detect its own defect.
+    ///
+    /// What still separates the classes is the WINDOW, and it separates them
+    /// only when attempts are slow. So make them slow: a 529 that takes a
+    /// full `READ_TIMEOUT` to arrive is window-bound and stops early; the
+    /// same shape misclassified as SERVED would spend the whole count and
+    /// send more. The arms differ, so the assertion can fail.
     #[tokio::test(start_paused = true)]
-    async fn an_http_529_outage_is_ridden_out_on_the_window() {
+    async fn an_http_529_outage_is_classified_unserved_and_capped_by_the_window() {
         struct Overloaded {
             calls: Arc<std::sync::atomic::AtomicUsize>,
+            delay: std::time::Duration,
         }
         #[async_trait]
         impl LlmProvider for Overloaded {
@@ -27033,6 +27536,7 @@ mod audit_2026_05_22_tests {
                 _: &LlmRequest,
             ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
                 self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(self.delay).await;
                 Err(ProviderError::Api {
                     status: 529,
                     message: "overloaded".into(),
@@ -27040,28 +27544,36 @@ mod audit_2026_05_22_tests {
             }
         }
 
+        let slow_step = wcore_providers::http_client::READ_TIMEOUT;
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut engine = engine_with(Arc::new(Overloaded {
             calls: Arc::clone(&calls),
+            delay: slow_step,
         }));
-        let result = engine.run("task", "m-1").await;
+        // Pinned draw — see `unserved_outage`; the assertion below is an
+        // exact send count derived from the un-jittered curve.
+        let result = wcore_providers::backoff::scope_jitter(0.0, engine.run("task", "m-1")).await;
         assert!(
             matches!(result, Err(super::AgentError::ApiError(_))),
             "a permanent 529 outage must still fail the turn, got {result:?}"
         );
 
         let sends = calls.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(
-            sends > 3,
-            "a 529 was bounded by the served-failure count ({sends} sends; \
-             MAX_STREAM_RETRIES is 2, so 3 total attempts) — the status never \
-             reached the unserved classifier"
-        );
         assert_eq!(
             sends,
-            sends_the_window_admits(std::time::Duration::ZERO),
-            "a 529 outage must fit exactly the sends the window admits"
+            sends_the_budget_admits(slow_step),
+            "a slow 529 must fit exactly the sends the two bounds admit"
         );
+        // The discriminator, stated as the thing that could go wrong: a 529
+        // treated as a SERVED failure has no window over it and spends the
+        // whole count instead.
+        assert!(
+            sends <= super::DEFAULT_MAX_STREAM_RETRIES as usize,
+            "a slow 529 sent {sends} times — the full served-class budget — \
+             so the status never reached the unserved classifier"
+        );
+        // ...and it is still genuinely retried, not failed fast.
+        assert!(sends > 1, "a 529 must be retried at all");
     }
 
     /// An engine whose emitted events can be read back.
@@ -27115,7 +27627,9 @@ mod audit_2026_05_22_tests {
             delay: std::time::Duration::ZERO,
             calls: Arc::clone(&calls),
         }));
-        let result = engine.run("task", "m-1").await;
+        // Pinned draw — see `unserved_outage`; the precondition below is an
+        // exact send count derived from the un-jittered curve.
+        let result = wcore_providers::backoff::scope_jitter(0.0, engine.run("task", "m-1")).await;
         assert!(
             matches!(result, Err(super::AgentError::ApiError(_))),
             "the outage must still fail the turn, got {result:?}"
@@ -27124,7 +27638,7 @@ mod audit_2026_05_22_tests {
         let sent = calls.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             sent,
-            sends_the_window_admits(std::time::Duration::ZERO),
+            sends_the_budget_admits(std::time::Duration::ZERO),
             "precondition: the outage must have run the window out"
         );
 
@@ -27217,7 +27731,13 @@ mod audit_2026_05_22_tests {
     /// began serving the stream keeps `MAX_STREAM_RETRIES`. Re-sending that one
     /// costs a full context the provider already billed, so the larger budget
     /// must not leak onto it.
-    #[tokio::test]
+    ///
+    /// This one asserts the real default rather than pinning it — that IS the
+    /// property under test — so it runs on a paused clock. At the shipped
+    /// budget the curve it schedules is 127.5 s, and a unit test must not
+    /// spend it.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
     async fn served_stream_err_keeps_the_default_retry_budget() {
         struct MidStreamErrProvider {
             calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -27251,8 +27771,9 @@ mod audit_2026_05_22_tests {
         );
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
-            3,
-            "a served stream keeps 1 initial send plus 2 bounded retries"
+            super::DEFAULT_MAX_STREAM_RETRIES as usize + 1,
+            "a served stream keeps the bounded COUNT budget; the 900 s \
+             unserved outage window must not leak onto it"
         );
     }
 
@@ -34416,17 +34937,22 @@ mod stream_retry_budget_tests {
 
     // --- (a) the retry count is configurable, clamped, and unchanged ------
 
-    /// The whole point of exposing the knob is that exposing it must not move
-    /// the number. A provider that returns a stream and then closes it
-    /// without a `Done` is a SERVED failure, which is the count-bounded path.
-    #[tokio::test]
+    /// The loop has to SPEND the default, not merely resolve it. A provider
+    /// that returns a stream and then closes it without a `Done` is a SERVED
+    /// failure, which is the count-bounded path.
+    ///
+    /// Paused clock on purpose: at the shipped budget this loop schedules
+    /// 127.5 s of backoff and a unit test must not sit through it. The proof
+    /// that the curve is SLEPT rather than merely scheduled is
+    /// `the_backoff_is_real_time_not_just_scheduled_time`.
+    #[tokio::test(start_paused = true)]
     #[serial_test::serial]
-    async fn the_default_served_retry_budget_is_still_two_retries() {
+    async fn the_default_served_retry_budget_is_ten_retries() {
         let (sends, _) = run_against(Vec::new()).await;
         assert_eq!(
-            sends, 3,
-            "the shipped budget is 1 send + 2 retries; exposing it as a knob \
-             must not be a silent behaviour change"
+            sends, 11,
+            "the shipped budget is 1 send + 10 retries; the 2 it replaced \
+             spent 1.5 s before giving up, which is a flinch and not a policy"
         );
         assert_eq!(
             sends,
@@ -34487,32 +35013,72 @@ mod stream_retry_budget_tests {
         );
     }
 
-    /// The ceiling is derived, not invented, and this pins the derivation:
-    /// the largest retry budget whose cumulative linear backoff still fits
-    /// inside the resilience layer's own recovery cooldown. Past that the
-    /// extra attempts hold the run on a broken endpoint, billed, while the
-    /// component whose job is failover is already waiting.
+    /// The ceiling has to leave the knob somewhere to go, and it has to cost
+    /// what its doc comment claims.
+    ///
+    /// Two dead derivations are pinned out of the way here. "The largest
+    /// budget whose cumulative LINEAR backoff fits the breaker cooldown"
+    /// described a schedule the engine no longer runs. "The last row of the
+    /// published curve" cannot even be re-derived now: `base_backoff`
+    /// saturates, so every row from the seventh on is the same 24 s step and
+    /// there is no last row to point at. What is left is a spend decision,
+    /// which is what the assertions below actually check.
     #[test]
-    fn the_ceiling_is_the_largest_budget_that_fits_the_breaker_cooldown() {
-        let cooldown =
-            std::time::Duration::from_secs(wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS);
-        let spent = |budget: u32| {
-            (1..=budget)
-                .map(super::served_retry_backoff)
-                .sum::<std::time::Duration>()
-        };
+    fn the_ceiling_leaves_headroom_above_the_default() {
+        use wcore_providers::backoff::{RETRY_JITTER_FRACTION, base_backoff};
         let ceiling = super::MAX_STREAM_RETRIES_CEILING;
+        let default = super::DEFAULT_MAX_STREAM_RETRIES;
+        assert_eq!(ceiling, 15);
+        assert_eq!(default, 10);
         assert!(
-            spent(ceiling) <= cooldown,
-            "the ceiling ({ceiling}) spends {:?} in backoff, past the {cooldown:?} \
-             cooldown it is supposed to fit inside",
-            spent(ceiling)
+            ceiling > default,
+            "a ceiling equal to the default leaves an env knob that can only \
+             ever LOWER the budget, which is not a knob"
         );
-        assert!(
-            spent(ceiling + 1) > cooldown,
-            "one retry past the ceiling still fits in {cooldown:?} ({:?}) — the \
-             ceiling is lower than its own derivation allows",
-            spent(ceiling + 1)
+        let spent = |budget: u32| (1..=budget).map(base_backoff).sum::<std::time::Duration>();
+        // The published arithmetic for both rows of the doc comment. Assert it
+        // rather than describing it, so a change to the curve that silently
+        // moves what these budgets COST lands here.
+        assert_eq!(spent(default), std::time::Duration::from_millis(127_500));
+        assert_eq!(spent(ceiling), std::time::Duration::from_millis(247_500));
+        assert_eq!(
+            spent(ceiling).mul_f64(1.0 + RETRY_JITTER_FRACTION),
+            std::time::Duration::from_micros(309_375_000)
+        );
+        // The curve has no "last row" left to derive a ceiling from.
+        assert_eq!(base_backoff(7), base_backoff(ceiling));
+        // And the ceiling is a real bound on spend, not a formality: the
+        // budget past it costs strictly more.
+        assert!(spent(ceiling + 1) > spent(ceiling));
+    }
+
+    /// The default is a DECISION now, not an alias, and this pins the pair:
+    /// the engine's inference budget moved to 10 and the provider crate's
+    /// HTTP-helper budget deliberately did NOT move with it.
+    ///
+    /// The two were bound together precisely so a pair of bare `2`s could not
+    /// drift. Breaking that bond is the change, so a test has to hold its
+    /// shape — otherwise the next reader "repairs" the drift and silently
+    /// hands every model-catalog fetch, TUI GET and Ollama call a two-minute
+    /// retry curve.
+    #[test]
+    fn the_default_budget_is_a_curve_not_a_flinch() {
+        assert_eq!(
+            super::DEFAULT_MAX_STREAM_RETRIES,
+            10,
+            "one billed inference turn is re-sent on the full curve"
+        );
+        assert_eq!(
+            wcore_providers::retry::DEFAULT_MAX_RETRIES,
+            2,
+            "the provider HTTP helper's ring is NOT inference: it carries \
+             model-catalog fetches, the TUI's own GET and the Ollama plugin, \
+             and ten retries on the shared curve would park those for minutes"
+        );
+        assert_ne!(
+            super::DEFAULT_MAX_STREAM_RETRIES,
+            wcore_providers::retry::DEFAULT_MAX_RETRIES,
+            "these were one aliased constant; they are two decisions now"
         );
     }
 
@@ -34862,6 +35428,469 @@ mod stream_retry_budget_tests {
                 .iter()
                 .any(|e| e.to_string().contains("Still waiting")),
             "a dispatch that answered immediately must produce no notice, got {events:?}"
+        );
+    }
+
+    // --- retry parity: the shared backoff curve ---------------------------
+
+    /// A provider that fails every send with `error`, recording the instant of
+    /// each send, so a test can read the ACTUAL gaps the engine slept off the
+    /// provider side rather than off a log line.
+    struct TimedFailProvider {
+        error: fn() -> ProviderError,
+        sends: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for TimedFailProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.sends
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(tokio::time::Instant::now());
+            Err((self.error)())
+        }
+    }
+
+    /// Drive one run against a provider that fails every send with `error`.
+    /// Returns the gap between consecutive physical sends, in milliseconds —
+    /// the only observable that distinguishes one backoff curve from another.
+    async fn send_gaps_ms(error: fn() -> ProviderError) -> Vec<u128> {
+        let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(TimedFailProvider {
+            error,
+            sends: Arc::clone(&sends),
+        });
+        let sink = TestSink::new();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(sink),
+        );
+        engine.max_turns = Some(2);
+        let _ = engine.run("task", "m-1").await;
+        let sends = sends.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        sends
+            .windows(2)
+            .map(|w| w[1].duration_since(w[0]).as_millis())
+            .collect()
+    }
+
+    fn served_500() -> ProviderError {
+        ProviderError::Api {
+            status: 500,
+            message: "deliberate".into(),
+        }
+    }
+
+    fn rate_limited_7s() -> ProviderError {
+        ProviderError::RateLimited {
+            retry_after_ms: 7_000,
+        }
+    }
+
+    fn api_503() -> ProviderError {
+        ProviderError::Api {
+            status: 503,
+            message: "deliberate load shedding".into(),
+        }
+    }
+
+    fn connection_lost() -> ProviderError {
+        ProviderError::Connection("connection reset by peer".into())
+    }
+
+    /// Drive one run against a provider that fails every send with `error`,
+    /// under a session budget whose output-token cap is smaller than TWO
+    /// conservative reservations. Returns the physical send count and every
+    /// message the run put on the user's surface.
+    ///
+    /// `max_tokens` is set to 64 so one reservation fits under a cap of 100
+    /// and two cannot: the defect becomes reachable in one step instead of
+    /// the sixteen it took in production.
+    async fn run_under_output_cap(
+        error: fn() -> ProviderError,
+        cap_output_tokens: u64,
+    ) -> (usize, Vec<String>, u64) {
+        let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(TimedFailProvider {
+            error,
+            sends: Arc::clone(&sends),
+        });
+        let sink = TestSink::new();
+        let surface = sink.handle();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(sink),
+        );
+        engine.max_turns = Some(2);
+        engine.max_tokens = 64;
+        // A reservation is only TAKEN when the provider/model pair is priced.
+        // Without these the pair is `/`, the run reports "Pricing unavailable
+        // ... cost is unpriced, not $0", no reservation is held, and the cap
+        // below could never fire for either arm — the control would fail and
+        // the 503 test would pass for free.
+        engine.set_model("claude-opus-4-6");
+        engine.compat = wcore_config::compat::ProviderCompat::anthropic_defaults();
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(cap_output_tokens)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+        let _ = engine.run("task", "m-1").await;
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let charged = tracker.lock().session_totals(&session_id).0;
+        let n = sends.lock().unwrap_or_else(|p| p.into_inner()).len();
+        (n, notices(&surface.snapshot()), charged)
+    }
+
+    /// A 503 must not be charged for output it provably did not generate.
+    ///
+    /// Measured on the shipped 0.13.5 binary against a 503 endpoint: 15
+    /// physical sends over 301.9 s, and the run did NOT end on its 900 s
+    /// outage window — it ended on `budget cap 'per_session_output_tokens'
+    /// would be exceeded (limit 1000000, reserved total 1024000)`. Sixteen
+    /// reservations of 64 000 conservative output tokens, settled one after
+    /// another for a turn that generated none. Two things were wrong at once:
+    /// the session budget was silently acting as the retry policy, and the
+    /// user was told the wrong cause for the stop. At the shipped retry
+    /// budget one failed turn eats 70 % of a 1 000 000-token session.
+    #[tokio::test(start_paused = true)]
+    async fn a_503_releases_its_reservation_instead_of_being_billed_for_it() {
+        let (sends, surface, charged) = run_under_output_cap(api_503, 100).await;
+        assert_eq!(
+            charged, 0,
+            "a 503 generated no tokens, so the session must be charged for \
+             none; it was charged {charged}"
+        );
+        let capped: Vec<&String> = surface
+            .iter()
+            .filter(|m| m.contains("budget cap"))
+            .collect();
+        assert!(
+            capped.is_empty(),
+            "a 503 IS a response head: the provider answered, and answered \
+             with a refusal, so there are no output tokens to charge for. The \
+             run was stopped by the budget instead of by its retry policy: \
+             {capped:?}"
+        );
+        assert!(
+            sends > 2,
+            "the outage window, not the budget, has to be what bounds a 503; \
+             only {sends} send(s) happened"
+        );
+    }
+
+    /// KNOWN-POSITIVE CONTROL for the absence assertion above.
+    ///
+    /// Same harness, same cap, same outage window — the only thing that
+    /// changes is the failure class. A lost socket carries no response head,
+    /// so the conservative charge is right and the cap MUST still be
+    /// reachable. Without this, a fix that simply stopped reserving anything,
+    /// or a harness whose cap could never fire at all, would satisfy the test
+    /// above for free.
+    ///
+    /// It also pins the half of the rule that is easy to over-apply. Measured
+    /// on this workspace: a client-side ECONNRESET against an upstream that
+    /// had answered 200 and billed 102 output tokens. "Nothing was served to
+    /// us" is not "nothing was billed".
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_socket_still_pays_the_conservative_charge() {
+        let (sends, _, charged) = run_under_output_cap(connection_lost, 100).await;
+        assert!(
+            charged > 0,
+            "a lost socket leaves the outcome UNKNOWN, so the conservative \
+             charge has to stand. The session was charged {charged} after \
+             {sends} send(s); a zero here would mean the release rule had \
+             swallowed the whole class, and the 503 test above would prove \
+             nothing"
+        );
+    }
+
+    fn rate_limited_100ms() -> ProviderError {
+        ProviderError::RateLimited {
+            retry_after_ms: 100,
+        }
+    }
+
+    fn rate_limited_1200ms() -> ProviderError {
+        ProviderError::RateLimited {
+            retry_after_ms: 1_200,
+        }
+    }
+
+    /// Run `body` with the stream-retry budget pinned to `budget`, restoring
+    /// whatever was there before. Every caller is `#[serial_test::serial]`.
+    async fn with_retry_budget<F, T>(budget: &str, body: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let prior = std::env::var(super::MAX_STREAM_RETRIES_ENV).ok();
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in
+        // this binary, matching the contract the budget tests above already
+        // carry.
+        unsafe {
+            std::env::set_var(super::MAX_STREAM_RETRIES_ENV, budget);
+        }
+        let out = body.await;
+        unsafe {
+            match prior {
+                Some(prior) => std::env::set_var(super::MAX_STREAM_RETRIES_ENV, prior),
+                None => std::env::remove_var(super::MAX_STREAM_RETRIES_ENV),
+            }
+        }
+        out
+    }
+
+    /// THE CURVE. `base(n) = min(500ms * 2^(n-1), 24s)`.
+    ///
+    /// Measured on 0.13.5 against a real 127.0.0.1 server: an HTTP 500 arm at
+    /// n=3 produced gaps of 0.505 s and 1.006 s — the linear `500ms * n`
+    /// schedule. Linear and exponential are INDISTINGUISHABLE at the default
+    /// budget of 2 retries (0.5, 1.0 either way), which is why this test
+    /// raises the budget: the third and fourth gaps are where a send loop and
+    /// a backoff diverge (linear spends 1.5 s and 2.0 s, the curve spends
+    /// 2.0 s and 4.0 s).
+    ///
+    /// Jitter is pinned to zero so the assertion is exact. The production
+    /// draw is graded separately in `wcore_providers::backoff`, by a test
+    /// that fails if jitter is ever a constant.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn served_retries_double_they_do_not_step_linearly() {
+        let gaps = with_retry_budget("4", async {
+            wcore_providers::backoff::scope_jitter(0.0, send_gaps_ms(served_500)).await
+        })
+        .await;
+        assert_eq!(
+            gaps,
+            vec![500u128, 1_000, 2_000, 4_000],
+            "the gaps between physical sends must walk the doubling curve; \
+             the linear schedule this replaces gives [500, 1000, 1500, 2000]"
+        );
+    }
+
+    /// The cap is 24 s, not 30 s and not unbounded: 24 s times the 1.25 jitter
+    /// ceiling is exactly `DEFAULT_RECOVERY_TIMEOUT_SECS`, the promise the
+    /// unserved backoff cap has always carried.
+    #[test]
+    fn the_curve_caps_at_twenty_four_seconds() {
+        use wcore_providers::backoff::{RETRY_BACKOFF_CAP, base_backoff};
+        assert_eq!(
+            RETRY_BACKOFF_CAP,
+            std::time::Duration::from_secs(24),
+            "the cap is derived: 24 s times 1.25 max jitter = the breaker cooldown"
+        );
+        assert_eq!(
+            RETRY_BACKOFF_CAP.mul_f64(1.25),
+            std::time::Duration::from_secs(wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS),
+            "cap plus maximum jitter must land exactly on the breaker cooldown"
+        );
+        for attempt in 7..=20u32 {
+            assert_eq!(
+                base_backoff(attempt),
+                RETRY_BACKOFF_CAP,
+                "attempt {attempt} must hold the cap"
+            );
+        }
+    }
+
+    /// A `Retry-After` the provider sent must be SLEPT, not merely printed.
+    ///
+    /// Measured on 0.13.5 against a real 127.0.0.1 server, n=3: a 429 carrying
+    /// `Retry-After: 7` rendered "Rate limited, retry after 7000ms" on the
+    /// user surface and the whole run then finished in 0.677 s. The number was
+    /// parsed, carried into the message, and ignored by the loop.
+    ///
+    /// That run also made only ONE physical send, for a SECOND reason this
+    /// test cannot see: the 429 demoted the only API key into a cooldown and
+    /// the retry found the pool empty. The provider here is a mock
+    /// `LlmProvider`, so no `KeyPool` is consulted and reverting that fix
+    /// leaves this test green — measured, not assumed. The credential half is
+    /// graded where it lives, by
+    /// `wcore_providers::key_rotation::tests::a_lone_rate_limited_key_is_still_offered`,
+    /// and end to end by the live 0.13.5-vs-HEAD comparison in which 0.13.5
+    /// answers a 429 with "No API key. Set an api_key via --api-key…".
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limit_hint_is_slept_not_just_printed() {
+        let gaps = wcore_providers::backoff::scope_jitter(0.0, send_gaps_ms(rate_limited_7s)).await;
+        assert!(
+            !gaps.is_empty(),
+            "the provider saw a single send — a 429 must still be retried"
+        );
+        for gap in &gaps {
+            assert!(
+                *gap >= 7_000,
+                "the engine slept {gap} ms after a server that asked for \
+                 7000 ms; the hint outranks the curve, whose first step is \
+                 500 ms. Gaps: {gaps:?}"
+            );
+        }
+    }
+
+    /// The server instruction outranks the curve in BOTH directions: a hint
+    /// far below the curve is honoured too, otherwise "honour Retry-After"
+    /// silently means "take the larger of the two".
+    ///
+    /// Control for the test above: same code path, a hint the curve would
+    /// dwarf. Without this, a loop that slept `max(hint, base(n))` would pass
+    /// the 7 s case while still not honouring the server.
+    #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
+    async fn a_small_hint_is_honoured_even_when_the_curve_would_wait_longer() {
+        let gaps = with_retry_budget("4", async {
+            wcore_providers::backoff::scope_jitter(0.0, send_gaps_ms(rate_limited_100ms)).await
+        })
+        .await;
+        assert_eq!(gaps.len(), 4, "four retries must produce four gaps");
+        // By gap 4 the unhinted curve would be at 4000 ms. The server said
+        // 100 ms, and the server wins.
+        for gap in &gaps {
+            assert!(
+                *gap < 1_000,
+                "a 100 ms server hint was overridden by the curve ({gap} ms); \
+                 gaps: {gaps:?}"
+            );
+        }
+    }
+
+    /// The notice must NAME the wait.
+    ///
+    /// Nothing else speaks during a backoff sleep: the silence notice
+    /// (`stream_silence_notice_after`) is armed on a provider dispatch, not on
+    /// this sleep. Measured on this host against a real 127.0.0.1 server at a
+    /// budget of 10 — the shipped ceiling — the run produced four consecutive
+    /// gaps of 24-29 s carrying ZERO output, and `Still waiting on the
+    /// provider` appeared 0 times in the whole run. A curve whose later steps
+    /// are half a minute has to say so, or it is a hang with a schedule.
+    #[tokio::test(start_paused = true)]
+    async fn the_retry_notice_names_how_long_it_will_wait() {
+        let events = wcore_providers::backoff::scope_jitter(0.0, async {
+            let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let provider = Arc::new(TimedFailProvider {
+                error: rate_limited_7s,
+                sends,
+            });
+            let sink = TestSink::new();
+            let surface = sink.handle();
+            let mut engine = super::AgentEngine::new_with_provider(
+                provider,
+                wcore_config::config::Config::default(),
+                ToolRegistry::new(),
+                Arc::new(sink),
+            );
+            engine.max_turns = Some(2);
+            let _ = engine.run("task", "m-1").await;
+            surface.snapshot()
+        })
+        .await;
+        let retries: Vec<String> = notices(&events)
+            .into_iter()
+            .filter(|m| m.contains("retrying in"))
+            .collect();
+        assert!(
+            !retries.is_empty(),
+            "no retry notice reached the user surface at all; \
+             the absence check below would pass for free. Surface: {:?}",
+            notices(&events)
+        );
+        for notice in &retries {
+            assert!(
+                notice.contains("7.0s"),
+                "the notice must name the wait it is about to spend — the \
+                 server asked for 7000 ms and the surface said {notice:?}"
+            );
+        }
+    }
+
+    /// Control for the test above: a SUB-second wait must render in
+    /// milliseconds, not as `0.5s`-shaped noise, and must still be named.
+    /// Without this, a notice that only ever printed a hard-coded string
+    /// would satisfy the 7 s assertion.
+    #[tokio::test(start_paused = true)]
+    async fn a_sub_second_wait_is_named_in_milliseconds() {
+        let events = wcore_providers::backoff::scope_jitter(0.0, async {
+            let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let provider = Arc::new(TimedFailProvider {
+                error: served_500,
+                sends,
+            });
+            let sink = TestSink::new();
+            let surface = sink.handle();
+            let mut engine = super::AgentEngine::new_with_provider(
+                provider,
+                wcore_config::config::Config::default(),
+                ToolRegistry::new(),
+                Arc::new(sink),
+            );
+            engine.max_turns = Some(2);
+            let _ = engine.run("task", "m-1").await;
+            surface.snapshot()
+        })
+        .await;
+        let retries: Vec<String> = notices(&events)
+            .into_iter()
+            .filter(|m| m.contains("retrying in"))
+            .collect();
+        assert!(!retries.is_empty(), "no retry notice reached the surface");
+        assert!(
+            retries[0].contains("500ms"),
+            "the first step of the curve is 500 ms and must render as such, \
+             got {:?}",
+            retries[0]
+        );
+        assert!(
+            retries[1].contains("1.0s"),
+            "the second step is 1 s and must cross into seconds, got {:?}",
+            retries[1]
+        );
+    }
+
+    /// WALL CLOCK. Everything above runs on a paused clock, which proves the
+    /// engine SCHEDULED a sleep — not that it spent one. A curve implemented
+    /// with a zero-duration sleep would satisfy every paused-clock assertion
+    /// in this module and still be a send loop against a real provider.
+    ///
+    /// The hint is 1200 ms deliberately: it is ABOVE the first two steps of
+    /// the curve (500 ms, 1000 ms), so real elapsed time alone distinguishes
+    /// a loop that honours the server from one that walks its own schedule.
+    /// A 300 ms hint would have been satisfied by the old 500 ms step and
+    /// certified nothing.
+    ///
+    /// Pinned to a two-retry budget deliberately. This is the one test in the
+    /// module that spends REAL time, and the default is now 10: at the default
+    /// it would park a unit test for twelve seconds to prove a property that
+    /// two gaps already prove. What is under test is that the sleep is SPENT,
+    /// not how many of them there are.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_backoff_is_real_time_not_just_scheduled_time() {
+        let started = std::time::Instant::now();
+        let gaps = with_retry_budget("2", async {
+            wcore_providers::backoff::scope_jitter(0.0, send_gaps_ms(rate_limited_1200ms)).await
+        })
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(
+            gaps.len(),
+            2,
+            "the pinned budget is two retries, so two gaps; a 429 that costs \
+             the run its credential produces none"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(2_400),
+            "two 1200 ms server hints cost {elapsed:?} of REAL time; on a \
+             paused clock every other test in this module would still pass, \
+             which is exactly what this one is here to catch"
         );
     }
 }

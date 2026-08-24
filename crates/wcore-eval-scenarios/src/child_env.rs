@@ -13,6 +13,14 @@ static CREDENTIAL_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static VAULT_PASSPHRASES: LazyLock<Mutex<std::collections::HashMap<PathBuf, String>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
+/// Eval-only control that pins the retry budget of the evaluated child.
+///
+/// Named in the `WCORE_EVAL_*` namespace so it can never be confused with the
+/// product's `WAYLAND_MAX_STREAM_RETRIES`, and so an ambient value of the
+/// latter cannot reach a hermetic child. Set it with
+/// [`crate::tempenv::ScenarioRetryBudget`].
+pub const STREAM_RETRY_BUDGET_CONTROL: &str = "WCORE_EVAL_STREAM_RETRY_BUDGET";
+
 pub(crate) struct ChildEnvironment {
     variables: Vec<(OsString, OsString)>,
     credential_file: Option<PathBuf>,
@@ -93,6 +101,21 @@ impl ChildEnvironment {
         // This is an explicit deterministic-fixture control, not an ambient
         // product input. F04 replaces it with the fixture protocol.
         copy_if_present(&mut variables, "WCORE_EVAL_FIXTURE_FAIL_CANARY");
+
+        // Same class of control: the retry budget the scenario runs under.
+        // A scenario that scripts a FIXED number of failing provider steps is
+        // asserting what happens once the budget is EXHAUSTED, and the shipped
+        // default (10 retries on the shared backoff curve, 127.5 s) cannot be
+        // exhausted inside a 12 s scenario cap.
+        //
+        // The eval-namespaced spelling is deliberate. Copying the product's own
+        // `WAYLAND_MAX_STREAM_RETRIES` through would let a developer's shell
+        // change scenario results, which is precisely what the `env_clear` in
+        // `apply_tokio`/`apply_pty` exists to prevent; the translation keeps the
+        // control explicit and the child hermetic against ambient product env.
+        if let Some(budget) = std::env::var_os(STREAM_RETRY_BUDGET_CONTROL) {
+            variables.push(("WAYLAND_MAX_STREAM_RETRIES".into(), budget));
+        }
 
         let credential_file = secret
             .filter(|value| !value.is_empty())

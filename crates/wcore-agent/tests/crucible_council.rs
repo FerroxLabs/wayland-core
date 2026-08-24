@@ -379,6 +379,11 @@ async fn keyless_proposer_skipped_before_spawn() {
 
 #[tokio::test]
 async fn insufficient_usable_proposals_errors() {
+    // Budget PINNED, not inherited. This test drives a provider that fails
+    // every attempt; the shipped default is 10 retries on the shared backoff
+    // curve (127.5 s of scheduled sleep), and what is under test here is the
+    // failure OUTCOME, not the size of the budget.
+    let _retry_budget = wcore_agent::test_utils::PinnedRetryBudget::pin(2);
     // Both proposers error → 0 usable < min_proposers(2) → InsufficientProposals.
     let mut map: HashMap<String, Result<Arc<dyn LlmProvider>, ResolveError>> = HashMap::new();
     map.insert("openai".into(), Ok(Arc::new(ErrorProvider)));
