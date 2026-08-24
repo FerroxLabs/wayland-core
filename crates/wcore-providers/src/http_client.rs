@@ -175,7 +175,19 @@ where
 }
 
 /// Default TCP+TLS connect timeout for provider clients.
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// RE-EXPORTED from `wcore_egress`, not re-declared. The provider streaming
+/// client is built by `EgressClient::streaming_with_read_timeout`, which reads
+/// `wcore_egress::CONNECT_TIMEOUT`; a second `from_secs(30)` here was a COPY
+/// of that deadline, not the deadline. Everything in this module that reasons
+/// about the connect window — [`STREAM_SILENCE_NOTICE_AFTER`], the
+/// `the_silence_threshold_must_beat_the_connect_deadline` guard, and
+/// `wcore_agent`'s silent-stall retry ceiling — would have gone on agreeing
+/// with the copy while the live client used the other number. #1077 asks for
+/// precisely that edit ("consider a shorter connect timeout"), so the two
+/// constants were one such edit away from disagreeing in silence. A re-export
+/// makes the divergence unrepresentable rather than merely tested for.
+pub const CONNECT_TIMEOUT: Duration = wcore_egress::CONNECT_TIMEOUT;
 
 /// Default between-bytes read timeout for provider streams.
 ///

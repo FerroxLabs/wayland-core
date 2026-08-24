@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use wcore_config::config::app_config_dir;
+use wcore_config::config::{COMMANDS_DIR_NAME, SKILLS_DIR_NAME, app_config_dir};
 
 // ---------------------------------------------------------------------------
 // User-level directories (<config_dir>/wayland-core/)
@@ -10,12 +10,12 @@ use wcore_config::config::app_config_dir;
 ///
 /// Returns `None` if the platform config directory cannot be determined.
 pub fn user_skills_dir() -> Option<PathBuf> {
-    app_config_dir().map(|d| d.join("skills"))
+    app_config_dir().map(|d| d.join(SKILLS_DIR_NAME))
 }
 
 /// Return the user-level legacy commands directory: `<config_dir>/wayland-core/commands/`
 pub fn user_commands_dir() -> Option<PathBuf> {
-    app_config_dir().map(|d| d.join("commands"))
+    app_config_dir().map(|d| d.join(COMMANDS_DIR_NAME))
 }
 
 /// Return the `$WAYLAND_HOME`-rooted skill directories the auto-skill
@@ -61,7 +61,11 @@ pub fn wayland_home_skills_dirs() -> Vec<PathBuf> {
 /// session, trusted and contained alike, because its contents are obeyed
 /// rather than merely read. An output root has to be writable, so it gets its
 /// own name.
-pub const SKILL_OUTPUT_ROOT: &str = ".wayland-out";
+///
+/// The name itself lives in `wcore_config` because the tool-result spill
+/// directory is chosen under the same root from `wcore-tools`, which does not
+/// depend on this crate (FerroxLabs/wayland#1097).
+pub const SKILL_OUTPUT_ROOT: &str = wcore_config::config::SESSION_OUTPUT_ROOT;
 
 /// Where a skill puts the files it produces: `<cwd>/.wayland-out/skills/<session>/`.
 ///

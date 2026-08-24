@@ -18,7 +18,7 @@
 //! `operator_bash_network` for a sandboxed one). It is never hardcoded here.
 
 use parking_lot::RwLock;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use thiserror::Error;
@@ -211,6 +211,19 @@ pub enum WorkspaceCapabilityGrantError {
     CredentialPath(PathBuf),
     #[error("capability path could not be resolved: {0}")]
     Resolve(#[from] std::io::Error),
+}
+
+/// A write target that the session could create but could never read back.
+///
+/// FerroxLabs/wayland#1097. Write authority and read authority are enforced by
+/// different mechanisms, so a location can be writable and unreadable at the
+/// same time — and the asymmetry only reveals itself at the END of the work,
+/// when the produced path is handed over and the read is refused. This is the
+/// refusal that turns that dead end into a write-time error naming the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{} is outside this session's readable roots", path.display())]
+pub struct WriteTargetNotReadable {
+    pub path: PathBuf,
 }
 
 /// One standing read grant held by a session.
@@ -620,10 +633,105 @@ impl WorkspacePolicy {
     /// business, and a benign-named symlink into the control surface resolves
     /// before the prefix match so it cannot be used to smuggle a write through.
     pub fn is_repo_control_path(&self, path: &Path) -> bool {
-        let canon = canon_for_scope(path);
+        // `canon_deep`, not `canon_for_scope`: the root is canonicalized at
+        // construction, so a candidate that resolves to something shallower
+        // never matches it. `canon_for_scope` resolves only the IMMEDIATE
+        // parent and returns the RAW path when that parent is missing —
+        // which is exactly the shape of a NEW control file
+        // (`.wayland-core/skills/<new>/SKILL.md`, `.git/<new>/hook`), and
+        // exactly the write this guard exists to refuse. Measured on this
+        // tree before the change: with the workspace addressed through a
+        // symlink, `Write` of `<link>/.git/hooks/pre-commit` (parent not yet
+        // created) reported `Created`, while the same write addressed through
+        // the real root was refused. See
+        // `crates/wcore-tools/tests/repo_control_symlink.rs`.
+        let canon = canon_deep(path);
         REPO_CONTROL_DIRS
             .iter()
             .any(|dir| canon.starts_with(self.root.join(dir)))
+    }
+
+    /// True when `path` names a directory skills are LOADED from — this
+    /// workspace's (or any ancestor's) `.wayland-core/skills` and
+    /// `.wayland-core/commands`, or the user-level `<config_dir>/skills` and
+    /// `<config_dir>/commands`.
+    ///
+    /// FerroxLabs/wayland#1096, suggested direction 2. A load path is not an
+    /// output path, and the everyday failure is not malice: a skill produces a
+    /// report and puts it next to its own `SKILL.md`, which lives in the global
+    /// config dir, OUTSIDE the session workspace. The file is then unreachable
+    /// to the session that made it — the dead end the 2026-08-19 UAT hit, and
+    /// reproduced through the live binary in
+    /// `wcore-cli/tests/skill_source_write_live.rs`.
+    ///
+    /// Strictly WIDER than [`is_repo_control_path`](Self::is_repo_control_path),
+    /// and that is the whole point of it being separate. Repo-control is
+    /// workspace-scoped (`<root>/.wayland-core`), because a `.git` elsewhere on
+    /// the host is not this policy's business. A skill LOAD path is: the
+    /// user-level directory is read into every future session on the machine no
+    /// matter where the workspace sits, and `project_skills_dirs()` walks
+    /// ANCESTORS of the cwd, so a `.wayland-core/skills` above the workspace
+    /// root is loaded too. Both are refused here; neither is reachable from the
+    /// workspace-scoped predicate.
+    ///
+    /// Not a read deny. The loader reads these paths on every boot and the model
+    /// may inspect a skill it is about to run; only AUTHORING them is refused.
+    /// Also deliberately narrow inside the config dir — session state, memory
+    /// and plugin data live there too and stay writable.
+    ///
+    /// Refuses the model's TOOLS, not the engine. The auto-skill drafter
+    /// (`wcore_agent::auto_skill::drafter`) and the `skills` CLI verbs write
+    /// their `SKILL.md` files through `wcore_config::atomic_write` / `std::fs`,
+    /// never the tool VFS, so skill installation and drafting are unaffected.
+    pub fn is_skill_source_path(&self, path: &Path) -> bool {
+        let canon = canon_deep(path);
+        if under_project_load_path(&canon) {
+            return true;
+        }
+        wcore_config::config::user_skill_source_dirs()
+            .iter()
+            .any(|dir| canon.starts_with(canon_deep(dir)))
+    }
+
+    /// Refuse a write target this session could never read back
+    /// (FerroxLabs/wayland#1097).
+    ///
+    /// The invariant: a path we let an agent WRITE must sit under a root
+    /// [`readable_roots`](Self::readable_roots) also covers. Where it does not,
+    /// the work still succeeds and the delivery fails — the agent finishes
+    /// holding a path it just created and cannot open. Refusing at write time
+    /// costs the same information one step earlier, with the reason named.
+    ///
+    /// Canonicalize-first, exactly like
+    /// [`is_repo_control_path`](Self::is_repo_control_path): the longest
+    /// EXISTING ancestor is resolved (so a target whose directories do not
+    /// exist yet is still judged on where it would really land), which also
+    /// means a `..` segment and a symlinked parent are resolved before the
+    /// prefix match rather than after it.
+    ///
+    /// SCOPE — this is the OS-sandbox answer, which is the WIDER of the two
+    /// answers this codebase has to "can the session read it". `Bash` reads
+    /// through the OS sandbox, whose allow-list IS `readable_roots()`; the file
+    /// tools (`Read`/`Grep`/`Glob`) read through `ctx.vfs`, whose jail is
+    /// rooted at the workspace plus the standing session read grants and does
+    /// NOT include `readable_extra` (toolchain dirs) or the writable scratch
+    /// tree. So passing this check is NECESSARY for a readable-back write and
+    /// is not by itself SUFFICIENT for one the `Read` tool can open: a caller
+    /// that hands its path to the model should keep the target under
+    /// [`root`](Self::root).
+    pub fn ensure_write_target_readable(&self, path: &Path) -> Result<(), WriteTargetNotReadable> {
+        let resolved = canon_existing_ancestor(path);
+        let covered = self
+            .readable_roots()
+            .iter()
+            .any(|root| resolved.starts_with(canon_existing_ancestor(root)));
+        if covered {
+            Ok(())
+        } else {
+            Err(WriteTargetNotReadable {
+                path: path.to_path_buf(),
+            })
+        }
     }
 
     /// #667: opt a `Trusted` policy into the same PROJECT-committed-secret
@@ -1509,6 +1617,30 @@ fn compute_secret_deny(
     out
 }
 
+thread_local! {
+    /// #1111 acceptance 1 asked for the walk to be counted "via an injected
+    /// counter, not wall-clock". This is that counter. It is THREAD-LOCAL on
+    /// purpose: `cargo test` runs one binary as threads in a single process, so
+    /// a process-global would be corrupted by any concurrent test that also
+    /// walks and the count would quietly stop meaning anything. Every
+    /// `project_committed_secrets` call runs on the thread that asked for it.
+    static WALK_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of full workspace secret walks ([`project_committed_secrets`])
+/// performed **on the calling thread** since the process started.
+///
+/// Read it either side of an operation to assert how many walks that operation
+/// really cost. It counts WALKS, not entries: one call that starts serial and
+/// restarts in parallel above `SERIAL_WALK_BUDGET` is one walk, because the
+/// question #1111 asks is whether a walk is repeated.
+///
+/// Graded by `tests/secret_walk_call_count_test.rs`, which also carries the
+/// executable evidence for why this walk is deliberately NOT memoised.
+pub fn walk_calls() -> u64 {
+    WALK_CALLS.with(|c| c.get())
+}
+
 /// Absolute, canonicalized paths of the workspace's OWN committed secrets
 /// (`.env`, `service-account*.json`, `*.pem`, …) that are reachable from a
 /// sandbox mounted at `root`. Walks `root` ignoring `.gitignore` (a
@@ -1520,6 +1652,8 @@ fn compute_secret_deny(
 /// The returned list is SORTED. A big tree is walked in parallel (below), and a
 /// security boundary must not vary with thread scheduling.
 fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<PathBuf> {
+    WALK_CALLS.with(|c| c.set(c.get() + 1));
+
     let system_roots: Vec<PathBuf> = SYSTEM_CREDENTIAL_STORES.iter().map(PathBuf::from).collect();
     let under_mounted = |p: &Path| {
         readable_canon.iter().any(|r| p.starts_with(r))
@@ -1730,6 +1864,107 @@ pub(crate) fn canon_for_scope(path: &Path) -> PathBuf {
             .unwrap_or_else(|_| path.to_path_buf()),
         _ => path.to_path_buf(),
     }
+}
+
+/// Canonicalize as much of `path` as exists and keep the remainder verbatim.
+///
+/// [`canon_for_scope`] resolves only the IMMEDIATE parent and falls back to the
+/// raw path when that parent is missing. For a deny predicate that is a hole on
+/// any host whose config or temp root is itself a symlink (`/var` ->
+/// `/private/var` on macOS): the deny list resolves, the candidate does not, and
+/// the prefix comparison misses. The miss lands on exactly the case
+/// [`WorkspacePolicy::is_skill_source_path`] exists to catch — writing
+/// `<config_dir>/skills/<new-skill>/report.html` creates BOTH missing
+/// components, so "the parent exists" is false precisely when it matters.
+fn canon_deep(path: &Path) -> PathBuf {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return resolved;
+    }
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path;
+    while let (Some(parent), Some(name)) = (cursor.parent(), cursor.file_name()) {
+        trailing.push(name.to_os_string());
+        if let Ok(base) = std::fs::canonicalize(parent) {
+            let mut resolved = base;
+            resolved.extend(trailing.iter().rev());
+            return resolved;
+        }
+        cursor = parent;
+    }
+    path.to_path_buf()
+}
+
+/// True when any ancestor of `path` is a `.wayland-core/skills` or
+/// `.wayland-core/commands` directory.
+///
+/// Walks components rather than joining a root, because
+/// `wcore_skills::paths::project_skills_dirs()` walks UP from the cwd: a
+/// `.wayland-core/skills` in an ancestor of the workspace is a load path for
+/// this session, and one in a sibling checkout is a load path for that one. A
+/// component walk covers all of them with no root to be wrong about.
+fn under_project_load_path(path: &Path) -> bool {
+    use std::path::Component;
+    let mut parent_was_marker = false;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            parent_was_marker = false;
+            continue;
+        };
+        if parent_was_marker
+            && wcore_config::config::SKILL_SOURCE_DIR_NAMES
+                .iter()
+                .any(|leaf| name == std::ffi::OsStr::new(leaf))
+        {
+            return true;
+        }
+        parent_was_marker = name == std::ffi::OsStr::new(".wayland-core");
+    }
+    false
+}
+
+/// Resolve `path` to where it would ACTUALLY land, component by component,
+/// without requiring any of it to exist yet.
+///
+/// [`canon_for_scope`] resolves at most one missing component, which is enough
+/// for a leaf that does not exist yet but not for a target whose directories
+/// have not been created either (`<root>/.wayland-out/results/x.txt` on a fresh
+/// workspace, which is what every FIRST spill looks like).
+///
+/// Walking DOWN and re-canonicalizing after every component — rather than
+/// canonicalizing the longest existing ancestor once and appending the rest
+/// verbatim — is what keeps the result honest for the two escapes that matter,
+/// both of which appear only when part of the path is missing:
+///
+/// * `<root>/nope/../../outside/x` — a `..` that follows a component which
+///   does not exist. Appended verbatim it stays in the string, and the result
+///   still `starts_with` the root while the real target is outside it.
+/// * `<root>/nope/../link/x` — a symlinked component reached only after such a
+///   `..`. It has to be resolved before the prefix compare, not after.
+///
+/// A `..` is applied lexically (`pop`) because the prefix accumulated so far is
+/// already canonical, so there is no symlink left for it to traverse wrongly.
+fn canon_existing_ancestor(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(name) => out.push(name),
+        }
+        // Resolve as soon as the prefix so far exists, so a symlinked
+        // component is replaced by its target BEFORE any later `..` is
+        // applied to it, and so a `..` that follows a component which does
+        // not exist is still applied instead of being carried into the
+        // comparison verbatim.
+        if let Ok(resolved) = std::fs::canonicalize(&out) {
+            out = resolved;
+        }
+    }
+    out
 }
 
 fn canon(p: PathBuf) -> PathBuf {

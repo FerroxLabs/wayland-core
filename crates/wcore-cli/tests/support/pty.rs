@@ -129,6 +129,41 @@ pub struct Pty {
     _master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     _reader: std::thread::JoinHandle<()>,
+    /// FerroxLabs/wayland#1109. What the reader thread has managed to do.
+    /// When a `wait_for` gives up, the last 40-row screen alone cannot say
+    /// whether the child stopped emitting or kept painting; those are
+    /// different components, and that issue burned two CI runs failing to
+    /// tell them apart.
+    reader_stats: std::sync::Arc<std::sync::Mutex<ReaderStats>>,
+    /// Every `wait_for` already SATISFIED on this terminal. The speed of the
+    /// prefix is what separates process-wide starvation from a stall specific
+    /// to one awaited thing — see [`timeout_report`].
+    steps: std::sync::Mutex<Vec<StepTiming>>,
+    /// The master side, kept for the `FIONREAD` probe in [`Pty::pending_bytes`].
+    /// `None` on a backend that does not expose one, which is not a failure —
+    /// the probe simply reports "unknown" and nothing is extended on it.
+    master_fd: Option<std::os::fd::RawFd>,
+}
+
+/// What the PTY reader thread has managed to do so far.
+#[cfg(unix)]
+#[derive(Default)]
+pub struct ReaderStats {
+    pub bytes: u64,
+    pub reads: u64,
+    pub last_read: Option<Instant>,
+    /// The read loop ended — EOF or an error on the master side, which on
+    /// every platform this harness runs on means the child is gone.
+    pub eof: bool,
+}
+
+/// One satisfied `wait_for`, kept so a later timeout can print the timeline.
+#[cfg(unix)]
+#[derive(Clone, Debug)]
+pub struct StepTiming {
+    pub what: String,
+    pub elapsed: Duration,
+    pub budget: Duration,
 }
 
 #[cfg(unix)]
@@ -217,21 +252,43 @@ impl Pty {
         let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
         let parser = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let parser_for_thread = std::sync::Arc::clone(&parser);
+        let reader_stats = std::sync::Arc::new(std::sync::Mutex::new(ReaderStats::default()));
+        let stats_for_thread = std::sync::Arc::clone(&reader_stats);
         let reader_handle = std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        if let Ok(mut s) = stats_for_thread.lock() {
+                            s.eof = true;
+                        }
+                        break;
+                    }
                     Ok(n) => {
+                        // Liveness is recorded BEFORE the parse: a starved
+                        // reader and a silent child differ only in whether
+                        // bytes are still arriving, and #1109 needs that
+                        // answer even when the vt100 parse is the slow part.
+                        if let Ok(mut s) = stats_for_thread.lock() {
+                            s.bytes = s.bytes.saturating_add(n as u64);
+                            s.reads = s.reads.saturating_add(1);
+                            s.last_read = Some(Instant::now());
+                        }
                         if let Ok(mut p) = parser_for_thread.lock() {
                             p.process(&buf[..n]);
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        if let Ok(mut s) = stats_for_thread.lock() {
+                            s.eof = true;
+                        }
+                        break;
+                    }
                 }
             }
         });
 
+        let master_fd = pty.master.as_raw_fd();
         let writer = pty.master.take_writer().expect("take PTY writer");
         Self {
             writer,
@@ -239,6 +296,28 @@ impl Pty {
             _master: pty.master,
             child,
             _reader: reader_handle,
+            reader_stats,
+            steps: std::sync::Mutex::new(Vec::new()),
+            master_fd,
+        }
+    }
+
+    /// Bytes the child has written that NOTHING in this harness has read yet,
+    /// via `FIONREAD` on the master. `None` when there is no fd to ask.
+    ///
+    /// This is the fact that separates "the child went quiet" from "this
+    /// harness fell behind the child" — the two readings #1109 could not tell
+    /// apart, because both look identical on a stale screen.
+    pub fn pending_bytes(&self) -> Option<u64> {
+        let fd = self.master_fd?;
+        let mut n: libc::c_int = 0;
+        // SAFETY: `fd` is the live master end of a pty this struct owns, and
+        // `FIONREAD` writes one `c_int` through the pointer we hand it.
+        let rc = unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) };
+        if rc == -1 {
+            None
+        } else {
+            Some(n.max(0) as u64)
         }
     }
 
@@ -248,19 +327,133 @@ impl Pty {
     }
 
     pub fn wait_for<F: Fn(&str) -> bool>(&self, predicate: F, timeout: Duration, what: &str) {
-        let deadline = Instant::now() + timeout;
-        let mut last = String::new();
-        while Instant::now() < deadline {
+        self.wait_for_ctx(predicate, timeout, what, String::new);
+    }
+
+    /// `wait_for` plus a caller-supplied diagnostic, evaluated ONLY on the
+    /// timeout path.
+    ///
+    /// FerroxLabs/wayland#1109 asked for the boundary tests to be instrumented
+    /// so a CI timeout names the component that stalled. The one fact this
+    /// harness cannot see for itself is what the mock PROVIDER received, which
+    /// separates "the engine never dispatched the turn" from "the provider
+    /// answered and the answer never reached the screen". The caller knows
+    /// that; this seam lets it say so at the moment of failure.
+    pub fn wait_for_ctx<F: Fn(&str) -> bool, C: Fn() -> String>(
+        &self,
+        predicate: F,
+        timeout: Duration,
+        what: &str,
+        context: C,
+    ) {
+        let started = Instant::now();
+        let deadline = started + timeout;
+        // How many times this thread actually got to LOOK. Against the
+        // `timeout / POLL_INTERVAL` it was entitled to, this measures whether
+        // the harness thread itself was being scheduled — the reading #1109
+        // needed and could not take.
+        let mut polls = 0_u64;
+        let mut last;
+        loop {
             last = self.screen_text();
+            polls += 1;
             if predicate(&last) {
+                self.record_step(what, started.elapsed(), timeout);
                 return;
             }
-            std::thread::sleep(Duration::from_millis(30));
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(POLL_INTERVAL);
         }
+
+        // #1109 GRACE. The deadline can expire while output the child ALREADY
+        // wrote is still queued in the pty — the screen this loop has been
+        // polling is then simply OLD, and failing on it reports our own
+        // observation lag as the product's stall. Extend only on EVIDENCE of
+        // unobserved output: bytes pending in the kernel buffer, or bytes that
+        // landed moments ago. A genuinely silent child satisfies neither, so
+        // this is not a budget increase for a stalled product — it is bounded
+        // by GRACE_CAP either way.
+        let grace_started = Instant::now();
+        let mut extended = false;
+        while should_extend(
+            self.pending_bytes(),
+            self.quiet_for(),
+            grace_started.elapsed(),
+            GRACE_CAP,
+        ) {
+            extended = true;
+            std::thread::sleep(POLL_INTERVAL);
+            last = self.screen_text();
+            polls += 1;
+            if predicate(&last) {
+                let waited = started.elapsed();
+                // Loud on purpose: a wait that only passed because the screen
+                // was stale is a scheduling fact worth keeping, not a silent
+                // rescue.
+                eprintln!(
+                    "[pty#1109] {what}: satisfied {:?} PAST its {timeout:?} budget, after \
+                     draining output already written by the child. The screen was STALE, not \
+                     the child.",
+                    waited.saturating_sub(timeout)
+                );
+                self.record_step(what, waited, timeout);
+                return;
+            }
+        }
+
+        let (bytes, reads, last_read_age, eof) = self.reader_liveness();
+        let steps = self
+            .steps
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_else(|p| p.into_inner().clone());
         panic!(
-            "timed out after {:?} waiting for {what}.\n--- last screen ---\n{}\n--- end ---",
-            timeout, last
+            "{}",
+            timeout_report(&TimeoutFacts {
+                what,
+                timeout,
+                steps: &steps,
+                polls,
+                bytes,
+                reads,
+                last_read_age,
+                pending: self.pending_bytes(),
+                eof,
+                extended,
+                context: &context(),
+                screen: &last,
+            })
         );
+    }
+
+    fn record_step(&self, what: &str, elapsed: Duration, budget: Duration) {
+        if let Ok(mut steps) = self.steps.lock() {
+            steps.push(StepTiming {
+                what: what.to_owned(),
+                elapsed,
+                budget,
+            });
+        }
+    }
+
+    /// How long since the newest byte arrived. `Duration::MAX` when none ever
+    /// did, so "never spoke" and "long silent" fall on the same side of every
+    /// comparison.
+    fn quiet_for(&self) -> Duration {
+        match self.reader_stats.lock() {
+            Ok(s) => s.last_read.map_or(Duration::MAX, |t| t.elapsed()),
+            Err(_) => Duration::MAX,
+        }
+    }
+
+    /// `(bytes, reads, age of the newest byte, reader ended)`.
+    fn reader_liveness(&self) -> (u64, u64, Option<Duration>, bool) {
+        match self.reader_stats.lock() {
+            Ok(s) => (s.bytes, s.reads, s.last_read.map(|t| t.elapsed()), s.eof),
+            Err(_) => (0, 0, None, false),
+        }
     }
 
     /// Type at the terminal.
@@ -350,4 +543,496 @@ pub fn boot(home: &Path) -> Pty {
         "TUI to render the chrome wordmark and Workspace tab",
     );
     h
+}
+
+// ===========================================================================
+// Timeout diagnostics — FerroxLabs/wayland#1109.
+//
+// #1109 spent two CI runs, and this file's own `threads-required` override in
+// `.config/nextest.toml`, on a question the harness could not answer: when a
+// PTY wait times out, WHICH component stopped — the child, the reader thread,
+// or the test thread? The captured 40-row screen is the same picture in all
+// three cases. Everything below exists to make the failure say which.
+// ===========================================================================
+
+/// How often a wait looks at the screen. Named because the diagnostic divides
+/// by it to work out how many looks the wait was ENTITLED to.
+#[cfg(unix)]
+const POLL_INTERVAL: Duration = Duration::from_millis(30);
+
+/// The hard ceiling on the post-deadline drain. Bounded so a stuck product can
+/// never turn one wait into an unbounded one.
+#[cfg(unix)]
+const GRACE_CAP: Duration = Duration::from_secs(3);
+
+/// A terminal quiet for longer than this has stopped emitting, for the
+/// purposes of both the drain and the verdict. Comfortably longer than one
+/// poll interval and than a vt100 repaint.
+#[cfg(unix)]
+const QUIET_WINDOW: Duration = Duration::from_millis(400);
+
+/// A wait whose satisfied prefix used at most 1/`PREFIX_FAST_DIVISOR` of its
+/// own budget was running at normal speed. A fifth is deliberately generous:
+/// the PTY tests satisfy every prefix wait in about a second against 10-60s
+/// budgets when unloaded.
+#[cfg(unix)]
+const PREFIX_FAST_DIVISOR: u32 = 5;
+
+/// A wait that got at least this fraction of the looks it was entitled to was
+/// being scheduled. Two thirds tolerates ordinary jitter while still catching
+/// a thread that spent most of the budget off-CPU.
+#[cfg(unix)]
+const SCHEDULED_NUMERATOR: u64 = 2;
+#[cfg(unix)]
+const SCHEDULED_DENOMINATOR: u64 = 3;
+
+/// Should a wait be extended past its deadline?
+///
+/// The whole point is the NEGATIVE case: a silent terminal returns `false`
+/// immediately, so a stalled product still fails on its stated budget and this
+/// is not a timeout increase. `true` requires positive evidence that the child
+/// produced output this harness has not yet rendered.
+#[cfg(unix)]
+pub fn should_extend(
+    pending: Option<u64>,
+    quiet_for: Duration,
+    extended_for: Duration,
+    cap: Duration,
+) -> bool {
+    if extended_for >= cap {
+        return false;
+    }
+    // Unread bytes in the kernel buffer: the child spoke and we have not
+    // listened. Unambiguous.
+    if pending.is_some_and(|n| n > 0) {
+        return true;
+    }
+    // Bytes landed a moment ago: the parse may be mid-flight, or more is
+    // coming. `Duration::MAX` (never spoke) fails this, as intended.
+    quiet_for < QUIET_WINDOW
+}
+
+/// Everything known at the moment a `wait_for` gives up.
+#[cfg(unix)]
+pub struct TimeoutFacts<'a> {
+    pub what: &'a str,
+    pub timeout: Duration,
+    /// The waits already satisfied on this terminal, in order.
+    pub steps: &'a [StepTiming],
+    /// How many times the waiting thread actually looked at the screen.
+    pub polls: u64,
+    pub bytes: u64,
+    pub reads: u64,
+    /// Age of the newest byte read off the master; `None` if none ever came.
+    pub last_read_age: Option<Duration>,
+    /// Unread bytes in the pty buffer; `None` when unknowable.
+    pub pending: Option<u64>,
+    pub eof: bool,
+    /// Whether the post-deadline drain ran at all.
+    pub extended: bool,
+    pub context: &'a str,
+    pub screen: &'a str,
+}
+
+/// Render the timeout diagnostic.
+///
+/// Pure on purpose: the classification it draws is the deliverable, so it has
+/// to be gradeable without provoking a real 30s stall. It answers three
+/// questions in order, and the three together name the component:
+///
+/// 1. **Was THIS THREAD scheduled?** `polls` against the `timeout /
+///    POLL_INTERVAL` looks it was entitled to. Few looks means the test thread
+///    itself was off-CPU, and nothing else in the report can be trusted.
+/// 2. **Did the child keep talking?** EOF, unread bytes pending, silence, or
+///    live output. Unread bytes mean the harness fell behind a child that was
+///    fine — the "stale frame" reading `.config/nextest.toml` records.
+/// 3. **Was the run slow BEFORE this wait?** Measured on `hetzner-dsm` against
+///    `addb4f48`: pinning both boundary tests to 3 cores against 170 spinning
+///    competitors stretched them from ~1.3s to ~20s TOTAL and they still
+///    PASSED, because every wait slowed together. The CI failures #1109
+///    reports took 31.148 / 31.147 / 31.194 / 31.202s total — a normal-speed
+///    prefix plus one full 30s stall. Uniform CPU starvation does not produce
+///    that shape.
+#[cfg(unix)]
+pub fn timeout_report(facts: &TimeoutFacts<'_>) -> String {
+    let mut out = format!(
+        "timed out after {:?} waiting for {}.\n",
+        facts.timeout, facts.what
+    );
+
+    // 1. Was this thread scheduled?
+    let entitled = (facts.timeout.as_millis() / POLL_INTERVAL.as_millis().max(1)).max(1) as u64;
+    if facts.polls.saturating_mul(SCHEDULED_DENOMINATOR)
+        >= entitled.saturating_mul(SCHEDULED_NUMERATOR)
+    {
+        out.push_str(&format!(
+            "HARNESS SCHEDULED — this thread looked at the screen {} time(s) of the {} it was \
+             entitled to, so it was on-CPU throughout. A verdict below is about the child, not \
+             about our own scheduling.\n",
+            facts.polls, entitled
+        ));
+    } else {
+        out.push_str(&format!(
+            "HARNESS STARVED — this thread looked at the screen only {} time(s) of the {} it \
+             was entitled to, so the TEST THREAD was off-CPU for most of the budget. This is a \
+             runner-capacity failure; nothing below is evidence about the product.\n",
+            facts.polls, entitled
+        ));
+    }
+
+    // 2. Did the child keep talking?
+    out.push_str(&match (facts.eof, facts.pending, facts.last_read_age) {
+        (true, _, _) => "TERMINAL CLOSED — the pty reached EOF, so the child exited before this \
+                         wait could be satisfied.\n"
+            .to_owned(),
+        (false, Some(n), _) if n > 0 => format!(
+            "TERMINAL BACKLOGGED — {n} byte(s) the child already wrote are still unread in the \
+             pty, so the screen above is STALE. The stall is this harness falling behind the \
+             child, not the child.\n"
+        ),
+        (false, _, None) => {
+            "TERMINAL SILENT — the child never wrote one byte to the terminal.\n".to_owned()
+        }
+        (false, _, Some(age)) if age >= QUIET_WINDOW => format!(
+            "TERMINAL SILENT — no byte arrived for the last {age:?} and nothing is queued, so \
+             the child stopped emitting. The stall is upstream of the terminal, inside the \
+             binary.\n"
+        ),
+        (false, _, Some(age)) => format!(
+            "TERMINAL LIVE — a byte arrived {age:?} ago, so the child is still painting. The \
+             awaited text simply never rendered.\n"
+        ),
+    });
+
+    // 3. Was the run already slow?
+    if facts.steps.is_empty() {
+        out.push_str(
+            "NO PRIOR STEPS — this is the first wait on this terminal, so there is no speed \
+             baseline to compare it against.\n",
+        );
+    } else {
+        let spent: Duration = facts.steps.iter().map(|s| s.elapsed).sum();
+        let budget: Duration = facts.steps.iter().map(|s| s.budget).sum();
+        let n = facts.steps.len();
+        if spent * PREFIX_FAST_DIVISOR <= budget {
+            out.push_str(&format!(
+                "NOT UNIFORM SLOWDOWN — the {n} wait(s) before this one were satisfied in \
+                 {spent:?} against {budget:?} of budget, so the run was at normal speed until \
+                 this step. Process-wide CPU starvation is refuted; the stall is specific to \
+                 what THIS step waits on.\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "UNIFORM SLOWDOWN — the {n} wait(s) before this one already needed {spent:?} of \
+                 {budget:?} budget, so earlier waits were slow too. Consistent with process-wide \
+                 starvation rather than a stall specific to this step.\n"
+            ));
+        }
+    }
+
+    out.push_str(&format!(
+        "reader: {} byte(s) in {} read(s); pending {}; post-deadline drain {}.\n",
+        facts.bytes,
+        facts.reads,
+        facts
+            .pending
+            .map_or_else(|| "unknown".to_owned(), |n| n.to_string()),
+        if facts.extended { "ran" } else { "did not run" },
+    ));
+
+    out.push_str("step timeline:\n");
+    if facts.steps.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for step in facts.steps {
+        out.push_str(&format!(
+            "  {:?} of {:?} — {}\n",
+            step.elapsed, step.budget, step.what
+        ));
+    }
+    out.push_str(&format!(
+        "  {:?} of {:?} — {} (TIMED OUT)\n",
+        facts.timeout, facts.timeout, facts.what
+    ));
+
+    if !facts.context.is_empty() {
+        out.push_str("caller context:\n");
+        for line in facts.context.lines() {
+            out.push_str(&format!("  {line}\n"));
+        }
+    }
+
+    out.push_str(&format!(
+        "--- last screen ---\n{}\n--- end ---",
+        facts.screen
+    ));
+    out
+}
+
+#[cfg(all(unix, test))]
+mod pty_diagnostics_tests {
+    use super::*;
+
+    fn step(what: &str, elapsed_ms: u64, budget_s: u64) -> StepTiming {
+        StepTiming {
+            what: what.to_owned(),
+            elapsed: Duration::from_millis(elapsed_ms),
+            budget: Duration::from_secs(budget_s),
+        }
+    }
+
+    /// A wait that was scheduled throughout: 1000 looks of the 1000 a 30s
+    /// budget at a 30ms interval entitles it to.
+    fn facts<'a>(steps: &'a [StepTiming], last_read_age: Option<Duration>) -> TimeoutFacts<'a> {
+        TimeoutFacts {
+            what: "the turn to continue after the granted read",
+            timeout: Duration::from_secs(30),
+            steps,
+            polls: 1000,
+            bytes: 4096,
+            reads: 12,
+            last_read_age,
+            pending: Some(0),
+            eof: false,
+            extended: false,
+            context: "",
+            screen: "SCREEN-SENTINEL",
+        }
+    }
+
+    // --- the drain decision -------------------------------------------------
+
+    /// Unread bytes in the pty are positive evidence that the screen is behind
+    /// the child, so the wait extends.
+    #[test]
+    fn a_pending_input_extends_the_wait() {
+        assert!(should_extend(
+            Some(64),
+            Duration::from_secs(20),
+            Duration::ZERO,
+            GRACE_CAP
+        ));
+    }
+
+    /// THE CONTROL THAT MATTERS. A silent terminal with nothing queued must
+    /// NOT extend. Without this the grace would be a blanket timeout increase,
+    /// and a genuinely stalled product would get 3 extra seconds to hide in.
+    #[test]
+    fn a_control_a_silent_terminal_does_not_extend() {
+        assert!(!should_extend(
+            Some(0),
+            Duration::from_secs(20),
+            Duration::ZERO,
+            GRACE_CAP
+        ));
+    }
+
+    /// A byte that landed moments ago: the parse may be mid-flight.
+    #[test]
+    fn b_recently_arrived_bytes_extend_the_wait() {
+        assert!(should_extend(
+            Some(0),
+            Duration::from_millis(50),
+            Duration::ZERO,
+            GRACE_CAP
+        ));
+    }
+
+    /// CONTROL. The extension is capped however loud the terminal is — a child
+    /// spewing output forever cannot turn one wait into an unbounded one.
+    #[test]
+    fn b_control_the_extension_is_capped() {
+        assert!(!should_extend(
+            Some(4096),
+            Duration::ZERO,
+            GRACE_CAP,
+            GRACE_CAP
+        ));
+    }
+
+    /// CONTROL. An unknowable pending count is not evidence of anything, so a
+    /// backend without a `FIONREAD` fd behaves exactly like today.
+    #[test]
+    fn b_control_unknown_pending_is_not_evidence() {
+        assert!(!should_extend(
+            None,
+            Duration::from_secs(20),
+            Duration::ZERO,
+            GRACE_CAP
+        ));
+    }
+
+    // --- the verdict --------------------------------------------------------
+
+    /// A child that stopped emitting, with nothing queued, is named as a stall
+    /// inside the binary.
+    #[test]
+    fn c_a_stalled_child_is_named_as_a_silent_terminal() {
+        let steps = [step("the approval card", 900, 30)];
+        let report = timeout_report(&facts(&steps, Some(Duration::from_secs(29))));
+        assert!(
+            report.contains("TERMINAL SILENT"),
+            "a terminal with no byte for 29s and nothing queued must be named SILENT; \
+             got:\n{report}"
+        );
+        assert!(
+            !report.contains("TERMINAL LIVE") && !report.contains("TERMINAL BACKLOGGED"),
+            "a silent terminal must not also be reported live or backlogged; got:\n{report}"
+        );
+    }
+
+    /// CONTROL. Bytes still arriving is the opposite finding and must not be
+    /// reported as a silent child — otherwise the verdict is unfalsifiable.
+    #[test]
+    fn c_control_a_painting_child_is_named_as_a_live_terminal() {
+        let steps = [step("the approval card", 900, 30)];
+        let report = timeout_report(&facts(&steps, Some(Duration::from_millis(40))));
+        assert!(
+            report.contains("TERMINAL LIVE"),
+            "a terminal still receiving bytes must be named LIVE; got:\n{report}"
+        );
+        assert!(
+            !report.contains("TERMINAL SILENT"),
+            "a live terminal must not also be reported SILENT; got:\n{report}"
+        );
+    }
+
+    /// THE STALE-FRAME READING. `.config/nextest.toml` blames a starved reader
+    /// thread leaving the parser behind the child. That state has a signature
+    /// — unread bytes in the pty — and the report must name it rather than
+    /// blaming the binary.
+    #[test]
+    fn d_unread_bytes_are_named_as_a_stale_screen() {
+        let steps = [step("the approval card", 900, 30)];
+        let mut f = facts(&steps, Some(Duration::from_secs(29)));
+        f.pending = Some(512);
+        let report = timeout_report(&f);
+        assert!(
+            report.contains("TERMINAL BACKLOGGED") && report.contains("STALE"),
+            "unread pty bytes must be named as a stale screen; got:\n{report}"
+        );
+        assert!(
+            !report.contains("inside the binary"),
+            "a backlogged terminal must not be blamed on the binary; got:\n{report}"
+        );
+    }
+
+    /// A thread that got its looks was on-CPU; the verdict about the child is
+    /// then worth reading.
+    #[test]
+    fn e_a_thread_that_got_its_polls_is_named_scheduled() {
+        let report = timeout_report(&facts(&[], Some(Duration::from_secs(29))));
+        assert!(
+            report.contains("HARNESS SCHEDULED"),
+            "1000 polls of an entitled 1000 must read as scheduled; got:\n{report}"
+        );
+    }
+
+    /// CONTROL, and the reading #1109 could never take. A test thread that was
+    /// off-CPU explains a timeout by itself, and the report must say so
+    /// instead of pointing at the product.
+    #[test]
+    fn e_control_a_thread_denied_its_polls_is_named_starved() {
+        let mut f = facts(&[], Some(Duration::from_secs(29)));
+        f.polls = 12;
+        let report = timeout_report(&f);
+        assert!(
+            report.contains("HARNESS STARVED"),
+            "12 polls of an entitled 1000 must read as starved; got:\n{report}"
+        );
+        assert!(
+            !report.contains("HARNESS SCHEDULED"),
+            "the starvation verdict must not also carry its own negation; got:\n{report}"
+        );
+    }
+
+    /// THE DISCRIMINATOR. A fast prefix plus one full-budget stall is the CI
+    /// shape (31.15s total against a 30s wait) and is NOT what process-wide
+    /// starvation produces.
+    #[test]
+    fn f_a_fast_prefix_refutes_process_wide_starvation() {
+        let steps = [
+            step("the TUI chrome", 1_100, 60),
+            step("the approval card", 120, 30),
+            step("the folder name on the card", 60, 10),
+        ];
+        let report = timeout_report(&facts(&steps, Some(Duration::from_secs(29))));
+        assert!(
+            report.contains("NOT UNIFORM SLOWDOWN"),
+            "a prefix that used ~1.3s of 100s of budget must refute uniform starvation; \
+             got:\n{report}"
+        );
+    }
+
+    /// CONTROL. When the earlier waits WERE slow the report must say so — a
+    /// verdict that always refutes starvation would name nothing.
+    #[test]
+    fn f_control_a_slow_prefix_reports_uniform_starvation() {
+        let steps = [
+            step("the TUI chrome", 40_000, 60),
+            step("the approval card", 20_000, 30),
+        ];
+        let report = timeout_report(&facts(&steps, Some(Duration::from_secs(29))));
+        assert!(
+            report.contains("UNIFORM SLOWDOWN"),
+            "a prefix that burned 60s of 90s budget must report uniform starvation; \
+             got:\n{report}"
+        );
+        assert!(
+            !report.contains("NOT UNIFORM SLOWDOWN"),
+            "the starvation verdict must not also carry its own negation; got:\n{report}"
+        );
+    }
+
+    /// The fact the caller owns — what the mock provider received — has to
+    /// reach the failure text, because nothing inside this harness can see it.
+    #[test]
+    fn g_the_caller_context_reaches_the_failure_text() {
+        let steps = [step("the approval card", 900, 30)];
+        let mut f = facts(&steps, Some(Duration::from_secs(29)));
+        f.context = "mock provider received 1 request(s)";
+        let report = timeout_report(&f);
+        assert!(
+            report.contains("mock provider received 1 request(s)"),
+            "the diagnostic supplied by the caller must be rendered; got:\n{report}"
+        );
+    }
+
+    /// Every satisfied wait must be named with its own duration: the timeline
+    /// is what lets a reader locate the stall without a second CI run.
+    #[test]
+    fn g_the_step_timeline_names_every_satisfied_wait() {
+        let steps = [
+            step("the TUI chrome", 1_100, 60),
+            step("the approval card", 120, 30),
+        ];
+        let report = timeout_report(&facts(&steps, Some(Duration::from_secs(29))));
+        for entry in &steps {
+            assert!(
+                report.contains(&entry.what),
+                "the timeline must name the wait {:?}; got:\n{report}",
+                entry.what
+            );
+        }
+        assert!(
+            report.contains("TIMED OUT"),
+            "the timeline must mark which wait failed; got:\n{report}"
+        );
+    }
+
+    /// CONTROL / no-regression. The last screen was the ONLY diagnostic this
+    /// harness used to print. It must survive.
+    #[test]
+    fn h_control_the_last_screen_survives() {
+        let report = timeout_report(&facts(&[], None));
+        assert!(
+            report.contains("SCREEN-SENTINEL") && report.contains("--- last screen ---"),
+            "the pre-existing screen dump must not be lost; got:\n{report}"
+        );
+        assert!(
+            report.contains("NO PRIOR STEPS"),
+            "a first wait must say it has no baseline rather than claiming a verdict; \
+             got:\n{report}"
+        );
+    }
 }

@@ -20,6 +20,12 @@ pub mod aria;
 pub mod backends;
 pub mod binary;
 pub mod config_hint;
+/// gh#1053 end-to-end grading of the DNS resolution gate against hosts that
+/// resolve to DENIED addresses. In-crate because the resolver seam it needs
+/// (`BrowserPolicy::with_resolver`) is deliberately not public — see the
+/// module header.
+#[cfg(test)]
+mod dns_gate_e2e;
 pub mod liveness;
 pub mod op;
 pub mod policy;

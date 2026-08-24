@@ -611,11 +611,68 @@ fn provider_error_from_reqwest(e: reqwest::Error) -> ProviderError {
         || e.is_body()
         || e.is_decode()
         || is_broken_established_connection(&e);
+    // Read the endpoint BEFORE `without_url()` takes it away. Only the
+    // transport classes below can be attributed to an endpoint at all; a
+    // decode failure names a body, not a socket.
+    let endpoint = (e.is_connect() || e.is_timeout())
+        .then(|| e.url().and_then(dialled_endpoint))
+        .flatten();
     let e = e.without_url();
     if is_transient {
-        ProviderError::Connection(with_transport_cause(&e))
+        ProviderError::Connection(with_endpoint(with_transport_cause(&e), endpoint))
     } else {
         ProviderError::Http(e)
+    }
+}
+
+/// The `host:port` a request was actually dialled at, or `None` when the URL
+/// carries no host (a `data:`/`file:` URL cannot be a provider endpoint).
+///
+/// #1077: every connect-phase failure rendered the same sentence — `error
+/// sending request: Connection refused (os error 111)` for a wrong port, and
+/// `error sending request: failed to lookup address information` for a wrong
+/// host — and neither named the endpoint. For a `base_url` typo, which is the
+/// reported cause, the endpoint IS the diagnosis.
+///
+/// H-2 / secrets-26: `provider_error_from_reqwest` strips the URL because a
+/// provider may put a credential in it (Gemini's old `?key=` query form).
+/// This puts back the two components of the authority that provably cannot
+/// hold one — `Url::host_str` excludes userinfo, and a port is a number — and
+/// nothing else. Pinned by
+/// `naming_the_endpoint_must_not_reintroduce_the_url`, which drives a URL
+/// carrying userinfo, a path and a `?key=` secret and requires every one of
+/// them to stay out.
+///
+/// The port is resolved rather than echoed, so an implicit `https://host/v1`
+/// still reports the 443 it dialled instead of leaving the operator to assume
+/// it.
+fn dialled_endpoint(url: &reqwest::Url) -> Option<String> {
+    let host = url.host_str()?;
+    match url.port_or_known_default() {
+        Some(port) => Some(format!("{host}:{port}")),
+        None => Some(host.to_string()),
+    }
+}
+
+/// Append the dialled endpoint to a rendered transport failure.
+///
+/// APPENDED, not substituted: the OS cause says WHAT happened and is what
+/// `provider_failure_code` classifies on, so replacing the message with a
+/// friendlier sentence would both lose the diagnosis and re-merge the failure
+/// classes that `classify_connect_chain` exists to keep apart.
+///
+/// The appended text is user-supplied — a `base_url` is configuration — and
+/// it becomes input to that same substring classifier, so it must not be able
+/// to move a failure between classes. It cannot: every marker
+/// `classify_connect_chain` and [`is_timeout_rendering`] match on either
+/// contains a space (`dns error`, `connection refused`, `timed out`, `try
+/// again`, `deadline has elapsed`) or the literal `(os error `, and a host and
+/// a port number can contain neither. Pinned by
+/// `the_endpoint_text_cannot_change_the_failure_class`.
+fn with_endpoint(message: String, endpoint: Option<String>) -> String {
+    match endpoint {
+        Some(endpoint) => format!("{message} (endpoint {endpoint})"),
+        None => message,
     }
 }
 

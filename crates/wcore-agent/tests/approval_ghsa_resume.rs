@@ -24,6 +24,7 @@ fn approved() -> ApprovalOutcome {
     ApprovalOutcome {
         approved: true,
         modifications: None,
+        cancellation: None,
     }
 }
 

@@ -53,8 +53,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use wcore_channels::{
-    AckMode, AutoReplyRateLimiter, ChannelEvent, ChannelManager, DedupeCache, IncomingMessage,
-    OutgoingMessage, PairingBook, TurnAdmission, evaluate_paired,
+    AckMode, AutoReplyOutcome, AutoReplyRateLimiter, ChannelEvent, ChannelManager, DedupeCache,
+    IncomingMessage, OutgoingMessage, PairingBook, RATE_LIMIT_NOTICE, TurnAdmission,
+    evaluate_paired,
 };
 
 use crate::channel_policy::ChannelPolicyRegistry;
@@ -602,19 +603,45 @@ async fn run_turn(
             // before any `.await` (bounded map op only — never held across the
             // send); a poisoned mutex is recovered rather than panicking, since
             // the critical section cannot itself panic.
-            let allowed = {
+            let outcome = {
                 let mut limiter = rate_limiter
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                limiter.check_and_record(session_key, std::time::Instant::now())
+                limiter.check_and_record_with_notice(session_key, std::time::Instant::now())
             };
-            if !allowed {
+            if let AutoReplyOutcome::Suppressed { notify } = outcome {
                 // Content-free: log only the session key, never message text.
                 tracing::warn!(
                     target: "wcore_agent::channel_inbound",
                     session_key = %session_key,
+                    notice_emitted = notify,
                     "autonomous reply suppressed: per-conversation rate limit hit (ping-pong guard)"
                 );
+                if notify {
+                    // wayland#585 criterion 1: a `warn!` reaches the operator,
+                    // not the human in the chat, who would otherwise just see
+                    // the agent stop answering. The limiter hands out this
+                    // notice at most once per conversation per window, so the
+                    // notice adds one message per window and cannot itself
+                    // sustain the loop it is reporting. It goes through
+                    // `send_to` directly — the limiter has already refused this
+                    // conversation, so re-consulting it would suppress the very
+                    // message that explains the suppression.
+                    let notice = OutgoingMessage {
+                        conversation_id: msg.conversation_id.clone(),
+                        text: RATE_LIMIT_NOTICE.to_string(),
+                        reply_to: outbound_reply_target(msg),
+                        attachments: Vec::new(),
+                    };
+                    let guard = manager.read().await;
+                    if let Err(e) = guard.send_to(channel_name, notice).await {
+                        tracing::warn!(
+                            channel = %channel_name,
+                            error = %e,
+                            "failed to send auto-reply rate-limit notice"
+                        );
+                    }
+                }
                 return;
             }
 
@@ -1398,11 +1425,17 @@ mod tests {
 
         // Give any (incorrect) extra sends a chance to land, then assert the cap.
         tokio::time::sleep(Duration::from_millis(200)).await;
+        let out = outbound.lock().await;
+        let replies = out.iter().filter(|m| m.text == "pong").count();
+        let notices = out.iter().filter(|m| m.text == RATE_LIMIT_NOTICE).count();
         assert_eq!(
-            outbound.lock().await.len(),
-            2,
+            replies, 2,
             "autonomous sends capped at the per-conversation limit"
         );
+        // The three suppressed turns share ONE channel notice (wayland#585).
+        assert_eq!(notices, 1, "exactly one rate-limit notice per window");
+        assert_eq!(out.len(), 3, "no outbound beyond the 2 replies + 1 notice");
+        drop(out);
 
         manager.write().await.stop_all().await.unwrap();
         handle.abort();
@@ -1432,10 +1465,23 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         let out = outbound.lock().await;
-        assert_eq!(out.len(), 2, "one allowed send per conversation");
-        let mut convs: Vec<String> = out.iter().map(|m| m.conversation_id.clone()).collect();
+        let mut convs: Vec<String> = out
+            .iter()
+            .filter(|m| m.text == "pong")
+            .map(|m| m.conversation_id.clone())
+            .collect();
         convs.sort();
         assert_eq!(convs, vec!["c1".to_string(), "c2".to_string()]);
+        // Each conversation is suppressed once, and each gets its OWN notice —
+        // the notice budget is per-conversation, like the send budget.
+        let mut notice_convs: Vec<String> = out
+            .iter()
+            .filter(|m| m.text == RATE_LIMIT_NOTICE)
+            .map(|m| m.conversation_id.clone())
+            .collect();
+        notice_convs.sort();
+        assert_eq!(notice_convs, vec!["c1".to_string(), "c2".to_string()]);
+        assert_eq!(out.len(), 4, "two replies + two notices");
 
         drop(out);
         manager.write().await.stop_all().await.unwrap();
@@ -1495,6 +1541,96 @@ mod tests {
         );
 
         manager.write().await.stop_all().await.unwrap();
+    }
+
+    /// wayland#585 criterion 1: when the per-conversation cap suppresses an
+    /// autonomous reply, the human in the chat must be TOLD, on the channel —
+    /// not merely logged at WARN, which reaches nobody with `RUST_LOG` unset.
+    ///
+    /// Asserts against the outbound channel log (a real `send_message` on the
+    /// channel), never a log line. Reverting the notice emission in `run_turn`
+    /// reddens this: the log holds the one allowed "pong" and nothing else.
+    #[tokio::test]
+    async fn a_suppressed_auto_reply_emits_a_channel_notice() {
+        let mut policies = HashMap::new();
+        policies.insert("slack".to_string(), open_dm_policy());
+
+        // Two inbounds on one conversation, cap of 1: the second is suppressed.
+        let mut q = VecDeque::new();
+        q.push_back(dm_conv("m0", "c1"));
+        q.push_back(dm_conv("m1", "c1"));
+
+        let (manager, outbound, calls, _count, handle) =
+            harness_with_limit("slack", q, policies, 1, Duration::from_secs(600)).await;
+
+        assert_eq!(
+            wait_for_len(&calls, 2, Duration::from_secs(3)).await,
+            2,
+            "both turns run; only the SEND is gated"
+        );
+        // One reply + one notice.
+        assert_eq!(wait_for_len(&outbound, 2, Duration::from_secs(3)).await, 2);
+
+        let out = outbound.lock().await;
+        assert_eq!(out[0].text, "pong", "the first reply is delivered");
+        assert_eq!(
+            out[1].text, RATE_LIMIT_NOTICE,
+            "the suppression is announced on the channel, not just in a log"
+        );
+        assert_eq!(
+            out[1].conversation_id, "c1",
+            "the notice lands in the conversation that was suppressed"
+        );
+
+        drop(out);
+        manager.write().await.stop_all().await.unwrap();
+        handle.abort();
+    }
+
+    /// Paired control for [`a_suppressed_auto_reply_emits_a_channel_notice`]:
+    /// the notice is one-per-window, not one-per-suppression. Six suppressions
+    /// in one window must yield exactly ONE notice — otherwise the notice is
+    /// itself the ping-pong the guard exists to stop.
+    ///
+    /// Reverting the one-per-window rationing to "notify on every suppression"
+    /// reddens this with 6 notices instead of 1.
+    #[tokio::test]
+    async fn repeated_suppression_in_one_window_emits_only_one_notice() {
+        let mut policies = HashMap::new();
+        policies.insert("slack".to_string(), open_dm_policy());
+
+        // Seven inbounds on one conversation, cap of 1 -> six suppressions.
+        let mut q = VecDeque::new();
+        for i in 0..7 {
+            q.push_back(dm_conv(&format!("m{i}"), "c1"));
+        }
+
+        let (manager, outbound, calls, _count, handle) =
+            harness_with_limit("slack", q, policies, 1, Duration::from_secs(600)).await;
+
+        assert_eq!(
+            wait_for_len(&calls, 7, Duration::from_secs(5)).await,
+            7,
+            "every inbound drives a turn"
+        );
+        // Let any (incorrect) extra notices land before counting.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let out = outbound.lock().await;
+        let notices = out.iter().filter(|m| m.text == RATE_LIMIT_NOTICE).count();
+        assert_eq!(
+            notices, 1,
+            "six suppressions in one window share a single notice"
+        );
+        assert_eq!(
+            out.len(),
+            2,
+            "one allowed reply + one notice: the guard adds at most one message per window"
+        );
+
+        drop(out);
+        manager.write().await.stop_all().await.unwrap();
+        handle.abort();
     }
 
     // ---------------------------------------------------------------------

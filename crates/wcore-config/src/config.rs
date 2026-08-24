@@ -3873,6 +3873,22 @@ pub fn wayland_config_dir() -> PathBuf {
         .join("wayland-core")
 }
 
+/// Workspace-relative root for everything a session PRODUCES.
+///
+/// Defined in the lowest crate both writers depend on, because two crates now
+/// choose paths under it and a second string literal would drift: skill
+/// artifacts (`wcore_skills::paths::skill_output_dir`) and oversized
+/// tool-result spills
+/// (`wcore_tools::tool_result_storage::StorageDir::for_session`).
+///
+/// Deliberately NOT `.wayland-core`. That directory is repository CONTROL
+/// surface — `WorkspacePolicy::is_repo_control_path` write-denies it for every
+/// session — and an output root has to be writable. It must also sit INSIDE
+/// the session workspace, because the workspace is what the session's own
+/// file-tool jail is rooted at: an output written anywhere else is a file the
+/// agent creates and then cannot read back (FerroxLabs/wayland#1096, #1097).
+pub const SESSION_OUTPUT_ROOT: &str = ".wayland-out";
+
 /// Platform-aware app config root.
 ///
 /// - Linux:   `~/.config/wayland-core`  (or `$WAYLAND_HOME` / `$XDG_DATA_HOME`)
@@ -3882,6 +3898,42 @@ pub fn wayland_config_dir() -> PathBuf {
 /// Delegates to [`wayland_config_dir`] so `WAYLAND_HOME` is always honoured.
 pub fn app_config_dir() -> Option<PathBuf> {
     Some(wayland_config_dir())
+}
+
+/// Leaf name, under the app config root, that skills are LOADED from.
+///
+/// FerroxLabs/wayland#1096. This is the one piece of skill-layout knowledge two
+/// crates on different branches of the graph both need and neither may take
+/// from the other: `wcore-skills` resolves these to build its load paths
+/// (`paths::user_skills_dir` / `user_commands_dir`), and `wcore-tools` needs
+/// the same set to refuse a WRITE aimed at one. Defining it in the crate both
+/// already depend on keeps a single source of truth instead of a copied pair of
+/// string literals that can drift apart silently.
+pub const SKILLS_DIR_NAME: &str = "skills";
+
+/// Leaf name of the legacy per-command load directory. See
+/// [`SKILLS_DIR_NAME`].
+pub const COMMANDS_DIR_NAME: &str = "commands";
+
+/// Both load-path leaf names, for callers that treat them alike — the write
+/// refusal does, the loaders address them individually. Built FROM the two
+/// named constants rather than repeating the literals, so the pair can never
+/// disagree with the names.
+pub const SKILL_SOURCE_DIR_NAMES: [&str; 2] = [SKILLS_DIR_NAME, COMMANDS_DIR_NAME];
+
+/// The user-level skill / legacy-command SOURCE directories:
+/// `<config_dir>/skills` and `<config_dir>/commands`.
+///
+/// Empty only when the config root cannot be resolved at all.
+#[must_use]
+pub fn user_skill_source_dirs() -> Vec<PathBuf> {
+    match app_config_dir() {
+        Some(root) => SKILL_SOURCE_DIR_NAMES
+            .iter()
+            .map(|name| root.join(name))
+            .collect(),
+        None => Vec::new(),
+    }
 }
 
 /// The OS-native config root (`dirs::config_dir()`), deliberately NOT

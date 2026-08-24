@@ -1942,6 +1942,7 @@ impl TuiEngine {
                     wcore_agent::approval::ApprovalOutcome {
                         approved,
                         modifications,
+                        cancellation: None,
                     },
                 )
                 .await;
@@ -1967,6 +1968,7 @@ impl TuiEngine {
                     wcore_agent::approval::ApprovalOutcome {
                         approved,
                         modifications: None,
+                        cancellation: None,
                     },
                 )
                 .await;
