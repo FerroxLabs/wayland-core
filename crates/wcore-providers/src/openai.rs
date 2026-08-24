@@ -1430,6 +1430,93 @@ impl StreamState {
         }
         &mut self.tool_calls[index]
     }
+
+    /// Which accumulator a streamed tool-call chunk belongs to.
+    ///
+    /// `index` is the OpenAI wire contract and stays authoritative when it is
+    /// present. It is NOT always present. Google's OpenAI-compatibility
+    /// endpoint (`/v1beta/openai`, which is how every Gemini model reaches this
+    /// provider) omits `index` entirely and distinguishes parallel calls only
+    /// by `id`:
+    ///
+    /// ```text
+    /// {"delta":{"tool_calls":[{"id":"call_3217803","function":{"name":"ToolSearch",
+    ///    "arguments":"{\"query\":\"web search news\",\"max_results\":5}"}}]}}
+    /// {"delta":{"tool_calls":[{"id":"call_3217807","function":{"name":"ToolSearch",
+    ///    "arguments":"{\"query\":\"read file disk\",\"max_results\":5}"}}]}}
+    /// ```
+    ///
+    /// Defaulting the absent index to 0 collapsed both onto one accumulator, so
+    /// `push_str` produced `{...}{...}` and the turn died on
+    /// "tool-call arguments for 'X' did not parse as JSON: trailing characters".
+    /// Every parallel tool call from a Gemini model failed this way.
+    ///
+    /// Returns [`ToolSlot::AtCapacity`] when a new slot would exceed
+    /// `MAX_TOOL_CALLS`, and [`ToolSlot::Ambiguous`] when an unlabelled chunk
+    /// cannot be attributed — the caller fails closed on both, exactly as it
+    /// does for an out-of-range index.
+    fn resolve_tool_slot(&mut self, index: Option<usize>, id: Option<&str>) -> ToolSlot {
+        if let Some(index) = index {
+            self.get_or_create_tool(index);
+            return ToolSlot::Slot(index);
+        }
+        if let Some(id) = id {
+            if let Some(pos) = self.tool_calls.iter().position(|tc| tc.id == id) {
+                return ToolSlot::Slot(pos);
+            }
+            // The call already in flight may have opened WITHOUT an id: a
+            // provider that omits `index` is also free to send the opening
+            // chunk bare and the id on a later one. Adopt that slot rather
+            // than opening a second one for a single call — opening one left
+            // both halves as unparseable argument fragments, so a stream that
+            // parsed before this function existed produced two errors and no
+            // tool call. Only the LAST slot is adoptable: an earlier empty-id
+            // slot is a gap `get_or_create_tool` grew through, not a call.
+            if let Some(last) = self.tool_calls.len().checked_sub(1)
+                && self.tool_calls[last].id.is_empty()
+            {
+                return ToolSlot::Slot(last);
+            }
+            if self.tool_calls.len() >= MAX_TOOL_CALLS {
+                return ToolSlot::AtCapacity;
+            }
+            let pos = self.tool_calls.len();
+            self.get_or_create_tool(pos);
+            return ToolSlot::Slot(pos);
+        }
+        // Neither index nor id. This is only attributable while at most one
+        // call is open.
+        match self.tool_calls.len() {
+            // An opening chunk that names nothing: start the first call.
+            0 => {
+                self.get_or_create_tool(0);
+                ToolSlot::Slot(0)
+            }
+            // Exactly one call in flight — the fragment continues it.
+            1 => ToolSlot::Slot(0),
+            // Several calls are open and this chunk names none of them.
+            // Guessing "the most recently opened" is not a fallback, it is
+            // silent corruption: measured, a bare fragment `hosts"}` appended
+            // to a half-streamed `write` produced a well-formed, error-free,
+            // RUNNABLE call assembled from two different calls' bytes. Refuse
+            // instead, the way the out-of-range index and the arg-bytes cap
+            // already refuse. Neither known shape reaches this arm: OpenAI
+            // proper always sends `index`, and Google's compat endpoint puts
+            // an `id` on every tool-call chunk.
+            _ => ToolSlot::Ambiguous,
+        }
+    }
+}
+
+/// Which accumulator [`StreamState::resolve_tool_slot`] picked for a streamed
+/// tool-call chunk, or why it refused to pick one.
+enum ToolSlot {
+    Slot(usize),
+    /// Opening another slot would exceed `MAX_TOOL_CALLS`.
+    AtCapacity,
+    /// The chunk carries neither `index` nor `id` while more than one call is
+    /// open, so which call it continues cannot be determined.
+    Ambiguous,
 }
 
 #[async_trait]
@@ -2034,20 +2121,44 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
     // Tool calls
     if let Some(tool_calls) = delta["tool_calls"].as_array() {
         for tc in tool_calls {
-            let index = tc["index"].as_u64().unwrap_or(0) as usize;
+            let explicit_index = tc["index"].as_u64().map(|i| i as usize);
             // #136: reject an out-of-range tool-call index BEFORE
             // `get_or_create_tool` grows the accumulator Vec to `index` slots.
             // Fail closed by aborting the stream, mirroring the arg-bytes cap
             // below — a stream claiming an absurd index is buggy or hostile and
             // no tool should run from it.
-            if index >= MAX_TOOL_CALLS {
+            if let Some(index) = explicit_index
+                && index >= MAX_TOOL_CALLS
+            {
                 events.push(LlmEvent::Error(format!(
                     "tool-call index {index} exceeds {MAX_TOOL_CALLS} — \
                      aborting stream to bound memory"
                 )));
                 return events;
             }
-            let acc = state.get_or_create_tool(index);
+            // A provider that omits `index` (Google's OpenAI-compat endpoint)
+            // keys its parallel calls by `id` alone - see `resolve_tool_slot`.
+            let chunk_id = tc["id"].as_str().filter(|value| !value.is_empty());
+            let slot = match state.resolve_tool_slot(explicit_index, chunk_id) {
+                ToolSlot::Slot(slot) => slot,
+                ToolSlot::AtCapacity => {
+                    events.push(LlmEvent::Error(format!(
+                        "tool-call count exceeds {MAX_TOOL_CALLS} — \
+                         aborting stream to bound memory"
+                    )));
+                    return events;
+                }
+                ToolSlot::Ambiguous => {
+                    events.push(LlmEvent::Error(format!(
+                        "tool-call chunk carries neither `index` nor `id` while {} calls \
+                         are open — aborting stream rather than assigning its bytes to \
+                         the wrong call",
+                        state.tool_calls.len()
+                    )));
+                    return events;
+                }
+            };
+            let acc = &mut state.tool_calls[slot];
 
             if let Some(id) = tc["id"].as_str() {
                 acc.id = id.to_string();
@@ -2091,6 +2202,19 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
             ("tool_calls" | "stop", false) => {
                 let synthetic_namespace = state.synthetic_tool_call_namespace.clone();
                 for (index, mut tc) in state.tool_calls.drain(..).enumerate() {
+                    // A slot the accumulator Vec merely grew THROUGH to reach a
+                    // higher `index` carries nothing from the wire — no id, no
+                    // name, no arguments. #862's id synthesizer below would
+                    // otherwise launder that gap into a runnable ToolUse with
+                    // an empty tool name.
+                    if tc.id.is_empty() && tc.name.is_empty() && tc.arguments.is_empty() {
+                        tracing::warn!(
+                            target: "wcore_providers::openai",
+                            tool_call_index = index,
+                            "OpenAI-compatible stream skipped a tool-call index; dropping the empty slot"
+                        );
+                        continue;
+                    }
                     if tc.id.trim().is_empty() {
                         tc.id = format!("call_wcore_{synthetic_namespace}_{index}");
                         tracing::warn!(
@@ -2614,6 +2738,294 @@ mod tests {
         server.abort();
     }
 
+    // --- parallel tool calls from a provider that omits `index` -----------
+
+    #[test]
+    fn gemini_compat_parallel_tool_calls_are_not_merged_into_one_slot() {
+        // CAPTURED, not invented. These two chunks are the literal bytes
+        // returned by Google's OpenAI-compatibility endpoint
+        // (generativelanguage.googleapis.com/v1beta/openai/chat/completions)
+        // for gemini-3.7-flash asked to issue two ToolSearch calls at once.
+        //
+        // Note what is NOT there: `index`. Google identifies parallel calls by
+        // `id` alone. Reading the absent index as 0 put both calls in slot 0,
+        // `push_str` glued them into
+        //     {"query":"web search news",...}{"query":"read file disk",...}
+        // and the turn died with "did not parse as JSON: trailing characters at
+        // line 1 column 44". Every parallel tool call from a Gemini model
+        // failed this way; the user saw it as a dead chat.
+        let mut state = StreamState::new();
+
+        let first = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_3217803","function":{"name":"ToolSearch","arguments":"{\"query\":\"web search news\",\"max_results\":5}"}}]}}]}"#;
+        let second = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_3217807","function":{"name":"ToolSearch","arguments":"{\"query\":\"read file disk filesystem\",\"max_results\":5}"}}]}}]}"#;
+        let finish = r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
+
+        let mut events = parse_sse_chunk(first, &mut state);
+        events.extend(parse_sse_chunk(second, &mut state));
+
+        assert_eq!(
+            state.tool_calls.len(),
+            2,
+            "two ids must claim two slots, got: {:?}",
+            state
+                .tool_calls
+                .iter()
+                .map(|t| &t.arguments)
+                .collect::<Vec<_>>()
+        );
+
+        events.extend(parse_sse_chunk(finish, &mut state));
+
+        assert!(
+            !events.iter().any(|e| matches!(e, LlmEvent::Error(_))),
+            "parallel Gemini tool calls must not error, got: {events:?}"
+        );
+
+        let uses: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::ToolUse { name, input, .. } => Some((name.clone(), input.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(uses.len(), 2, "both tool calls must survive, got: {uses:?}");
+        assert_eq!(uses[0].0, "ToolSearch");
+        assert_eq!(uses[0].1["query"], "web search news");
+        assert_eq!(uses[1].1["query"], "read file disk filesystem");
+        assert_eq!(uses[1].1["max_results"], 5);
+    }
+
+    #[test]
+    fn tool_call_chunk_without_index_or_id_continues_the_call_in_flight() {
+        // True delta streaming from a provider that omits `index`: the opening
+        // chunk carries the id, later chunks carry only argument fragments.
+        // Those must append to the SAME call, not open a new slot.
+        let mut state = StreamState::new();
+        let open = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_z","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}"#;
+        let rest =
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"weather\"}"}}]}}]}"#;
+        parse_sse_chunk(open, &mut state);
+        parse_sse_chunk(rest, &mut state);
+
+        assert_eq!(state.tool_calls.len(), 1, "a fragment must not open a slot");
+        assert_eq!(state.tool_calls[0].arguments, r#"{"q":"weather"}"#);
+    }
+
+    #[test]
+    fn repeated_id_without_index_appends_to_the_same_slot() {
+        // The same id appearing twice is one call streamed in two pieces.
+        let mut state = StreamState::new();
+        let a = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_same","function":{"name":"f","arguments":"{\"a\":"}}]}}]}"#;
+        let b = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_same","function":{"arguments":"1}"}}]}}]}"#;
+        parse_sse_chunk(a, &mut state);
+        parse_sse_chunk(b, &mut state);
+
+        assert_eq!(state.tool_calls.len(), 1);
+        assert_eq!(state.tool_calls[0].arguments, r#"{"a":1}"#);
+    }
+
+    // --- the index-less seam: late ids, gaps, unlabelled fragments ---------
+    //
+    // Every case below was MEASURED against v0.13.5 (`addb4f48`) before it was
+    // written. The `index`-less path that fixes the Gemini merge introduced a
+    // seam of its own, and these are that seam.
+
+    fn tool_uses(events: &[LlmEvent]) -> Vec<(String, Value)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::ToolUse { name, input, .. } => Some((name.clone(), input.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn tool_use_ids(events: &[LlmEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn errors(events: &[LlmEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::Error(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn late_id_adopts_the_call_already_in_flight_instead_of_opening_a_second_slot() {
+        // A provider that omits `index` is also free to open a tool call with a
+        // bare chunk and put the `id` on a later one. Resolving that later id
+        // by id-equality alone never matches the open slot (its id is still
+        // empty), so it opened a SECOND slot and split one call across two
+        // accumulators: measured on the unrepaired branch, `{"q":` and
+        // `"weather"}` each failed to parse and the turn produced 2 errors and
+        // 0 tool calls. v0.13.5 got this right by accident (`unwrap_or(0)`),
+        // so this is a regression guard, not a new feature.
+        let mut state = StreamState::new();
+        let open = r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}"#;
+        let late = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_late","function":{"arguments":"\"weather\"}"}}]}}]}"#;
+        let finish = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+        let mut events = parse_sse_chunk(open, &mut state);
+        events.extend(parse_sse_chunk(late, &mut state));
+        assert_eq!(
+            state.tool_calls.len(),
+            1,
+            "a late id must label the open call, not open a second slot: {:?}",
+            state
+                .tool_calls
+                .iter()
+                .map(|t| (t.id.clone(), t.arguments.clone()))
+                .collect::<Vec<_>>()
+        );
+        events.extend(parse_sse_chunk(finish, &mut state));
+
+        assert_eq!(errors(&events), Vec::<String>::new());
+        let uses = tool_uses(&events);
+        assert_eq!(uses.len(), 1, "one call, streamed in two chunks: {uses:?}");
+        assert_eq!(uses[0].0, "lookup");
+        assert_eq!(uses[0].1["q"], "weather");
+        assert_eq!(tool_use_ids(&events), vec!["call_late".to_string()]);
+    }
+
+    #[test]
+    fn a_new_id_still_opens_a_new_slot_when_the_call_in_flight_is_already_labelled() {
+        // The adoption above must not over-reach: once the open call HAS an id,
+        // a different id is a different call. This is the Gemini parallel shape
+        // and it must keep producing two slots.
+        let mut state = StreamState::new();
+        let first = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_a","function":{"name":"f","arguments":"{\"a\":1}"}}]}}]}"#;
+        let second = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_b","function":{"name":"g","arguments":"{\"b\":2}"}}]}}]}"#;
+        parse_sse_chunk(first, &mut state);
+        parse_sse_chunk(second, &mut state);
+
+        assert_eq!(state.tool_calls.len(), 2);
+        assert_eq!(state.tool_calls[0].id, "call_a");
+        assert_eq!(state.tool_calls[1].id, "call_b");
+    }
+
+    #[test]
+    fn unlabelled_fragment_is_refused_when_more_than_one_call_is_open() {
+        // The decision this seam turns on. A chunk with neither `index` nor
+        // `id`, arriving while two calls are open, names NEITHER of them.
+        // Attributing it to the most recently opened slot is not a fallback,
+        // it is silent corruption: measured on the unrepaired branch, the bare
+        // fragment `hosts"}` below was appended to the half-streamed `write`
+        // and the parser emitted a well-formed, error-free, RUNNABLE
+        // write(path="/etc/hosts") assembled out of two different calls'
+        // bytes. v0.13.5 failed loudly on the same input. Refusing is the only
+        // behaviour that is not worse than both.
+        let mut state = StreamState::new();
+        let read = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_read","function":{"name":"read","arguments":"{\"path\":\"/etc/"}}]}}]}"#;
+        let write = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_write","function":{"name":"write","arguments":"{\"path\":\"/etc/"}}]}}]}"#;
+        let orphan_fragment =
+            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"hosts\"}"}}]}}]}"#;
+        let finish = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+        let mut events = parse_sse_chunk(read, &mut state);
+        events.extend(parse_sse_chunk(write, &mut state));
+        let refusal = parse_sse_chunk(orphan_fragment, &mut state);
+
+        assert!(
+            errors(&refusal)
+                .iter()
+                .any(|m| m.contains("neither `index` nor `id`")),
+            "the ambiguous fragment must be refused, got: {refusal:?}"
+        );
+        // The refusal must not have been paid for by writing the bytes first.
+        assert_eq!(state.tool_calls[1].arguments, r#"{"path":"/etc/"#);
+
+        events.extend(refusal);
+        events.extend(parse_sse_chunk(finish, &mut state));
+        assert!(
+            tool_uses(&events).is_empty(),
+            "no call may be assembled from another call's bytes, got: {:?}",
+            tool_uses(&events)
+        );
+    }
+
+    #[test]
+    fn unlabelled_fragment_still_continues_the_only_open_call() {
+        // The refusal above is scoped to ambiguity. With exactly one call open
+        // an unlabelled fragment is unambiguous and must still append — this is
+        // the true delta-streaming shape and it must not become an error.
+        let mut state = StreamState::new();
+        let open = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_only","function":{"name":"f","arguments":"{\"a\":"}}]}}]}"#;
+        let frag = r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"1}"}}]}}]}"#;
+        let mut events = parse_sse_chunk(open, &mut state);
+        events.extend(parse_sse_chunk(frag, &mut state));
+
+        assert_eq!(errors(&events), Vec::<String>::new());
+        assert_eq!(state.tool_calls.len(), 1);
+        assert_eq!(state.tool_calls[0].arguments, r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn a_skipped_index_leaves_no_phantom_tool_call() {
+        // `get_or_create_tool` grows the Vec THROUGH every index below the one
+        // it was handed, so a stream whose first chunk is `index: 1` leaves
+        // slot 0 holding nothing from the wire. #862's id synthesizer used to
+        // hand that gap a synthetic `call_wcore_<ns>_0` and emit it as a
+        // runnable ToolUse with an EMPTY tool name — measured on the
+        // unrepaired branch, this exact input produced 3 tool calls for 2 real
+        // ones. A gap is not a call.
+        let mut state = StreamState::new();
+        let gap = r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_one","function":{"name":"real","arguments":"{\"a\":1}"}}]}}]}"#;
+        let second = r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_two","function":{"name":"other","arguments":"{\"b\":2}"}}]}}]}"#;
+        let finish = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+        let mut events = parse_sse_chunk(gap, &mut state);
+        events.extend(parse_sse_chunk(second, &mut state));
+        assert_eq!(state.tool_calls.len(), 3, "slot 0 is the gap");
+        events.extend(parse_sse_chunk(finish, &mut state));
+
+        let uses = tool_uses(&events);
+        assert_eq!(uses.len(), 2, "only the two real calls may run: {uses:?}");
+        assert!(
+            !uses.iter().any(|(name, _)| name.is_empty()),
+            "an empty tool name must never reach the engine: {uses:?}"
+        );
+        assert!(
+            !tool_use_ids(&events)
+                .iter()
+                .any(|id| id.starts_with("call_wcore_")),
+            "the gap must be dropped, not given a synthetic id: {:?}",
+            tool_use_ids(&events)
+        );
+        assert_eq!(uses[0].0, "real");
+        assert_eq!(uses[1].0, "other");
+    }
+
+    #[test]
+    fn a_real_call_that_never_received_an_id_still_gets_a_synthetic_one() {
+        // The gap guard must stay narrow: it drops slots that carry NOTHING.
+        // A call with a name and arguments but no id is a real call the
+        // provider under-labelled, and #862's synthesizer must still run for
+        // it.
+        let mut state = StreamState::new();
+        let bare = r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"f","arguments":"{\"a\":1}"}}]}}]}"#;
+        let finish = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+        let mut events = parse_sse_chunk(bare, &mut state);
+        events.extend(parse_sse_chunk(finish, &mut state));
+
+        let uses = tool_uses(&events);
+        assert_eq!(uses.len(), 1, "{uses:?}");
+        assert_eq!(uses[0].0, "f");
+        assert!(
+            tool_use_ids(&events)[0].starts_with("call_wcore_"),
+            "an unlabelled REAL call still needs a synthetic id: {:?}",
+            tool_use_ids(&events)
+        );
+    }
     // --- is_tools_unsupported_error (#389) --------------------------------
 
     #[test]
