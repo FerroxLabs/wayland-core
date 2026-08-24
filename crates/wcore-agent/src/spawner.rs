@@ -5392,6 +5392,10 @@ mod phase7_tests {
             &[],
             test_sandbox_runtime(),
             &unrestricted_parent(),
+            // The shell-principal inheritance c2-bash added is orthogonal to the
+            // workspace posture this test grades; `false` is the production default
+            // (`AtomicBool::new(false)`) and what every other test call site passes.
+            false,
         );
         let child = registry
             .workspace_policy()
