@@ -38,9 +38,29 @@ async fn a_refused_connection_names_the_host_and_port_it_was_refused_by() {
     );
     // The cause must survive alongside the endpoint — the endpoint says WHERE,
     // the OS error says WHAT, and dropping either one re-opens #1077.
+    //
+    // Asserted on the MEANING, not on Unix's phrasing. The two platforms share
+    // no sentence: Unix renders `Connection refused (os error 111)`, Windows 11
+    // 26200 renders `No connection could be made because the target machine
+    // actively refused it. (os error 10061)`. What they do share is the word
+    // the OS uses for the event, and the class the shipped classifier puts it
+    // in — `classify_connect_chain` already matches both spellings, so the
+    // product was correct here and only this assertion was not.
+    //
+    // Note what is NOT weakened. The endpoint assertion above is untouched, so
+    // this test still fails the moment the host and port stop being named. And
+    // the reason is asserted on the message with the endpoint text REMOVED, so
+    // it cannot be satisfied by the suffix #1077 added — the cause has to come
+    // from the OS.
+    let without_endpoint = message.replace("127.0.0.1:1", "");
     assert!(
-        message.to_ascii_lowercase().contains("connection refused"),
+        without_endpoint.to_ascii_lowercase().contains("refused"),
         "naming the endpoint must not displace the reason; got: {message}"
+    );
+    assert_eq!(
+        provider_failure_code(&ProviderError::Connection(message.clone())),
+        "connection_refused",
+        "the reason must still classify as a refusal on this platform; got: {message}"
     );
 }
 

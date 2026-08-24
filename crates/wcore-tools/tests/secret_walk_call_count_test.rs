@@ -60,6 +60,24 @@ fn denied(policy: &WorkspacePolicy) -> Vec<PathBuf> {
     policy.secret_deny_paths_for_backend(true)
 }
 
+/// A fixture directory in the spelling the POLICY reports it in.
+///
+/// Every path in the deny set is canonicalized by the walk, and on two of the
+/// three platforms that is a different string from the one `TempDir` hands out
+/// -- macOS resolves `/var` to `/private/var`, Windows resolves to the verbatim
+/// `\\?\F:\...` form. A `starts_with` against the raw tempdir path therefore
+/// answers "no" for a path that IS underneath it, and the assertions below read
+/// that as "the grant contributed nothing" -- which is how this file failed on
+/// Windows 11 26200 while the deny set it printed plainly contained the file.
+///
+/// `std::fs::canonicalize`, not `dunce::canonicalize`: the point is to compare
+/// against the walk's own spelling, whatever that is, so the two sides are
+/// produced the same way rather than converted to agree.
+fn as_the_policy_sees_it(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|e| panic!("the fixture must exist before it is resolved: {e}"))
+}
+
 /// POSITIVE CONTROL for the instrument itself.
 ///
 /// Every other test in this file reads a difference in [`walk_calls`]. If the
@@ -162,6 +180,7 @@ fn the_deny_list_changes_with_no_mutation_call_at_all() {
     tree_with_a_secret(&root);
     tree_with_a_secret(&elsewhere);
     std::fs::write(elsewhere.join("id_rsa"), b"-----BEGIN PRIVATE KEY-----").unwrap();
+    let elsewhere = as_the_policy_sees_it(&elsewhere);
 
     let policy = WorkspacePolicy::contained(&root).with_local_operator_principal();
     let expiry = SystemTime::now() + Duration::from_millis(750);
@@ -245,6 +264,7 @@ fn a_disjoint_grant_root_really_is_walked() {
     let elsewhere = tmp.path().join("elsewhere");
     tree_with_a_secret(&root);
     tree_with_a_secret(&elsewhere);
+    let elsewhere = as_the_policy_sees_it(&elsewhere);
 
     let policy = WorkspacePolicy::contained(&root).with_local_operator_principal();
     policy
@@ -293,6 +313,7 @@ fn a_grant_added_after_the_first_walk_still_contributes_its_secrets() {
     tree_with_a_secret(&root);
     tree_with_a_secret(&elsewhere);
     std::fs::write(elsewhere.join("id_rsa"), b"-----BEGIN PRIVATE KEY-----").unwrap();
+    let elsewhere = as_the_policy_sees_it(&elsewhere);
 
     let policy = WorkspacePolicy::contained(&root).with_local_operator_principal();
 
