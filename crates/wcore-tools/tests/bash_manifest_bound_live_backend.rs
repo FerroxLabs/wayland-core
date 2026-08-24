@@ -52,14 +52,36 @@ const TARGET: Duration = Duration::from_millis(40);
 /// Smallest-of-three, not first: one sample can hit the target because this
 /// 96-core host stalled, and the tree then stays small while callers derive
 /// their budget from a cost the walk does not really have.
+/// Grow `root` until ONE COLD walk of it costs at least `target`, and hand back
+/// a policy that has not walked yet.
+///
+/// EVERY measurement here is taken on a FRESH `WorkspacePolicy`, and the policy
+/// returned is fresh too. That is not tidiness — it is what makes the number
+/// mean anything now that #1111 memoises the deny walk
+/// (`WorkspacePolicy::deny_cache_key` / `deny_cache_hit`).
+///
+/// This helper used to keep one policy for the whole loop and take the MINIMUM
+/// of three back-to-back walks as its estimate. With the memo in the tree the
+/// second and third of those are cache hits costing microseconds, so the
+/// minimum collapsed to ~0, the target was never reached, and all three tests
+/// in this file died on "could not grow a workspace whose walk costs 40ms
+/// within 240k entries" — a calibration failure reported as a product failure.
+/// A cheap-arm-of-a-repeat is the wrong instrument whenever a cache exists; the
+/// cold arm is the one the product actually pays on a first exec, and it is the
+/// one the timeout under test has to cut.
+///
+/// Returning a never-walked policy matters for the same reason: a warm policy
+/// handed to the call under test would answer from the memo, and the test would
+/// be timing a cache lookup instead of the walk it claims to bound.
 fn workspace_whose_walk_costs_at_least(
     root: &std::path::Path,
     target: Duration,
 ) -> (Arc<WorkspacePolicy>, Duration) {
     std::fs::write(root.join(".env"), b"TOKEN=hunter2\n").unwrap();
-    let policy = Arc::new(WorkspacePolicy::contained(root));
 
-    for batch in 0..24usize {
+    // One cold walk on a policy that has never walked before.
+    let cold_walk = |root: &std::path::Path| -> Duration {
+        let policy = WorkspacePolicy::contained(root);
         let started = Instant::now();
         let deny = policy.secret_deny_paths_for_backend(true);
         let walk = started.elapsed();
@@ -70,20 +92,20 @@ fn workspace_whose_walk_costs_at_least(
             deny.iter().any(|p| p.ends_with(".env")),
             "control: the contained walk must find the planted .env; got {deny:?}"
         );
-        if walk >= target {
-            let mut floor = walk;
-            for _ in 0..2 {
-                let s = Instant::now();
-                let d = policy.secret_deny_paths_for_backend(true);
-                floor = floor.min(s.elapsed());
-                assert!(
-                    d.iter().any(|p| p.ends_with(".env")),
-                    "control: the contained walk must find the planted .env; got {d:?}"
-                );
-            }
-            if floor >= target {
-                return (policy, floor);
-            }
+        walk
+    };
+
+    for batch in 0..24usize {
+        // Worst of three COLD walks, not the best of three warm ones. The
+        // quantity is compared against a floor, so an under-estimate only ever
+        // grows the tree further; taking the max keeps a single scheduling
+        // hiccup from ending the loop early on a tree that is really too small.
+        let mut best = Duration::ZERO;
+        for _ in 0..3 {
+            best = best.max(cold_walk(root));
+        }
+        if best >= target {
+            return (Arc::new(WorkspacePolicy::contained(root)), best);
         }
         for d in 0..100 {
             let dir = root.join(format!("b{batch}")).join(format!("d{d}"));

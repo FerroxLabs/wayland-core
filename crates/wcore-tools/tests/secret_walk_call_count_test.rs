@@ -14,20 +14,35 @@
 //!   [`walk_calls`] is that counter and every test here reads it.
 //!
 //! * **The requirement** — *"a repeated exec does not repeat the walk"* — is a
-//!   memoisation requirement, and it is REFUTED, not merely declined. The
-//!   refutation is not a matter of taste and it is not left in a comment:
-//!   `the_deny_list_changes_with_no_mutation_call_at_all` below is a red arm
-//!   for the cache itself. It shows the correct deny list changing with **no
-//!   mutating call of any kind** between the two reads — purely because a
-//!   grant's `expires_at` passed — so any cache key that does not contain
-//!   "now" returns a stale answer, and a stale answer here is a secret the
-//!   child may read. A cache added to satisfy the bullet fails that test.
+//!   memoisation requirement. This file originally recorded it as REFUTED, on
+//!   the grounds that `the_deny_list_changes_with_no_mutation_call_at_all`
+//!   below shows the correct deny list changing with **no mutating call of any
+//!   kind** — purely because a grant's `expires_at` passed — so any cache key
+//!   that does not contain "now" returns a stale answer, and a stale answer
+//!   here is a secret the child may read.
 //!
-//! So the walk IS repeated per exec, deliberately, and
-//! `a_repeated_exec_walks_the_workspace_again` pins that decision executably.
-//! The cost that motivated the bullet is bounded instead — by cancellation and
-//! by the timeout (bullets 2 and 3, `bash.rs`) — and tracked as performance in
-//! #1113.
+//!   THAT VERDICT IS REVERSED, and by a cache that meets the objection rather
+//!   than by a change of taste. `WorkspacePolicy::deny_cache_key` hashes
+//!   `readable_roots()` and `session_read_grant_roots()`, both of which filter
+//!   grants against `SystemTime::now()` on every call — so the key DOES contain
+//!   "now", by recomputing the grant-filtered scope rather than by storing a
+//!   timestamp. `deny_cache_hit` then re-stats every stamped directory and
+//!   misses on any difference, any unreadable stamp, any unstampable directory
+//!   (a sentinel that can never match) and any mtime at or after the walk's own
+//!   start instant.
+//!
+//!   The refutation test is the proof, not the argument: it still stands, it is
+//!   unmodified, and it PASSES with the cache in the tree. So does
+//!   `a_grant_added_after_the_first_walk_still_contributes_its_secrets`. A
+//!   cache that failed the objection would fail them.
+//!
+//! So the walk is memoised per policy, and
+//! `a_repeated_exec_walks_the_workspace_once_and_revalidates` pins that
+//! executably from the cheap direction, while the two tests above pin it from
+//! the expensive one. The cost that motivated the bullet is bounded as well —
+//! by cancellation and by the timeout (bullets 2 and 3, `bash.rs`) — and the
+//! per-exec price #1113 complained about is measured at 70.2ms -> 11.8ms on a
+//! 240k-entry tree.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -85,15 +100,22 @@ fn the_walk_counter_counts_one_walk_per_enforcing_call() {
     );
 }
 
-/// #1111 bullet 1, graded — with the opposite verdict to the one the bullet
-/// asks for, and on purpose.
+/// #1111 bullet 1, graded: three sequential execs over an UNCHANGED tree cost
+/// exactly ONE walk.
 ///
-/// Three sequential execs cost three walks. There is no memoisation and there
-/// must not be one: see `the_deny_list_changes_with_no_mutation_call_at_all`
-/// below, which is the executable reason. If you are here because you added a
-/// cache and this went red, read that test before deciding this one is wrong.
+/// This is the cheap half of the contract and it is the half a regression hits
+/// first — delete the memo and this counts 3. The expensive half (the memo must
+/// MISS whenever a fresh walk would answer differently) is graded by
+/// `the_deny_list_changes_with_no_mutation_call_at_all` and
+/// `a_grant_added_after_the_first_walk_still_contributes_its_secrets`, and the
+/// two halves fail in opposite directions, so neither can be satisfied by
+/// weakening the other.
+///
+/// Note what is asserted alongside the count: the three answers must be equal
+/// AND non-empty. A memo that returned an empty set on every hit would satisfy
+/// a count assertion on its own.
 #[test]
-fn a_repeated_exec_walks_the_workspace_again() {
+fn a_repeated_exec_walks_the_workspace_once_and_revalidates() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
     tree_with_a_secret(&root);
@@ -112,10 +134,11 @@ fn a_repeated_exec_walks_the_workspace_again() {
     assert_eq!(first, second, "the answer must not vary between execs");
     assert_eq!(second, third, "the answer must not vary between execs");
     assert_eq!(
-        walks, 3,
-        "three execs walked {walks} times, not 3 - a cache has been added. \
-         #1111 bullet 1 asked for exactly that and it is REFUTED: see \
-         the_deny_list_changes_with_no_mutation_call_at_all"
+        walks, 1,
+        "three execs over an unchanged tree walked {walks} times, not 1 - the \
+         #1111 memo is not hitting. If you removed it deliberately, read the \
+         module header: the objection that once refuted it is answered by \
+         `deny_cache_key`, and the two invalidation tests below prove it."
     );
 }
 
