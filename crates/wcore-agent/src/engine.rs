@@ -14064,31 +14064,50 @@ impl AgentEngine {
                     || attempt_usage.output_tokens > 0;
                 // TWO narrowings of the same budget, composed with `min` so
                 // neither can hand a run more attempts than the other allows.
+                // They bind DIFFERENT paths, and that scoping is the whole of
+                // the correctness here:
                 //
                 //  * `class_retry_budget` (#1109) prices re-sends by FAILURE
-                //    CLASS: a refused endpoint is not going to start listening,
-                //    so it gets 2 rather than the configured 10.
+                //    CLASS and applies to every class. A refused endpoint is
+                //    not going to start listening, so it gets 2 rather than the
+                //    configured 10.
                 //  * `stream_retry_budget_after_attempt` (#1077) prices them in
-                //    the user's WALL CLOCK: an attempt that produced nothing
-                //    and spent a whole connect deadline doing it has already
-                //    been answered. See `SILENT_STALL_MAX_STREAM_RETRIES`.
+                //    the user's WALL CLOCK: an attempt that produced nothing and
+                //    spent a whole connect deadline doing it has already been
+                //    answered. See `SILENT_STALL_MAX_STREAM_RETRIES`.
                 //
-                // INTEGRATION NOTE (0.13.6). These two landed on separate lanes
-                // and disagree on the blackhole shape: measured alone, the class
-                // budget gives a blackholed endpoint 11 sends over 252 s, and the
-                // silent-stall ceiling gives it 2 over ~20 s. The ceiling wins
-                // here deliberately — 92 s of unexplained churn against an
-                // endpoint that answers nothing IS #1077, and a bigger budget
-                // makes it worse, not better. The classes that can actually
-                // recover (429, 5xx) produce output or fail fast, so they never
-                // reach the ceiling and keep the full budget.
-                let class_max_retries = class_retry_budget(&failure_code, max_stream_retries).min(
-                    stream_retry_budget_after_attempt(
-                        max_stream_retries,
-                        produced_output,
-                        attempt_started.elapsed(),
-                    ),
-                );
+                // The silent-stall ceiling is applied ONLY on the count-bounded
+                // path, because that is the only path it was measured against
+                // and reasoned about. Its own test says so: the blackhole it
+                // targets renders as `timeout`, which is NOT admitted to the
+                // unserved outage window, "and therefore lands on the
+                // count-bounded path this test grades".
+                //
+                // Applying it to the unserved class as well is wrong, and
+                // measurably so: an HTTP 503 or 529 produces no assistant text
+                // and no output tokens, so `produced_output` is false, and a
+                // provider that takes a full read timeout to refuse also clears
+                // the connect deadline. The ceiling would then cut a 900 s
+                // outage ride-out to two sends — which is the opposite of what
+                // the window exists for, and what
+                // `an_unserved_outage_is_bounded_by_the_count_and_by_the_window`
+                // and `an_http_529_outage_is_classified_unserved_and_capped_by_the_window`
+                // caught when the two lanes were first composed without this
+                // guard (4 sends expected on the slow arm, 2 observed).
+                //
+                // An unserved failure is already bounded twice — by the count
+                // and by the window, ANDed below — so it is not going
+                // unbounded here.
+                let class_max_retries =
+                    class_retry_budget(&failure_code, max_stream_retries).min(if unserved {
+                        max_stream_retries
+                    } else {
+                        stream_retry_budget_after_attempt(
+                            max_stream_retries,
+                            produced_output,
+                            attempt_started.elapsed(),
+                        )
+                    });
                 // The window is armed lazily, on the first unserved failure of
                 // the turn, so a turn that never sees one never starts a clock.
                 let outage_window_open = !unserved || {
