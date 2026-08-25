@@ -72,6 +72,8 @@ npx @ferroxlabs/wayland-core@latest "summarize the TODOs in this repo and draft 
 
 **Prebuilt binaries** for macOS (arm64/x64), Linux (arm64/x64), and Windows (arm64/x64) are on the [Releases](https://github.com/FerroxLabs/wayland-core/releases) page, each verifiable against `wayland-core-checksums.txt`.
 
+**Linux system requirements.** The Linux binaries are glibc-linked (glibc 2.34+, i.e. Debian 12 / Ubuntu 22.04 / RHEL 9 or newer) and need exactly one library beyond the C runtime: `libseccomp.so.2`, used to apply the sandbox's seccomp-bpf filter. Debian and Ubuntu base images (including `node:*-slim`) already ship it; on a stripped-down image install `libseccomp2` (Debian/Ubuntu) or `libseccomp` (RHEL/Fedora). Alpine and other musl distributions are not supported.
+
 **From source** (Rust 1.95+):
 
 ```bash
