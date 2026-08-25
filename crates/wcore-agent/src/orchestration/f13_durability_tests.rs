@@ -1729,3 +1729,102 @@ async fn a_checkpoint_the_session_cannot_store_degrades_to_opaque_instead_of_ref
     assert!(tool.effect_receipt.is_none());
     assert_eq!(std::fs::read(&target).unwrap(), b"one\ntwo\n");
 }
+
+/// Upgrade path. A journal written before Write declared a
+/// filesystem-transactional effect holds an opaque, receiptless record, and a
+/// crash between durable prepare and durable start leaves that record to be
+/// RETRIED by the new binary. The retry inherits the old record verbatim, so
+/// the fresh declaration must be accepted as compatible with it and the
+/// attempt must run the opaque path rather than the prepared one — otherwise
+/// the physical dispatch and the durable description of it disagree, or the
+/// call is refused outright for having changed shape.
+#[tokio::test]
+async fn a_pre_upgrade_opaque_write_record_can_still_be_retried() {
+    let workspace = tempfile::tempdir().unwrap();
+    let target = workspace.path().join("upgraded.txt");
+    std::fs::write(&target, b"one\n").unwrap();
+    let (_dir, journal, scope) = effect_fixture();
+    let registry = file_tool_registry();
+    let input = json!({"file_path": target.to_string_lossy(), "content": "one\ntwo\n"});
+    let call = tool_call("provider-call", "Write", input.clone());
+
+    // The record an older binary would have left behind.
+    let prior = scope
+        .prepare_tool_with_contract(
+            "provider-call",
+            0,
+            "Write",
+            input.clone(),
+            input,
+            wcore_types::tool::ToolEffectContract::default(),
+        )
+        .unwrap();
+    let prior_tool_execution_id = prior.id().to_owned();
+    prior
+        .not_started(ToolNotStartedReason::Cancelled {
+            reason: "interrupted before durable tool start".into(),
+        })
+        .unwrap();
+    let prior = journal.state().unwrap().tools[&prior_tool_execution_id].clone();
+    assert_eq!(
+        prior.effect_contract.kind,
+        wcore_types::tool::ToolEffectKind::Opaque
+    );
+    assert!(prior.effect_receipt.is_none());
+
+    let approval_manager = Arc::new(ToolApprovalManager::new());
+    let writer: Arc<dyn ProtocolEmitter> = Arc::new(NoopEmitter);
+    let outcome = execute_recovered_retry_tool_call_with_effects(
+        &registry,
+        &call,
+        &approval_manager,
+        &writer,
+        "msg",
+        &["Write".into()],
+        None,
+        wcore_compact::CompactionLevel::Off,
+        false,
+        None,
+        &CancellationToken::new(),
+        None,
+        &scope,
+        0,
+        None,
+        "provider-call",
+        &prior_tool_execution_id,
+        &prior.tool,
+        prior.ordinal,
+        &prior.effect_contract,
+        prior.effect_receipt.as_ref(),
+        &prior.requested_input_digest,
+        &prior.effective_input_digest,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            outcome.results.first(),
+            Some(ContentBlock::ToolResult { is_error, .. }) if !is_error
+        ),
+        "the retry must run, not be refused: {:?}",
+        outcome.results
+    );
+
+    let state = journal.state().unwrap();
+    let (_, retry) = state
+        .tools
+        .iter()
+        .find(|(_, tool)| tool.retry_of.as_deref() == Some(&prior_tool_execution_id))
+        .expect("the retry must be linked to the pre-upgrade record");
+    assert!(matches!(retry.effect, ToolEffectState::Succeeded));
+    assert_eq!(
+        retry.effect_contract.kind,
+        wcore_types::tool::ToolEffectKind::Opaque,
+        "a retry inherits its record; it may not silently upgrade to a receipt \
+         the record does not carry"
+    );
+    assert!(retry.effect_receipt.is_none());
+    assert_eq!(std::fs::read(&target).unwrap(), b"one\ntwo\n");
+}

@@ -379,3 +379,48 @@ async fn a_third_party_write_between_prepare_and_recovery_stays_unknown() {
         "reconciliation must not touch a contended target"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A measured residual limit, on the record rather than in a comment.
+// ---------------------------------------------------------------------------
+
+/// A write of byte-identical content that LANDED is not answerable.
+///
+/// `FilesystemEffectReceiptV1::reconcile` refuses to call a byte-identical
+/// no-op "already applied" unless the exact prepared object is still there,
+/// and `RealFs` writes through a temp file and a rename, so the landed write
+/// replaced the inode. Preimage, postimage and observation are all the same
+/// bytes; only the object differs, and that is indistinguishable from a third
+/// party having rewritten the same content. So it stays Unknown.
+///
+/// That is the correct direction to fail — the world is in the intended state
+/// either way, and no claim is made that cannot be supported — but it is a
+/// real case the automatic path does not close, and it is asserted here so it
+/// cannot become a surprise.
+#[tokio::test]
+async fn a_byte_identical_write_that_landed_still_needs_an_operator() {
+    let staging = tempfile::tempdir().unwrap();
+    let target = staging.path().join("noop.txt");
+    std::fs::write(&target, b"same\n").unwrap();
+
+    let mut state = interrupt(
+        &write_tool(),
+        write_input(&target, "same\n"),
+        Interruption::AfterThePhysicalWrite,
+    )
+    .await;
+    assert!(state.prepared_a_receipt);
+
+    let error = reconcile(&mut state)
+        .await
+        .expect_err("a byte-identical no-op cannot be attributed to this write");
+    assert!(error.contains("reconciliation"), "{error}");
+    assert!(matches!(
+        effect(&state),
+        ToolEffectState::Unknown {
+            reason: ToolUnknownReason::Interrupted,
+            ..
+        }
+    ));
+    assert_eq!(std::fs::read(&state.target).unwrap(), b"same\n");
+}
