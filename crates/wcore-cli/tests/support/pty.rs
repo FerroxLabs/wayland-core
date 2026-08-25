@@ -302,6 +302,14 @@ impl Pty {
         }
     }
 
+    /// The OS pid of the child this harness drives, when the backend exposes
+    /// one. FerroxLabs/wayland#1126 needs it to take an OS-level stack sample of
+    /// a stalled child: no reading available INSIDE this process can distinguish
+    /// "the child is blocked" from "the child answered and we did not see it".
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
     /// Bytes the child has written that NOTHING in this harness has read yet,
     /// via `FIONREAD` on the master. `None` when there is no fd to ask.
     ///

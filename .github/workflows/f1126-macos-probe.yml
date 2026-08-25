@@ -1,0 +1,76 @@
+# FerroxLabs/wayland#1126 — LANE-ONLY DIAGNOSTIC WORKFLOW. NOT FOR MERGE.
+#
+# `ci.yml` gives a macOS verdict in ~65 minutes and only when the commit message
+# carries `[ci-darwin]`. That is the right instrument for the final proof and the
+# wrong one for iterating on a hypothesis. This runs ONE test binary on
+# `macos-latest` (which is arm64) so a cycle costs a build, not a matrix.
+name: f1126 macOS probe
+
+on:
+  push:
+    branches:
+      - 'lane/f1126'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: f1126-macos-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: f1126 macOS probe
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: '0'
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host facts
+        run: |
+          sysctl -n hw.logicalcpu hw.physicalcpu
+          sw_vers
+          uname -m
+          echo "TMPDIR=$TMPDIR"
+
+      - name: Toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: f1126-probe
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Build the two pty binaries
+        run: cargo nextest list -p wcore-cli --test f1126_macos_probe --test path_boundary_tui_pty
+
+      # The probe binary, five times. The failure is 5-in-6 per attempt under
+      # full-suite load and much rarer alone, so repetition is the cheap
+      # substitute for load.
+      - name: f1126 probe x5
+        run: |
+          for i in 1 2 3 4 5; do
+            echo "::group::probe attempt $i"
+            cargo nextest run --profile ci --retries 0 --no-fail-fast \
+              -p wcore-cli --test f1126_macos_probe || echo "ATTEMPT $i FAILED"
+            echo "::endgroup::"
+          done
+
+      # The real test, unquarantined, three times — so the probe's reading is
+      # anchored to the actual subject rather than only to its copy.
+      - name: real test (--run-ignored all) x3
+        run: |
+          for i in 1 2 3; do
+            echo "::group::real attempt $i"
+            cargo nextest run --profile ci --retries 0 --no-fail-fast --run-ignored all \
+              -p wcore-cli --test path_boundary_tui_pty || echo "REAL ATTEMPT $i FAILED"
+            echo "::endgroup::"
+          done
