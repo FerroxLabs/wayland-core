@@ -382,6 +382,89 @@ impl ResilientProvider {
     }
 }
 
+/// Why one candidate was refused BEFORE any call was made to it, in the terms
+/// a person can act on.
+///
+/// [`CandidateRejection`] is a machine token; this is its other half. Kept
+/// beside the sentence it feeds so a new rejection variant cannot be added
+/// without a note for it.
+fn rejection_note(rejection: CandidateRejection) -> &'static str {
+    match rejection {
+        CandidateRejection::ProviderNotAllowed => "the routing policy does not allow this provider",
+        CandidateRejection::ProviderDenied => "the routing policy denies this provider",
+        CandidateRejection::RegionNotAllowed => "the routing policy does not allow this region",
+        CandidateRejection::OrganizationMismatch => {
+            "it belongs to a different organization than the routing policy requires"
+        }
+        CandidateRejection::ToolsUnsupported => "it does not support the tools this request needs",
+        CandidateRejection::VisionUnsupported => {
+            "it does not support the images this request carries"
+        }
+        CandidateRejection::StructuredOutputUnsupported => {
+            "it does not support the structured output this request needs"
+        }
+        CandidateRejection::ContextWindowUnknown => "its context window is unknown",
+        CandidateRejection::ContextWindowTooSmall => {
+            "its context window is too small for this request"
+        }
+        CandidateRejection::PricingStale => {
+            "its pricing evidence is stale and the routing policy requires fresh pricing"
+        }
+        CandidateRejection::PricingUnavailable => {
+            "it is unpriced and the routing policy requires priced candidates"
+        }
+        CandidateRejection::CooldownActive => "it is in cooldown after an earlier failure",
+        CandidateRejection::BudgetDenied => "the spend budget refused it",
+    }
+}
+
+/// The sentence the chain ends on when it walked the whole roster with NOTHING
+/// dispatched: the primary skipped for an open circuit, and every configured
+/// candidate refused before any call.
+///
+/// It replaces a blanket "no configured fallback candidate passed routing
+/// policy", which was true of exactly one of the thirteen dispositions that
+/// reach here. MEASURED (#1127) on 0.13.6: a run whose fallback endpoint had
+/// already been DISPATCHED three times — counted server-side on the mock —
+/// died on that sentence, and the disposition on the receipt was
+/// `CooldownActive`. Routing policy was never consulted, so the user it sends
+/// to `[provider_policy]` finds an empty section, and the refused `base_url`
+/// that actually opened every circuit is named nowhere.
+///
+/// Built from the receipt rather than from this function's control flow, so it
+/// can only say what the chain recorded.
+fn nothing_attempted_reason(receipt: &FailoverReceipt) -> String {
+    let candidates: Vec<String> = receipt
+        .candidates
+        .iter()
+        .map(|candidate| {
+            let note = match candidate.disposition {
+                Ok(()) => "it was dispatched and failed",
+                Err(rejection) => rejection_note(rejection),
+            };
+            match candidate.cooldown_reason {
+                Some(reason) => format!(
+                    "{}/{}: {note} ({reason})",
+                    candidate.provider, candidate.model
+                ),
+                None => format!("{}/{}: {note}", candidate.provider, candidate.model),
+            }
+        })
+        .collect();
+    let tail = if candidates.is_empty() {
+        "and no fallback candidate was configured".to_string()
+    } else {
+        format!(
+            "and no configured fallback candidate could be dispatched ({})",
+            candidates.join("; ")
+        )
+    };
+    format!(
+        "the primary '{}' was skipped because its circuit is open ({}), {tail}",
+        receipt.failed_provider, receipt.reason
+    )
+}
+
 #[async_trait]
 impl LlmProvider for ResilientProvider {
     /// Delegate to the wrapped primary so callers that introspect the
@@ -653,7 +736,7 @@ impl LlmProvider for ResilientProvider {
         }
         self.reporter.report_failover(&receipt);
         Err(last_error.unwrap_or_else(|| ProviderError::NotAttempted {
-            reason: "no configured fallback candidate passed routing policy".into(),
+            reason: nothing_attempted_reason(&receipt),
         }))
     }
 }
@@ -1932,6 +2015,128 @@ mod tests {
         assert!(
             !models.is_empty(),
             "list_models must yield the primary's alias catalog, not an empty list"
+        );
+    }
+    /// #1127 — a provider whose connect phase is REFUSED, in the wire shape
+    /// `reqwest` produces (`with_transport_cause` keeps only the innermost
+    /// link, which is what `classify_connect_chain` reads).
+    struct RefusedProvider;
+    #[async_trait]
+    impl LlmProvider for RefusedProvider {
+        async fn stream(&self, _: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            Err(ProviderError::Connection(
+                "error sending request: Connection refused (os error 111) (endpoint 127.0.0.1:9)"
+                    .into(),
+            ))
+        }
+    }
+
+    /// One failure opens a circuit, and it stays open long enough that the
+    /// SECOND call in each test below finds nothing it may dispatch.
+    fn collapse_config() -> CircuitConfig {
+        CircuitConfig {
+            fail_threshold: 1,
+            window: Duration::from_secs(60),
+            cooldown: Duration::from_secs(60),
+        }
+    }
+
+    fn chain_of(
+        primary: Arc<dyn LlmProvider>,
+        fallback: Arc<dyn LlmProvider>,
+    ) -> ResilientProvider {
+        ResilientProvider::new(
+            "primary",
+            primary,
+            vec![("fallback".to_string(), fallback)],
+            collapse_config(),
+            Arc::new(NoOpCircuitReporter),
+        )
+    }
+
+    /// Drive the chain until it collapses with nothing left to dispatch, and
+    /// hand back the refusal it ends on.
+    async fn collapse(resilient: &ResilientProvider) -> ProviderError {
+        resilient
+            .stream(&dummy_request())
+            .await
+            .expect_err("the first call must fail and open both circuits");
+        resilient
+            .stream(&dummy_request())
+            .await
+            .expect_err("the second call must be refused with nothing dispatched")
+    }
+
+    /// #1127 — the sentence a collapsed chain ends on must describe what
+    /// actually happened to each candidate.
+    ///
+    /// Measured on 0.13.6: a run whose fallback endpoint had already been
+    /// DISPATCHED three times (counted server-side) died on "no configured
+    /// fallback candidate passed routing policy". The candidate was refused
+    /// for an ACTIVE COOLDOWN and the primary for an OPEN CIRCUIT; routing
+    /// policy was never consulted, and a user sent to read `[provider_policy]`
+    /// finds it empty.
+    #[tokio::test]
+    async fn a_collapsed_chain_names_the_real_disposition_not_routing_policy() {
+        let resilient = chain_of(Arc::new(RefusedProvider), Arc::new(RefusedProvider));
+        let reason = match collapse(&resilient).await {
+            ProviderError::NotAttempted { reason, .. } => reason,
+            other => panic!("expected a NotAttempted refusal, got {other:?}"),
+        };
+        assert!(
+            reason.contains("cooldown"),
+            "the refusal must name the cooldown that actually refused the \
+             candidate; got: {reason}"
+        );
+        assert!(
+            !reason.contains("routing policy"),
+            "no routing policy was consulted on this path; got: {reason}"
+        );
+        assert!(
+            reason.contains("primary"),
+            "the refusal must say the primary was skipped too; got: {reason}"
+        );
+    }
+
+    /// Known-positive control for the test above: the SAME collapse path, with
+    /// a candidate that really was refused by the routing policy, must still
+    /// say routing policy. Without this, a fix that hardcoded "cooldown" would
+    /// pass.
+    #[tokio::test]
+    async fn a_policy_refused_candidate_still_names_the_routing_policy() {
+        let metadata = FailoverCandidateMetadata {
+            label: "fallback".into(),
+            provider: "openai".into(),
+            model: "gpt-test".into(),
+            organization: None,
+            region: None,
+            capabilities: CandidateCapabilities {
+                tools: true,
+                vision: true,
+                structured_output: true,
+                context_window: Some(1_000_000),
+            },
+            // Unpriced, against a policy that requires priced candidates.
+            pricing: PricingEvidence::default(),
+        };
+        let resilient = ResilientProvider::new_with_policy(
+            "primary",
+            Arc::new(RefusedProvider),
+            vec![(metadata, Arc::new(RefusedProvider) as Arc<dyn LlmProvider>)],
+            collapse_config(),
+            Arc::new(NoOpCircuitReporter),
+            FailoverRoutingPolicy {
+                require_priced: true,
+                ..FailoverRoutingPolicy::default()
+            },
+        );
+        let reason = match collapse(&resilient).await {
+            ProviderError::NotAttempted { reason, .. } => reason,
+            other => panic!("expected a NotAttempted refusal, got {other:?}"),
+        };
+        assert!(
+            reason.contains("routing policy"),
+            "a candidate the policy really did refuse must say so; got: {reason}"
         );
     }
 }
