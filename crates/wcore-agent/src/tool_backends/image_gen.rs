@@ -36,7 +36,9 @@ use wcore_tools::media_cost::ReportedCost;
 use wcore_config::config::Config;
 
 use super::build_ssrf_safe_tool_client;
-use super::shared::{OPENAI_API_BASE, join_openai_endpoint, openai_wire_media_base, read_env_key};
+use super::shared::{
+    OPENAI_API_BASE, http_error_detail, join_openai_endpoint, openai_wire_media_base, read_env_key,
+};
 
 // ---------------------------------------------------------------------
 // Per-call timeout. `reqwest`'s `.timeout()` covers the HTTP exchange
@@ -184,8 +186,12 @@ pub fn build_image_gen_backend(
 fn map_http_error(status: u16, body: &str, provider: &str) -> ImageGenerationError {
     let preview: String = body.chars().take(400).collect();
     if status == 402 {
+        // #938: the CATEGORY was already right here; the MESSAGE was not. A
+        // recognised FluxRouter 402 says which plan the user needs instead of
+        // pasting the provider's JSON envelope.
         return ImageGenerationError::InsufficientCredits(format!(
-            "{provider} returned HTTP 402: {preview}"
+            "{provider} returned HTTP 402: {}",
+            http_error_detail("image generation", status, body)
         ));
     }
     if status == 400
@@ -1809,5 +1815,35 @@ mod tests {
             .expect("hf happy path");
         assert!(resp.image.starts_with("data:image/png;base64,"));
         assert_eq!(resp.used_provider, "Hugging Face FLUX.1-schnell");
+    }
+
+    /// #938. A FluxRouter 402 on the images endpoint already routed to the
+    /// `InsufficientCredits` CATEGORY, but the message handed to the user was
+    /// the provider's raw JSON. The category is not the message.
+    #[test]
+    fn flux_402_on_images_yields_the_typed_entitlement_message() {
+        let body = r#"{"error":{"message":"image generation is available on paid plans only","code":"premium_locked"}}"#;
+        let e = map_http_error(402, body, "flux-router");
+        assert!(
+            matches!(e, ImageGenerationError::InsufficientCredits(_)),
+            "got: {e:?}"
+        );
+        let msg = e.to_string();
+        assert!(msg.contains("requires a paid Flux plan"), "got: {msg}");
+        assert!(
+            !msg.contains("\"code\""),
+            "the provider's raw JSON envelope must not reach the user, got: {msg}"
+        );
+        assert!(msg.contains("402"), "got: {msg}");
+
+        // KNOWN-POSITIVE CONTROL: a non-Flux 402 body is still surfaced
+        // verbatim, so the assertion above is discrimination and not an
+        // implementation that discards every error body.
+        let other =
+            map_http_error(402, "quota exhausted, top up your balance", "fal flux").to_string();
+        assert!(
+            other.contains("quota exhausted, top up your balance"),
+            "got: {other}"
+        );
     }
 }

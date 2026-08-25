@@ -12,7 +12,7 @@ use super::build_ssrf_safe_tool_client;
 // 27-C3. `cost_from_headers` started here and now lives in `shared.rs`: five
 // billable backends need it, and three of them were discarding
 // `resp.headers()` entirely.
-use super::shared::cost_from_headers;
+use super::shared::{cost_from_headers, http_error_detail};
 use wcore_tools::media_cost::{
     MediaAccounting, MediaCostLedger, MediaCostRecord, MediaRateCard, MediaUnits,
 };
@@ -179,7 +179,7 @@ impl TranscriptionBackend for OpenAiCompatWhisperBackend {
                     "{} transcription returned HTTP {}: {}",
                     self.backend_id,
                     status.as_u16(),
-                    txt.chars().take(400).collect::<String>()
+                    http_error_detail("speech-to-text", status.as_u16(), &txt)
                 ),
             };
         }
@@ -477,5 +477,81 @@ mod tests {
         // A separate ledger, never bound, must be untouched.
         let other = MediaCostLedger::new();
         assert_eq!(other.snapshot().len(), 0);
+    }
+
+    /// #938 RED ARM. The same FluxRouter 402 the image path maps to a typed
+    /// `PremiumLocked` ("requires a paid Flux plan") must produce the SAME
+    /// actionable message on the transcription path. Before the fix this
+    /// handed the provider's raw JSON envelope to the user.
+    #[tokio::test]
+    async fn flux_402_on_transcription_yields_the_typed_entitlement_message() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .respond_with(ResponseTemplate::new(402).set_body_json(json!({
+                "error": {
+                    "message": "speech-to-text is available on paid plans only",
+                    "code": "premium_locked"
+                }
+            })))
+            .mount(&server)
+            .await;
+        let backend = OpenAiCompatWhisperBackend::new(
+            "flux-test-key".to_string(),
+            format!("{}/v1/audio/transcriptions", server.uri()),
+            "flux-voice-fast".to_string(),
+            "flux-router",
+        );
+        let msg = match backend.transcribe("audio/wav", b"RIFF0000WAVE", None).await {
+            TranscriptionOutcome::Err { message } => message,
+            other => panic!("a 402 must not succeed: {other:?}"),
+        };
+        assert!(
+            msg.contains("requires a paid Flux plan"),
+            "the entitlement lock must be spelled out the way the image path \
+             spells it, got: {msg}"
+        );
+        assert!(
+            !msg.contains("\"code\""),
+            "the provider's raw JSON envelope must not reach the user, got: {msg}"
+        );
+        assert!(
+            msg.contains("402"),
+            "the status must survive the rewrite - video_analyze classifies \
+             InsufficientCredits by string-matching it, got: {msg}"
+        );
+    }
+
+    /// KNOWN-POSITIVE CONTROL for the test above. A non-Flux failure body must
+    /// still reach the user verbatim - without this, an implementation that
+    /// threw every error body away would satisfy the "no raw JSON" assertion
+    /// for free.
+    #[tokio::test]
+    async fn a_non_flux_transcription_failure_body_is_still_surfaced_verbatim() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_string("upstream transcoder exploded"),
+            )
+            .mount(&server)
+            .await;
+        let backend = OpenAiCompatWhisperBackend::new(
+            "k".to_string(),
+            format!("{}/v1/audio/transcriptions", server.uri()),
+            "whisper-1".to_string(),
+            "openai",
+        );
+        let msg = match backend.transcribe("audio/wav", b"RIFF0000WAVE", None).await {
+            TranscriptionOutcome::Err { message } => message,
+            other => panic!("a 500 must not succeed: {other:?}"),
+        };
+        assert!(msg.contains("upstream transcoder exploded"), "got: {msg}");
     }
 }
