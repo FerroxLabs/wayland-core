@@ -378,6 +378,47 @@ fn manifest_pins_generator_and_all_three_digests() {
 }
 
 #[test]
+fn manifest_publishes_a_wire_shape_for_every_command_and_event() {
+    // The published wire shapes are what `generate` diffs the next regeneration
+    // against, so a corpus that stops publishing them silently restores the
+    // blind blessing this guard exists to stop.
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(root().join("manifest.json")).unwrap()).unwrap();
+    let shapes = manifest["wire_shapes"]
+        .as_object()
+        .expect("manifest must publish one wire shape digest per wire type");
+    for entry in manifest["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(manifest["events"].as_array().unwrap())
+    {
+        let path = entry["path"].as_str().unwrap();
+        assert!(
+            shapes
+                .get(path)
+                .and_then(Value::as_str)
+                .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71),
+            "{path} must publish a prefixed SHA-256 wire shape digest"
+        );
+    }
+    assert!(
+        shapes.contains_key("compat/events/sub_agent_event.legacy.json"),
+        "the legacy sub-agent compatibility branch is a validated shape too"
+    );
+    assert_eq!(
+        shapes.len(),
+        23 + 61 + 1,
+        "23 commands, 61 events, and the legacy sub-agent compatibility branch"
+    );
+    // The correlation anchors every later tool frame is matched against. A
+    // rename here is the exact break regeneration used to bless.
+    for anchor in ["events/tool_request.json", "commands/tool_approve.json"] {
+        assert!(shapes.contains_key(anchor));
+    }
+}
+
+#[test]
 fn manifest_ready_and_schema_titles_share_one_contract_identity() {
     let manifest = generated_json("manifest.json");
     let ready = generated_json("events/ready.json");
