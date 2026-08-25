@@ -117,10 +117,7 @@ impl SupervisorConfig {
         let base_url = base_url.trim_end_matches('/');
         Self {
             healthcheck_url: format!("{base_url}/health"),
-            sidecar_program: Some(
-                std::env::var("WAYLAND_CAMOUFOX_BIN")
-                    .unwrap_or_else(|_| "camofox-browser".to_string()),
-            ),
+            sidecar_program: Some(crate::install::CAMOUFOX.configured_program()),
             camoufox_download: configured_camoufox_download(),
             allow_unproxied_sidecar: configured_allow_unproxied_sidecar(),
             ..Self::default()
@@ -482,6 +479,21 @@ impl BrowserSupervisor {
         let resolved_program = self.resolve_sidecar_program(&configured_program).await?;
         let program = resolved_program.as_str();
 
+        // gh#491 - "nothing is installed" is answered here, BEFORE the
+        // containment pre-flight below. That pre-flight looks for the Camoufox
+        // install's default-preference directory, and on a clean machine it
+        // truthfully reports that it cannot find one - four paragraphs about an
+        // egress proxy, naming CAMOUFOX_EXECUTABLE_PATH, for a host whose real
+        // condition is that no browser is installed at all. The containment
+        // refusal is correct for the case it is FOR (an install Core cannot
+        // write to) and is unchanged; it just no longer answers first for a
+        // question it was not asked.
+        if which::which(program).is_err() {
+            return Err(
+                crate::install::CAMOUFOX.not_installed(program, Some(&self.config.healthcheck_url))
+            );
+        }
+
         // A prior owned sidecar may be alive but unhealthy. Remove it before
         // reusing the stable ownership key so inserting the replacement can
         // never detach the old Child handle.
@@ -504,8 +516,9 @@ impl BrowserSupervisor {
             .map_err(|error| {
                 format!(
                     "Camoufox is unavailable at {} and Core could not start `{program}`: {error}. \
-Install @askjo/camofox-browser or set WAYLAND_CAMOUFOX_BIN to its executable",
-                    self.config.healthcheck_url
+{}",
+                    self.config.healthcheck_url,
+                    crate::install::CAMOUFOX.remedy()
                 )
             })?;
 
@@ -1008,8 +1021,14 @@ mod tests {
         };
         let sup = Arc::new(BrowserSupervisor::with_config(cfg));
         let error = sup.ensure_ready().await.unwrap_err();
-        assert!(error.contains("Install @askjo/camofox-browser"), "{error}");
-        assert!(error.contains("WAYLAND_CAMOUFOX_BIN"), "{error}");
+        assert!(
+            error.contains(crate::install::CAMOUFOX_SIDECAR_PACKAGE),
+            "{error}"
+        );
+        assert!(
+            error.contains(crate::install::CAMOUFOX_SIDECAR_ENV),
+            "{error}"
+        );
         assert!(sup.live_sessions().is_empty());
     }
 

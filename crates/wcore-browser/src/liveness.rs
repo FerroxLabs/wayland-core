@@ -202,9 +202,9 @@ pub async fn probe(camoufox_base_url: &str) -> BrowserLiveness {
         };
         BrowserLiveness::Unavailable(Unavailable {
             reason,
-            remedy: "install @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the \
-                     executable, or start the Camoufox sidecar before the session"
-                .to_string(),
+            // gh#491 - the ONE install instruction, shared with the
+            // supervisor's refusal and with `--doctor`.
+            remedy: crate::install::CAMOUFOX.remedy(),
         })
     }
 }

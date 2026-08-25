@@ -84,6 +84,11 @@ voice = ["wcore-agent/voice"]
 async-trait.workspace    = true
 wcore-agent.workspace    = true
 wcore-agents-pack.workspace = true
+# gh#491: `--doctor` asks `wcore_browser::install` which browser backend
+# this build actually compiled instead of hardcoding Chromium, which is
+# behind an opt-in feature and is not in the shipped artifact. Already in
+# the graph transitively via wcore-agent, so this compiles nothing new.
+wcore-browser.workspace  = true
 # S10: read-only Integrations view in `/doctor` scans the on-disk channel
 # configs (`scan_user_channels`) through the same WAYLAND_HOME-correct path the
 # engine loader uses. Already in the graph transitively via wcore-agent.

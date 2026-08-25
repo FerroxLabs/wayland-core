@@ -9,7 +9,7 @@
 //!   value because that depends on whether the runner has `wlrctl`,
 //!   `grim`, `chromium`, etc. installed — and `[FAIL]` rows are
 //!   normal on a stock GitHub macOS / Linux runner).
-//! - The `chromium browser` and `binary version` rows always appear,
+//! - The `browser backend` and `binary version` rows always appear,
 //!   because those checks run on every platform.
 //!
 //! Rationale: the harness must be a smoke test, not a hermetic
@@ -48,7 +48,7 @@ fn doctor_emits_header_and_summary() {
 
 #[test]
 fn doctor_includes_universal_checks() {
-    // The `binary version` and `chromium browser` rows run on every
+    // The `binary version` and `browser backend` rows run on every
     // platform, so they must appear in the report regardless of
     // whether the binary itself is found.
     let out = run_doctor();
@@ -59,8 +59,14 @@ fn doctor_includes_universal_checks() {
         "stdout missing 'binary version' row:\n{stdout}"
     );
     assert!(
-        stdout.contains("chromium browser"),
-        "stdout missing 'chromium browser' row:\n{stdout}"
+        stdout.contains("browser backend"),
+        "stdout missing 'browser backend' row:\n{stdout}"
+    );
+    // gh#491: the doctor must not send the operator after a backend this
+    // binary did not compile.
+    assert!(
+        !stdout.contains("chromium"),
+        "the doctor recommends Chromium, which is not compiled into this build:\n{stdout}"
     );
     // Optional providers always render (Pass or Warn — never absent).
     assert!(
