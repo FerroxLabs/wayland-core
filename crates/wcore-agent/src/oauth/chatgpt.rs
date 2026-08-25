@@ -62,13 +62,24 @@ const REFRESH_LEAD_SECS: u64 = 120;
 ///
 /// DERIVED FROM THE DISPATCH PATH, not chosen. The bearer is resolved once, at
 /// the top of `OpenAIChatGptProvider::stream`, and folded into immutable
-/// headers; the gap between that resolve and the backend RECEIVING the request
-/// is bounded by `wcore_providers::retry::BROKEN_CONNECTION_RETRY_WINDOW`
-/// (30 s, its deadline set on entry to `builder_send_with_retry`), plus one
-/// final `connect_timeout` (30 s), plus ~1.9 s of 5xx backoff -- call it 60 s.
-/// A token with less life than that ceiling cannot be RELIED on to survive
-/// Core's own retry path, so handing one out trades a named rate-limit error
-/// for an unattributable upstream 4xx -- which is the shape of #147.
+/// headers; the floor is the ceiling on the gap between that resolve and the
+/// backend RECEIVING the request.
+///
+/// That ceiling has TWO values, and the floor takes the conservative one:
+///
+/// * On the engine's streaming path the whole provider call runs under
+///   `scope_max_retries(0)` (`wcore_agent::engine`), which clamps
+///   `builder_send_with_retry` to ONE physical send and zeroes its
+///   `BROKEN_CONNECTION_RETRY_WINDOW` attempt cap outright. The gap is then a
+///   single `connect_timeout` -- 30 s.
+/// * A caller that does NOT scope (model-catalog fetches, the TUI's own GET,
+///   the Ollama plugin) gets the full ring: `BROKEN_CONNECTION_RETRY_WINDOW`
+///   (30 s, its deadline set on entry) plus a final `connect_timeout` (30 s)
+///   plus ~1.9 s of 5xx backoff -- about 60 s.
+///
+/// 60 s covers both. Below it the token cannot be RELIED on to survive Core's
+/// own dispatch, so handing one out trades a named rate-limit error for an
+/// unattributable upstream 4xx -- which is the shape of #147.
 ///
 /// Honest about the cost, because the same measurement cuts both ways: HTTP
 /// authenticates once, at request receipt, so on the COMMON dispatch path (a
