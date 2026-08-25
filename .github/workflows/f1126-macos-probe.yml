@@ -50,7 +50,7 @@ jobs:
           tool: nextest
 
       - name: Build the two pty binaries
-        run: cargo nextest list -p wcore-cli --test f1126_macos_probe --test path_boundary_tui_pty
+        run: cargo nextest list -p wcore-cli --test f1126_macos_probe --test f1126_jsonstream_probe --test path_boundary_tui_pty
 
       # The probe binary, five times. The failure is 5-in-6 per attempt under
       # full-suite load and much rarer alone, so repetition is the cheap
@@ -61,6 +61,23 @@ jobs:
             echo "::group::probe attempt $i"
             cargo nextest run --profile ci --retries 0 --no-fail-fast \
               -p wcore-cli --test f1126_macos_probe || echo "ATTEMPT $i FAILED"
+            echo "::endgroup::"
+          done
+
+      # THE ARM THAT DECIDES BLAST RADIUS. Same scenario, same mock, same
+      # approve-once answer - driven over `--json-stream`, the surface the
+      # Wayland desktop host speaks. If the wedge reproduces here it is not a
+      # macOS CI annoyance, it is a shipped hang for every Desktop user.
+      #
+      # Headless is deliberately NOT a third arm: it installs no approval
+      # manager, so the path-boundary gate is never forced there and a green
+      # would be a false exoneration rather than evidence.
+      - name: f1126 json-stream probe x5
+        run: |
+          for i in 1 2 3 4 5; do
+            echo "::group::json-stream attempt $i"
+            cargo nextest run --profile ci --retries 0 --no-fail-fast \
+              -p wcore-cli --test f1126_jsonstream_probe || echo "JSONSTREAM ATTEMPT $i FAILED"
             echo "::endgroup::"
           done
 
