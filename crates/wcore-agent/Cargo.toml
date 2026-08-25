@@ -198,6 +198,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    # #1131: the approval prompt peeks the console input queue so readiness
+    # means "a whole line is pending", not "any input record arrived".
+    "Win32_System_Console",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
 ] }
