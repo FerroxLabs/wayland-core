@@ -1025,6 +1025,21 @@ pub struct ProviderConfig {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    /// #685 — the explicit OFF state. `enabled = false` refuses this provider
+    /// outright, BEFORE any rung of the credential ladder is consulted.
+    ///
+    /// It exists because "no credential in the config file" was never an off
+    /// switch. Four independent sources feed the same ladder — the `--api-key`
+    /// flag, this file, the credentials store, and the process environment,
+    /// which `~/.wayland/.env` re-injects at every startup — so a host UI that
+    /// clears the inline `api_key` leaves three live sources and the provider
+    /// keeps being billed. Anything short of a source-independent flag is a
+    /// toggle that turns nothing off.
+    ///
+    /// Fail-closed by construction: the refusal is not "resolve, then ignore",
+    /// it is "never resolve". `None` (the default) means enabled — an existing
+    /// config keeps behaving exactly as before.
+    pub enabled: Option<bool>,
     /// Routing-policy metadata, not a credential or provider wire header.
     pub organization: Option<String>,
     pub region: Option<String>,
@@ -2366,6 +2381,19 @@ impl Config {
         let account_id = resolved_provider.account_id.clone();
         let provider = resolved_provider.provider_type;
         let provider_config = resolved_provider.effective_config;
+
+        // #685 — the OFF state, enforced before ANY credential source is read.
+        // Placed here rather than inside `resolve_api_key` on purpose: the
+        // ladder is not the only way a key reaches this function (the CLI flag
+        // and the catalog entry's own env var both bypass rungs of it), and a
+        // check that guards only the ladder would leave the two loudest sources
+        // still live. Nothing below this line runs for a disabled provider.
+        if provider_config.enabled == Some(false) {
+            return Err(ProviderDisabled {
+                provider: provider_label.clone(),
+            }
+            .into());
+        }
         // Set only when `--provider <id>` matched a bundled data-driven catalog
         // entry (resolves to ProviderType::OpenAI). Used below to stamp the
         // catalog base_url, the catalog-derived compat, and the env-var key.
@@ -2432,7 +2460,8 @@ impl Config {
         //    the env-var fallback, closing SECURITY MAJOR #16's
         //    "plaintext in config.toml only" pathway.
         // A catalog provider resolves to ProviderType::OpenAI, which is unknown
-        // to `resolve_api_key` -- it only tries OPENAI_API_KEY / API_KEY. A user
+        // to `resolve_api_key` -- it only tries OPENAI_API_KEY (and the bare
+        // API_KEY, when opted in per #685). A user
         // who set the provider's OWN documented env var (e.g. NOVITA_API_KEY)
         // must have it honored as a fallback HERE, in BOTH cases: when the
         // standard chain errors (no OPENAI_API_KEY -> MissingApiKey) and when it
@@ -2447,18 +2476,24 @@ impl Config {
                     .and_then(|e| std::env::var(&e.env_var).ok())
             })
             .flatten();
-        let mut api_key = match resolve_api_key(
+        let catalog_env_source = || {
+            catalog_entry
+                .as_ref()
+                .map(|e| CredentialSource::CatalogEnvVar(e.env_var.clone()))
+                .unwrap_or(CredentialSource::OutOfBand)
+        };
+        let (mut api_key, mut credential_source) = match resolve_api_key_with_source(
             cli.api_key.as_deref(),
             account_id.as_deref(),
             provider_config.api_key.as_deref(),
             provider,
             &merged.storage.credentials,
         ) {
-            Ok(key) => key,
+            Ok(pair) => pair,
             // The standard chain found nothing; honor the catalog entry's own
             // env var before surfacing MissingApiKey.
             Err(e) => match catalog_env_key.clone() {
-                Some(key) => key,
+                Some(key) => (key, catalog_env_source()),
                 // 27-C2: a LOCAL model has no remote credential, so demanding
                 // one here is wrong. This is not a new affordance -- it is the
                 // one the engine already advertises. On `MissingApiKey` the CLI
@@ -2478,7 +2513,9 @@ impl Config {
                 // if no plugin claims the local route, `AgentBootstrap` refuses
                 // to fall through to a remote provider with an empty
                 // credential and fails loudly instead.
-                None if wcore_types::model_aliases::is_local_model(&model) => String::new(),
+                None if wcore_types::model_aliases::is_local_model(&model) => {
+                    (String::new(), CredentialSource::OutOfBand)
+                }
                 None => return Err(e),
             },
         };
@@ -2488,6 +2525,14 @@ impl Config {
             && let Some(key) = catalog_env_key
         {
             api_key = key;
+            credential_source = catalog_env_source();
+        }
+
+        // #685 — say which AMBIENT source answered. The billing complaint this
+        // closes is not that the wrong key was used, it is that the user had no
+        // way to learn WHERE the key that kept spending was coming from.
+        if let Some(notice) = ambient_credential_notice(&provider_label, &credential_source) {
+            emit_credential_notice_once(&notice);
         }
 
         // 7. Apply auto_approve from CLI
@@ -3139,6 +3184,10 @@ fn merge_provider_configs(base: ProviderConfig, overlay: ProviderConfig) -> Prov
         model: overlay.model.or(base.model),
         api_key: overlay.api_key.or(base.api_key),
         base_url: overlay.base_url.or(base.base_url),
+        // #685 — an alias inherits the underlying entry's OFF state. Disabling
+        // `[providers.anthropic]` must not be escapable by pointing an alias at
+        // it; the alias may still set its own value to override deliberately.
+        enabled: overlay.enabled.or(base.enabled),
         organization: overlay.organization.or(base.organization),
         region: overlay.region.or(base.region),
         prompt_caching: overlay.prompt_caching.or(base.prompt_caching),
@@ -3252,6 +3301,11 @@ pub enum CouncilProviderError {
     /// config, credentials store, or env var). Skip, don't fail.
     #[error("council provider '{0}' has no usable api key")]
     Keyless(String),
+    /// #685 — the provider is `enabled = false`. Distinct from [`Self::Keyless`]
+    /// because the remedy is the opposite: a keyless member needs a credential,
+    /// a disabled one has been turned off on purpose and must stay off.
+    #[error("council provider '{0}' is disabled (`enabled = false`)")]
+    Disabled(String),
 }
 
 /// Resolve a council `spec` (`"provider"` or `"provider:model"`) into a fully
@@ -3303,6 +3357,13 @@ pub fn resolve_council_provider(
     let account_id = resolved.account_id.clone();
     let provider_config = resolved.effective_config;
     let catalog_entry = resolved.catalog_entry;
+
+    // #685 — same OFF state, same position: before any credential is read. A
+    // disabled provider is not a keyless member the council may retry later,
+    // it is one the user turned off, so it gets its own variant.
+    if provider_config.enabled == Some(false) {
+        return Err(CouncilProviderError::Disabled(provider_id.to_string()));
+    }
 
     let base_url = provider_config
         .base_url
@@ -3420,6 +3481,35 @@ pub fn resolve_council_provider(
     Ok((derived, resolved_model))
 }
 
+/// Which rung of the credential ladder actually answered (#685).
+///
+/// The ladder has four independent feeds and the user can see only one of them
+/// (the config file). Carrying the answer out of resolution is what makes it
+/// possible to SAY which one was used, instead of leaving the user to guess
+/// why a provider they thought they had cleared is still spending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialSource {
+    /// The `--api-key` flag on this invocation.
+    CliFlag,
+    /// The selected named account's own credentials-store slot (#14).
+    AccountStore,
+    /// An inline `[providers.<name>].api_key` in a config file.
+    ConfigFile,
+    /// The credentials store (OS keyring or encrypted vault).
+    CredentialsStore,
+    /// A provider environment variable, or the opted-in bare `API_KEY`.
+    /// AMBIENT: nothing in the user's config controls this.
+    EnvVar(&'static str),
+    /// A bundled catalog entry's own environment variable. Also ambient; the
+    /// name is data, not a compile-time constant.
+    CatalogEnvVar(String),
+    /// The provider authenticates out of band (AWS/GCP credentials, OAuth), so
+    /// the empty key is the correct answer and no rung supplied it.
+    OutOfBand,
+}
+
+/// [`resolve_api_key_with_source`], with the source discarded. The shape every
+/// caller that only wants the key keeps using.
 fn resolve_api_key(
     cli_key: Option<&str>,
     account_id: Option<&str>,
@@ -3427,9 +3517,20 @@ fn resolve_api_key(
     provider: ProviderType,
     storage: &crate::credentials::CredentialsStorageConfig,
 ) -> anyhow::Result<String> {
+    resolve_api_key_with_source(cli_key, account_id, config_key, provider, storage)
+        .map(|(key, _)| key)
+}
+
+fn resolve_api_key_with_source(
+    cli_key: Option<&str>,
+    account_id: Option<&str>,
+    config_key: Option<&str>,
+    provider: ProviderType,
+    storage: &crate::credentials::CredentialsStorageConfig,
+) -> anyhow::Result<(String, CredentialSource)> {
     // CLI arg takes precedence
     if let Some(key) = cli_key {
-        return Ok(key.to_string());
+        return Ok((key.to_string(), CredentialSource::CliFlag));
     }
 
     // #14 — the NAMED ACCOUNT rung. When the session selected an account id
@@ -3446,12 +3547,12 @@ fn resolve_api_key(
         && let Ok(store) = crate::credentials::open_store(storage, &credentials_storage_path())
         && let Some(key) = store.get(&slot).ok().flatten()
     {
-        return Ok(key);
+        return Ok((key, CredentialSource::AccountStore));
     }
 
     // Config file value
     if let Some(key) = config_key {
-        return Ok(key.to_string());
+        return Ok((key.to_string(), CredentialSource::ConfigFile));
     }
 
     // Wave SD — credentials store: plaintext-with-0o600 or OS keyring.
@@ -3460,100 +3561,200 @@ fn resolve_api_key(
     if let Ok(store) = crate::credentials::open_store(storage, &credentials_storage_path())
         && let Some(key) = lookup_store_api_key(&*store, provider)
     {
-        return Ok(key);
+        return Ok((key, CredentialSource::CredentialsStore));
     }
 
-    resolve_api_key_from_env(provider)
+    resolve_api_key_from_env_with_source(provider)
+}
+
+/// Render the operator-facing line for an AMBIENT credential source, or `None`
+/// when the source is one the user explicitly chose (#685).
+///
+/// Split out so the exact words are under test, exactly as
+/// [`unknown_config_keys_notice`] is — and for the same reason as that notice:
+/// `tracing::warn!` is NOT a user-facing channel here. With `RUST_LOG` unset
+/// only ERROR reaches stderr and everything below it goes to the log file, so a
+/// warning about an invisible credential source would itself be invisible.
+///
+/// Only ambient sources qualify. `--api-key`, an inline config key and the
+/// credentials store are things the user typed or stored on purpose; narrating
+/// them on every launch is noise. The environment is the source the reporter
+/// could not see and the host UI could not clear, and `~/.wayland/.env` — which
+/// Core re-injects into the environment at every startup — is the least visible
+/// of all, so it is named specifically.
+fn ambient_credential_notice(provider_label: &str, source: &CredentialSource) -> Option<String> {
+    let var = match source {
+        CredentialSource::EnvVar(name) => (*name).to_string(),
+        CredentialSource::CatalogEnvVar(name) => name.clone(),
+        CredentialSource::CliFlag
+        | CredentialSource::AccountStore
+        | CredentialSource::ConfigFile
+        | CredentialSource::CredentialsStore
+        | CredentialSource::OutOfBand => return None,
+    };
+    let origin = if crate::env_file::injected_from_wayland_env_file(&var) {
+        format!(
+            "{var} (loaded from {})",
+            profile_home().join(".env").display()
+        )
+    } else {
+        format!("{var} (set in this environment)")
+    };
+    Some(format!(
+        "notice: provider '{provider_label}' is using the credential from {origin}, not from \
+         your config file or the credentials store. To stop using this provider, set \
+         `providers.{provider_label}.enabled = false` in your config — clearing the config \
+         key alone does not turn it off."
+    ))
+}
+
+/// Emit `notice` on stderr the first time this process renders it.
+///
+/// Keyed on the rendered text rather than a bare `Once`: a launch resolves the
+/// primary provider and then every fallback in the chain, and each distinct
+/// provider/source pair is worth saying once — the same pair repeated is not.
+fn emit_credential_notice_once(notice: &str) {
+    static EMITTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let emitted = EMITTED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let first_time = match emitted.lock() {
+        Ok(mut seen) => seen.insert(notice.to_string()),
+        // A poisoned lock must never swallow the notice.
+        Err(_) => true,
+    };
+    if first_time {
+        eprintln!("{notice}");
+    }
+}
+
+/// The env var that opts the bare, provider-agnostic `API_KEY` into the
+/// credential ladder (#685).
+pub const ALLOW_BARE_API_KEY_ENV: &str = "WAYLAND_ALLOW_BARE_API_KEY";
+
+/// Has the user explicitly opted the bare `API_KEY` in?
+///
+/// Fails closed: anything other than an affirmative literal — including unset,
+/// empty, `0`, `false`, or a typo — means NO. The variable is namespaced so an
+/// unrelated service cannot enable this by accident, which is the whole point:
+/// the value being gated (`API_KEY`) is the one credential name a random tool
+/// in the same shell is likely to have set for its own reasons.
+fn bare_api_key_opt_in() -> bool {
+    match std::env::var(ALLOW_BARE_API_KEY_ENV) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
 }
 
 /// Resolve only the environment/out-of-band portion of the API-key chain.
 /// Kept separate so batch connection checks can reuse one credentials-store
 /// snapshot without reopening it once per provider.
-fn resolve_api_key_from_env(provider: ProviderType) -> anyhow::Result<String> {
-    // Env var fallback chain
-    if let Ok(key) = std::env::var("API_KEY") {
-        return Ok(key);
+fn resolve_api_key_from_env_with_source(
+    provider: ProviderType,
+) -> anyhow::Result<(String, CredentialSource)> {
+    // Env var fallback chain.
+    //
+    // #685 — the bare, UNNAMESPACED `API_KEY` is opt-in. It names no provider,
+    // so honouring it silently means a generic `API_KEY` exported for an
+    // entirely unrelated service is adopted as THIS provider's credential and
+    // sent to the configured endpoint. That is a credential-disclosure path,
+    // and it has already contaminated supposedly-isolated E2E profiles in this
+    // repo (`doctor_honours_cli_args.rs::CREDENTIAL_ENV` documents the same
+    // hazard from the test side).
+    //
+    // It is not simply removed because it IS a documented input
+    // (`docs/getting-started.md`, "API Key Resolution Order"), so dropping it
+    // outright would silently break installs that depend on it. Instead it
+    // fails closed: the variable is read only when the user has explicitly
+    // said so with `WAYLAND_ALLOW_BARE_API_KEY`, which no unrelated service
+    // will ever set. Every provider-NAMESPACED variable below is unaffected.
+    if bare_api_key_opt_in()
+        && let Ok(key) = std::env::var("API_KEY")
+    {
+        return Ok((key, CredentialSource::EnvVar("API_KEY")));
     }
 
     match provider {
         ProviderType::Anthropic => {
             if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("ANTHROPIC_API_KEY")));
             }
         }
         ProviderType::OpenAI => {
             if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("OPENAI_API_KEY")));
             }
         }
         // Bedrock uses AWS credentials, Vertex uses GCP credentials
         // They don't need a traditional API key
         ProviderType::Bedrock | ProviderType::Vertex => {
-            return Ok(String::new());
+            return Ok((String::new(), CredentialSource::OutOfBand));
         }
         // ChatGPT Codex authenticates via OAuth tokens resolved out-of-band by
         // the bootstrap-built bearer source (same shape as Bedrock/Vertex — no
         // inline API key). Returning an empty key here keeps config resolution
         // from erroring with MissingApiKey when no OPENAI_API_KEY is set.
         ProviderType::OpenAIChatGpt => {
-            return Ok(String::new());
+            return Ok((String::new(), CredentialSource::OutOfBand));
         }
         ProviderType::Gemini => {
             // Native Gemini uses an API key (NOT GCP OAuth — that's Vertex).
             // Standard env vars per Google's CLI samples.
             if let Ok(key) = std::env::var("GEMINI_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("GEMINI_API_KEY")));
             }
             if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("GOOGLE_API_KEY")));
             }
         }
         // v0.6.3 Tier-2 providers each take a static API key via their
         // canonical env var (matches the provider's own docs/SDK conventions).
         ProviderType::AzureOpenAI => {
             if let Ok(key) = std::env::var("AZURE_OPENAI_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("AZURE_OPENAI_API_KEY")));
             }
         }
         ProviderType::Together => {
             if let Ok(key) = std::env::var("TOGETHER_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("TOGETHER_API_KEY")));
             }
         }
         ProviderType::Fireworks => {
             if let Ok(key) = std::env::var("FIREWORKS_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("FIREWORKS_API_KEY")));
             }
         }
         ProviderType::Nvidia => {
             if let Ok(key) = std::env::var("NVIDIA_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("NVIDIA_API_KEY")));
             }
         }
         ProviderType::Perplexity => {
             if let Ok(key) = std::env::var("PERPLEXITY_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("PERPLEXITY_API_KEY")));
             }
         }
         ProviderType::Cerebras => {
             if let Ok(key) = std::env::var("CEREBRAS_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("CEREBRAS_API_KEY")));
             }
         }
         // v0.8.1 U10a — router-class OpenAI-compat providers.
         ProviderType::OpenRouter => {
             if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("OPENROUTER_API_KEY")));
             }
         }
         ProviderType::FluxRouter => {
             if let Ok(key) = std::env::var("FLUX_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("FLUX_API_KEY")));
             }
         }
         ProviderType::Deepseek => {
             if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("DEEPSEEK_API_KEY")));
             }
         }
         ProviderType::Xai => {
@@ -3563,55 +3764,60 @@ fn resolve_api_key_from_env(provider: ProviderType) -> anyhow::Result<String> {
             // credential exists — otherwise a plain `xai` API key still works
             // via XAI_API_KEY below.
             if xai_oauth_credentials_present() {
-                return Ok(String::new());
+                return Ok((String::new(), CredentialSource::OutOfBand));
             }
             if let Ok(key) = std::env::var("XAI_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("XAI_API_KEY")));
             }
         }
         ProviderType::Groq => {
             if let Ok(key) = std::env::var("GROQ_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("GROQ_API_KEY")));
             }
         }
         ProviderType::Moonshot => {
             if let Ok(key) = std::env::var("MOONSHOT_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("MOONSHOT_API_KEY")));
             }
         }
         ProviderType::Qwen => {
             // DashScope is canonical; ALIBABA_API_KEY is a documented alias.
             if let Ok(key) = std::env::var("DASHSCOPE_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("DASHSCOPE_API_KEY")));
             }
             if let Ok(key) = std::env::var("ALIBABA_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("ALIBABA_API_KEY")));
             }
         }
         // F-025: Mistral + Cohere key resolution.
         ProviderType::Mistral => {
             if let Ok(key) = std::env::var("MISTRAL_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("MISTRAL_API_KEY")));
             }
         }
         ProviderType::Cohere => {
             if let Ok(key) = std::env::var("COHERE_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("COHERE_API_KEY")));
             }
         }
         ProviderType::MiniMax => {
             if let Ok(key) = std::env::var("MINIMAX_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("MINIMAX_API_KEY")));
             }
         }
         ProviderType::Sakana => {
             if let Ok(key) = std::env::var("SAKANA_API_KEY") {
-                return Ok(key);
+                return Ok((key, CredentialSource::EnvVar("SAKANA_API_KEY")));
             }
         }
     }
 
     Err(MissingApiKey.into())
+}
+
+/// [`resolve_api_key_from_env_with_source`], with the source discarded.
+fn resolve_api_key_from_env(provider: ProviderType) -> anyhow::Result<String> {
+    resolve_api_key_from_env_with_source(provider).map(|(key, _)| key)
 }
 
 /// No credential could be resolved for the active provider — CLI flag, config
@@ -3635,10 +3841,30 @@ fn resolve_api_key_from_env(provider: ProviderType) -> anyhow::Result<String> {
 #[derive(Debug, thiserror::Error)]
 #[error(
     "No API key found. Add one with `wayland-core auth add <provider> <key>` (stored in \
-     the OS keyring or the encrypted vault), pass --api-key for a one-off, or set an \
-     environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY)."
+     the OS keyring or the encrypted vault), pass --api-key for a one-off, or set the \
+     provider's environment variable (ANTHROPIC_API_KEY, OPENAI_API_KEY, …). The bare \
+     `API_KEY` names no provider and is ignored unless WAYLAND_ALLOW_BARE_API_KEY=1."
 )]
 pub struct MissingApiKey;
+
+/// The selected provider is explicitly disabled in config (#685).
+///
+/// Typed and raised BEFORE credential resolution, so it is not a variant of
+/// "no key found": the distinction matters to the user, because every source
+/// that WOULD have supplied a key is still sitting there and the remedy is the
+/// opposite one (re-enable, don't add a credential).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Provider '{provider}' is disabled: your config sets \
+     `providers.{provider}.enabled = false`. No credential source can override this — not \
+     --api-key, not the credentials store, not API_KEY or any other environment variable, \
+     and not ~/.wayland/.env. Change it to `providers.{provider}.enabled = true` (or delete \
+     the line) to use it again."
+)]
+pub struct ProviderDisabled {
+    /// The provider id exactly as the session requested it.
+    pub provider: String,
+}
 
 /// The provider whose credentials-store slot an ENV VAR NAME stands for, or
 /// `None` when the name is a tool key with no store slot at all.
@@ -6000,7 +6226,9 @@ max_tokens = 64000                 # a CAP; the engine clamps it per-model befor
 
 # Provider-specific API settings
 [providers.anthropic]
-# api_key = "sk-ant-xxx"         # can also use env: API_KEY or ANTHROPIC_API_KEY
+# enabled = false                # turn this provider OFF: no credential source
+#                                # (flag, store, env, ~/.wayland/.env) revives it
+# api_key = "sk-ant-xxx"         # can also use env: ANTHROPIC_API_KEY
 # base_url = "https://api.anthropic.com"
 
 [providers.openai]
@@ -7801,6 +8029,91 @@ mod tests {
     // -------------------------------------------------------------------------
     // resolve_api_key tests
     // -------------------------------------------------------------------------
+
+    // #685 — the credential-source notice. The renderer is tested directly
+    // (the exact words the user reads); `wcore-cli/tests/credential_source_notice.rs`
+    // proves the renderer is actually REACHED from a real launch.
+
+    #[test]
+    fn ambient_credential_notice_names_the_variable_and_the_off_switch() {
+        let notice =
+            ambient_credential_notice("anthropic", &CredentialSource::EnvVar("ANTHROPIC_API_KEY"))
+                .expect("an environment credential is ambient and must be narrated");
+
+        assert!(
+            notice.contains("ANTHROPIC_API_KEY"),
+            "the notice must name the variable: {notice}"
+        );
+        assert!(
+            notice.contains("anthropic"),
+            "the notice must name the provider: {notice}"
+        );
+        assert!(
+            notice.contains("enabled = false"),
+            "the notice must name the OFF switch — a user told only WHERE the key \
+             came from still has no way to stop it: {notice}"
+        );
+    }
+
+    #[test]
+    fn ambient_credential_notice_is_silent_for_explicit_sources() {
+        // Polarity control: a renderer that returned Some for everything would
+        // satisfy the test above while narrating every launch.
+        for source in [
+            CredentialSource::CliFlag,
+            CredentialSource::AccountStore,
+            CredentialSource::ConfigFile,
+            CredentialSource::CredentialsStore,
+            CredentialSource::OutOfBand,
+        ] {
+            assert_eq!(
+                ambient_credential_notice("anthropic", &source),
+                None,
+                "{source:?} is a source the user chose; narrating it is noise"
+            );
+        }
+        // Non-vacuity: the same call with an ambient source DOES render.
+        assert!(
+            ambient_credential_notice(
+                "openrouter",
+                &CredentialSource::CatalogEnvVar("NOVITA_API_KEY".to_string())
+            )
+            .is_some(),
+            "a catalog env var is ambient and must be narrated"
+        );
+    }
+
+    #[test]
+    fn resolve_api_key_reports_the_rung_that_answered() {
+        // The source must track the rung, not merely be plausible: a constant
+        // `CliFlag` would satisfy any single-arm assertion.
+        let storage = crate::credentials::CredentialsStorageConfig::default();
+        let (key, source) = resolve_api_key_with_source(
+            Some("cli-key"),
+            None,
+            Some("config-key"),
+            ProviderType::Anthropic,
+            &storage,
+        )
+        .unwrap();
+        assert_eq!(
+            (key.as_str(), source),
+            ("cli-key", CredentialSource::CliFlag)
+        );
+
+        let (key, source) = resolve_api_key_with_source(
+            None,
+            None,
+            Some("config-key"),
+            ProviderType::Anthropic,
+            &storage,
+        )
+        .unwrap();
+        assert_eq!(
+            (key.as_str(), source),
+            ("config-key", CredentialSource::ConfigFile)
+        );
+    }
 
     #[test]
     fn test_api_key_from_cli_arg() {

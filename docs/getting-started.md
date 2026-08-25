@@ -309,8 +309,14 @@ the process, do not add writable roots, and are refused for strict sessions.
 
 1. `--api-key` CLI parameter
 2. Config file `providers.<name>.api_key`
-3. Env var `API_KEY`
+3. Credentials store (`wayland-core auth add`) — OS keyring or encrypted vault
 4. Env var `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` (depends on provider)
+5. Env var `API_KEY` — **only when `WAYLAND_ALLOW_BARE_API_KEY=1` is set**
+
+> **`API_KEY` is opt-in.** The bare variable names no provider, so an `API_KEY`
+> exported in your shell for an unrelated service would otherwise be adopted as
+> this provider's credential and sent to its endpoint. It is ignored unless you
+> set `WAYLAND_ALLOW_BARE_API_KEY=1`. Prefer the provider-specific variable.
 
 > **Note**: `bedrock` and `vertex` providers use their own cloud credentials and do not require a traditional API key. See [Providers & Auth](providers.md).
 

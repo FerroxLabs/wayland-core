@@ -181,8 +181,39 @@ pub fn load_wayland_env_file() {
             // SAFETY: called once at startup before any threads are spawned
             // (wcore-cli main() invokes this before building the Tokio runtime).
             unsafe { std::env::set_var(&key, value) };
+            record_injected(&key);
         }
     }
+}
+
+/// Names this process injected from the Wayland `.env`. Empty until
+/// [`load_wayland_env_file`] runs, which is once, at startup.
+fn injected() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
+    static INJECTED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    INJECTED.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+}
+
+fn record_injected(key: &str) {
+    if let Ok(mut set) = injected().lock() {
+        set.insert(key.to_string());
+    }
+}
+
+/// Did `key`'s value in this process come from `~/.wayland/.env` rather than
+/// from the shell that launched it? (#685)
+///
+/// This is the distinction the user cannot make from the outside, and it is the
+/// one that matters: a variable they exported is one they can unset, whereas a
+/// variable this file re-injects at every startup survives closing the terminal,
+/// rebooting, and clearing the field in the host UI. Resolution reports it so
+/// the credential notice can name the file instead of blaming the shell.
+///
+/// `false` for anything the loader skipped (already present in the environment,
+/// or not credential-shaped) and for everything before the loader runs.
+#[must_use]
+pub fn injected_from_wayland_env_file(key: &str) -> bool {
+    injected().lock().is_ok_and(|set| set.contains(key))
 }
 
 /// Validate a key. Matches `^[A-Z][A-Z0-9_]*$`.

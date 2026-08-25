@@ -475,6 +475,7 @@ mod tests {
                 Some(Ok(())) => unreachable!("provider build not exercised in these tests"),
                 Some(Err(ResolveError::Keyless(s))) => Err(ResolveError::Keyless(s.clone())),
                 Some(Err(ResolveError::Unknown(s))) => Err(ResolveError::Unknown(s.clone())),
+                Some(Err(ResolveError::Disabled(s))) => Err(ResolveError::Disabled(s.clone())),
                 Some(Err(ResolveError::Build(a, b))) => {
                     Err(ResolveError::Build(a.clone(), b.clone()))
                 }
