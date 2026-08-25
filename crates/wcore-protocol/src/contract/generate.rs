@@ -1424,13 +1424,27 @@ fn wire_shape_refusal(
         return None;
     }
     let (was_major, was_minor) = (published.major, published.minor);
+    // The justification has to match the finding. On an added-only refusal
+    // nothing a pinned host already correlates or renders has moved, and
+    // telling the author otherwise points them at CONTRACT_MAJOR for a change
+    // that is additive - #314 walked into exactly that sentence.
+    let consequence = if altered.is_empty() && removed.is_empty() {
+        format!(
+            "a host pinned to {was_major}.{was_minor} has no way to learn the added wire \
+             types exist: the version has to move for the addition to be discoverable"
+        )
+    } else {
+        format!(
+            "a host pinned to {was_major}.{was_minor} would accept an engine whose frames it \
+             can no longer correlate or render"
+        )
+    };
     Some(format!(
         "Desktop contract wire shape changed while the contract version stayed at \
          {was_major}.{was_minor}: altered={altered:?}, removed={removed:?}, added={added:?}. \
          Regenerating cannot bless this. `contract.major`/`contract.minor` in manifest.json is \
          the only compatibility signal a pinned Desktop build reads and regeneration does not \
-         move it, so a host pinned to {was_major}.{was_minor} would accept an engine whose \
-         frames it can no longer correlate or render. Decide the version in \
+         move it, so {consequence}. Decide the version in \
          crates/wcore-protocol/src/contract/generate.rs first, then regenerate: bump \
          CONTRACT_MINOR for a new wire type or a new optional field on an existing one, bump \
          CONTRACT_MAJOR for a field renamed, removed, retyped or newly required, and move \
@@ -2380,6 +2394,61 @@ mod tests {
             refusal.contains("events/tool_request.json"),
             "the refusal must name the dropped type: {refusal}"
         );
+    }
+
+    /// The two justification clauses, named once so the pair of tests below
+    /// cannot quietly drift back into agreeing with each other.
+    const CORRELATION_CLAUSE: &str = "can no longer correlate or render";
+    const DISCOVERY_CLAUSE: &str = "no way to learn the added wire types exist";
+
+    #[test]
+    fn an_added_only_refusal_does_not_claim_broken_correlation() {
+        let published = published_at(1, 16, BASELINE);
+        let mut added = shape_map(BASELINE);
+        added.insert("commands/set_effort.json".into(), "sha256:ddd".into());
+        let refusal = wire_shape_refusal(&published, &added, 1, 16)
+            .expect("a new wire type must not regenerate under a standing version");
+        assert!(
+            refusal.contains(DISCOVERY_CLAUSE),
+            "an added-only refusal must justify itself by discoverability: {refusal}"
+        );
+        assert!(
+            !refusal.contains(CORRELATION_CLAUSE),
+            "nothing a pinned host correlates or renders moves when a type is added: {refusal}"
+        );
+        assert!(
+            refusal.contains("CONTRACT_MINOR") && refusal.contains("CONTRACT_MAJOR"),
+            "the rule sentence stays on both branches: {refusal}"
+        );
+    }
+
+    #[test]
+    fn an_altered_or_removed_refusal_keeps_the_correlation_justification() {
+        let published = published_at(1, 16, BASELINE);
+        let moved = shape_map(&[
+            ("events/ready.json", "sha256:bbb"),
+            ("events/tool_request.json", "sha256:ccc"),
+        ]);
+        let dropped = shape_map(&[("events/ready.json", "sha256:bbb")]);
+        // Mixed: an addition alongside a moved shape still breaks correlation,
+        // so the branch turns on altered/removed and never on added.
+        let mixed = shape_map(&[
+            ("commands/set_effort.json", "sha256:ddd"),
+            ("events/ready.json", "sha256:bbb"),
+            ("events/tool_request.json", "sha256:ccc"),
+        ]);
+        for (label, current) in [("altered", moved), ("removed", dropped), ("mixed", mixed)] {
+            let refusal = wire_shape_refusal(&published, &current, 1, 16)
+                .unwrap_or_else(|| panic!("{label} must refuse under a standing version"));
+            assert!(
+                refusal.contains(CORRELATION_CLAUSE),
+                "{label} must keep the correlation justification: {refusal}"
+            );
+            assert!(
+                !refusal.contains(DISCOVERY_CLAUSE),
+                "{label} is not a discoverability problem: {refusal}"
+            );
+        }
     }
 
     #[test]
