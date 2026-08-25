@@ -319,6 +319,10 @@ fn is_secret_path_flags_project_and_key_secrets() {
         ".env.local",
         ".env.production",
         ".git/config",
+        // #243/#245, the Mercurial analogue of `.git/config`: `[paths]
+        // default = https://user:TOKEN@host/repo` is the same
+        // embedded-credential shape.
+        ".hg/hgrc",
         ".git/hooks/pre-commit",
         ".git-credentials",
         "deploy/key.pem",
@@ -1749,4 +1753,160 @@ fn a_workspace_reached_through_a_symlink_still_accepts_its_own_dangling_writes()
     policy
         .ensure_write_target_readable(&escaping)
         .expect_err("CONTROL: a dangling link pointing OUT of the workspace is still refused");
+}
+
+// ── #242 / #243: VCS content stores beyond the repo-root `.git` ───────────
+
+/// Build a workspace holding a checkout of every VCS the deny set covers, plus
+/// the working-STATE files of each that must stay readable.
+fn vcs_workspace(root: &Path) {
+    for (rel, body) in [
+        (".git/objects/ab/cd1234", "zlib"),
+        (".git/config", "url = https://u:TOK@h/r.git"),
+        (".git/HEAD", "ref: refs/heads/main"),
+        (".git/refs/heads/main", "deadbeef"),
+        (".hg/store/data/_env.i", "revlog"),
+        (".hg/hgrc", "default = https://u:TOK@h/r"),
+        (".hg/dirstate", "state"),
+        (".svn/pristine/ab/abcd.svn-base", "base"),
+        (".svn/wc.db", "db"),
+        (".bzr/repository/packs/x.pack", "pack"),
+        ("src/store/mod.rs", "fn main() {}"),
+    ] {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+}
+
+fn denies(deny: &[std::path::PathBuf], p: &Path) -> bool {
+    let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    deny.contains(&canon)
+}
+
+/// #243 — the #241 content-store deny was git-only, so a committed secret in a
+/// Mercurial / Subversion / Bazaar checkout was still reconstructable from the
+/// respective store via `Bash` (`hg cat -r`, `svn cat -r`, `bzr cat -r`) in a
+/// posture whose whole point is that committed secrets are unreadable.
+///
+/// The CONTROLS are the point of the second half: the deny must not swallow the
+/// working-STATE files each VCS needs for an ordinary metadata question, which
+/// is the same carve-out `.git/refs` + `HEAD` already get so `git rev-parse`
+/// keeps working. A deny that refuses those trades a low-severity read hazard
+/// for a broken checkout.
+#[test]
+fn secret_deny_covers_non_git_vcs_content_stores() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    vcs_workspace(root);
+
+    let deny = WorkspacePolicy::trusted_local(root)
+        .with_project_secret_deny()
+        .secret_deny_paths_dynamic();
+
+    // CONTROL that the query works at all: the git store #241 already denied.
+    assert!(
+        denies(&deny, &root.join(".git/objects")),
+        "CONTROL: the pre-existing git object-store deny must still fire; deny={deny:?}"
+    );
+    for rel in [".hg/store", ".svn/pristine", ".bzr/repository", ".hg/hgrc"] {
+        assert!(
+            denies(&deny, &root.join(rel)),
+            "{rel} is a VCS content/credential store and must be denied; deny={deny:?}"
+        );
+    }
+    // WRONG-REFUSAL: metadata-only state stays readable in every VCS.
+    for rel in [
+        ".git/HEAD",
+        ".git/refs/heads/main",
+        ".hg/dirstate",
+        ".svn/wc.db",
+        "src/store/mod.rs",
+    ] {
+        assert!(
+            !denies(&deny, &root.join(rel)),
+            "{rel} carries no committed content and must stay readable; deny={deny:?}"
+        );
+    }
+}
+
+/// #242 — a workspace that IS a linked worktree (`git worktree add`) has a `.git`
+/// FILE, not a directory, so `root.join(".git/objects")` matches nothing while
+/// `git show HEAD:.env` inside it reads the MAIN repository's store perfectly
+/// well. Every spelling of "the store is not at `<root>/.git/objects`" is graded
+/// here: an absolute gitdir behind a `commondir` hop, a relative gitdir (the
+/// submodule shape), and an `objects/info/alternates` borrow.
+#[test]
+fn secret_deny_follows_gitfile_and_alternate_object_stores() {
+    let outer = tempfile::tempdir().unwrap();
+    let mk = |rel: &str, body: &str| {
+        let p = outer.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body).unwrap();
+        p
+    };
+    let deny_for = |root: &Path| {
+        WorkspacePolicy::trusted_local(root)
+            .with_project_secret_deny()
+            .secret_deny_paths_dynamic()
+    };
+
+    // (a) linked worktree: absolute gitdir, objects reached via `commondir`.
+    mk("mainrepo/.git/objects/ff/eeee", "blob");
+    mk("mainrepo/.git/worktrees/wt/commondir", "../..\n");
+    let linked = outer.path().join("linked");
+    std::fs::create_dir_all(&linked).unwrap();
+    std::fs::write(
+        linked.join(".git"),
+        format!(
+            "gitdir: {}\n",
+            outer.path().join("mainrepo/.git/worktrees/wt").display()
+        ),
+    )
+    .unwrap();
+    assert!(
+        denies(
+            &deny_for(&linked),
+            &outer.path().join("mainrepo/.git/objects")
+        ),
+        "a linked worktree's external object store must be denied"
+    );
+
+    // (b) submodule shape: a RELATIVE gitdir, resolved against the worktree.
+    mk("realgit/objects/aa/bb", "blob");
+    let sub = outer.path().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join(".git"), "gitdir: ../realgit\n").unwrap();
+    assert!(
+        denies(&deny_for(&sub), &outer.path().join("realgit/objects")),
+        "a relative gitdir must resolve against the worktree, not the cwd"
+    );
+
+    // (c) `git clone --shared`: the store is BORROWED through alternates.
+    mk("shared/objects/cc/dd", "blob");
+    mk(
+        "altrepo/.git/objects/info/alternates",
+        &format!("{}\n", outer.path().join("shared/objects").display()),
+    );
+    let alt = outer.path().join("altrepo");
+    let alt_deny = deny_for(&alt);
+    assert!(
+        denies(&alt_deny, &alt.join(".git/objects")),
+        "CONTROL: the repo's own store is denied even when it borrows"
+    );
+    assert!(
+        denies(&alt_deny, &outer.path().join("shared/objects")),
+        "a borrowed alternate object store must be denied too"
+    );
+
+    // WRONG-REFUSAL / no-op CONTROL: a workspace under no VCS at all must gain
+    // nothing from any of this. Compared against the SAME policy without the
+    // project-secret opt-in so the always-on system entries cancel out.
+    mk("plain/src/main.rs", "fn main() {}");
+    let plain = outer.path().join("plain");
+    assert_eq!(
+        deny_for(&plain),
+        WorkspacePolicy::trusted_local(&plain).secret_deny_paths_dynamic(),
+        "a workspace with no VCS metadata must gain no deny entries"
+    );
 }

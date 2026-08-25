@@ -36,6 +36,7 @@ const MAX_SESSION_READ_GRANTS: usize = 64;
 const SECRET_SUFFIXES: &[&str] = &[
     "/.env",
     "/.git/config",
+    "/.hg/hgrc",
     "/.git-credentials",
     "/.npmrc",
     "/.pypirc",
@@ -1044,7 +1045,7 @@ impl WorkspacePolicy {
     /// (a `.gitignore`d `.env` is still denied, a symlink-to-secret is masked,
     /// only under-mounted paths are emitted) are inherited verbatim.
     ///
-    /// Also denies the git CONTENT stores ([`git_content_stores`]) so a committed
+    /// Also denies the VCS CONTENT stores ([`vcs_content_stores`]) so a committed
     /// secret cannot be reconstructed from `.git/objects` via `Bash("git show
     /// HEAD:.env")` and friends — the sibling of the typed-GitTool drop (MF1).
     pub fn secret_deny_paths_dynamic(&self) -> Vec<PathBuf> {
@@ -1103,7 +1104,7 @@ impl WorkspacePolicy {
                 &readable_canon,
                 &mut dirs,
             ));
-            out.extend(git_content_stores(&self.root));
+            out.extend(vcs_content_stores(&self.root));
             // A granted folder is a mounted root the child can reach, so it
             // needs the same secret walk the workspace gets. Without this the
             // in-process file tools would refuse `<granted>/id_rsa` while
@@ -2085,7 +2086,7 @@ fn walk_root_is_covered(covering: &Path, candidate: &Path) -> bool {
     }
 }
 
-/// Git CONTENT stores under `root` that must be OS-sandbox-denied for reads in a
+/// VCS CONTENT stores under `root` that must be OS-sandbox-denied for reads in a
 /// secret-deny posture. A committed secret's bytes live in the object store, NOT
 /// as a working-tree path, so `Bash("git show HEAD:.env")` / `git cat-file` /
 /// `git log -p` / `git blame` reconstruct the committed secret from there,
@@ -2097,15 +2098,131 @@ fn walk_root_is_covered(covering: &Path, candidate: &Path) -> bool {
 /// content) still works. Covers the main store, submodule stores (`.git/modules`)
 /// and LFS (`.git/lfs`). Empirically verified on the box (bwrap `--tmpfs` shadows
 /// the dir → `git show`/`cat-file`/`log -p` all fail).
-fn git_content_stores(root: &Path) -> Vec<PathBuf> {
+///
+/// #243 extends the same mechanism to the other VCSes a project may actually be
+/// checked out under: Mercurial revlogs (`.hg/store`), Subversion pristine text
+/// bases (`.svn/pristine`) and Bazaar's packed store (`.bzr/repository`) each
+/// reconstruct a committed secret through their own porcelain (`hg cat -r`,
+/// `svn cat -r`, `bzr cat -r`) exactly as `git show` does. Working-state files
+/// that carry no content — `.hg/dirstate`, `.svn/wc.db`, `.git/refs` — stay
+/// readable, mirroring the `git rev-parse` carve-out above.
+///
+/// #242 resolves a `.git` FILE (a "gitfile"). A linked worktree (`git worktree
+/// add`) and a submodule checkout both have one, and the store it names can sit
+/// OUTSIDE `root` — where `root.join(".git/objects")` does not exist, so the
+/// deny above silently covers nothing. See [`gitfile_content_stores`].
+fn vcs_content_stores(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for rel in [".git/objects", ".git/modules", ".git/lfs"] {
-        let p = root.join(rel);
-        if p.exists() {
-            out.push(std::fs::canonicalize(&p).unwrap_or(p));
+    for rel in VCS_CONTENT_STORES {
+        push_store(&mut out, root.join(rel));
+    }
+    out.extend(gitfile_content_stores(root));
+    out.extend(alternate_object_dirs(root.join(".git/objects")));
+    out
+}
+
+/// Workspace-relative content stores denied for reads in a secret-deny posture,
+/// one per VCS. Each holds committed CONTENT; none is needed to answer a
+/// metadata question (branch name, dirty state), which is what keeps the deny
+/// from breaking ordinary session work.
+const VCS_CONTENT_STORES: &[&str] = &[
+    ".git/objects",
+    ".git/modules",
+    ".git/lfs",
+    ".hg/store",
+    ".svn/pristine",
+    ".bzr/repository",
+];
+
+/// Canonicalize and record `p` when it exists. A path that does not exist is
+/// dropped rather than denied: the deny list is handed to the OS sandbox, and a
+/// deny for a non-existent path is noise the backend still has to carry.
+fn push_store(out: &mut Vec<PathBuf>, p: PathBuf) {
+    if p.exists() {
+        out.push(std::fs::canonicalize(&p).unwrap_or(p));
+    }
+}
+
+/// #242 — content stores reached through a `.git` FILE rather than a `.git`
+/// directory.
+///
+/// `git worktree add` writes `<worktree>/.git` as a one-line `gitdir: <path>`
+/// pointer, so a workspace that IS a linked worktree has no `.git/objects` of
+/// its own and the plain join in [`vcs_content_stores`] matches nothing — while
+/// `git show HEAD:.env` inside it reads the main repository's object store
+/// perfectly well. The gitdir it names may be absolute or relative to the
+/// worktree, and for a linked worktree the objects live not in that gitdir but
+/// in the COMMON dir it points at in turn (`<gitdir>/commondir`), so both are
+/// resolved. `metadata` (not `symlink_metadata`) so a symlinked gitfile is
+/// followed; a `.git` symlink to a real DIRECTORY needs nothing here, because
+/// the `exists()` join above already follows it.
+///
+/// Denying a store outside every readable root is harmless — the child cannot
+/// reach it either way — so this deliberately does not scope-check: the case
+/// that matters is precisely the one where the external gitdir IS reachable.
+fn gitfile_content_stores(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let dot_git = root.join(".git");
+    if !std::fs::metadata(&dot_git).is_ok_and(|m| m.is_file()) {
+        return out;
+    }
+    let Ok(text) = std::fs::read_to_string(&dot_git) else {
+        return out;
+    };
+    let Some(named) = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))
+        .map(|rest| PathBuf::from(rest.trim()))
+        .filter(|p| !p.as_os_str().is_empty())
+    else {
+        return out;
+    };
+    let gitdir = resolve_against(root, named);
+    let mut dirs = vec![gitdir.clone()];
+    if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
+        let common = PathBuf::from(common.trim());
+        if !common.as_os_str().is_empty() {
+            dirs.push(resolve_against(&gitdir, common));
         }
     }
+    for dir in dirs {
+        for leaf in ["objects", "modules", "lfs"] {
+            push_store(&mut out, dir.join(leaf));
+        }
+        out.extend(alternate_object_dirs(dir.join("objects")));
+    }
     out
+}
+
+/// Object stores borrowed through `objects/info/alternates` — the third way a
+/// git store lives outside `root` (after a gitfile and a symlink), and the one
+/// `git clone --shared` / `--reference` produces. One path per line, absolute
+/// or relative to `objects_dir`; a `#`-prefixed line is a comment.
+fn alternate_object_dirs(objects_dir: PathBuf) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(text) = std::fs::read_to_string(objects_dir.join("info/alternates")) else {
+        return out;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        push_store(&mut out, resolve_against(&objects_dir, PathBuf::from(line)));
+    }
+    out
+}
+
+/// Resolve a VCS-file-supplied path: absolute as written, relative against the
+/// file's own directory, then canonicalized so it compares against the rest of
+/// the deny set on equal terms.
+fn resolve_against(base: &Path, named: PathBuf) -> PathBuf {
+    let joined = if named.is_absolute() {
+        named
+    } else {
+        base.join(named)
+    };
+    std::fs::canonicalize(&joined).unwrap_or(joined)
 }
 
 /// Best-effort canonicalization for the under-root scope check. Falls back to
