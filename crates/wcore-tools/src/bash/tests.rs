@@ -2756,3 +2756,86 @@ async fn invalid_utf8_in_non_ctx_streaming_output_is_flagged() {
         result.content
     );
 }
+
+// ── wayland#1103: a path that is merely MISSING is not a sandbox denial ──────
+//
+// The advisory opens by ruling out the two causes it is most often mistaken
+// for — "not a broken machine and not a missing tool" — and it was being
+// appended to `No such file or directory`. A typo in a path therefore produced
+// a message that explicitly denied the true cause and then offered
+// `--trust-workspace` or `--dangerously-skip-permissions-and-sandbox` as the
+// remedy: a mistyped filename steering the reader into turning the sandbox off.
+//
+// The two cases are only separable OUTSIDE the child. Under bwrap an ungranted
+// path is simply absent from the child's mount namespace, so a genuine denial
+// and a genuine typo produce the SAME `No such file or directory`; under
+// seatbelt the denial is `Operation not permitted` but the typo still is not.
+// This annotation runs in the PARENT, which is not sandboxed, so it can ask
+// the filesystem which of the two happened instead of assuming.
+#[cfg(unix)]
+#[test]
+fn a_merely_missing_path_is_not_blamed_on_the_sandbox() {
+    let ws = tempfile::tempdir().unwrap();
+    let granted = std::fs::canonicalize(ws.path()).unwrap();
+    // A REAL directory outside every granted root: the accusation graded here
+    // cannot then be excused as "nothing about this path resolved anyway".
+    let outside = tempfile::tempdir().unwrap();
+    let outside = std::fs::canonicalize(outside.path()).unwrap();
+    let missing = outside.join("todo-that-never-existed.md");
+    assert!(
+        std::fs::symlink_metadata(&missing).is_err(),
+        "test precondition: the file must not exist"
+    );
+
+    let manifest = wcore_sandbox::manifest::SandboxManifest {
+        fs_read_allow: vec![granted.clone()],
+        fs_write_allow: vec![granted.clone()],
+        ..Default::default()
+    };
+    let scope = super::policy::SandboxScope::new(&manifest, Some(&granted));
+
+    let result = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\ncat: {}: No such file or directory\n",
+                missing.display()
+            ),
+            is_error: true,
+        },
+    );
+    assert!(
+        !result.content.contains("out of reach of this command"),
+        "the shell already gave the correct answer — the sandbox must not be \
+         blamed for a file that does not exist; got:\n{}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("--dangerously-skip-permissions-and-sandbox"),
+        "a typo in a path must never steer the reader toward disabling the \
+         sandbox; got:\n{}",
+        result.content
+    );
+
+    // POSITIVE CONTROL, same scope and same shape: a file that really IS there
+    // and really is outside every granted root must still be reported. Without
+    // this row the test above could be passed by muting the advisory.
+    let present = outside.join("secret.txt");
+    std::fs::write(&present, b"x").unwrap();
+    let real = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\ncat: {}: Operation not permitted\n",
+                present.display()
+            ),
+            is_error: true,
+        },
+    );
+    assert!(
+        real.content.contains("outside every root"),
+        "positive control: a REAL file outside every granted root is still a \
+         denial and must still be named; got:\n{}",
+        real.content
+    );
+}
