@@ -21,6 +21,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use wcore_config::circuit_breaker::{
     BreakerState, CircuitBreaker as SharedCircuitBreaker, CircuitBreakerConfig,
@@ -209,6 +210,17 @@ pub struct ResilientProvider {
     health: Arc<CooldownTracker>,
     reporter: Arc<dyn CircuitReporter>,
     policy: FailoverRoutingPolicy,
+    /// #1127 — the failure class of the primary's most recent failed dispatch.
+    ///
+    /// The circuit that later SKIPS the primary remembers only a
+    /// `FailoverReason`, which is far coarser than the failure code the engine
+    /// prices retries with: a refused connection and a read timeout are both
+    /// `Timeout` there, and only one of them is capped at
+    /// `REFUSED_ENDPOINT_MAX_RETRIES`. Kept here so a refusal that opened the
+    /// circuit on an earlier call is still nameable on the call that finds it
+    /// open. Cleared on a successful primary dispatch — the endpoint answered,
+    /// so the old class is no longer evidence of anything.
+    primary_failure_code: Mutex<Option<String>>,
 }
 
 struct ResilientFallback {
@@ -311,6 +323,7 @@ impl ResilientProvider {
             )),
             reporter,
             policy,
+            primary_failure_code: Mutex::new(None),
         }
     }
 
@@ -433,7 +446,15 @@ fn rejection_note(rejection: CandidateRejection) -> &'static str {
 ///
 /// Built from the receipt rather than from this function's control flow, so it
 /// can only say what the chain recorded.
-fn nothing_attempted_reason(receipt: &FailoverReceipt) -> String {
+///
+/// `primary_failure_code` is preferred over the receipt's `FailoverReason`
+/// wherever the chain proved one: the reason cannot tell a refused connection
+/// from a read timeout — both classify as `Timeout` — and only one of the two
+/// points the user at a `base_url`.
+fn nothing_attempted_reason(
+    receipt: &FailoverReceipt,
+    primary_failure_code: Option<&str>,
+) -> String {
     let candidates: Vec<String> = receipt
         .candidates
         .iter()
@@ -442,7 +463,12 @@ fn nothing_attempted_reason(receipt: &FailoverReceipt) -> String {
                 Ok(()) => "it was dispatched and failed",
                 Err(rejection) => rejection_note(rejection),
             };
-            match candidate.cooldown_reason {
+            // An unclassified cooldown adds nothing but a word that reads
+            // like an answer; a mid-stream failure records exactly that.
+            match candidate
+                .cooldown_reason
+                .filter(|reason| *reason != FailoverReason::Unknown)
+            {
                 Some(reason) => format!(
                     "{}/{}: {note} ({reason})",
                     candidate.provider, candidate.model
@@ -459,9 +485,12 @@ fn nothing_attempted_reason(receipt: &FailoverReceipt) -> String {
             candidates.join("; ")
         )
     };
+    let primary_fault = primary_failure_code
+        .map(str::to_string)
+        .unwrap_or_else(|| receipt.reason.to_string());
     format!(
-        "the primary '{}' was skipped because its circuit is open ({}), {tail}",
-        receipt.failed_provider, receipt.reason
+        "the primary '{}' was skipped because its circuit is open ({primary_fault}), {tail}",
+        receipt.failed_provider
     )
 }
 
@@ -536,6 +565,7 @@ impl LlmProvider for ResilientProvider {
             .await
             {
                 Ok(rx) => {
+                    *self.primary_failure_code.lock() = None;
                     return Ok(Self::spawn_health_forwarder(
                         rx,
                         Arc::clone(&self.health),
@@ -547,6 +577,8 @@ impl LlmProvider for ResilientProvider {
                 }
                 Err(e) if is_request_fatal(&e) => return Err(e),
                 Err(e) => {
+                    *self.primary_failure_code.lock() =
+                        Some(crate::retry::provider_failure_code(&e));
                     let reason = classify_error(&e);
                     if should_trip_breaker(&e) {
                         self.health.record_failure(reason, retry_after(&e));
@@ -600,6 +632,7 @@ impl LlmProvider for ResilientProvider {
                     reason: format!(
                         "primary circuit is open ({reason}) and no fallback is configured"
                     ),
+                    failure_code: self.primary_failure_code.lock().clone(),
                 });
             }
             receipt =
@@ -735,8 +768,10 @@ impl LlmProvider for ResilientProvider {
             }
         }
         self.reporter.report_failover(&receipt);
+        let primary_failure_code = self.primary_failure_code.lock().clone();
         Err(last_error.unwrap_or_else(|| ProviderError::NotAttempted {
-            reason: nothing_attempted_reason(&receipt),
+            reason: nothing_attempted_reason(&receipt, primary_failure_code.as_deref()),
+            failure_code: primary_failure_code,
         }))
     }
 }
@@ -1503,7 +1538,7 @@ mod tests {
             Err(ProviderError::Api { status: 403, .. })
         ));
         let refusal = match resilient.stream(&dummy_request()).await {
-            Err(ProviderError::NotAttempted { reason }) => reason,
+            Err(ProviderError::NotAttempted { reason, .. }) => reason,
             other => panic!("expected a NotAttempted refusal, got {other:?}"),
         };
         assert!(
@@ -2137,6 +2172,55 @@ mod tests {
         assert!(
             reason.contains("routing policy"),
             "a candidate the policy really did refuse must say so; got: {reason}"
+        );
+    }
+    /// #1127 — a provider that answers every request with an HTTP 503.
+    struct UnavailableProvider;
+    #[async_trait]
+    impl LlmProvider for UnavailableProvider {
+        async fn stream(&self, _: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            Err(ProviderError::Api {
+                status: 503,
+                message: "service unavailable".into(),
+            })
+        }
+    }
+
+    /// #1127 — the failure CLASS must survive a collapsed chain.
+    ///
+    /// `provider_failure_code` is what the engine prices retries with
+    /// (`class_retry_budget`) and what the host is told
+    /// (`emit_provider_failure`). A chain that reports its own control flow
+    /// (`provider_not_attempted`) in place of the fault erases the refused
+    /// endpoint's short budget and names nothing the user can act on.
+    #[tokio::test]
+    async fn a_collapsed_chain_carries_the_class_that_ended_it() {
+        let resilient = chain_of(Arc::new(RefusedProvider), Arc::new(RefusedProvider));
+        let error = collapse(&resilient).await;
+        assert_eq!(
+            crate::retry::provider_failure_code(&error),
+            crate::retry::FAILURE_CONNECTION_REFUSED,
+            "the refused primary is the fault that opened every circuit"
+        );
+        let ProviderError::NotAttempted { reason, .. } = &error else {
+            panic!("expected a NotAttempted refusal, got {error:?}");
+        };
+        assert!(
+            reason.contains(crate::retry::FAILURE_CONNECTION_REFUSED),
+            "the sentence must name the same fault the class does; got: {reason}"
+        );
+    }
+
+    /// Known-positive control for the test above: a chain that collapsed for a
+    /// DIFFERENT reason must carry that reason, not a hardcoded refusal.
+    #[tokio::test]
+    async fn a_collapsed_chain_does_not_invent_a_refusal() {
+        let resilient = chain_of(Arc::new(UnavailableProvider), Arc::new(UnavailableProvider));
+        let error = collapse(&resilient).await;
+        assert_eq!(
+            crate::retry::provider_failure_code(&error),
+            "http_503",
+            "the class carried must be the one that actually ended the chain"
         );
     }
 }
