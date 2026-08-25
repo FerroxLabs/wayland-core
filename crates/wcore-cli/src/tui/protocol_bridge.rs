@@ -84,7 +84,21 @@ pub fn spawn_bridge(
                     // different claims and I conflated them once already. This
                     // line is the one that means applied.
                     let discriminant = std::mem::discriminant(&event);
+                    // #1126: the F12 path appends a finished turn's text to an
+                    // EARLIER in-flight turn (protocol_bridge.rs ~:355) instead
+                    // of pushing a new one at the tail. If that earlier turn has
+                    // scrolled off the TOP of the viewport, the answer is on the
+                    // screen's model but not in its visible rows - and "jump to
+                    // latest" cannot help, because latest is the bottom.
+                    let in_flight_before = guard.session.in_flight_turn_idx;
                     apply_event(&mut guard, event);
+                    tracing::trace!(
+                        target: "f1126",
+                        in_flight_before = ?in_flight_before,
+                        in_flight_after = ?guard.session.in_flight_turn_idx,
+                        streaming_len = guard.session.streaming.len(),
+                        "bridge FLUSHPATH"
+                    );
                     tracing::trace!(
                         target: "f1126",
                         event = ?discriminant,
