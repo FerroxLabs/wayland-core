@@ -172,6 +172,64 @@ fn os_probe(label: &str, pid: Option<u32>) -> String {
     out
 }
 
+/// Everything the engine wrote under `WAYLAND_HOME`, and the contents of the
+/// session journal.
+///
+/// The journal is the engine's own record of provider attempts and stream
+/// lifecycle. When the process is idle and the provider has already answered,
+/// it is the only artifact that can say how far the turn got.
+fn durable_state_dump(home: &std::path::Path) -> String {
+    fn walk(dir: &std::path::Path, depth: usize, out: &mut Vec<(std::path::PathBuf, u64)>) {
+        if depth > 6 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => walk(&path, depth + 1, out),
+                Ok(_) => {
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    out.push((path, size));
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(home, 0, &mut files);
+    files.sort();
+    let mut out = String::from("\n--- WAYLAND_HOME tree ---\n");
+    for (path, size) in &files {
+        out.push_str(&format!(
+            "{:>10}  {}\n",
+            size,
+            path.strip_prefix(home).unwrap_or(path).display()
+        ));
+    }
+    for (path, size) in &files {
+        let name = path.to_string_lossy();
+        let interesting = name.contains("journal")
+            || name.contains("session")
+            || name.ends_with(".jsonl")
+            || name.ends_with(".wal");
+        if !interesting || *size > 400_000 {
+            continue;
+        }
+        match std::fs::read(path) {
+            Ok(bytes) => out.push_str(&format!(
+                "\n--- {} ({size} bytes) ---\n{}\n",
+                path.strip_prefix(home).unwrap_or(path).display(),
+                String::from_utf8_lossy(&bytes)
+            )),
+            Err(e) => out.push_str(&format!("\n--- {} UNREADABLE: {e} ---\n", path.display())),
+        }
+    }
+    out
+}
+
 #[test]
 fn f1126_probe_the_approve_once_stall() {
     println!(
@@ -207,10 +265,13 @@ fn f1126_probe_the_approve_once_stall() {
         home.path(),
         40,
         200,
-        &[(
-            "RUST_LOG",
-            "info,wcore_agent=trace,wcore_providers=trace,wcore_tools=debug",
-        )],
+        &[
+            (
+                "RUST_LOG",
+                "info,wcore_agent=trace,wcore_providers=trace,wcore_tools=debug",
+            ),
+            ("RUST_BACKTRACE", "1"),
+        ],
     );
     println!("child pid = {:?}", pty.child_pid());
     pty.wait_for(
@@ -267,6 +328,7 @@ fn f1126_probe_the_approve_once_stall() {
     println!("{log}");
     println!("--- final screen ---\n{}\n--- end ---", pty.screen_text());
     println!("--- final traffic ---\n{}", provider_traffic(&rt, &server));
+    println!("{}", durable_state_dump(home.path()));
     let log_path = home.path().join("logs").join("wayland-core.log");
     match std::fs::read_to_string(&log_path) {
         Ok(text) => println!(
