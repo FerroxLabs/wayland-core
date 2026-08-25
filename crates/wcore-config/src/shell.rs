@@ -392,18 +392,64 @@ fn cmd_payload_index(program: &str, args: &[&str]) -> Option<usize> {
 /// than half-done. The two cmd payload rules should be consolidated into this
 /// crate once that lands.
 fn push_argv(cmd: &mut Command, program: &str, args: &[&str]) {
-    let payload_idx = cmd_payload_index(program, args);
-    if payload_idx.is_none() {
+    let Some(payload_idx) = cmd_payload_index(program, args) else {
         cmd.args(args);
         return;
-    }
-    for (idx, arg) in args.iter().enumerate() {
-        if Some(idx) == payload_idx {
+    };
+    let (planned, planned_payload_idx) = plan_cmd_argv(args, payload_idx);
+    for (idx, arg) in planned.iter().enumerate() {
+        if idx == planned_payload_idx {
             push_cmd_payload(cmd, arg);
         } else {
             cmd.arg(arg);
         }
     }
+}
+
+/// The argv [`push_argv`] actually delivers for a `cmd` payload invocation:
+/// the caller's entries, plus `/S` immediately before the `/C`/`/K` when the
+/// caller did not already supply it. Returns the plan and the payload's index
+/// within it.
+///
+/// WHY THE SWITCH TRAVELS WITH THE WRAP. [`wrap_cmd_payload`] adds ONE outer
+/// quote pair, and `cmd` strips that pair unconditionally only when `/S` is
+/// present. Without `/S`, cmd has a second, quote-PRESERVING branch (`cmd /?`,
+/// modelled by `tests::cmd_preserves_the_outer_pair`) and the pair we added
+/// survives into the text the child runs. Measured on Windows 11 build
+/// 26200.9168, driving `cmd.exe` with a byte-exact command line:
+///
+/// ```text
+/// cmd    /C "cmd /c echo NESTED"   ->  stdout `NESTED"`   <- our pair, preserved
+/// cmd /S /C "cmd /c echo NESTED"   ->  stdout `NESTED`
+/// ```
+///
+/// That stray `0x22` is #943. [`windows_cmd_payload_prefix`] already supplies
+/// `/S` for BashTool, but `shell_command_argv` reached the same wrap from
+/// operator-supplied argv — `wcore-cli`'s `goal_cmd` worker and `gateway`
+/// service manager both forward `argv[0]` and the rest verbatim — with no
+/// switch attached. Same defect, ungated call site. Supplying it here keeps the
+/// pair and the rule that strips it in one place, which is the argument
+/// [`push_argv`] already makes for correcting in the helper rather than at each
+/// call site.
+///
+/// Pure, and compiled on every target so the rule is assertable from a Linux or
+/// macOS job — the same reason [`wrap_cmd_payload`] is. Off Windows nothing
+/// spawns `cmd`, so the extra entry is inert there.
+///
+/// A caller who already passed `/S` (in any case spelling) is left exactly as
+/// written; this only fills in an absent switch, never reorders or removes one.
+fn plan_cmd_argv(args: &[&str], payload_idx: usize) -> (Vec<String>, usize) {
+    if args.iter().any(|a| a.eq_ignore_ascii_case("/s")) {
+        return (args.iter().map(|a| (*a).to_string()).collect(), payload_idx);
+    }
+    // `cmd_payload_index` returns `flag_idx + 1`, so the flag is always the
+    // entry before the payload and `payload_idx` is always >= 1.
+    let flag_idx = payload_idx - 1;
+    let mut planned: Vec<String> = Vec::with_capacity(args.len() + 1);
+    planned.extend(args[..flag_idx].iter().map(|a| (*a).to_string()));
+    planned.push("/S".to_string());
+    planned.extend(args[flag_idx..].iter().map(|a| (*a).to_string()));
+    (planned, payload_idx + 1)
 }
 
 /// Append a `cmd /C` payload as ONE outer double-quote pair with the payload's
@@ -580,6 +626,88 @@ mod tests {
             "cmd /c echo SHELL_CMD",
             true
         ));
+    }
+
+    /// The SAME property, asked of the other producer of a wrapped payload.
+    ///
+    /// `bash_shell_prefix_for` is not the only argv that reaches
+    /// [`wrap_cmd_payload`]. `shell_command_argv` wraps whenever the program is
+    /// `cmd` and a `/c`/`/k` is present, and two production call sites hand it
+    /// an argv the OPERATOR wrote — `wcore-cli`'s `goal_cmd` worker
+    /// (`shell_command_argv(&argv[0], &rest)`) and its `gateway` service
+    /// manager. Those argvs carry no `/S`, so before [`plan_cmd_argv`] they got
+    /// the wrapper's quote pair with nothing to strip it: #943 exactly, at a
+    /// call site the #943 fix never reached.
+    ///
+    /// Graded with the same predicate as the BashTool prefix above, so the two
+    /// producers cannot drift apart. `true` for the executable-name question is
+    /// the hostile answer — `cmd` is a real program on every Windows host, so
+    /// this payload genuinely satisfies it.
+    #[test]
+    fn an_operator_supplied_cmd_argv_also_carries_the_strip_switch() {
+        let args = ["/c", "cmd /c echo NESTED"];
+        let payload_idx =
+            cmd_payload_index("cmd", &args).expect("this argv must be recognised as a cmd payload");
+        let (planned, planned_payload_idx) = plan_cmd_argv(&args, payload_idx);
+        let prefix = planned[..planned_payload_idx].to_vec();
+        assert!(
+            !cmd_preserves_the_outer_pair(&prefix, planned[planned_payload_idx].as_str(), true),
+            "an operator argv that reaches the wrapper must also reach cmd's \
+             stripping branch. Planned prefix was {prefix:?}; without /S cmd \
+             keeps the pair and the child echoes the trailing `\"` (#943)."
+        );
+    }
+
+    /// Mechanics of the plan: the switch lands in front of the flag, the
+    /// payload moves with it, and not one byte of the payload changes.
+    #[test]
+    fn plan_cmd_argv_inserts_the_switch_without_disturbing_the_payload() {
+        let payload = r#"echo %T% > "%SINK%\c.%RANDOM%" & exit 91"#;
+        let args = ["/c", payload];
+        let payload_idx = cmd_payload_index("cmd", &args).expect("cmd /c payload must be found");
+        let (planned, planned_payload_idx) = plan_cmd_argv(&args, payload_idx);
+
+        assert_eq!(planned, vec!["/S", "/c", payload]);
+        assert_eq!(planned_payload_idx, 2);
+        assert_eq!(
+            planned[planned_payload_idx], payload,
+            "the payload must reach the spawn layer byte-identical to what the caller wrote"
+        );
+
+        // Entries BEFORE the flag keep their order and their position relative
+        // to it — the switch goes in front of `/c`, not in front of the argv.
+        let args = ["/d", "/k", "dir"];
+        let payload_idx = cmd_payload_index("cmd", &args).expect("cmd /k payload must be found");
+        let (planned, planned_payload_idx) = plan_cmd_argv(&args, payload_idx);
+        assert_eq!(planned, vec!["/d", "/S", "/k", "dir"]);
+        assert_eq!(planned_payload_idx, 3);
+        assert_eq!(planned[planned_payload_idx], "dir");
+    }
+
+    /// A caller who already supplies the switch is left exactly as written —
+    /// including `bash_shell_argv_prefix`, which routes its own `cmd /S /C`
+    /// argv through this same planner. Fill in an absent switch, never add a
+    /// second one, never reorder.
+    #[test]
+    fn plan_cmd_argv_leaves_a_caller_supplied_switch_alone() {
+        for args in [
+            ["/S", "/C", "echo hi"].as_slice(),
+            ["/s", "/c", "echo hi"].as_slice(),
+        ] {
+            let payload_idx =
+                cmd_payload_index("cmd", args).expect("cmd payload must be found with /S present");
+            let (planned, planned_payload_idx) = plan_cmd_argv(args, payload_idx);
+            assert_eq!(planned, args.to_vec());
+            assert_eq!(planned_payload_idx, payload_idx);
+            assert_eq!(
+                planned
+                    .iter()
+                    .filter(|a| a.eq_ignore_ascii_case("/s"))
+                    .count(),
+                1,
+                "the planner must not add a second /S to {args:?}"
+            );
+        }
     }
 
     /// The two shapes that measured CLEAN on the same box bound the fix: both
