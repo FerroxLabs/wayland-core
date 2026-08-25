@@ -1688,3 +1688,44 @@ async fn an_edit_that_cannot_match_fails_terminally_rather_than_blocking_the_ses
     );
     assert_eq!(std::fs::read(&target).unwrap(), b"one\n");
 }
+
+/// The session's private checkpoint store is quota'd, and a receipt whose
+/// preimage cannot be checkpointed is one recovery declines anyway. Refusing
+/// the call there would mean an agent that had spent the quota could no
+/// longer write a file at all; falling back to the opaque path costs only the
+/// automatic reconciliation of an interrupted write.
+#[tokio::test]
+async fn a_checkpoint_the_session_cannot_store_degrades_to_opaque_instead_of_refusing() {
+    let workspace = tempfile::tempdir().unwrap();
+    let target = workspace.path().join("unbacked.txt");
+    std::fs::write(&target, b"one\n").unwrap();
+    let (dir, journal, scope) = effect_fixture();
+    // Put an ordinary file exactly where the private checkpoint directory
+    // has to be, so nothing can ever be stored under it.
+    std::fs::write(
+        dir.path().join(".session.journal.effects"),
+        b"not a directory",
+    )
+    .unwrap();
+
+    let registry = file_tool_registry();
+    let call = tool_call(
+        "provider-call",
+        "Write",
+        json!({"file_path": target.to_string_lossy(), "content": "one\ntwo\n"}),
+    );
+    let block = execute_durable(&registry, &call, None, &CancellationToken::new(), &scope).await;
+    assert!(
+        matches!(&block, ContentBlock::ToolResult { is_error, .. } if !is_error),
+        "an unstorable checkpoint must not refuse the write: {block:?}"
+    );
+
+    let tool = only_tool(&journal);
+    assert!(matches!(tool.effect, ToolEffectState::Succeeded));
+    assert_eq!(
+        tool.effect_contract.kind,
+        wcore_types::tool::ToolEffectKind::Opaque
+    );
+    assert!(tool.effect_receipt.is_none());
+    assert_eq!(std::fs::read(&target).unwrap(), b"one\ntwo\n");
+}

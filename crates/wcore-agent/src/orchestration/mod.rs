@@ -2160,42 +2160,30 @@ async fn execute_single_with_streaming(
                 } else {
                     (prepared_runtime, durable_receipt)
                 };
-            if let Err(error) =
-                store_prepared_effect_checkpoint(effect_scope, prepared_runtime.as_ref()).await
+            // A receipt whose preimage cannot be checkpointed is a receipt
+            // recovery would decline anyway, so this call falls back to the
+            // opaque path rather than being refused. The session's checkpoint
+            // quota is finite; refusing here would mean an agent that had
+            // spent it could no longer write a file at all, which is a far
+            // worse outcome than an interrupted write going back to being an
+            // operator's question.
+            let (prepared_runtime, durable_receipt) = match store_prepared_effect_checkpoint(
+                effect_scope,
+                prepared_runtime.as_ref(),
+            )
+            .await
             {
-                let reason = crate::output_redaction::redact_tool_output(&error);
-                if let Err(journal_error) = record_tool_attempt_not_started(
-                    effect_scope,
-                    id,
-                    ordinal,
-                    name,
-                    input,
-                    &effective_input,
-                    effect_contract.clone(),
-                    ToolNotStartedReason::DispatchFailed {
-                        error: reason.clone(),
-                    },
-                    pre_hook_phase_id.as_deref(),
-                    recovered_retry,
-                ) {
-                    return (
-                        journal_authority_failure(id, journal_error),
-                        None,
-                        pre_outcome,
-                        false,
+                Ok(()) => (prepared_runtime, durable_receipt),
+                Err(error) => {
+                    eprintln!(
+                        "[effect-checkpoint] tool={} call_id={} degraded to opaque recovery: {}",
+                        name,
+                        id,
+                        crate::output_redaction::redact_tool_output(&error)
                     );
+                    (None, None)
                 }
-                return (
-                    ContentBlock::ToolResult {
-                        tool_use_id: id.clone(),
-                        content: reason,
-                        is_error: true,
-                    },
-                    None,
-                    pre_outcome,
-                    false,
-                );
-            }
+            };
             #[cfg(test)]
             inject_dispatcher_crash(DispatcherCrashCut::BeforePrepared);
             let prepared_effect = match recovered_retry {
