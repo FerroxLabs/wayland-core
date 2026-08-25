@@ -73,24 +73,7 @@ impl WebBackend for BraveWebBackend {
                 };
             }
         };
-        let raw_results = parsed
-            .pointer("/web/results")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let results: Vec<serde_json::Value> = raw_results
-            .into_iter()
-            .map(|r| {
-                serde_json::json!({
-                    "title": r.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    "url": r.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    "snippet": r.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                })
-            })
-            .collect();
-        WebOutcome::Ok {
-            payload: serde_json::json!({ "web": results }),
-        }
+        map_brave_results(&parsed)
     }
 
     async fn extract(&self, _req: ExtractRequest) -> WebOutcome {
@@ -108,5 +91,102 @@ impl WebBackend for BraveWebBackend {
 
     fn backend_id(&self) -> &str {
         "brave"
+    }
+}
+/// Map a Brave `GET /res/v1/web/search` 200 body into a `WebOutcome`.
+///
+/// Split out of `search` so the payload contract is testable without network
+/// I/O, mirroring `parallel_web::map_parallel_results`.
+fn map_brave_results(parsed: &serde_json::Value) -> WebOutcome {
+    let raw_results = parsed
+        .pointer("/web/results")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let results = super::shared::map_validated_rows(&raw_results, "description");
+    if results.is_empty() {
+        return WebOutcome::Err {
+            message: "brave returned no valid results".to_string(),
+        };
+    }
+    WebOutcome::Ok {
+        payload: serde_json::json!({ "web": results }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err_message(outcome: WebOutcome) -> String {
+        match outcome {
+            WebOutcome::Err { message } => message,
+            WebOutcome::Ok { payload } => {
+                panic!("expected Err, got Ok({payload})")
+            }
+        }
+    }
+
+    fn web_len(outcome: WebOutcome) -> usize {
+        match outcome {
+            WebOutcome::Ok { payload } => payload
+                .get("web")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or_else(|| panic!("no web array in {payload}")),
+            WebOutcome::Err { message } => panic!("expected Ok, got Err({message})"),
+        }
+    }
+
+    /// gh#452 — see the matching test in `tavily_web`. An empty result set must
+    /// be `Err` so `ChainedWebBackend` falls through to DuckDuckGo instead of
+    /// serving a successful empty search.
+    #[test]
+    fn empty_results_array_is_an_error_not_an_empty_success() {
+        let parsed = serde_json::json!({ "web": { "results": [] } });
+        let msg = err_message(map_brave_results(&parsed));
+        assert!(
+            msg.contains("brave"),
+            "message must name the backend: {msg}"
+        );
+    }
+
+    /// Brave omits `web` entirely when a query matches nothing, so the missing
+    /// pointer is the common case, not an exotic one.
+    #[test]
+    fn missing_web_pointer_is_an_error() {
+        let parsed = serde_json::json!({ "query": { "original": "rust" } });
+        let msg = err_message(map_brave_results(&parsed));
+        assert!(
+            msg.contains("brave"),
+            "message must name the backend: {msg}"
+        );
+    }
+
+    #[test]
+    fn rows_without_title_or_http_url_do_not_count_as_results() {
+        let parsed = serde_json::json!({
+            "web": { "results": [
+                { "title": "", "url": "https://example.com", "description": "x" },
+                { "title": "ok", "url": "ftp://example.com", "description": "x" },
+            ] }
+        });
+        let msg = err_message(map_brave_results(&parsed));
+        assert!(
+            msg.contains("brave"),
+            "message must name the backend: {msg}"
+        );
+    }
+
+    /// Positive control.
+    #[test]
+    fn valid_results_are_returned() {
+        let parsed = serde_json::json!({
+            "web": { "results": [
+                { "title": "Rust", "url": "https://rust-lang.org", "description": "snippet" },
+                { "title": "Docs", "url": "http://doc.rust-lang.org", "description": "more" },
+            ] }
+        });
+        assert_eq!(web_len(map_brave_results(&parsed)), 2);
     }
 }
