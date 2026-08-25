@@ -281,16 +281,33 @@ async fn a_bearer_dead_at_receipt_renders_the_exact_reported_404() {
     match &err {
         ProviderError::Api { status, message } => {
             assert_eq!(*status, 404);
-            assert_eq!(message, NOT_FOUND_BODY);
+            assert!(message.starts_with(NOT_FOUND_BODY), "message: {message}");
         }
         other => panic!("expected Api{{404}}, got {other:?}"),
     }
-    // The reporter's exact text, character for character.
-    assert_eq!(
-        err.to_string(),
-        r#"API error 404: {"detail":"Not Found"}"#,
-        "rendered error must match issue #147 verbatim"
+    // The reporter's text still leads, character for character, so a user
+    // reporting this error is still matchable against issue #147.
+    let rendered = err.to_string();
+    assert!(
+        rendered.starts_with(r#"API error 404: {"detail":"Not Found"}"#),
+        "the reported string must survive as the prefix: {rendered}"
     );
+    // ...and it is now attributed. Only provable facts: which endpoint
+    // answered, that it was refused there, that it is not retried.
+    assert!(rendered.contains("ChatGPT Codex backend"), "{rendered}");
+    assert!(rendered.contains("/responses"), "{rendered}");
+    assert!(rendered.contains("does not retry"), "{rendered}");
+    assert!(
+        rendered.contains("wayland auth login chatgpt"),
+        "{rendered}"
+    );
+    // No cause is asserted. These are the words a diagnosis would need.
+    for forbidden in ["expired", "token expiry", "your session", "because"] {
+        assert!(
+            !rendered.contains(forbidden),
+            "the message must not assert a cause ({forbidden:?}): {rendered}"
+        );
+    }
     // A 404 is not retried: exactly one physical request reached the backend.
     assert_eq!(
         log.requests.load(Ordering::SeqCst),
@@ -378,4 +395,43 @@ async fn a_401_at_the_front_door_is_a_login_nudge_not_a_404() {
         "a 401 must never render as a 404: {rendered}"
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+/// RED ARM for the 404 attribution. The SAME body at a DIFFERENT status must
+/// pass through untouched: the arm is gated on 404, not on the body, and every
+/// other status keeps its existing behaviour. Without this, the assertions
+/// above would pass on a provider that decorated every error alike.
+#[tokio::test]
+async fn a_403_with_the_same_body_is_not_attributed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(ResponseTemplate::new(403).set_body_string(NOT_FOUND_BODY))
+        .mount(&server)
+        .await;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = provider_for(
+        &server.uri(),
+        counting_bearer(&jwt_expiring_at(now_secs() + 3600), calls.clone()),
+    );
+    let err = provider
+        .stream(&make_request())
+        .await
+        .expect_err("403 must fail the turn");
+
+    match &err {
+        ProviderError::Api { status, message } => {
+            assert_eq!(*status, 403);
+            assert_eq!(
+                message, NOT_FOUND_BODY,
+                "a non-404 body must pass through unchanged"
+            );
+        }
+        other => panic!("expected Api{{403}}, got {other:?}"),
+    }
+    assert!(
+        !err.to_string().contains("ChatGPT Codex backend"),
+        "only 404 is attributed: {err}"
+    );
 }

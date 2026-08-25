@@ -57,6 +57,28 @@ pub const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callba
 
 /// Refresh this many seconds before expiry to absorb clock skew.
 const REFRESH_LEAD_SECS: u64 = 120;
+/// Floor on the remaining access-token life the rate-limited (C3) concession
+/// will hand back to the provider.
+///
+/// DERIVED FROM THE DISPATCH PATH, not chosen. The bearer is resolved once, at
+/// the top of `OpenAIChatGptProvider::stream`, and folded into immutable
+/// headers; the gap between that resolve and the backend RECEIVING the request
+/// is bounded by `wcore_providers::retry::BROKEN_CONNECTION_RETRY_WINDOW`
+/// (30 s, its deadline set on entry to `builder_send_with_retry`), plus one
+/// final `connect_timeout` (30 s), plus ~1.9 s of 5xx backoff -- call it 60 s.
+/// A token with less life than that ceiling cannot be RELIED on to survive
+/// Core's own retry path, so handing one out trades a named rate-limit error
+/// for an unattributable upstream 4xx -- which is the shape of #147.
+///
+/// Honest about the cost, because the same measurement cuts both ways: HTTP
+/// authenticates once, at request receipt, so on the COMMON dispatch path (a
+/// few milliseconds) a token with one second left still buys a complete turn.
+/// This floor gives that up. It is affordable because a refresh is attempted
+/// on every `get()` inside the lead window, so a token only reaches the
+/// sub-floor band when the 429 has persisted for a full minute -- by which
+/// time the session is dying regardless, and a named error beats a silent
+/// gamble on an upstream rejection the engine cannot attribute.
+const RATE_LIMITED_REUSE_FLOOR_SECS: u64 = 60;
 /// Outer wall-clock cap on the refresh round-trip.
 /// The refresh POST's wall-clock cap. Re-exported from `refresh_lock` rather
 /// than duplicated: the cross-process lock's wait ceiling and staleness are
@@ -407,20 +429,18 @@ impl ChatGptTokenManager {
         exp.saturating_sub(REFRESH_LEAD_SECS) > now
     }
 
-    /// Whether the token is past its actual expiry (no lead window). Used by
-    /// the 429 path: if a rate-limited refresh returns and the current token
-    /// is NOT hard-expired, we can keep using it.
-    fn token_is_hard_expired(t: &OAuthTokens) -> bool {
-        let Some(exp) = t.expires_at_unix_secs else {
-            // Unknown expiry → cannot prove still-valid; treat as expired so
-            // a 429 doesn't hand back a possibly-dead token.
-            return true;
-        };
+    /// Remaining access-token life in seconds, or `None` when the stored
+    /// bundle carries no expiry at all. The 429 path must decide not merely
+    /// "is it dead" but "has it enough life left to be worth handing out" --
+    /// see [`RATE_LIMITED_REUSE_FLOOR_SECS`]. An unknown expiry cannot prove
+    /// still-valid, so it reads as no usable life.
+    fn token_remaining_secs(t: &OAuthTokens) -> Option<u64> {
+        let exp = t.expires_at_unix_secs?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        exp <= now
+        Some(exp.saturating_sub(now))
     }
 
     /// Load the active token on first call, then keep it in memory. Reads the
@@ -499,17 +519,33 @@ impl ChatGptTokenManager {
         match refreshed {
             Ok(tokens) => Ok(tokens),
             Err(RefreshError::Transport(msg)) if msg == RATE_LIMIT_SENTINEL => {
-                // C3: rate limited. Keep using the current token if it has not
-                // actually expired; only error when it's truly dead.
-                if Self::token_is_hard_expired(&current) {
-                    return Err(
+                // C3: rate limited. Keep using the current token -- but only
+                // while it has enough life left to survive a dispatch, not
+                // merely while it is technically unexpired. The bare
+                // "not hard-expired" test this replaces would hand out a token
+                // with one second left; see [`RATE_LIMITED_REUSE_FLOOR_SECS`]
+                // for why 60 s and what the floor costs.
+                match Self::token_remaining_secs(&current) {
+                    Some(remaining) if remaining >= RATE_LIMITED_REUSE_FLOOR_SECS => {
+                        *self.cached.lock().await = Some(current.clone());
+                        Ok(current)
+                    }
+                    // Dead, or expiry unknown: unchanged from before the floor.
+                    Some(0) | None => Err(
                         "ChatGPT refresh is rate limited (429) and the access token has \
                          expired — try again shortly."
                             .to_string(),
-                    );
+                    ),
+                    // Alive but too thin to dispatch. Name the rate limit and
+                    // the margin rather than letting the turn fail upstream
+                    // with a status the engine cannot attribute.
+                    Some(remaining) => Err(format!(
+                        "ChatGPT refresh is rate limited (429) and the access token has \
+                         only {remaining}s left — under the \
+                         {RATE_LIMITED_REUSE_FLOOR_SECS}s a request dispatch can need, so \
+                         reusing it would fail upstream instead of here. Try again shortly."
+                    )),
                 }
-                *self.cached.lock().await = Some(current.clone());
-                Ok(current)
             }
             // A retryable failure carries its own complete message; wrapping it
             // in "refresh failed" would read as the auth failure it is not.
@@ -1282,36 +1318,59 @@ mod tests {
         );
     }
 
-    /// MEASURES THE TRUE WORST CASE (#147). The 121 s above is the NORMAL
-    /// path. On the rate-limited path (C3) `get()` deliberately hands back the
-    /// CURRENT token whenever it is not HARD-expired — the predicate is
-    /// `exp <= now`, with no lead at all — so the worst-case remaining
-    /// access-token life at bearer hand-off is one second, not 121.
+    /// MEASURES THE WORST CASE ON THE RATE-LIMITED PATH (#147), and pins the
+    /// floor that now bounds it.
     ///
-    /// `rate_limit_returns_current_token_when_not_expired` pins the behaviour
-    /// at 30 s of life; this pins where the floor actually sits, and the
-    /// `now` arm is its red control (a token with zero life must be refused).
+    /// Before the floor, the C3 concession's predicate was a bare
+    /// `exp <= now` — no lead at all — so the worst-case remaining
+    /// access-token life at bearer hand-off was ONE SECOND, not the 121 s of
+    /// the normal path. [`RATE_LIMITED_REUSE_FLOOR_SECS`] now bounds it at
+    /// 60 s, the ceiling on Core's own resolve-to-receipt gap.
+    ///
+    /// Both sides are asserted, so the arm cannot pass on a predicate that
+    /// simply answers one way.
     #[test]
-    fn the_rate_limited_path_has_no_lead_at_all() {
+    fn the_rate_limited_path_floors_reuse_at_the_dispatch_ceiling() {
+        assert_eq!(
+            RATE_LIMITED_REUSE_FLOOR_SECS, 60,
+            "the floor is derived from the ~60s resolve-to-receipt ceiling"
+        );
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        assert!(
-            ChatGptTokenManager::token_is_hard_expired(&token("a", Some("rt"), Some(now))),
-            "zero remaining life must be hard-expired"
+        assert_eq!(
+            ChatGptTokenManager::token_remaining_secs(&token("a", Some("rt"), Some(now))),
+            Some(0),
+            "an expired token has no remaining life"
         );
+        assert_eq!(
+            ChatGptTokenManager::token_remaining_secs(&token("a", Some("rt"), None)),
+            None,
+            "an unknown expiry cannot prove remaining life"
+        );
+        let thin =
+            ChatGptTokenManager::token_remaining_secs(&token("a", Some("rt"), Some(now + 2)))
+                .expect("known expiry");
         assert!(
-            !ChatGptTokenManager::token_is_hard_expired(&token("a", Some("rt"), Some(now + 2))),
-            "a token with seconds left is NOT hard-expired, so a 429 hands it out"
+            thin < RATE_LIMITED_REUSE_FLOOR_SECS,
+            "2s of life is below the floor, was {thin}"
+        );
+        let ample =
+            ChatGptTokenManager::token_remaining_secs(&token("a", Some("rt"), Some(now + 119)))
+                .expect("known expiry");
+        assert!(
+            ample >= RATE_LIMITED_REUSE_FLOOR_SECS,
+            "119s of life is above the floor, was {ample}"
         );
     }
 
-    /// The same floor, end to end through `get()`: a 429 on refresh hands the
-    /// provider a bearer with ~2 s of life left. Every turn opened with it is
-    /// past its expiry almost immediately.
+    /// RED ARM for the floor, end to end through `get()`: a 429 on refresh
+    /// with only ~2 s of token life left must FAIL, and must name the rate
+    /// limit rather than letting the turn die upstream with a status the
+    /// engine cannot attribute. Before the floor this handed the bearer out.
     #[tokio::test]
-    async fn a_rate_limited_refresh_hands_out_a_nearly_dead_token() {
+    async fn a_rate_limited_refresh_refuses_a_token_below_the_dispatch_floor() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1337,11 +1396,55 @@ mod tests {
             .store(PROVIDER, &token(&at, Some("rt"), Some(now + 2)))
             .unwrap();
 
-        let (access, _) = mgr.get().await.expect("get");
-        assert_eq!(
-            access, at,
-            "a rate-limited refresh hands out the nearly-dead current token"
+        let err = mgr
+            .get()
+            .await
+            .expect_err("a token below the dispatch floor must not be handed out");
+        assert!(err.contains("rate limited"), "err={err}");
+        assert!(
+            err.contains("left"),
+            "the refusal must name the remaining margin: err={err}"
         );
+    }
+
+    /// COSTS THE FLOOR. The concession exists so a rate-limited refresh does
+    /// not kill a live session, and the floor must not swallow it: a token
+    /// still holding 119 s — anywhere in the lead window above the floor — is
+    /// handed out on a 429 exactly as before. Together with the arm above,
+    /// this brackets what the floor actually gives up: only the sub-60 s band,
+    /// which a session reaches only after a full minute of sustained 429.
+    #[tokio::test]
+    async fn a_rate_limited_refresh_still_saves_a_session_above_the_floor() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("Too Many Requests"))
+            .mount(&server)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = manager_at(tmp.path().join("oauth"));
+        mgr.flow = Arc::new(build_chatgpt_flow_with_token_url(&format!(
+            "{}/oauth/token",
+            server.uri()
+        )));
+        let at = jwt_with_account("acct_429_above");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        mgr.storage
+            .store(PROVIDER, &token(&at, Some("rt"), Some(now + 119)))
+            .unwrap();
+
+        let (access, _) = mgr
+            .get()
+            .await
+            .expect("above the floor, the concession holds");
+        assert_eq!(access, at);
     }
 
     #[tokio::test]
@@ -1441,13 +1544,16 @@ mod tests {
             server.uri()
         )));
         let at = jwt_with_account("acct_429");
-        // Inside the lead window (not fresh) but NOT hard-expired: 30s out,
-        // lead is 120s → refresh attempted, 429 → keep current.
+        // Inside the lead window (not fresh) but with ample life left: 90s out,
+        // lead is 120s → refresh attempted, 429 → keep current. Was 30s before
+        // RATE_LIMITED_REUSE_FLOOR_SECS; 30s is now below the dispatch floor
+        // and is covered by
+        // `a_rate_limited_refresh_refuses_a_token_below_the_dispatch_floor`.
         let soon = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
-            + 30;
+            + 90;
         mgr.storage
             .store(PROVIDER, &token(&at, Some("rt"), Some(soon)))
             .unwrap();

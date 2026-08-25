@@ -255,6 +255,39 @@ fn plan_gate_rejection_message(
     }
 }
 
+/// #147 — attribute a bare `404` from the Codex backend.
+///
+/// A 404 whose body carries no model/plan signal (see
+/// [`plan_gate_rejection_message`]) is otherwise unattributable: the reporter
+/// of #147 saw `API error 404: {"detail":"Not Found"}` and had no way to tell
+/// a backend refusal from a wayland-core routing fault, a bad model id, or a
+/// problem with their prompt.
+///
+/// This says ONLY what the engine can prove — which endpoint answered, that
+/// the request reached it and was refused there, and that a 404 is not
+/// retried — and offers two things to try. It deliberately asserts NO cause.
+/// The engine genuinely cannot distinguish an auth refusal from a route miss
+/// at this status (a backend that answers a rejected bearer with 404 rather
+/// than 401 is indistinguishable here), and #147 was dismissed three times on
+/// a plausible cause stated as fact. A suggestion is not a diagnosis.
+///
+/// The raw body leads, so the rendered error still contains verbatim what a
+/// user reports.
+fn codex_not_found_message(body: &str, url: &str) -> String {
+    let body = body.trim();
+    let body = if body.is_empty() {
+        "(empty body)"
+    } else {
+        body
+    };
+    format!(
+        "{body} — HTTP 404 from the ChatGPT Codex backend at {url}. The request \
+         reached the backend and was refused there; wayland-core does not retry \
+         a 404. Things to try: re-authenticate with `wayland auth login chatgpt`, \
+         or pick another model with /model."
+    )
+}
+
 #[async_trait]
 impl LlmProvider for OpenAIChatGptProvider {
     fn alias_key(&self) -> &str {
@@ -328,13 +361,20 @@ impl LlmProvider for OpenAIChatGptProvider {
             // through unchanged. The plan tier comes from the bearer we already
             // resolved above.
             let plan_tier = wcore_config::chatgpt_catalog::decode_plan_type(&creds.access_token);
-            let message = plan_gate_rejection_message(
+            let message = match plan_gate_rejection_message(
                 status.as_u16(),
                 &text,
                 &request.model,
                 plan_tier.as_deref(),
-            )
-            .unwrap_or(text);
+            ) {
+                Some(plan_message) => plan_message,
+                // #147: a 404 the plan-gate did not claim is otherwise a bare,
+                // unattributable body. Name the endpoint and the retry
+                // semantics — and nothing else. Every other status keeps
+                // passing its body through untouched.
+                None if status.as_u16() == 404 => codex_not_found_message(&text, &url),
+                None => text,
+            };
             return Err(ProviderError::Api {
                 status: status.as_u16(),
                 message,
