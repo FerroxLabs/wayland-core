@@ -281,11 +281,14 @@ jobs:
       # Linux user, and should be argued for in the PR that does it.
       #
       # libssl.so.3 / libcrypto.so.3 / libdbus-1.so.3 were removed from this
-      # list in #1128: OpenSSL (imap -> native-tls) and libdbus (keyring ->
-      # dbus-secret-service) are now vendored and statically linked, and
-      # node:22-slim -- an entirely ordinary landing place for a Node-distributed
-      # CLI -- ships none of the three. Keeping them listed would let a future
-      # dependency edge silently re-introduce the failure. libseccomp.so.2
+      # list in #1128, because node:22-slim -- an entirely ordinary landing place
+      # for a Node-distributed CLI -- ships none of the three and the artifact
+      # could not start there. They stay removed, by two different mechanisms:
+      # OpenSSL is no longer a dependency at all (`wcore-channel-email` drives
+      # IMAP TLS on rustls; `cargo tree -i openssl-sys --target all -e all`
+      # prints nothing), and libdbus (keyring -> dbus-secret-service) is vendored
+      # and statically linked. Keeping them listed would let a future dependency
+      # edge silently re-introduce the failure. libseccomp.so.2
       # stays: wcore-tools enables wcore-sandbox/seccomp on Linux so the bwrap
       # backend can apply its seccomp-bpf filter, dropping it is a security
       # regression, and every base image we target already provides it.

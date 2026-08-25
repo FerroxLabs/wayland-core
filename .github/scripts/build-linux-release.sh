@@ -18,45 +18,40 @@
 #
 # WHY NOT AN EVEN OLDER BASE
 # --------------------------
-# The floor is squeezed from BOTH sides and the second side used to be OpenSSL:
-# a base old enough to give glibc 2.28 (rockylinux:8, almalinux:8,
+# The floor used to be squeezed from BOTH sides, and the second side was
+# OpenSSL: a base old enough to give glibc 2.28 (rockylinux:8, almalinux:8,
 # manylinux_2_28) ships OpenSSL 1.1, so it emitted a binary needing
 # `libssl.so.1.1`, which does NOT exist on Ubuntu 22.04, Debian 12 or RHEL 9.
 #
-#   almalinux:9   glibc 2.34   <- lowest glibc that still has OpenSSL 3
-#   ubuntu:22.04  glibc 2.35   <- lowest OpenSSL-3 base with arm64 multiarch
+#   almalinux:9   glibc 2.34
+#   ubuntu:22.04  glibc 2.35   <- lowest base with arm64 multiarch
 #
-# #1128 REVERSED THE OPENSSL HALF OF THAT, DELIBERATELY. This block used to end
-# "going below 2.34 requires vendoring OpenSSL, which forfeits distro security
-# updates for TLS. That is a product decision, not a build-container choice."
-# The product decision has now been made, because the premise under it was
-# wrong.
+# THAT SQUEEZE IS GONE: NOTHING HERE LINKS OPENSSL AT ALL. The old note
+# attributed libssl to `reqwest -> openssl-sys`, which was wrong -- reqwest is
+# declared `default-features = false, features = ["rustls-tls"]` and has never
+# linked OpenSSL here. OpenSSL had exactly ONE entry point into this workspace:
+# `imap` 2.x's default `tls` feature, i.e. native-tls, used by the IMAP inbound
+# leg of the email channel.
 #
-# That note (and the dependency comment below) attributed libssl to
-# `reqwest -> openssl-sys`. reqwest is declared `default-features = false,
-# features = ["rustls-tls"]`; it has never linked OpenSSL here. Every provider
-# connection, and lettre's SMTP leg, are rustls. OpenSSL had exactly ONE entry
-# point into this workspace: `imap` 2.x, whose `connect` / `connect_starttls`
-# take a concrete `native_tls::TlsConnector` and expose no rustls path. So
-# "distro security updates for TLS" only ever covered the IMAP inbound leg of
-# the email channel -- not the product's TLS.
+# #1128 closed that by VENDORING OpenSSL into the artifact. This branch closes
+# it by REMOVING the dependency: `wcore-channel-email` takes `imap` with
+# `default-features = false` and drives both TLS legs on the rustls stack the
+# rest of the workspace (reqwest, lettre SMTP) already used.
+# `cargo tree -i openssl-sys --target all -e all` now prints nothing.
 #
-# Against that: the shipped artifact could not start AT ALL on node:22-slim,
-# which ships neither libssl.so.3 nor libdbus-1.so.3, and which is an entirely
-# ordinary landing place for a Node-distributed CLI. The user got a dynamic
-# linker error that does not look like a Wayland problem.
+# Removing it beats vendoring on three counts: no `make`/perl requirement in
+# every image that builds this workspace (the CI image has neither, and the
+# vendored build reddened `CI (linux-containerized)`), no OpenSSL CVE ownership
+# -- an advisory would have needed a wayland-core release instead of the user's
+# `apt upgrade` -- and one TLS implementation in the product instead of two.
 #
-# OpenSSL (imap -> native-tls) and libdbus (keyring -> dbus-secret-service) are
-# now vendored and statically linked. THE COST IS REAL AND IS ACCEPTED: an
-# OpenSSL CVE affecting the IMAP leg now needs a wayland-core release rather
-# than the user's `apt upgrade`. `cargo audit` runs in CI and RustSec issues
-# advisories against `openssl-src`, so an unpatched vendored OpenSSL fails the
-# build -- but that is a slower loop than distro patching, and it is the price
-# of an artifact that starts on a stock slim image.
+# libdbus (keyring -> dbus-secret-service) IS still vendored, on its own merits:
+# `libdbus-sys/vendored` is a `cc` build of the bundled C source, so it needs
+# only the C compiler every image already has, and it is what keeps
+# `libdbus-1.so.3` out of DT_NEEDED without dropping the Linux keyring backend.
 #
-# The glibc floor is UNCHANGED at 2.34. Vendoring removes the OpenSSL squeeze,
-# not the glibc one; lowering the floor is a separate decision with its own
-# evidence, and this lane did not make it.
+# The glibc floor is UNCHANGED at 2.34. Lowering it is a separate decision with
+# its own evidence, and this lane did not make it.
 set -euo pipefail
 
 IMAGE="${1:?usage: build-linux-release.sh <image> <target-triple>}"
@@ -91,13 +86,12 @@ docker run --rm \
   "${IMAGE}" bash -euo pipefail -c '
 # ---- system dependencies ------------------------------------------------
 # libseccomp-dev (wcore-sandbox) and libasound2-dev (cpal -> alsa-sys, voice
-# feature) only. libssl-dev and libdbus-1-dev were dropped in #1128: OpenSSL
-# (imap -> native-tls) and libdbus (keyring -> dbus-secret-service) are now
-# vendored, so `openssl-sys` never consults pkg-config and `libdbus-sys` builds
-# the bundled C source with `cc`. Their ABSENCE is the proof: if either edge is
-# ever un-vendored, the build fails HERE rather than shipping an artifact that
-# cannot start on a slim image. `perl` is required by the vendored OpenSSL
-# build and is already installed below.
+# feature) only. libssl-dev and libdbus-1-dev were dropped in #1128 and stay
+# dropped: nothing in the workspace links OpenSSL any more (the `imap`
+# native-tls edge is gone, see the header), and `libdbus-sys` builds the bundled
+# C source with `cc`. Their ABSENCE is the proof: if either edge comes back the
+# build fails HERE rather than shipping an artifact that cannot start on a slim
+# image.
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then

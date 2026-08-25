@@ -555,10 +555,11 @@ impl Channel for EmailChannel {
             // "rotate the password" from "the server was unreachable", and
             // collapsing it would make an operator rotate a working password
             // because a firewall was in the way.
-            let tls =
-                native_tls::TlsConnector::new().map_err(|e| (false, format!("tls init: {e}")))?;
-            let client = ::imap::connect((host.as_str(), port), host.as_str(), &tls)
-                .map_err(|e| (false, format!("connect {host}:{port}: {e}")))?;
+            // Implicit TLS, unconditionally — unchanged by the move off
+            // native-tls. The probe has always opened IMAPS here regardless of
+            // `imap.security`; only the TLS implementation underneath changed.
+            let client = crate::imap::connect_implicit_tls(host.as_str(), port)
+                .map_err(|e| (false, e.to_string()))?;
             let mut session = client
                 .login(&user, &pass)
                 .map_err(|(e, _)| (true, format!("imap login rejected: {e}")))?;
