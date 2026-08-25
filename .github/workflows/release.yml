@@ -1008,6 +1008,18 @@ jobs:
       # exactly where a Node-distributed CLI lands. This leg installs NOTHING.
       # It is the only check that fails when a dependency edge re-introduces a
       # shared object a stock slim image does not carry.
+      #
+      # THE TWO LEGS DISAGREE ON libseccomp, AND THAT IS THE POINT. Measured
+      # 2026-08-25: libseccomp.so.2 is present in node:22-slim, debian:12-slim
+      # and ubuntu:22.04, and ABSENT from rockylinux:9 -- which is why the leg
+      # above installs it and this one does not. So the last remaining
+      # non-libc dependency is carried by the Debian family and not by the RHEL
+      # family, and only ONE of these two legs can ever observe that.
+      #
+      # If you change either base image, re-measure BOTH. Swapping this leg to a
+      # RHEL-family base, or adding an install line to it "to make it pass",
+      # silently recreates #1128 for every Debian-derived user: the artifact
+      # would again require a library the check no longer proves is there.
       - name: Execute the artifact on clean node:22-slim (no packages installed)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
