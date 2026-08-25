@@ -5,10 +5,14 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolEffectKind, ToolResult};
 
 use crate::Tool;
 use crate::context::ToolContext;
+use crate::effects::{
+    FILESYSTEM_EFFECT_RECONCILER, FilesystemWriteAttempt, PreparedToolEffect, ToolEffectExecution,
+    classify_filesystem_execution, prepare_filesystem_effect,
+};
 use crate::file_cache::{FileStateCache, file_mtime_ms, update_cache_after_write};
 use crate::fuzzy_match::fuzzy_find_and_replace;
 use crate::path_validation::validate_user_path;
@@ -151,6 +155,164 @@ impl EditTool {
             Err(format!(
                 "Multiple matches found ({match_count}). Use replace_all or provide more context."
             ))
+        }
+    }
+
+    /// W8b — vfs-aware edit body. Reads and writes through `ctx.vfs`
+    /// (sandbox-aware for sub-agents). The "must Read first" cache
+    /// guard + staleness check still consult the FileStateCache and
+    /// `file_mtime_ms` directly because those are engine-level
+    /// invariants, not VFS-level facts.
+    async fn edit_through_vfs(
+        &self,
+        input: Value,
+        ctx: &ToolContext,
+        attempt: &mut FilesystemWriteAttempt,
+    ) -> ToolResult {
+        let Some(file_path) = input["file_path"].as_str() else {
+            return ToolResult {
+                content: "Missing required parameter: file_path".to_string(),
+                is_error: true,
+            };
+        };
+        let Some(old_string) = input["old_string"].as_str() else {
+            return ToolResult {
+                content: "Missing required parameter: old_string".to_string(),
+                is_error: true,
+            };
+        };
+        let Some(new_string) = input["new_string"].as_str() else {
+            return ToolResult {
+                content: "Missing required parameter: new_string".to_string(),
+                is_error: true,
+            };
+        };
+        let replace_all = input["replace_all"].as_bool().unwrap_or(false);
+
+        // Wave SD — single validation primitive for both entry paths.
+        let validated = match validate_user_path(Path::new(file_path)) {
+            Ok(p) => p,
+            Err(e) => {
+                return ToolResult {
+                    content: format!("Refused to edit {file_path}: {e}"),
+                    is_error: true,
+                };
+            }
+        };
+        let path = validated.as_path();
+
+        // Cache guard: "must Read first" + staleness detection.
+        if let Some(cache_arc) = &self.file_cache
+            && let Ok(mut cache) = cache_arc.write()
+        {
+            let cached = cache.get(path);
+            if cached.is_none() {
+                return ToolResult {
+                    content: format!(
+                        "You must Read {file_path} before editing. Use the Read tool first \
+                         so the file content is loaded into context."
+                    ),
+                    is_error: true,
+                };
+            }
+            let cached_mtime = cached.map(|s| s.mtime_ms);
+            let disk_mtime = file_mtime_ms(path);
+            if let (Some(cached_mt), Some(disk_mt)) = (cached_mtime, disk_mtime)
+                && cached_mt != disk_mt
+            {
+                return ToolResult {
+                    content: format!(
+                        "File {file_path} has been modified externally since last read. \
+                         Read the file again to see the current content before editing."
+                    ),
+                    is_error: true,
+                };
+            }
+        }
+
+        let bytes = match ctx.vfs.read(path).await {
+            Ok(b) => b,
+            Err(e) => {
+                return ToolResult {
+                    content: format!("Failed to read file {file_path}: {e}"),
+                    is_error: true,
+                };
+            }
+        };
+        let content = String::from_utf8_lossy(&bytes).into_owned();
+
+        let (new_content, match_count) =
+            match self.compute_edit(&content, old_string, new_string, replace_all) {
+                Ok(v) => v,
+                Err(msg) => {
+                    return ToolResult {
+                        content: msg,
+                        is_error: true,
+                    };
+                }
+            };
+
+        // INV-2: identical assessment to the legacy path. `content` came from
+        // `ctx.vfs`, so the pre-image judged here is the one this call will
+        // replace.
+        let mut unsaved_note = String::new();
+        match self
+            .unsaved
+            .assess(path, file_path, &content, &new_content, Mode::Surgical)
+        {
+            Verdict::Proceed => {}
+            Verdict::ProceedWithNote(note) => unsaved_note = note,
+            Verdict::Refuse(refusal) => {
+                return ToolResult {
+                    content: refusal,
+                    is_error: true,
+                };
+            }
+        }
+
+        // W8b.2.A D.4 — mark this write as engine-originated BEFORE the
+        // actual write so an upstream FileWatcher can debounce its own
+        // change event. See the matching block in WriteTool::execute_with_ctx.
+        if let Some(n) = ctx.file_write_notifier.as_ref() {
+            n.note_self_originated_write(path).await;
+        }
+
+        // ADV-7, vfs side.
+        match ctx.vfs.read(path).await {
+            Ok(now) if now == bytes => {}
+            _ => {
+                return ToolResult {
+                    content: crate::unsaved_work::changed_under_write(
+                        file_path,
+                        "its contents changed on disk",
+                    ),
+                    is_error: true,
+                };
+            }
+        }
+
+        // F13: everything above this line left the target untouched, and
+        // everything below it may not have. The filesystem cannot be asked
+        // afterwards which side a failure fell on.
+        *attempt = FilesystemWriteAttempt::Attempted;
+        if let Err(e) = ctx.vfs.write(path, new_content.as_bytes()).await {
+            return ToolResult {
+                content: format!("Failed to write file: {e}"),
+                is_error: true,
+            };
+        }
+        *attempt = FilesystemWriteAttempt::Completed;
+
+        if let Some(cache_arc) = &self.file_cache {
+            update_cache_after_write(cache_arc, path, &new_content);
+        }
+        self.unsaved.note_written(path, &content, &new_content);
+
+        ToolResult {
+            content: format!(
+                "Edited {file_path}: replaced {match_count} occurrence(s){unsaved_note}"
+            ),
+            is_error: false,
         }
     }
 }
@@ -342,152 +504,9 @@ impl Tool for EditTool {
         }
     }
 
-    /// W8b — vfs-aware variant. Reads and writes through `ctx.vfs`
-    /// (sandbox-aware for sub-agents). The "must Read first" cache
-    /// guard + staleness check still consult the FileStateCache and
-    /// `file_mtime_ms` directly because those are engine-level
-    /// invariants, not VFS-level facts.
     async fn execute_with_ctx(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let Some(file_path) = input["file_path"].as_str() else {
-            return ToolResult {
-                content: "Missing required parameter: file_path".to_string(),
-                is_error: true,
-            };
-        };
-        let Some(old_string) = input["old_string"].as_str() else {
-            return ToolResult {
-                content: "Missing required parameter: old_string".to_string(),
-                is_error: true,
-            };
-        };
-        let Some(new_string) = input["new_string"].as_str() else {
-            return ToolResult {
-                content: "Missing required parameter: new_string".to_string(),
-                is_error: true,
-            };
-        };
-        let replace_all = input["replace_all"].as_bool().unwrap_or(false);
-
-        // Wave SD — single validation primitive for both entry paths.
-        let validated = match validate_user_path(Path::new(file_path)) {
-            Ok(p) => p,
-            Err(e) => {
-                return ToolResult {
-                    content: format!("Refused to edit {file_path}: {e}"),
-                    is_error: true,
-                };
-            }
-        };
-        let path = validated.as_path();
-
-        // Cache guard: "must Read first" + staleness detection.
-        if let Some(cache_arc) = &self.file_cache
-            && let Ok(mut cache) = cache_arc.write()
-        {
-            let cached = cache.get(path);
-            if cached.is_none() {
-                return ToolResult {
-                    content: format!(
-                        "You must Read {file_path} before editing. Use the Read tool first \
-                         so the file content is loaded into context."
-                    ),
-                    is_error: true,
-                };
-            }
-            let cached_mtime = cached.map(|s| s.mtime_ms);
-            let disk_mtime = file_mtime_ms(path);
-            if let (Some(cached_mt), Some(disk_mt)) = (cached_mtime, disk_mtime)
-                && cached_mt != disk_mt
-            {
-                return ToolResult {
-                    content: format!(
-                        "File {file_path} has been modified externally since last read. \
-                         Read the file again to see the current content before editing."
-                    ),
-                    is_error: true,
-                };
-            }
-        }
-
-        let bytes = match ctx.vfs.read(path).await {
-            Ok(b) => b,
-            Err(e) => {
-                return ToolResult {
-                    content: format!("Failed to read file {file_path}: {e}"),
-                    is_error: true,
-                };
-            }
-        };
-        let content = String::from_utf8_lossy(&bytes).into_owned();
-
-        let (new_content, match_count) =
-            match self.compute_edit(&content, old_string, new_string, replace_all) {
-                Ok(v) => v,
-                Err(msg) => {
-                    return ToolResult {
-                        content: msg,
-                        is_error: true,
-                    };
-                }
-            };
-
-        // INV-2: identical assessment to the legacy path. `content` came from
-        // `ctx.vfs`, so the pre-image judged here is the one this call will
-        // replace.
-        let mut unsaved_note = String::new();
-        match self
-            .unsaved
-            .assess(path, file_path, &content, &new_content, Mode::Surgical)
-        {
-            Verdict::Proceed => {}
-            Verdict::ProceedWithNote(note) => unsaved_note = note,
-            Verdict::Refuse(refusal) => {
-                return ToolResult {
-                    content: refusal,
-                    is_error: true,
-                };
-            }
-        }
-
-        // W8b.2.A D.4 — mark this write as engine-originated BEFORE the
-        // actual write so an upstream FileWatcher can debounce its own
-        // change event. See the matching block in WriteTool::execute_with_ctx.
-        if let Some(n) = ctx.file_write_notifier.as_ref() {
-            n.note_self_originated_write(path).await;
-        }
-
-        // ADV-7, vfs side.
-        match ctx.vfs.read(path).await {
-            Ok(now) if now == bytes => {}
-            _ => {
-                return ToolResult {
-                    content: crate::unsaved_work::changed_under_write(
-                        file_path,
-                        "its contents changed on disk",
-                    ),
-                    is_error: true,
-                };
-            }
-        }
-
-        if let Err(e) = ctx.vfs.write(path, new_content.as_bytes()).await {
-            return ToolResult {
-                content: format!("Failed to write file: {e}"),
-                is_error: true,
-            };
-        }
-
-        if let Some(cache_arc) = &self.file_cache {
-            update_cache_after_write(cache_arc, path, &new_content);
-        }
-        self.unsaved.note_written(path, &content, &new_content);
-
-        ToolResult {
-            content: format!(
-                "Edited {file_path}: replaced {match_count} occurrence(s){unsaved_note}"
-            ),
-            is_error: false,
-        }
+        self.edit_through_vfs(input, ctx, &mut FilesystemWriteAttempt::default())
+            .await
     }
 
     fn max_result_size(&self) -> usize {
@@ -498,8 +517,59 @@ impl Tool for EditTool {
         ToolCategory::Edit
     }
 
+    /// F13: a surgical replacement is filesystem-transactional *when the
+    /// target can be identified before the write*. See
+    /// [`WriteTool::effect_contract`](crate::write::WriteTool) for why the
+    /// kind is declared unconditionally.
     fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
-        ToolEffectContract::default()
+        ToolEffectContract {
+            kind: ToolEffectKind::FilesystemTransactional,
+            reconciler: Some(FILESYSTEM_EFFECT_RECONCILER.to_string()),
+        }
+    }
+
+    /// Bind this call to the exact preimage and postimage identities, so a
+    /// crash between here and the terminal journal append can be answered by
+    /// one read of the target instead of by a human.
+    async fn prepare_effect(
+        &self,
+        input: &Value,
+        ctx: &ToolContext,
+    ) -> Result<Option<PreparedToolEffect>, ToolResult> {
+        let (Some(file_path), Some(old_string), Some(new_string)) = (
+            input["file_path"].as_str(),
+            input["old_string"].as_str(),
+            input["new_string"].as_str(),
+        ) else {
+            return Ok(None);
+        };
+        let replace_all = input["replace_all"].as_bool().unwrap_or(false);
+        Ok(
+            prepare_filesystem_effect(ctx.vfs.as_ref(), Path::new(file_path), input, |preimage| {
+                // The postimage is computed exactly the way the write body
+                // computes it, lossy UTF-8 conversion included. Anything else
+                // would bind the receipt to bytes this tool never writes, and
+                // every landed edit would then reconcile as "cannot tell".
+                let content = String::from_utf8_lossy(preimage?).into_owned();
+                let (new_content, _) = self
+                    .compute_edit(&content, old_string, new_string, replace_all)
+                    .ok()?;
+                Some(new_content.into_bytes())
+            })
+            .await,
+        )
+    }
+
+    async fn execute_prepared_effect(
+        &self,
+        prepared: PreparedToolEffect,
+        ctx: &ToolContext,
+    ) -> ToolEffectExecution {
+        let mut attempt = FilesystemWriteAttempt::default();
+        let result = self
+            .edit_through_vfs(prepared.invocation().clone(), ctx, &mut attempt)
+            .await;
+        classify_filesystem_execution(&prepared, ctx.vfs.as_ref(), attempt, result).await
     }
 
     fn describe(&self, input: &Value) -> String {
