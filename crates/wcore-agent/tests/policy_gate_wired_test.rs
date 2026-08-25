@@ -353,7 +353,10 @@ async fn policy_allow_still_honors_protocol_denial() {
             is_error, content, ..
         } => {
             assert!(*is_error, "host denial must remain terminal");
-            assert_eq!(content, "Tool denied: denied by host");
+            assert!(
+                content.starts_with("Tool denied: denied by host"),
+                "host denial text drifted: {content:?}"
+            );
             assert!(!content.contains("tool-executed"));
         }
         other => panic!("expected ToolResult, got {other:?}"),
@@ -397,7 +400,10 @@ async fn live_mode_deescalation_revokes_boot_bypass() {
             is_error, content, ..
         } => {
             assert!(is_error);
-            assert_eq!(content, "Tool denied: denied by host");
+            assert!(
+                content.starts_with("Tool denied: denied by host"),
+                "host denial text drifted: {content:?}"
+            );
         }
         other => panic!("expected ToolResult, got {other:?}"),
     }

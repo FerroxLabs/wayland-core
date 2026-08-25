@@ -844,6 +844,21 @@ enum ConfirmedCall {
     Denied(ContentBlock),
 }
 
+/// The way forward every approval denial that reaches the model must name.
+///
+/// #946: the old text reported the outcome and stopped there, so a headless
+/// run dead-ended with nothing to act on — not one occurrence of
+/// `--auto-approve` anywhere in the tree reached a user or the model. Narrowest
+/// grant first (this one tool, in config), with the run-wide bypass last so the
+/// message never leads with the flag that turns the gate off entirely.
+fn approval_remedy(tool_name: &str) -> String {
+    format!(
+        "To allow it without prompting, add \"{tool_name}\" to `[tools] \
+         allow_list` in your wayland-core config; to skip every confirmation \
+         for the whole run, start wayland-core with `--auto-approve`."
+    )
+}
+
 fn confirm_call(
     registry: &ToolRegistry,
     confirmer: &Arc<Mutex<ToolConfirmer>>,
@@ -881,10 +896,14 @@ fn confirm_call(
         ConfirmResult::Denied => Ok(ConfirmedCall::Denied(ContentBlock::ToolResult {
             tool_use_id: id.clone(),
             // Not "denied by user": `ToolConfirmer` also denies when there
-            // is no interactive terminal to ask, and on EOF at the prompt.
-            // The message must not assert a human decision that never
-            // happened — it reports the outcome, approval was not granted.
-            content: "Tool execution denied: approval was not granted".to_string(),
+            // is no interactive terminal to ask, when nobody answers within
+            // the budget, and on EOF at the prompt. The message must not
+            // assert a human decision that never happened — it reports the
+            // outcome and then names what the operator can actually do.
+            content: format!(
+                "Tool execution denied: approval was not granted for {name}.\n{}",
+                approval_remedy(name)
+            ),
             is_error: true,
         })),
         ConfirmResult::Quit => Err(ExecutionControl::Quit),
@@ -3359,8 +3378,13 @@ async fn execute_tool_calls_with_approval_budget_effects_inner(
                     });
                     let denied = ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
+                        // #946: the reason alone is a dead end when no host
+                        // ever answered (TTL reap, host EOF), so the remedy
+                        // rides along here too — same helper, so the two
+                        // denial surfaces cannot drift apart.
                         content: crate::output_redaction::redact_tool_output(&format!(
-                            "Tool denied: {reason}"
+                            "Tool denied: {reason}\n{}",
+                            approval_remedy(name)
                         )),
                         is_error: true,
                     };

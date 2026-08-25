@@ -172,7 +172,10 @@ async fn concurrent_confirmation_preserves_original_result_order() {
             is_error,
         } => {
             assert_eq!(tool_use_id, "id-denied");
-            assert_eq!(content, "Tool execution denied: approval was not granted");
+            assert!(
+                content.starts_with("Tool execution denied: approval was not granted for denied."),
+                "denial text drifted: {content:?}"
+            );
             assert!(*is_error);
         }
         other => panic!("expected ToolResult, got {other:?}"),
@@ -572,5 +575,77 @@ async fn rust_hook_modify_input_changes_tool_invocation() {
             );
         }
         other => panic!("expected ToolResult, got {:?}", other),
+    }
+}
+
+/// #946 — a denial that reaches the model must name the way forward, and it
+/// must do so through BOTH `confirm_call` call sites: the concurrent-batch
+/// loop and the sequential loop. A guard in this repo has already shipped
+/// correct-but-ungraded through a second call site, so proving one call is not
+/// proving two. `MockTool::new` is concurrency-safe and `MockTool::sequential`
+/// is not, so a single call list makes `partition` produce one batch of each.
+#[tokio::test]
+async fn approval_denial_names_the_remedy_on_both_confirmation_paths() {
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MockTool::new(
+        "concurrent_denied",
+        "must-not-run",
+        false,
+    )));
+    registry.register(Box::new(MockTool::sequential(
+        "sequential_denied",
+        "must-not-run",
+    )));
+
+    let calls = vec![
+        make_tool_use("id-concurrent", "concurrent_denied"),
+        make_tool_use("id-sequential", "sequential_denied"),
+    ];
+    // Prompt policy with an empty allow list. The test process has no tty, so
+    // both calls are denied without an interactive read.
+    let confirmer = std::sync::Arc::new(std::sync::Mutex::new(
+        wcore_agent::confirm::ToolConfirmer::new(false, vec![]),
+    ));
+
+    let results = execute_tool_calls(
+        &registry,
+        &calls,
+        &confirmer,
+        None,
+        CompactionLevel::Off,
+        false,
+    )
+    .await
+    .expect("a fully denied batch still completes");
+
+    assert_eq!(results.len(), 2);
+    for (call_id, tool_name) in [
+        ("id-concurrent", "concurrent_denied"),
+        ("id-sequential", "sequential_denied"),
+    ] {
+        let content = results
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } if tool_use_id == call_id => {
+                    assert!(*is_error, "{call_id}: a denial must be an error result");
+                    Some(content.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no ToolResult for {call_id}"));
+        assert!(
+            content.contains("allow_list") && content.contains(tool_name),
+            "{call_id}: the denial must name the narrowest remedy — this tool \
+             in `[tools] allow_list`; got: {content:?}"
+        );
+        assert!(
+            content.contains("--auto-approve"),
+            "{call_id}: the denial must name the run-wide bypass too; \
+             got: {content:?}"
+        );
     }
 }
