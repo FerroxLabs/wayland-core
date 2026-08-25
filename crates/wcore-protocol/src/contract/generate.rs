@@ -38,8 +38,14 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // `render_artifact_v1` (#1098): a new event. No field on an existing event
 // changed shape, so `major` holds at 1 — the vocabulary a host can validate
 // got strictly wider, which is what a minor bump is for.
-pub const CONTRACT_MINOR: u64 = 16;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/16";
+// 16 -> 17: `grant_workspace_capability`, `grant_path` and `revoke_path` are
+// declared (#314). Three new command wire types; no field on an existing
+// command or event changed shape, so `major` holds at 1 and the command union
+// a host can emit got strictly wider. The wire-shape gate refuses this
+// regeneration without the bump - three `added=` entries under a standing
+// 1.16 - which is that gate deciding the version question it exists to force.
+pub const CONTRACT_MINOR: u64 = 17;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/17";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -86,11 +92,17 @@ cannot be fooled by the producer-side `PRODUCER_EVENT_TYPES` constant.
 `generated_artifacts()` now refuses to build a corpus whose `EVENT_SPECS` and
 `PRODUCER_EVENT_TYPES` disagree, so this hole cannot reopen silently.
 
-STILL OPEN, same class, command direction: `grant_workspace_capability` is in
-`PRODUCER_COMMAND_TYPES` and absent from `manifest.json`'s `commands`. The blast
-radius is different — commands travel host to Core, so an undeclared command
-does not hard error a host — and the generator parity check deliberately covers
-events only. It is not closed.
+CLOSED, same class, command direction (#314): `grant_workspace_capability`,
+`grant_path` and `revoke_path` were in `PRODUCER_COMMAND_TYPES` and absent from
+`manifest.json`'s `commands`. The blast radius was different — commands travel
+host to Core, so an undeclared command does not hard error a host — but a host
+that derives its emitter or its conformance check from the published union
+cannot send a command that union does not contain, and that failure reads as
+"folder grants do not persist" rather than as a contract gap. All three now
+carry a `WireSpec`, a fixture generated from the real deserializer, and a branch
+in `host-command.schema.json`, and `generated_artifacts()` refuses to build a
+corpus whose `COMMAND_SPECS` and `PRODUCER_COMMAND_TYPES` disagree — the parity
+gate the event direction already had, which previously covered events only.
 
 Malformed command fixtures and the current unknown-type behavior are proved by
 `desktop_contract_adversarial.rs`. Browser, CUA, and plugin event fixtures are
@@ -289,6 +301,13 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
         }
         ("resolve_interrupted_approval", "decision") => {
             json!({"enum": ["approve", "deny"], "type": "string"})
+        }
+        // CLOSED on the wire (`PathGrantAccess`), so closed in the published
+        // schema too. Inference would read `"read"` from the fixture and
+        // publish `{"type": "string"}` - a contract that calls a frame valid
+        // which the deserializer rejects outright.
+        ("grant_path", "access") => {
+            json!({"enum": ["read", "write"], "type": "string"})
         }
         ("session_recovery_snapshot" | "turn_recovery_lifecycle", "lifecycle") => {
             recovery_lifecycle_schema()
@@ -1731,8 +1750,43 @@ fn assert_producer_event_parity() -> ContractResult<()> {
     .into())
 }
 
+/// The command-direction mirror of [`assert_producer_event_parity`].
+///
+/// An undeclared command does not hard error a host the way an undeclared
+/// event does - commands travel host to Core - so this gate was deliberately
+/// left off the command direction. #314 is what that cost: three commands the
+/// engine has dispatched since 0.13.6 were absent from the published union, so
+/// a host that derives its emitter, its codegen or its conformance check from
+/// `manifest.json` could not send them, and the resulting silence reads as the
+/// FEATURE being broken rather than the contract being incomplete.
+fn assert_producer_command_parity() -> ContractResult<()> {
+    let declared = COMMAND_SPECS
+        .iter()
+        .map(|spec| spec.wire_type)
+        .collect::<BTreeSet<_>>();
+    let produced = PRODUCER_COMMAND_TYPES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if declared == produced {
+        return Ok(());
+    }
+    let undeclared = produced.difference(&declared).copied().collect::<Vec<_>>();
+    let phantom = declared.difference(&produced).copied().collect::<Vec<_>>();
+    Err(format!(
+        "Desktop contract corpus does not match the producer command inventory. \
+         Accepted by Core but absent from COMMAND_SPECS (a host that derives its \
+         emitter from the published union cannot send these): {undeclared:?}. \
+         Declared in COMMAND_SPECS but never accepted: {phantom:?}. Add a WireSpec \
+         plus a real fixture in contract/spec.rs, or remove the variant from \
+         PRODUCER_COMMAND_TYPES."
+    )
+    .into())
+}
+
 pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
     assert_producer_event_parity()?;
+    assert_producer_command_parity()?;
     let mut artifacts = BTreeMap::new();
 
     for (path, value) in command_fixture_values() {

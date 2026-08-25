@@ -225,6 +225,47 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "request_id",
         "runtime_mcp_lifecycle_v1"
     ),
+    // #314 - the three host-initiated authority grants. Each has been
+    // dispatched in `crates/wcore-cli/src/main.rs` since 0.13.6 and named in
+    // `PRODUCER_COMMAND_TYPES`; none was declared here, so the command union a
+    // Desktop host derives its emitter or its conformance check from did not
+    // contain them, and a corpus-driven host could not send one at all.
+    //
+    // `capability: "available"`, not `path_grants_v1`: that capability is the
+    // feature-detect for the `always_path` APPROVAL SCOPE - a different promise
+    // on a different frame, which is exactly why `path_boundary_prompt_v1` sits
+    // beside it rather than inside it. These commands are always accepted and
+    // always answered on this contract version; the launcher opt-in decides
+    // whether the answer is a grant receipt or a legible refusal, which is the
+    // same shape `set_mode` already publishes as "available" for its `--force`
+    // gate.
+    //
+    // `Safety`, not `Observational`: each mutates the workspace authority that
+    // the OS sandbox and the in-process file tools both read.
+    wire!(
+        "grant_workspace_capability",
+        "commands/grant_workspace_capability.json",
+        ["executable"],
+        Safety,
+        "session",
+        "available"
+    ),
+    wire!(
+        "grant_path",
+        "commands/grant_path.json",
+        ["grant_id", "root"],
+        Safety,
+        "grant_id",
+        "available"
+    ),
+    wire!(
+        "revoke_path",
+        "commands/revoke_path.json",
+        ["grant_id"],
+        Safety,
+        "grant_id",
+        "available"
+    ),
     wire!(
         "get_runtime_diagnostics",
         "commands/get_runtime_diagnostics.json",
@@ -1255,6 +1296,22 @@ pub fn command_fixture_values() -> BTreeMap<String, Value> {
         (
             "commands/remove_mcp_server.json".into(),
             json!({"type":"remove_mcp_server","lifecycle_version":1,"request_id":"mcp-remove-001","name":"desktop-tools"}),
+        ),
+        // #314. `access` and `expires_at_ms` are carried explicitly although
+        // both are `#[serde(default)]`: the schema branch is inferred from the
+        // fixture, so a fixture that omits an optional field publishes a branch
+        // that says nothing about the frames a host really sends.
+        (
+            "commands/grant_workspace_capability.json".into(),
+            json!({"type":"grant_workspace_capability","executable":"cargo"}),
+        ),
+        (
+            "commands/grant_path.json".into(),
+            json!({"type":"grant_path","grant_id":"grant-001","root":"/srv/reports","access":"read","expires_at_ms":1_767_225_600_000_u64}),
+        ),
+        (
+            "commands/revoke_path.json".into(),
+            json!({"type":"revoke_path","grant_id":"grant-001"}),
         ),
         // F22-C1 host Goal control. Every value below is accepted by
         // `ProtocolCommand` — pinned by the corpus's
