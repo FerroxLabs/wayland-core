@@ -24,13 +24,19 @@
 //!    panel found this false-negative class unanimously: stripping a working
 //!    capability from a user's UI is the same defect as advertising a broken
 //!    one, pointed the other way.
+//! 4. **It says so.** A narrowing that only ever reached `tracing::warn!` was
+//!    invisible: with `RUST_LOG` unset stderr takes ERROR only, so the one
+//!    diagnostic explaining a vanished capability never reached the user
+//!    (#1130). `narrowed_to_live` now returns the fact, and
+//!    `narrowing_carries_the_words_a_user_needs` pins that the returned line
+//!    names the capability, the reason and the remedy.
 //!
 //! **No wire-contract surface is touched.** Nothing here constructs, compares
 //! or regenerates a `wcore-protocol` contract artifact: the field name, type
 //! and value domain are unchanged, and `false` is already what a host sees when
 //! the plugin is absent.
 
-use wcore_agent::output::protocol_sink::PluginCapabilitySet;
+use wcore_agent::output::protocol_sink::{CapabilityNarrowing, PluginCapabilitySet};
 use wcore_browser::liveness::BrowserLiveness;
 use wcore_cua::liveness::CuaLiveness;
 
@@ -98,8 +104,13 @@ async fn never_widens_a_capability_the_identity_check_refused() {
     let none = PluginCapabilitySet::default();
     assert!(!none.browser_suite && !none.computer_use, "precondition");
 
-    let after = none.narrowed_to_live().await;
+    let (after, narrowings) = none.narrowed_to_live().await;
 
+    assert!(
+        narrowings.is_empty(),
+        "nothing was advertised, so nothing could be narrowed, yet a notice was produced: \
+         {narrowings:?}"
+    );
     assert!(
         !after.browser_suite,
         "liveness probing SET browser_suite that identity verification had refused — \
@@ -130,7 +141,20 @@ async fn narrows_when_no_backend_can_start() {
         browser_suite: true,
         computer_use: true,
     };
-    let after = advertised.narrowed_to_live().await;
+    let (after, narrowings) = advertised.narrowed_to_live().await;
+
+    // #1130 — every cleared flag must arrive with the words to explain it.
+    // A narrowing the caller is not handed is a narrowing the user is never
+    // told about, which is the whole of the defect.
+    let narrowed_count =
+        usize::from(browser_verdict.should_narrow()) + usize::from(cua_verdict.should_narrow());
+    assert_eq!(
+        narrowings.len(),
+        narrowed_count,
+        "{narrowed_count} capability/capabilities were dropped but {} notice(s) came back \
+         ({narrowings:?}) — a dropped capability with no notice is #1130 reopened",
+        narrowings.len()
+    );
 
     if browser_verdict.should_narrow() {
         assert!(
@@ -176,5 +200,44 @@ fn indeterminate_never_narrows() {
     assert!(
         !CuaLiveness::Indeterminate { platform: "macos" }.should_narrow(),
         "an undecidable CUA platform dropped the capability"
+    );
+}
+
+/// Property 4 — the returned narrowing carries the words a person can act on.
+///
+/// Pure, so it grades the SENTENCE on every host rather than only on one with
+/// no display and no browser. Both directions in one instrument: the notice
+/// must contain the capability, the probe's reason and the probe's remedy, and
+/// must NOT contain a field that was never put in it — without that half, an
+/// assertion that three substrings are present is satisfied by a renderer that
+/// concatenates the whole struct's `Debug`.
+#[test]
+fn narrowing_carries_the_words_a_user_needs() {
+    let narrowing = CapabilityNarrowing {
+        capability: "browser_suite",
+        reason: "no browser backend can start: `camofox-browser` does not resolve on PATH"
+            .to_string(),
+        remedy: "npm install -g @askjo/camofox-browser".to_string(),
+    };
+    let notice = narrowing.notice();
+
+    assert!(
+        notice.contains("browser_suite"),
+        "the notice does not name the capability: {notice}"
+    );
+    assert!(
+        notice.contains("does not resolve on PATH"),
+        "the notice drops the probe's reason, so the user cannot tell what is wrong: {notice}"
+    );
+    assert!(
+        notice.contains("npm install -g @askjo/camofox-browser"),
+        "the notice drops the probe's remedy, so the user cannot tell what to do: {notice}"
+    );
+    // CAN-FAIL half: a renderer that dumped the struct would pass the three
+    // assertions above while being unreadable. `Unavailable`/`capability:` are
+    // shapes only a Debug dump produces.
+    assert!(
+        !notice.contains("capability:") && !notice.contains("CapabilityNarrowing"),
+        "the notice looks like a Debug dump rather than a sentence: {notice}"
     );
 }

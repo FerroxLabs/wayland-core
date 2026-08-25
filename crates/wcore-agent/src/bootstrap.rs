@@ -1103,10 +1103,29 @@ impl AgentBootstrap {
         // stops rendering a capability whose first operation dies with
         // `spawn camoufox: No such file or directory`. Clears flags only; the
         // identity guarantee above is untouched.
-        let plugin_capabilities =
+        let (plugin_capabilities, capability_narrowings) =
             crate::output::protocol_sink::PluginCapabilitySet::from_verified(&verified_plugins)
                 .narrowed_to_live()
                 .await;
+        // #1130 — say it where the user is looking. Every narrowing used to be
+        // a `tracing::warn!` and nothing else; with `RUST_LOG` unset stderr
+        // takes ERROR only, so the single line explaining why a capability
+        // vanished never reached the person whose feature stopped working. The
+        // sink is the channel the retry notices already use, so it reaches the
+        // TUI, a headless run and a JSON-stream host alike. The WARN is kept
+        // for the log file, which is where an operator debugging after the
+        // fact looks — it is a copy of the notice, not the notice itself.
+        for narrowing in &capability_narrowings {
+            let notice = narrowing.notice();
+            self.output.emit_info(&notice);
+            tracing::warn!(
+                target: "wcore_agent::bootstrap",
+                capability = narrowing.capability,
+                reason = %narrowing.reason,
+                remedy = %narrowing.remedy,
+                "{notice}"
+            );
+        }
         // Backwards-compat alias for any consumer that still expects
         // the raw name list (handler-side log lines etc.).
         let loaded_plugin_names: Vec<String> =
