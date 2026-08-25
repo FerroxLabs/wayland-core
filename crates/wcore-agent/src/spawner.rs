@@ -1025,6 +1025,16 @@ impl AgentSpawner {
         }
     }
 
+    /// The session's own configured output-token cap.
+    ///
+    /// #862 — the Spawn tool floors a fork's output budget at this so a child
+    /// is never given LESS room than the session that spawned it. Deliberate
+    /// per-spawn caps (Crucible proposers, skills, delegate) pass their own
+    /// value and never consult this, so their narrowing is untouched.
+    pub fn base_max_tokens(&self) -> u32 {
+        self.base_config.max_tokens
+    }
+
     /// #1118 — declare the parent session's shell principal, so a delegated
     /// child inherits it instead of falling to the strict default.
     ///
