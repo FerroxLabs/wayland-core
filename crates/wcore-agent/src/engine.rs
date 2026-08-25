@@ -4257,6 +4257,23 @@ pub struct AgentEngine {
     /// the `x-wl-conversation-id` request header on tier-alias turns. Survives
     /// `/clear` and `/resume` so a continued session keeps routing affinity.
     conversation_id: String,
+    /// #863 F2 — loop-ownership provenance stamped onto every `LlmRequest` this
+    /// engine builds. `Some(ClientOwned("anvil"))` on an Anvil builder fork, so
+    /// the router knows this turn is mid-loop material of a CLIENT-side climb
+    /// and must not run its own server-side ladder on it.
+    ///
+    /// Set once, from OUTSIDE, at the single durable-spawn site that knows the
+    /// child's `ChildOrigin` (`AgentSpawner::execute_durable_launch`). The
+    /// engine cannot infer it: origin is a property of how the engine was
+    /// launched, not of anything the engine can see about itself.
+    ///
+    /// `None` for an ordinary session turn — Core only claims the loop where it
+    /// really is running one.
+    flux_loop_intent: Option<wcore_types::llm::FluxLoopIntent>,
+    /// #863 F2 — count of turns on which the router replied
+    /// `x-flux-loop-engaged: elevation` while this engine held the loop. A
+    /// non-zero value means both ladders climbed the same task.
+    flux_loop_collisions: u32,
     /// #282 contract V1: the REAL context window of the model Flux routed the
     /// LAST turn to (`x-flux-model-window`). `None` until Flux signals back.
     /// Used to reconcile the #255 pre-flight overflow guard against the actual
@@ -4481,6 +4498,7 @@ impl AgentEngine {
         let memory_enabled = config.memory.enabled;
 
         Self {
+            flux_loop_intent: None,
             provider,
             egress_policy: wcore_egress::default_policy(),
             tools: Arc::new(tools),
@@ -4634,6 +4652,7 @@ impl AgentEngine {
             pending_hook_phase_consumptions: Vec::new(),
             // #282: mint the stable Flux conversation id once per engine.
             conversation_id: uuid::Uuid::new_v4().to_string(),
+            flux_loop_collisions: 0,
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
             flux_context_pressure: None,
@@ -4759,6 +4778,7 @@ impl AgentEngine {
         let memory_enabled = config.memory.enabled;
 
         Self {
+            flux_loop_intent: None,
             provider,
             egress_policy: wcore_egress::default_policy(),
             tools: Arc::new(tools),
@@ -4910,6 +4930,7 @@ impl AgentEngine {
             // #282: mint the stable Flux conversation id once per engine. A
             // resumed session gets a fresh id (sticky routing is best-effort).
             conversation_id: uuid::Uuid::new_v4().to_string(),
+            flux_loop_collisions: 0,
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
             flux_context_pressure: None,
@@ -5940,6 +5961,18 @@ impl AgentEngine {
     /// Install the policy minted by `AgentBootstrap` for this exact session.
     pub fn set_egress_policy(&mut self, policy: wcore_egress::SharedPolicy) {
         self.egress_policy = policy;
+    }
+
+    /// #863 F2 — declare that this engine's turns are mid-loop material of a
+    /// client-side climb Core owns. Called at the durable-spawn seam for an
+    /// `Anvil`-origin child; see [`AgentEngine::flux_loop_intent`].
+    pub fn set_flux_loop_intent(&mut self, intent: wcore_types::llm::FluxLoopIntent) {
+        self.flux_loop_intent = Some(intent);
+    }
+
+    /// #863 F2 — how many turns collided with a server-side Flux ladder.
+    pub fn flux_loop_collisions(&self) -> u32 {
+        self.flux_loop_collisions
     }
 
     /// W7 Pre-flight 0: read access to the engine's `MemoryApi` handle.
@@ -12007,6 +12040,21 @@ impl AgentEngine {
                         // context-routing headers on tier-alias turns.
                         conversation_id: Some(self.conversation_id.clone()),
                         client_context_tokens: Some(input_token_estimate as u64),
+                        // #863 F2 — loop-ownership provenance. `None` on an
+                        // ordinary session turn; `ClientOwned("anvil")` on an
+                        // Anvil builder fork.
+                        flux_loop_intent: self.flux_loop_intent.clone(),
+                        // #863 F3 — per-turn cache variance for loop traffic.
+                        // DERIVED, never randomly minted: the session journal
+                        // digests the prepared request, so a value that changed
+                        // between preparing a turn and replaying it would break
+                        // recovery. `conversation_id` is stable for the session
+                        // and `turn` is monotonic within it, so this is unique
+                        // per turn and identical on replay.
+                        flux_turn_nonce: self
+                            .flux_loop_intent
+                            .as_ref()
+                            .map(|_| format!("{}:{}", self.conversation_id, turn)),
                         // Crucible #3: per-session sampling temperature (council child
                         // engines set it; top-level session leaves it `None`).
                         temperature: self.temperature,
@@ -13669,7 +13717,51 @@ impl AgentEngine {
                             model_window,
                             context_pressure,
                             tokens_counted,
+                            loop_engaged,
                         } => {
+                            // #863 F2 — the runtime collision detector. Core
+                            // declared it owns the climb for this turn; if the
+                            // router ran its OWN server-side ladder anyway, both
+                            // ladders climbed the same task and whatever came
+                            // back is contaminated mid-loop material. Record it
+                            // and fault the turn — a candidate produced under a
+                            // doubled ladder must never be accepted, and a
+                            // receipt that counted it would be the exact "one
+                            // receipt lying about the other" this contract
+                            // exists to prevent.
+                            //
+                            // `cascade` is NOT a collision: F1 explicitly
+                            // permits Cascade's single-tier climb-on-failure.
+                            // A missing header is not one either — a non-Flux
+                            // endpoint never sends one.
+                            if let Some(owner) = self
+                                .flux_loop_intent
+                                .as_ref()
+                                .and_then(|i| i.owner())
+                                .map(str::to_string)
+                                && wcore_providers::flux_loop::collides(
+                                    Some(owner.as_str()),
+                                    loop_engaged.as_deref(),
+                                )
+                            {
+                                let engaged = loop_engaged
+                                    .as_deref()
+                                    .unwrap_or(wcore_providers::flux_loop::LOOP_ENGAGED_ELEVATION)
+                                    .to_string();
+                                self.flux_loop_collisions =
+                                    self.flux_loop_collisions.saturating_add(1);
+                                // One message, defined next to the predicate, so
+                                // the wording the operator sees and the wording
+                                // the contract tests assert cannot drift apart.
+                                let detail =
+                                    wcore_providers::flux_loop::collision_message(&owner, &engaged);
+                                tracing::error!(
+                                    loop_owner = %owner,
+                                    loop_engaged = %engaged,
+                                    "{detail}"
+                                );
+                                return Err(AgentError::ApiError(detail));
+                            }
                             // #282 contract V1: Flux SIGNALS-BACK. Capture the
                             // pressure for future #280 scheduling (not yet acted
                             // on) and the REAL served-model window so the #255
@@ -19483,6 +19575,8 @@ mod set_config_tests {
 
     fn make_engine(model: &str) -> super::AgentEngine {
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -21354,6 +21448,8 @@ mod phase6_tests {
 
     fn make_engine(model: &str, allow_list: Vec<String>) -> super::AgentEngine {
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -21676,6 +21772,8 @@ mod compact_tests {
         messages: Vec<Message>,
     ) -> super::AgentEngine {
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -23382,6 +23480,8 @@ mod plan_mode_tests {
     fn make_plan_engine(allow_list: Vec<String>) -> super::AgentEngine {
         let flag = Arc::new(AtomicBool::new(false));
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -23837,6 +23937,8 @@ mod hook_integration_tests {
 
     fn make_engine(model: &str) -> super::AgentEngine {
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -25003,6 +25105,8 @@ mod approval_bridge_engine_tests {
 
     fn make_engine() -> super::AgentEngine {
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -26069,6 +26173,8 @@ mod user_model_writeback_tests {
 
     fn make_engine() -> super::AgentEngine {
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,

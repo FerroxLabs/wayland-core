@@ -26,6 +26,58 @@ impl RoutingHint {
     }
 }
 
+/// The canonical `loop_owner` value wayland-core sends: this process runs a
+/// CLIENT-side Anvil climb.
+pub const ANVIL_LOOP_OWNER: &str = "anvil";
+
+/// #863 F2/F5 — loop-ownership provenance for the Flux anti-collision
+/// handshake, carried on [`LlmRequest::flux_loop_intent`].
+///
+/// The contract has exactly one rule: **one ladder per task**. wayland-core's
+/// Anvil is a client-side climb; Flux's Elevation is a server-side climb; a
+/// request must never run both. The two arms below are the only two things a
+/// caller can say about that, and they are mutually exclusive **by
+/// construction** — there is no representable state in which a turn both
+/// declares Core owns the loop and opts into Flux running its own. That is F5
+/// ("Core must never set `flux_verify` implicitly on driver traffic") enforced
+/// by the type system rather than by a guard somebody can forget to call.
+///
+/// NOTE the naming. The wire field is `loop_owner`, but nothing in Rust here is
+/// called `loop_owner`: the Goals subsystem (`wcore_agent::goal`) has its own,
+/// entirely unrelated `loop_owner` concept spread over ~14 files. The `flux_`
+/// prefix keeps the two greppable apart — a plain `loop_owner` grep in this
+/// workspace returns Goals hits and nothing to do with Flux.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FluxLoopIntent {
+    /// Core owns the loop for this turn — mid-loop material of a client-side
+    /// climb. Flux MUST NOT engage Elevation on it regardless of alias, and
+    /// MUST NOT stamp verification on it. Emitted as `X-Flux-Loop-Owner` (and
+    /// `metadata.loop_owner` on OpenAI-wire bodies).
+    ClientOwned(String),
+    /// Explicit per-request opt-in to Flux running its OWN server-side
+    /// Elevation ladder on `flux-auto` (Flux's C2 decision). Emitted as
+    /// `X-Flux-Verify` (and `metadata.flux_verify` on OpenAI-wire bodies). Core
+    /// never sets this implicitly — it exists so a caller who genuinely wants
+    /// the server ladder can ask for it, and asking for it makes `ClientOwned`
+    /// unrepresentable on the same turn.
+    ServerVerify,
+}
+
+impl FluxLoopIntent {
+    /// The `loop_owner` value to put on the wire, or `None` for `ServerVerify`.
+    pub fn owner(&self) -> Option<&str> {
+        match self {
+            Self::ClientOwned(owner) => Some(owner.as_str()),
+            Self::ServerVerify => None,
+        }
+    }
+
+    /// Whether this turn opts into Flux's server-side Elevation ladder.
+    pub fn is_server_verify(&self) -> bool {
+        matches!(self, Self::ServerVerify)
+    }
+}
+
 /// A request to the LLM provider
 ///
 /// W8 v0.6.3: `cache_tier` lets callers express an Anthropic prompt-cache
@@ -108,6 +160,41 @@ pub struct LlmRequest {
     /// all existing `..Default::default()` construction sites keep sending the
     /// field.
     pub omit_max_tokens: bool,
+    /// #863 F2/F5 — loop-ownership provenance for the Flux anti-collision
+    /// contract. `Some(ClientOwned("anvil"))` marks this turn as mid-loop
+    /// material of wayland-core's CLIENT-side Anvil climb, so Flux must not run
+    /// its server-side Elevation ladder on it; `Some(ServerVerify)` is the
+    /// opposite, explicit opt-in. See [`FluxLoopIntent`] for why the two cannot
+    /// coexist and why nothing here is spelled `loop_owner`.
+    ///
+    /// Whether this reaches the wire is decided by the ENDPOINT, not by this
+    /// field and not by the model name: providers emit it only when
+    /// `ProviderCompat::flux_loop_provenance()` is on. That is deliberate — the
+    /// F2 contract says Flux honours `loop_owner` "regardless of alias", so
+    /// gating emission on a tier-alias name (the way the #282 `x-wl-*` headers
+    /// do) would silently drop the marking on a concrete-model driver turn,
+    /// which is exactly the collision this contract exists to prevent.
+    ///
+    /// `Default` is `None`, so every existing `..Default::default()`
+    /// construction site stays back-compatible and emits nothing.
+    pub flux_loop_intent: Option<FluxLoopIntent>,
+    /// #863 F3 — per-turn cache-variance nonce, emitted as `metadata.nonce` on
+    /// OpenAI-wire bodies alongside the loop-ownership marking.
+    ///
+    /// FerroxLabs/wayland#862 measured identical requests returning identical
+    /// cached completion ids, which intermittently wedges an iterative client
+    /// loop: the loop asks again, gets its own previous answer back, and cannot
+    /// make progress. Flux bypasses/varies its semantic cache for requests
+    /// carrying `loop_owner`, so this is belt-and-braces — but it is the half
+    /// that does not depend on the server keeping its promise.
+    ///
+    /// Must be DERIVED, never randomly minted at the provider: the session
+    /// journal digests the prepared request, so a value that changed between
+    /// building a turn and replaying it would break recovery. The engine
+    /// derives it from the stable conversation id plus the turn index.
+    ///
+    /// `Default` is `None`, so all existing construction sites emit nothing.
+    pub flux_turn_nonce: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -223,6 +310,12 @@ pub enum LlmEvent {
         context_pressure: Option<f32>,
         /// `x-flux-context-tokens-counted` — Flux's own count of the prompt.
         tokens_counted: Option<u64>,
+        /// #863 F2 — `x-flux-loop-engaged`: which ladder Flux ran for this
+        /// turn (`none` | `cascade` | `elevation`). This is the RUNTIME half of
+        /// the anti-collision detector: `elevation` on a turn Core marked
+        /// `FluxLoopIntent::ClientOwned` means both ladders ran, and the
+        /// candidate it produced is contaminated mid-loop material.
+        loop_engaged: Option<String>,
     },
 }
 

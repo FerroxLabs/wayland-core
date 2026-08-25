@@ -70,6 +70,8 @@ mod tests {
 
     fn request_with(messages: Vec<Message>) -> LlmRequest {
         LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "m".into(),
             system: "s".into(),
             messages,

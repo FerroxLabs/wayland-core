@@ -149,15 +149,26 @@ impl AnthropicProvider {
         base_url: &str,
         key: &str,
         body: &Value,
+        request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         let url = format!("{}/v1/messages", base_url);
-        let response = builder_send_with_retry(
-            self.client
-                .post(&url)
-                .headers(self.build_headers(key)?)
-                .json(body),
-        )
-        .await?;
+        // #863 F2 — loop-ownership marking on the Anthropic Messages
+        // translation. HEADER ONLY, deliberately: the Anthropic `metadata`
+        // object accepts `user_id` and rejects arbitrary keys, so the
+        // `metadata.loop_owner` carrier the OpenAI-wire paths use is not
+        // wire-legal here. The header carrier is, and it is the one carrier
+        // that survives all three translations — which is why the contract
+        // names it first.
+        //
+        // Endpoint-gated like everywhere else: `compat.flux_loop_provenance()`
+        // is off for `anthropic_defaults`, so api.anthropic.com receives a
+        // byte-identical request and Core never leaks its internal loop state
+        // to an endpoint that has no contract to honour it. An Anthropic-wire
+        // deployment that DOES speak the handshake turns it on in its compat.
+        let mut headers = self.build_headers(key)?;
+        crate::flux_loop::apply_loop_headers(&mut headers, request, &self.compat);
+        let response =
+            builder_send_with_retry(self.client.post(&url).headers(headers).json(body)).await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -557,7 +568,7 @@ impl LlmProvider for AnthropicProvider {
         let key = self.select_key()?;
         let primary = self.effective_base_url();
 
-        match self.try_stream(&primary, &key, &body).await {
+        match self.try_stream(&primary, &key, &body, request).await {
             Ok(rx) => Ok(rx),
             // Region-locked-key failover: a credential rejected here (401/403)
             // may belong to the provider's alternate platform. When a fallback
@@ -579,7 +590,7 @@ impl LlmProvider for AnthropicProvider {
                     .auth_fallback_base_url
                     .clone()
                     .expect("is_some_and guarantees Some");
-                let rx = self.try_stream(&fallback, &key, &body).await?;
+                let rx = self.try_stream(&fallback, &key, &body, request).await?;
                 self.pin_base_url(&fallback);
                 Ok(rx)
             }
@@ -1532,6 +1543,8 @@ mod tests {
 
     fn cache_req(tier: Option<CacheTier>) -> LlmRequest {
         LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "claude-sonnet-4-6".into(),
             system: "you are a test".into(),
             messages: vec![wcore_types::message::Message::new(

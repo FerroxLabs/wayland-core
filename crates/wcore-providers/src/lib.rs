@@ -19,6 +19,7 @@ pub mod fingerprint;
 pub mod fireworks;
 pub mod flux_fetch;
 pub mod flux_image;
+pub mod flux_loop;
 pub mod flux_router;
 pub mod gemini;
 pub mod groq;

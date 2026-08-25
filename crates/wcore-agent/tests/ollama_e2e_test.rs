@@ -91,6 +91,8 @@ async fn ollama_provider_streams_text_delta_and_done() {
 
     let provider = OllamaProvider::new(format!("{}/api/chat", server.uri()), "llama4");
     let request = LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "ollama:llama4".into(),
         system: "you are a test".into(),
         messages: vec![Message::new(
@@ -223,6 +225,8 @@ async fn ollama_provider_maps_length_done_reason() {
 
     let provider = OllamaProvider::new(format!("{}/api/chat", server.uri()), "llama4");
     let request = LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "llama4".into(),
         system: String::new(),
         messages: vec![Message::new(
@@ -269,6 +273,8 @@ async fn ollama_provider_5xx_surfaces_as_api_error() {
 
     let provider = OllamaProvider::new(format!("{}/api/chat", server.uri()), "llama4");
     let request = LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "llama4".into(),
         system: String::new(),
         messages: vec![Message::new(
@@ -313,6 +319,8 @@ async fn ollama_live_smoke() {
     let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "llama3".into());
     let provider = OllamaProvider::new(base_url, model);
     let request = LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "llama3".into(),
         system: "Reply with a single word.".into(),
         messages: vec![Message::new(

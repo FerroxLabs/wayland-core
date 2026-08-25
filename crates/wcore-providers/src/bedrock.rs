@@ -2035,6 +2035,8 @@ mod tests {
 
         fn req(model: &str, system: &str, messages: Vec<Message>) -> LlmRequest {
             LlmRequest {
+                flux_loop_intent: None,
+                flux_turn_nonce: None,
                 model: model.to_string(),
                 system: system.to_string(),
                 messages,

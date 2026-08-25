@@ -177,6 +177,8 @@ mod tests {
             DebugConfig::default(),
         );
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "anthropic/claude-opus-4-7".into(),
             system: String::new(),
             messages: vec![],
@@ -247,6 +249,8 @@ mod tests {
         // network layer (and fail there with a connection error), not panic
         // earlier inside the adapter.
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "anthropic/claude-opus-4-7".into(),
             system: String::new(),
             messages: vec![],

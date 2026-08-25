@@ -127,6 +127,8 @@ mod tests {
             DebugConfig::default(),
         );
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "fugu".into(),
             system: String::new(),
             messages: vec![],

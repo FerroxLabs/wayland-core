@@ -51,6 +51,8 @@ fn connection_err_provider(calls: Arc<AtomicUsize>) -> Arc<dyn LlmProvider> {
 
 fn dummy_request() -> LlmRequest {
     LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "test-model".into(),
         system: String::new(),
         messages: vec![],

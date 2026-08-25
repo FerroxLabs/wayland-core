@@ -136,6 +136,8 @@ mod tests {
             DebugConfig::default(),
         );
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "moonshot-v1-8k".into(),
             system: String::new(),
             messages: vec![],

@@ -1942,6 +1942,32 @@ struct PreparedProviderRequestV1 {
     client_context_tokens: Option<u64>,
     temperature: Option<f32>,
     omit_max_tokens: bool,
+    /// #863 F2 — loop-ownership provenance, journaled so a RECOVERED turn is
+    /// replayed with the same marking it was prepared with. Without this the
+    /// round-trip would silently drop it and a recovered Anvil builder turn
+    /// would go back on the wire unmarked — a contract break visible nowhere.
+    ///
+    /// `default` + `skip_serializing_if` keep the encoding byte-identical for
+    /// every unmarked turn, so existing journals still decode under
+    /// `deny_unknown_fields` and no already-written digest changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flux_loop_intent: Option<PreparedFluxLoopIntentV1>,
+    /// #863 F3 — the per-turn cache-variance nonce, journaled for the same
+    /// reason: it is part of the exact request that was sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flux_turn_nonce: Option<String>,
+}
+
+/// #863 F2 — journal form of [`wcore_types::llm::FluxLoopIntent`]. Kept as an
+/// enum rather than two flat fields so the "cannot be both" invariant survives
+/// the round-trip instead of being re-checkable only in memory.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum PreparedFluxLoopIntentV1 {
+    #[serde(rename = "client_owned")]
+    ClientOwned { owner: String },
+    #[serde(rename = "server_verify")]
+    ServerVerify,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -2122,6 +2148,20 @@ impl From<&wcore_types::llm::LlmRequest> for PreparedProviderRequestV1 {
             client_context_tokens: request.client_context_tokens,
             temperature: request.temperature,
             omit_max_tokens: request.omit_max_tokens,
+            flux_loop_intent: request
+                .flux_loop_intent
+                .as_ref()
+                .map(|intent| match intent {
+                    wcore_types::llm::FluxLoopIntent::ClientOwned(owner) => {
+                        PreparedFluxLoopIntentV1::ClientOwned {
+                            owner: owner.clone(),
+                        }
+                    }
+                    wcore_types::llm::FluxLoopIntent::ServerVerify => {
+                        PreparedFluxLoopIntentV1::ServerVerify
+                    }
+                }),
+            flux_turn_nonce: request.flux_turn_nonce.clone(),
         }
     }
 }
@@ -2172,6 +2212,15 @@ impl From<PreparedProviderRequestV1> for wcore_types::llm::LlmRequest {
             client_context_tokens: request.client_context_tokens,
             temperature: request.temperature,
             omit_max_tokens: request.omit_max_tokens,
+            flux_loop_intent: request.flux_loop_intent.map(|intent| match intent {
+                PreparedFluxLoopIntentV1::ClientOwned { owner } => {
+                    wcore_types::llm::FluxLoopIntent::ClientOwned(owner)
+                }
+                PreparedFluxLoopIntentV1::ServerVerify => {
+                    wcore_types::llm::FluxLoopIntent::ServerVerify
+                }
+            }),
+            flux_turn_nonce: request.flux_turn_nonce,
         }
     }
 }

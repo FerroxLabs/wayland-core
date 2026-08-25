@@ -132,6 +132,8 @@ pub struct RecoveredProviderMetadata {
     pub model_window: Option<u64>,
     pub context_pressure: Option<f32>,
     pub tokens_counted: Option<u64>,
+    /// #863 F2 — which ladder the router ran on the recovered turn.
+    pub loop_engaged: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +330,10 @@ struct StrictProviderMetadata {
     model_window: Option<u64>,
     context_pressure: Option<f32>,
     tokens_counted: Option<u64>,
+    /// #863 F2 — `default` so a journal written before this field existed
+    /// still decodes under the strict shape.
+    #[serde(default)]
+    loop_engaged: Option<String>,
 }
 
 /// Compute the canonical digest used by both the live journal writer and
@@ -549,6 +555,7 @@ pub fn recover_provider_round(
                     model_window: decoded.model_window,
                     context_pressure: decoded.context_pressure,
                     tokens_counted: decoded.tokens_counted,
+                    loop_engaged: decoded.loop_engaged,
                 };
             }
         }

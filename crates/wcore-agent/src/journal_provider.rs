@@ -661,6 +661,7 @@ fn provider_stream_event(event: &LlmEvent) -> Result<Option<ProviderStreamEvent>
             model_window,
             context_pressure,
             tokens_counted,
+            loop_engaged,
         } => {
             if context_pressure.is_some_and(|pressure| !pressure.is_finite()) {
                 return Err(ProviderError::Parse(authority_message(
@@ -673,6 +674,7 @@ fn provider_stream_event(event: &LlmEvent) -> Result<Option<ProviderStreamEvent>
                     model_window,
                     context_pressure,
                     tokens_counted,
+                    loop_engaged,
                 })
                 .map_err(|error| {
                     ProviderError::Parse(authority_message(format!(
@@ -690,6 +692,10 @@ struct ProviderMetadata<'a> {
     model_window: &'a Option<u64>,
     context_pressure: &'a Option<f32>,
     tokens_counted: &'a Option<u64>,
+    /// #863 F2 — which ladder the router ran. Journaled with the rest of the
+    /// signal-back so a replayed turn can still detect a collision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    loop_engaged: &'a Option<String>,
 }
 
 #[cfg(test)]

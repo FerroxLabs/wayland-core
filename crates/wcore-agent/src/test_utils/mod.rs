@@ -385,6 +385,8 @@ mod tests {
     async fn scripted_provider_replays_script_per_call() {
         let p = ScriptedProvider::single_text_turn("hello");
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "test".into(),
             system: String::new(),
             messages: vec![],

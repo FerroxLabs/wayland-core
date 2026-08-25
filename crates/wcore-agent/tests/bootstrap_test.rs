@@ -966,6 +966,8 @@ mod resilience_wrap {
         // event should fire because the wrap is absent.
         for _ in 0..5 {
             let req = LlmRequest {
+                flux_loop_intent: None,
+                flux_turn_nonce: None,
                 model: "test".into(),
                 system: String::new(),
                 messages: vec![],
@@ -1018,6 +1020,8 @@ mod resilience_wrap {
         // 3 failed calls = threshold reached → breaker opens → reporter fires.
         for _ in 0..4 {
             let req = LlmRequest {
+                flux_loop_intent: None,
+                flux_turn_nonce: None,
                 model: "test".into(),
                 system: String::new(),
                 messages: vec![],

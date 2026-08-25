@@ -363,6 +363,31 @@ pub struct ProviderCompat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omit_max_tokens_when_unsized: Option<bool>,
 
+    /// #863 F2 — whether this ENDPOINT speaks the Flux loop-ownership
+    /// anti-collision handshake (`X-Flux-Loop-Owner` / `metadata.loop_owner`,
+    /// `X-Flux-Verify` / `metadata.flux_verify`, and the `x-flux-loop-engaged`
+    /// response echo).
+    ///
+    /// `Some(true)` for `flux_router_defaults` only; every other provider
+    /// leaves it `None` (→ false) and no loop-provenance field ever reaches
+    /// their wire. This is the single, vendor-neutral place that decides it —
+    /// deliberately NOT a `base_url.contains("fluxrouter")` test and
+    /// deliberately NOT `is_flux_tier_alias(&request.model)`:
+    ///
+    /// - a URL test is the hardcoded-provider-quirk shape this whole field
+    ///   family exists to remove, and
+    /// - a model-name test would be WRONG for this contract. The #282 `x-wl-*`
+    ///   headers gate on the tier alias because they are routing hints that
+    ///   only mean something to the router's own tiers. Loop ownership is not a
+    ///   routing hint: Flux honours `loop_owner` "regardless of alias" (F2), so
+    ///   an alias gate would silently drop the marking on a driver turn pinned
+    ///   to a concrete model id — the precise case where a collision is
+    ///   undetectable from either side.
+    ///
+    /// A self-hosted or Anthropic-wire deployment that also speaks the
+    /// handshake turns it on here rather than by being pattern-matched.
+    pub flux_loop_provenance: Option<bool>,
+
     /// #648 — whether the provider's served model(s) accept inline image
     /// (vision) input. Consulted by `OpenAIProvider::build_messages`: when
     /// `false` (or unset) a `ContentBlock::Image` is NOT emitted as an OpenAI
@@ -796,6 +821,10 @@ impl ProviderCompat {
             // Flux user unless they knew about `OPENAI_IMAGE_MODEL=flux-image`.
             // Measured live by lane `27-c3-media`, one variable moved.
             image_model: Some("flux-image".into()),
+            // #863 F2 — Flux is the endpoint that implements the loop-ownership
+            // anti-collision handshake (Elevation is its server-side ladder), so
+            // it is the one preset that opts in.
+            flux_loop_provenance: Some(true),
             ..Self::openai_compat_provider("flux-router")
         }
     }
@@ -1026,6 +1055,12 @@ impl ProviderCompat {
             omit_max_tokens_when_unsized: user
                 .omit_max_tokens_when_unsized
                 .or(defaults.omit_max_tokens_when_unsized),
+            // #863 F2 — must be merged like every other field. Omitting it here
+            // would drop the `flux_router_defaults` opt-in on every merged
+            // compat, leaving the loop-provenance gate permanently false in
+            // production while its unit tests (which read the preset directly)
+            // stayed green.
+            flux_loop_provenance: user.flux_loop_provenance.or(defaults.flux_loop_provenance),
             supports_vision: user.supports_vision.or(defaults.supports_vision),
             supports_tools: user.supports_tools.or(defaults.supports_tools),
             supports_structured_output: user
@@ -1103,6 +1138,13 @@ impl ProviderCompat {
     /// presets set `true`.
     pub fn omit_max_tokens_when_unsized(&self) -> bool {
         self.omit_max_tokens_when_unsized.unwrap_or(false)
+    }
+
+    /// #863 F2 — whether this endpoint speaks the Flux loop-ownership
+    /// handshake. Default `false`: absent an explicit opt-in, no
+    /// loop-provenance field is ever put on the wire.
+    pub fn flux_loop_provenance(&self) -> bool {
+        self.flux_loop_provenance.unwrap_or(false)
     }
 
     /// #648: whether to send inline images as OpenAI `image_url` multipart

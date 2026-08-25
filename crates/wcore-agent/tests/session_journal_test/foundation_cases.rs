@@ -56,6 +56,8 @@ fn provider_request_digest_changes_when_wire_relevant_input_changes() {
 fn prepared_provider_request_snapshot_round_trips_every_request_field() {
     let timestamp = "2026-07-16T01:02:03Z".parse().unwrap();
     let request = LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "model-a".into(),
         system: "system prompt".into(),
         messages: vec![Message {

@@ -1138,6 +1138,8 @@ mod tests {
 
     fn make_request_with_messages(messages: Vec<Message>) -> LlmRequest {
         LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "gemini-2.5-pro".into(),
             system: String::new(),
             messages,
