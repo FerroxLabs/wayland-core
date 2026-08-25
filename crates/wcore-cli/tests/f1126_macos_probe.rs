@@ -319,9 +319,19 @@ fn f1126_probe_the_approve_once_stall() {
     let mut done_at: Option<Duration> = None;
     let mut poked_tab = false;
     let mut poked_prompt = false;
+    let mut contaminated = false;
     loop {
         if pty.screen_text().contains(DONE_TOKEN) {
             done_at = Some(started.elapsed());
+            // CONTAMINATION GUARD. The t=75s poke sends a fresh prompt, and the
+            // mock replays its last scripted turn once the script drains - so
+            // that new turn prints DONE_TOKEN too. A token that appears only
+            // after the poke says nothing about the WEDGED turn, and counting
+            // it would turn the instrument into a machine for manufacturing
+            // passes. Iteration 3 hit exactly this: one attempt "passed" at
+            // 82.859s against ~2s for its siblings, i.e. immediately after the
+            // poke.
+            contaminated = poked_prompt;
             break;
         }
         let elapsed = started.elapsed();
@@ -422,8 +432,10 @@ fn f1126_probe_the_approve_once_stall() {
     println!("--- tool_results ---\n{}", tool_result_text(&bodies));
     pty.quit();
 
+    println!("contaminated_by_poke = {contaminated}");
     assert!(
-        done_at.is_some(),
-        "the closing token never reached the screen within {budget:?}"
+        done_at.is_some() && !contaminated,
+        "the closing token did not reach the screen on its own within {budget:?} \
+         (done_at={done_at:?}, contaminated_by_poke={contaminated})"
     );
 }
