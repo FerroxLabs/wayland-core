@@ -1025,6 +1025,21 @@ pub struct ProviderConfig {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    /// #685 — the explicit OFF state. `enabled = false` refuses this provider
+    /// outright, BEFORE any rung of the credential ladder is consulted.
+    ///
+    /// It exists because "no credential in the config file" was never an off
+    /// switch. Four independent sources feed the same ladder — the `--api-key`
+    /// flag, this file, the credentials store, and the process environment,
+    /// which `~/.wayland/.env` re-injects at every startup — so a host UI that
+    /// clears the inline `api_key` leaves three live sources and the provider
+    /// keeps being billed. Anything short of a source-independent flag is a
+    /// toggle that turns nothing off.
+    ///
+    /// Fail-closed by construction: the refusal is not "resolve, then ignore",
+    /// it is "never resolve". `None` (the default) means enabled — an existing
+    /// config keeps behaving exactly as before.
+    pub enabled: Option<bool>,
     /// Routing-policy metadata, not a credential or provider wire header.
     pub organization: Option<String>,
     pub region: Option<String>,
@@ -2366,6 +2381,19 @@ impl Config {
         let account_id = resolved_provider.account_id.clone();
         let provider = resolved_provider.provider_type;
         let provider_config = resolved_provider.effective_config;
+
+        // #685 — the OFF state, enforced before ANY credential source is read.
+        // Placed here rather than inside `resolve_api_key` on purpose: the
+        // ladder is not the only way a key reaches this function (the CLI flag
+        // and the catalog entry's own env var both bypass rungs of it), and a
+        // check that guards only the ladder would leave the two loudest sources
+        // still live. Nothing below this line runs for a disabled provider.
+        if provider_config.enabled == Some(false) {
+            return Err(ProviderDisabled {
+                provider: provider_label.clone(),
+            }
+            .into());
+        }
         // Set only when `--provider <id>` matched a bundled data-driven catalog
         // entry (resolves to ProviderType::OpenAI). Used below to stamp the
         // catalog base_url, the catalog-derived compat, and the env-var key.
@@ -3140,6 +3168,10 @@ fn merge_provider_configs(base: ProviderConfig, overlay: ProviderConfig) -> Prov
         model: overlay.model.or(base.model),
         api_key: overlay.api_key.or(base.api_key),
         base_url: overlay.base_url.or(base.base_url),
+        // #685 — an alias inherits the underlying entry's OFF state. Disabling
+        // `[providers.anthropic]` must not be escapable by pointing an alias at
+        // it; the alias may still set its own value to override deliberately.
+        enabled: overlay.enabled.or(base.enabled),
         organization: overlay.organization.or(base.organization),
         region: overlay.region.or(base.region),
         prompt_caching: overlay.prompt_caching.or(base.prompt_caching),
@@ -3253,6 +3285,11 @@ pub enum CouncilProviderError {
     /// config, credentials store, or env var). Skip, don't fail.
     #[error("council provider '{0}' has no usable api key")]
     Keyless(String),
+    /// #685 — the provider is `enabled = false`. Distinct from [`Self::Keyless`]
+    /// because the remedy is the opposite: a keyless member needs a credential,
+    /// a disabled one has been turned off on purpose and must stay off.
+    #[error("council provider '{0}' is disabled (`enabled = false`)")]
+    Disabled(String),
 }
 
 /// Resolve a council `spec` (`"provider"` or `"provider:model"`) into a fully
@@ -3304,6 +3341,13 @@ pub fn resolve_council_provider(
     let account_id = resolved.account_id.clone();
     let provider_config = resolved.effective_config;
     let catalog_entry = resolved.catalog_entry;
+
+    // #685 — same OFF state, same position: before any credential is read. A
+    // disabled provider is not a keyless member the council may retry later,
+    // it is one the user turned off, so it gets its own variant.
+    if provider_config.enabled == Some(false) {
+        return Err(CouncilProviderError::Disabled(provider_id.to_string()));
+    }
 
     let base_url = provider_config
         .base_url
@@ -3679,6 +3723,24 @@ fn resolve_api_key_from_env(provider: ProviderType) -> anyhow::Result<String> {
      `API_KEY` names no provider and is ignored unless WAYLAND_ALLOW_BARE_API_KEY=1."
 )]
 pub struct MissingApiKey;
+
+/// The selected provider is explicitly disabled in config (#685).
+///
+/// Typed and raised BEFORE credential resolution, so it is not a variant of
+/// "no key found": the distinction matters to the user, because every source
+/// that WOULD have supplied a key is still sitting there and the remedy is the
+/// opposite one (re-enable, don't add a credential).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Provider '{provider}' is disabled: `[providers.{provider}] enabled = false` in your \
+     config. No credential source can override this — not --api-key, not the credentials \
+     store, not API_KEY or any other environment variable, and not ~/.wayland/.env. \
+     Set `enabled = true` (or delete the line) to use it again."
+)]
+pub struct ProviderDisabled {
+    /// The provider id exactly as the session requested it.
+    pub provider: String,
+}
 
 /// The provider whose credentials-store slot an ENV VAR NAME stands for, or
 /// `None` when the name is a tool key with no store slot at all.
@@ -6040,7 +6102,9 @@ max_tokens = 64000                 # a CAP; the engine clamps it per-model befor
 
 # Provider-specific API settings
 [providers.anthropic]
-# api_key = "sk-ant-xxx"         # can also use env: API_KEY or ANTHROPIC_API_KEY
+# enabled = false                # turn this provider OFF: no credential source
+#                                # (flag, store, env, ~/.wayland/.env) revives it
+# api_key = "sk-ant-xxx"         # can also use env: ANTHROPIC_API_KEY
 # base_url = "https://api.anthropic.com"
 
 [providers.openai]

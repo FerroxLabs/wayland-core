@@ -30,11 +30,16 @@ use std::path::Path;
 
 use serial_test::serial;
 use tempfile::{TempDir, tempdir};
-use wcore_config::config::{CliArgs, Config};
+use wcore_config::config::{CliArgs, Config, store_provider_api_key};
 
 /// Invented literals. Distinct per source so an assertion can name WHICH rung
 /// answered, not merely that some rung did.
 const BARE_ENV_KEY: &str = "f685-fixture-bare-api-key-not-a-credential";
+const ANTHROPIC_ENV_KEY: &str = "f685-fixture-anthropic-env-not-a-credential";
+const CLI_KEY: &str = "f685-fixture-cli-flag-not-a-credential";
+const STORE_KEY: &str = "f685-fixture-store-not-a-credential";
+const ENV_FILE_KEY: &str = "f685-fixture-dotenv-not-a-credential";
+const VAULT_PASS: &str = "f685-test-vault-passphrase";
 
 /// Every variable that can satisfy the ladder from the developer's own shell.
 /// Cleared by default in each fixture — an ambient key would make every
@@ -152,5 +157,121 @@ fn bare_api_key_is_honoured_when_explicitly_opted_in() {
     assert_eq!(
         config.api_key, BARE_ENV_KEY,
         "the opt-in did not route the bare API_KEY into the ladder"
+    );
+}
+
+// ── 2. The OFF state ─────────────────────────────────────────────────────────
+
+const DISABLED: &str = "[providers.anthropic]\nenabled = false\n";
+
+/// Non-vacuity control for every `enabled = false` case below: the SAME
+/// fixture, with the flag absent, must resolve. Without this a refusal could
+/// mean "the fixture supplied no credential at all".
+#[test]
+#[serial(f685_credential_off_state)]
+fn control_enabled_provider_resolves_the_env_credential() {
+    let (_home, project, mut env) = fixture("");
+    env.set("ANTHROPIC_API_KEY", ANTHROPIC_ENV_KEY);
+
+    let config = Config::resolve(&cli(project.path()))
+        .expect("control: an enabled provider must resolve its env credential");
+    assert_eq!(config.api_key, ANTHROPIC_ENV_KEY);
+}
+
+#[test]
+#[serial(f685_credential_off_state)]
+fn disabled_provider_refuses_an_environment_credential() {
+    let (_home, project, mut env) = fixture(DISABLED);
+    env.set("ANTHROPIC_API_KEY", ANTHROPIC_ENV_KEY);
+
+    let err = Config::resolve(&cli(project.path()))
+        .err()
+        .unwrap_or_else(|| {
+            panic!(
+                "provider anthropic is `enabled = false` yet resolution succeeded from \
+             ANTHROPIC_API_KEY — there is no OFF state"
+            )
+        });
+    assert!(
+        err.to_string().contains("disabled"),
+        "expected a disabled-provider refusal, got: {err}"
+    );
+}
+
+#[test]
+#[serial(f685_credential_off_state)]
+fn disabled_provider_refuses_a_config_file_credential() {
+    let config_toml =
+        format!("[providers.anthropic]\nenabled = false\napi_key = \"{ANTHROPIC_ENV_KEY}\"\n");
+    let (_home, project, _env) = fixture(&config_toml);
+
+    let err = Config::resolve(&cli(project.path()))
+        .err()
+        .unwrap_or_else(|| panic!("a disabled provider resolved its inline config api_key"));
+    assert!(
+        err.to_string().contains("disabled"),
+        "expected a disabled-provider refusal, got: {err}"
+    );
+}
+
+#[test]
+#[serial(f685_credential_off_state)]
+fn disabled_provider_refuses_a_cli_flag_credential() {
+    let (_home, project, _env) = fixture(DISABLED);
+
+    let mut args = cli(project.path());
+    args.api_key = Some(CLI_KEY.to_string());
+
+    let err = Config::resolve(&args)
+        .err()
+        .unwrap_or_else(|| panic!("a disabled provider resolved a --api-key flag"));
+    assert!(
+        err.to_string().contains("disabled"),
+        "expected a disabled-provider refusal, got: {err}"
+    );
+}
+
+#[test]
+#[serial(f685_credential_off_state)]
+fn disabled_provider_refuses_a_credentials_store_credential() {
+    let (_home, project, mut env) = fixture(DISABLED);
+    env.set("WAYLAND_VAULT_PASSPHRASE", VAULT_PASS);
+    store_provider_api_key(wcore_config::config::ProviderType::Anthropic, STORE_KEY)
+        .expect("store write");
+
+    let err = Config::resolve(&cli(project.path()))
+        .err()
+        .unwrap_or_else(|| panic!("a disabled provider resolved its credentials-store slot"));
+    assert!(
+        err.to_string().contains("disabled"),
+        "expected a disabled-provider refusal, got: {err}"
+    );
+}
+
+#[test]
+#[serial(f685_credential_off_state)]
+fn disabled_provider_refuses_a_wayland_env_file_credential() {
+    let (home, project, _env) = fixture(DISABLED);
+    std::fs::write(
+        home.path().join(".env"),
+        format!("ANTHROPIC_API_KEY={ENV_FILE_KEY}\n"),
+    )
+    .unwrap();
+    // The startup re-injection that makes `~/.wayland/.env` a live fourth
+    // source no host toggle can clear.
+    wcore_config::env_file::load_wayland_env_file();
+
+    let resolved = Config::resolve(&cli(project.path()));
+
+    // Restore: `load_wayland_env_file` mutates the real process environment.
+    // SAFETY: single-threaded inside the serial group.
+    unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+
+    let err = resolved
+        .err()
+        .unwrap_or_else(|| panic!("a disabled provider resolved a ~/.wayland/.env credential"));
+    assert!(
+        err.to_string().contains("disabled"),
+        "expected a disabled-provider refusal, got: {err}"
     );
 }

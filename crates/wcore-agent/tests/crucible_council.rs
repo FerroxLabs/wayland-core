@@ -75,6 +75,7 @@ fn clone_err(e: &ResolveError) -> ResolveError {
     match e {
         ResolveError::Unknown(s) => ResolveError::Unknown(s.clone()),
         ResolveError::Keyless(s) => ResolveError::Keyless(s.clone()),
+        ResolveError::Disabled(s) => ResolveError::Disabled(s.clone()),
         ResolveError::Build(a, b) => ResolveError::Build(a.clone(), b.clone()),
     }
 }
