@@ -60,7 +60,7 @@ jobs:
           for i in 1 2 3 4 5; do
             echo "::group::probe attempt $i"
             cargo nextest run --profile ci --retries 0 --no-fail-fast \
-              -p wcore-cli --test f1126_macos_probe || echo "ATTEMPT $i FAILED"
+              -p wcore-cli --test f1126_macos_probe --no-capture || echo "ATTEMPT $i FAILED"
             echo "::endgroup::"
           done
 
