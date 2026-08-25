@@ -191,10 +191,83 @@ try {
   // fail-safe: the update check must never break a launch
 }
 
+// Debian/Ubuntu and RHEL package names for the shared objects the Linux
+// artifact can legitimately need, so the message below is actionable rather
+// than a soname the user has to search for.
+const LIB_PACKAGES = {
+  "libseccomp.so.2": { deb: "libseccomp2", rpm: "libseccomp" },
+  "libssl.so.3": { deb: "libssl3", rpm: "openssl-libs" },
+  "libcrypto.so.3": { deb: "libssl3", rpm: "openssl-libs" },
+  "libdbus-1.so.3": { deb: "libdbus-1-3", rpm: "dbus-libs" },
+  "libgcc_s.so.1": { deb: "libgcc-s1", rpm: "libgcc" },
+};
+
+// A binary the dynamic loader refuses is NOT a spawnSync error: the child IS
+// created, ld.so kills it before main, and "error while loading shared
+// libraries: libfoo.so.N: cannot open shared object file" goes straight to the
+// inherited stderr, where this process cannot read it. All that comes back is
+// status 127 -- which the engine itself can also exit with legitimately (a
+// Bash tool relaying "command not found"). So: re-probe with a side-effect-free
+// --version and a PIPED stderr, and only speak up when the loader is what
+// actually failed. Costs one extra spawn, on the failure path only. See #1128.
+function explainLoaderFailure(bin) {
+  let probe;
+  try {
+    probe = spawnSync(bin, ["--version"], {
+      stdio: ["ignore", "ignore", "pipe"],
+      encoding: "utf8",
+      timeout: 10000,
+    });
+  } catch (_e) {
+    return;
+  }
+  if (!probe || probe.status === 0) {
+    return;
+  }
+  const err = String(probe.stderr || "");
+  const m = /error while loading shared libraries: ([^\\s:]+)/.exec(err);
+  if (!m) {
+    return;
+  }
+  const lib = m[1];
+  const pkg = LIB_PACKAGES[lib];
+  const lines = [
+    "",
+    "wayland-core: this machine is missing a system library the engine needs.",
+    "",
+    "  missing:  " + lib,
+    "  binary:   " + bin,
+    "",
+    "This is not a wayland-core error -- the binary never started. Install the",
+    "library and re-run. Minimal images (node:*-slim, debian:*-slim, alpine,",
+    "distroless) commonly omit it.",
+    "",
+  ];
+  if (pkg) {
+    lines.push("  Debian/Ubuntu:  apt-get install -y " + pkg.deb);
+    lines.push("  RHEL/Fedora:    dnf install -y " + pkg.rpm);
+  } else {
+    lines.push("  Install the package providing " + lib + " for your distribution.");
+  }
+  lines.push("");
+  lines.push("Alpine/musl is not supported: the Linux artifact is glibc-linked.");
+  lines.push("");
+  console.error(lines.join("\\n"));
+}
+
 const result = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
 if (result.error) {
   console.error("wayland-core: failed to launch: " + result.error.message);
   process.exit(1);
+}
+// 127 is the only status a loader refusal can produce. Anything else is the
+// engine's own exit code and must be relayed untouched.
+if (result.status === 127 && process.platform === "linux") {
+  try {
+    explainLoaderFailure(bin);
+  } catch (_e) {
+    // fail-safe: a diagnostic must never change the exit path
+  }
 }
 process.exit(result.status === null ? 1 : result.status);
 `;
