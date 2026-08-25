@@ -25,6 +25,46 @@
 //! the master end, so the vt100 grid stays empty and every wait times out. The
 //! Windows terminal leg of this behaviour is NOT measured here.
 
+//! ## Why BOTH cases are quarantined on macOS — FerroxLabs/wayland#1126
+//!
+//! v0.13.6 quarantined only `approving_once_leaves_the_read_refused_by_the_sandbox`,
+//! on the reading that the approve-once path was what failed. That reading does
+//! not survive measurement.
+//!
+//! `a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds` carries the
+//! SAME signature. Measured: CI run 32505224898 job 97105432835,
+//! `TRY 1 FAIL [31.161s]` — the same ~31 s shape, on the same binary, on macOS.
+//! Reproduced again on 2026-08-25 in the #1126 probe job 97784635550, where the
+//! grant case failed at `31.464s` in the very attempt the approve-once case
+//! PASSED at `1.373s`.
+//!
+//! Across every macOS job that has ever executed this binary (it reached `main`
+//! on 2026-08-20, so the population is 16 jobs, not the whole month): the
+//! approve-once case failed at least one attempt in 4 of 14, the grant case in
+//! 1 of 16. Fisher exact p = 0.157. So the asymmetry is DIRECTIONAL BUT NOT
+//! ESTABLISHED — it is a difference in how often the two land on the same
+//! defect, not evidence that one of them is immune.
+//!
+//! `[profile.ci] retries = 2` does not apply here: `.config/nextest.toml`
+//! deliberately sets `retries = 0` for the pty/tui binaries, so ONE failed
+//! attempt fails the job. `CI (macos-latest)` is a required context. Leaving the
+//! grant case live therefore left a required check able to go red on any PR, at
+//! the rate measured above, for a defect already known and already tracked.
+//! Quarantining one of two cases that share a defect is not containment.
+//!
+//! What the failure actually is, measured on 2026-08-25 (probe job 97784635550):
+//! not a 30 s timeout but a PERMANENT wedge — 3 of 5 observed runs were still
+//! stuck at a 120 s ceiling with the TUI live and repainting (turn timer at
+//! `1m59s`). By then the mock provider had already received BOTH requests, the
+//! second carrying the tool_result, and the child process was entirely idle:
+//! every thread parked, no blocking syscall anywhere. The provider answered and
+//! the turn never ended. Both cases assert on that same closing turn, which is
+//! why both are exposed.
+//!
+//! Do NOT restore `retries` to hide this, and do not widen either attribute to a
+//! bare `#[ignore]`: the Linux and Windows legs still run both cases, and they
+//! are the legs that make this quarantine bounded rather than a deletion.
+//!
 #![cfg(unix)]
 
 use std::path::PathBuf;
@@ -145,6 +185,10 @@ fn provider_traffic(rt: &tokio::runtime::Runtime, server: &wiremock::MockServer)
 /// precisely not in this workspace), and `a` sent a bare `Always`, which the
 /// boundary check overrides, so the tool never ran and no tool_result was ever
 /// POSTed.
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "FerroxLabs/wayland#1126: the macOS wedge — see the module doc for why this case is quarantined too"
+)]
 #[test]
 fn a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds() {
     let home = TempDir::new().expect("tempdir");
@@ -237,12 +281,21 @@ fn a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds() {
 /// approval, not that it works *because of the folder grant*. It also pins the
 /// honesty of the docs: `once` does NOT run the call, and the protocol spec
 /// must not promise that it does.
-/// macOS-only quarantine, FerroxLabs/wayland#1109. This test times out at 30 s
+/// macOS-only quarantine, FerroxLabs/wayland#1126. This test times out at 30 s
 /// on the macOS leg and passes in ~0.9 s on Linux at the same commit, so the
 /// failure is platform-specific and not a property of what it asserts.
 /// Measured per-attempt failure rate on macOS: 5 of 6. Run 32613130982 job
 /// 97129254675 went TRY 1 FAIL 30.996s / TRY 2 FAIL 30.956s / TRY 3 PASS and
 /// the run reported SUCCESS; run 32442806629 failed all three attempts.
+///
+/// The quarantine carried `#1109` until 2026-08-25. That was a MISLABEL, not a
+/// cross-reference: #1109 is a different and genuinely-fixed defect (a
+/// usage-only `message_delta` ending a turn holding nothing) with its own live
+/// test, `issue_1109_silent_empty_turn_tui_pty.rs`. Nothing about this hang
+/// relates to it — an earlier CI-flake hunt ran under #1109's number and the
+/// number followed the code. #1126 is the issue that actually tracks this hang.
+/// (The `provider_traffic` doc above still cites #1109 correctly: that
+/// diagnostic really was built during #1109.)
 ///
 /// `retries = 0` on the pty/tui binaries deliberately removed the mask that was
 /// laundering that into a green, so this is quarantined WHERE it is broken and
@@ -251,7 +304,7 @@ fn a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds() {
 /// shows it passing.
 #[cfg_attr(
     target_os = "macos",
-    ignore = "FerroxLabs/wayland#1109: 30s timeout on the macOS leg only"
+    ignore = "FerroxLabs/wayland#1126: 30s timeout on the macOS leg only"
 )]
 #[test]
 fn approving_once_leaves_the_read_refused_by_the_sandbox() {
