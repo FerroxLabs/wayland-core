@@ -27334,6 +27334,11 @@ mod audit_2026_05_22_tests {
     }
 
     #[tokio::test]
+    // `PinnedRetryBudget::pin` writes the process-global
+    // WAYLAND_MAX_STREAM_RETRIES. Under plain `cargo test` this binary is one
+    // process, so an unserialized pin is read by every budget-reading test
+    // running beside it — see the helper's own contract note.
+    #[serial_test::serial]
     async fn stream_error_exhausts_retries_then_fails_the_turn() {
         // AUDIT A3 / E-C2 — when every attempt fails the turn ends as a
         // hard error (NOT a silent empty success).
@@ -27968,6 +27973,87 @@ mod audit_2026_05_22_tests {
         assert!(
             tracker.lock().session_totals(&session_id).0 > 0,
             "the ambiguous failed primary send must be conservatively charged"
+        );
+    }
+
+    /// #1127 — the refused-endpoint cap must survive a configured provider
+    /// chain.
+    ///
+    /// `REFUSED_ENDPOINT_MAX_RETRIES` exists because a refused connection
+    /// fails in a millisecond, so the whole budget is spent asleep in the
+    /// backoff curve for a fault a re-send almost never heals. Measured on
+    /// 0.13.6, that cap vanished the moment a fallback was configured: the
+    /// chain surfaced its own control flow (`provider_not_attempted`) instead
+    /// of the refusal, and `class_retry_budget` priced the full budget.
+    #[tokio::test]
+    async fn a_collapsed_chain_keeps_the_refused_class_cap() {
+        struct RefusedProvider;
+        #[async_trait]
+        impl LlmProvider for RefusedProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::Connection(
+                    "error sending request: Connection refused (os error 111) (endpoint \
+                     127.0.0.1:9)"
+                        .into(),
+                ))
+            }
+        }
+        struct UnavailableProvider;
+        #[async_trait]
+        impl LlmProvider for UnavailableProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::Api {
+                    status: 503,
+                    message: "service unavailable".into(),
+                })
+            }
+        }
+
+        async fn collapse(primary: Arc<dyn LlmProvider>, fallback: Arc<dyn LlmProvider>) -> String {
+            let resilient = wcore_providers::ResilientProvider::new(
+                "primary",
+                primary,
+                vec![("fallback".to_string(), fallback)],
+                wcore_providers::CircuitConfig {
+                    fail_threshold: 1,
+                    window: std::time::Duration::from_secs(60),
+                    cooldown: std::time::Duration::from_secs(60),
+                },
+                Arc::new(wcore_providers::NoOpCircuitReporter),
+            );
+            let request = LlmRequest::default();
+            resilient
+                .stream(&request)
+                .await
+                .expect_err("the first call opens both circuits");
+            let error = resilient
+                .stream(&request)
+                .await
+                .expect_err("the second call is refused with nothing dispatched");
+            wcore_providers::retry::provider_failure_code(&error)
+        }
+
+        let refused = collapse(Arc::new(RefusedProvider), Arc::new(RefusedProvider)).await;
+        assert_eq!(
+            super::class_retry_budget(&refused, super::DEFAULT_MAX_STREAM_RETRIES),
+            super::REFUSED_ENDPOINT_MAX_RETRIES,
+            "a chain that collapsed on a refused endpoint must still be priced \
+             at the refused cap; got class {refused}"
+        );
+        // Known-positive control: a chain that collapsed on something else
+        // keeps the full budget, so the assertion above is not vacuous.
+        let unavailable =
+            collapse(Arc::new(UnavailableProvider), Arc::new(UnavailableProvider)).await;
+        assert_eq!(
+            super::class_retry_budget(&unavailable, super::DEFAULT_MAX_STREAM_RETRIES),
+            super::DEFAULT_MAX_STREAM_RETRIES,
+            "only the refused class is capped; got class {unavailable}"
         );
     }
 

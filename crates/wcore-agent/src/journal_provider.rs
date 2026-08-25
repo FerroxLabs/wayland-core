@@ -187,6 +187,7 @@ impl LlmProvider for JournaledLlmProvider {
         let request_digest =
             provider_request_digest(request).map_err(|error| ProviderError::NotAttempted {
                 reason: format!("provider request digest could not be computed: {error}"),
+                failure_code: None,
             })?;
         let provider = if self.provider.is_empty() {
             self.inner.alias_key().to_owned()
