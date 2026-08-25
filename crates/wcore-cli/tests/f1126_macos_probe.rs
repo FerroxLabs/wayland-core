@@ -209,22 +209,43 @@ fn durable_state_dump(home: &std::path::Path) -> String {
             path.strip_prefix(home).unwrap_or(path).display()
         ));
     }
-    for (path, size) in &files {
-        let name = path.to_string_lossy();
-        let interesting = name.contains("journal")
-            || name.contains("session")
-            || name.ends_with(".jsonl")
-            || name.ends_with(".wal");
-        if !interesting || *size > 400_000 {
+    // The journal, as its EVENT SEQUENCE only. Iteration 2 dumped the raw
+    // bytes of everything matching "session", which swept in 1.5 MB of binary
+    // `.db-wal` and pushed the child's trace log past nextest's output cap —
+    // the one artifact the dump existed to deliver.
+    out.push_str("\n--- session journal event sequence ---\n");
+    for (path, _) in &files {
+        if path.extension().and_then(|e| e.to_str()) != Some("journal") {
             continue;
         }
-        match std::fs::read(path) {
-            Ok(bytes) => out.push_str(&format!(
-                "\n--- {} ({size} bytes) ---\n{}\n",
-                path.strip_prefix(home).unwrap_or(path).display(),
-                String::from_utf8_lossy(&bytes)
-            )),
-            Err(e) => out.push_str(&format!("\n--- {} UNREADABLE: {e} ---\n", path.display())),
+        let Ok(bytes) = std::fs::read(path) else {
+            out.push_str(&format!("{}: UNREADABLE\n", path.display()));
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        out.push_str(&format!(
+            "{} ({} bytes)\n",
+            path.strip_prefix(home).unwrap_or(path).display(),
+            bytes.len()
+        ));
+        // `"seq":N,...,"event":{"type":"..."` — the frames are length-prefixed
+        // binary around JSON, so scan the text rather than parse the container.
+        let mut cursor = 0usize;
+        while let Some(at) = text[cursor..].find("\"event\":{\"type\":\"") {
+            let abs = cursor + at;
+            let seq = text[..abs]
+                .rfind("\"seq\":")
+                .map(|s| {
+                    text[s + 6..]
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            let rest = &text[abs + 17..];
+            let ty: String = rest.chars().take_while(|c| *c != '"').collect();
+            out.push_str(&format!("  seq {seq:>4}  {ty}\n"));
+            cursor = abs + 17;
         }
     }
     out
@@ -268,7 +289,7 @@ fn f1126_probe_the_approve_once_stall() {
         &[
             (
                 "RUST_LOG",
-                "info,wcore_agent=trace,wcore_providers=trace,wcore_tools=debug",
+                "info,wcore_agent=trace,wcore_providers=trace,wcore_cli=trace,wcore_tools=debug",
             ),
             ("RUST_BACKTRACE", "1"),
         ],
@@ -296,6 +317,8 @@ fn f1126_probe_the_approve_once_stall() {
     let mut probe_at: Vec<u64> = vec![12, 32, 62, 100];
     let mut log = String::new();
     let mut done_at: Option<Duration> = None;
+    let mut poked_tab = false;
+    let mut poked_prompt = false;
     loop {
         if pty.screen_text().contains(DONE_TOKEN) {
             done_at = Some(started.elapsed());
@@ -305,6 +328,48 @@ fn f1126_probe_the_approve_once_stall() {
         if elapsed >= budget {
             break;
         }
+        // LIVENESS POKES. The screen is known to be repainting (the turn timer
+        // advances), so the question is WHICH half is dead. Each poke isolates
+        // one path and none of them writes a diagnostic into the terminal —
+        // they are ordinary user input, which is the channel the subject
+        // already owns.
+        //
+        //   Tab   — input -> render. Proves the TUI event loop still turns.
+        //   ping  — input -> engine -> provider. If the mock's request count
+        //           moves 2 -> 3, the ENGINE is alive and only the previous
+        //           turn's completion was lost; if it stays at 2, the engine
+        //           itself is wedged. That is the whole question.
+        if !poked_tab && elapsed >= Duration::from_secs(40) {
+            poked_tab = true;
+            let before = pty.screen_text();
+            pty.send(b"\t");
+            std::thread::sleep(Duration::from_millis(1500));
+            let after = pty.screen_text();
+            log.push_str(&format!(
+                "\n[poke t=40s] Tab: screen changed = {}\n",
+                before != after
+            ));
+            pty.send(b"\t");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if !poked_prompt && elapsed >= Duration::from_secs(75) {
+            poked_prompt = true;
+            log.push_str(&format!(
+                "\n[poke t=75s BEFORE new prompt] {}",
+                provider_traffic(&rt, &server)
+            ));
+            pty.send(b"ping\r");
+            std::thread::sleep(Duration::from_secs(6));
+            log.push_str(&format!(
+                "[poke t=75s AFTER new prompt] {}",
+                provider_traffic(&rt, &server)
+            ));
+            log.push_str(&format!(
+                "[poke t=75s screen after prompt]\n{}\n",
+                pty.screen_text()
+            ));
+        }
+
         let due = probe_at.first().copied();
         if let Some(t) = due {
             if elapsed.as_secs() >= t {
