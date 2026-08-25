@@ -198,7 +198,20 @@ fn f1126_probe_the_approve_once_stall() {
         Some(&server.uri()),
     );
 
-    let mut pty = Pty::spawn_with_env(home.path(), 40, 200, &[] as &[(&str, &str)]);
+    // The child's own tracing output. In TUI mode `wayland-core` routes every
+    // record to `$WAYLAND_HOME/logs/wayland-core.log` and NOTHING to the
+    // terminal (main.rs:1362 — the alt-screen owns stdio), so raising the
+    // filter cannot corrupt the screen this harness reads. It is the one
+    // channel that can say what the engine was doing when it went quiet.
+    let mut pty = Pty::spawn_with_env(
+        home.path(),
+        40,
+        200,
+        &[(
+            "RUST_LOG",
+            "info,wcore_agent=trace,wcore_providers=trace,wcore_tools=debug",
+        )],
+    );
     println!("child pid = {:?}", pty.child_pid());
     pty.wait_for(
         |s| s.contains("WAYLAND") && s.contains("Workspace"),
@@ -254,6 +267,18 @@ fn f1126_probe_the_approve_once_stall() {
     println!("{log}");
     println!("--- final screen ---\n{}\n--- end ---", pty.screen_text());
     println!("--- final traffic ---\n{}", provider_traffic(&rt, &server));
+    let log_path = home.path().join("logs").join("wayland-core.log");
+    match std::fs::read_to_string(&log_path) {
+        Ok(text) => println!(
+            "--- child log ({} bytes) {} ---\n{text}\n--- end child log ---",
+            text.len(),
+            log_path.display()
+        ),
+        Err(e) => println!(
+            "--- child log UNREADABLE at {}: {e} ---",
+            log_path.display()
+        ),
+    }
 
     let bodies: Vec<Value> = rt
         .block_on(async {
