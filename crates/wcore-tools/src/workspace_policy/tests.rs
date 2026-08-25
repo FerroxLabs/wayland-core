@@ -1910,3 +1910,187 @@ fn secret_deny_follows_gitfile_and_alternate_object_stores() {
         "a workspace with no VCS metadata must gain no deny entries"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FerroxLabs/wayland#1104 — the WRITE-only grant predicates.
+//
+// Unit-graded here, in the crate, because two of them are pure and one takes an
+// injected budget: an integration test would have to reach them through a real
+// `$HOME` and a twenty-thousand-file fixture, and both of those grade the
+// environment as much as the code.
+// ---------------------------------------------------------------------------
+
+/// Overlap is symmetric, and each direction fails differently.
+///
+/// `dir` inside `known` hands over the auto-run directory itself; `dir`
+/// containing `known` hands over a directory that CONTAINS it. A containment
+/// check written as one `starts_with` catches only the first, and the second is
+/// the likelier request ("grant me ~/.config").
+#[test]
+fn auto_run_overlap_is_symmetric_and_component_wise() {
+    let autostart = Path::new("/home/u/.config/autostart");
+
+    assert!(paths_overlap(autostart, autostart), "identity overlaps");
+    assert!(
+        paths_overlap(Path::new("/home/u/.config/autostart/deep"), autostart),
+        "a directory INSIDE an auto-run location overlaps it"
+    );
+    assert!(
+        paths_overlap(Path::new("/home/u/.config"), autostart),
+        "a directory that CONTAINS an auto-run location overlaps it"
+    );
+
+    // WRONG-REFUSAL CONTROL. Both of these are the ordinary user folder the
+    // whole feature exists to grant, and a prefix compared byte-wise rather
+    // than component-wise would refuse the second one.
+    assert!(
+        !paths_overlap(Path::new("/home/u/Downloads"), autostart),
+        "an unrelated sibling does not overlap"
+    );
+    assert!(
+        !paths_overlap(Path::new("/home/u/.configuration"), autostart),
+        "a longer name that merely SHARES a prefix is a different directory"
+    );
+}
+
+/// A path inside a `.git` is the hook surface reached from below, and
+/// `is_repo_control_path` cannot see it — that predicate is deliberately
+/// scoped to THIS workspace, and a granted folder is by definition elsewhere.
+#[test]
+fn a_path_inside_a_git_directory_is_an_auto_run_location() {
+    assert!(auto_run_overlap(Path::new("/srv/proj/.git/hooks")).is_some());
+    assert!(auto_run_overlap(Path::new("/srv/proj/.git")).is_some());
+
+    // WRONG-REFUSAL CONTROL: component-wise, so a directory whose NAME merely
+    // contains the string is ordinary user data.
+    assert!(auto_run_overlap(Path::new("/srv/proj/my.git-notes")).is_none());
+    assert!(auto_run_overlap(Path::new("/srv/proj/src")).is_none());
+}
+
+/// The Windows extension rules are live on Linux and macOS too, which is the
+/// only reason they can be graded at all — CI cannot introspect the one
+/// platform they describe.
+#[test]
+fn executable_detection_covers_both_platform_families() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let by_extension = dir.path().join("installer.EXE");
+    std::fs::write(&by_extension, b"MZ").unwrap();
+    let metadata = std::fs::symlink_metadata(&by_extension).unwrap();
+    assert!(
+        entry_is_executable(&by_extension, &metadata),
+        "a Windows executable has no unix mode bit and must still be caught, \
+         case-folded"
+    );
+
+    let plain = dir.path().join("report.pdf");
+    std::fs::write(&plain, b"%PDF").unwrap();
+    let metadata = std::fs::symlink_metadata(&plain).unwrap();
+    assert!(
+        !entry_is_executable(&plain, &metadata),
+        "WRONG-REFUSAL CONTROL: ordinary user data is not an executable"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.path().join("run");
+        std::fs::write(&script, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let metadata = std::fs::symlink_metadata(&script).unwrap();
+        assert!(
+            entry_is_executable(&script, &metadata),
+            "an ELF or a +x script has no extension at all — the mode bit is \
+             what catches it"
+        );
+
+        assert!(
+            !entry_is_executable(dir.path(), &std::fs::symlink_metadata(dir.path()).unwrap()),
+            "WRONG-REFUSAL CONTROL: every directory carries the exec bit, and \
+             calling one an executable would refuse every grant there is"
+        );
+    }
+}
+
+/// The scan refuses a root already holding something runnable, and passes an
+/// ordinary documents folder.
+#[test]
+fn scan_write_root_refuses_only_what_it_should() {
+    let clean = tempfile::tempdir().unwrap();
+    std::fs::create_dir(clean.path().join("2026")).unwrap();
+    std::fs::write(clean.path().join("2026/brief.pdf"), b"%PDF").unwrap();
+    std::fs::write(clean.path().join("notes.md"), b"# hi").unwrap();
+    scan_write_root(clean.path())
+        .expect("WRONG-REFUSAL CONTROL: an ordinary documents folder is grantable");
+
+    let with_exe = tempfile::tempdir().unwrap();
+    std::fs::create_dir(with_exe.path().join("nested")).unwrap();
+    std::fs::write(with_exe.path().join("nested/setup.msi"), b"x").unwrap();
+    assert!(
+        matches!(
+            scan_write_root(with_exe.path()),
+            Err(PathGrantError::WriteRootExecutable(_))
+        ),
+        "the walk descends: an executable one level down is still one the \
+         operator can run"
+    );
+
+    let with_secret = tempfile::tempdir().unwrap();
+    std::fs::write(with_secret.path().join(".env"), b"K=v").unwrap();
+    assert!(matches!(
+        scan_write_root(with_secret.path()),
+        Err(PathGrantError::WriteRootSecret(_))
+    ));
+
+    let with_git = tempfile::tempdir().unwrap();
+    std::fs::create_dir(with_git.path().join(".git")).unwrap();
+    assert!(
+        matches!(
+            scan_write_root(with_git.path()),
+            Err(PathGrantError::WriteRootAutoRun(_))
+        ),
+        "`.git/hooks` and `.git/config` both run on ordinary developer \
+         commands, and this `.git` is outside the workspace so \
+         `is_repo_control_path` never sees it"
+    );
+}
+
+/// A symlink is not the executable the operator later runs, and following it
+/// would misattribute a file that lives somewhere else entirely.
+///
+/// Not a hole: writing THROUGH the link is refused by both enforcement layers,
+/// which resolve before they compare — `SandboxedFs` canonicalizes out of the
+/// grant, and the OS sandbox never bound the target's directory writable.
+#[test]
+#[cfg(unix)]
+fn the_scan_does_not_follow_symlinks_out_of_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("/bin/sh", dir.path().join("shell")).unwrap();
+    scan_write_root(dir.path())
+        .expect("a link to an executable is a link, not an executable in this folder");
+
+    let dangling = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("/nonexistent/f1104", dangling.path().join("broken")).unwrap();
+    scan_write_root(dangling.path())
+        .expect("a DANGLING link must not make the scan fail closed on an io error");
+}
+
+/// Exhausting the budget is a REFUSAL. The scan cannot prove the absence of an
+/// executable it never reached, and "could not check" must never read as
+/// "checked and clean".
+#[test]
+fn an_unscannably_large_root_is_refused_not_waved_through() {
+    let dir = tempfile::tempdir().unwrap();
+    for index in 0..5 {
+        std::fs::write(dir.path().join(format!("f{index}.txt")), b"x").unwrap();
+    }
+    assert!(
+        matches!(
+            scan_write_root_bounded(dir.path(), 2),
+            Err(PathGrantError::WriteRootTooLarge(_, 2))
+        ),
+        "and the refusal reports the budget it actually used"
+    );
+    // WRONG-REFUSAL CONTROL: the same tree, under a budget that covers it.
+    scan_write_root_bounded(dir.path(), 5).expect("a root inside the budget is scanned and passes");
+}

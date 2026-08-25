@@ -38,22 +38,37 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // `render_artifact_v1` (#1098): a new event. No field on an existing event
 // changed shape, so `major` holds at 1 — the vocabulary a host can validate
 // got strictly wider, which is what a minor bump is for.
+// 17 -> 18: `path_write_grants_v1` (#1104). No wire type or field changed
+// shape — `ApprovalScope::AlwaysPath::write` and `PathGrantAccess::Write` were
+// already published and already refused — so `major` holds at 1. What changed
+// is that the engine can now say YES to them, and a pinned host has no way to
+// learn that from the shapes alone. Without the bump a host would have to
+// discover write support by sending a grant and reading the refusal text,
+// which is exactly the button-that-lies this feature exists to prevent.
 // 16 -> 17: `grant_workspace_capability`, `grant_path` and `revoke_path` are
 // declared (#314). Three new command wire types; no field on an existing
 // command or event changed shape, so `major` holds at 1 and the command union
 // a host can emit got strictly wider. The wire-shape gate refuses this
 // regeneration without the bump - three `added=` entries under a standing
 // 1.16 - which is that gate deciding the version question it exists to force.
-// 17 -> 18: `inline_reasoning_split_v1` (#1129). No wire SHAPE moved - this is
-// the first bump here that the wire-shape gate does NOT force, and the entry
-// says so plainly rather than implying a refusal that never happened. What
-// moved is the MEANING of two already-published types: `text_delta` no longer
-// carries inline `<think>`/`<thinking>`/`<reasoning>` bodies from open-weights
-// models, and `thinking` now carries them. A host pinned to 1.17 has no way to
-// learn that from the shapes, and rendering is exactly what it changes - the
-// reasoning was previously indistinguishable from the answer. `contract.minor`
-// plus the named capability are the only signals a pinned host reads, so the
-// version moves and the capability names the behaviour.
+// 17 -> 18: TWO capabilities land in the same release; one bump carries both.
+//
+// `inline_reasoning_split_v1` (#1129). No wire SHAPE moved - this is the first
+// bump here that the wire-shape gate does NOT force, and the entry says so
+// plainly rather than implying a refusal that never happened. What moved is the
+// MEANING of two already-published types: `text_delta` no longer carries inline
+// `<think>`/`<thinking>`/`<reasoning>` bodies from open-weights models, and
+// `thinking` now carries them. A host pinned to 1.17 has no way to learn that
+// from the shapes, and rendering is exactly what it changes - the reasoning was
+// previously indistinguishable from the answer.
+//
+// `path_write_grants_v1` (#1104). Every shipped Core accepts `write: true` and
+// every one before this refused it, so a host CANNOT feature-detect by sending
+// one - it would have to parse refusal prose. The version and the capability
+// are the only honest signals.
+//
+// `contract.minor` plus the named capabilities are the only signals a pinned
+// host reads, so the version moves once and both capabilities name themselves.
 pub const CONTRACT_MINOR: u64 = 18;
 pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/18";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
@@ -1545,6 +1560,33 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         // nothing about who raises the prompt; that is
         // `path_boundary_prompt_v1` below.
         ("path_grants_v1".into(), ContractCapabilityStatus::Available),
+        // The feature-detect for the WRITE half of a path grant (#1104):
+        // `always_path.write: true` on a `tool_approve`, and
+        // `grant_path.access: "write"`.
+        //
+        // Separate from `path_grants_v1` for the same reason
+        // `path_boundary_prompt_v1` is: they are separate promises and a host
+        // must be able to hold one without the other. Every shipped Core
+        // accepts both frames — the field and the enum variant were on the wire
+        // from the start — and every Core before this one REFUSED the write and
+        // granted nothing. So a host cannot feature-detect write support by
+        // sending it: the frame is valid either way and the only difference is
+        // an `info` line. A host that renders a "grant write access" button
+        // without checking this ships a button that silently does nothing on
+        // three quarters of the installed base.
+        //
+        // Available, not ShapeOnly: an approved write grant is honoured end to
+        // end by the same Core that declares this — `writable_roots()` for the
+        // OS sandbox manifest and `SandboxedFs`'s mutating operations for the
+        // in-process file tools. It does NOT promise that any given folder will
+        // be accepted: the write grant applies strictly more refusals than the
+        // read grant (an unconfined sandbox backend, an auto-run location, a
+        // folder holding an executable or a secret), and a host must still
+        // render the refusal it gets back.
+        (
+            "path_write_grants_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
         // The feature-detect for `tool_request.tool.escalation` (#1099): Core
         // itself raises the approval when a read names a path outside every
         // reachable root, instead of letting the call fail with an

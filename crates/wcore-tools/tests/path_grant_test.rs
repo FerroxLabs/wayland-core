@@ -2,9 +2,16 @@
 //! this folder" answer to an out-of-workspace escalation prompt.
 //!
 //! Written from the contract, not from the implementation: a grant must widen
-//! READS by exactly one root, must never widen writes, must be refused for a
-//! session that is not a local operator's, and must never be a way to reach a
-//! credential store or `$HOME`.
+//! READS by exactly one root, must never widen writes UNLESS write was asked
+//! for and separately earned, must be refused for a session that is not a
+//! local operator's, and must never be a way to reach a credential store or
+//! `$HOME`.
+//!
+//! The write half lives in `path_write_grant_test.rs` (#1104). It stays a
+//! separate file because these are the tests that must keep passing BYTE FOR
+//! BYTE: every one of them asks for `write = false`, and any of them turning
+//! green only because write grants exist would be the read grant silently
+//! widening.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -57,20 +64,45 @@ fn granting_the_file_the_user_was_looking_at_grants_its_folder() {
     assert_eq!(granted, std::fs::canonicalize(outside.path()).unwrap());
 }
 
+/// #1104 — the WINDOWS refusal path, exercised on every platform.
+///
+/// `local_policy` deliberately does NOT call `with_filesystem_confinement`, so
+/// it is the shape of a session on a backend that confines nothing — the
+/// Windows job-object default, where a Bash command can already write anywhere
+/// the user account can. A write grant there would name a boundary that does
+/// not exist, so it is refused rather than faked.
+///
+/// The policy field is fail-safe `None`, which is what makes this test grade
+/// the DEFAULT rather than an opt-out: a new construction path that forgets to
+/// declare confinement refuses write grants, it does not hand them out.
 #[test]
-fn write_is_not_grantable() {
+fn write_is_refused_on_a_backend_that_confines_nothing() {
     let ws = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let policy = local_policy(ws.path());
+    assert_eq!(policy.filesystem_confinement_backend(), None);
 
     let error = policy
         .grant_session_read_root(outside.path(), true)
-        .expect_err("write authority outside the workspace is a bigger ask");
-    assert!(matches!(error, PathGrantError::WriteNotGrantable));
+        .expect_err("an unconfined backend cannot honour a write grant");
     assert!(
-        policy.session_read_grant_roots().is_empty(),
+        matches!(error, PathGrantError::WriteRequiresConfinedBackend(_)),
+        "got {error:?}"
+    );
+    assert!(
+        policy.session_path_grant_roots().is_empty(),
         "a refused write grant must not leave a read grant behind"
     );
+
+    // WRONG-REFUSAL CONTROL: the same folder, same session, asked for READ.
+    // The Windows refusal must cost the user their write grant and nothing
+    // else — read grants widen the in-process jail, which is real on every
+    // platform.
+    let granted = policy
+        .grant_session_read_root(outside.path(), false)
+        .expect("read access is still grantable on an unconfined backend");
+    assert!(policy.readable_roots().contains(&granted));
+    assert!(!policy.writable_roots().contains(&granted));
 }
 
 #[test]
@@ -86,7 +118,7 @@ fn a_session_that_is_not_a_local_operators_cannot_be_granted() {
         .grant_session_read_root(outside.path(), false)
         .expect_err("a remote peer must not be able to widen the sandbox");
     assert!(matches!(error, PathGrantError::RequiresLocalOperator));
-    assert!(policy.session_read_grant_roots().is_empty());
+    assert!(policy.session_path_grant_roots().is_empty());
 }
 
 #[test]
@@ -186,7 +218,7 @@ fn re_approving_the_same_folder_is_idempotent() {
     policy.grant_session_read_root(&nested, false).unwrap();
 
     assert_eq!(
-        policy.session_read_grant_roots().len(),
+        policy.session_path_grant_roots().len(),
         1,
         "clicking the same button twice must not stack grants"
     );
@@ -207,7 +239,7 @@ async fn the_file_tools_read_a_granted_folder_but_still_cannot_write_it() {
 
     let policy = Arc::new(local_policy(ws.path()));
     let jail = SandboxedFs::new(RealFs, ws.path().to_path_buf())
-        .with_read_grants(policy.session_read_grant_handle());
+        .with_path_grants(policy.session_path_grant_handle());
 
     // Before the grant: the dead end the escalation prompt exists to replace.
     assert!(
@@ -265,7 +297,7 @@ async fn a_symlink_out_of_a_granted_folder_is_still_refused() {
 
     let policy = Arc::new(local_policy(ws.path()));
     let jail = SandboxedFs::new(RealFs, ws.path().to_path_buf())
-        .with_read_grants(policy.session_read_grant_handle());
+        .with_path_grants(policy.session_path_grant_handle());
     policy
         .grant_session_read_root(outside.path(), false)
         .unwrap();
@@ -287,7 +319,7 @@ async fn a_jail_with_no_grants_behaves_exactly_as_before() {
     let inside = ws.path().join("in.txt");
     std::fs::write(&inside, b"in").unwrap();
 
-    // Constructed the old way — no `with_read_grants` at all.
+    // Constructed the old way — no `with_path_grants` at all.
     let jail = SandboxedFs::new(RealFs, ws.path().to_path_buf());
     assert_eq!(jail.read(&inside).await.unwrap(), b"in".to_vec());
     assert!(matches!(
@@ -346,7 +378,7 @@ async fn a_secret_inside_a_granted_folder_is_still_refused() {
 
     let policy = Arc::new(local_policy(ws.path()));
     let jail = SandboxedFs::new(RealFs, ws.path().to_path_buf())
-        .with_read_grants(policy.session_read_grant_handle());
+        .with_path_grants(policy.session_path_grant_handle());
     policy.grant_session_read_root(&ordinary, false).unwrap();
 
     // The grant works for the thing it was for.
@@ -375,7 +407,7 @@ async fn a_benign_name_symlinked_to_a_secret_inside_a_grant_is_refused() {
 
     let policy = Arc::new(local_policy(ws.path()));
     let jail = SandboxedFs::new(RealFs, ws.path().to_path_buf())
-        .with_read_grants(policy.session_read_grant_handle());
+        .with_path_grants(policy.session_path_grant_handle());
     policy
         .grant_session_read_root(outside.path(), false)
         .unwrap();
@@ -431,7 +463,7 @@ async fn a_revoked_grant_stops_working_immediately() {
 
     let policy = Arc::new(local_policy(ws.path()));
     let jail = SandboxedFs::new(RealFs, ws.path().to_path_buf())
-        .with_read_grants(policy.session_read_grant_handle());
+        .with_path_grants(policy.session_path_grant_handle());
 
     policy
         .grant_session_read_root_full(outside.path(), false, Some("g1".into()), None)
@@ -459,7 +491,7 @@ async fn an_expired_grant_stops_working_without_anyone_sweeping() {
 
     let policy = Arc::new(local_policy(ws.path()));
     let jail = SandboxedFs::new(RealFs, ws.path().to_path_buf())
-        .with_read_grants(policy.session_read_grant_handle());
+        .with_path_grants(policy.session_path_grant_handle());
 
     // Already in the past: expiry is evaluated at USE time, so a grant cannot
     // outlive its deadline by racing whatever would otherwise reap it.
@@ -473,7 +505,7 @@ async fn an_expired_grant_stops_working_without_anyone_sweeping() {
         "an expired grant grants nothing"
     );
     assert!(
-        policy.session_read_grant_roots().is_empty(),
+        policy.session_path_grant_roots().is_empty(),
         "and it is not reported as a live root either"
     );
     assert!(!policy.is_session_read_granted(&file));

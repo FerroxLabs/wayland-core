@@ -441,7 +441,9 @@ reach. Before it existed, such a call ran, failed with an out-of-sandbox tool
 error, and the model was left to explain the dead end to the user.
 
 * `target` — the path the call named, canonicalized.
-* `access` — always `"read"`. Write access outside the workspace is not
+* `access` — always `"read"`. Core raises this escalation only for a read tool;
+  a write grant is minted from a folder the OPERATOR chose, never from a path
+  the model named. Write access outside the workspace is not
   grantable, so a write never raises this escalation.
 * `suggested_root` — the **containing folder**, which is what a grant actually
   opens. Putting `target` on an "always allow this folder" button would label
@@ -786,7 +788,7 @@ changes the bare-string wire shape.
 | Form | Meaning |
 |---|---|
 | `{"always_prefix": {"prefix": "cargo "}}` | Auto-approve later commands in the same category whose normalized head matches `prefix`. |
-| `{"always_path": {"root": "/Users/me/reports", "write": false}}` | Grant the session standing READ access to a folder outside the workspace. `write` defaults to `false`. |
+| `{"always_path": {"root": "/Users/me/reports", "write": false}}` | Grant the session standing access to a folder outside the workspace. `write` defaults to `false`, so the bare object grants READ only; `write: true` is a separate, stricter grant (§2.3.2 rule 2). |
 
 #### 2.3.2 `always_path` — "always allow this folder"
 
@@ -813,10 +815,43 @@ Contract, in the order a host needs it:
    looking at; the agent grants the directory that contains it. That is what a
    person answering "always allow this folder" believes they said. The prompt
    SHOULD name the folder that will actually be granted, not the file.
-2. **The grant is READ-only.** `write: true` is refused outright rather than
-   silently downgraded, so a host cannot ship a button whose label promises
-   more than it delivers. Write authority outside the workspace is a separate,
-   larger thing and is not grantable through this field.
+2. **`write` is a separate, STRICTER grant — never the same grant with a flag
+   set.** `write: false` (the default) grants read. `write: true` applies every
+   rule below and then four more, any of which refuses the grant outright
+   rather than downgrading it silently:
+
+   * **The OS sandbox must actually confine the filesystem.** On a backend that
+     does not — today the Windows `windows_job_object` default — a shell command
+     in the session can already create or overwrite files anywhere the user
+     account can, so a "write access to this one folder" grant would name a
+     boundary that does not exist. Read grants are unaffected there: they widen
+     the in-process file tools, which are real on every platform. Hosts can read
+     the backend's answer from `sandbox status` (`confines_filesystem`).
+   * **No overlap with an auto-run location**, in either direction — the grant
+     is inside one, or it contains one. `~/Library/LaunchAgents`,
+     `~/.config/autostart`, `~/.config/systemd/user`, `~/.local/bin`, the
+     Windows `Startup` folder, `/etc/cron.d`, and any `.git` (whose `hooks/`
+     runs on the operator's next commit).
+   * **Nothing already runnable inside it.** The folder is scanned; a regular
+     file that is executable by its owner, or that carries an executable
+     extension (`.exe`, `.msi`, `.ps1`, `.pkg`, …), refuses the grant. This is
+     why `~/Downloads` is often refused for write and always grantable for
+     read: it is the single most likely place an unsigned binary is sitting,
+     and a write grant there is a write-to-RCE.
+   * **No secret inside it.** A `.env`, `id_rsa` or `*.pem` under the folder
+     refuses the write grant. The read deny-list already keeps such a file
+     unreadable; there is no `fs_write_deny` in the OS sandbox manifest to
+     express the write half with, so the honest narrowing is to refuse the
+     ROOT rather than promise a per-file rule that only half the layers could
+     enforce.
+
+   A folder too large to scan within the budget is refused for write as well:
+   the scan cannot prove the absence of an executable it never reached.
+
+   A read grant NEVER implies write, and a live read grant is not cover for a
+   later write request on the same folder — that request mints its own grant,
+   with its own `grant_id` to revoke, so revoking the write leaves the read
+   standing.
 3. **A grant lasts for the process lifetime** and is not persisted across
    restarts. A host that wants a durable allow-list must re-send its grants on
    each launch; the agent will not remember them for you.
@@ -855,8 +890,13 @@ party choosing which folder to hand over, so it needs this to choose well.
 * `Grep` shells out to `rg`, which opens the paths itself. Nothing inside the
   agent can pin that, so a grep over a granted folder carries the ordinary
   check-then-use exposure of any external process.
-* A grant is still never a write grant, and never widens what may be read to
-  include a secret inside the granted folder.
+* A grant never widens what may be READ to include a secret inside the granted
+  folder, whether it confers write or not.
+* A WRITE grant widens exactly four operations (`write`, `remove_file`,
+  `observe_file`, `compare_exchange_file`) and exactly one root. Every other
+  root — including the granted folder's own parent and siblings — is refused
+  as before, and a symlink out of the granted folder (live or dangling) is
+  refused at the boundary rather than followed.
 
 #### 2.3.3 `grant_path` / `revoke_path` — the flow with no pending call
 
@@ -884,7 +924,7 @@ there is exactly one mechanism to audit.
 |---|---|---|
 | `grant_id` | yes | Host-chosen. Echo it to `revoke_path` to withdraw this exact grant |
 | `root` | yes | Folder to grant. May be a file — the containing directory is granted |
-| `access` | no | `read` (default) or `write`. `write` is **refused**, never downgraded |
+| `access` | no | `read` (default) or `write`. `write` is the stricter grant of §2.3.2 rule 2; when a rule refuses it, it is refused outright and never downgraded to `read` |
 | `expires_at_ms` | no | Unix ms deadline. Absent = process lifetime |
 
 Every rule in §2.3.2 applies unchanged. In addition:
@@ -901,6 +941,9 @@ Every rule in §2.3.2 applies unchanged. In addition:
 - **Expiry is evaluated at use time**, not by a sweep, so a grant cannot outlive
   its deadline by racing whatever would otherwise reap it. This is what makes an
   unattended overnight run safe to grant to.
+- **A write grant is announced as one.** The `info` frame Core emits on success
+  reads `(read and write; sandbox remains active)` rather than `(read-only; …)`,
+  so the confirmation the user sees matches the authority that was granted.
 - **The deny-list wins.** A grant says *where* the agent may look, never *what* it
   may read. A secret inside a granted folder — `id_rsa`, `.env`, `*.pem` — stays
   refused, in the in-process file tools and in the OS sandbox's read-deny list

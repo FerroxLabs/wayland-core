@@ -4132,10 +4132,15 @@ fn emit_path_grant(
     match policy.grant_session_read_root_full(&root, write, Some(grant_id), expires_at) {
         Ok(granted) => {
             emit_workspace_policy_receipt(policy, receipt, writer);
+            // #1104: the parenthetical is the grant's own access, not a fixed
+            // string. A write grant announced as "read-only" would be the
+            // button-that-lies this whole surface exists to avoid, in the one
+            // frame the user actually reads.
+            let access = if write { "read and write" } else { "read-only" };
             let _ = writer.emit(&ProtocolEvent::Info {
                 msg_id: String::new(),
                 message: format!(
-                    "folder granted for this session: {} (read-only; sandbox remains active)",
+                    "folder granted for this session: {} ({access}; sandbox remains active)",
                     granted.display()
                 ),
             });

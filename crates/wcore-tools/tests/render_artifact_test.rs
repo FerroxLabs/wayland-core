@@ -140,7 +140,7 @@ async fn a_secret_inside_a_granted_folder_cannot_be_rendered() {
 
     let vfs = Arc::new(
         SandboxedFs::new(SecretDenyFs::new(RealFs, Arc::clone(&policy)), ws.path())
-            .with_read_grants(policy.session_read_grant_handle()),
+            .with_path_grants(policy.session_path_grant_handle()),
     );
     let (tool, sink) = tool_and_sink();
     let ctx = ctx_with(vfs);

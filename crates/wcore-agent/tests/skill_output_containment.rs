@@ -302,7 +302,7 @@ async fn the_decided_output_directory_is_both_writable_and_readable() {
             ),
             cwd.path(),
         )
-        .with_read_grants(policy.session_read_grant_handle()),
+        .with_path_grants(policy.session_path_grant_handle()),
     );
 
     let chosen =

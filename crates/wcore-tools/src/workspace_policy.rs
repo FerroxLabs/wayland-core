@@ -200,10 +200,27 @@ pub struct WorkspacePolicy {
     /// Read-only roots approved by the local desktop host for this process
     /// lifetime. This is interior-mutable so an already-running Bash tool sees
     /// the grant on its next call without replacing the session sandbox.
-    session_read_grants: Arc<RwLock<Vec<SessionReadGrant>>>,
+    session_path_grants: Arc<RwLock<Vec<SessionPathGrant>>>,
+    /// #1104 — the name of the OS sandbox backend that CONFINES this session's
+    /// filesystem, when one does.
+    ///
+    /// FAIL-SAFE DEFAULT: `None` in every constructor. A policy only learns it
+    /// is filesystem-confined through an explicit
+    /// [`with_filesystem_confinement`](Self::with_filesystem_confinement) at
+    /// the one seam that can see the selected backend, so a new construction
+    /// path cannot acquire write-grantability by omission.
+    ///
+    /// It gates WRITE grants only. On a backend that answers
+    /// `confines_filesystem() == false` — today the Windows job-object default
+    /// — a shell command in this session can already create or overwrite files
+    /// anywhere this user account can. A "write access to this one folder"
+    /// grant there would be a button describing a boundary that does not
+    /// exist, so it is refused rather than faked. Read grants are unaffected:
+    /// they widen the IN-PROCESS jail, which is real on every platform.
+    fs_confinement_backend: Option<String>,
     /// #1111 — the memoised exec-path deny set, with the stamp that proves it
     /// is still what a fresh walk would produce. Interior-mutable and shared by
-    /// `Arc` for the same reason `session_read_grants` is: `bash.rs` holds the
+    /// `Arc` for the same reason `session_path_grants` is: `bash.rs` holds the
     /// policy behind an `Arc` and cannot replace it between executions.
     deny_cache: Arc<RwLock<Option<DenyCache>>>,
     /// #1111 — how many times this policy has actually recomputed the dynamic
@@ -275,25 +292,47 @@ pub struct WriteTargetNotReadable {
     pub path: PathBuf,
 }
 
-/// One standing read grant held by a session.
+/// One standing path grant held by a session.
 ///
 /// Capability-derived roots (`grant_session_capability`) and host path grants
 /// (`grant_session_read_root`) share ONE store, because they answer the same
-/// question — what may this session read — and two stores would be two answers.
-/// They differ only in whether they carry an id to revoke by.
+/// question — what may this session reach — and two stores would be two
+/// answers. They differ in whether they carry an id to revoke by, and in the
+/// ACCESS they confer.
+///
+/// FerroxLabs/wayland#1104. `write` is a strictly narrower subset of the same
+/// store rather than a second list, so the invariant "a write grant implies a
+/// read grant; a read grant NEVER implies write" is structural: every read
+/// consumer reads the whole store and is correct by construction, and exactly
+/// ONE place ([`WorkspacePolicy::writable_roots`]) filters on `write`. Two
+/// stores would need every read consumer to remember to union them, and a
+/// forgotten union is a grant that silently does not work — the failure mode
+/// the read grant already shipped once (`SandboxedFs` vs `readable_roots`).
 #[derive(Debug, Clone)]
-pub struct SessionReadGrant {
+pub struct SessionPathGrant {
     pub root: PathBuf,
     /// Host-supplied id, for revocation. `None` for capability-derived roots,
     /// which are withdrawn only by ending the session.
     pub id: Option<String>,
     /// Wall-clock expiry. `None` means process lifetime.
     pub expires_at: Option<SystemTime>,
+    /// Does this grant confer WRITE as well as read?
+    ///
+    /// FAIL-SAFE: `false` is the only value any read-grant path constructs.
+    /// A `true` here is reachable solely through
+    /// [`WorkspacePolicy::check_write_grantable`], which applies every read
+    /// refusal PLUS the write-only ones.
+    pub write: bool,
 }
 
-impl SessionReadGrant {
+impl SessionPathGrant {
     fn is_live(&self, now: SystemTime) -> bool {
         self.expires_at.is_none_or(|deadline| now < deadline)
+    }
+
+    /// Does this grant confer at least `write` access, right now?
+    fn confers(&self, now: SystemTime, write: bool) -> bool {
+        self.is_live(now) && (!write || self.write)
     }
 }
 
@@ -318,8 +357,32 @@ pub enum PathGrantError {
     CredentialPath(PathBuf),
     #[error("{0} is a protected secret path")]
     SecretPath(PathBuf),
-    #[error("write access to a folder outside the workspace is not grantable")]
-    WriteNotGrantable,
+    // #1104 — the WRITE-only refusals. Everything above applies to a write
+    // grant too; these apply ONLY to write, and are what makes it the stricter
+    // grant rather than the same grant with a flag set.
+    #[error(
+        "write access needs an OS sandbox that confines the filesystem, and this session's does \
+         not — a Bash command here can already create or overwrite files anywhere your account \
+         can, so a write grant on {0} would name a boundary that does not exist. Read access is \
+         still grantable."
+    )]
+    WriteRequiresConfinedBackend(PathBuf),
+    #[error(
+        "{0} would let this session replace a program you could run later — grant read access \
+         instead, or pick a folder that holds no executables"
+    )]
+    WriteRootExecutable(PathBuf),
+    #[error("{0} overlaps a location whose contents are run automatically")]
+    WriteRootAutoRun(PathBuf),
+    #[error("{0} holds a secret file, which a write grant could overwrite or replace")]
+    WriteRootSecret(PathBuf),
+    #[error(
+        "{0} has more than {1} entries, so it cannot be checked for programs before write is \
+         granted — grant a narrower folder"
+    )]
+    WriteRootTooLarge(PathBuf, usize),
+    #[error("{0} could not be inspected before granting write: {1}")]
+    WriteRootUnscannable(PathBuf, String),
     #[error("this session already holds the maximum of {0} folder grants")]
     CapReached(usize),
 }
@@ -399,7 +462,8 @@ impl WorkspacePolicy {
             secret_read_deny_required: false,
             local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(developer_capabilities)),
-            session_read_grants: Arc::new(RwLock::new(Vec::new())),
+            session_path_grants: Arc::new(RwLock::new(Vec::new())),
+            fs_confinement_backend: None,
             deny_cache: Arc::new(RwLock::new(None)),
             deny_walks: Arc::new(AtomicU64::new(0)),
         }
@@ -451,7 +515,8 @@ impl WorkspacePolicy {
             secret_read_deny_required: true,
             local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(Vec::new())),
-            session_read_grants: Arc::new(RwLock::new(Vec::new())),
+            session_path_grants: Arc::new(RwLock::new(Vec::new())),
+            fs_confinement_backend: None,
             deny_cache: Arc::new(RwLock::new(None)),
             deny_walks: Arc::new(AtomicU64::new(0)),
         }
@@ -556,7 +621,8 @@ impl WorkspacePolicy {
             // operator, so it is never a local-operator principal.
             local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(Vec::new())),
-            session_read_grants: Arc::new(RwLock::new(Vec::new())),
+            session_path_grants: Arc::new(RwLock::new(Vec::new())),
+            fs_confinement_backend: None,
             deny_cache: Arc::new(RwLock::new(None)),
             deny_walks: Arc::new(AtomicU64::new(0)),
         })
@@ -594,6 +660,17 @@ impl WorkspacePolicy {
     pub fn session_output_root(&self) -> PathBuf {
         dunce::simplified(&self.root).join(wcore_config::config::SESSION_OUTPUT_ROOT)
     }
+    /// Every root this session may WRITE.
+    ///
+    /// This is the SOLE producer of `SandboxManifest::fs_write_allow`
+    /// (`bash.rs`), and — because [`readable_roots`](Self::readable_roots) is
+    /// built on top of it — a write grant is a read grant for free, never the
+    /// other way round.
+    ///
+    /// #1104: this filter on `grant.write` is the ONE place a standing grant
+    /// turns into write authority. Every other consumer of the grant store
+    /// reads the whole store and confers read only, so a write grant cannot
+    /// leak out of a path that forgot to check.
     pub fn writable_roots(&self) -> Vec<PathBuf> {
         let mut v = Vec::with_capacity(1 + self.writable_extra.len());
         v.push(self.root.clone());
@@ -608,6 +685,32 @@ impl WorkspacePolicy {
                 })
                 .cloned(),
         );
+        // Expiry is evaluated HERE rather than reaped on a timer, exactly as
+        // `readable_roots` does it: this is the one place that decides what a
+        // session may write, so a grant cannot outlive its deadline by racing
+        // a sweep. `bash.rs` rebuilds the manifest per exec, so the next
+        // command after the deadline is already narrowed.
+        //
+        // APPENDED, never sorted. The existing order is load-bearing: the
+        // workspace root is `[0]`, the private scratch grant is the first entry
+        // after it (`temp_env` points TMPDIR at whatever that is), and
+        // `is_delegated_shape` compares the whole vector against
+        // `[checkout, scratch]` positionally. Sorting this list to dedup it
+        // silently repointed TMPDIR at `~/.cargo/registry` on a Trusted policy
+        // — caught by `trusted_local_sets_cwd_and_does_not_redirect_caches`,
+        // which is the only reason this comment exists.
+        let now = SystemTime::now();
+        for granted in self
+            .session_path_grants
+            .read()
+            .iter()
+            .filter(|grant| grant.confers(now, true))
+            .map(|grant| grant.root.clone())
+        {
+            if !v.contains(&granted) {
+                v.push(granted);
+            }
+        }
         v
     }
     pub fn readable_roots(&self) -> Vec<PathBuf> {
@@ -625,10 +728,10 @@ impl WorkspacePolicy {
         // grant cannot outlive its deadline by racing a sweep.
         let now = SystemTime::now();
         v.extend(
-            self.session_read_grants
+            self.session_path_grants
                 .read()
                 .iter()
-                .filter(|grant| grant.is_live(now))
+                .filter(|grant| grant.confers(now, false))
                 .map(|grant| grant.root.clone()),
         );
         v.sort();
@@ -646,6 +749,46 @@ impl WorkspacePolicy {
     }
     pub fn network(&self) -> NetworkPolicy {
         self.network.clone()
+    }
+
+    /// #1104 — record that the OS sandbox selected for this session CONFINES
+    /// the filesystem, naming the backend that does it.
+    ///
+    /// The single gate on write grants. Called at the one seam that can see the
+    /// selected backend, with `SandboxBackend::confines_filesystem()` read off
+    /// the SAME handle that will run this session's commands — so there is no
+    /// window between reading the capability and relying on it, and no second
+    /// copy of the question to drift.
+    ///
+    /// Deliberately NOT inferred from the platform or the trust level. Both
+    /// have been wrong here before: the backend's own claim is the only thing
+    /// that tracks a `WAYLAND_SANDBOX` override, a probe failure, or the
+    /// fail-closed backend.
+    #[must_use]
+    pub fn with_filesystem_confinement(mut self, backend_name: impl Into<String>) -> Self {
+        self.fs_confinement_backend = Some(backend_name.into());
+        self
+    }
+
+    /// The backend confining this session's filesystem, if one does.
+    #[must_use]
+    pub fn filesystem_confinement_backend(&self) -> Option<&str> {
+        self.fs_confinement_backend.as_deref()
+    }
+
+    /// True when `path` is inside a standing grant that confers WRITE.
+    ///
+    /// The write sibling of
+    /// [`is_session_read_granted`](Self::is_session_read_granted), and the
+    /// predicate `SandboxedFs`'s mutating operations ask.
+    pub fn is_session_write_granted(&self, path: &Path) -> bool {
+        let canon = canon_for_scope(path);
+        let now = SystemTime::now();
+        self.session_path_grants
+            .read()
+            .iter()
+            .filter(|grant| grant.confers(now, true))
+            .any(|grant| canon.starts_with(&grant.root))
     }
 
     /// Override the network posture. Used at bootstrap to grant `Inherit` to a
@@ -1127,7 +1270,7 @@ impl WorkspacePolicy {
             // also checked for REACHABILITY, not just prefix — see
             // `walk_root_is_covered`.
             let mut walked = vec![canon(self.root.clone())];
-            let mut granted_roots = self.session_read_grant_roots();
+            let mut granted_roots = self.session_path_grant_roots();
             // An ancestor sorts before its descendants, so one greedy pass
             // retains the covering root and drops what it covers whatever order
             // the grants were minted in.
@@ -1164,7 +1307,7 @@ impl WorkspacePolicy {
         self.secret_read_deny_required.hash(&mut hasher);
         self.authority_read_deny.hash(&mut hasher);
         self.readable_roots().hash(&mut hasher);
-        self.session_read_grant_roots().hash(&mut hasher);
+        self.session_path_grant_roots().hash(&mut hasher);
         hasher.finish()
     }
 
@@ -1306,13 +1449,16 @@ impl WorkspacePolicy {
         roots.sort();
         roots.dedup();
         {
-            let mut grants = self.session_read_grants.write();
+            let mut grants = self.session_path_grants.write();
             for root in &roots {
                 if !grants.iter().any(|existing| existing.root == *root) {
-                    grants.push(SessionReadGrant {
+                    grants.push(SessionPathGrant {
                         root: root.clone(),
                         id: None,
                         expires_at: None,
+                        // A developer capability is a toolchain the session may
+                        // RUN and read; it never asked to rewrite the toolchain.
+                        write: false,
                     });
                 }
             }
@@ -1339,10 +1485,13 @@ impl WorkspacePolicy {
         Ok(capability)
     }
 
-    /// Standing read grants held by this session that have not expired.
-    pub fn session_read_grant_roots(&self) -> Vec<PathBuf> {
+    /// Standing grants held by this session that have not expired, whatever
+    /// access they confer. Read-scoped by construction: every grant confers
+    /// read, so this is the right list for a caller asking "what extra roots
+    /// can this session reach" (the secret walk, the deny-cache key).
+    pub fn session_path_grant_roots(&self) -> Vec<PathBuf> {
         let now = SystemTime::now();
-        self.session_read_grants
+        self.session_path_grants
             .read()
             .iter()
             .filter(|grant| grant.is_live(now))
@@ -1355,14 +1504,14 @@ impl WorkspacePolicy {
     /// no-op so a host can revoke idempotently (a host that crashed mid-flow
     /// should be able to clean up without having to know what landed).
     pub fn revoke_session_read_root(&self, grant_id: &str) -> Option<PathBuf> {
-        let mut grants = self.session_read_grants.write();
+        let mut grants = self.session_path_grants.write();
         let index = grants
             .iter()
             .position(|grant| grant.id.as_deref() == Some(grant_id))?;
         Some(grants.remove(index).root)
     }
 
-    /// Shared handle to the standing read grants, for the in-process file
+    /// Shared handle to the standing path grants, for the in-process file
     /// tools.
     ///
     /// `readable_roots()` already folds these in for the Bash OS sandbox, but
@@ -1370,8 +1519,9 @@ impl WorkspacePolicy {
     /// keep refusing a granted path — the user would approve the folder and
     /// `Read` would still say no. Handing out the same `Arc` (never a copy)
     /// is what makes a grant take effect on the very next call.
-    pub fn session_read_grant_handle(&self) -> Arc<RwLock<Vec<SessionReadGrant>>> {
-        Arc::clone(&self.session_read_grants)
+    #[must_use]
+    pub fn session_path_grant_handle(&self) -> Arc<RwLock<Vec<SessionPathGrant>>> {
+        Arc::clone(&self.session_path_grants)
     }
 
     /// True when the in-process file tools can already READ `path`.
@@ -1391,7 +1541,7 @@ impl WorkspacePolicy {
     pub fn is_session_read_granted(&self, path: &Path) -> bool {
         let canon = canon_for_scope(path);
         let now = SystemTime::now();
-        self.session_read_grants
+        self.session_path_grants
             .read()
             .iter()
             .filter(|grant| grant.is_live(now))
@@ -1414,12 +1564,14 @@ impl WorkspacePolicy {
     /// operator may permit. The flag is fail-safe `false` in every constructor,
     /// so a future construction path cannot acquire this by omission.
     ///
-    /// WRITE is not grantable. A read grant answers "let me show you this
-    /// file"; write authority outside the workspace is a materially larger
-    /// thing and would need its own store, its own prompt wording, and its own
-    /// review. Refusing it explicitly (rather than silently ignoring the flag)
-    /// keeps the host from shipping a button whose label overstates what it
-    /// does.
+    /// WRITE is a SEPARATE, STRICTER grant (#1104), never the read grant with
+    /// a flag set. `write = true` applies every refusal above and then
+    /// [`check_write_grantable`](Self::check_write_grantable) on top: an OS
+    /// sandbox that actually confines the filesystem, no overlap with any
+    /// auto-run location, and a bounded scan that refuses a root already
+    /// holding an executable, a secret, or a `.git`. A read grant NEVER
+    /// implies write, and a live read grant is not cover for a write request —
+    /// see [`grant_capacity`].
     pub fn grant_session_read_root(
         &self,
         root: impl AsRef<Path>,
@@ -1441,16 +1593,17 @@ impl WorkspacePolicy {
         let dir = self.grantable_read_root(root, write)?;
 
         let now = SystemTime::now();
-        let mut grants = self.session_read_grants.write();
+        let mut grants = self.session_path_grants.write();
         // Re-checked under the WRITE lock, because the dry run above took only
         // a read lock and a concurrent grant may have landed since.
-        if grant_capacity(&grants, &dir, now)? {
+        if grant_capacity(&grants, &dir, now, write)? {
             return Ok(dir);
         }
-        grants.push(SessionReadGrant {
+        grants.push(SessionPathGrant {
             root: dir.clone(),
             id: grant_id,
             expires_at,
+            write,
         });
         Ok(dir)
     }
@@ -1470,20 +1623,24 @@ impl WorkspacePolicy {
     ) -> Result<PathBuf, PathGrantError> {
         let dir = self.grantable_read_root_shape(root, write)?;
         let now = SystemTime::now();
-        let grants = self.session_read_grants.read();
-        grant_capacity(&grants, &dir, now)?;
+        let grants = self.session_path_grants.read();
+        grant_capacity(&grants, &dir, now, write)?;
         Ok(dir)
     }
 
     /// The path-shape half: is this a folder we are willing to open at all?
+    ///
+    /// #1104 — the write-only checks run LAST, after the folder has been
+    /// resolved and has passed every rule a read grant must pass. Ordering is
+    /// load-bearing for the message the user reads: a `$HOME` grant asked for
+    /// with `write` should say "grant the specific folder instead", not
+    /// "that folder holds an executable", because the first is the reason and
+    /// the second is an accident of which check ran first.
     fn grantable_read_root_shape(
         &self,
         root: impl AsRef<Path>,
         write: bool,
     ) -> Result<PathBuf, PathGrantError> {
-        if write {
-            return Err(PathGrantError::WriteNotGrantable);
-        }
         if !self.local_operator_principal {
             return Err(PathGrantError::RequiresLocalOperator);
         }
@@ -1518,24 +1675,271 @@ impl WorkspacePolicy {
         if is_secret_path_static(&dir) {
             return Err(PathGrantError::SecretPath(dir));
         }
+        if write {
+            self.check_write_grantable(&dir)?;
+        }
         Ok(dir)
+    }
+
+    /// #1104 — every refusal a WRITE grant adds on top of the read rules.
+    ///
+    /// A read grant answers "let me show you this file". A write grant hands
+    /// the session the ability to REPLACE bytes the operator will later run or
+    /// trust, and outside the workspace there is no `git checkout` to undo it.
+    /// So it refuses, in order:
+    ///
+    /// 1. **An unconfined backend.** Gated on the policy's own
+    ///    `fs_confinement_backend`, which is fail-safe `None`. See the field.
+    /// 2. **Anything that runs itself.** A start-up / hook / service directory,
+    ///    in either direction (the grant is inside one, or contains one).
+    /// 3. **Anything already runnable inside it.** One bounded walk refuses a
+    ///    root holding an executable, a secret, or a `.git` (whose `hooks/`
+    ///    and `config` are write-to-RCE and are NOT covered by
+    ///    [`is_repo_control_path`](Self::is_repo_control_path), which is
+    ///    deliberately workspace-scoped).
+    ///
+    /// Rule 3 is a grant-TIME refusal rather than a per-write deny on purpose.
+    /// A write-deny inside a granted root would have to be expressed to the OS
+    /// sandbox, and `SandboxManifest` has no `fs_write_deny` — so it would hold
+    /// only for the in-process file tools and fail open for `Bash`, which is
+    /// two answers to one question. Refusing the ROOT is one answer, enforced
+    /// by the same `fs_write_allow` bind that enforces everything else.
+    fn check_write_grantable(&self, dir: &Path) -> Result<(), PathGrantError> {
+        if self.fs_confinement_backend.is_none() {
+            return Err(PathGrantError::WriteRequiresConfinedBackend(
+                dir.to_path_buf(),
+            ));
+        }
+        if let Some(hit) = auto_run_overlap(dir) {
+            return Err(PathGrantError::WriteRootAutoRun(hit));
+        }
+        scan_write_root(dir)
     }
 }
 
-/// Is there room for a grant on `dir`?
+/// Locations whose contents the OS, the shell or a VCS runs WITHOUT the user
+/// asking — the write-to-RCE surface a folder grant must never cover.
 ///
-/// `Ok(true)` — a LIVE grant already covers it, so recording a second entry
-/// would be a duplicate. An expired grant does not count as cover, or a
-/// deadline could be silently extended by re-asking.
+/// Relative to the user's home. Both platform families are live on every host
+/// rather than `cfg`-selected, for the same reason
+/// `bash::policy::ALWAYS_GRANTED_PREFIXES` keeps both path syntaxes live: a
+/// Windows-shaped relative path cannot collide with a real POSIX directory,
+/// the only consequence of a spurious match is a refusal (this list's SAFE
+/// direction), and keeping them live is what lets the Windows rules be graded
+/// by the suite on Linux and macOS instead of only on the one platform CI
+/// cannot introspect.
+const AUTO_RUN_HOME_DIRS: &[&str] = &[
+    // macOS
+    "Library/LaunchAgents",
+    "Library/LaunchDaemons",
+    "Library/Application Support/com.apple.backgroundtaskmanagementagent",
+    // Linux / freedesktop
+    ".config/autostart",
+    ".config/systemd/user",
+    ".config/environment.d",
+    ".local/share/systemd/user",
+    // On PATH for the login shell on every unix desktop.
+    ".local/bin",
+    "bin",
+    // Windows
+    "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup",
+];
+
+/// The absolute siblings of [`AUTO_RUN_HOME_DIRS`]. Same both-families rule.
+const AUTO_RUN_SYSTEM_DIRS: &[&str] = &[
+    "/Library/LaunchAgents",
+    "/Library/LaunchDaemons",
+    "/etc/systemd/system",
+    "/etc/systemd/user",
+    "/etc/init.d",
+    "/etc/cron.d",
+    "/etc/cron.daily",
+    "/etc/profile.d",
+    "/usr/lib/systemd/system",
+    "C:/ProgramData/Microsoft/Windows/Start Menu/Programs/StartUp",
+];
+
+/// A directory whose contents git executes on ordinary developer commands.
+/// Named here because [`WorkspacePolicy::is_repo_control_path`] is deliberately
+/// WORKSPACE-scoped — a `.git` elsewhere on the host is not that predicate's
+/// business, and a granted folder is exactly "elsewhere on the host".
+const VCS_CONTROL_DIR: &str = ".git";
+
+/// Extensions the OS, a shell, or a double-click will EXECUTE. Checked on
+/// every platform (see [`AUTO_RUN_HOME_DIRS`] for why both families stay live);
+/// on unix the owner-execute bit is checked as well, which is what catches an
+/// ELF binary or a `+x` script with no extension at all.
+const EXECUTABLE_EXTENSIONS: &[&str] = &[
+    "exe", "bat", "cmd", "com", "msi", "msix", "appx", "ps1", "psm1", "scr", "vbs", "vbe", "js",
+    "jse", "wsf", "wsh", "lnk", "jar", "appimage", "dmg", "pkg", "deb", "rpm", "run", "apk", "app",
+];
+
+/// How many directory entries [`scan_write_root`] will look at before it gives
+/// up and refuses.
+///
+/// A bound is required: the scan is on the interactive path of a person who
+/// just clicked a button, and a home-sized tree would hang it. Exhausting the
+/// budget is a REFUSAL, not a pass — the scan cannot prove the absence of an
+/// executable it never reached, and "could not check" must never read as
+/// "checked and clean".
+const WRITE_GRANT_SCAN_BUDGET: usize = 20_000;
+
+/// True when `dir` and `known` overlap in EITHER direction.
+///
+/// Both directions matter and they fail differently: granting
+/// `~/.config/autostart` hands over the auto-run directory itself, while
+/// granting `~/.config` hands over a directory that CONTAINS it. The second is
+/// the one a containment check written as a single `starts_with` misses, and it
+/// is the more likely user request of the two.
+fn paths_overlap(dir: &Path, known: &Path) -> bool {
+    dir.starts_with(known) || known.starts_with(dir)
+}
+
+/// The first auto-run location `dir` overlaps, if any.
+///
+/// Lexical and cheap, and deliberately runs BEFORE the walk: a directory that
+/// overlaps an auto-run location must be refused whether or not it currently
+/// has anything in it, and an empty `~/.config/autostart` is still the place a
+/// `.desktop` file would be written to.
+fn auto_run_overlap(dir: &Path) -> Option<PathBuf> {
+    // A path that is INSIDE a `.git` is the hooks surface reached from below.
+    // Component-wise, not `contains`, so a directory honestly named
+    // `my.git-notes` is not mistaken for one.
+    if dir
+        .components()
+        .any(|component| component.as_os_str() == VCS_CONTROL_DIR)
+    {
+        return Some(dir.to_path_buf());
+    }
+    let mut known: Vec<PathBuf> = AUTO_RUN_SYSTEM_DIRS.iter().map(PathBuf::from).collect();
+    if let Some(home) = dirs::home_dir() {
+        let home = canon_for_scope(&home);
+        known.extend(
+            AUTO_RUN_HOME_DIRS
+                .iter()
+                .map(|relative| home.join(relative)),
+        );
+    }
+    known
+        .into_iter()
+        .find(|candidate| paths_overlap(dir, candidate))
+}
+
+/// True when this directory entry is something the OS or a shell would run.
+fn entry_is_executable(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    if !metadata.is_file() {
+        return false;
+    }
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            EXECUTABLE_EXTENSIONS
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known))
+        })
+    {
+        return true;
+    }
+    // The surviving `cfg` block is this function's tail expression; the other
+    // is stripped before type-checking, exactly as `sandbox_root_identity`
+    // does it in `vfs.rs`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// The bounded walk behind rule 3 of
+/// [`check_write_grantable`](WorkspacePolicy::check_write_grantable).
+///
+/// Symlinks are NOT followed, and that is a security decision rather than a
+/// loop-avoidance one: a symlink inside the granted root pointing outside it
+/// is not a way to write outside, because both enforcement layers resolve
+/// before they compare — `SandboxedFs` canonicalizes and finds the target
+/// outside every grant, and the OS sandbox never bound the target's directory
+/// writable in the first place. So the link's TARGET is not this scan's
+/// business; the link itself is a symlink, not a regular file, and cannot be
+/// the executable the operator later runs.
+fn scan_write_root(dir: &Path) -> Result<(), PathGrantError> {
+    scan_write_root_bounded(dir, WRITE_GRANT_SCAN_BUDGET)
+}
+
+/// [`scan_write_root`] with the budget injected.
+///
+/// Separate so the exhaustion arm is graded with a budget of 2 instead of a
+/// twenty-thousand-file fixture. A test that is too slow to run is a test that
+/// gets `#[ignore]`d, and an `#[ignore]`d refusal is not a refusal.
+fn scan_write_root_bounded(dir: &Path, limit: usize) -> Result<(), PathGrantError> {
+    let unscannable = |path: &Path, error: std::io::Error| {
+        PathGrantError::WriteRootUnscannable(path.to_path_buf(), error.to_string())
+    };
+    let mut budget = limit;
+    let mut queue = vec![dir.to_path_buf()];
+    while let Some(current) = queue.pop() {
+        let entries = std::fs::read_dir(&current).map_err(|error| unscannable(&current, error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| unscannable(&current, error))?;
+            if budget == 0 {
+                return Err(PathGrantError::WriteRootTooLarge(dir.to_path_buf(), limit));
+            }
+            budget -= 1;
+            let path = entry.path();
+            // `symlink_metadata`, never `metadata`: the latter follows the
+            // link and would classify `<granted>/notes -> /bin/sh` as an
+            // executable regular file living in the grant, which it is not.
+            let metadata = entry
+                .path()
+                .symlink_metadata()
+                .map_err(|error| unscannable(&path, error))?;
+            if metadata.is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                if path.file_name().is_some_and(|name| name == VCS_CONTROL_DIR) {
+                    return Err(PathGrantError::WriteRootAutoRun(path));
+                }
+                queue.push(path);
+                continue;
+            }
+            if is_secret_path_static(&path) {
+                return Err(PathGrantError::WriteRootSecret(path));
+            }
+            if entry_is_executable(&path, &metadata) {
+                return Err(PathGrantError::WriteRootExecutable(path));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Is there room for a grant on `dir` conferring at least `write`?
+///
+/// `Ok(true)` — a LIVE grant already confers this access, so recording a
+/// second entry would be a duplicate. An expired grant does not count as
+/// cover, or a deadline could be silently extended by re-asking.
 /// `Ok(false)` — not covered, and under the cap.
+///
+/// #1104 — coverage is ACCESS-AWARE, and the read-only spelling of this was a
+/// silent downgrade waiting to happen: a session already holding a READ grant
+/// on `~/Downloads` that is then granted WRITE on the same folder would have
+/// matched here, returned "already covered", recorded nothing, and reported
+/// success. The user would have been told write was granted and the very next
+/// write would have been refused. A read grant is not cover for a write.
 fn grant_capacity(
-    grants: &[SessionReadGrant],
+    grants: &[SessionPathGrant],
     dir: &Path,
     now: SystemTime,
+    write: bool,
 ) -> Result<bool, PathGrantError> {
     if grants
         .iter()
-        .any(|existing| existing.is_live(now) && dir.starts_with(&existing.root))
+        .any(|existing| existing.confers(now, write) && dir.starts_with(&existing.root))
     {
         return Ok(true);
     }
@@ -1549,7 +1953,11 @@ impl PathGrantSink for WorkspacePolicy {
     fn grant_path(&self, root: &Path, write: bool) -> bool {
         match self.grant_session_read_root(root, write) {
             Ok(dir) => {
-                tracing::info!(root = %dir.display(), "session read grant recorded");
+                tracing::info!(
+                    root = %dir.display(),
+                    write,
+                    "session path grant recorded"
+                );
                 true
             }
             Err(error) => {
