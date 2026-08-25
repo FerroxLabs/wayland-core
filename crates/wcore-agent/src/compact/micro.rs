@@ -57,11 +57,11 @@ pub struct ContextPressure {
 }
 
 impl ContextPressure {
-    /// Whether pressure is high enough to let the count trigger fire, given
+    /// Whether pressure is high enough to let a microcompact fire, given
     /// `fraction` of the autocompact threshold. A zero (or negative) fraction
     /// means "ungated" — the pre-fix behaviour, kept reachable by config. A
     /// zero threshold is also ungated: it carries no information.
-    fn admits_count_trigger(self, fraction: f64) -> bool {
+    fn admits_trigger(self, fraction: f64) -> bool {
         let f = if fraction.is_finite() {
             fraction.clamp(0.0, 1.0)
         } else {
@@ -77,19 +77,31 @@ impl ContextPressure {
 
 /// Decide whether microcompact should run.
 ///
-/// Returns `true` if **either** trigger fires:
+/// Real context pressure must have reached `config.micro_pressure_fraction` of
+/// the autocompact threshold, **and** one of the two triggers must fire:
 /// - **Time**: the most recent assistant message is older than
 ///   `config.micro_gap_seconds`.
 /// - **Count**: total compactable (non-cleared) tool results exceed
-///   `config.micro_keep_recent * 2` **and** real context pressure has reached
-///   `config.micro_pressure_fraction` of the autocompact threshold.
+///   `config.micro_keep_recent * 2`.
 ///
-/// The pressure conjunct is the A-6 fix. A count of tool results says nothing
-/// about how full the window is: without the conjunct the eleventh tool result
-/// of a session erases the model's working set no matter how much room is
-/// left, and a job that must hold a dozen files in mind can never assemble the
-/// edit it was asked for. Corpus row A-6 microcompacted 25 times in 60 turns,
-/// freeing ~2k tokens a time at ~10% window occupancy, and produced no edit.
+/// The pressure conjunct is the A-6 fix. Neither trigger is a pressure signal.
+/// A count of tool results says nothing about how full the window is: without
+/// the conjunct the eleventh tool result of a session erases the model's
+/// working set no matter how much room is left, and a job that must hold a
+/// dozen files in mind can never assemble the edit it was asked for. Corpus
+/// row A-6 microcompacted 25 times in 60 turns, freeing ~2k tokens a time at
+/// ~10% window occupancy, and produced no edit.
+///
+/// An idle gap says no more about pressure than a count does, and it reaches
+/// the SAME conversation: A-6's fixture carries no timestamps, but every
+/// message a live session builds is a `Message::now` and a resumed session
+/// loads yesterday's — so at the shipped hour-long gap, a user who came back
+/// from lunch had 7 of 12 tool results erased at 7.4% occupancy, freeing 7.2k
+/// tokens of a 167k budget that was already 93% empty. Nor can the gap be
+/// read as a staleness signal: the pass keeps the `micro_keep_recent` most
+/// recent results, and those predate the gap exactly as much as the ones it
+/// clears. Superseded reads are pruned on their own evidence
+/// (`prune_superseded_reads`), not on the clock.
 pub fn should_microcompact(
     messages: &[Message],
     config: &CompactConfig,
@@ -98,9 +110,8 @@ pub fn should_microcompact(
     if !config.enabled {
         return false;
     }
-    time_trigger(messages, config)
-        || (pressure.admits_count_trigger(config.micro_pressure_fraction)
-            && count_trigger(messages, config))
+    pressure.admits_trigger(config.micro_pressure_fraction)
+        && (time_trigger(messages, config) || count_trigger(messages, config))
 }
 
 /// Time-based trigger: last assistant timestamp older than gap threshold.
