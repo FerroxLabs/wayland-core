@@ -695,7 +695,7 @@ impl OpenAIProvider {
             // so the CLI can message a feature lock vs an account-needs-payment
             // state distinctly; unrecognised 402s fall through to `Api`.
             if status.as_u16() == 402
-                && let Some(err) = parse_flux_402(&body_text)
+                && let Some(err) = parse_flux_402("this model", &body_text)
             {
                 return Err(err);
             }
@@ -2339,7 +2339,14 @@ pub fn is_flux_tier_alias(model: &str) -> bool {
 /// (`error` may be a string code, or an object with `code`) AND, when the outer
 /// `message`/`error` is itself a JSON string, the inner object. Returns `None`
 /// for an unrecognised 402 so the caller falls back to [`ProviderError::Api`].
-pub(crate) fn parse_flux_402(body: &str) -> Option<ProviderError> {
+///
+/// `capability` names the surface the caller was using (e.g. `"image
+/// generation"`, `"speech-to-text"`) and is what
+/// [`ProviderError::PremiumLocked`] renders. It is a parameter rather than a
+/// constant because Flux serves the same `premium_locked` code on every
+/// paid-only surface, and every one of them must be able to say which surface
+/// the user was locked out of.
+pub fn parse_flux_402(capability: &str, body: &str) -> Option<ProviderError> {
     let outer: Value = serde_json::from_str(body).ok()?;
 
     // The inner (recovered) object, if the envelope double-wraps JSON in a
@@ -2385,7 +2392,7 @@ pub(crate) fn parse_flux_402(body: &str) -> Option<ProviderError> {
 
     match code {
         "premium_locked" => Some(ProviderError::PremiumLocked {
-            capability: "image generation".to_string(),
+            capability: capability.to_string(),
             message,
         }),
         "upgrade_required" => Some(ProviderError::UpgradeRequired { message }),
@@ -3119,7 +3126,7 @@ mod tests {
     #[test]
     fn parse_flux_402_premium_locked_image() {
         let body = r#"{"error":{"message":"image generation requires a paid plan","code":"premium_locked"}}"#;
-        match parse_flux_402(body) {
+        match parse_flux_402("image generation", body) {
             Some(ProviderError::PremiumLocked {
                 capability,
                 message,
@@ -3136,7 +3143,7 @@ mod tests {
     #[test]
     fn parse_flux_402_upgrade_required_fetch() {
         let body = r#"{"error":"upgrade_required","message":"web_fetch is a paid capability; upgrade or clear a charge"}"#;
-        match parse_flux_402(body) {
+        match parse_flux_402("image generation", body) {
             Some(ProviderError::UpgradeRequired { message }) => {
                 assert_eq!(
                     message,
@@ -3160,7 +3167,7 @@ mod tests {
             "error": { "message": inner, "code": "402" }
         })
         .to_string();
-        match parse_flux_402(&body) {
+        match parse_flux_402("image generation", &body) {
             Some(ProviderError::SpendCeilingUnresolved {
                 reason,
                 upgrade_url,
@@ -3180,7 +3187,7 @@ mod tests {
     #[test]
     fn parse_flux_402_spend_ceiling_unresolved_flat() {
         let body = r#"{"error":"spend_ceiling_unresolved","reason":"no_account_id","message":"Add a payment method.","upgrade_url":"https://fluxrouter.ai/home/billing"}"#;
-        match parse_flux_402(body) {
+        match parse_flux_402("image generation", body) {
             Some(ProviderError::SpendCeilingUnresolved {
                 reason,
                 upgrade_url,
@@ -3200,13 +3207,13 @@ mod tests {
     #[test]
     fn parse_flux_402_unrecognized_returns_none() {
         let body = r#"{"error":{"message":"final price exceeds max_price","code":"price_exceeds_max_price"}}"#;
-        assert!(parse_flux_402(body).is_none());
+        assert!(parse_flux_402("image generation", body).is_none());
     }
 
     /// A non-JSON 402 body returns `None` (falls back to `Api`).
     #[test]
     fn parse_flux_402_non_json_returns_none() {
-        assert!(parse_flux_402("not json at all").is_none());
+        assert!(parse_flux_402("image generation", "not json at all").is_none());
     }
 
     // --- #282 FluxRouter typed 409 context_overflow parsing ----------------
