@@ -52,32 +52,27 @@ jobs:
       - name: Build the two pty binaries
         run: cargo nextest list -p wcore-cli --test f1126_macos_probe --test f1126_jsonstream_probe --test path_boundary_tui_pty
 
-      # The probe binary, five times. The failure is 5-in-6 per attempt under
-      # full-suite load and much rarer alone, so repetition is the cheap
-      # substitute for load.
-      - name: f1126 probe x5
-        run: |
-          for i in 1 2 3 4 5; do
-            echo "::group::probe attempt $i"
-            cargo nextest run --profile ci --retries 0 --no-fail-fast \
-              -p wcore-cli --test f1126_macos_probe --no-capture || echo "ATTEMPT $i FAILED"
-            echo "::endgroup::"
-          done
-
-      # THE ARM THAT DECIDES BLAST RADIUS. Same scenario, same mock, same
-      # approve-once answer - driven over `--json-stream`, the surface the
-      # Wayland desktop host speaks. If the wedge reproduces here it is not a
-      # macOS CI annoyance, it is a shipped hang for every Desktop user.
+      # INTERLEAVED ARMS, MATCHED n. Iteration 4 ran TUI x5 then json-stream
+      # x5 and got 1 wedge / 0 wedges. At an observed per-attempt wedge rate of
+      # ~20% in that run, seeing 0 of 5 on the second arm happens 33% of the
+      # time even if the two arms were IDENTICAL - so that result bounded
+      # nothing. Two fixes, both required:
       #
-      # Headless is deliberately NOT a third arm: it installs no approval
-      # manager, so the path-boundary gate is never forced there and a green
-      # would be a false exoneration rather than evidence.
-      - name: f1126 json-stream probe x5
+      #   * matched n=12 per arm, not 5;
+      #   * INTERLEAVED, so a drift in host conditions across the job lands on
+      #     both arms instead of only the one that ran second.
+      #
+      # --no-capture on every arm: [profile.ci] sets success-output = "never",
+      # which throws the readings away on exactly the attempts that pass - and
+      # for the json-stream arm a PASS is the result being measured.
+      - name: interleaved arms, matched n=12
         run: |
-          for i in 1 2 3 4 5; do
-            echo "::group::json-stream attempt $i"
+          for i in $(seq 1 12); do
+            echo "::group::pair $i"
             cargo nextest run --profile ci --retries 0 --no-fail-fast \
-              -p wcore-cli --test f1126_jsonstream_probe || echo "JSONSTREAM ATTEMPT $i FAILED"
+              -p wcore-cli --test f1126_macos_probe --no-capture || echo "TUI ATTEMPT $i FAILED"
+            cargo nextest run --profile ci --retries 0 --no-fail-fast \
+              -p wcore-cli --test f1126_jsonstream_probe --no-capture || echo "JSONSTREAM ATTEMPT $i FAILED"
             echo "::endgroup::"
           done
 
@@ -88,6 +83,6 @@ jobs:
           for i in 1 2 3; do
             echo "::group::real attempt $i"
             cargo nextest run --profile ci --retries 0 --no-fail-fast --run-ignored all \
-              -p wcore-cli --test path_boundary_tui_pty || echo "REAL ATTEMPT $i FAILED"
+              -p wcore-cli --test path_boundary_tui_pty --no-capture || echo "REAL ATTEMPT $i FAILED"
             echo "::endgroup::"
           done

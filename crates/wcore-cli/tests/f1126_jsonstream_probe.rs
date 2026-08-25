@@ -148,6 +148,7 @@ fn f1126_probe_the_same_turn_over_json_stream() {
     let mut approved_at: Option<Duration> = None;
     let mut done_at: Option<Duration> = None;
     let mut saw_escalation = false;
+    let mut done_kind = String::new();
 
     while started.elapsed() < budget {
         let Ok(line) = rx.recv_timeout(Duration::from_millis(500)) else {
@@ -182,6 +183,13 @@ fn f1126_probe_the_same_turn_over_json_stream() {
             approved_at = Some(started.elapsed());
         }
         if line.contains(DONE_TOKEN) {
+            // Record WHICH frame satisfied this. A whole-line match would also
+            // fire on any frame that echoes the transcript back (a state or
+            // session frame), which would be the same class of ambiguity that
+            // made the TUI probe count a poked turn as a pass. Printing the
+            // frame type makes the satisfying evidence auditable instead of
+            // assumed.
+            done_kind = kind.to_string();
             done_at = Some(started.elapsed());
             break;
         }
@@ -200,7 +208,10 @@ fn f1126_probe_the_same_turn_over_json_stream() {
         .map(|r| r.body)
         .collect();
 
-    println!("=== f1126 json-stream: approved_at={approved_at:?} done_at={done_at:?} ===");
+    println!(
+        "=== f1126 json-stream: approved_at={approved_at:?} done_at={done_at:?} \
+         satisfied_by_frame_type={done_kind:?} ==="
+    );
     println!("path_boundary escalation seen on the wire: {saw_escalation}");
     println!("mock provider received {} request(s)", bodies.len());
     println!("--- frames ({}) ---", frames.len());
