@@ -213,6 +213,48 @@ pub fn urlencode(s: &str) -> String {
     out
 }
 
+/// Map raw search rows into the `{title,url,snippet}` shape, dropping any row
+/// that carries no usable information.
+///
+/// gh#452 — a row needs a non-empty title and an `http(s)` url to be worth
+/// showing. Callers MUST treat an empty return as `WebOutcome::Err`, never as
+/// an empty success: `ChainedWebBackend` takes any `Ok` as final, so an
+/// `Ok{web:[]}` silently disables the DuckDuckGo floor and the user is shown a
+/// successful search with nothing in it and no error explaining why.
+///
+/// `snippet_key` names the per-provider field holding the result text
+/// (`content` for Tavily, `description` for Brave).
+pub fn map_validated_rows(
+    raw_results: &[serde_json::Value],
+    snippet_key: &str,
+) -> Vec<serde_json::Value> {
+    let mut results = Vec::new();
+    for r in raw_results {
+        let title = r
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let url = r
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if title.is_empty() || !(url.starts_with("http://") || url.starts_with("https://")) {
+            continue;
+        }
+        let snippet = r
+            .get(snippet_key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        results.push(serde_json::json!({ "title": title, "url": url, "snippet": snippet }));
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
