@@ -44,8 +44,18 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // a host can emit got strictly wider. The wire-shape gate refuses this
 // regeneration without the bump - three `added=` entries under a standing
 // 1.16 - which is that gate deciding the version question it exists to force.
-pub const CONTRACT_MINOR: u64 = 17;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/17";
+// 17 -> 18: `inline_reasoning_split_v1` (#1129). No wire SHAPE moved - this is
+// the first bump here that the wire-shape gate does NOT force, and the entry
+// says so plainly rather than implying a refusal that never happened. What
+// moved is the MEANING of two already-published types: `text_delta` no longer
+// carries inline `<think>`/`<thinking>`/`<reasoning>` bodies from open-weights
+// models, and `thinking` now carries them. A host pinned to 1.17 has no way to
+// learn that from the shapes, and rendering is exactly what it changes - the
+// reasoning was previously indistinguishable from the answer. `contract.minor`
+// plus the named capability are the only signals a pinned host reads, so the
+// version moves and the capability names the behaviour.
+pub const CONTRACT_MINOR: u64 = 18;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/18";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -1489,6 +1499,17 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         ),
         (
             "durable_child_model_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        // #1129. Core splits inline reasoning out of the visible stream on the
+        // JSON-stream path: `text_delta` carries answer text only, and the
+        // `<think>`/`<thinking>`/`<reasoning>` bodies that open-weights models
+        // inline in that same stream ride `thinking` instead. `Available`, not
+        // `ShapeOnly`: both event types already existed and already round-trip
+        // - what this declares is that the producer now populates them this
+        // way, which is the part a host renders off.
+        (
+            "inline_reasoning_split_v1".into(),
             ContractCapabilityStatus::Available,
         ),
         // F22-C1. Promoted ShapeOnly -> Available in the SAME change that

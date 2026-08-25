@@ -348,9 +348,40 @@ Incremental text output (streaming).
 }
 ```
 
+**`text` never contains inline reasoning tags.** Stripping is the AGENT's job,
+not the client's — see [1.4 `thinking`](#14-thinking). A client must not
+implement its own `<think>` stripper; if a reasoning tag ever reaches
+`text_delta`, that is an agent defect, and the client rendering it verbatim is
+the correct behaviour for surfacing it.
+
 ### 1.4 `thinking`
 
-Model's internal reasoning (if extended thinking is enabled).
+The model's private reasoning. Two producers land on this one event:
+
+1. **Native reasoning** — a provider that returns reasoning as its own content
+   block (Anthropic extended thinking, a provider reasoning summary). Requires
+   `capabilities.thinking`.
+2. **Inline reasoning** — open-weights models (DeepSeek-R1 / Qwen-QwQ class,
+   reached through Flux or Ollama) that emit reasoning INSIDE the ordinary text
+   stream wrapped in `<think>…</think>`, `<thinking>…</thinking>` or
+   `<reasoning>…</reasoning>` (case-insensitive, attributes and self-closing
+   forms included). The agent strips those from `text_delta` and re-emits the
+   body here. `capabilities.thinking` may be `false` for these providers — it
+   describes the provider's native reasoning feature, not this split.
+
+Case 2 is advertised as the `inline_reasoning_split_v1` contract capability
+(`contract.capabilities` on the `ready` event, contract `1.18` and later).
+Before `1.18` the tags reached `text_delta` verbatim and every client rendered
+them inside the assistant bubble.
+
+Tag bodies may straddle chunk boundaries, so a single inline block can arrive as
+several `thinking` events; concatenating the `text` of every `thinking` event on
+one `msg_id` reconstructs the block. Two blocks in one turn are separated by a
+newline. An unclosed block is flushed immediately before `stream_end`.
+
+The event carries no obligation to display. A client may render it collapsed
+(the Wayland CLI TUI shows a one-line `▶ Thought: …` the user can expand), or
+drop it entirely. What it must not do is treat it as answer text.
 
 ```json
 {

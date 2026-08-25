@@ -8,6 +8,7 @@ use wcore_protocol::events::{
 };
 use wcore_protocol::execution_policy::ExecutionPolicySnapshot;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
+use wcore_types::reasoning_filter::ReasoningFilter;
 
 use super::OutputSink;
 
@@ -331,6 +332,24 @@ pub struct ProtocolSink {
     /// diagnostic and has no ordering claim, so it waits for the handshake
     /// and is replayed immediately after it, in order.
     pre_ready_info: Arc<parking_lot::Mutex<Option<Vec<ProtocolEvent>>>>,
+    /// #1129 - inline-reasoning splitter for the JSON-stream wire.
+    ///
+    /// Open-weights models (DeepSeek-R1 / Qwen-QwQ class, reached through
+    /// Flux or Ollama) emit their private reasoning INSIDE the ordinary text
+    /// stream, wrapped in `<think>`/`<thinking>`/`<reasoning>`. The CLI TUI
+    /// has always stripped those host-side; the protocol path did not, so a
+    /// Desktop host rendered the literal tag body inside the assistant
+    /// bubble.
+    ///
+    /// The filter runs HERE rather than in the engine because the TUI's own
+    /// sink must keep receiving raw text: the TUI does not delete reasoning,
+    /// it captures it and renders a collapsed `Thought:` block, and stripping
+    /// upstream of every sink would take that block away from the local user.
+    ///
+    /// Stateful across chunks by design - a tag may straddle a chunk
+    /// boundary (`<thi` | `nk>`). Reset on `stream_start`, drained on
+    /// `stream_end`.
+    reasoning: Arc<parking_lot::Mutex<ReasoningFilter>>,
 }
 
 impl ProtocolSink {
@@ -358,6 +377,7 @@ impl ProtocolSink {
             current_msg_id: Arc::new(RwLock::new(String::new())),
             session_id: Arc::new(RwLock::new(None)),
             pre_ready_info: Arc::new(parking_lot::Mutex::new(None)),
+            reasoning: Arc::new(parking_lot::Mutex::new(ReasoningFilter::new())),
         }
     }
 
@@ -382,6 +402,25 @@ impl ProtocolSink {
         let held = self.pre_ready_info.lock().take();
         for event in held.into_iter().flatten() {
             let _ = self.writer.emit(&event);
+        }
+    }
+
+    /// #1129 - drain whatever inline reasoning the filter is holding and put
+    /// it on the wire as `thinking`.
+    ///
+    /// Called after every text chunk (so reasoning streams incrementally,
+    /// not as one end-of-turn blob) and once more at `stream_end`, which is
+    /// what recovers an UNCLOSED `<think>` - the filter deliberately eats to
+    /// end of stream rather than leak a runaway tail, and without this flush
+    /// that tail would be silently deleted instead of shown.
+    fn flush_reasoning(&self, msg_id: &str) {
+        let captured = self.reasoning.lock().take_captured_delta();
+        if !captured.is_empty() {
+            let _ = self.writer.emit(&ProtocolEvent::Thinking {
+                text: captured,
+                msg_id: msg_id.to_string(),
+                subject: None,
+            });
         }
     }
 
@@ -739,8 +778,23 @@ impl OutputSink for ProtocolSink {
     }
 
     fn emit_text_delta(&self, text: &str, msg_id: &str) {
+        // #1129: split inline reasoning out of the visible stream. `visible`
+        // is what the host renders as the answer; the reasoning the filter
+        // withheld rides the typed `thinking` event instead of being
+        // deleted, so a host can render it collapsed exactly as the TUI does.
+        let visible = self.reasoning.lock().process(text);
+        self.flush_reasoning(msg_id);
+        // A chunk the filter consumed WHOLE (pure reasoning, or the first
+        // half of a tag straddling the boundary) must not become an empty
+        // `text_delta`: a host that counts deltas to decide "the model
+        // answered" would read a reasoning-only turn as an answer. An
+        // already-empty input still passes through unchanged - that is a
+        // producer's frame, not the filter's doing.
+        if visible.is_empty() && !text.is_empty() {
+            return;
+        }
         let _ = self.writer.emit(&ProtocolEvent::TextDelta {
-            text: text.to_string(),
+            text: visible,
             msg_id: msg_id.to_string(),
         });
     }
@@ -790,6 +844,9 @@ impl OutputSink for ProtocolSink {
     }
 
     fn emit_stream_start(&self, msg_id: &str) {
+        // #1129: a runaway unclosed `<think>` from a cancelled turn must not
+        // suppress the next turn's visible output.
+        self.reasoning.lock().reset();
         let _ = self.writer.emit(&ProtocolEvent::StreamStart {
             msg_id: msg_id.to_string(),
         });
@@ -805,6 +862,9 @@ impl OutputSink for ProtocolSink {
         cache_read_tokens: u64,
         finish_reason: FinishReason,
     ) {
+        // #1129: an unclosed reasoning block reaches the host instead of
+        // vanishing with the turn.
+        self.flush_reasoning(msg_id);
         let _ = self.writer.emit(&ProtocolEvent::StreamEnd {
             msg_id: msg_id.to_string(),
             finish_reason,
@@ -842,6 +902,9 @@ impl OutputSink for ProtocolSink {
         agent_run_id: Option<&str>,
         usage_delta: Option<&wcore_types::message::TokenUsage>,
     ) {
+        // #1129: same unclosed-block flush as the plain `emit_stream_end`.
+        // Both overrides are live producer paths, so the flush is on both.
+        self.flush_reasoning(msg_id);
         let _ = self.writer.emit(&ProtocolEvent::StreamEnd {
             msg_id: msg_id.to_string(),
             finish_reason,
