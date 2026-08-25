@@ -135,7 +135,7 @@ impl Tool for SpawnTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let (mut tasks, agent_names) = match parse_tasks(&input) {
+        let (tasks, agent_names) = match parse_tasks(&input) {
             Ok(parsed) => parsed,
             Err(e) => {
                 return ToolResult {
@@ -144,22 +144,6 @@ impl Tool for SpawnTool {
                 };
             }
         };
-
-        // #862 — never hand a fork a SMALLER output budget than the session it
-        // serves. `size_output_cap` only ever clamps DOWNWARD, so the 4096
-        // sub-agent default also puts the reasoning-aware ceiling (#426,
-        // `UNKNOWN_REASONING_CAP` = 32768) out of reach: on a router alias that
-        // routes to a reasoning model, the reasoning tokens consume the whole
-        // 4096 and the turn ends `finish_reason=length` having emitted no
-        // answer text and no tool call, so the child terminates without
-        // completing. The identical prompt run WITHOUT a fork succeeds,
-        // because the top-level session keeps its own larger configured cap.
-        // Flooring here (not in `child_config`) keeps deliberate per-spawn
-        // narrowing by Crucible / skills / delegate untouched.
-        let parent_cap = self.spawner.base_max_tokens();
-        for task in &mut tasks {
-            task.max_tokens = task.max_tokens.max(parent_cap);
-        }
 
         if tasks.is_empty() {
             return ToolResult {
