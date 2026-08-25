@@ -510,8 +510,11 @@ A prompt that nobody answers is **denied after 5 minutes**, not left waiting.
 Stdin being a terminal does not prove anyone is reading it — a detached
 `tmux`/`screen` pane, a `script` wrapper, and CI that allocated a tty nobody
 types into all used to park the run forever with no output and no way to
-answer. The bound is fail-closed: a timeout denies, it never approves. Change
-or remove it with [`WAYLAND_APPROVAL_TIMEOUT_SECS`](#environment-variables).
+answer. The bound is fail-closed: a timeout denies, it never approves. It
+covers the whole answer, not only its first keystroke, so a partial line left
+at the prompt in a terminal that is not in canonical mode expires the same way.
+Change or remove it with
+[`WAYLAND_APPROVAL_TIMEOUT_SECS`](#environment-variables).
 
 
 ---
