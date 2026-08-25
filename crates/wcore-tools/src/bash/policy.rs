@@ -297,6 +297,26 @@ fn path_exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
+/// True only when the filesystem positively reports that NOTHING is there.
+///
+/// This is NOT `!path_exists(path)`, and the difference is the whole reason
+/// both functions exist. `path_exists` is false whenever the stat FAILS, for
+/// any reason at all: a permission error on a parent directory, a component
+/// that is a regular file, a spelling the platform rejects outright. Reading
+/// any of those as "absent" would silence [`annotate_sandbox_denial`] for a
+/// path that may well be there and may well have been genuinely denied —
+/// strictly worse than the false accusation the silence is meant to prevent.
+///
+/// So absence has to be POSITIVELY established: only `NotFound` counts, and
+/// every other outcome — including "the stat failed and we do not know why" —
+/// keeps the advisory. This oracle fails safe toward speaking, not silence.
+fn path_is_positively_absent(path: &Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
 /// Resolve a token the way [`classify`] does — absolute as written, relative
 /// against the child's cwd. Shared by the tokenizer so the two cannot drift
 /// into disagreeing about what a token even names.
@@ -338,6 +358,27 @@ fn classify(scope: &SandboxScope, token: &str) -> Option<(PathBuf, DeniedBecause
     // (where the join above turns it into nonsense under the cwd), and the
     // resolved form is what carries Windows' verbatim `\\?\` decoration.
     if is_always_granted(token) || is_always_granted(&resolved.to_string_lossy()) {
+        return None;
+    }
+    // wayland#1103. Everything above this line is evidence about the POLICY.
+    // None of it is evidence that there was ever anything for the policy to
+    // deny. A path that is not on disk at all was put out of reach by not
+    // existing, and saying otherwise contradicts the shell's own correct
+    // answer — `No such file or directory` — inside a message that then offers
+    // to turn the sandbox off. A mistyped filename argued the reader into
+    // `--trust-workspace` or `--dangerously-skip-permissions-and-sandbox`.
+    //
+    // The two cases are only separable HERE. Under bwrap an ungranted path is
+    // simply absent from the child's mount namespace, so the CHILD cannot tell
+    // a denial from a typo: both are `No such file or directory`. This runs in
+    // the parent, which is not sandboxed — the same property `candidate_paths`
+    // already relies on — so the filesystem can answer for it.
+    //
+    // The `PolicyDeny` arm above is deliberately NOT filtered this way. It
+    // names a rule this manifest actually carries, which is true whether or
+    // not that particular file exists; `NotGranted` is inferred FROM the
+    // failure and is only true if there was something to fail on.
+    if path_is_positively_absent(&resolved) {
         return None;
     }
     Some((resolved, DeniedBecause::NotGranted))
@@ -506,13 +547,20 @@ pub(super) fn annotate_sandbox_denial(scope: &SandboxScope, mut result: ToolResu
              pr_create instead of shelling out to git.",
         );
     }
+    // Narrowest remedy first, and the full bypass named as what it is rather
+    // than as a peer joined by "or". `--trust-workspace` re-scopes THIS
+    // workspace and leaves the OS sandbox on; the other flag removes the
+    // sandbox for everything the session goes on to do.
+    //
     // No clause here may forbid the model from reporting a cause: the W2/W3
     // sandbox gate measured such a clause suppressing the TRUE cause of a
     // failure while a false one was asserted elsewhere in the same message.
     result.content.push_str(
-        "\nRemedy: run once with `--trust-workspace` in this directory to switch to the \
-         trusted-local profile, or `--dangerously-skip-permissions-and-sandbox` to turn the \
-         OS sandbox off entirely.",
+        "\nRemedy: run once with `--trust-workspace` in this directory. That switches this \
+         workspace to the trusted-local profile, which grants the paths above while keeping \
+         the OS sandbox on. `--dangerously-skip-permissions-and-sandbox` removes the sandbox \
+         entirely for the rest of the session and is a last resort, not the fix for one \
+         path.",
     );
     result.is_error = true;
     result
@@ -984,7 +1032,7 @@ pub fn check_denylist(command: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_always_granted, is_path_token, path_exists};
+    use super::{is_always_granted, is_path_token, path_exists, path_is_positively_absent};
 
     /// The reassembly oracle must require POSITIVE evidence that a path
     /// exists. Asking "is it definitely absent?" instead looks identical on a
@@ -1009,6 +1057,50 @@ mod tests {
         assert!(
             !path_exists(std::path::Path::new("/definitely/not/here/xyzzy")),
             "and a plainly absent path is still absent"
+        );
+    }
+
+    /// The SUPPRESSION oracle is the mirror of the one above and has the same
+    /// safe direction, not the opposite one: `path_exists` may only answer YES
+    /// on positive evidence, and `path_is_positively_absent` may only answer
+    /// YES on positive evidence too. They are not each other's negation, and
+    /// writing the second as `!path_exists(p)` is the inversion that would
+    /// silence a real denial for a path that is really there.
+    ///
+    /// A file used as a directory COMPONENT is where that inversion shows:
+    /// the stat fails, so `!path_exists` says "absent", while the kernel is
+    /// saying `NotADirectory` and not `NotFound`. The row is graded against
+    /// the error kind the host actually returns — Windows collapses this shape
+    /// to `NotFound`, Unix does not — with an anti-vacuity guard so it cannot
+    /// silently grade nothing on the platform it was written for.
+    #[test]
+    fn the_absence_oracle_answers_to_not_found_alone() {
+        let file = std::env::current_exe().expect("the test binary exists");
+        assert!(
+            !path_is_positively_absent(&file),
+            "positive control: the binary is there, so it is not absent"
+        );
+        assert!(
+            path_is_positively_absent(&file.with_file_name("no-such-file-xyzzy")),
+            "and a plainly absent sibling is absent"
+        );
+
+        let as_dir = file.join("not-a-directory");
+        let kind = std::fs::symlink_metadata(&as_dir)
+            .expect_err("a regular file cannot be a directory component")
+            .kind();
+        #[cfg(unix)]
+        assert_ne!(
+            kind,
+            std::io::ErrorKind::NotFound,
+            "anti-vacuity: on unix this shape must stat as something OTHER \
+             than NotFound, or the assertion below grades nothing"
+        );
+        assert_eq!(
+            path_is_positively_absent(&as_dir),
+            kind == std::io::ErrorKind::NotFound,
+            "the oracle must answer to NotFound alone, never to 'the stat \
+             failed' — this path stats as {kind:?}"
         );
     }
 
