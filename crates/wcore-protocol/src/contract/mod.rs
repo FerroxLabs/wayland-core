@@ -15,7 +15,7 @@ pub use canonical::{canonical_json, digest_named_bytes};
 pub use check::check_contract;
 pub use generate::{
     CONTRACT_MAJOR, CONTRACT_MINOR, CONTRACT_NAME, CONTRACT_ROOT, GENERATOR_VERSION,
-    generated_artifacts, manifest_digests, write_contract,
+    enforce_wire_shape_version, generated_artifacts, manifest_digests, write_contract,
 };
 pub use observation::{
     ContractCapabilityStatus, ContractDescriptor, HostContractObserver, HostObservation,
