@@ -2,9 +2,10 @@
 //!
 //! These prove the four properties the PLAN/SPEC demand of the scheduler:
 //!
-//! 1. **No barrier (timing proof):** a fast item completes ALL stages before a
-//!    slow item finishes stage 1. The barrier baseline (a `Parallel` step,
-//!    which DOES join) is shown to behave differently.
+//! 1. **No barrier:** a fast item completes ALL stages before a slow item
+//!    finishes stage 1. The slow item's first stage is held open by a
+//!    [`StageGate`] until the fast item has logged all three of its stages, so
+//!    a barrier-per-stage scheduler CANNOT produce the asserted ordering.
 //! 2. **Single-item failure isolation:** one item's stage error drops exactly
 //!    that item to `null`; the others complete.
 //! 3. **Order + holes:** the result length equals the input length, with the
@@ -18,14 +19,14 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use common::{bound_test_spawner, test_config};
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use wcore_agent::orchestration::workflow::runner::{WorkflowPlan, WorkflowRunner};
 use wcore_agent::spawner::AgentSpawner;
 use wcore_providers::{LlmProvider, ProviderError};
@@ -59,6 +60,48 @@ fn ok_events(text: String) -> Vec<LlmEvent> {
     ]
 }
 
+/// How long a held stage waits for its release before giving up.
+///
+/// Never reached on a healthy pipeline: the release is causal and lands the
+/// instant the releasing item logs its last stage. It exists only so that a
+/// barrier-per-stage REGRESSION — under which the release can never arrive —
+/// fails the assertion RED instead of hanging the test forever.
+const GATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A causal ordering gate, used in place of a sleep.
+///
+/// The FIRST stage of `hold_tag` blocks until `release_after` completions of
+/// `release_tag` have been logged. That makes the interleaving the no-barrier
+/// assertion checks a CONSTRUCTED fact rather than a bet that one item's sleep
+/// outlasts three of the other item's scheduler round-trips — a bet that lost
+/// whenever many test processes competed for the machine (issue #1101: 0 % when
+/// run alone, 60.9 % of 256 runs at 64 concurrent test processes).
+struct StageGate {
+    /// Tag whose first stage is held.
+    hold_tag: String,
+    /// Tag whose logged completions release the hold.
+    release_tag: String,
+    /// How many `release_tag` completions must be logged before release.
+    release_after: usize,
+    notify: Notify,
+    /// Set once the hold has been applied. Only the FIRST stage of `hold_tag`
+    /// waits; without this, a regression that never releases would burn
+    /// `GATE_TIMEOUT` once per stage instead of once per run.
+    held: AtomicBool,
+}
+
+impl StageGate {
+    fn new(hold_tag: &str, release_tag: &str, release_after: usize) -> Self {
+        Self {
+            hold_tag: hold_tag.to_string(),
+            release_tag: release_tag.to_string(),
+            release_after,
+            notify: Notify::new(),
+            held: AtomicBool::new(false),
+        }
+    }
+}
+
 /// A provider that delays each stage by a per-tag amount and records the
 /// completion order as `(tag, global_seq)`. It re-embeds `TAG=<tag>` in its
 /// output so the tag survives stage→stage threading. It also tracks the
@@ -71,6 +114,8 @@ struct TimedProvider {
     completions: Arc<Mutex<Vec<String>>>,
     in_flight: Arc<AtomicUsize>,
     max_in_flight: Arc<AtomicUsize>,
+    /// Optional causal ordering gate; see [`StageGate`].
+    gate: Option<StageGate>,
 }
 
 impl TimedProvider {
@@ -85,7 +130,13 @@ impl TimedProvider {
             completions,
             in_flight,
             max_in_flight,
+            gate: None,
         }
+    }
+
+    fn with_gate(mut self, gate: StageGate) -> Self {
+        self.gate = Some(gate);
+        self
     }
 }
 
@@ -98,6 +149,30 @@ impl LlmProvider for TimedProvider {
         let tag = tag_of(request).unwrap_or_else(|| "untagged".to_string());
         let delay = self.delays.get(&tag).copied().unwrap_or(Duration::ZERO);
 
+        // Causal ordering gate. Applied before the in-flight accounting: a held
+        // stage is test scaffolding waiting on another item, not provider work.
+        if let Some(gate) = &self.gate
+            && tag == gate.hold_tag
+            && !gate.held.swap(true, Ordering::SeqCst)
+        {
+            let _ = tokio::time::timeout(GATE_TIMEOUT, async {
+                loop {
+                    let done = {
+                        let log = self.completions.lock().unwrap();
+                        log.iter().filter(|t| *t == &gate.release_tag).count()
+                    };
+                    if done >= gate.release_after {
+                        break;
+                    }
+                    // `notify_one` stores a permit when no task is waiting, so a
+                    // release landing between the check above and this await is
+                    // not lost.
+                    gate.notify.notified().await;
+                }
+            })
+            .await;
+        }
+
         // Track in-flight concurrency.
         let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_in_flight.fetch_max(now, Ordering::SeqCst);
@@ -108,6 +183,9 @@ impl LlmProvider for TimedProvider {
 
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
         self.completions.lock().unwrap().push(tag.clone());
+        if let Some(gate) = &self.gate {
+            gate.notify.notify_one();
+        }
 
         let (tx, rx) = mpsc::channel(8);
         // Re-embed the tag so the next stage's prompt still carries it.
@@ -171,25 +249,35 @@ Workflow(
 "#
 }
 
-/// 1. NO-BARRIER TIMING PROOF.
+/// 1. NO-BARRIER PROOF.
 ///
-/// Two items, `fast` and `slow`, three stages each. The `slow` item's stage 1
-/// sleeps long; `fast` stages are instant. With true item-level streaming the
-/// `fast` item completes ALL three of its stages before `slow` even finishes
-/// stage 1. A barrier-per-stage scheduler could not produce this ordering: it
-/// would have to finish stage 1 for BOTH items (incl. the long sleep) before
-/// any item's stage 2 ran.
+/// Two items, `fast` and `slow`, three stages each. The `slow` item's stage 1 is
+/// HELD until the `fast` item has logged all three of its stage completions;
+/// `fast` stages are instant. With true item-level streaming the release
+/// arrives and both items finish. A barrier-per-stage scheduler cannot produce
+/// this ordering: it would have to finish stage 1 for BOTH items before any
+/// item's stage 2 ran, so the release could never arrive, the hold would expire
+/// on [`GATE_TIMEOUT`], and `slow` would log its stage 1 with fewer than three
+/// `fast` completions ahead of it — a RED assertion.
+///
+/// The hold replaces a 300 ms sleep. The sleep only made the ordering *likely*:
+/// under process-level contention the scheduler could still land `slow`'s
+/// stage 1 ahead of `fast`'s third stage (issue #1101).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn no_barrier_fast_item_finishes_all_stages_before_slow_finishes_stage_one() {
     let completions = Arc::new(Mutex::new(Vec::new()));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let max_in_flight = Arc::new(AtomicUsize::new(0));
-    let provider = Arc::new(TimedProvider::new(
-        &[("slow", Duration::from_millis(300))],
-        Arc::clone(&completions),
-        Arc::clone(&in_flight),
-        Arc::clone(&max_in_flight),
-    ));
+    // No delays anywhere: ordering comes from the gate, not from the clock.
+    let provider = Arc::new(
+        TimedProvider::new(
+            &[],
+            Arc::clone(&completions),
+            Arc::clone(&in_flight),
+            Arc::clone(&max_in_flight),
+        )
+        .with_gate(StageGate::new("slow", "fast", 3)),
+    );
     let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = WorkflowPlan::parse(three_stage_pipeline_src()).expect("workflow should parse");
