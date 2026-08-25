@@ -1,8 +1,123 @@
 use std::collections::HashSet;
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::time::Duration;
 
 use wcore_protocol::events::ToolCategory;
 use wcore_types::execution_policy::ApprovalPolicy;
+
+/// Wall-clock budget for one answer at the interactive approval prompt.
+///
+/// `is_terminal()` proves stdin is a terminal; it never proves anyone is
+/// reading it. A detached tmux or screen pane, a `script` wrapper, and CI that
+/// allocated a tty nobody types into all leave a real pty on stdin with no one
+/// on the other end, so the non-terminal guard in `check_for` does not fire and
+/// `read_line` parks for the life of the process. Five minutes is far longer
+/// than a human needs for a prompt they can see, and unlike the unbounded wait
+/// it ends in a decision instead of a dead turn.
+///
+/// The number is a ratified product choice, not an arbitrary literal, so do not
+/// "fix" this by removing the bound. It is defensible because the outcome is
+/// fail-closed (a timeout denies, never approves), because a denial is
+/// recoverable (the model reports it and the user can ask again) where an
+/// indefinite park is not, and because the escape hatch is explicit:
+/// `WAYLAND_APPROVAL_TIMEOUT_SECS=0` restores the old unbounded wait for
+/// anyone who wants it. Changing the default changes documented behaviour --
+/// see the Tool Confirmation section of `docs/getting-started.md`.
+const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 300;
+
+/// Override for [`DEFAULT_APPROVAL_TIMEOUT_SECS`], in whole seconds. `0`
+/// restores the historical unbounded wait for operators who want it; an
+/// unparseable value falls back to the default rather than to "never".
+const APPROVAL_TIMEOUT_ENV: &str = "WAYLAND_APPROVAL_TIMEOUT_SECS";
+
+/// The configured approval budget, or `None` when the operator asked to wait
+/// forever.
+fn approval_timeout() -> Option<Duration> {
+    let secs = std::env::var(APPROVAL_TIMEOUT_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS);
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// Outcome of waiting for the approver to type something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnswerWait {
+    /// Input is available, so the blocking read will not park.
+    Ready,
+    /// The budget expired with nothing typed.
+    TimedOut,
+    /// Readiness cannot be arbitrated on this stdin. The caller keeps the
+    /// historical blocking read: a stdin that cannot be polled cannot be read
+    /// either, and `decide_from_answer` already fails closed on that error.
+    Unavailable,
+}
+
+/// Wait up to `budget` for stdin to have something to read. The single
+/// centralized home for this platform difference — no call site cfg-branches.
+#[cfg(unix)]
+fn wait_for_answer(budget: Duration) -> AnswerWait {
+    use std::os::fd::AsRawFd;
+    use std::time::Instant;
+
+    let deadline = Instant::now() + budget;
+    let mut fd = libc::pollfd {
+        fd: io::stdin().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        // `poll(2)` takes whole milliseconds in an `int`. Clamping keeps a
+        // large budget from wrapping into a negative timeout, which `poll`
+        // reads as "wait forever" — precisely the hang this guard ends.
+        let millis = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+        // SAFETY: `fd` is a live, fully initialised `pollfd` describing this
+        // process's own stdin, and the length matches the single element.
+        let rc = unsafe { libc::poll(&mut fd, 1, millis) };
+        if rc > 0 {
+            return AnswerWait::Ready;
+        }
+        if rc == 0 {
+            return AnswerWait::TimedOut;
+        }
+        // A signal (SIGWINCH from a resize, SIGCHLD from a finished tool) is
+        // not an answer; retry against the same deadline rather than reading
+        // the interruption as either consent or a timeout.
+        if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return AnswerWait::Unavailable;
+    }
+}
+
+/// Windows counterpart. A console input handle is signalled by any input
+/// record, so a keystroke that is not yet a whole line reports `Ready` and the
+/// read below blocks as before; the case this guard exists for — nothing
+/// arriving at all — still times out.
+#[cfg(windows)]
+fn wait_for_answer(budget: Duration) -> AnswerWait {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+    // `INFINITE` is `u32::MAX`; staying one below it keeps a large budget from
+    // becoming the unbounded wait this guard exists to end.
+    let millis = u32::try_from(budget.as_millis()).unwrap_or(u32::MAX - 1);
+    let millis = millis.min(u32::MAX - 1);
+    let handle = io::stdin().as_raw_handle() as HANDLE;
+    // SAFETY: `handle` is this process's own live standard-input handle.
+    match unsafe { WaitForSingleObject(handle, millis) } {
+        WAIT_OBJECT_0 => AnswerWait::Ready,
+        WAIT_TIMEOUT => AnswerWait::TimedOut,
+        _ => AnswerWait::Unavailable,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn wait_for_answer(_budget: Duration) -> AnswerWait {
+    AnswerWait::Unavailable
+}
 
 pub struct ToolConfirmer {
     approval_policy: ApprovalPolicy,
@@ -143,6 +258,34 @@ impl ToolConfirmer {
         // panic preserves the existing "abort if I/O is hosed"
         // semantics for interactive callers.
         let _ = io::stderr().flush();
+
+        // A terminal is not an approver. The guard above proves stdin is a
+        // tty, never that anything is attached to the other end of it, so a
+        // detached tmux/screen pane, a `script` wrapper, or CI that allocated
+        // a tty nobody types into leaves `read_line` parked for the life of
+        // the process and the turn stops with no output and no way to answer.
+        // Bound the wait and fail closed, exactly like the non-terminal and
+        // EOF cases: a tool that needs confirmation and never gets one is
+        // denied, never auto-approved.
+        if let Some(budget) = approval_timeout()
+            && wait_for_answer(budget) == AnswerWait::TimedOut
+        {
+            eprintln!(
+                "\nNo answer after {}s - denying {}. Set {}=<seconds> to change \
+                 the budget (0 waits forever).",
+                budget.as_secs(),
+                tool_name,
+                APPROVAL_TIMEOUT_ENV
+            );
+            let _ = io::stderr().flush();
+            tracing::debug!(
+                target: "wcore_agent::confirm",
+                tool = %tool_name,
+                timeout_secs = budget.as_secs(),
+                "no answer at the approval prompt within the budget; denying (terminal with no approver)"
+            );
+            return ConfirmResult::Denied;
+        }
 
         self.decide_from_answer(tool_name, &mut io::stdin().lock())
     }
