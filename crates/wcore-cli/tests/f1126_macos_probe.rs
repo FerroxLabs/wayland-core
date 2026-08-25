@@ -317,6 +317,8 @@ fn f1126_probe_the_approve_once_stall() {
     let mut probe_at: Vec<u64> = vec![12, 32, 62, 100];
     let mut log = String::new();
     let mut done_at: Option<Duration> = None;
+    let mut poked_end = false;
+    let mut revealed_by_end: Option<&str> = None;
     let mut poked_tab = false;
     let mut poked_prompt = false;
     let mut contaminated = false;
@@ -331,13 +333,48 @@ fn f1126_probe_the_approve_once_stall() {
             // passes. Iteration 3 hit exactly this: one attempt "passed" at
             // 82.859s against ~2s for its siblings, i.e. immediately after the
             // poke.
-            contaminated = poked_prompt;
+            contaminated = poked_prompt || revealed_by_end.is_some();
             break;
         }
         let elapsed = started.elapsed();
         if elapsed >= budget {
             break;
         }
+        // THE VIEWPORT TEST, and it runs FIRST because it can invalidate
+        // everything below it.
+        //
+        // The harness's vt100 parser is built with ZERO scrollback
+        // (support/pty.rs:253), so `screen_text()` can only ever see the 40
+        // visible rows. The child's own log shows this turn's TextDelta and
+        // StreamEnd were RECEIVED and APPLIED ~0.2s in, and the final frame
+        // does carry the answer - so "the token is not on screen" may mean
+        // "the transcript is not scrolled to it", not "the turn never
+        // finished". The TUI renders a "jump to latest" affordance, which is
+        // exactly the state of a view that is not following its tail.
+        //
+        // Press End. If the token appears, the turn completed on time and the
+        // wedge is the harness reading a viewport that scrolled off it. That
+        // would make this a TEST defect, not a product hang, and every earlier
+        // conclusion in this issue would need re-reading.
+        if !poked_end && elapsed >= Duration::from_secs(20) {
+            poked_end = true;
+            for (label, keys) in [
+                ("CSI-F", &b"\x1b[F"[..]),
+                ("SS3-F", &b"\x1bOF"[..]),
+                ("CSI-4~", &b"\x1b[4~"[..]),
+            ] {
+                pty.send(keys);
+                std::thread::sleep(Duration::from_millis(800));
+                if pty.screen_text().contains(DONE_TOKEN) {
+                    revealed_by_end = Some(label);
+                    break;
+                }
+            }
+            log.push_str(&format!(
+                "\n[poke t=20s] End (jump to latest) revealed the token: {revealed_by_end:?}\n"
+            ));
+        }
+
         // LIVENESS POKES. The screen is known to be repainting (the turn timer
         // advances), so the question is WHICH half is dead. Each poke isolates
         // one path and none of them writes a diagnostic into the terminal —
@@ -433,6 +470,7 @@ fn f1126_probe_the_approve_once_stall() {
     pty.quit();
 
     println!("contaminated_by_poke = {contaminated}");
+    println!("revealed_by_end = {revealed_by_end:?}");
     assert!(
         done_at.is_some() && !contaminated,
         "the closing token did not reach the screen on its own within {budget:?} \
