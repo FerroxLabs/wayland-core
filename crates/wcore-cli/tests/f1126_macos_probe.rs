@@ -362,6 +362,7 @@ fn f1126_probe_the_approve_once_stall() {
     let mut poked_end = false;
     let mut revealed_by_end: Option<&str> = None;
     let mut end_moved_screen = false;
+    let mut revealed_by_scrollup: Option<u32> = None;
     let mut poked_tab = false;
     let mut poked_prompt = false;
     let mut contaminated = false;
@@ -376,7 +377,8 @@ fn f1126_probe_the_approve_once_stall() {
             // passes. Iteration 3 hit exactly this: one attempt "passed" at
             // 82.859s against ~2s for its siblings, i.e. immediately after the
             // poke.
-            contaminated = poked_prompt || revealed_by_end.is_some();
+            contaminated =
+                poked_prompt || revealed_by_end.is_some() || revealed_by_scrollup.is_some();
             break;
         }
         let elapsed = started.elapsed();
@@ -407,10 +409,24 @@ fn f1126_probe_the_approve_once_stall() {
             // delivered" produce the same reading. PgUp must move the screen;
             // if it does not, this whole probe is inert and its None means
             // nothing.
+            // Scroll UP, not just to latest. If the answer was appended to an
+            // earlier turn that has scrolled off the TOP, then "jump to latest"
+            // is the one direction that cannot find it, and every reading taken
+            // at the tail is blind to it.
             let before_pgup = pty.screen_text();
-            pty.send(b"\x1b[5~");
-            std::thread::sleep(Duration::from_millis(800));
-            let scroll_control = pty.screen_text() != before_pgup;
+            let mut scroll_control = false;
+            for page in 1..=8 {
+                pty.send(b"\x1b[5~");
+                std::thread::sleep(Duration::from_millis(400));
+                let now = pty.screen_text();
+                if now != before_pgup {
+                    scroll_control = true;
+                }
+                if now.contains(DONE_TOKEN) {
+                    revealed_by_scrollup = Some(page);
+                    break;
+                }
+            }
             for (label, keys) in [
                 ("CSI-F", &b"\x1b[F"[..]),
                 ("SS3-F", &b"\x1bOF"[..]),
@@ -429,7 +445,8 @@ fn f1126_probe_the_approve_once_stall() {
             log.push_str(&format!(
                 "\n[poke t=20s] PgUp moved the screen (control) = {scroll_control}; \
                  End moved the screen = {end_moved_screen}; \
-                 End revealed the token = {revealed_by_end:?}\n"
+                 End revealed the token = {revealed_by_end:?}; \
+                 SCROLL-UP revealed the token on page = {revealed_by_scrollup:?}\n"
             ));
         }
 
@@ -530,6 +547,7 @@ fn f1126_probe_the_approve_once_stall() {
 
     println!("contaminated_by_poke = {contaminated}");
     println!("revealed_by_end = {revealed_by_end:?}");
+    println!("revealed_by_scrollup = {revealed_by_scrollup:?}");
     assert!(
         done_at.is_some() && !contaminated,
         "the closing token did not reach the screen on its own within {budget:?} \
