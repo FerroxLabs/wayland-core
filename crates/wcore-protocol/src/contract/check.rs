@@ -4,7 +4,8 @@ use std::io;
 
 use super::ContractResult;
 use super::generate::{
-    all_relative_files, contract_path, enforce_wire_shape_version, generated_artifacts,
+    WireShapeBaseline, all_relative_files, contract_path, enforce_wire_shape_version,
+    generated_artifacts,
 };
 
 /// Regenerate in memory and reject missing, extra, or byte-drifted artifacts.
@@ -14,7 +15,7 @@ pub fn check_contract() -> ContractResult<()> {
     // Before the drift report, because "run `wcore-contract generate`" is the
     // wrong remedy for a moved wire shape and running it used to certify the
     // break as green.
-    enforce_wire_shape_version(&expected)?;
+    enforce_wire_shape_version(&expected, WireShapeBaseline::Required)?;
     let expected_paths = expected.keys().cloned().collect::<BTreeSet<_>>();
     let actual_paths = all_relative_files(&root)?;
 
