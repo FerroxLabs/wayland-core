@@ -1073,6 +1073,46 @@ impl Drop for ProtocolToolSink {
     }
 }
 
+/// Narrow a declared effect contract to the evidence this call actually
+/// produced.
+///
+/// A tool's `effect_contract` sees only the input. `Write` and `Edit` declare
+/// a filesystem-transactional effect, but they produce no receipt when the
+/// target cannot be identified before the write — a symlink, a hard link, a
+/// preimage past the checkpoint bound, a backend with no identity primitive.
+/// The durable reducer refuses to START a filesystem-transactional execution
+/// with no receipt, and it is right to: recovery would have a reconciler name
+/// and nothing to reconcile against. So the record keeps the narrowed
+/// contract, which is exactly the opaque recovery those calls had before this
+/// seam existed.
+fn narrow_contract_to_evidence(
+    contract: wcore_types::tool::ToolEffectContract,
+    effect_receipt: Option<&serde_json::Value>,
+) -> wcore_types::tool::ToolEffectContract {
+    if effect_receipt.is_none() && matches!(contract.kind, ToolEffectKind::FilesystemTransactional)
+    {
+        return wcore_types::tool::ToolEffectContract::default();
+    }
+    contract
+}
+
+/// Whether a recovered retry may proceed against the contract its durable
+/// record holds.
+///
+/// The record holds the NARROWED contract, so an opaque record is compatible
+/// with a fresh filesystem-transactional declaration that is still willing to
+/// narrow to it — the attempt is then forced back onto the opaque path below.
+/// Nothing else about the contract may change across a retry.
+fn retry_contract_is_compatible(
+    durable: &wcore_types::tool::ToolEffectContract,
+    declared: &wcore_types::tool::ToolEffectContract,
+) -> bool {
+    durable == declared
+        || (matches!(durable.kind, ToolEffectKind::Opaque)
+            && durable.reconciler.is_none()
+            && matches!(declared.kind, ToolEffectKind::FilesystemTransactional))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_tool_effect(
     effect_scope: Option<&TurnEffectScope>,
@@ -1085,6 +1125,7 @@ fn prepare_tool_effect(
     effect_receipt: Option<serde_json::Value>,
     pre_hook_phase_id: Option<&str>,
 ) -> Result<Option<PreparedToolLease>, String> {
+    let contract = narrow_contract_to_evidence(contract, effect_receipt.as_ref());
     effect_scope
         .map(|scope| {
             let prepared = match (effect_receipt, pre_hook_phase_id) {
@@ -1797,7 +1838,7 @@ async fn execute_single_with_streaming(
             let max_size = tool.max_result_size();
             let effect_contract = tool.effect_contract(&effective_input);
             if let Some(retry) = recovered_retry
-                && retry.effect_contract != &effect_contract
+                && !retry_contract_is_compatible(retry.effect_contract, &effect_contract)
             {
                 return (
                     journal_authority_failure(
@@ -2108,6 +2149,17 @@ async fn execute_single_with_streaming(
                 },
                 None => None,
             };
+            // A recovered retry inherits its durable record's contract and
+            // receipt verbatim. If that record carries none, this attempt must
+            // run the opaque path too, whatever this process managed to
+            // prepare — otherwise the physical dispatch and the durable
+            // description of it would disagree.
+            let (prepared_runtime, durable_receipt) =
+                if recovered_retry.is_some_and(|retry| retry.effect_receipt.is_none()) {
+                    (None, None)
+                } else {
+                    (prepared_runtime, durable_receipt)
+                };
             if let Err(error) =
                 store_prepared_effect_checkpoint(effect_scope, prepared_runtime.as_ref()).await
             {

@@ -1553,3 +1553,138 @@ async fn actual_script_adapter_error_is_ambiguous_and_terminal() {
     )
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// F13, reachable half (#889): the production dispatcher must carry a real
+// Write/Edit call's filesystem receipt onto the durable record, and must
+// narrow the contract back to opaque when the tool could not produce one.
+// ---------------------------------------------------------------------------
+
+fn file_tool_registry() -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(
+        wcore_tools::write::WriteTool::new(None).with_unsaved_guard(std::sync::Arc::new(
+            wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+        )),
+    ));
+    registry.register(Box::new(
+        wcore_tools::edit::EditTool::new(None).with_unsaved_guard(std::sync::Arc::new(
+            wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+        )),
+    ));
+    registry
+}
+
+#[tokio::test]
+async fn a_dispatched_write_records_its_filesystem_receipt_on_the_durable_tool() {
+    let workspace = tempfile::tempdir().unwrap();
+    let target = workspace.path().join("dispatched.txt");
+    std::fs::write(&target, b"one\n").unwrap();
+    let (_dir, journal, scope) = effect_fixture();
+    let registry = file_tool_registry();
+    let call = tool_call(
+        "provider-call",
+        "Write",
+        json!({"file_path": target.to_string_lossy(), "content": "one\ntwo\n"}),
+    );
+
+    let block = execute_durable(&registry, &call, None, &CancellationToken::new(), &scope).await;
+    assert!(
+        matches!(&block, ContentBlock::ToolResult { is_error, .. } if !is_error),
+        "unexpected dispatch outcome: {block:?}"
+    );
+
+    let tool = only_tool(&journal);
+    assert!(matches!(tool.effect, ToolEffectState::Succeeded));
+    assert_eq!(
+        tool.effect_contract.kind,
+        wcore_types::tool::ToolEffectKind::FilesystemTransactional
+    );
+    assert_eq!(
+        tool.effect_contract.reconciler.as_deref(),
+        Some(wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER)
+    );
+    let receipt = tool
+        .effect_receipt
+        .clone()
+        .expect("the dispatcher must persist the prepared receipt");
+    let receipt =
+        serde_json::from_value::<wcore_tools::effects::FilesystemEffectReceiptV1>(receipt)
+            .expect("a receipt the reducer already accepted must decode");
+    receipt.validate().expect("and must still validate");
+    assert_eq!(receipt.path(), target.as_path());
+    assert_eq!(std::fs::read(&target).unwrap(), b"one\ntwo\n");
+}
+
+/// The reducer refuses to START a filesystem-transactional execution with no
+/// receipt, and it is right to. A target the tool cannot identify beforehand
+/// must therefore be recorded as the opaque effect it actually is — and must
+/// still run.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_write_that_could_not_be_prepared_is_recorded_opaque_and_still_runs() {
+    let workspace = tempfile::tempdir().unwrap();
+    let real = workspace.path().join("real.txt");
+    let link = workspace.path().join("link.txt");
+    std::fs::write(&real, b"one\n").unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let (_dir, journal, scope) = effect_fixture();
+    let registry = file_tool_registry();
+    let call = tool_call(
+        "provider-call",
+        "Write",
+        json!({"file_path": link.to_string_lossy(), "content": "one\ntwo\n"}),
+    );
+
+    let block = execute_durable(&registry, &call, None, &CancellationToken::new(), &scope).await;
+    assert!(
+        matches!(&block, ContentBlock::ToolResult { is_error, .. } if !is_error),
+        "a declined preparation must not refuse the call: {block:?}"
+    );
+
+    let tool = only_tool(&journal);
+    assert!(matches!(tool.effect, ToolEffectState::Succeeded));
+    assert_eq!(
+        tool.effect_contract.kind,
+        wcore_types::tool::ToolEffectKind::Opaque,
+        "a receiptless call must be recorded as the opaque effect it is"
+    );
+    assert!(tool.effect_contract.reconciler.is_none());
+    assert!(tool.effect_receipt.is_none());
+    assert_eq!(std::fs::read(&link).unwrap(), b"one\ntwo\n");
+}
+
+/// An ordinary tool error must stay a terminal failure. Recording it as a
+/// reconcilable unknown would block the whole session on a human for every
+/// `old_string` that did not match.
+#[tokio::test]
+async fn an_edit_that_cannot_match_fails_terminally_rather_than_blocking_the_session() {
+    let workspace = tempfile::tempdir().unwrap();
+    let target = workspace.path().join("nomatch.txt");
+    std::fs::write(&target, b"one\n").unwrap();
+    let (_dir, journal, scope) = effect_fixture();
+    let registry = file_tool_registry();
+    let call = tool_call(
+        "provider-call",
+        "Edit",
+        json!({
+            "file_path": target.to_string_lossy(),
+            "old_string": "not present anywhere",
+            "new_string": "x",
+        }),
+    );
+
+    let block = execute_durable(&registry, &call, None, &CancellationToken::new(), &scope).await;
+    assert!(
+        matches!(&block, ContentBlock::ToolResult { is_error, .. } if *is_error),
+        "unexpected dispatch outcome: {block:?}"
+    );
+
+    let tool = only_tool(&journal);
+    assert!(
+        matches!(tool.effect, ToolEffectState::Failed { .. }),
+        "expected a terminal failure, got {:?}",
+        tool.effect
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"one\n");
+}
