@@ -4585,6 +4585,23 @@ fn xai_oauth_available() -> bool {
 /// of `wcore_providers::create_provider`, so switching to `openai-chatgpt` at
 /// runtime constructs a working OAuth-backed provider.
 pub fn create_provider_with_oauth(config: &Config) -> anyhow::Result<Arc<dyn LlmProvider>> {
+    create_provider_with_oauth_reported(config, Arc::new(wcore_providers::NoOpCircuitReporter))
+}
+
+/// [`create_provider_with_oauth`] with the circuit reporter supplied by the
+/// caller.
+///
+/// #1133 — the chain this builds is a REAL one (`build_fallback_providers`), so
+/// a caller that rebinds the provider mid-session can silently start being
+/// answered by a different provider at a different price. With a
+/// `NoOpCircuitReporter` the failover receipt is dropped before any sink is
+/// involved, so the notice `ProtocolCircuitReporter` renders never exists.
+/// Callers that own a sink pass a reporter built on it; the sinkless ones
+/// (a workflow runner, an Anvil seat) keep the no-op through the wrapper above.
+pub fn create_provider_with_oauth_reported(
+    config: &Config,
+    reporter: Arc<dyn wcore_providers::CircuitReporter>,
+) -> anyhow::Result<Arc<dyn LlmProvider>> {
     let inner = build_native_or_chatgpt_provider(config)?;
     let cfg = CircuitConfig {
         fail_threshold: config.provider_chain.failure_threshold as usize,
@@ -4600,7 +4617,7 @@ pub fn create_provider_with_oauth(config: &Config) -> anyhow::Result<Arc<dyn Llm
         inner,
         build_fallback_providers(config, &mut pricing_refresher_constructed)?,
         cfg,
-        Arc::new(wcore_providers::NoOpCircuitReporter),
+        reporter,
         failover_routing_policy(config),
     )))
 }

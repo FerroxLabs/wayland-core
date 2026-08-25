@@ -2237,16 +2237,33 @@ impl TuiEngine {
         // (e.g. an unreadable OAuth token store) is treated like a resolve
         // failure: leave the engine on its current binding and report
         // "live apply skipped" rather than dropping the running provider.
-        let provider = match wcore_agent::bootstrap::create_provider_with_oauth(&config) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(
-                    target: "wcore_cli::tui::engine_bridge",
-                    "rebind skipped: provider build failed ({e:#})"
-                );
-                return None;
-            }
+        // #1133 — a rebound provider carries a REAL fallback chain, so it can
+        // start answering from a different provider at a different price. The
+        // no-op reporter this path used to take dropped that fact before any
+        // sink saw it, leaving a user who typed `/provider` or `/profile`
+        // silent again. `self.tx` is the same channel the engine's own sink
+        // forwards on, so the notice lands in the transcript like any other.
+        let reporter: Arc<dyn wcore_providers::CircuitReporter> = if config.provider_chain.enabled {
+            Arc::new(
+                wcore_agent::resilient_reporter::ProtocolCircuitReporter::new(Arc::new(
+                    ChannelSink::new(self.tx.clone()),
+                )
+                    as Arc<dyn wcore_agent::output::OutputSink>),
+            )
+        } else {
+            Arc::new(wcore_providers::NoOpCircuitReporter)
         };
+        let provider =
+            match wcore_agent::bootstrap::create_provider_with_oauth_reported(&config, reporter) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "wcore_cli::tui::engine_bridge",
+                        "rebind skipped: provider build failed ({e:#})"
+                    );
+                    return None;
+                }
+            };
         let compat = config.compat.clone();
         let model = config.model.clone();
 
