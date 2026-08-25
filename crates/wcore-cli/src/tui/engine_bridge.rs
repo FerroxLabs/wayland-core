@@ -270,6 +270,14 @@ impl ChannelSink {
     /// Forward one event, dropping the result — a closed channel means
     /// the TUI shut down and there is nothing to recover.
     fn send(&self, event: ProtocolEvent) {
+        // FerroxLabs/wayland#1126 (LANE-ONLY diagnostic). Timestamps both ends
+        // of the engine->TUI channel so a wedge can be attributed: if SEND is
+        // logged and RECV is not, the bridge task stopped draining; if neither
+        // is logged, the engine never emitted at all. Goes to the tracing log
+        // file, which in TUI mode is $WAYLAND_HOME/logs/wayland-core.log and
+        // NEVER the terminal (main.rs:1362), so it cannot corrupt the pty
+        // screen the harness reads.
+        tracing::trace!(target: "f1126", event = ?std::mem::discriminant(&event), "sink SEND");
         let _ = self.tx.send(event);
     }
 }

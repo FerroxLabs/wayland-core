@@ -61,7 +61,15 @@ pub fn spawn_bridge(
     wake: Arc<Notify>,
 ) {
     tokio::spawn(async move {
+        tracing::trace!(target: "f1126", "bridge task STARTED");
         while let Some(event) = engine_rx.recv().await {
+            // FerroxLabs/wayland#1126 (LANE-ONLY diagnostic) - see the paired
+            // "sink SEND" line in engine_bridge.rs.
+            tracing::trace!(
+                target: "f1126",
+                event = ?std::mem::discriminant(&event),
+                "bridge RECV"
+            );
             // A poisoned lock means a surface panicked mid-mutation; the
             // TUI is already unwinding, so there is nothing useful to do
             // but stop draining. Recover the inner guard from the

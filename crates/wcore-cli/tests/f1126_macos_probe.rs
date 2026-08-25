@@ -289,7 +289,7 @@ fn f1126_probe_the_approve_once_stall() {
         &[
             (
                 "RUST_LOG",
-                "info,wcore_agent=trace,wcore_providers=trace,wcore_cli=trace,wcore_tools=debug",
+                "info,f1126=trace,wcore_agent=trace,wcore_providers=trace,wcore_cli=trace",
             ),
             ("RUST_BACKTRACE", "1"),
         ],
