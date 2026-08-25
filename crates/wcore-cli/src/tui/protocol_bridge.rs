@@ -77,7 +77,23 @@ pub fn spawn_bridge(
             // a wedged "working" indicator must never be a panic's
             // legacy (AUDIT-D D2, defense in depth behind D1).
             match app.lock() {
-                Ok(mut guard) => apply_event(&mut guard, event),
+                Ok(mut guard) => {
+                    // FerroxLabs/wayland#1126. The "bridge RECV" line above is
+                    // logged on DEQUEUE, before this lock — it proves the event
+                    // left the channel, NOT that it reached App state. Those are
+                    // different claims and I conflated them once already. This
+                    // line is the one that means applied.
+                    let discriminant = std::mem::discriminant(&event);
+                    apply_event(&mut guard, event);
+                    tracing::trace!(
+                        target: "f1126",
+                        event = ?discriminant,
+                        streaming_active = guard.session.streaming_active,
+                        run_live = guard.session.run_live,
+                        turns = guard.session.turns.len(),
+                        "bridge APPLIED"
+                    );
+                }
                 Err(poisoned) => {
                     poisoned.into_inner().session.streaming_active = false;
                     wake.notify_one();

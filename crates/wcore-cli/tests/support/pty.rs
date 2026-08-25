@@ -250,7 +250,9 @@ impl Pty {
         let child = pty.slave.spawn_command(cmd).expect("spawn wayland-core");
 
         let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
-        let parser = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(
+            rows, cols, 10_000,
+        )));
         let parser_for_thread = std::sync::Arc::clone(&parser);
         let reader_stats = std::sync::Arc::new(std::sync::Mutex::new(ReaderStats::default()));
         let stats_for_thread = std::sync::Arc::clone(&reader_stats);
@@ -300,6 +302,30 @@ impl Pty {
             steps: std::sync::Mutex::new(Vec::new()),
             master_fd,
         }
+    }
+
+    /// FerroxLabs/wayland#1126 — does this TUI produce terminal scrollback AT
+    /// ALL? The proposed harness fix (give the parser scrollback, read the full
+    /// buffer) is only buildable if the answer is yes. A full-screen
+    /// alternate-screen app repaints in place, and content that falls outside a
+    /// widget's own viewport is never emitted, so it would never reach
+    /// scrollback either. Measure instead of assuming.
+    pub fn scrollback_probe(&self) -> String {
+        let Ok(mut parser) = self.parser.lock() else {
+            return "parser lock poisoned".to_string();
+        };
+        let mut out = String::new();
+        for offset in [0usize, 1, 5, 40] {
+            parser.set_scrollback(offset);
+            let contents = parser.screen().contents();
+            let non_blank = contents.lines().filter(|l| !l.trim().is_empty()).count();
+            out.push_str(&format!(
+                "scrollback offset {offset}: {} bytes, {non_blank} non-blank rows\n",
+                contents.len()
+            ));
+        }
+        parser.set_scrollback(0);
+        out
     }
 
     /// The OS pid of the child this harness drives, when the backend exposes

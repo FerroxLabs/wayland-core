@@ -30,8 +30,36 @@ use support::pty::{Pty, write_config};
 const OUTSIDE_TOKEN: &str = "WAYLAND_OUTSIDE_FILE_CONTENT_OK";
 const DONE_TOKEN: &str = "WAYLAND_BOUNDARY_TURN_DONE";
 
+/// A tempdir whose ABSOLUTE PATH can be padded to a chosen length.
+///
+/// The macOS-only pattern may be nothing but path length. macOS hands out
+/// `/private/var/folders/df/<32 chars>/T/.tmpXXXXXX` (~67 chars) where Linux
+/// gives `/tmp/.tmpXXXXXX` (~15). The refusal card renders that path THREE
+/// times (the tool arg, the file, the sandbox root) and a `Files changed` card
+/// renders it again, so the same turn wraps to several times as many rows on
+/// macOS. With a 40-row viewport and a harness that keeps no scrollback, that
+/// is enough to push the answer below the fold.
+///
+/// `F1126_PATH_PAD=N` inserts an N-character directory under the temp root, so
+/// a Linux run can be given macOS-length paths with everything else held
+/// constant. That turns "macOS-only" from a correlation into a manipulable
+/// variable.
+fn padded_tempdir() -> TempDir {
+    match std::env::var("F1126_PATH_PAD")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        Some(n) if n > 0 => {
+            let base = std::env::temp_dir().join("p".repeat(n));
+            std::fs::create_dir_all(&base).expect("create padded base");
+            TempDir::new_in(base).expect("tempdir")
+        }
+        _ => TempDir::new().expect("tempdir"),
+    }
+}
+
 fn outside_file() -> (TempDir, PathBuf, PathBuf) {
-    let dir = TempDir::new().expect("tempdir");
+    let dir = padded_tempdir();
     let reports = dir.path().join("reports");
     std::fs::create_dir_all(&reports).expect("create reports dir");
     let file = reports.join("q3.md");
@@ -259,7 +287,7 @@ fn f1126_probe_the_approve_once_stall() {
     );
     println!("test process pid = {}", std::process::id());
 
-    let home = TempDir::new().expect("tempdir");
+    let home = padded_tempdir();
     let (_outside, _root, file) = outside_file();
     let file_arg = file.to_str().expect("utf-8 path").to_string();
 
@@ -282,10 +310,24 @@ fn f1126_probe_the_approve_once_stall() {
     // terminal (main.rs:1362 — the alt-screen owns stdio), so raising the
     // filter cannot corrupt the screen this harness reads. It is the one
     // channel that can say what the engine was doing when it went quiet.
+    // Viewport as a manipulable variable. The path-length arm did NOT
+    // reproduce on Linux (6/6 pass at pad=52, macOS-equivalent), so test the
+    // thing path length was only a proxy for: whether the turn's content
+    // exceeds the visible rows. `F1126_ROWS` / `F1126_COLS` let a Linux run be
+    // given a viewport too small for the turn while everything else is held
+    // constant.
+    let rows: u16 = std::env::var("F1126_ROWS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+    let cols: u16 = std::env::var("F1126_COLS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
     let mut pty = Pty::spawn_with_env(
         home.path(),
-        40,
-        200,
+        rows,
+        cols,
         &[
             (
                 "RUST_LOG",
@@ -319,6 +361,7 @@ fn f1126_probe_the_approve_once_stall() {
     let mut done_at: Option<Duration> = None;
     let mut poked_end = false;
     let mut revealed_by_end: Option<&str> = None;
+    let mut end_moved_screen = false;
     let mut poked_tab = false;
     let mut poked_prompt = false;
     let mut contaminated = false;
@@ -358,20 +401,35 @@ fn f1126_probe_the_approve_once_stall() {
         // conclusion in this issue would need re-reading.
         if !poked_end && elapsed >= Duration::from_secs(20) {
             poked_end = true;
+            // POSITIVE CONTROL FIRST. `revealed_by_end = None` is worthless
+            // without evidence that the key reached the TUI at all — "End does
+            // nothing because there is nothing to jump to" and "End was never
+            // delivered" produce the same reading. PgUp must move the screen;
+            // if it does not, this whole probe is inert and its None means
+            // nothing.
+            let before_pgup = pty.screen_text();
+            pty.send(b"\x1b[5~");
+            std::thread::sleep(Duration::from_millis(800));
+            let scroll_control = pty.screen_text() != before_pgup;
             for (label, keys) in [
                 ("CSI-F", &b"\x1b[F"[..]),
                 ("SS3-F", &b"\x1bOF"[..]),
                 ("CSI-4~", &b"\x1b[4~"[..]),
             ] {
+                let before = pty.screen_text();
                 pty.send(keys);
                 std::thread::sleep(Duration::from_millis(800));
-                if pty.screen_text().contains(DONE_TOKEN) {
+                let after = pty.screen_text();
+                end_moved_screen |= after != before;
+                if after.contains(DONE_TOKEN) {
                     revealed_by_end = Some(label);
                     break;
                 }
             }
             log.push_str(&format!(
-                "\n[poke t=20s] End (jump to latest) revealed the token: {revealed_by_end:?}\n"
+                "\n[poke t=20s] PgUp moved the screen (control) = {scroll_control}; \
+                 End moved the screen = {end_moved_screen}; \
+                 End revealed the token = {revealed_by_end:?}\n"
             ));
         }
 
@@ -440,6 +498,7 @@ fn f1126_probe_the_approve_once_stall() {
     println!("{log}");
     println!("--- final screen ---\n{}\n--- end ---", pty.screen_text());
     println!("--- final traffic ---\n{}", provider_traffic(&rt, &server));
+    println!("--- scrollback probe ---\n{}", pty.scrollback_probe());
     println!("{}", durable_state_dump(home.path()));
     let log_path = home.path().join("logs").join("wayland-core.log");
     match std::fs::read_to_string(&log_path) {
