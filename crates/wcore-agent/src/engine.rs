@@ -1987,8 +1987,8 @@ fn is_provider_auth_failure(reason: &str) -> bool {
 const AUTH_FAILURE_REMEDY: &str = "The provider rejected this API key — not retried, because an authentication \
      failure fails identically on every attempt. Replace it with \
      `wayland-core auth add <provider> <key>` (stored in the OS keyring or the \
-     encrypted vault), pass --api-key for a one-off, or set an environment \
-     variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).";
+     encrypted vault), pass --api-key for a one-off, or set the provider's \
+     environment variable (ANTHROPIC_API_KEY, OPENAI_API_KEY, …).";
 
 /// #923(3) — does this provider refusal name an orphaned `tool_use` /
 /// `tool_result` pair?

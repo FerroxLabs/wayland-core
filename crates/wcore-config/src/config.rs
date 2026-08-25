@@ -2432,7 +2432,8 @@ impl Config {
         //    the env-var fallback, closing SECURITY MAJOR #16's
         //    "plaintext in config.toml only" pathway.
         // A catalog provider resolves to ProviderType::OpenAI, which is unknown
-        // to `resolve_api_key` -- it only tries OPENAI_API_KEY / API_KEY. A user
+        // to `resolve_api_key` -- it only tries OPENAI_API_KEY (and the bare
+        // API_KEY, when opted in per #685). A user
         // who set the provider's OWN documented env var (e.g. NOVITA_API_KEY)
         // must have it honored as a fallback HERE, in BOTH cases: when the
         // standard chain errors (no OPENAI_API_KEY -> MissingApiKey) and when it
@@ -3466,12 +3467,50 @@ fn resolve_api_key(
     resolve_api_key_from_env(provider)
 }
 
+/// The env var that opts the bare, provider-agnostic `API_KEY` into the
+/// credential ladder (#685).
+pub const ALLOW_BARE_API_KEY_ENV: &str = "WAYLAND_ALLOW_BARE_API_KEY";
+
+/// Has the user explicitly opted the bare `API_KEY` in?
+///
+/// Fails closed: anything other than an affirmative literal — including unset,
+/// empty, `0`, `false`, or a typo — means NO. The variable is namespaced so an
+/// unrelated service cannot enable this by accident, which is the whole point:
+/// the value being gated (`API_KEY`) is the one credential name a random tool
+/// in the same shell is likely to have set for its own reasons.
+fn bare_api_key_opt_in() -> bool {
+    match std::env::var(ALLOW_BARE_API_KEY_ENV) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
 /// Resolve only the environment/out-of-band portion of the API-key chain.
 /// Kept separate so batch connection checks can reuse one credentials-store
 /// snapshot without reopening it once per provider.
 fn resolve_api_key_from_env(provider: ProviderType) -> anyhow::Result<String> {
-    // Env var fallback chain
-    if let Ok(key) = std::env::var("API_KEY") {
+    // Env var fallback chain.
+    //
+    // #685 — the bare, UNNAMESPACED `API_KEY` is opt-in. It names no provider,
+    // so honouring it silently means a generic `API_KEY` exported for an
+    // entirely unrelated service is adopted as THIS provider's credential and
+    // sent to the configured endpoint. That is a credential-disclosure path,
+    // and it has already contaminated supposedly-isolated E2E profiles in this
+    // repo (`doctor_honours_cli_args.rs::CREDENTIAL_ENV` documents the same
+    // hazard from the test side).
+    //
+    // It is not simply removed because it IS a documented input
+    // (`docs/getting-started.md`, "API Key Resolution Order"), so dropping it
+    // outright would silently break installs that depend on it. Instead it
+    // fails closed: the variable is read only when the user has explicitly
+    // said so with `WAYLAND_ALLOW_BARE_API_KEY`, which no unrelated service
+    // will ever set. Every provider-NAMESPACED variable below is unaffected.
+    if bare_api_key_opt_in()
+        && let Ok(key) = std::env::var("API_KEY")
+    {
         return Ok(key);
     }
 
@@ -3635,8 +3674,9 @@ fn resolve_api_key_from_env(provider: ProviderType) -> anyhow::Result<String> {
 #[derive(Debug, thiserror::Error)]
 #[error(
     "No API key found. Add one with `wayland-core auth add <provider> <key>` (stored in \
-     the OS keyring or the encrypted vault), pass --api-key for a one-off, or set an \
-     environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY)."
+     the OS keyring or the encrypted vault), pass --api-key for a one-off, or set the \
+     provider's environment variable (ANTHROPIC_API_KEY, OPENAI_API_KEY, …). The bare \
+     `API_KEY` names no provider and is ignored unless WAYLAND_ALLOW_BARE_API_KEY=1."
 )]
 pub struct MissingApiKey;
 
