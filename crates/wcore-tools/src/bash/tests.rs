@@ -2877,3 +2877,109 @@ fn a_merely_missing_path_is_not_blamed_on_the_sandbox() {
         real.content
     );
 }
+
+/// wayland#1103, second half: the BANNER may only assert a cause it actually
+/// established.
+///
+/// Suppressing the merely-absent path removed the common trigger for the false
+/// claim, but the banner itself was still unconditional — so on the rarer shape
+/// the advisory deliberately keeps (the stat failed for a reason that is NOT
+/// `NotFound`, so absence was never established) the reader still got "not a
+/// broken machine and not a missing tool" about a path nobody had checked.
+/// Same falsehood, rarer trigger.
+///
+/// The indeterminate shape is reached here with a path whose parent COMPONENT
+/// is a regular file: `symlink_metadata` fails with `NotADirectory` on unix,
+/// which is not `NotFound`, so `Presence::Unverifiable` is the honest answer.
+/// (Windows collapses this shape to `NotFound`, hence the unix gate — the
+/// polarity itself is pinned in `policy.rs`'s own test on every host.)
+#[cfg(unix)]
+#[test]
+fn an_unverifiable_path_gets_a_conditional_banner_not_an_assertion() {
+    const ASSERTION: &str = "not a broken machine and not a missing tool";
+
+    let ws = tempfile::tempdir().unwrap();
+    let granted = std::fs::canonicalize(ws.path()).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside = std::fs::canonicalize(outside.path()).unwrap();
+
+    let regular_file = outside.join("notes.md");
+    std::fs::write(&regular_file, b"x").unwrap();
+    let through_a_file = regular_file.join("child.txt");
+    let kind = std::fs::symlink_metadata(&through_a_file)
+        .expect_err("a regular file cannot be a directory component")
+        .kind();
+    assert_ne!(
+        kind,
+        std::io::ErrorKind::NotFound,
+        "anti-vacuity: this test only grades the indeterminate arm if the \
+         stat fails as something OTHER than NotFound; it stats as {kind:?}"
+    );
+
+    let manifest = wcore_sandbox::manifest::SandboxManifest {
+        fs_read_allow: vec![granted.clone()],
+        fs_write_allow: vec![granted.clone()],
+        ..Default::default()
+    };
+    let scope = super::policy::SandboxScope::new(&manifest, Some(&granted));
+
+    let unverified = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\ncat: {}: Not a directory\n",
+                through_a_file.display()
+            ),
+            is_error: true,
+        },
+    );
+    // It must still SPEAK — suppressing an unestablished case would be the
+    // inversion this whole area exists to avoid.
+    assert!(
+        unverified.content.contains("out of reach of this command"),
+        "an unverifiable path must still be reported, never silenced; got:\n{}",
+        unverified.content
+    );
+    assert!(
+        !unverified.content.contains(ASSERTION),
+        "the banner must not assert a cause for a path whose existence was \
+         never established; got:\n{}",
+        unverified.content
+    );
+    assert!(
+        unverified.content.contains("POSSIBLE — not an established"),
+        "the conditional banner must say so in its own words; got:\n{}",
+        unverified.content
+    );
+    let advisory = advisory_of(&unverified.content);
+    assert!(
+        advisory.contains("UNKNOWN"),
+        "the path itself must carry the caveat, so a mixed list stays \
+         readable; got advisory:\n{advisory}"
+    );
+
+    // POSITIVE CONTROL, same scope: a path whose existence IS established gets
+    // the assertive banner and no caveat. Without this row the test could be
+    // passed by making every advisory conditional, which would throw away the
+    // claim in the case where it is true and useful.
+    let established = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\ncat: {}: Operation not permitted\n",
+                regular_file.display()
+            ),
+            is_error: true,
+        },
+    );
+    assert!(
+        established.content.contains(ASSERTION),
+        "a confirmed denial must keep asserting its cause; got:\n{}",
+        established.content
+    );
+    assert!(
+        !established.content.contains("UNKNOWN"),
+        "and must not be diluted with a caveat that does not apply; got:\n{}",
+        established.content
+    );
+}

@@ -191,8 +191,14 @@ fn is_always_granted(path: &str) -> bool {
 enum DeniedBecause {
     /// Explicitly listed in `manifest.fs_read_deny`.
     PolicyDeny,
-    /// Not under any root the manifest granted.
+    /// Not under any root the manifest granted, AND the parent confirmed the
+    /// path is really there — so something really was put out of reach.
     NotGranted,
+    /// Not under any root the manifest granted, but the parent could not
+    /// establish whether the path exists at all (see [`Presence`]). The grant
+    /// half is a fact about the manifest; the "the sandbox is why this failed"
+    /// half is NOT established, and the message must not claim it is.
+    NotGrantedUnverifiable,
 }
 
 /// Is this token path-shaped at all?
@@ -297,24 +303,54 @@ fn path_exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
-/// True only when the filesystem positively reports that NOTHING is there.
+/// What the (unsandboxed) parent process can ESTABLISH about a path the child
+/// failed on. Three-valued on purpose: "the stat failed" is not an answer.
 ///
-/// This is NOT `!path_exists(path)`, and the difference is the whole reason
-/// both functions exist. `path_exists` is false whenever the stat FAILS, for
-/// any reason at all: a permission error on a parent directory, a component
-/// that is a regular file, a spelling the platform rejects outright. Reading
-/// any of those as "absent" would silence [`annotate_sandbox_denial`] for a
-/// path that may well be there and may well have been genuinely denied —
-/// strictly worse than the false accusation the silence is meant to prevent.
+/// A boolean here is the inversion trap. `!path_exists(p)` is true whenever
+/// the stat fails for ANY reason — a permission error on a parent directory, a
+/// regular file used as a directory component, a spelling the platform rejects
+/// outright — and reading those as "absent" would silence a real denial. That
+/// is strictly worse than the false accusation the silence exists to prevent.
+/// Keeping [`Presence::Unverifiable`] as its own state means the caller has to
+/// decide what to do about not knowing, instead of being handed a guess.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Presence {
+    /// The filesystem answered: something is there.
+    Present,
+    /// The filesystem answered: nothing is there. `NotFound`, and only that.
+    PositivelyAbsent,
+    /// The stat failed for some other reason, so NOTHING is established —
+    /// neither that the path is there nor that it is not.
+    Unverifiable,
+}
+
+/// Ask the filesystem what it can establish about `path`.
 ///
-/// So absence has to be POSITIVELY established: only `NotFound` counts, and
-/// every other outcome — including "the stat failed and we do not know why" —
-/// keeps the advisory. This oracle fails safe toward speaking, not silence.
-fn path_is_positively_absent(path: &Path) -> bool {
-    matches!(
-        std::fs::symlink_metadata(path),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound
-    )
+/// This process's answer is authoritative about the CHILD's world, and that is
+/// structural rather than assumed. `SandboxBackend` is implemented, outside of
+/// tests, only by bwrap, sandbox-exec, AppContainer, the Windows job object,
+/// no-sandbox and Docker. bwrap can bind only what this process can already
+/// see, so the child's mount namespace is a SUBSET of ours and anything it
+/// could have been denied is visible here; seatbelt and the two Windows
+/// backends leave the filesystem itself intact and restrict by policy, so the
+/// child's view is ours. Docker is the one backend whose child has a different
+/// filesystem, and no workspace member enables its `live-docker` feature — so
+/// `DockerBackend::is_available()` is a hardcoded `false` and
+/// `WAYLAND_SANDBOX=docker` fails closed instead of selecting it. The SSH and
+/// container backends in `wcore-exec-backend` are a different trait on a
+/// different surface; `wcore-tools` does not depend on that crate, so this
+/// annotation is never applied to their output.
+///
+/// If that ever changes — a Docker build that ships, or a remote executor
+/// wired into `ToolContext::sandbox` — a `PositivelyAbsent` here would stop
+/// meaning "absent for the child" and this suppression would have to be gated
+/// on the backend sharing our filesystem.
+fn presence_of(path: &Path) -> Presence {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Presence::Present,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Presence::PositivelyAbsent,
+        Err(_) => Presence::Unverifiable,
+    }
 }
 
 /// Resolve a token the way [`classify`] does — absolute as written, relative
@@ -378,10 +414,15 @@ fn classify(scope: &SandboxScope, token: &str) -> Option<(PathBuf, DeniedBecause
     // names a rule this manifest actually carries, which is true whether or
     // not that particular file exists; `NotGranted` is inferred FROM the
     // failure and is only true if there was something to fail on.
-    if path_is_positively_absent(&resolved) {
-        return None;
+    //
+    // `Unverifiable` is the third answer and it is NOT absence: the advisory
+    // still fires, and the banner below stops asserting a cause it cannot
+    // know. Failing safe means speaking, but speaking honestly.
+    match presence_of(&resolved) {
+        Presence::PositivelyAbsent => None,
+        Presence::Present => Some((resolved, DeniedBecause::NotGranted)),
+        Presence::Unverifiable => Some((resolved, DeniedBecause::NotGrantedUnverifiable)),
     }
-    Some((resolved, DeniedBecause::NotGranted))
 }
 
 /// Path-shaped tokens from a COMMAND, for the masked-read check.
@@ -515,18 +556,52 @@ pub(super) fn annotate_sandbox_denial(scope: &SandboxScope, mut result: ToolResu
         return result;
     }
 
-    result.content.push_str(
-        "\n\n⚠ The OS sandbox — not a broken machine and not a missing tool — put these \
-         paths out of reach of this command:",
-    );
+    // The banner asserts a cause, so it may only be the ASSERTIVE one when
+    // every path listed under it was established to exist. wayland#1103 is
+    // exactly this class of claim: "not a missing tool" said of a missing
+    // file. Suppressing the merely-absent case removed the common trigger;
+    // leaving the banner unconditional would have kept the same falsehood
+    // alive on the rarer one, where the stat failed for a reason other than
+    // `NotFound` and the advisory is (correctly) still shown.
+    //
+    // The two banners are deliberately different sentences, not one sentence
+    // with a hedge bolted on, so a reader can tell at a glance which of the
+    // two they got. Both keep the "out of reach of this command:" tail, which
+    // is the anchor the tests split the advisory on.
+    let any_unverified = denied
+        .iter()
+        .any(|(_, why)| *why == DeniedBecause::NotGrantedUnverifiable);
+    if any_unverified {
+        result.content.push_str(
+            "\n\n⚠ The OS sandbox is a POSSIBLE — not an established — reason these paths were \
+             out of reach of this command:",
+        );
+    } else {
+        result.content.push_str(
+            "\n\n⚠ The OS sandbox — not a broken machine and not a missing tool — put these \
+             paths out of reach of this command:",
+        );
+    }
     for (path, why) in &denied {
         let reason = match why {
             DeniedBecause::PolicyDeny => "explicitly denied by this workspace's policy",
             DeniedBecause::NotGranted => "outside every root granted to this workspace",
+            DeniedBecause::NotGrantedUnverifiable => {
+                "outside every root granted to this workspace — but this path could not be \
+                 examined, so whether it exists at all is UNKNOWN"
+            }
         };
         result
             .content
             .push_str(&format!("\n  • {} — {reason}", path.display()));
+    }
+    if any_unverified {
+        result.content.push_str(
+            "\nFor any path marked UNKNOWN above, this process could not examine it, so it \
+             cannot rule out that the path is simply missing or misspelled — which fails the \
+             same way and is not something the sandbox did. Check the spelling before \
+             changing any sandbox setting.",
+        );
     }
     result.content.push_str(
         "\nThis workspace is running under the STRICT (untrusted) sandbox profile, which is \
@@ -1032,7 +1107,7 @@ pub fn check_denylist(command: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_always_granted, is_path_token, path_exists, path_is_positively_absent};
+    use super::{Presence, is_always_granted, is_path_token, path_exists, presence_of};
 
     /// The reassembly oracle must require POSITIVE evidence that a path
     /// exists. Asking "is it definitely absent?" instead looks identical on a
@@ -1060,28 +1135,29 @@ mod tests {
         );
     }
 
-    /// The SUPPRESSION oracle is the mirror of the one above and has the same
-    /// safe direction, not the opposite one: `path_exists` may only answer YES
-    /// on positive evidence, and `path_is_positively_absent` may only answer
-    /// YES on positive evidence too. They are not each other's negation, and
-    /// writing the second as `!path_exists(p)` is the inversion that would
-    /// silence a real denial for a path that is really there.
+    /// The SUPPRESSION oracle has the same safe direction as the one above,
+    /// not the opposite one: each may only answer on positive evidence.
+    /// `Presence` is three-valued precisely so "the stat failed" cannot
+    /// collapse into "absent" — writing that as `!path_exists(p)` is the
+    /// inversion that would silence a real denial for a path really there.
     ///
-    /// A file used as a directory COMPONENT is where that inversion shows:
-    /// the stat fails, so `!path_exists` says "absent", while the kernel is
-    /// saying `NotADirectory` and not `NotFound`. The row is graded against
-    /// the error kind the host actually returns — Windows collapses this shape
-    /// to `NotFound`, Unix does not — with an anti-vacuity guard so it cannot
+    /// A file used as a directory COMPONENT is where the inversion shows: the
+    /// stat fails, so `!path_exists` says "absent", while the kernel is saying
+    /// `NotADirectory` and not `NotFound`. The row is graded against the error
+    /// kind the host actually returns — Windows collapses this shape to
+    /// `NotFound`, Unix does not — with an anti-vacuity guard so it cannot
     /// silently grade nothing on the platform it was written for.
     #[test]
     fn the_absence_oracle_answers_to_not_found_alone() {
         let file = std::env::current_exe().expect("the test binary exists");
-        assert!(
-            !path_is_positively_absent(&file),
-            "positive control: the binary is there, so it is not absent"
+        assert_eq!(
+            presence_of(&file),
+            Presence::Present,
+            "positive control: the binary is there"
         );
-        assert!(
-            path_is_positively_absent(&file.with_file_name("no-such-file-xyzzy")),
+        assert_eq!(
+            presence_of(&file.with_file_name("no-such-file-xyzzy")),
+            Presence::PositivelyAbsent,
             "and a plainly absent sibling is absent"
         );
 
@@ -1089,6 +1165,11 @@ mod tests {
         let kind = std::fs::symlink_metadata(&as_dir)
             .expect_err("a regular file cannot be a directory component")
             .kind();
+        assert_ne!(
+            presence_of(&as_dir),
+            Presence::Present,
+            "nothing is at this path either way"
+        );
         #[cfg(unix)]
         assert_ne!(
             kind,
@@ -1097,9 +1178,13 @@ mod tests {
              than NotFound, or the assertion below grades nothing"
         );
         assert_eq!(
-            path_is_positively_absent(&as_dir),
-            kind == std::io::ErrorKind::NotFound,
-            "the oracle must answer to NotFound alone, never to 'the stat \
+            presence_of(&as_dir),
+            if kind == std::io::ErrorKind::NotFound {
+                Presence::PositivelyAbsent
+            } else {
+                Presence::Unverifiable
+            },
+            "absence must answer to NotFound alone, never to 'the stat \
              failed' — this path stats as {kind:?}"
         );
     }
