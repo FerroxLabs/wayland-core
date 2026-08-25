@@ -27,10 +27,14 @@ use wcore_agent::engine::AgentEngine;
 use wcore_agent::journal_effects::JournalEffectCoordinator;
 use wcore_agent::output::OutputSink;
 use wcore_agent::output::terminal::TerminalSink;
+use wcore_agent::recovery::{INTERRUPTED_EFFECT_UNOBSERVED, INTERRUPTION_ADMISSION_RECONCILER};
 use wcore_agent::session::SessionManager;
-use wcore_agent::session_journal::{SessionEvent, ToolEffectState, ToolUnknownReason};
+use wcore_agent::session_journal::{
+    SessionEvent, ToolEffectState, ToolResolutionSource, ToolUnknownReason,
+};
 use wcore_tools::context::ToolContext;
 use wcore_tools::edit::EditTool;
+use wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER;
 use wcore_tools::registry::ToolRegistry;
 use wcore_tools::unsaved_work::UnsavedWorkGuard;
 use wcore_tools::vfs::RealFs;
@@ -423,4 +427,160 @@ async fn a_byte_identical_write_that_landed_still_needs_an_operator() {
         }
     ));
     assert_eq!(std::fs::read(&state.target).unwrap(), b"same\n");
+}
+
+// ---------------------------------------------------------------------------
+// The same three arms, through the surface a plain `wayland-core --resume`
+// actually takes.
+//
+// `reconcile_interrupted_turn` above is what the TUI, the `--json-stream`
+// Desktop host and `session reconcile` drive. The headless resume path does
+// NOT go through it: it calls `settle_interrupted_turn_for_resume`, which must
+// leave a killed job RESUMABLE (job-corpus row B-1: ten kill boundaries, ten
+// losses of the work after the kill). So it terminalizes everything.
+//
+// That makes it exactly the place a confident wrong answer would be least
+// visible — nothing blocks, nothing asks, the model is simply told something.
+// The contended arm therefore matters more here than anywhere else: it must
+// still reach the honest "may or may not have landed" admission, attributed to
+// the interruption-admission reconciler and NOT to the filesystem one.
+// ---------------------------------------------------------------------------
+
+/// Drive the production headless-resume settlement.
+async fn settle_for_resume(state: &mut Interrupted) -> String {
+    state
+        .engine
+        .settle_interrupted_turn_for_resume()
+        .await
+        .expect("resume settlement must not fail")
+        .expect("an interrupted turn must produce a report")
+        .briefing()
+}
+
+fn resolution(state: &Interrupted) -> Option<ToolResolutionSource> {
+    state
+        .engine
+        .session_journal()
+        .expect("journal")
+        .state()
+        .expect("reduced state")
+        .tools[&state.tool_execution_id]
+        .resolution_source
+        .clone()
+}
+
+#[tokio::test]
+async fn resume_settles_a_landed_write_as_succeeded_not_as_unobserved() {
+    let staging = tempfile::tempdir().unwrap();
+    let target = staging.path().join("resume-landed.txt");
+    std::fs::write(&target, b"before\n").unwrap();
+
+    let mut state = interrupt(
+        &write_tool(),
+        write_input(&target, "before\nafter\n"),
+        Interruption::AfterThePhysicalWrite,
+    )
+    .await;
+    assert!(state.prepared_a_receipt);
+
+    let briefing = settle_for_resume(&mut state).await;
+    assert!(
+        matches!(effect(&state), ToolEffectState::Succeeded),
+        "expected Succeeded, got {:?}",
+        effect(&state)
+    );
+    assert_eq!(
+        resolution(&state),
+        Some(ToolResolutionSource::Reconciler {
+            reconciler: FILESYSTEM_EFFECT_RECONCILER.to_string()
+        }),
+        "the answer must be attributed to the filesystem reconciler that proved it"
+    );
+    assert!(
+        !briefing.contains(&state.tool_execution_id),
+        "an effect the receipt proved landed must not be reported to the model as \
+         one nobody observed:\n{briefing}"
+    );
+    assert_eq!(std::fs::read(&state.target).unwrap(), b"before\nafter\n");
+}
+
+#[tokio::test]
+async fn resume_settles_a_write_that_never_landed_as_not_started() {
+    let staging = tempfile::tempdir().unwrap();
+    let target = staging.path().join("resume-not-landed.txt");
+    std::fs::write(&target, b"before\n").unwrap();
+
+    let mut state = interrupt(
+        &write_tool(),
+        write_input(&target, "before\nafter\n"),
+        Interruption::BeforeThePhysicalWrite,
+    )
+    .await;
+    assert!(state.prepared_a_receipt);
+
+    let briefing = settle_for_resume(&mut state).await;
+    assert!(
+        matches!(effect(&state), ToolEffectState::NotStarted),
+        "expected NotStarted, got {:?}",
+        effect(&state)
+    );
+    assert_eq!(
+        resolution(&state),
+        Some(ToolResolutionSource::Reconciler {
+            reconciler: FILESYSTEM_EFFECT_RECONCILER.to_string()
+        })
+    );
+    assert!(!briefing.contains(&state.tool_execution_id), "{briefing}");
+    assert_eq!(std::fs::read(&state.target).unwrap(), b"before\n");
+}
+
+/// The one that keeps the two above honest.
+///
+/// A third party rewrote the target between prepare and recovery, so the
+/// receipt proves nothing. This path may not block — a killed job has to stay
+/// resumable — so the effect terminalizes. What it must NOT do is claim an
+/// outcome: the receipt goes to `Failed` carrying "may or may not have
+/// landed", attributed to the interruption admission and never to the
+/// filesystem reconciler, and the model is told to go and look.
+#[tokio::test]
+async fn resume_refuses_to_answer_a_contended_write_and_says_so_to_the_model() {
+    let staging = tempfile::tempdir().unwrap();
+    let target = staging.path().join("resume-contended.txt");
+    std::fs::write(&target, b"before\n").unwrap();
+
+    let mut state = interrupt(
+        &write_tool(),
+        write_input(&target, "before\nafter\n"),
+        Interruption::BeforeTheWriteAndThenAThirdPartyWrote,
+    )
+    .await;
+    assert!(state.prepared_a_receipt);
+
+    let briefing = settle_for_resume(&mut state).await;
+    assert!(
+        matches!(
+            effect(&state),
+            ToolEffectState::Failed { ref error } if error == INTERRUPTED_EFFECT_UNOBSERVED
+        ),
+        "a contended target must terminalize as ignorance, not as an outcome; got {:?}",
+        effect(&state)
+    );
+    assert_eq!(
+        resolution(&state),
+        Some(ToolResolutionSource::Reconciler {
+            reconciler: INTERRUPTION_ADMISSION_RECONCILER.to_string()
+        }),
+        "the filesystem reconciler must not put its name on an answer it does not have"
+    );
+    assert!(
+        briefing.contains(&state.tool_execution_id)
+            && briefing.contains("was still running when the process died")
+            && briefing.contains("Your FIRST action must be a read-only check"),
+        "the model must be told what was in flight and sent to go and look:\n{briefing}"
+    );
+    assert_eq!(
+        std::fs::read(&state.target).unwrap(),
+        b"bytes from somebody else entirely\n",
+        "settlement must not touch a contended target"
+    );
 }

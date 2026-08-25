@@ -9628,9 +9628,23 @@ impl AgentEngine {
             | crate::recovery::RecoveryDisposition::ReconciliationRequired { turn_id, .. }
             | crate::recovery::RecoveryDisposition::Blocked { turn_id, .. } => turn_id,
         };
-        // Read the account of what was in flight BEFORE terminalizing it.
-        // Afterwards the journal records only that an outcome is unknown, not
-        // which operation it is unknown about.
+        // Answer what can be ANSWERED before writing the account, so the model
+        // is not sent to re-verify a file whose receipt already proves what
+        // happened to it. This path used to skip the reconciler entirely: it
+        // resolved every unknown to "the effect may or may not have landed",
+        // including the ones a durable receipt could settle outright.
+        //
+        // The order is forced. `requires_reconciliation` is only true once a
+        // still-running tool has become `Unknown`, so the nonterminal starts
+        // are terminalized first; the reconciler then gets its chance; and
+        // only then is the account written, naming exactly what is genuinely
+        // still in doubt.
+        self.admit_interrupted_tool_starts(&turn_id).await?;
+        self.reconcile_authoritative_filesystem_effects("resume_after_interruption")
+            .await?;
+        // Read the account of what was in flight BEFORE terminalizing the
+        // rest. Afterwards the journal records only that an outcome is
+        // unknown, not which operation it is unknown about.
         let report = self.describe_interrupted_turn(&turn_id)?;
         self.admit_unobserved_effects(&turn_id).await?;
         self.abandon_nonterminal_hook_phases(&turn_id).await?;
@@ -9655,8 +9669,18 @@ impl AgentEngine {
             if tool.turn_id != turn_id {
                 continue;
             }
+            // `Unknown { Interrupted }` IS "was still running when the process
+            // died" — it is the receipt that state takes. Keying the phrase on
+            // the reason rather than on whether this routine has already
+            // terminalized the start keeps the account stable no matter which
+            // recovery surface ran first, and stops an engine-startup-recovered
+            // interruption from being described as an ambiguous completion.
             let phrase = match &tool.effect {
-                ToolEffectState::Running => "was still running when the process died",
+                ToolEffectState::Running
+                | ToolEffectState::Unknown {
+                    reason: ToolUnknownReason::Interrupted,
+                    ..
+                } => "was still running when the process died",
                 ToolEffectState::Unknown { .. } => "ran and its outcome was never observed",
                 _ => continue,
             };
@@ -9708,7 +9732,15 @@ impl AgentEngine {
     /// class this routine has never seen fail would be a guess. If one is
     /// outstanding, [`Self::cancel_interrupted_turn`] refuses and the caller
     /// surfaces that refusal.
-    async fn admit_unobserved_effects(&self, turn_id: &str) -> Result<(), AgentError> {
+    /// Terminalize the two nonterminal tool states a crash leaves behind,
+    /// without claiming anything about either.
+    ///
+    /// Split out of [`Self::admit_unobserved_effects`] so it can run BEFORE
+    /// the account handed to the model is written: `requires_reconciliation`
+    /// is only true once a running tool has become `Unknown`, so an
+    /// authoritative reconciler cannot be given its chance until this has
+    /// happened. Idempotent — a second call finds nothing in either state.
+    async fn admit_interrupted_tool_starts(&self, turn_id: &str) -> Result<(), AgentError> {
         let evidence = serde_json::json!({
             "recovery": "resume_after_interruption",
             "turn_id": turn_id,
@@ -9736,6 +9768,16 @@ impl AgentEngine {
             })
             .await?;
         }
+        Ok(())
+    }
+
+    async fn admit_unobserved_effects(&self, turn_id: &str) -> Result<(), AgentError> {
+        let evidence = serde_json::json!({
+            "recovery": "resume_after_interruption",
+            "turn_id": turn_id,
+        });
+
+        self.admit_interrupted_tool_starts(turn_id).await?;
 
         for tool_execution_id in self.turn_tools_in_state(turn_id, |effect| {
             matches!(effect, ToolEffectState::Unknown { .. })
@@ -10264,10 +10306,53 @@ impl AgentEngine {
             }
         }
 
-        let refreshed = journal
+        self.reconcile_authoritative_filesystem_effects("engine_startup")
+            .await?;
+
+        let unresolved = self.tool_effects_requiring_reconciliation()?;
+        if !unresolved.is_empty() {
+            return Err(AgentError::SessionAuthority(format!(
+                "unresolved tool effects require reconciliation before continuation: {}",
+                unresolved.join(", ")
+            )));
+        }
+
+        if let Some(turn_id) = interrupted.into_iter().next() {
+            self.append_journal_event(SessionEvent::TurnFailed {
+                turn_id: turn_id.clone(),
+                error: "interrupted before a terminal journal event".to_string(),
+            })
+            .await?;
+            self.finish_budget_turn(&turn_id)?;
+        }
+        Ok(())
+    }
+
+    /// Run the one authoritative reconciler Core registers — the filesystem
+    /// compare-exchange receipt — over every tool effect that still requires
+    /// reconciliation.
+    ///
+    /// Read-only, and deliberately silent about anything it cannot decide. A
+    /// receipt whose checkpoint will not load, whose bytes match neither the
+    /// prepared preimage nor the prepared postimage, or whose target is no
+    /// longer the prepared object is SKIPPED, not guessed at: it stays
+    /// `Unknown` for the caller to deal with. `reconcile_interrupted_turn`
+    /// then refuses to continue, and the headless resume path records the
+    /// honest "may or may not have landed" admission instead.
+    ///
+    /// `recovery` names the surface that ran it, and lands in the durable
+    /// resolution evidence.
+    async fn reconcile_authoritative_filesystem_effects(
+        &self,
+        recovery: &'static str,
+    ) -> Result<(), AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
             .state()
             .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
-        let filesystem_unknowns = refreshed
+        let filesystem_unknowns = state
             .tools
             .iter()
             .filter_map(|(tool_execution_id, tool)| {
@@ -10343,27 +10428,10 @@ impl AgentEngine {
                 resolution,
                 ToolResolutionSource::Reconciler { reconciler },
                 serde_json::json!({
-                    "recovery": "engine_startup",
+                    "recovery": recovery,
                     "observed": observed,
                 }),
             )?;
-        }
-
-        let unresolved = self.tool_effects_requiring_reconciliation()?;
-        if !unresolved.is_empty() {
-            return Err(AgentError::SessionAuthority(format!(
-                "unresolved tool effects require reconciliation before continuation: {}",
-                unresolved.join(", ")
-            )));
-        }
-
-        if let Some(turn_id) = interrupted.into_iter().next() {
-            self.append_journal_event(SessionEvent::TurnFailed {
-                turn_id: turn_id.clone(),
-                error: "interrupted before a terminal journal event".to_string(),
-            })
-            .await?;
-            self.finish_budget_turn(&turn_id)?;
         }
         Ok(())
     }
