@@ -1025,6 +1025,16 @@ impl AgentSpawner {
         }
     }
 
+    /// The session's own configured output-token cap.
+    ///
+    /// #862 — the Spawn tool floors a fork's output budget at this so a child
+    /// is never given LESS room than the session that spawned it. Deliberate
+    /// per-spawn caps (Crucible proposers, skills, delegate) pass their own
+    /// value and never consult this, so their narrowing is untouched.
+    pub fn base_max_tokens(&self) -> u32 {
+        self.base_config.max_tokens
+    }
+
     /// #1118 — declare the parent session's shell principal, so a delegated
     /// child inherits it instead of falling to the strict default.
     ///
@@ -3858,6 +3868,28 @@ mod crucible_provider_resolution_tests {
         assert!(
             cfg.max_tokens_explicit,
             "a spawned child's per-spawn cap must read as explicit (never omitted on the wire)"
+        );
+    }
+
+    /// #862 (scope guard) — the fork output-budget floor lives in the Spawn
+    /// TOOL, never here. `child_config` is shared by callers that pass a
+    /// DELIBERATELY narrow cap (Crucible proposers, `wcore-skills`,
+    /// `wcore-tools/delegate`) to bound spend; flooring here would silently
+    /// widen every one of them. If someone moves the #862 fix into
+    /// `child_config`, this test fails.
+    #[test]
+    fn child_config_preserves_a_deliberately_narrow_cap() {
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let base = Config {
+            max_tokens: 64_000,
+            ..Config::default()
+        };
+        let spawner = AgentSpawner::new(parent, base);
+        // `sub()` asks for 16 — a deliberate, spend-bounding narrowing.
+        let cfg = spawner.child_config(&sub("p", None));
+        assert_eq!(
+            cfg.max_tokens, 16,
+            "child_config must pass a deliberate per-spawn cap through untouched"
         );
     }
 

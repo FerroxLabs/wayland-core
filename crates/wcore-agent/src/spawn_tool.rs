@@ -135,7 +135,7 @@ impl Tool for SpawnTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let (tasks, agent_names) = match parse_tasks(&input) {
+        let (mut tasks, agent_names) = match parse_tasks(&input) {
             Ok(parsed) => parsed,
             Err(e) => {
                 return ToolResult {
@@ -144,6 +144,19 @@ impl Tool for SpawnTool {
                 };
             }
         };
+
+        // #862 — never hand a fork a SMALLER output budget than the session it
+        // serves. `size_output_cap` only ever clamps DOWNWARD, so the 4096
+        // sub-agent default also puts the reasoning-aware ceiling (#426,
+        // `UNKNOWN_REASONING_CAP` = 32768) out of reach: on a router alias that
+        // routes to a reasoning model, the reasoning tokens consume the whole
+        // 4096 and the turn ends `finish_reason=length` having emitted no
+        // answer text and no tool call, so the child terminates without
+        // completing. The identical prompt run WITHOUT a fork succeeds,
+        // because the top-level session keeps its own larger configured cap.
+        // Flooring here (not in `child_config`) keeps deliberate per-spawn
+        // narrowing by Crucible / skills / delegate untouched.
+        floor_task_caps_at_parent(&mut tasks, self.spawner.base_max_tokens());
 
         if tasks.is_empty() {
             return ToolResult {
@@ -263,6 +276,21 @@ impl Tool for SpawnTool {
             .and_then(|v| v.as_str())
             .unwrap_or("sub-agent");
         format!("Spawn: {}", wcore_tools::truncate_utf8(task, 80))
+    }
+}
+
+/// #862 — raise every parsed Spawn task's output cap to at least the parent
+/// session's own.
+///
+/// `size_output_cap` only ever clamps DOWNWARD, so leaving a fork on the 4096
+/// sub-agent default also puts the reasoning-aware ceiling (#426,
+/// `UNKNOWN_REASONING_CAP`) permanently out of reach. Applied here rather than
+/// in `AgentSpawner::child_config` so that callers which pass a DELIBERATELY
+/// narrow cap — Crucible proposers, `wcore-skills`, `wcore-tools/delegate` —
+/// keep it.
+fn floor_task_caps_at_parent(tasks: &mut [SubAgentConfig], parent_cap: u32) {
+    for task in tasks {
+        task.max_tokens = task.max_tokens.max(parent_cap);
     }
 }
 
@@ -785,5 +813,63 @@ mod partial_failure_rollup_tests {
             "partial-failure content must lead with the failed-count prefix; got: {}",
             out.content
         );
+    }
+}
+
+#[cfg(test)]
+mod spawn_output_budget_tests {
+    //! #862 — a Spawn fork on a Flux tier alias intermittently terminated
+    //! without completing: the routed model spent the child's whole 4096-token
+    //! output budget on reasoning, so the turn ended `finish_reason=length`
+    //! with no answer text and no tool call. Measured live, the identical task
+    //! run WITHOUT a fork completed 20/20 while `flux-auto` forks failed 3/8.
+    use super::{DEFAULT_SUB_AGENT_MAX_TOKENS, SubAgentConfig, floor_task_caps_at_parent};
+
+    /// The reasoning-aware ceiling an unknown/router-aliased model is allowed
+    /// to grow to (`wcore_agent::engine::UNKNOWN_REASONING_CAP`). Duplicated as
+    /// a literal on purpose: this test asserts the FORK can reach that ceiling,
+    /// so it must fail if either side drifts.
+    const UNKNOWN_REASONING_CAP: u32 = 32_768;
+
+    fn task(max_tokens: u32) -> SubAgentConfig {
+        SubAgentConfig {
+            name: "audit".into(),
+            prompt: "inspect the workspace".into(),
+            max_turns: 200,
+            max_tokens,
+            system_prompt: None,
+            provider: None,
+            model: None,
+            temperature: None,
+        }
+    }
+
+    /// Assertion 1 — the fork/no-fork asymmetry is closed. A Spawn child must
+    /// not be pinned below what the reasoning-aware ceiling would allow.
+    #[test]
+    fn spawn_child_cap_is_floored_at_the_parent_cap() {
+        // The parent's configured cap (`default_max_tokens()` is 64000; it is
+        // a CAP that `size_output_cap` clamps per model, never sent raw).
+        let parent_cap = 64_000;
+        let mut tasks = vec![task(DEFAULT_SUB_AGENT_MAX_TOKENS)];
+
+        floor_task_caps_at_parent(&mut tasks, parent_cap);
+
+        assert_eq!(tasks[0].max_tokens, parent_cap);
+        assert!(
+            tasks[0].max_tokens >= UNKNOWN_REASONING_CAP,
+            "a fork must be able to reach the reasoning-aware ceiling; \
+             {} would clamp below it and starve a reasoning model",
+            tasks[0].max_tokens
+        );
+    }
+
+    /// A per-spawn cap WIDER than the parent is already deliberate — the floor
+    /// must not shrink it.
+    #[test]
+    fn spawn_child_cap_wider_than_the_parent_survives() {
+        let mut tasks = vec![task(128_000)];
+        floor_task_caps_at_parent(&mut tasks, 64_000);
+        assert_eq!(tasks[0].max_tokens, 128_000);
     }
 }
