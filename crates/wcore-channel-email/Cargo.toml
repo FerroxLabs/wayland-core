@@ -9,16 +9,28 @@ description = "Email (SMTP outbound + IMAP inbound) channel adapter for Wayland-
 async-trait = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
-imap = { version = "2" }
-# `vendored` builds and statically links OpenSSL so the shipped Linux binary
-# does not require libssl.so.3 / libcrypto.so.3 from the host. OpenSSL is
-# reachable ONLY from here: `imap` 2.x hard-wires `imap::connect` to a
-# concrete `native_tls::TlsConnector` and offers no rustls path. Everything
-# else in the workspace (reqwest, lettre SMTP) is already rustls. native-tls
-# still resolves CA roots at runtime via openssl-probe, so vendoring does not
-# change which trust anchors IMAP accepts. No-op on macOS (security-framework)
-# and Windows (schannel). See #1128.
-native-tls = { version = "0.2", features = ["vendored"] }
+# `default-features = false` drops the crate's `tls` feature, which is
+# native-tls, which on Linux is OpenSSL. That edge was the ONE reason anything
+# in this workspace linked libssl: `cargo tree -i openssl-sys` on 86f1ddbc had a
+# single root, native-tls, reached only from here. The two `#[cfg(feature =
+# "tls")]` entry points it also removes (`imap::connect`, `imap::connect_starttls`)
+# are reimplemented on rustls in `src/imap.rs`, over the crate's own
+# stream-generic `Client::new`.
+#
+# This replaces the `native-tls = { features = ["vendored"] }` of #1128. Vendoring
+# satisfied the same requirement — no libssl.so.3 on the host — by statically
+# linking an OpenSSL we would then own for CVE purposes, and by requiring `make`
+# and perl in every image that builds this workspace (the CI image has neither,
+# which is what reddened `CI (linux-containerized)`). Removing the dependency
+# removes the runtime requirement at the root instead.
+imap = { version = "2", default-features = false }
+# The IMAP TLS legs. Same rustls 0.23 / ring stack the SMTP leg and the rest of
+# the workspace already use; adds no new crate to the graph.
+rustls = { workspace = true }
+# OS trust store, which is where native-tls (OpenSSL default verify paths, found
+# via openssl-probe) read its anchors from, so IMAP accepts the same
+# certificates it did before. Already in the graph via reqwest/hyper-rustls.
+rustls-native-certs = "0.8"
 # Used to COUNT the anchors in `smtp.tls_root_cert_path` with the same parser
 # lettre uses. Needed because lettre's `Certificate::from_pem` returns Ok on
 # input containing no PEM block (empty anchor set) on the rustls path — see
@@ -46,8 +58,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "ne
 rcgen = "0.14"
 # Matches the workspace rustls 0.23 / tokio-rustls 0.26 stack (ring, no
 # openssl / aws-lc-rs) so the test relay links the same provider the SMTP
-# client already uses.
-rustls = { workspace = true }
+# client already uses. (`rustls` itself is a normal dependency now — see above.)
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 # Needed to construct the `lettre::Message` handed to `MailSender::send`;
 # integration tests do not inherit the crate's own [dependencies].

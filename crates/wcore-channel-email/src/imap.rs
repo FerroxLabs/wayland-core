@@ -209,6 +209,195 @@ fn new_uids(uids: std::collections::HashSet<u32>, seen_through: u32) -> Vec<u32>
     out
 }
 
+/// The IMAP client's TLS stream type. `rustls`, not `native_tls`: `native-tls`
+/// on Linux is OpenSSL, and it was the ONLY edge in this workspace that reached
+/// `openssl-sys` (`cargo tree -i openssl-sys` on 86f1ddbc: one root, this
+/// crate). Everything else — every provider connection through reqwest, and
+/// lettre's SMTP leg in this same crate — was already rustls.
+pub(crate) type ImapTlsStream = rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>;
+
+/// The rustls configuration both TLS legs use.
+///
+/// Anchors come from the OS trust store, which is exactly what the `native_tls`
+/// connector this replaced resolved (OpenSSL's default verify paths, located by
+/// `openssl-probe`), so the set of certificates IMAP accepts does not change.
+/// The SMTP leg's anchors come from lettre's bundled `webpki-roots` and are
+/// untouched by this.
+///
+/// Built once per process. `rustls_native_certs` parses every anchor eagerly
+/// while OpenSSL loaded them lazily out of a hashed directory, so rebuilding it
+/// per poll would turn a poll loop into a repeated full walk of the trust store.
+///
+/// The provider is named explicitly instead of using `ClientConfig::builder()`.
+/// Feature unification enables BOTH `ring` and `aws-lc-rs` on rustls in this
+/// workspace (`aws-smithy-http-client` pulls the latter in), and with two
+/// providers compiled in the no-argument builder panics unless something has
+/// installed a process default. `wcore-agent`'s postgres backend names `ring`
+/// the same way, for the same reason.
+fn tls_client_config() -> Result<Arc<rustls::ClientConfig>, EmailError> {
+    static CONFIG: std::sync::OnceLock<Result<Arc<rustls::ClientConfig>, String>> =
+        std::sync::OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let native = rustls_native_certs::load_native_certs();
+            let unreadable = native.errors.len();
+            for err in &native.errors {
+                tracing::warn!(error = %err, "imap: skipping an unreadable OS trust anchor");
+            }
+            let mut roots = rustls::RootCertStore::empty();
+            let (added, unparsable) = roots.add_parsable_certificates(native.certs);
+            if added == 0 {
+                return Err(format!(
+                    "no usable TLS trust anchors in the OS trust store \
+                     ({unparsable} unparsable, {unreadable} unreadable): \
+                     IMAP over TLS cannot verify any server"
+                ));
+            }
+            rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| format!("rustls provider rejects the default protocol versions: {e}"))
+            .map(|cfg| Arc::new(cfg.with_root_certificates(roots).with_no_client_auth()))
+        })
+        .clone()
+        .map_err(EmailError::Imap)
+}
+
+/// Wrap an already-connected socket in TLS and drive the handshake to
+/// completion here, so a bad certificate surfaces as a connect failure rather
+/// than as a confusing error on the first IMAP read. `native_tls::connect` was
+/// eager in the same way.
+fn tls_handshake(host: &str, sock: std::net::TcpStream) -> Result<ImapTlsStream, EmailError> {
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| EmailError::Imap(format!("{host:?} is not a valid TLS server name: {e}")))?;
+    let conn = rustls::ClientConnection::new(tls_client_config()?, name)
+        .map_err(|e| EmailError::Imap(format!("tls init for {host}: {e}")))?;
+    let mut stream = rustls::StreamOwned::new(conn, sock);
+    while stream.conn.is_handshaking() {
+        stream
+            .conn
+            .complete_io(&mut stream.sock)
+            .map_err(|e| EmailError::Imap(format!("tls handshake with {host}: {e}")))?;
+    }
+    Ok(stream)
+}
+
+/// Connect with implicit TLS (IMAPS): TLS first, then the IMAP greeting.
+/// The rustls twin of the `imap::connect` this replaced.
+pub(crate) fn connect_implicit_tls(
+    host: &str,
+    port: u16,
+) -> Result<imap::Client<ImapTlsStream>, EmailError> {
+    let sock = std::net::TcpStream::connect((host, port))
+        .map_err(|e| EmailError::Imap(format!("connect {host}:{port}: {e}")))?;
+    let mut client = imap::Client::new(tls_handshake(host, sock)?);
+    client
+        .read_greeting()
+        .map_err(|e| EmailError::Imap(format!("greeting {host}:{port}: {e}")))?;
+    Ok(client)
+}
+
+/// The tag on the one IMAP command this module issues itself.
+const STARTTLS_TAG: &str = "wl1";
+/// Upper bound on a single pre-TLS response line.
+const STARTTLS_MAX_LINE: usize = 8192;
+/// Upper bound on untagged lines the server may interleave before the tagged
+/// response, so a chatty or hostile server cannot hold the poll open forever.
+const STARTTLS_MAX_UNTAGGED: usize = 64;
+
+/// Read one CRLF-terminated response line from a pre-TLS socket.
+///
+/// One byte at a time on purpose. A buffered reader may pull bytes past the
+/// tagged response into a buffer this function is about to drop, and the bytes
+/// immediately after `OK` on a STARTTLS exchange are the peer's TLS records.
+fn read_pre_tls_line<S: std::io::Read>(sock: &mut S, host: &str) -> Result<String, EmailError> {
+    let mut line: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match sock.read(&mut byte) {
+            Ok(0) => {
+                return Err(EmailError::Imap(format!(
+                    "starttls {host}: server closed the connection mid-response"
+                )));
+            }
+            Ok(_) => {}
+            Err(e) => return Err(EmailError::Imap(format!("starttls {host}: read: {e}"))),
+        }
+        match byte[0] {
+            b'\n' => break,
+            b'\r' => {}
+            b => {
+                if line.len() >= STARTTLS_MAX_LINE {
+                    return Err(EmailError::Imap(format!(
+                        "starttls {host}: response line exceeded {STARTTLS_MAX_LINE} bytes"
+                    )));
+                }
+                line.push(b);
+            }
+        }
+    }
+    Ok(String::from_utf8_lossy(&line).into_owned())
+}
+
+/// Drive the cleartext half of an IMAP STARTTLS exchange on a raw socket:
+/// read the greeting, issue `STARTTLS`, and consume the tagged response.
+///
+/// This is spelled out here rather than delegated because `imap` 2.4.1 gates
+/// `imap::connect_starttls` behind its `tls` feature — i.e. native-tls, i.e.
+/// OpenSSL — and offers no public route to the same exchange: `Connection::stream`
+/// is `pub(crate)` and `Connection::run_command_and_check_ok` is private, so the
+/// upgraded socket cannot be taken back out of a `Client`. The upgraded stream
+/// is handed to `imap::Client::new` with NO second greeting, exactly as upstream
+/// does: RFC 2595 has the server resume the same session inside TLS.
+fn negotiate_starttls<S: std::io::Read + std::io::Write>(
+    sock: &mut S,
+    host: &str,
+) -> Result<(), EmailError> {
+    let greeting = read_pre_tls_line(sock, host)?;
+    if !(greeting.starts_with("* OK") || greeting.starts_with("* PREAUTH")) {
+        return Err(EmailError::Imap(format!(
+            "starttls {host}: server did not greet with OK: {greeting}"
+        )));
+    }
+    sock.write_all(format!("{STARTTLS_TAG} STARTTLS\r\n").as_bytes())
+        .and_then(|()| sock.flush())
+        .map_err(|e| EmailError::Imap(format!("starttls {host}: sending STARTTLS: {e}")))?;
+    let tag = format!("{STARTTLS_TAG} ");
+    for _ in 0..STARTTLS_MAX_UNTAGGED {
+        let line = read_pre_tls_line(sock, host)?;
+        let Some(rest) = line.strip_prefix(tag.as_str()) else {
+            // An untagged status line the server is allowed to interleave.
+            continue;
+        };
+        if rest.starts_with("OK") {
+            return Ok(());
+        }
+        // Fail CLOSED. A NO/BAD here means the server intends to keep speaking
+        // cleartext; carrying on would put the LOGIN password and every message
+        // body on the wire unencrypted, which is the exact thing this mode
+        // exists to prevent.
+        return Err(EmailError::Imap(format!(
+            "starttls {host}: server refused STARTTLS: {line}"
+        )));
+    }
+    Err(EmailError::Imap(format!(
+        "starttls {host}: no tagged response to STARTTLS within {STARTTLS_MAX_UNTAGGED} lines"
+    )))
+}
+
+/// Connect on a cleartext port and upgrade in place with STARTTLS.
+/// The rustls twin of the `imap::connect_starttls` this replaced.
+pub(crate) fn connect_starttls(
+    host: &str,
+    port: u16,
+) -> Result<imap::Client<ImapTlsStream>, EmailError> {
+    let mut sock = std::net::TcpStream::connect((host, port))
+        .map_err(|e| EmailError::Imap(format!("connect {host}:{port}: {e}")))?;
+    negotiate_starttls(&mut sock, host)?;
+    Ok(imap::Client::new(tls_handshake(host, sock)?))
+}
+
 /// Open the IMAP socket in whichever transport mode `security` resolves to,
 /// then run one poll over it.
 ///
@@ -218,7 +407,7 @@ fn new_uids(uids: std::collections::HashSet<u32>, seen_through: u32) -> Vec<u32>
 /// so the three arms cannot share a binding. Each arm therefore hands its own
 /// concrete client to the stream-generic [`poll_with_client`].
 ///
-/// Previously this was one unconditional `imap::connect`, i.e. implicit TLS on
+/// Previously this was one unconditional implicit-TLS connect on
 /// every port. Against a STARTTLS-only or plaintext server that put a TLS
 /// ClientHello onto a cleartext port on every single poll — the connection was
 /// reset each time, and the loop retried forever without ever reading mail.
@@ -275,10 +464,7 @@ fn poll_once(
             )
         }
         MailSecurity::Starttls => {
-            let tls = native_tls::TlsConnector::new()
-                .map_err(|e| EmailError::Imap(format!("tls init: {e}")))?;
-            let client = imap::connect_starttls((host, port), host, &tls)
-                .map_err(|e| EmailError::Imap(format!("starttls {host}:{port}: {e}")))?;
+            let client = connect_starttls(host, port)?;
             poll_with_client(
                 client,
                 user,
@@ -298,10 +484,7 @@ fn poll_once(
         // `resolve` never returns Auto; folding it in with Implicit keeps the
         // match total and preserves the historical default on port 993.
         MailSecurity::Implicit | MailSecurity::Auto => {
-            let tls = native_tls::TlsConnector::new()
-                .map_err(|e| EmailError::Imap(format!("tls init: {e}")))?;
-            let client = imap::connect((host, port), host, &tls)
-                .map_err(|e| EmailError::Imap(format!("connect {host}:{port}: {e}")))?;
+            let client = connect_implicit_tls(host, port)?;
             poll_with_client(
                 client,
                 user,
@@ -1445,6 +1628,181 @@ mod tests {
         assert!(
             msg.contains("refuses non-loopback host"),
             "expected the fail-closed refusal, got: {msg}"
+        );
+    }
+
+    // ----- STARTTLS on rustls -----
+    //
+    // The move off native-tls (i.e. off OpenSSL) had to reimplement the
+    // cleartext half of the STARTTLS exchange, because `imap` 2.4.1 gates
+    // `imap::connect_starttls` behind its native-tls feature and exposes no
+    // public route to the same three lines. These tests grade THAT code against
+    // the bytes a server actually receives, which is the only place a downgrade
+    // would be visible.
+
+    /// What [`starttls_server`] reports: the cleartext command line it read,
+    /// and the bytes the client sent after the tagged response.
+    type StarttlsCapture = std::sync::mpsc::Receiver<(Vec<u8>, Vec<u8>)>;
+
+    /// A loopback server that greets, answers one `STARTTLS` with `tagged`,
+    /// and then records whatever the client sends next. The recorded bytes are
+    /// what separates "upgraded to TLS" from "kept talking in the clear".
+    fn starttls_server(
+        greeting: &'static str,
+        pre_tagged: &'static [&'static str],
+        tagged: &'static str,
+    ) -> (u16, StarttlsCapture) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else {
+                return;
+            };
+            let _ = sock.set_read_timeout(Some(Duration::from_secs(10)));
+            let _ = sock.write_all(greeting.as_bytes());
+            let _ = sock.flush();
+            // Read the client command a byte at a time so nothing that follows
+            // it is swallowed into a buffer this server then drops.
+            let mut command = Vec::new();
+            let mut byte = [0u8; 1];
+            while let Ok(1) = sock.read(&mut byte) {
+                command.push(byte[0]);
+                if byte[0] == b'\n' {
+                    break;
+                }
+            }
+            for line in pre_tagged {
+                let _ = sock.write_all(line.as_bytes());
+            }
+            let _ = sock.write_all(tagged.as_bytes());
+            let _ = sock.flush();
+            let mut after = [0u8; 64];
+            let n = sock.read(&mut after).unwrap_or(0);
+            let _ = tx.send((command, after[..n].to_vec()));
+        });
+        (port, rx)
+    }
+
+    /// The happy path: the client must negotiate in CLEARTEXT IMAP and only
+    /// then open TLS. Untagged lines before the tagged OK are tolerated.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn starttls_negotiates_in_cleartext_then_opens_tls() {
+        let (port, rx) = starttls_server(
+            "* OK [CAPABILITY IMAP4rev1 STARTTLS] ready\r\n",
+            &["* CAPABILITY IMAP4rev1 STARTTLS\r\n"],
+            "wl1 OK Begin TLS negotiation now\r\n",
+        );
+        let _ = tokio::task::spawn_blocking(move || {
+            poll_once_against("127.0.0.1", port, MailSecurity::Starttls)
+        })
+        .await;
+
+        let (command, after) = rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("the server must have received something");
+        let text = String::from_utf8_lossy(&command).to_uppercase();
+        assert!(
+            !command.is_empty() && command[0] != TLS_HANDSHAKE_BYTE,
+            "the client opened with a TLS ClientHello on a STARTTLS port; captured {command:?}"
+        );
+        assert!(
+            text.contains("STARTTLS"),
+            "the client must issue STARTTLS in cleartext IMAP; captured {text:?}"
+        );
+        assert_eq!(
+            after.first().copied(),
+            Some(TLS_HANDSHAKE_BYTE),
+            "after a STARTTLS OK the very next bytes must be a TLS ClientHello, \
+             otherwise the session stayed in the clear; captured {after:?}"
+        );
+    }
+
+    /// The control, and the one that keeps the happy path from being vacuous:
+    /// a server that REFUSES STARTTLS must not be talked to anyway. Nothing may
+    /// follow the refusal on the wire — least of all a LOGIN.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_starttls_fails_closed_and_sends_nothing_further() {
+        let (port, rx) = starttls_server(
+            "* OK ready\r\n",
+            &[],
+            "wl1 NO STARTTLS is not supported here\r\n",
+        );
+        let err = tokio::task::spawn_blocking(move || {
+            poll_once_against("127.0.0.1", port, MailSecurity::Starttls)
+        })
+        .await
+        .expect("join")
+        .expect_err("a refused STARTTLS must not yield a usable session");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("server refused STARTTLS"),
+            "expected the fail-closed refusal, got: {msg}"
+        );
+
+        let (command, after) = rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("the server must have received the STARTTLS command");
+        assert!(
+            String::from_utf8_lossy(&command)
+                .to_uppercase()
+                .contains("STARTTLS"),
+            "captured {command:?}"
+        );
+        assert!(
+            after.is_empty(),
+            "the client kept talking after the server refused to encrypt; captured {after:?}"
+        );
+    }
+
+    /// `negotiate_starttls` reads exactly one line and stops. If it ever used a
+    /// buffered reader it would swallow the bytes after the tagged OK, and those
+    /// bytes are the peer's TLS records — a corruption that only shows up
+    /// against a server that pipelines, which is most of them.
+    #[test]
+    fn the_negotiation_leaves_the_bytes_after_the_tagged_ok_on_the_stream() {
+        // One buffer holding the greeting, the tagged OK, and a stand-in for the
+        // first TLS record, delivered as if they arrived in a single read.
+        let mut script: Vec<u8> = Vec::new();
+        script.extend_from_slice(b"* OK ready\r\n");
+        script.extend_from_slice(b"wl1 OK go ahead\r\n");
+        script.extend_from_slice(&[TLS_HANDSHAKE_BYTE, 0x03, 0x03, 0xAA]);
+
+        struct Duplex {
+            inbound: std::io::Cursor<Vec<u8>>,
+            outbound: Vec<u8>,
+        }
+        impl std::io::Read for Duplex {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                std::io::Read::read(&mut self.inbound, buf)
+            }
+        }
+        impl std::io::Write for Duplex {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.outbound.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut duplex = Duplex {
+            inbound: std::io::Cursor::new(script),
+            outbound: Vec::new(),
+        };
+        negotiate_starttls(&mut duplex, "mail.example.com").expect("negotiation must succeed");
+        assert_eq!(
+            duplex.outbound, b"wl1 STARTTLS\r\n",
+            "exactly one cleartext command, and it is STARTTLS"
+        );
+        let mut rest = Vec::new();
+        std::io::Read::read_to_end(&mut duplex, &mut rest).expect("drain");
+        assert_eq!(
+            rest,
+            vec![TLS_HANDSHAKE_BYTE, 0x03, 0x03, 0xAA],
+            "the negotiation consumed bytes belonging to the TLS handshake"
         );
     }
 

@@ -53,13 +53,19 @@ fn open_pty() -> (OwnedFd, OwnedFd) {
     let mut slave = -1;
     // SAFETY: both out-params are valid `c_int` slots; the three optional
     // pointers are null, which `openpty(3)` documents as "use the defaults".
+    //
+    // All three are `null_mut`, never `null`: Apple's binding declares `termp` and
+    // `winp` as `*mut termios` / `*mut winsize` while glibc's declares them
+    // `*const`. `*mut T` coerces to `*const T` and not the other way round, so the
+    // mutable spelling is the only one that compiles on both. It was `null()` here
+    // until it failed `Clippy (warnings = errors)` on CI (macos-latest) with E0308.
     let rc = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
         )
     };
     assert_eq!(rc, 0, "openpty failed: {}", std::io::Error::last_os_error());
