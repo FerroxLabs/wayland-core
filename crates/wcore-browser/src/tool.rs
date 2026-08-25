@@ -748,7 +748,13 @@ mod tests {
         );
         let result = tool.execute(json!({ "op": { "kind": "get_state" } })).await;
         assert!(result.is_error);
-        assert!(result.content.contains("Install @askjo/camofox-browser"));
+        assert!(
+            result
+                .content
+                .contains(crate::install::CAMOUFOX_SIDECAR_PACKAGE),
+            "{}",
+            result.content
+        );
     }
 
     #[tokio::test]

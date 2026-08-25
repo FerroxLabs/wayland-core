@@ -2286,13 +2286,16 @@ mod tests {
 
         // Fail → Fail, detail carries the first hint.
         let fail = health_check_from(&CheckResult {
-            label: "chromium browser",
+            label: "browser backend",
             outcome: Outcome::Fail {
-                hints: vec!["apt install chromium-browser".into()],
+                hints: vec!["npm install -g @askjo/camofox-browser".into()],
             },
         });
         assert_eq!(fail.state, HealthState::Fail);
-        assert!(fail.detail.contains("apt install chromium-browser"));
+        assert!(
+            fail.detail
+                .contains("npm install -g @askjo/camofox-browser")
+        );
 
         // Warn / Skip / Manual all degrade to the non-fatal Warn state.
         for outcome in [

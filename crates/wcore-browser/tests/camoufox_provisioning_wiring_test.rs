@@ -219,7 +219,7 @@ async fn ensure_ready_fetches_nothing_when_download_disabled() {
         .await
         .expect_err("with auto-download off there is no binary, so readiness must fail");
     assert!(
-        err.contains("Install @askjo/camofox-browser"),
+        err.contains(wcore_browser::install::CAMOUFOX_SIDECAR_PACKAGE),
         "the disabled path must keep the actionable install message, got: {err}"
     );
     assert!(

@@ -191,8 +191,9 @@ async fn collect_checks(version: &str) -> Vec<CheckResult> {
     //    is mostly a structural row).
     out.push(check_version(version));
 
-    // 2. Chromium / Chrome — required for the browser CDP backend
-    //    fallback path on every platform.
+    // 2. The browser backend this build actually compiled. gh#491: this
+    //    used to probe Chromium unconditionally, which is behind an opt-in
+    //    cargo feature and is absent from the shipped artifact.
     out.push(check_browser_binary().await);
 
     // 3. Linux Wayland CUA — `wlrctl` + `grim` + `WAYLAND_DISPLAY`.
@@ -242,46 +243,53 @@ fn check_version(version: &str) -> CheckResult {
     }
 }
 
+/// gh#491 — probe the browser backend this binary COMPILED, not a hardcoded
+/// one.
+///
+/// `chromium` is an opt-in cargo feature (`default = []`), so the shipped
+/// artifact has no Chromium backend in it at all — and this check nonetheless
+/// told every Linux user to `apt install chromium-browser`, never naming the
+/// Camoufox sidecar that is the only backend actually there. The backend list,
+/// the program names and the install hints now all come from
+/// [`wcore_browser::install`], which is the same source the supervisor
+/// resolves the sidecar program from, so the doctor cannot drift away from
+/// what the engine runs.
 async fn check_browser_binary() -> CheckResult {
-    // Try the three canonical aliases in order; PASS on the first hit.
-    for prog in ["chromium-browser", "chromium", "google-chrome"] {
-        if let Some(path) = which(prog).await {
-            return CheckResult {
-                label: "chromium browser",
-                outcome: Outcome::Pass {
-                    detail: format!("{prog} -> {path}"),
-                },
-            };
-        }
+    let backends = wcore_browser::install::compiled_backends();
+    if let Some((backend, path)) = wcore_browser::install::resolve_any() {
+        return CheckResult {
+            label: BROWSER_BACKEND_LABEL,
+            outcome: Outcome::Pass {
+                detail: format!("{} -> {}", backend.backend, path.display()),
+            },
+        };
     }
-    // F-073: on macOS Chromium is optional (Ollama/Browserbase cover
-    // most local use-cases; Chrome is typically available via Desktop
-    // without a PATH alias). Emit WARN so the exit code stays 0 rather
-    // than forcing every macOS user to install a CLI alias just to pass
-    // the doctor. On Linux Chromium is still a hard FAIL.
+    let hints: Vec<String> = backends
+        .iter()
+        .flat_map(|backend| backend.install_hints.iter().map(|h| (*h).to_string()))
+        .collect();
+    // F-073: the browser backend is optional on macOS, so a missing one is a
+    // WARN there and does not flip the exit code. Unchanged by gh#491 — only
+    // the software being named changes.
     if cfg!(target_os = "macos") {
         return CheckResult {
-            label: "chromium browser",
+            label: BROWSER_BACKEND_LABEL,
             outcome: Outcome::Warn {
-                detail: "not found on PATH — browser CDP backend unavailable".into(),
-                hints: vec![
-                    "brew install --cask google-chrome  (optional)".into(),
-                    "or ensure your Chrome/Chromium has a shell alias".into(),
-                ],
+                detail: "not installed — the browser tool is unavailable".into(),
+                hints,
             },
         };
     }
     CheckResult {
-        label: "chromium browser",
-        outcome: Outcome::Fail {
-            hints: vec![
-                "apt install chromium-browser  (Debian/Ubuntu)".into(),
-                "pacman -S chromium             (Arch)".into(),
-                "nix-env -iA nixpkgs.chromium       (NixOS)".into(),
-            ],
-        },
+        label: BROWSER_BACKEND_LABEL,
+        outcome: Outcome::Fail { hints },
     }
 }
+
+/// The doctor row label. Deliberately generic: the concrete backend is named
+/// in the PASS detail and in the install hints, both of which come from the
+/// compiled-in backend list rather than from this string.
+const BROWSER_BACKEND_LABEL: &str = "browser backend";
 
 async fn check_which(prog: &'static str, hints: &[String]) -> CheckResult {
     match which(prog).await {
@@ -971,9 +979,9 @@ fn skip(label: &'static str, reason: &str) -> CheckResult {
 ///
 /// On Windows `which` is not part of the base system, so the lookup
 /// will return `None`. That's acceptable: the only Windows-relevant
-/// check (`chromium browser`) tries `where` as a fallback. For v0.2.2
+/// check (`browser backend`) tries `where` as a fallback. For v0.2.2
 /// the doctor is Linux/macOS-focused; Windows users will see SKIP rows
-/// for the Linux-only checks and a `chromium browser` FAIL row that we
+/// for the Linux-only checks and a `browser backend` FAIL row that we
 /// will tighten in a follow-up if a Windows ship surfaces.
 async fn which(prog: &str) -> Option<String> {
     // First try POSIX `which`.
