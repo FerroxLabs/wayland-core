@@ -635,6 +635,13 @@ Workflow(
 /// 3. A stage failure surfaces as a typed `StageFailed` error carrying the
 ///    partial result — prior completed stages are preserved, not discarded.
 #[tokio::test]
+// The two tests in this binary that pin the retry budget are the only two
+// that read it (every other fixture here always returns Ok, so the stream
+// retry loop is never entered). `PinnedRetryBudget` writes the
+// process-global WAYLAND_MAX_STREAM_RETRIES, and one guard's `Drop`
+// restores it while the other test may still be mid-run - so "both pin the
+// same value" is not the invariant that makes this safe. Serialize them.
+#[serial_test::serial]
 async fn stage_failure_surfaces_typed_error_with_partial_results() {
     // Budget PINNED, not inherited. This test drives a provider that fails
     // every attempt; the shipped default is 10 retries on the shared backoff
@@ -937,6 +944,13 @@ impl LlmProvider for FailNamedProvider {
 /// `stage_results`. Before the fix, the loop returned on the FIRST errored
 /// sibling, discarding any sibling processed after it in the same wave.
 #[tokio::test]
+// The two tests in this binary that pin the retry budget are the only two
+// that read it (every other fixture here always returns Ok, so the stream
+// retry loop is never entered). `PinnedRetryBudget` writes the
+// process-global WAYLAND_MAX_STREAM_RETRIES, and one guard's `Drop`
+// restores it while the other test may still be mid-run - so "both pin the
+// same value" is not the invariant that makes this safe. Serialize them.
+#[serial_test::serial]
 async fn parallel_wave_failing_sibling_preserves_successful_siblings() {
     // Budget PINNED, not inherited. This test drives a provider that fails
     // every attempt; the shipped default is 10 retries on the shared backoff
