@@ -1025,6 +1025,72 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    /// gh#491 — `--doctor` must recommend the browser backend this binary
+    /// actually compiled, and must not recommend one it did not.
+    ///
+    /// `chromium` is an opt-in cargo feature (`default = []`), so the shipped
+    /// artifact contains no Chromium backend at all — yet the doctor told
+    /// every Linux user to `apt install chromium-browser`, which leaves them
+    /// exactly as far from a working browser as before and never names the
+    /// sidecar that is actually required.
+    ///
+    /// PATH is emptied so the row is the MISSING one on every host; without
+    /// that this passes vacuously wherever a browser happens to be installed.
+    #[tokio::test]
+    #[serial]
+    async fn the_browser_row_recommends_the_compiled_backend_not_chromium() {
+        let empty = tempfile::tempdir().unwrap();
+        let prior_path = std::env::var_os("PATH");
+        let prior_bin = std::env::var_os("WAYLAND_CAMOUFOX_BIN");
+        unsafe {
+            std::env::set_var("PATH", empty.path());
+            std::env::remove_var("WAYLAND_CAMOUFOX_BIN");
+        }
+
+        let row = check_browser_binary().await;
+
+        unsafe {
+            match prior_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+            match prior_bin {
+                Some(v) => std::env::set_var("WAYLAND_CAMOUFOX_BIN", v),
+                None => std::env::remove_var("WAYLAND_CAMOUFOX_BIN"),
+            }
+        }
+
+        let hints = match &row.outcome {
+            Outcome::Fail { hints } => hints.clone(),
+            Outcome::Warn { hints, .. } => hints.clone(),
+            other => panic!(
+                "nothing resolves on an empty PATH, so the row must report a missing backend, got {other:?}"
+            ),
+        };
+
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains(wcore_browser::install::CAMOUFOX_SIDECAR_PACKAGE)),
+            "the doctor never names the package that provides the backend this build \
+             compiled; got: {hints:?}"
+        );
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains(wcore_browser::install::CAMOUFOX_SIDECAR_ENV)),
+            "the doctor never names the env var the supervisor reads; got: {hints:?}"
+        );
+        for hint in &hints {
+            let lower = hint.to_ascii_lowercase();
+            assert!(
+                !lower.contains("chromium") && !lower.contains("google-chrome"),
+                "this build has no Chromium backend compiled in, so the doctor must not \
+                 tell the operator to install one; got: {hint}"
+            );
+        }
+    }
+
     #[test]
     fn check_version_passes_for_non_empty() {
         let r = check_version("1.2.3");
