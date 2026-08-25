@@ -234,12 +234,15 @@ impl PluginCapabilitySet {
     /// Confirmed 3-of-3 by cross-audit panel; see
     /// `.planning/FALSE-ADVERTISING-SUMMARY.md`.
     ///
-    /// Each narrowing is logged at WARN with the probe's reason and remedy. A
-    /// recorded panel dissent held that silently dropping a capability replaces
-    /// an actionable runtime error with an un-debuggable missing feature; the
-    /// log is how that objection is honoured without keeping the false claim.
-    pub async fn narrowed_to_live(self) -> Self {
+    /// Every narrowing is RETURNED beside the narrowed set, so the caller —
+    /// which owns the session's `OutputSink` — announces it on a channel the
+    /// user actually reads. A recorded panel dissent held that silently
+    /// dropping a capability replaces an actionable runtime error with an
+    /// un-debuggable missing feature; that objection is honoured by the
+    /// announcement, not by the log. See [`CapabilityNarrowing`].
+    pub async fn narrowed_to_live(self) -> (Self, Vec<CapabilityNarrowing>) {
         let mut out = self;
+        let mut narrowed = Vec::new();
 
         if out.browser_suite {
             let probe = wcore_browser::liveness::probe(
@@ -247,12 +250,11 @@ impl PluginCapabilitySet {
             )
             .await;
             if let Some(u) = probe.unavailable() {
-                tracing::warn!(
-                    capability = "browser_suite",
-                    reason = %u.reason,
-                    remedy = %u.remedy,
-                    "not advertising browser_suite: the plugin is loaded but no backend can start"
-                );
+                narrowed.push(CapabilityNarrowing {
+                    capability: "browser_suite",
+                    reason: u.reason.clone(),
+                    remedy: u.remedy.clone(),
+                });
                 out.browser_suite = false;
             }
         }
@@ -260,17 +262,63 @@ impl PluginCapabilitySet {
         if out.computer_use {
             let probe = wcore_cua::liveness::probe();
             if let Some(u) = probe.unavailable() {
-                tracing::warn!(
-                    capability = "computer_use",
-                    reason = %u.reason,
-                    remedy = %u.remedy,
-                    "not advertising computer_use: the plugin is loaded but no backend can start"
-                );
+                narrowed.push(CapabilityNarrowing {
+                    capability: "computer_use",
+                    reason: u.reason.clone(),
+                    remedy: u.remedy.clone(),
+                });
                 out.computer_use = false;
             }
         }
 
-        out
+        (out, narrowed)
+    }
+}
+
+/// One capability [`PluginCapabilitySet::narrowed_to_live`] dropped, carrying
+/// the probe's own reason and remedy.
+///
+/// #1130 — the narrowing used to exist ONLY as a `tracing::warn!`. With
+/// `RUST_LOG` unset, which is the default for every ordinary user, stderr takes
+/// ERROR only (`wcore-cli`'s `main.rs` builds the writer as
+/// `stderr.with_max_level(Level::ERROR)`) and everything below it goes to the
+/// rotating log file; under the TUI nothing may reach stdio at all. So the one
+/// diagnostic that explained why a capability disappeared was invisible to the
+/// person it was written for, and the feature simply looked broken.
+///
+/// A log-level bump cannot fix that — the user is not reading logs. The fact is
+/// therefore RETURNED rather than logged, which makes announcing it the
+/// caller's obligation: bootstrap owns the session's `OutputSink` and puts the
+/// line on the same channel the retry notices use. Same shape as
+/// `bootstrap::local_shell_notice` and `config::ambient_credential_notice`,
+/// and for the same reason.
+///
+/// Returning a value rather than taking a sink is deliberate: the type makes it
+/// impossible to narrow a capability without being handed the words for it, so
+/// a future second call site cannot silently drop one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityNarrowing {
+    /// The wire flag that was cleared: `browser_suite` or `computer_use`.
+    pub capability: &'static str,
+    /// The probe's own account of why no backend can start.
+    pub reason: String,
+    /// The probe's own account of what would make it start.
+    pub remedy: String,
+}
+
+impl CapabilityNarrowing {
+    /// The operator-facing line. Pure, so the exact words are under test rather
+    /// than reachable only on a host with no display and no browser.
+    ///
+    /// It states AVAILABILITY, not advertising: the flag is read by the JSON
+    /// stream host, but the fact underneath — no backend on this host can start
+    /// — is equally true for a CLI or TUI user, whose tool call would die at
+    /// first use instead. One sentence is therefore correct on every surface.
+    pub fn notice(&self) -> String {
+        format!(
+            "notice: the '{}' capability is not available in this session: {}. To enable it: {}",
+            self.capability, self.reason, self.remedy
+        )
     }
 }
 
