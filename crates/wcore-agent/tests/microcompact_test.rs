@@ -448,13 +448,36 @@ fn a6_zero_fraction_restores_unconditional_count_trigger() {
 }
 
 /// The time trigger is a different signal (the session was idle for an hour)
-/// and is deliberately NOT pressure-gated. Low pressure must not suppress it.
+/// but it is no more a PRESSURE signal than the count trigger is, and it
+/// reaches the same conversation: every message a live session builds carries
+/// a timestamp, and a resumed one carries yesterday's. Left ungated it wiped
+/// the working set on the first turn back from lunch at any occupancy, which
+/// is A-6 by another route. Nor is it a staleness signal — `microcompact`
+/// keeps the most RECENT results, and those predate the gap exactly as much
+/// as the ones it clears.
 #[test]
-fn a6_time_trigger_is_not_pressure_gated() {
+fn a6_time_trigger_is_pressure_gated_too() {
     let old_ts = Utc::now() - Duration::seconds(3660);
     let msgs = vec![assistant_at(vec![text("thinking")], old_ts)];
     let config = CompactConfig {
         micro_gap_seconds: 3600,
+        ..Default::default()
+    };
+    assert!(!should_microcompact(&msgs, &config, low_pressure()));
+    // Positive control: the gate must be passable, or the assertion above
+    // would hold for a trigger that had simply been deleted.
+    assert!(should_microcompact(&msgs, &config, high_pressure()));
+}
+
+/// The operator escape hatch covers the time trigger as well: `0.0` restores
+/// the ungated pre-fix behaviour for both triggers.
+#[test]
+fn a6_zero_fraction_restores_unconditional_time_trigger() {
+    let old_ts = Utc::now() - Duration::seconds(3660);
+    let msgs = vec![assistant_at(vec![text("thinking")], old_ts)];
+    let config = CompactConfig {
+        micro_gap_seconds: 3600,
+        micro_pressure_fraction: 0.0,
         ..Default::default()
     };
     assert!(should_microcompact(&msgs, &config, low_pressure()));

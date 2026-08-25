@@ -357,7 +357,7 @@ A three-tier automatic compaction strategy that prevents context window overflow
 
 ### How It Works
 
-- **Microcompact** runs automatically: replaces old Read/Bash/Grep/Glob/Write/Edit results with `[Tool result cleared]`, keeping the 5 most recent results intact. Triggered by count (>10 compactable results) or time (>1 hour since last assistant message).
+- **Microcompact** runs automatically: replaces old Read/Bash/Grep/Glob/Write/Edit results with `[Tool result cleared]`, keeping the 5 most recent results intact. Triggered by count (>10 compactable results) or time (>1 hour since the last assistant message) — and, either way, only once real input pressure reaches `micro_pressure_fraction` of the autocompact threshold.
 
 - **Autocompact** triggers when input tokens reach `effective_context_window - output_reserve - autocompact_buffer`. The agent calls the LLM to produce a conversation summary, then replaces history with a compact boundary marker. A circuit breaker stops retrying after 3 consecutive failures.
 
@@ -379,13 +379,15 @@ emergency_buffer = 3000     # Buffer before emergency block
 max_failures = 3            # Circuit breaker threshold
 micro_keep_recent = 5       # Keep N most recent tool results
 micro_pressure_fraction = 0.5
-                            # Microcompact's count trigger ("more than
-                            # micro_keep_recent * 2 tool results exist") only
-                            # fires once real input pressure reaches this share
-                            # of the autocompact threshold. Without the gate the
-                            # eleventh tool result of a session clears the
-                            # model's working set in an almost-empty window.
-                            # Set 0.0 to restore the ungated count trigger.
+                            # Neither microcompact trigger is a pressure signal,
+                            # so both are gated on this share of the autocompact
+                            # threshold. Ungated, the count trigger ("more than
+                            # micro_keep_recent * 2 tool results exist") clears
+                            # the model's working set on the eleventh tool
+                            # result of a session, and the time trigger clears
+                            # it on the first turn back from an hour away — both
+                            # in an almost-empty window.
+                            # Set 0.0 to restore the ungated triggers.
 ```
 
 ### Smart auto-compaction (#280)

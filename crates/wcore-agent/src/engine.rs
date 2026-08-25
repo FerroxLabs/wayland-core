@@ -22412,6 +22412,71 @@ mod compact_tests {
         );
     }
 
+    /// The same twelve results, stamped the way a REAL session stamps them
+    /// (`Message::now`), after the user stepped away for an hour.
+    ///
+    /// `twelve_read_results` above carries no timestamps, so the time trigger
+    /// is dormant there and the A-6 test only ever grades the count trigger.
+    /// A live session has a timestamp on every message, and a resumed one
+    /// carries yesterday's — so an idle gap re-opens A-6 on exactly the
+    /// conversation A-6 was fixed for. Bodies are realistically sized (4 KiB
+    /// per read) so the failure message reports what is actually destroyed.
+    fn twelve_aged_read_results(age_seconds: i64) -> Vec<Message> {
+        let ts = chrono::Utc::now() - chrono::Duration::seconds(age_seconds);
+        let stamp = |mut m: Message| {
+            m.timestamp = Some(ts);
+            m
+        };
+        let mut messages = Vec::new();
+        for i in 0..12 {
+            let id = format!("t{i}");
+            messages.push(stamp(tool_use_msg(&id, "Read")));
+            messages.push(stamp(tool_result_msg(&id, &"x".repeat(4096))));
+        }
+        messages
+    }
+
+    /// A-6 through the TIME trigger: an idle gap must not wipe the working set
+    /// in a near-empty window either. Graded on the ENGINE path for the same
+    /// reason the count-trigger test is.
+    #[tokio::test]
+    async fn microcompact_leaves_results_alone_after_an_idle_gap_at_low_pressure() {
+        let config = CompactConfig {
+            micro_keep_recent: 3,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        // ~16k in a 200k window: 9.6% of the 167k autocompact threshold.
+        state.last_real_input_tokens = 16_000;
+
+        let mut engine = make_compact_engine(config, state, twelve_aged_read_results(3_601));
+        engine.run_compaction().await.unwrap();
+
+        assert_eq!(
+            cleared_results(&engine),
+            0,
+            "an hour of idle erased tool results at 16k/167k pressure"
+        );
+    }
+
+    /// Negative control for the gate above: past the pressure gate the idle
+    /// gap must STILL fire. Without this the fix could be a trigger that can
+    /// never pass.
+    #[tokio::test]
+    async fn microcompact_still_clears_after_an_idle_gap_at_high_pressure() {
+        let config = CompactConfig {
+            micro_keep_recent: 3,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_real_input_tokens = 120_000;
+
+        let mut engine = make_compact_engine(config, state, twelve_aged_read_results(3_601));
+        engine.run_compaction().await.unwrap();
+
+        assert_eq!(cleared_results(&engine), 9);
+    }
+
     // -- Manual /compact runs deterministic micro-compaction, not the
     //    old fixed-string truncation --
 

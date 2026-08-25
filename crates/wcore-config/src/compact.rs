@@ -58,27 +58,36 @@ pub struct CompactConfig {
     pub micro_keep_recent: usize,
 
     /// Microcompact: gap threshold in seconds for time-based trigger.
-    /// When the last assistant message is older than this, microcompact fires.
+    /// When the last assistant message is older than this — and real pressure
+    /// has reached `micro_pressure_fraction` — microcompact fires.
     #[serde(default = "default_micro_gap_seconds")]
     pub micro_gap_seconds: u64,
 
     /// Microcompact: share of the autocompact threshold that REAL input
-    /// pressure must reach before the COUNT trigger may fire.
+    /// pressure must reach before EITHER microcompact trigger may fire.
     ///
-    /// The count trigger alone ("more than `micro_keep_recent * 2` tool
-    /// results exist") is not a pressure signal — it fires on the eleventh
-    /// tool result of a session regardless of how empty the context window
-    /// is. Corpus row A-6 died of exactly that: 25 microcompacts inside 60
-    /// turns freed ~2k tokens each while real pressure never exceeded ~10%
-    /// of the window, and the agent spent every turn re-reading the thirteen
-    /// files whose results had just been erased. It made no edit at all.
+    /// Neither trigger is a pressure signal on its own. The count trigger
+    /// ("more than `micro_keep_recent * 2` tool results exist") fires on the
+    /// eleventh tool result of a session regardless of how empty the context
+    /// window is. Corpus row A-6 died of exactly that: 25 microcompacts
+    /// inside 60 turns freed ~2k tokens each while real pressure never
+    /// exceeded ~10% of the window, and the agent spent every turn re-reading
+    /// the thirteen files whose results had just been erased. It made no edit
+    /// at all.
     ///
-    /// Gating the count trigger on the SAME watermark autocompact reads
+    /// The TIME trigger ("the last assistant message is older than
+    /// `micro_gap_seconds`") reaches the same conversation by a different
+    /// route: a resumed session loads yesterday's timestamps, so the first
+    /// turn back from lunch wiped the working set at any occupancy. It is not
+    /// a staleness signal either — the pass keeps the most RECENT results,
+    /// which predate the gap exactly as much as the ones it clears.
+    ///
+    /// Gating both on the SAME watermark autocompact reads
     /// (`CompactState::last_real_input_tokens`) keeps microcompact as the
     /// cheap early relief valve — it still fires well before the summarizer —
     /// without erasing a working set the model has room to hold.
     ///
-    /// `0.0` restores the old unconditional count trigger. Clamped to
+    /// `0.0` restores the old unconditional triggers. Clamped to
     /// `0.0..=1.0` at the use site.
     #[serde(default = "default_micro_pressure_fraction")]
     pub micro_pressure_fraction: f64,
