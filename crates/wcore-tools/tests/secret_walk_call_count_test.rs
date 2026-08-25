@@ -23,7 +23,7 @@
 //!
 //!   THAT VERDICT IS REVERSED, and by a cache that meets the objection rather
 //!   than by a change of taste. `WorkspacePolicy::deny_cache_key` hashes
-//!   `readable_roots()` and `session_read_grant_roots()`, both of which filter
+//!   `readable_roots()` and `session_path_grant_roots()`, both of which filter
 //!   grants against `SystemTime::now()` on every call — so the key DOES contain
 //!   "now", by recomputing the grant-filtered scope rather than by storing a
 //!   timestamp. `deny_cache_hit` then re-stats every stamped directory and
@@ -162,7 +162,7 @@ fn a_repeated_exec_walks_the_workspace_once_and_revalidates() {
 
 /// The refutation of #1111 bullet 1, as a test rather than as a comment.
 ///
-/// `readable_roots()` and `session_read_grant_roots()` both filter grants
+/// `readable_roots()` and `session_path_grant_roots()` both filter grants
 /// against `SystemTime::now()`, so the correct deny list changes with **no
 /// mutating call between the two reads**. Nothing is written, nothing is
 /// revoked, no API is touched: a deadline simply passes. A memoised list keyed
@@ -232,7 +232,7 @@ fn a_redundant_grant_root_is_not_walked_twice() {
         .grant_session_read_root(&root, false)
         .expect("granting the workspace root must be accepted or nothing is deduped");
     assert_eq!(
-        policy.session_read_grant_roots().len(),
+        policy.session_path_grant_roots().len(),
         1,
         "the grant was not recorded - this test would pass on an empty grant list"
     );

@@ -38,13 +38,20 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // `render_artifact_v1` (#1098): a new event. No field on an existing event
 // changed shape, so `major` holds at 1 — the vocabulary a host can validate
 // got strictly wider, which is what a minor bump is for.
+// 17 -> 18: `path_write_grants_v1` (#1104). No wire type or field changed
+// shape — `ApprovalScope::AlwaysPath::write` and `PathGrantAccess::Write` were
+// already published and already refused — so `major` holds at 1. What changed
+// is that the engine can now say YES to them, and a pinned host has no way to
+// learn that from the shapes alone. Without the bump a host would have to
+// discover write support by sending a grant and reading the refusal text,
+// which is exactly the button-that-lies this feature exists to prevent.
 // 16 -> 17: `grant_workspace_capability`, `grant_path` and `revoke_path` are
 // declared (#314). Three new command wire types; no field on an existing
 // command or event changed shape, so `major` holds at 1 and the command union
 // a host can emit got strictly wider. The wire-shape gate refuses this
 // regeneration without the bump - three `added=` entries under a standing
 // 1.16 - which is that gate deciding the version question it exists to force.
-pub const CONTRACT_MINOR: u64 = 17;
+pub const CONTRACT_MINOR: u64 = 18;
 pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/17";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
@@ -1524,6 +1531,33 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         // nothing about who raises the prompt; that is
         // `path_boundary_prompt_v1` below.
         ("path_grants_v1".into(), ContractCapabilityStatus::Available),
+        // The feature-detect for the WRITE half of a path grant (#1104):
+        // `always_path.write: true` on a `tool_approve`, and
+        // `grant_path.access: "write"`.
+        //
+        // Separate from `path_grants_v1` for the same reason
+        // `path_boundary_prompt_v1` is: they are separate promises and a host
+        // must be able to hold one without the other. Every shipped Core
+        // accepts both frames — the field and the enum variant were on the wire
+        // from the start — and every Core before this one REFUSED the write and
+        // granted nothing. So a host cannot feature-detect write support by
+        // sending it: the frame is valid either way and the only difference is
+        // an `info` line. A host that renders a "grant write access" button
+        // without checking this ships a button that silently does nothing on
+        // three quarters of the installed base.
+        //
+        // Available, not ShapeOnly: an approved write grant is honoured end to
+        // end by the same Core that declares this — `writable_roots()` for the
+        // OS sandbox manifest and `SandboxedFs`'s mutating operations for the
+        // in-process file tools. It does NOT promise that any given folder will
+        // be accepted: the write grant applies strictly more refusals than the
+        // read grant (an unconfined sandbox backend, an auto-run location, a
+        // folder holding an executable or a secret), and a host must still
+        // render the refusal it gets back.
+        (
+            "path_write_grants_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
         // The feature-detect for `tool_request.tool.escalation` (#1099): Core
         // itself raises the approval when a read names a path outside every
         // reachable root, instead of letting the call fail with an

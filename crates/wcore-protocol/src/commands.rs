@@ -543,10 +543,13 @@ fn valid_evidence_digest(value: &str) -> bool {
 
 /// Access level requested by [`ProtocolCommand::GrantPath`].
 ///
-/// `Write` is accepted on the wire and REFUSED by the engine, rather than
-/// being absent or silently downgraded. A host that can express the request
-/// gets a legible refusal; a host that cannot express it might ship a button
-/// promising more than it delivers.
+/// `Write` is a SEPARATE, STRICTER grant (FerroxLabs/wayland#1104), not `Read`
+/// with a flag set: it additionally requires an OS sandbox that confines the
+/// filesystem, no overlap with an auto-run location, and a folder holding
+/// neither an executable nor a secret. When any of those refuses, the grant is
+/// refused OUTRIGHT and never downgraded to `Read` — a host that can express
+/// the request gets a legible refusal rather than a button promising more than
+/// it delivers.
 #[derive(Debug, Serialize, Deserialize, Default, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum PathGrantAccess {
@@ -575,6 +578,11 @@ pub enum ApprovalScope {
     /// as `{"always_path":{"root":"/Users/me/reports"}}`; `write` defaults
     /// to `false`, so the bare object grants READ only. Old clients never
     /// emit it, so the `Once`/`Always` bare-string wire form is unchanged.
+    ///
+    /// `write: true` is honoured under strictly more conditions than the read
+    /// grant (#1104) — see [`PathGrantAccess`]. The field was always on the
+    /// wire and always forward-compatible; what changed is that the engine can
+    /// now say yes to it.
     ///
     /// SECURITY: unlike `Always`/`AlwaysPrefix`, which scope an existing
     /// authority to fewer commands, this variant EXPANDS the session's

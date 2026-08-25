@@ -88,7 +88,7 @@ fn fixture() -> Fixture {
     let policy =
         Arc::new(WorkspacePolicy::contained(workspace.path()).with_local_operator_principal());
     let jail = SandboxedFs::new(RealFs, workspace.path().to_path_buf())
-        .with_read_grants(policy.session_read_grant_handle());
+        .with_path_grants(policy.session_path_grant_handle());
 
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(wcore_tools::read::ReadTool::new(None)));
@@ -242,7 +242,7 @@ async fn denying_the_card_grants_nothing() {
     let (content, is_error) = result_text(&result);
     assert!(is_error, "a denied call must not read the file: {content}");
     assert!(
-        fixture.policy.session_read_grant_roots().is_empty(),
+        fixture.policy.session_path_grant_roots().is_empty(),
         "a refusal must leave no standing grant behind"
     );
 }
@@ -275,5 +275,5 @@ async fn force_mode_never_raises_the_card() {
         is_error,
         "and the read still fails at the jail, exactly as it does on main: {content}"
     );
-    assert!(fixture.policy.session_read_grant_roots().is_empty());
+    assert!(fixture.policy.session_path_grant_roots().is_empty());
 }

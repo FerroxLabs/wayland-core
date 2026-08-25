@@ -127,7 +127,7 @@ fn redundant_walk_root_is_not_walked_twice() {
         .grant_session_read_root(&root, false)
         .expect("granting the workspace root must be accepted for this test to mean anything");
     assert_eq!(
-        subject.session_read_grant_roots(),
+        subject.session_path_grant_roots(),
         vec![granted.clone()],
         "the grant must actually be recorded, or this test measures nothing"
     );
@@ -182,7 +182,7 @@ fn a_disjoint_grant_really_does_cost_a_second_walk() {
     subject
         .grant_session_read_root(&other, false)
         .expect("a disjoint folder must be grantable");
-    assert_eq!(subject.session_read_grant_roots().len(), 1);
+    assert_eq!(subject.session_path_grant_roots().len(), 1);
 
     let (t_base, t_subj, set_base, set_subj) = interleaved_medians(&baseline, &subject);
 

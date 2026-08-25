@@ -3205,6 +3205,21 @@ impl AgentBootstrap {
                 wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(&workspace)
                     .with_network(wcore_tools::workspace_policy::local_bash_network(false))
             };
+            // #1104 — tell the policy whether THIS session's OS sandbox
+            // actually confines the filesystem, read off the same runtime
+            // handle that will execute its commands. It is the gate on WRITE
+            // path grants and nothing else: on a backend that confines
+            // nothing (the Windows job-object default) a Bash command can
+            // already write anywhere this account can, so "write access to
+            // this one folder" would describe a boundary that does not exist.
+            // The policy's field is fail-safe `None`, so omitting this call
+            // refuses write grants rather than granting them.
+            let sandbox_runtime = registry.sandbox_runtime();
+            let policy = if sandbox_runtime.confines_filesystem() {
+                policy.with_filesystem_confinement(sandbox_runtime.backend_name())
+            } else {
+                policy
+            };
             let policy = std::sync::Arc::new(policy);
             // The repository-control write guard is installed for BOTH profiles.
             // The strict profile gets it inside the existing jail; the trusted
@@ -3229,7 +3244,7 @@ impl AgentBootstrap {
                 // `Read`, and the OS sandbox (via `readable_roots`) and the
                 // in-process file tools must never hold two different answers
                 // to "what may this session look at".
-                .with_read_grants(policy.session_read_grant_handle());
+                .with_path_grants(policy.session_path_grant_handle());
                 registry.set_tool_vfs(std::sync::Arc::new(jail));
             } else {
                 registry.set_tool_vfs(std::sync::Arc::new(
