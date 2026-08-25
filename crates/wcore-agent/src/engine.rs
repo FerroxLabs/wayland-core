@@ -27269,6 +27269,11 @@ mod audit_2026_05_22_tests {
     }
 
     #[tokio::test]
+    // `PinnedRetryBudget::pin` writes the process-global
+    // WAYLAND_MAX_STREAM_RETRIES. Under plain `cargo test` this binary is one
+    // process, so an unserialized pin is read by every budget-reading test
+    // running beside it — see the helper's own contract note.
+    #[serial_test::serial]
     async fn stream_error_exhausts_retries_then_fails_the_turn() {
         // AUDIT A3 / E-C2 — when every attempt fails the turn ends as a
         // hard error (NOT a silent empty success).
