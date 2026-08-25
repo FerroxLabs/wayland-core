@@ -3603,8 +3603,8 @@ fn ambient_credential_notice(provider_label: &str, source: &CredentialSource) ->
     Some(format!(
         "notice: provider '{provider_label}' is using the credential from {origin}, not from \
          your config file or the credentials store. To stop using this provider, set \
-         `[providers.{provider_label}] enabled = false` — clearing the config key alone \
-         does not turn it off."
+         `providers.{provider_label}.enabled = false` in your config — clearing the config \
+         key alone does not turn it off."
     ))
 }
 
@@ -3855,10 +3855,11 @@ pub struct MissingApiKey;
 /// opposite one (re-enable, don't add a credential).
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "Provider '{provider}' is disabled: `[providers.{provider}] enabled = false` in your \
-     config. No credential source can override this — not --api-key, not the credentials \
-     store, not API_KEY or any other environment variable, and not ~/.wayland/.env. \
-     Set `enabled = true` (or delete the line) to use it again."
+    "Provider '{provider}' is disabled: your config sets \
+     `providers.{provider}.enabled = false`. No credential source can override this — not \
+     --api-key, not the credentials store, not API_KEY or any other environment variable, \
+     and not ~/.wayland/.env. Change it to `providers.{provider}.enabled = true` (or delete \
+     the line) to use it again."
 )]
 pub struct ProviderDisabled {
     /// The provider id exactly as the session requested it.

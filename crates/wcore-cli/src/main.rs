@@ -275,16 +275,15 @@ struct Cli {
     #[arg(short, long, env = "PROVIDER")]
     provider: Option<String>,
 
+    // #685 — deliberately NOT `env = "API_KEY"`. Clap's env fallback made the
+    // bare, provider-agnostic `API_KEY` the TOP rung of the credential ladder,
+    // outranking the config file and the credentials store, and it did so
+    // invisibly: the ladder's own gate in `resolve_api_key_from_env` was never
+    // reached because the value had already arrived as a "CLI" argument. The
+    // variable is still honoured — at the env rung, behind
+    // `WAYLAND_ALLOW_BARE_API_KEY`, which is the order `docs/getting-started.md`
+    // has always documented. A `///` here would print all of this in `--help`.
     /// API key
-    ///
-    /// #685 — deliberately NOT `env = "API_KEY"`. Clap's env fallback made the
-    /// bare, provider-agnostic `API_KEY` the TOP rung of the credential ladder,
-    /// outranking the config file and the credentials store, and it did so
-    /// invisibly: the ladder's own gate in `resolve_api_key_from_env` was never
-    /// reached because the value had already arrived as a "CLI" argument. The
-    /// variable is still honoured — at the env rung, behind
-    /// `WAYLAND_ALLOW_BARE_API_KEY`, which is the order `docs/getting-started.md`
-    /// has always documented.
     #[arg(short = 'k', long)]
     api_key: Option<String>,
 
