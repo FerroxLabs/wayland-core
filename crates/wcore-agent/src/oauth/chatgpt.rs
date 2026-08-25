@@ -1184,6 +1184,166 @@ mod tests {
         assert_eq!(account, "acct_fresh");
     }
 
+    /// MEASURES THE MARGIN (#147). `token_is_fresh` admits a stored token with
+    /// no refresh whenever `exp - REFRESH_LEAD_SECS > now`, so the worst-case
+    /// remaining access-token life at the moment `get()` hands a bearer to the
+    /// provider is *just over* `REFRESH_LEAD_SECS` — 121 s at the one-second
+    /// granularity of the stored expiry.
+    ///
+    /// That figure is a FLOOR at the moment of acquisition, not a cap on the
+    /// turn: nothing revalidates the bearer afterwards, and no caller checks
+    /// the margin against how long the turn is expected to run.
+    ///
+    /// Bracketed rather than probed at a single point so a second ticking over
+    /// mid-test cannot flake it: exactly `REFRESH_LEAD_SECS` of life is never
+    /// fresh (`now > now` is false for any `now`), and `REFRESH_LEAD_SECS + 2`
+    /// needs two whole seconds of drift to misread.
+    #[test]
+    fn the_refresh_lead_is_the_whole_margin_and_it_is_120_seconds() {
+        assert_eq!(
+            REFRESH_LEAD_SECS, 120,
+            "the #147 margin figure is quoted from this constant"
+        );
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            !ChatGptTokenManager::token_is_fresh(&token(
+                "a",
+                Some("rt"),
+                Some(now + REFRESH_LEAD_SECS)
+            )),
+            "exactly the lead must refresh"
+        );
+        assert!(
+            ChatGptTokenManager::token_is_fresh(&token(
+                "a",
+                Some("rt"),
+                Some(now + REFRESH_LEAD_SECS + 2)
+            )),
+            "two seconds past the lead must be admitted unrefreshed"
+        );
+    }
+
+    /// The margin measured at the API the provider actually calls: a token
+    /// with ~122 s of life left is handed out with NO refresh round-trip (the
+    /// token URL is a port that would fail if dialled). A turn that then runs
+    /// longer than that carries a bearer the server would reject if it
+    /// re-checked — nothing in `get()` knows or cares how long the turn is.
+    #[tokio::test]
+    async fn get_hands_out_a_token_with_only_two_seconds_of_slack_over_the_lead() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = manager_at(tmp.path().join("oauth"));
+        let at = jwt_with_account("acct_thin_margin");
+        mgr.flow = Arc::new(build_chatgpt_flow_with_token_url(
+            "http://127.0.0.1:1/never",
+        ));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        mgr.storage
+            .store(
+                PROVIDER,
+                &token(&at, Some("rt"), Some(now + REFRESH_LEAD_SECS + 2)),
+            )
+            .unwrap();
+        let (access, account) = mgr.get().await.expect("thin-margin token is admitted");
+        assert_eq!(access, at);
+        assert_eq!(account, "acct_thin_margin");
+    }
+
+    /// RED CONTROL for the arm above. One second less of life and the SAME
+    /// manager must attempt the refresh — which fails, because the token URL
+    /// is unreachable. Without this, the arm above would pass on a manager
+    /// that never refreshes anything.
+    #[tokio::test]
+    async fn get_at_the_lead_boundary_attempts_a_refresh() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = manager_at(tmp.path().join("oauth"));
+        let at = jwt_with_account("acct_at_boundary");
+        mgr.flow = Arc::new(build_chatgpt_flow_with_token_url(
+            "http://127.0.0.1:1/never",
+        ));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        mgr.storage
+            .store(
+                PROVIDER,
+                &token(&at, Some("rt"), Some(now + REFRESH_LEAD_SECS)),
+            )
+            .unwrap();
+        assert!(
+            mgr.get().await.is_err(),
+            "a token at exactly the lead must be refreshed, not handed out"
+        );
+    }
+
+    /// MEASURES THE TRUE WORST CASE (#147). The 121 s above is the NORMAL
+    /// path. On the rate-limited path (C3) `get()` deliberately hands back the
+    /// CURRENT token whenever it is not HARD-expired — the predicate is
+    /// `exp <= now`, with no lead at all — so the worst-case remaining
+    /// access-token life at bearer hand-off is one second, not 121.
+    ///
+    /// `rate_limit_returns_current_token_when_not_expired` pins the behaviour
+    /// at 30 s of life; this pins where the floor actually sits, and the
+    /// `now` arm is its red control (a token with zero life must be refused).
+    #[test]
+    fn the_rate_limited_path_has_no_lead_at_all() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            ChatGptTokenManager::token_is_hard_expired(&token("a", Some("rt"), Some(now))),
+            "zero remaining life must be hard-expired"
+        );
+        assert!(
+            !ChatGptTokenManager::token_is_hard_expired(&token("a", Some("rt"), Some(now + 2))),
+            "a token with seconds left is NOT hard-expired, so a 429 hands it out"
+        );
+    }
+
+    /// The same floor, end to end through `get()`: a 429 on refresh hands the
+    /// provider a bearer with ~2 s of life left. Every turn opened with it is
+    /// past its expiry almost immediately.
+    #[tokio::test]
+    async fn a_rate_limited_refresh_hands_out_a_nearly_dead_token() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("Too Many Requests"))
+            .mount(&server)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = manager_at(tmp.path().join("oauth"));
+        mgr.flow = Arc::new(build_chatgpt_flow_with_token_url(&format!(
+            "{}/oauth/token",
+            server.uri()
+        )));
+        let at = jwt_with_account("acct_429_floor");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        mgr.storage
+            .store(PROVIDER, &token(&at, Some("rt"), Some(now + 2)))
+            .unwrap();
+
+        let (access, _) = mgr.get().await.expect("get");
+        assert_eq!(
+            access, at,
+            "a rate-limited refresh hands out the nearly-dead current token"
+        );
+    }
+
     #[tokio::test]
     async fn rotates_and_restores_refresh_token() {
         use wiremock::matchers::{method, path};
