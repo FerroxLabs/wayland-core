@@ -2310,7 +2310,8 @@ impl AgentSpawner {
         // `execute_resolved_launch` carries the full child-engine state machine.
         // Keep that large future off Tokio's worker stack before the durable
         // cancellation/terminal-evidence wrapper adds its own select state.
-        let execution = Box::pin(self.execute_resolved_launch(launch, extras, child_cancel));
+        let execution =
+            Box::pin(self.execute_resolved_launch(launch, extras, child_cancel, origin));
         match admitted
             .execute_with_parent_cancel(execution, parent_cancel)
             .await
@@ -2332,6 +2333,10 @@ impl AgentSpawner {
         launch: ResolvedChildLaunch,
         extras: SpawnExtras,
         child_cancel: tokio_util::sync::CancellationToken,
+        // #863 F2 — the child's durable lifecycle origin. Threaded in because
+        // this is where the child `AgentEngine` is built, and loop ownership is
+        // a property of HOW a child was launched, which the engine cannot see.
+        origin: ChildOrigin,
     ) -> SubAgentResult {
         let requested_budget = launch
             .overrides
@@ -2369,6 +2374,19 @@ impl AgentSpawner {
             return SubAgentResult::error(&launch.request.name, &error);
         }
         engine.set_egress_policy(self.egress_policy.clone());
+        // #863 F2 — an Anvil child is a builder fork of a CLIENT-side climb, so
+        // every turn it takes is mid-loop material. Declare the loop ownership
+        // here, at the one seam that knows the child's `ChildOrigin`: the engine
+        // cannot infer it, because origin is a property of how it was launched.
+        //
+        // This is the ONLY production site that sets it, and it covers both
+        // driver-seat routings (in-session and standalone-CLI) because both
+        // reach the wire through this same durable-launch path.
+        if origin == wcore_types::spawner::ChildOrigin::Anvil {
+            engine.set_flux_loop_intent(wcore_types::llm::FluxLoopIntent::ClientOwned(
+                wcore_types::llm::ANVIL_LOOP_OWNER.to_string(),
+            ));
+        }
         // ===================================================================
         // F21-02-03 — LAYER 2 of the child tool authority. DO NOT DELETE AS
         // "duplicate" of the intersection in `build_tool_registry`.

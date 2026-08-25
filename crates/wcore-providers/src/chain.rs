@@ -255,6 +255,8 @@ mod tests {
 
     fn dummy_request() -> LlmRequest {
         LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "test".into(),
             system: String::new(),
             messages: vec![],

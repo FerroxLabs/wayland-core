@@ -16,6 +16,8 @@ use wcore_types::message::{ContentBlock, Message, Role, StopReason};
 
 fn minimal_request() -> LlmRequest {
     LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "claude-3-5-sonnet-20241022".to_string(),
         system: "You are helpful.".to_string(),
         messages: vec![Message::new(

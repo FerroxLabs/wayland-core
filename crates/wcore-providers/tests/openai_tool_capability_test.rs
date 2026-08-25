@@ -31,6 +31,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// A request carrying one function tool, for `model`.
 fn request_with_tools(model: &str) -> LlmRequest {
     LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: model.to_string(),
         system: "test".to_string(),
         messages: vec![Message::new(

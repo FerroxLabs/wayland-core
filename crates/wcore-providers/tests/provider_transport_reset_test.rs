@@ -29,6 +29,8 @@ use wcore_types::message::{ContentBlock, Message, Role};
 
 fn make_request() -> LlmRequest {
     LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "gpt-4o".to_string(),
         system: "You are a test assistant.".to_string(),
         messages: vec![Message::new(

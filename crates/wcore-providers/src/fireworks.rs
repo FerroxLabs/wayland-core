@@ -145,6 +145,8 @@ mod tests {
             DebugConfig::default(),
         );
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "accounts/fireworks/models/llama-v3p1-70b-instruct".into(),
             system: String::new(),
             messages: vec![],

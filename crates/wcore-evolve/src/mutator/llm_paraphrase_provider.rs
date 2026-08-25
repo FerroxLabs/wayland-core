@@ -121,6 +121,8 @@ impl LlmParaphraseProvider {
 
     fn build_request(&self, body: &str) -> LlmRequest {
         LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: self.model.clone(),
             system: self.system_prompt.clone(),
             messages: vec![Message::new(

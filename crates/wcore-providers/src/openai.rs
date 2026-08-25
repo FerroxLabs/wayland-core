@@ -667,6 +667,16 @@ impl OpenAIProvider {
         // tier aliases inside the helper); non-Flux requests are unchanged.
         let mut headers = self.build_headers(key)?;
         Self::apply_flux_context_headers(&mut headers, request);
+        // #863 F2 — the loop-ownership anti-collision marking. Gated on the
+        // ENDPOINT (`compat.flux_loop_provenance`), NOT on the tier alias the
+        // line above uses: F2 says Flux honours `loop_owner` regardless of
+        // alias, so a driver turn pinned to a concrete model id must still be
+        // marked. `try_send` is the single send funnel for the chat AND the
+        // Responses surface and for both re-send paths, so this one call site
+        // covers every request `OpenAIProvider` (and the FluxRouter,
+        // OpenRouter, Sakana and openai-compatible wrappers that delegate to
+        // it) ever puts on the wire.
+        crate::flux_loop::apply_loop_headers(&mut headers, request, &self.compat);
         let response =
             builder_send_with_retry(self.client.post(&url).headers(headers).json(body)).await?;
 
@@ -833,6 +843,13 @@ impl OpenAIProvider {
         {
             body["prompt_cache_key"] = json!(id);
         }
+
+        // #863 F2/F3 — `metadata.loop_owner` / `metadata.flux_verify` /
+        // `metadata.nonce`. Flux reads EITHER the header or the metadata, so
+        // this is redundant with `apply_loop_headers` by design: the contract
+        // names both carriers and a proxy that strips unknown headers must not
+        // be able to silently turn a marked turn into an unmarked one.
+        crate::flux_loop::apply_loop_metadata(&mut body, request, &self.compat);
 
         // Gate `reasoning_effort` on the model family. gpt-4o (and other
         // classic chat families) 400 on the field; only o1*/o3*/gpt-5*
@@ -2567,6 +2584,7 @@ pub(crate) fn parse_flux_overflow(body: &str) -> Option<ProviderError> {
 /// - `x-flux-model-window`           → `model_window`     (int)
 /// - `x-flux-context-pressure`       → `context_pressure` (float, REQUIRED/window)
 /// - `x-flux-context-tokens-counted` → `tokens_counted`   (int)
+/// - `x-flux-loop-engaged`            → `loop_engaged`     (str, #863 F2)
 fn parse_flux_response_meta(headers: &HeaderMap) -> Option<LlmEvent> {
     let as_str = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
     let routed_model = as_str("x-flux-routed-model").map(str::to_string);
@@ -2574,12 +2592,15 @@ fn parse_flux_response_meta(headers: &HeaderMap) -> Option<LlmEvent> {
     let context_pressure = as_str("x-flux-context-pressure").and_then(|s| s.parse::<f32>().ok());
     let tokens_counted =
         as_str("x-flux-context-tokens-counted").and_then(|s| s.parse::<u64>().ok());
+    // #863 F2 — which ladder Flux actually ran for this turn.
+    let loop_engaged = crate::flux_loop::parse_loop_engaged(headers);
 
     // No Flux signal present at all → nothing to emit (non-Flux response).
     if routed_model.is_none()
         && model_window.is_none()
         && context_pressure.is_none()
         && tokens_counted.is_none()
+        && loop_engaged.is_none()
     {
         return None;
     }
@@ -2588,6 +2609,7 @@ fn parse_flux_response_meta(headers: &HeaderMap) -> Option<LlmEvent> {
         model_window,
         context_pressure,
         tokens_counted,
+        loop_engaged,
     })
 }
 
@@ -3377,6 +3399,7 @@ mod tests {
         );
         match parse_flux_response_meta(&headers) {
             Some(LlmEvent::ProviderMeta {
+                loop_engaged: _,
                 routed_model,
                 model_window,
                 context_pressure,
@@ -3410,6 +3433,7 @@ mod tests {
         );
         match parse_flux_response_meta(&headers) {
             Some(LlmEvent::ProviderMeta {
+                loop_engaged: _,
                 routed_model,
                 model_window,
                 context_pressure,
@@ -3948,6 +3972,8 @@ mod tests {
             DebugConfig::default(),
         );
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "gpt-4o".into(),
             system: String::new(),
             messages: vec![],
@@ -4044,6 +4070,8 @@ mod tests {
 
     fn stop_req() -> LlmRequest {
         LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "gpt-4o".into(),
             system: String::new(),
             messages: vec![],
@@ -4546,6 +4574,8 @@ mod tests {
         let provider =
             OpenAIProvider::new("key", "http://localhost", compat, DebugConfig::default());
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "gpt-4o".into(),
             system: String::new(),
             messages: vec![],
@@ -4585,6 +4615,8 @@ mod tests {
             DebugConfig::default(),
         );
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "gpt-5".into(),
             system: String::new(),
             messages: vec![],
@@ -4620,6 +4652,8 @@ mod tests {
             DebugConfig::default(),
         );
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "gpt-4o".into(),
             system: String::new(),
             messages: vec![],
@@ -4653,6 +4687,8 @@ mod tests {
             DebugConfig::default(),
         );
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "gpt-4o".into(),
             system: String::new(),
             messages: vec![],
@@ -4686,6 +4722,8 @@ mod tests {
             DebugConfig::default(),
         );
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "o1-mini".into(),
             system: String::new(),
             messages: vec![],
