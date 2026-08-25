@@ -237,12 +237,21 @@ fn a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds() {
 /// approval, not that it works *because of the folder grant*. It also pins the
 /// honesty of the docs: `once` does NOT run the call, and the protocol spec
 /// must not promise that it does.
-/// macOS-only quarantine, FerroxLabs/wayland#1109. This test times out at 30 s
+/// macOS-only quarantine, FerroxLabs/wayland#1126. This test times out at 30 s
 /// on the macOS leg and passes in ~0.9 s on Linux at the same commit, so the
 /// failure is platform-specific and not a property of what it asserts.
 /// Measured per-attempt failure rate on macOS: 5 of 6. Run 32613130982 job
 /// 97129254675 went TRY 1 FAIL 30.996s / TRY 2 FAIL 30.956s / TRY 3 PASS and
 /// the run reported SUCCESS; run 32442806629 failed all three attempts.
+///
+/// The quarantine carried `#1109` until 2026-08-25. That was a MISLABEL, not a
+/// cross-reference: #1109 is a different and genuinely-fixed defect (a
+/// usage-only `message_delta` ending a turn holding nothing) with its own live
+/// test, `issue_1109_silent_empty_turn_tui_pty.rs`. Nothing about this hang
+/// relates to it — an earlier CI-flake hunt ran under #1109's number and the
+/// number followed the code. #1126 is the issue that actually tracks this hang.
+/// (The `provider_traffic` doc above still cites #1109 correctly: that
+/// diagnostic really was built during #1109.)
 ///
 /// `retries = 0` on the pty/tui binaries deliberately removed the mask that was
 /// laundering that into a green, so this is quarantined WHERE it is broken and
@@ -251,7 +260,7 @@ fn a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds() {
 /// shows it passing.
 #[cfg_attr(
     target_os = "macos",
-    ignore = "FerroxLabs/wayland#1109: 30s timeout on the macOS leg only"
+    ignore = "FerroxLabs/wayland#1126: 30s timeout on the macOS leg only"
 )]
 #[test]
 fn approving_once_leaves_the_read_refused_by_the_sandbox() {
