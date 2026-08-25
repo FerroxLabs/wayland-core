@@ -17,6 +17,22 @@ Windows (arm64/x64) are on the
 [Releases](https://github.com/FerroxLabs/wayland-core/releases) page, each
 verifiable against `wayland-core-checksums.txt`.
 
+**Linux system requirements.** The Linux binaries are glibc-linked (glibc
+2.34+, i.e. Debian 12 / Ubuntu 22.04 / RHEL 9 or newer). Beyond the C runtime
+they need exactly one shared library, `libseccomp.so.2`, which the sandbox uses
+to apply its seccomp-bpf filter:
+
+```bash
+apt-get install -y libseccomp2   # Debian/Ubuntu
+dnf install -y libseccomp        # RHEL/Fedora
+```
+
+Debian- and Ubuntu-derived images already ship it, `node:22-slim` included.
+TLS (OpenSSL, for IMAP) and the D-Bus secret-service keyring backend are
+statically linked, so `libssl.so.3` and `libdbus-1.so.3` are **not** required.
+Alpine and other musl distributions are not supported. To see the full list for
+an artifact you have on disk, run `ldd ./wayland-core`.
+
 **From source** (Rust 1.95+):
 
 ```bash

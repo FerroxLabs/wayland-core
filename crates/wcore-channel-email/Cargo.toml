@@ -10,7 +10,15 @@ async-trait = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 imap = { version = "2" }
-native-tls = "0.2"
+# `vendored` builds and statically links OpenSSL so the shipped Linux binary
+# does not require libssl.so.3 / libcrypto.so.3 from the host. OpenSSL is
+# reachable ONLY from here: `imap` 2.x hard-wires `imap::connect` to a
+# concrete `native_tls::TlsConnector` and offers no rustls path. Everything
+# else in the workspace (reqwest, lettre SMTP) is already rustls. native-tls
+# still resolves CA roots at runtime via openssl-probe, so vendoring does not
+# change which trust anchors IMAP accepts. No-op on macOS (security-framework)
+# and Windows (schannel). See #1128.
+native-tls = { version = "0.2", features = ["vendored"] }
 # Used to COUNT the anchors in `smtp.tls_root_cert_path` with the same parser
 # lettre uses. Needed because lettre's `Certificate::from_pem` returns Ok on
 # input containing no PEM block (empty anchor set) on the rustls path — see
