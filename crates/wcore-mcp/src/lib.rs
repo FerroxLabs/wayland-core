@@ -1,5 +1,6 @@
 pub mod config;
 pub mod forge_grant;
+pub mod malware_gate;
 pub mod manager;
 pub mod protocol;
 pub mod server;

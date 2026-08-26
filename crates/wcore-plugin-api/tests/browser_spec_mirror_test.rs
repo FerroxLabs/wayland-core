@@ -39,7 +39,6 @@ fn provider_hint_is_serde_round_trip() {
     for hint in [
         BrowserProviderHint::Auto,
         BrowserProviderHint::Camoufox,
-        BrowserProviderHint::Chromium,
         BrowserProviderHint::Browserbase,
     ] {
         let s = serde_json::to_string(&hint).unwrap();

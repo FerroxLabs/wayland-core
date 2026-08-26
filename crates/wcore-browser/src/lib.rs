@@ -10,9 +10,8 @@
 //! (`wayland-*`) MUST NOT depend on this crate directly; they go through
 //! `wcore-plugin-api::browser_spec::BrowserToolSpec` mirrors (audit F2).
 //!
-//! Three backends:
+//! Two backends:
 //! - **Camoufox** (PRIMARY): HTTP sidecar at `localhost:9377/...`. Default-on.
-//! - **Chromium** (FALLBACK): chromiumoxide CDP client. Behind `chromium` feature.
 //! - **Browserbase** (CLOUD): REST API, env-gated by `BROWSERBASE_API_KEY` +
 //!   `BROWSERBASE_PROJECT_ID`. Behind `browserbase` feature.
 

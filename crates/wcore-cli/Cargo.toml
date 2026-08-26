@@ -33,9 +33,8 @@ remote-registry = ["dep:reqwest", "dep:wcore-egress"]
 # User-flow harness Layer 3: the `harness_failure_injection` integration
 # test reproduces the audit's hang-class bugs (wedged MCP server, Ctrl+C
 # mid-task). It is slow — it boots the real binary and waits out the
-# bounded 30s MCP connect handshake — so it is gated OFF by default,
-# mirroring how `wcore-browser` gates its live Chromium tests behind
-# `browser-live-tests`. Run with:
+# bounded 30s MCP connect handshake — so it is gated OFF by default.
+# Run with:
 #   cargo test -p wcore-cli --features harness-failure-injection \
 #       --test harness_failure_injection
 harness-failure-injection = []

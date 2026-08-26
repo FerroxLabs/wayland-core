@@ -247,7 +247,7 @@ pub mod vision_tools;
 // website_policy for SSRF + blocklist gating before backend dispatch.
 pub mod web_tools;
 // Wave RC (2026-05-23): simple HTTP-GET tool — `WebFetch`. The Browser
-// tool requires a Camoufox / Chromium sidecar that is NOT installed on a
+// tool requires a Camoufox sidecar that is NOT installed on a
 // fresh wayland-core, so a user asking "fetch this URL" used to watch a
 // 60s spinner. WebFetch is a plain HTTP GET via a `FetchBackend` seam
 // (host wires `HttpFetchBackend` in `wcore-agent`); it is what the model

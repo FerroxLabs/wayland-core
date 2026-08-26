@@ -628,16 +628,15 @@ to the forge; judgment work with no checkable reward goes to the council.
 
 ## Browser tool family (W8c.1)
 
-`wcore-browser` is a multi-backend browser tool family. The three
+`wcore-browser` is a multi-backend browser tool family. The
 backends share an ARIA-tree-first surface (`BrowserOp::Navigate /
 Snapshot / Click / Type / NewTab / Download`) so prompt budgets stay
 under control regardless of which provider actually drives the
 session:
 
 - **Camoufox** — primary. Stealth-fingerprinted Firefox; the default
-  choice for any production session.
-- **chromiumoxide** — local-Chromium fallback when Camoufox is
-  unavailable.
+  choice for any production session. Installed on first use, so there
+  is no fallback backend to fall back to.
 - **Browserbase** — cloud-hosted browser sessions, opt-in via
   `BrowserPolicy.allow_cloud`.
 

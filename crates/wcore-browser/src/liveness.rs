@@ -20,8 +20,8 @@
 //! **2. Narrowing requires positive proof of unavailability, not absence of
 //! proof of availability.** A cross-audit panel unanimously found the
 //! false-negative class this design originally missed: `select_provider` has
-//! three backends, and probing only Camoufox would strip a working capability
-//! from a Chromium or Browserbase deployment. So any compiled-in backend whose
+//! more than one backend, and probing only Camoufox would strip a working
+//! capability from a Browserbase deployment. So any compiled-in backend whose
 //! startability cannot be established *without launching it* returns
 //! [`BrowserLiveness::Indeterminate`], which does **not** narrow. Only
 //! [`BrowserLiveness::Unavailable`] — every compiled-in backend provably unable
@@ -119,13 +119,6 @@ fn program_resolves(program: &str) -> bool {
 /// `camoufox_base_url` is the sidecar base URL (no trailing slash), normally
 /// `CamoufoxBackend::default_url()`. Only contacted when the local binary does
 /// not resolve, so an installed deployment pays nothing.
-///
-/// The `chromium` feature returns `Indeterminate` unconditionally below, which
-/// makes the Camoufox block — the only reader of `camoufox_base_url` — dead
-/// code in that configuration. The parameter stays in the signature because the
-/// default shipped build does use it; the allow is scoped to the one feature
-/// that cannot, and mirrors the existing `unreachable_code` allow on that block.
-#[cfg_attr(feature = "chromium", allow(unused_variables))]
 pub async fn probe(camoufox_base_url: &str) -> BrowserLiveness {
     // Cloud backend: compiled in AND credentialed means a machine with no local
     // browser at all can still browse. Whether `select_provider` ultimately
@@ -141,18 +134,7 @@ pub async fn probe(camoufox_base_url: &str) -> BrowserLiveness {
         };
     }
 
-    // chromiumoxide discovers a system Chrome/Chromium during `Browser::launch`.
-    // There is no non-executing probe for that, and rule 3 forbids launching it,
-    // so a build with this feature on never narrows.
-    #[cfg(feature = "chromium")]
-    {
-        return BrowserLiveness::Indeterminate {
-            backend: "chromium",
-        };
-    }
-
     // Camoufox — the only backend in the default shipped build.
-    #[cfg_attr(feature = "chromium", allow(unreachable_code))]
     {
         // Build the supervisor's real production config ONCE and read both the
         // program and the healthcheck URL out of it, so the probe cannot
@@ -295,7 +277,7 @@ mod tests {
     /// satisfied by a probe that is stuck on either answer.
     #[tokio::test]
     #[serial_test::serial(camoufox_bin_env)]
-    #[cfg(not(any(feature = "chromium", feature = "browserbase")))]
+    #[cfg(not(feature = "browserbase"))]
     async fn the_probe_reads_the_program_out_of_the_supervisors_own_config() {
         let key = "WAYLAND_CAMOUFOX_BIN";
         let prior = std::env::var_os(key);
@@ -404,7 +386,7 @@ mod tests {
     /// End-to-end on the default feature set: a program that cannot exist plus
     /// a port nothing is listening on must produce `Unavailable`, carrying both
     /// a reason and a remedy. If this ever returns `Ready`, the probe is inert.
-    #[cfg(not(any(feature = "chromium", feature = "browserbase")))]
+    #[cfg(not(feature = "browserbase"))]
     #[tokio::test]
     #[serial_test::serial(camoufox_bin_env)]
     async fn nothing_installed_and_nothing_listening_is_unavailable() {

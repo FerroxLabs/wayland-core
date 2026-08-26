@@ -56,21 +56,6 @@ pub const CAMOUFOX: BackendInstall = BackendInstall {
     ],
 };
 
-/// The chromiumoxide CDP fallback. Behind the `chromium` cargo feature, which
-/// is NOT in `default`, so this constant does not exist in the shipped build —
-/// and neither does the `apt install chromium-browser` advice built from it.
-#[cfg(feature = "chromium")]
-pub const CHROMIUM: BackendInstall = BackendInstall {
-    backend: "Chromium (CDP)",
-    programs: &["chromium-browser", "chromium", "google-chrome"],
-    env_override: None,
-    install_hints: &[
-        "apt install chromium-browser  (Debian/Ubuntu)",
-        "pacman -S chromium            (Arch)",
-        "nix-env -iA nixpkgs.chromium  (NixOS)",
-    ],
-};
-
 impl BackendInstall {
     /// The program this backend will actually try to run: the operator's env
     /// override when they set one, else the first candidate name.
@@ -138,11 +123,7 @@ impl BackendInstall {
 /// Browserbase is deliberately absent: it is a cloud backend with nothing to
 /// install locally, and it is reported by its own credential check.
 pub fn compiled_backends() -> Vec<&'static BackendInstall> {
-    #[allow(unused_mut)]
-    let mut backends: Vec<&'static BackendInstall> = vec![&CAMOUFOX];
-    #[cfg(feature = "chromium")]
-    backends.push(&CHROMIUM);
-    backends
+    vec![&CAMOUFOX]
 }
 
 /// The first compiled-in backend that is actually installed, if any.
@@ -164,13 +145,11 @@ mod tests {
         for backend in compiled_backends() {
             for hint in backend.install_hints {
                 let hint = hint.to_ascii_lowercase();
-                if cfg!(not(feature = "chromium")) {
-                    assert!(
-                        !hint.contains("chromium") && !hint.contains("chrome"),
-                        "a build without the `chromium` feature must not tell the operator to \
-                         install it: {hint}"
-                    );
-                }
+                assert!(
+                    !hint.contains("chromium") && !hint.contains("chrome"),
+                    "no build compiles a Chromium backend, so no remedy may tell the \
+                     operator to install one: {hint}"
+                );
             }
         }
     }

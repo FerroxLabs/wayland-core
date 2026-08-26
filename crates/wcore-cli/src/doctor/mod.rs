@@ -1260,8 +1260,8 @@ mod tests {
     /// gh#491 — `--doctor` must recommend the browser backend this binary
     /// actually compiled, and must not recommend one it did not.
     ///
-    /// `chromium` is an opt-in cargo feature (`default = []`), so the shipped
-    /// artifact contains no Chromium backend at all — yet the doctor told
+    /// The Chromium/CDP backend never shipped (opt-in cargo feature, refused by
+    /// selection under any policy) and has since been deleted — yet the doctor told
     /// every Linux user to `apt install chromium-browser`, which leaves them
     /// exactly as far from a working browser as before and never names the
     /// sidecar that is actually required.
