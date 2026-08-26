@@ -1175,6 +1175,21 @@ jobs:
           python3 scripts/check-no-vacuous-cargo-test.py --self-test
           python3 scripts/check-no-vacuous-cargo-test.py
 
+      # ── model-limits freshness checker: SELF-TEST ONLY ────────────────
+      # The LIVE scan runs at release time (release.yml `prepare-release`),
+      # not here: it needs models.dev, and a third-party catalogue in the
+      # main test path buys flakiness for no benefit.
+      #
+      # What runs here is the checker's own self-test — offline, ~0.1s, and
+      # it asserts the gate can still reach ALL FOUR verdicts: PASS on a
+      # table that matches, FAIL on a missing/over-claimed/stale arm, REPORT
+      # on a brand-new family, and a SKIPPED banner that never reads as a
+      # pass. Without this, a checker that had quietly stopped matching would
+      # sail through every release green, which is the same "green-looking
+      # absence of signal" the step above was moved twice to avoid.
+      - name: Model-limits freshness checker self-test
+        run: python3 scripts/check-model-limits-freshness.py --self-test
+
       # ── pre-publish personal-identifier gate ──────────────────────────
       # Placed here for the same reasons as the step above, which paid for
       # them twice: AFTER checkout (it needs the working tree) and EARLY (a

@@ -44,6 +44,33 @@ jobs:
         with:
           ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
 
+      # ── model-limits freshness gate ───────────────────────────────────
+      # Every release must refresh `crates/wcore-config/src/limits.rs`
+      # against the live models.dev catalogue. #165 is what the alternative
+      # costs: a frontier model shipped, nobody added its limits, the miss
+      # produced NO error, and a customer run died at 178,336 tokens against
+      # a fake ~177k ceiling.
+      #
+      # HERE, and not in the main CI matrix, for two reasons. It needs the
+      # network, and a third-party catalogue in the per-PR test path buys
+      # flakiness for no benefit. And every publishing job — `github-release`,
+      # `publish-npm` — depends on `prepare-release`, so a FAIL here actually
+      # stops the release rather than being advisory. The checker's offline
+      # self-test still runs on every CI run (ci.yml), so the gate itself
+      # cannot rot in between.
+      #
+      # It FAILS only on something we claim and got wrong: an in-scope
+      # first-party model with no arm, an arm that over-claims, or an arm
+      # grossly stale versus first-party. A brand-new family is REPORTED and
+      # does not fail — whether wayland-core should route someone else's new
+      # launch is the release owner's decision, not this script's. If
+      # models.dev is unreachable it prints a SKIPPED banner and exits 0;
+      # read that banner, it is not a pass.
+      - name: Model-limits table is current with models.dev
+        run: |
+          python3 scripts/check-model-limits-freshness.py --self-test
+          python3 scripts/check-model-limits-freshness.py
+
       - name: Extract version from tag
         id: metadata
         shell: bash
