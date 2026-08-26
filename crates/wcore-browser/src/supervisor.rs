@@ -57,6 +57,11 @@ pub struct SupervisorConfig {
     /// nothing unless an operator turns it on in `[browser.camoufox_download]`
     /// and pins a SHA-256 for their platform.
     pub camoufox_download: wcore_config::browser::CamoufoxDownloadConfig,
+    /// First-use npm install of the sidecar when no pinned artifact is
+    /// configured. Enabled by default - see [`SidecarAutoInstall`].
+    ///
+    /// [`SidecarAutoInstall`]: wcore_config::browser::SidecarAutoInstall
+    pub sidecar_auto_install: wcore_config::browser::SidecarAutoInstall,
     /// Install root for auto-provisioned browser binaries.
     pub binary_install_root: PathBuf,
     /// gh#1117 — the policy Core enforces on the sidecar's OWN egress.
@@ -96,6 +101,19 @@ impl Default for SupervisorConfig {
             sidecar_program: None,
             startup_timeout: Duration::from_secs(15),
             camoufox_download: wcore_config::browser::CamoufoxDownloadConfig::default(),
+            // OFF here, ON in `local_camoufox`. `SidecarAutoInstall::default()`
+            // is enabled - that is the operator-facing default - but
+            // `SupervisorConfig::default()` is the PROGRAMMATIC one, reached by
+            // every test that does not name the field. Inheriting "enabled"
+            // here means any such test npm-installs into the developer's home
+            // directory over the real network; measured, two arms raced each
+            // other into ENOTEMPTY doing exactly that. A constructor whose
+            // default performs a network install is a trap regardless of who
+            // steps in it.
+            sidecar_auto_install: wcore_config::browser::SidecarAutoInstall {
+                enabled: false,
+                ..Default::default()
+            },
             binary_install_root: home_bin_dir(),
             egress_policy: None,
             allow_unproxied_sidecar: false,
@@ -108,17 +126,28 @@ impl SupervisorConfig {
     /// Production configuration for the locally managed Camoufox sidecar.
     /// The command may be overridden by Desktop or an operator.
     ///
-    /// Core still invokes no package manager. It downloads executable code
-    /// only when the operator has explicitly enabled
-    /// `[browser.camoufox_download]` AND pinned a SHA-256 for their platform;
-    /// the default config leaves that switch off, which is the pre-existing
-    /// "never downloads" behaviour verbatim.
+    /// Two provisioning paths, in this order:
+    ///
+    /// 1. `[browser.camoufox_download]` - an operator-pinned artifact verified
+    ///    against a SHA-256 they supplied. Off by default. No package manager
+    ///    runs on this path.
+    /// 2. `[browser.sidecar_auto_install]` - `npm install -g` of
+    ///    `@askjo/camofox-browser` into a Core-owned prefix. ON by default,
+    ///    and the reason a fresh machine works at all.
+    ///
+    /// (2) DOES invoke a package manager, which this comment used to say Core
+    /// never did. That was true and it was also why the browser tool was
+    /// non-functional on any machine nobody had prepared by hand: path (1)
+    /// needs a self-contained sidecar executable per platform, and upstream
+    /// publishes no such artifact. An operator who wants the old behaviour
+    /// sets `browser.sidecar_auto_install.enabled = false`.
     pub fn local_camoufox(base_url: &str) -> Self {
         let base_url = base_url.trim_end_matches('/');
         Self {
             healthcheck_url: format!("{base_url}/health"),
             sidecar_program: Some(crate::install::CAMOUFOX.configured_program()),
             camoufox_download: configured_camoufox_download(),
+            sidecar_auto_install: configured_sidecar_auto_install(),
             allow_unproxied_sidecar: configured_allow_unproxied_sidecar(),
             ..Self::default()
         }
@@ -205,6 +234,22 @@ fn configured_camoufox_download() -> wcore_config::browser::CamoufoxDownloadConf
         .get_or_init(|| {
             wcore_config::config::load_merged_config_file(None)
                 .map(|file| file.browser.camoufox_download)
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+/// The operator's `[browser.sidecar_auto_install]` block, read once per process.
+///
+/// A config that cannot be read yields the default, which is *enabled* - the
+/// failure mode is "Core installs the sidecar", never "the browser silently
+/// stays broken".
+fn configured_sidecar_auto_install() -> wcore_config::browser::SidecarAutoInstall {
+    static CACHE: OnceLock<wcore_config::browser::SidecarAutoInstall> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            wcore_config::config::load_merged_config_file(None)
+                .map(|file| file.browser.sidecar_auto_install)
                 .unwrap_or_default()
         })
         .clone()
@@ -640,15 +685,40 @@ impl BrowserSupervisor {
         if which::which(program).is_ok() {
             return Ok(program.to_string());
         }
-        if !self.config.camoufox_download.enabled {
-            // Unchanged pre-existing behaviour: let the spawn below fail with
-            // the actionable "install it / set WAYLAND_CAMOUFOX_BIN" message.
-            return Ok(program.to_string());
-        }
         let manager = crate::binary::BrowserBinaryManager::new(
             self.config.binary_install_root.clone(),
             false,
         );
+        if !self.config.camoufox_download.enabled {
+            if !self.config.sidecar_auto_install.enabled {
+                // The operator turned the fresh-machine path off. Pre-existing
+                // behaviour: let the spawn below fail with the actionable
+                // "install it / set WAYLAND_CAMOUFOX_BIN" message.
+                return Ok(program.to_string());
+            }
+            // No pinned artifact, so this is a machine nobody prepared by
+            // hand. Install the sidecar rather than refusing.
+            let timeout = Duration::from_secs(self.config.sidecar_auto_install.timeout_secs);
+            return match manager.provision_sidecar_via_npm(program, timeout).await {
+                Ok(Some(path)) => path
+                    .to_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "installed sidecar path is not valid UTF-8".to_string()),
+                // npm reported success but left no shim where one belongs.
+                // Fall through to the spawn, which names the manual command.
+                Ok(None) => Ok(program.to_string()),
+                // Best effort, and a failure must still tell the caller what to
+                // DO. The pre-existing refusal names the package and
+                // WAYLAND_CAMOUFOX_BIN; reporting a raw npm error in its place
+                // reports the failure WITHOUT the remedy, which is the exact
+                // shape this whole path exists to remove.
+                Err(error) => Err(format!(
+                    "{}\nCore also tried to install it automatically, and that failed: {error}",
+                    crate::install::CAMOUFOX
+                        .not_installed(program, Some(&self.config.healthcheck_url))
+                )),
+            };
+        }
         match manager
             .provision_camoufox(&self.config.camoufox_download)
             .await

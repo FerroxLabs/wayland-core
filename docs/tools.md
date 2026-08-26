@@ -379,29 +379,45 @@ run; see `docs/json-stream-protocol.md` §§1.N+6 and 1.N+7.
 
 ### Two things a fresh install needs before a browser op works
 
-Neither is done for you, and both are deliberate. A first browser op on
-an untouched install is refused, and the tool card names whichever step
-is outstanding.
+A first browser op on an untouched install has two gates. Core clears the
+first one for you; the second is yours, deliberately. The tool card names
+whichever step is outstanding.
 
-**1. Install the sidecar.** Core does *not* bundle a browser. It drives
-the Camoufox sidecar, a separate npm package:
+**1. The sidecar — Core installs it.** Core does *not* bundle a browser; it
+drives the Camoufox sidecar, a separate npm package. When that sidecar does
+not resolve, Core installs it on first use:
 
 ```bash
-npm install -g @askjo/camofox-browser
+npm install -g --prefix <profile>/browser/bin/node @askjo/camofox-browser
 ```
 
-Already have one somewhere else? Point `WAYLAND_CAMOUFOX_BIN` at the
-`camofox-browser` executable instead. Auto-download
-(`[browser.camoufox_download]`) is off by default and has no built-in
-artifact: Core never fetches executable code from the network without an
-operator-supplied URL *and* a pinned SHA-256 per platform.
+The prefix is Core-owned, so this never needs `sudo` and never writes to a
+system-wide npm root. `npm` must be on `PATH`; if it is not, the tool refuses
+and names the manual command.
 
-**2. Open the policy.** `[browser.policy]` is fail-closed since v0.2.1 —
-`default_action = "deny"` with no `allowed_origins`, so every URL that
-reaches `Browser::navigate` / `download` / `new_tab { url }` is refused.
-This is the SSRF posture, not an oversight; the fix is to name the
-origins you intend to visit, including any search engine you expect the
-agent to use:
+The install deliberately does **not** pass `--ignore-scripts`. That package
+ships the control server (a ~181 KB tarball with no browser in it); its
+`postinstall` is what fetches the Camoufox browser itself. Skipping it would
+install a server with nothing behind it and move the failure from install time
+to your first `Browser::navigate`.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `[browser.sidecar_auto_install] enabled` | `true` | Install the sidecar on first use when it does not resolve. |
+| `[browser.sidecar_auto_install] timeout_secs` | `600` | Budget for that install. The postinstall downloads a browser, so this is minutes. |
+| `[browser.camoufox_download] enabled` | `false` | Operator-pinned artifact instead — takes precedence when on. Requires a `url` **and** a `sha256` per platform; enabling it without a digest is an error, not permission to fetch-and-trust. |
+
+Already have one somewhere else? Point `WAYLAND_CAMOUFOX_BIN` at the
+`camofox-browser` executable and Core skips both paths. Setting
+`[browser.sidecar_auto_install] enabled = false` restores the older behaviour,
+in which a fresh machine is refused and told to run the command itself.
+
+**2. Open the policy — this one is yours.** `[browser.policy]` is fail-closed
+since v0.2.1 — `default_action = "deny"` with no `allowed_origins`, so every
+URL that reaches `Browser::navigate` / `download` / `new_tab { url }` is
+refused. This is the SSRF posture, not an oversight; the fix is to name the
+origins you intend to visit, including any search engine you expect the agent
+to use:
 
 ```toml
 [browser.policy]

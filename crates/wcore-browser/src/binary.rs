@@ -82,6 +82,22 @@ pub enum BinaryError {
     #[error("unsafe path in configuration or archive: {0}")]
     UnsafePath(String),
     #[error(
+        "Core is offline, so it will not install the Camoufox sidecar; run `npm install -g @askjo/camofox-browser` yourself"
+    )]
+    OfflineRefusal,
+    #[error(
+        "npm is not on PATH, so Core cannot install the Camoufox sidecar; install Node.js, or run `npm install -g @askjo/camofox-browser` yourself"
+    )]
+    NpmMissing,
+    #[error(
+        "`npm install -g @askjo/camofox-browser` did not finish within {0}s; raise browser.sidecar_auto_install.timeout_secs, or run it yourself"
+    )]
+    NpmTimeout(u64),
+    #[error("could not run npm: {0}")]
+    NpmSpawn(String),
+    #[error("`npm install -g @askjo/camofox-browser` failed: {0}")]
+    NpmFailed(String),
+    #[error(
         "refusing to fetch an executable over {scheme} - browser.camoufox_download artifact url {url} must use https (plain http is accepted only for a loopback host)"
     )]
     InsecureScheme { scheme: String, url: String },
@@ -125,6 +141,69 @@ impl BrowserBinaryManager {
             b = b.proxy(p);
         }
         b.build().map_err(|e| BinaryError::Network(e.to_string()))
+    }
+
+    /// Install the Camoufox sidecar from npm into a Core-owned prefix.
+    ///
+    /// This is the path that makes the browser tool work on a machine where
+    /// nobody has installed anything. It is deliberately NOT the pinned
+    /// `[browser.camoufox_download]` path: that one resolves to a
+    /// self-contained sidecar executable per platform, and no such artifact is
+    /// published upstream. `@askjo/camofox-browser` ships the control server
+    /// (measured: a 181 KB tarball with no browser in it) and its postinstall
+    /// fetches the Camoufox browser itself.
+    ///
+    /// So `--ignore-scripts` is NOT passed. Skipping the postinstall installs a
+    /// control server with no browser behind it, which fails at first
+    /// navigation instead of at install — the same two-wall shape this exists
+    /// to remove.
+    ///
+    /// The prefix is Core-owned (`<install_root>/node`) so this never needs
+    /// root and never writes to a system-wide npm root.
+    pub async fn provision_sidecar_via_npm(
+        &self,
+        program: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Option<PathBuf>, BinaryError> {
+        if self.offline {
+            return Err(BinaryError::OfflineRefusal);
+        }
+        if which::which("npm").is_err() {
+            return Err(BinaryError::NpmMissing);
+        }
+        let prefix = self.install_root.join("node");
+        std::fs::create_dir_all(&prefix).map_err(|e| BinaryError::Extract(e.to_string()))?;
+        let prefix_s = prefix
+            .to_str()
+            .ok_or_else(|| BinaryError::UnsafePath(prefix.display().to_string()))?;
+
+        // Argv mode. The package name and prefix are separate argv entries, so
+        // no shell interprets them - see AGENTS.md "Shell Execution".
+        let mut cmd = wcore_config::shell::shell_command_argv(
+            "npm",
+            &[
+                "install",
+                "-g",
+                "--prefix",
+                prefix_s,
+                "--no-fund",
+                "--no-audit",
+                SIDECAR_NPM_PACKAGE,
+            ],
+        );
+        cmd.stdin(std::process::Stdio::null());
+        let output = tokio::time::timeout(timeout, cmd.output())
+            .await
+            .map_err(|_| BinaryError::NpmTimeout(timeout.as_secs()))?
+            .map_err(|e| BinaryError::NpmSpawn(e.to_string()))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail: Vec<&str> = stderr.lines().rev().take(3).collect();
+            return Err(BinaryError::NpmFailed(
+                tail.into_iter().rev().collect::<Vec<_>>().join("; "),
+            ));
+        }
+        Ok(sidecar_in_prefix(&prefix, program))
     }
 
     /// High-level: ensure the Camoufox binary is present + verified.
@@ -437,6 +516,30 @@ fn sanitize_version_for_filename(v: &str) -> String {
 /// Minimal SHA-256 (so we don't pull `sha2` just for this module). Lifted
 /// from FIPS 180-4 reference; ~70 lines. Verified by the `known_vectors`
 /// test against the empty-string + "abc" vectors.
+/// The npm package that provides the sidecar program on `PATH`.
+///
+/// Same package name the liveness probe, the doctor and the runtime refusal
+/// already name - see `crate::install::CAMOUFOX_SIDECAR_PACKAGE`.
+pub const SIDECAR_NPM_PACKAGE: &str = "@askjo/camofox-browser";
+
+/// Where `npm install -g --prefix P` leaves an executable.
+///
+/// Unix puts it in `P/bin/<name>`; Windows puts the shim at `P/<name>.cmd`
+/// beside `P/<name>`. Both spellings are probed rather than assumed, because a
+/// wrong guess here reads as "the install silently did nothing".
+fn sidecar_in_prefix(prefix: &Path, program: &str) -> Option<PathBuf> {
+    let candidates = if cfg!(windows) {
+        vec![
+            prefix.join(format!("{program}.cmd")),
+            prefix.join(format!("{program}.exe")),
+            prefix.join(program),
+        ]
+    } else {
+        vec![prefix.join("bin").join(program)]
+    };
+    candidates.into_iter().find(|p| p.exists())
+}
+
 pub fn sha256_hex(input: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
