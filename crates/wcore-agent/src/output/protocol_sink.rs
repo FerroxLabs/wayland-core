@@ -240,6 +240,9 @@ impl PluginCapabilitySet {
     /// dropping a capability replaces an actionable runtime error with an
     /// un-debuggable missing feature; that objection is honoured by the
     /// announcement, not by the log. See [`CapabilityNarrowing`].
+    #[must_use = "the narrowings are the only record of a capability this session \
+                  dropped; announce them on the OutputSink (see `AgentBootstrap::build`) \
+                  or #1130 is reopened"]
     pub async fn narrowed_to_live(self) -> (Self, Vec<CapabilityNarrowing>) {
         let mut out = self;
         let mut narrowed = Vec::new();
@@ -293,9 +296,17 @@ impl PluginCapabilitySet {
 /// `bootstrap::local_shell_notice` and `config::ambient_credential_notice`,
 /// and for the same reason.
 ///
-/// Returning a value rather than taking a sink is deliberate: the type makes it
-/// impossible to narrow a capability without being handed the words for it, so
-/// a future second call site cannot silently drop one.
+/// Returning a value rather than taking a sink is deliberate: a caller is handed
+/// the words for every capability it drops, and `narrowed_to_live` is
+/// `#[must_use]`, so a call that discards the pair outright fails the build
+/// under CI's `-D warnings`.
+///
+/// That is the whole of what the type system enforces, and the limit is stated
+/// here rather than left to be discovered: `let (caps, _) = ...` destructures
+/// the tuple and still compiles clean and silent. The announcement is therefore
+/// held by a TEST — `tests/issue_1130_narrowing_notice_test.rs` drives the real
+/// `AgentBootstrap::build()` with a capturing sink and a planted narrowing —
+/// not by the signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityNarrowing {
     /// The wire flag that was cleared: `browser_suite` or `computer_use`.

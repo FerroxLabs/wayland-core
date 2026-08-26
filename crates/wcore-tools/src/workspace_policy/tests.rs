@@ -1967,6 +1967,105 @@ fn a_path_inside_a_git_directory_is_an_auto_run_location() {
     assert!(auto_run_overlap(Path::new("/srv/proj/src")).is_none());
 }
 
+/// The auto-run LISTS, which the `.git` case above never reaches.
+///
+/// `auto_run_overlap` refuses through two branches, and only the first was
+/// graded: a path carrying a `.git` component returns before the
+/// `AUTO_RUN_HOME_DIRS` / `AUTO_RUN_SYSTEM_DIRS` lookup is ever consulted.
+/// MEASURED — emptying both arrays outright, or breaking the
+/// `dirs::home_dir()` join that turns the relative entries into absolute ones,
+/// left the entire crate suite green, while `~/.config` became write-grantable
+/// and the agent could drop a `.desktop` file into `~/.config/autostart`.
+///
+/// Rule 2 of #1104 names four auto-run locations. Three of them —
+/// `~/Library/LaunchAgents`, `~/.config/autostart`, and the Windows Startup
+/// folder — exist ONLY as entries in these arrays, so this is the only place
+/// they can be graded at all. They are asserted BY NAME and not merely swept
+/// by the loop below, because a loop over an emptied array runs zero
+/// iterations and passes: a sweep grades additions, never deletions.
+#[test]
+fn every_auto_run_list_entry_is_refused_in_both_directions() {
+    let home = dirs::home_dir().expect(
+        "the relative half of this list is only as good as `dirs::home_dir()`; \
+         with no home it silently stops applying altogether, so a host without \
+         one must FAIL here rather than skip",
+    );
+    let home = canon_for_scope(&home);
+
+    // Both directions, and they fail differently: the location itself hands
+    // over the auto-run directory, a parent hands over a directory that
+    // CONTAINS it. #1104 calls out the ancestor case specifically because it
+    // is the likelier user request ("grant me ~/.config").
+    let both_ways = |dir: PathBuf, parent: PathBuf, what: &str| {
+        assert!(
+            auto_run_overlap(&dir).is_some(),
+            "{what}: the auto-run location itself must be refused ({})",
+            dir.display()
+        );
+        assert!(
+            auto_run_overlap(&parent).is_some(),
+            "{what}: a directory that CONTAINS it must be refused too ({})",
+            parent.display()
+        );
+    };
+
+    // The rule-2 locations that live ONLY in the arrays, by name.
+    both_ways(
+        home.join("Library/LaunchAgents"),
+        home.join("Library"),
+        "macOS LaunchAgents",
+    );
+    both_ways(
+        home.join(".config/autostart"),
+        home.join(".config"),
+        "freedesktop autostart",
+    );
+    both_ways(
+        home.join("AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup"),
+        home.join("AppData/Roaming/Microsoft/Windows/Start Menu/Programs"),
+        "Windows Startup folder",
+    );
+    // At least one absolute entry, which needs no home at all and so is still
+    // graded on a host where `home_dir()` is a lie.
+    both_ways(
+        PathBuf::from("/etc/cron.d"),
+        PathBuf::from("/etc"),
+        "system cron.d",
+    );
+
+    // ...and then the whole of both lists, so an entry added later is graded
+    // on the day it is added rather than the day it is exploited.
+    for relative in AUTO_RUN_HOME_DIRS {
+        let dir = home.join(relative);
+        let parent = dir
+            .parent()
+            .expect("a joined home-relative entry always has a parent")
+            .to_path_buf();
+        both_ways(dir, parent, relative);
+    }
+    for absolute in AUTO_RUN_SYSTEM_DIRS {
+        let dir = PathBuf::from(absolute);
+        let parent = dir
+            .parent()
+            .expect("every system entry has at least two components")
+            .to_path_buf();
+        both_ways(dir, parent, absolute);
+    }
+
+    // WRONG-REFUSAL CONTROL. `~/Downloads` is the ticket's own worked example
+    // of the folder a user grants, and it must stay grantable — without this,
+    // the test above passes just as well against a predicate that refuses
+    // everything, which is the other way to fail #1104.
+    assert!(
+        auto_run_overlap(&home.join("Downloads")).is_none(),
+        "the folder the whole feature exists to grant is not an auto-run location"
+    );
+    assert!(
+        auto_run_overlap(&home.join("Documents/reports")).is_none(),
+        "nor is an ordinary nested project directory under home"
+    );
+}
+
 /// The Windows extension rules are live on Linux and macOS too, which is the
 /// only reason they can be graded at all — CI cannot introspect the one
 /// platform they describe.
