@@ -685,7 +685,12 @@ impl SlackChannel {
         let req = api::PostMessageRequest {
             channel: conversation_id.clone(),
             text: msg.text.clone(),
-            thread_ts: msg.reply_to.clone(),
+            // Slack's `thread_ts` is a DESTINATION thread, not a quoted
+            // message, so it comes from `thread_id`. `reply_to` is kept as the
+            // fallback for callers that predate `OutgoingMessage::thread_id`
+            // (core#253 §5): for Slack the two carry the same `thread_ts`
+            // value, so the fallback is behaviour-preserving.
+            thread_ts: msg.thread_id.clone().or_else(|| msg.reply_to.clone()),
         };
 
         let send_result = api::post_message_keyed(

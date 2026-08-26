@@ -13,24 +13,60 @@ use crate::event::{ChatType, IncomingMessage};
 
 use super::access::InboundPolicy;
 
-/// Derive the session key for `msg` within `channel_name` under `policy`.
+/// The agent-selector dimension used when no binding names another agent.
+///
+/// This was a bare `"main"` literal inside the key format strings. It is a
+/// DIMENSION, not a constant: core#253 §4 requires the selected agent to form
+/// part of the session key so two agents bound to the same conversation never
+/// share history, engines, or memory. Naming it makes that dimension a
+/// parameter; the binding table that supplies a non-default value is the next
+/// slice.
+pub const DEFAULT_AGENT: &str = "main";
+
+/// Percent-escape the key separator (and the escape character) out of the
+/// agent segment.
+///
+/// The agent selector is the only key segment that can legitimately contain a
+/// `:` — core#253 spells selectors `profile:<name>`. Unescaped, agent
+/// `profile:x` on channel `c` and agent `profile` on a channel named `x:c`
+/// compose the same key and share a session. Every other segment is left
+/// exactly as it was: escaping them too would re-point every session already
+/// persisted on disk, and `DEFAULT_AGENT` contains neither `%` nor `:` so this
+/// function is the identity for it — the legacy key is reproduced byte for
+/// byte.
+fn escape_agent(agent: &str) -> String {
+    let mut out = String::with_capacity(agent.len());
+    for ch in agent.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            ':' => out.push_str("%3A"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Derive the session key for `msg` within `channel_name` under `policy`,
+/// for the agent selected by `agent` (see [`DEFAULT_AGENT`]).
 ///
 /// DM (`Direct`):
-/// `agent:main:<channel>:dm:<conversation_id>`, plus `:<thread_id>` when
+/// `agent:<agent>:<channel>:dm:<conversation_id>`, plus `:<thread_id>` when
 /// the message carries a thread id (DMs always split per thread).
 ///
 /// Group/Channel:
-/// `agent:main:<channel>:<conversation_id>`, plus `:<sender_id>` when
+/// `agent:<agent>:<channel>:<conversation_id>`, plus `:<sender_id>` when
 /// `group_sessions_per_user`, plus `:<thread_id>` when the message has a
 /// thread id AND `thread_sessions_per_user`.
 pub fn build_session_key(
+    agent: &str,
     channel_name: &str,
     msg: &IncomingMessage,
     policy: &InboundPolicy,
 ) -> String {
+    let agent = escape_agent(agent);
     match msg.chat_type {
         ChatType::Direct => {
-            let mut key = format!("agent:main:{channel_name}:dm:{}", msg.conversation_id);
+            let mut key = format!("agent:{agent}:{channel_name}:dm:{}", msg.conversation_id);
             if let Some(thread) = &msg.thread_id {
                 key.push(':');
                 key.push_str(thread);
@@ -38,7 +74,7 @@ pub fn build_session_key(
             key
         }
         ChatType::Group | ChatType::Channel => {
-            let mut key = format!("agent:main:{channel_name}:{}", msg.conversation_id);
+            let mut key = format!("agent:{agent}:{channel_name}:{}", msg.conversation_id);
             if policy.group_sessions_per_user {
                 key.push(':');
                 key.push_str(&msg.sender_id);
@@ -68,7 +104,7 @@ mod tests {
     fn dm_key_without_thread() {
         let mut m = base();
         m.chat_type = ChatType::Direct;
-        let key = build_session_key("slack", &m, &InboundPolicy::default());
+        let key = build_session_key(DEFAULT_AGENT, "slack", &m, &InboundPolicy::default());
         assert_eq!(key, "agent:main:slack:dm:conv1");
     }
 
@@ -77,7 +113,7 @@ mod tests {
         let mut m = base();
         m.chat_type = ChatType::Direct;
         m.thread_id = Some("t9".into());
-        let key = build_session_key("slack", &m, &InboundPolicy::default());
+        let key = build_session_key(DEFAULT_AGENT, "slack", &m, &InboundPolicy::default());
         assert_eq!(key, "agent:main:slack:dm:conv1:t9");
     }
 
@@ -89,7 +125,7 @@ mod tests {
         };
         let mut m = base();
         m.chat_type = ChatType::Group;
-        let key = build_session_key("slack", &m, &p);
+        let key = build_session_key(DEFAULT_AGENT, "slack", &m, &p);
         assert_eq!(key, "agent:main:slack:conv1:u1");
     }
 
@@ -101,7 +137,7 @@ mod tests {
         };
         let mut m = base();
         m.chat_type = ChatType::Group;
-        let key = build_session_key("slack", &m, &p);
+        let key = build_session_key(DEFAULT_AGENT, "slack", &m, &p);
         assert_eq!(key, "agent:main:slack:conv1");
     }
 
@@ -115,7 +151,7 @@ mod tests {
         let mut m = base();
         m.chat_type = ChatType::Group;
         m.thread_id = Some("t9".into());
-        let key = build_session_key("slack", &m, &p);
+        let key = build_session_key(DEFAULT_AGENT, "slack", &m, &p);
         assert_eq!(key, "agent:main:slack:conv1:u1:t9");
     }
 
@@ -129,7 +165,7 @@ mod tests {
         let mut m = base();
         m.chat_type = ChatType::Group;
         m.thread_id = Some("t9".into());
-        let key = build_session_key("slack", &m, &p);
+        let key = build_session_key(DEFAULT_AGENT, "slack", &m, &p);
         // Thread id ignored -> shared with the parent chat session.
         assert_eq!(key, "agent:main:slack:conv1:u1");
     }
@@ -145,8 +181,55 @@ mod tests {
         let mut m = base();
         m.chat_type = ChatType::Group;
         m.thread_id = None;
-        let key = build_session_key("slack", &m, &p);
+        let key = build_session_key(DEFAULT_AGENT, "slack", &m, &p);
         assert_eq!(key, "agent:main:slack:conv1");
+    }
+
+    #[test]
+    fn the_default_agent_reproduces_the_legacy_key_byte_for_byte() {
+        // MIGRATION GUARD. `hashed_session_id` hashes this string and
+        // `engine_for` resumes the persisted session under that hash, so any
+        // change here silently orphans every session already on disk.
+        let mut m = base();
+        m.chat_type = ChatType::Direct;
+        assert_eq!(
+            build_session_key(DEFAULT_AGENT, "slack", &m, &InboundPolicy::default()),
+            "agent:main:slack:dm:conv1"
+        );
+        assert_eq!(DEFAULT_AGENT, "main");
+    }
+
+    #[test]
+    fn two_agents_on_one_conversation_never_share_a_session() {
+        // core#253 §4: messages routed to different agents must not share
+        // conversation history, engines, or persisted sessions.
+        let mut m = base();
+        m.chat_type = ChatType::Group;
+        let p = InboundPolicy::default();
+        assert_ne!(
+            build_session_key("triage", "slack", &m, &p),
+            build_session_key("escalation", "slack", &m, &p)
+        );
+    }
+
+    #[test]
+    fn a_colonised_agent_selector_cannot_impersonate_another_key_dimension() {
+        // core#253 spells selectors `profile:<name>`, so the agent segment is
+        // the one segment that legitimately contains the separator. Unescaped,
+        // agent `profile:x` on channel `c` composes the same key as agent
+        // `profile` on a channel named `x:c`, and the two share a session.
+        let mut m = base();
+        m.chat_type = ChatType::Group;
+        let p = InboundPolicy::default();
+        assert_ne!(
+            build_session_key("profile:x", "c", &m, &p),
+            build_session_key("profile", "x:c", &m, &p)
+        );
+        // And the escape itself stays injective.
+        assert_ne!(
+            build_session_key("a%3Ab", "c", &m, &p),
+            build_session_key("a:b", "c", &m, &p)
+        );
     }
 
     #[test]
@@ -157,7 +240,7 @@ mod tests {
         };
         let mut m = base();
         m.chat_type = ChatType::Channel;
-        let key = build_session_key("disc", &m, &p);
+        let key = build_session_key(DEFAULT_AGENT, "disc", &m, &p);
         assert_eq!(key, "agent:main:disc:conv1:u1");
     }
 }

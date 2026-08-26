@@ -147,10 +147,15 @@ impl MessageTransport for ChannelManagerTransport {
     async fn send(&self, target: &ParsedTarget, message: &str) -> SendOutcome {
         let platform_token = target.platform.as_str();
         let conversation_id = target.chat_id.clone().unwrap_or_default();
+        // `parse_target` reads the third segment of `platform:chat:thread` as a
+        // DESTINATION thread (its own docs name Telegram numeric topics). It
+        // used to be handed to connectors in `reply_to`, i.e. as a quoted
+        // message id — core#253 §5. It belongs in `thread_id`.
         let outgoing = OutgoingMessage {
             conversation_id,
             text: message.to_string(),
-            reply_to: target.thread_id.clone(),
+            thread_id: target.thread_id.clone(),
+            reply_to: None,
             attachments: Vec::new(),
         };
         let guard = self.mgr.read().await;
@@ -498,6 +503,37 @@ mod tests {
             ChannelManagerTransport::new(Arc::new(RwLock::new(mgr))),
             sent,
         )
+    }
+
+    /// core#253 §5 — `parse_target`'s third segment is a DESTINATION thread
+    /// (its own docs name Telegram numeric topics). It used to be handed to
+    /// the connector in `reply_to`, i.e. as a quoted-message id, so a
+    /// `send_message` to `telegram:<chat>:<topic>` asked Telegram to reply to
+    /// a message that does not exist. It must land in `thread_id`, and the
+    /// quoted-message slot must stay empty.
+    #[tokio::test]
+    async fn a_tool_target_thread_is_a_destination_not_a_quoted_message() {
+        let (transport, sent) = logging_transport("telegram").await;
+
+        let topic_target = ParsedTarget {
+            platform: MessagingPlatform::Telegram,
+            chat_id: Some("-1001234567890".to_string()),
+            thread_id: Some("123".to_string()),
+        };
+        let outcome = transport.send(&topic_target, "into the topic").await;
+        assert!(matches!(outcome, SendOutcome::Ok { .. }), "{outcome:?}");
+
+        let log = sent.lock().await;
+        assert_eq!(log.len(), 1);
+        assert_eq!(
+            log[0].thread_id.as_deref(),
+            Some("123"),
+            "the topic must reach the connector as a destination thread"
+        );
+        assert_eq!(
+            log[0].reply_to, None,
+            "the topic must NOT be handed over as a quoted-message id"
+        );
     }
 
     /// RED ARM 1 — the tool seam has no limiter at all.

@@ -233,6 +233,10 @@ pub struct SendMessageBody<'a> {
     pub text: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_mode: Option<&'a str>,
+    /// Forum topic to deliver into. A DIFFERENT id space from
+    /// `reply_to_message_id` — see `OutgoingMessage::thread_id` (core#253 §5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_thread_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<i64>,
 }
@@ -254,6 +258,9 @@ pub struct SendDocumentBody<'a> {
     pub document: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caption: Option<&'a str>,
+    /// Forum topic to deliver into — see `SendMessageBody::message_thread_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_thread_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<i64>,
 }
@@ -280,6 +287,9 @@ pub struct InputMediaDocument<'a> {
 pub struct SendMediaGroupBody<'a> {
     pub chat_id: &'a str,
     pub media: Vec<InputMediaDocument<'a>>,
+    /// Forum topic to deliver into — see `SendMessageBody::message_thread_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_thread_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<i64>,
 }
@@ -715,12 +725,14 @@ pub(crate) fn build_send_document<'a>(
     chat_id: &'a str,
     document: &'a str,
     caption: Option<&'a str>,
+    message_thread_id: Option<i64>,
     reply_to_message_id: Option<i64>,
 ) -> SendDocumentBody<'a> {
     SendDocumentBody {
         chat_id,
         document,
         caption,
+        message_thread_id,
         reply_to_message_id,
     }
 }
@@ -745,6 +757,7 @@ pub(crate) fn build_send_media_group<'a>(
     chat_id: &'a str,
     urls: &'a [String],
     caption: Option<&'a str>,
+    message_thread_id: Option<i64>,
     reply_to_message_id: Option<i64>,
 ) -> SendMediaGroupBody<'a> {
     let media = urls
@@ -761,6 +774,7 @@ pub(crate) fn build_send_media_group<'a>(
     SendMediaGroupBody {
         chat_id,
         media,
+        message_thread_id,
         reply_to_message_id,
     }
 }
@@ -1076,7 +1090,7 @@ mod tests {
 
     #[test]
     fn send_document_body_serializes_with_caption() {
-        let body = build_send_document("42", "https://x/a.jpg", Some("hello"), Some(7));
+        let body = build_send_document("42", "https://x/a.jpg", Some("hello"), None, Some(7));
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["chat_id"], "42");
         assert_eq!(json["document"], "https://x/a.jpg");
@@ -1086,7 +1100,7 @@ mod tests {
 
     #[test]
     fn send_document_body_omits_absent_optionals() {
-        let body = build_send_document("42", "https://x/a.jpg", None, None);
+        let body = build_send_document("42", "https://x/a.jpg", None, None, None);
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["chat_id"], "42");
         assert_eq!(json["document"], "https://x/a.jpg");
@@ -1102,7 +1116,7 @@ mod tests {
             "https://x/b.png".to_string(),
             "https://x/c.txt".to_string(),
         ];
-        let body = build_send_media_group("42", &urls, Some("shared"), Some(7));
+        let body = build_send_media_group("42", &urls, Some("shared"), None, Some(7));
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["chat_id"], "42");
         assert_eq!(json["reply_to_message_id"], 7);
@@ -1120,7 +1134,7 @@ mod tests {
     #[test]
     fn send_media_group_body_omits_absent_optionals() {
         let urls = vec!["https://x/a.pdf".to_string(), "https://x/b.png".to_string()];
-        let body = build_send_media_group("42", &urls, None, None);
+        let body = build_send_media_group("42", &urls, None, None, None);
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["chat_id"], "42");
         // No caption anywhere and no reply target when both are None.

@@ -853,8 +853,10 @@ impl ChannelManager {
             };
         }
 
-        // Multi-chunk: each piece keeps the conversation + reply target;
-        // attachments ride the LAST chunk (so the text precedes the media).
+        // Multi-chunk: each piece keeps the conversation, the DESTINATION
+        // thread and the reply target; attachments ride the LAST chunk (so the
+        // text precedes the media). Dropping `thread_id` here would send chunk
+        // one into the topic and the rest into the channel root.
         // Returns the final chunk's receipt.
         let last = chunks.len() - 1;
         let mut receipt: Option<MessageReceipt> = None;
@@ -862,6 +864,7 @@ impl ChannelManager {
             let part = OutgoingMessage {
                 conversation_id: msg.conversation_id.clone(),
                 text: chunk,
+                thread_id: msg.thread_id.clone(),
                 reply_to: msg.reply_to.clone(),
                 attachments: if i == last {
                     msg.attachments.clone()
@@ -1450,6 +1453,7 @@ mod tests {
                 OutgoingMessage {
                     conversation_id: "c1".into(),
                     text: body.clone(),
+                    thread_id: None,
                     reply_to: Some("t1".into()),
                     attachments: vec!["file://a".into()],
                 },
@@ -1487,6 +1491,7 @@ mod tests {
             OutgoingMessage {
                 conversation_id: "c1".into(),
                 text: "short".into(),
+                thread_id: None,
                 reply_to: None,
                 attachments: Vec::new(),
             },

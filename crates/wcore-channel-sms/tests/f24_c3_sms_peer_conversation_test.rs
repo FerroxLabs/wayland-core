@@ -28,7 +28,7 @@
 
 use wcore_channel_sms::inbound::{pairs_to_incoming, parse_form};
 use wcore_channels::dispatch::access::InboundPolicy;
-use wcore_channels::dispatch::session_key::build_session_key;
+use wcore_channels::dispatch::session_key::{DEFAULT_AGENT, build_session_key};
 
 const BOT_NUMBER: &str = "+15550009999";
 const ALICE: &str = "+15553330000";
@@ -63,8 +63,18 @@ fn the_conversation_is_the_peer_not_the_bots_own_number() {
 #[test]
 fn two_people_texting_the_same_bot_number_do_not_share_a_session() {
     let policy = InboundPolicy::default();
-    let alice = build_session_key("smschannel", &inbound_from(ALICE, "SM-alice-1"), &policy);
-    let bob = build_session_key("smschannel", &inbound_from(BOB, "SM-bob-1"), &policy);
+    let alice = build_session_key(
+        DEFAULT_AGENT,
+        "smschannel",
+        &inbound_from(ALICE, "SM-alice-1"),
+        &policy,
+    );
+    let bob = build_session_key(
+        DEFAULT_AGENT,
+        "smschannel",
+        &inbound_from(BOB, "SM-bob-1"),
+        &policy,
+    );
 
     assert_ne!(
         alice, bob,
@@ -79,7 +89,12 @@ fn two_people_texting_the_same_bot_number_do_not_share_a_session() {
     // Positive control: the SAME peer twice must still be ONE session, or the
     // assertion above would be satisfied by a key that was simply unique per
     // message and no conversation would ever have a history at all.
-    let alice_again = build_session_key("smschannel", &inbound_from(ALICE, "SM-alice-2"), &policy);
+    let alice_again = build_session_key(
+        DEFAULT_AGENT,
+        "smschannel",
+        &inbound_from(ALICE, "SM-alice-2"),
+        &policy,
+    );
     assert_eq!(
         alice, alice_again,
         "the same peer must resolve to the same session across messages"

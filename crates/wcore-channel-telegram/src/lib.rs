@@ -267,6 +267,10 @@ impl Channel for TelegramChannel {
     async fn send_message(&mut self, msg: OutgoingMessage) -> Result<MessageReceipt, ChannelError> {
         let token = self.bot_token.as_deref().ok_or(ChannelError::NotStarted)?;
         let reply_to = msg.reply_to.as_deref().and_then(|s| s.parse::<i64>().ok());
+        // Forum topic destination (core#253 §5). Telegram's `message_thread_id`
+        // is a topic id, NOT a message id: it must come from the outgoing
+        // message's `thread_id` and never from `reply_to`.
+        let message_thread_id = msg.thread_id.as_deref().and_then(|s| s.parse::<i64>().ok());
 
         // Track the most recent successful send so the receipt reflects
         // the last thing Telegram accepted (text first, then each
@@ -301,6 +305,7 @@ impl Channel for TelegramChannel {
                 chat_id: &msg.conversation_id,
                 text,
                 parse_mode: Some(self.config.parse_mode.as_api_str()),
+                message_thread_id,
                 reply_to_message_id: reply_to,
             };
             let result = api::send_message(&self.http, &self.api_base, token, &body)
@@ -322,7 +327,13 @@ impl Channel for TelegramChannel {
         match msg.attachments.as_slice() {
             [] => {}
             [url] => {
-                let body = api::build_send_document(&msg.conversation_id, url, None, reply_to);
+                let body = api::build_send_document(
+                    &msg.conversation_id,
+                    url,
+                    None,
+                    message_thread_id,
+                    reply_to,
+                );
                 let result = api::send_document(&self.http, &self.api_base, token, &body)
                     .await
                     .map_err(ChannelError::from)?;
@@ -330,8 +341,13 @@ impl Channel for TelegramChannel {
             }
             many => {
                 for chunk in many.chunks(MEDIA_GROUP_MAX) {
-                    let body =
-                        api::build_send_media_group(&msg.conversation_id, chunk, None, reply_to);
+                    let body = api::build_send_media_group(
+                        &msg.conversation_id,
+                        chunk,
+                        None,
+                        message_thread_id,
+                        reply_to,
+                    );
                     let result = api::send_media_group(&self.http, &self.api_base, token, &body)
                         .await
                         .map_err(ChannelError::from)?;
@@ -1158,6 +1174,7 @@ parse_mode = "MarkdownV2"
         let msg = OutgoingMessage {
             conversation_id: "1".to_string(),
             text: "see attached".to_string(),
+            thread_id: None,
             reply_to: None,
             attachments: vec!["https://example.com/a.pdf".to_string()],
         };
@@ -1196,6 +1213,7 @@ parse_mode = "MarkdownV2"
         let msg = OutgoingMessage {
             conversation_id: "1".to_string(),
             text: String::new(),
+            thread_id: None,
             reply_to: None,
             attachments: vec!["https://example.com/b.png".to_string()],
         };
@@ -1246,6 +1264,7 @@ parse_mode = "MarkdownV2"
             conversation_id: "1".to_string(),
             // Empty text so the send is attachments-only — isolates the group path.
             text: String::new(),
+            thread_id: None,
             reply_to: None,
             attachments: vec![
                 "https://example.com/a.pdf".to_string(),
@@ -1258,6 +1277,88 @@ parse_mode = "MarkdownV2"
         assert_eq!(receipt.id, "4");
         m_doc.assert_async().await;
         m_group.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    // -----------------------------------------------------------------
+    // 11c. core#253 §5 — a DESTINATION forum topic goes out as
+    //      `message_thread_id`, and the quoted-message slot stays empty. The
+    //      two carry different id spaces: before the split, the topic id was
+    //      handed to Telegram as `reply_to_message_id`, i.e. a message that
+    //      does not exist.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn outbound_topic_destination_uses_message_thread_id_not_reply_to() {
+        let mut server = mockito::Server::new_async().await;
+        let m_text = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/sendMessage").as_str())
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"chat_id":"-1001234567890","message_thread_id":123}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"ok":true,"result":{"message_id":5,"date":5,"chat":{"id":1}}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let m_doc = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/sendDocument").as_str())
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"message_thread_id":123}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"ok":true,"result":{"message_id":6,"date":6,"chat":{"id":1}}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        ch.start().await.unwrap();
+        let msg = OutgoingMessage {
+            conversation_id: "-1001234567890".to_string(),
+            text: "in the topic".to_string(),
+            thread_id: Some("123".to_string()),
+            reply_to: None,
+            attachments: vec!["https://example.com/a.pdf".to_string()],
+        };
+        ch.send_message(msg).await.unwrap();
+        // Both mocks matched on `message_thread_id`, so the topic reached the
+        // wire on the text send AND on the attachment send.
+        m_text.assert_async().await;
+        m_doc.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    // -----------------------------------------------------------------
+    // 11d. The reply slot still carries a real quoted message id, and the
+    //      two travel independently in one send.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn outbound_thread_and_reply_are_independent_fields() {
+        let mut server = mockito::Server::new_async().await;
+        let m_text = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/sendMessage").as_str())
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"message_thread_id":123,"reply_to_message_id":999}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"ok":true,"result":{"message_id":7,"date":7,"chat":{"id":1}}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        ch.start().await.unwrap();
+        let msg = OutgoingMessage {
+            conversation_id: "-1001234567890".to_string(),
+            text: "quoting inside the topic".to_string(),
+            thread_id: Some("123".to_string()),
+            reply_to: Some("999".to_string()),
+            attachments: Vec::new(),
+        };
+        ch.send_message(msg).await.unwrap();
+        m_text.assert_async().await;
         ch.stop().await.unwrap();
     }
 

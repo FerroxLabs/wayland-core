@@ -53,8 +53,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use wcore_channels::{
-    AckMode, AutoReplyOutcome, AutoReplyRateLimiter, ChannelEvent, ChannelManager, DedupeCache,
-    IncomingMessage, OutgoingMessage, PairingBook, RATE_LIMIT_NOTICE, TurnAdmission,
+    AckMode, AutoReplyOutcome, AutoReplyRateLimiter, ChannelEvent, ChannelManager, DEFAULT_AGENT,
+    DedupeCache, IncomingMessage, OutgoingMessage, PairingBook, RATE_LIMIT_NOTICE, TurnAdmission,
     evaluate_paired,
 };
 
@@ -94,9 +94,19 @@ const WORKER_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(300)
 /// connectors it carries the quoted id that was previously dropped. Returns
 /// `None` when the inbound is neither a reply nor in a thread.
 fn outbound_reply_target(msg: &IncomingMessage) -> Option<String> {
-    msg.reply_to_message_id
-        .clone()
-        .or_else(|| msg.thread_id.clone())
+    msg.reply_to_message_id.clone()
+}
+
+/// The DESTINATION topic / thread an inbound message arrived in, so the reply
+/// goes back to the same place (core#253 §6).
+///
+/// Deliberately separate from [`outbound_reply_target`]. This used to be one
+/// function that fell back from `reply_to_message_id` to `thread_id`, which
+/// handed Telegram a forum-topic id in the quoted-message slot. Slack is
+/// unaffected by the split: it stamps the same `thread_ts` into BOTH inbound
+/// fields, so whichever one the connector reads it gets the same value.
+fn outbound_thread_target(msg: &IncomingMessage) -> Option<String> {
+    msg.thread_id.clone()
 }
 
 /// Seam between the inbound subscriber and the agent engine.
@@ -300,7 +310,13 @@ impl InboundSubscriber {
                         // resurrect every expired code.
                         let now_wall_ms = chrono::Utc::now().timestamp_millis();
 
+                        // Agent-selector dimension of the session key. The
+                        // binding table that can name a non-default agent per
+                        // conversation/thread (core#253 §1) is the next slice;
+                        // until then every channel routes to the default agent,
+                        // which is exactly what the old hardcoded literal did.
                         let outcome = evaluate_paired(
+                            DEFAULT_AGENT,
                             &tagged.channel_name,
                             &msg,
                             &policy,
@@ -630,6 +646,7 @@ async fn run_turn(
                     let notice = OutgoingMessage {
                         conversation_id: msg.conversation_id.clone(),
                         text: RATE_LIMIT_NOTICE.to_string(),
+                        thread_id: outbound_thread_target(msg),
                         reply_to: outbound_reply_target(msg),
                         attachments: Vec::new(),
                     };
@@ -648,6 +665,7 @@ async fn run_turn(
             let outgoing = OutgoingMessage {
                 conversation_id: msg.conversation_id.clone(),
                 text: reply,
+                thread_id: outbound_thread_target(msg),
                 reply_to: outbound_reply_target(msg),
                 attachments: Vec::new(),
             };
@@ -887,6 +905,25 @@ mod tests {
         }
     }
 
+    // RED ARM (core#253 §5): a destination TOPIC id must never be handed to a
+    // connector as a quoted-message id. Telegram stamps `thread_id` from
+    // `message_thread_id` (a forum topic), and `reply_to_message_id` from a real
+    // quoted message. Collapsing the two makes every in-topic reply quote a
+    // message id that does not exist.
+    #[test]
+    fn a_topic_id_is_never_used_as_a_quoted_message_id() {
+        let mut m = dm("tg");
+        m.platform = Some("telegram".into());
+        m.thread_id = Some("77".into()); // forum topic, NOT a message id
+        m.reply_to_message_id = None;
+        assert_eq!(
+            outbound_reply_target(&m),
+            None,
+            "topic id leaked into the reply-to slot"
+        );
+        assert_eq!(outbound_thread_target(&m), Some("77".to_string()));
+    }
+
     #[test]
     fn outbound_reply_target_prefers_reply_id_over_thread() {
         let mut m = dm("1");
@@ -897,12 +934,19 @@ mod tests {
     }
 
     #[test]
-    fn outbound_reply_target_falls_back_to_thread() {
+    fn a_slack_thread_root_still_reaches_its_thread_after_the_split() {
+        // Slack's inbound parser stamps `thread_ts` into `thread_id` and,
+        // for a non-root message, into `reply_to_message_id` too. Before the
+        // core#253 §5 split this test asserted the FALLBACK (reply target =
+        // thread_id). The fallback is gone; what must survive is that the
+        // Slack adapter still receives the same `thread_ts` — now through
+        // `thread_id` — so the reply lands in the thread rather than the
+        // channel.
         let mut m = dm("2");
         m.thread_id = Some("1700000001.000100".into());
-        // No quoted id (Slack thread root / in-thread message): use thread_id.
+        assert_eq!(outbound_reply_target(&m), None);
         assert_eq!(
-            outbound_reply_target(&m),
+            outbound_thread_target(&m),
             Some("1700000001.000100".to_string())
         );
     }

@@ -766,6 +766,7 @@ mod tests {
         let msg = OutgoingMessage {
             conversation_id: "+15555550100".to_string(),
             text: "see attached".to_string(),
+            thread_id: None,
             reply_to: None,
             attachments: vec!["https://cdn.example/pic.jpg".to_string()],
         };

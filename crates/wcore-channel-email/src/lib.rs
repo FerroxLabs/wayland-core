@@ -1064,6 +1064,7 @@ tls_root_cert_path = "/etc/wayland/corporate-ca.pem"
         let out = OutgoingMessage {
             conversation_id: "ops@acme.com".into(),
             text: "here is my reply".into(),
+            thread_id: None,
             reply_to: Some("orig-99@acme.com".into()),
             attachments: Vec::new(),
         };
@@ -1103,6 +1104,7 @@ tls_root_cert_path = "/etc/wayland/corporate-ca.pem"
         let out = OutgoingMessage {
             conversation_id: "ops@acme.com".into(),
             text: "reply to unknown".into(),
+            thread_id: None,
             reply_to: Some("never-seen@x".into()),
             attachments: Vec::new(),
         };

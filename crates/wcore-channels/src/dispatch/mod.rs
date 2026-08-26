@@ -41,7 +41,7 @@ pub use rate_limit::{
     AutoReplyOutcome, AutoReplyRateLimiter, DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP,
     DEFAULT_MAX_AUTO_REPLIES, RATE_LIMIT_NOTICE,
 };
-pub use session_key::build_session_key;
+pub use session_key::{DEFAULT_AGENT, build_session_key};
 
 use crate::event::IncomingMessage;
 
@@ -60,10 +60,16 @@ pub struct DispatchOutcome {
 
 /// Evaluate one inbound message: classify, dedup, gate, and route.
 ///
+/// `agent` is the agent-selector dimension of the routed session key — see
+/// [`DEFAULT_AGENT`]. It is threaded through rather than hardcoded because
+/// core#253 §4 requires two agents bound to one conversation to get two
+/// sessions.
+///
 /// See the module docs for the pipeline. `now_ms` is caller-supplied
 /// monotonic millis (for deterministic dedup); `dedupe` is the shared
 /// per-channel cache and is mutated on every non-short-circuited call.
 pub fn evaluate(
+    agent: &str,
     channel_name: &str,
     msg: &IncomingMessage,
     policy: &InboundPolicy,
@@ -71,6 +77,7 @@ pub fn evaluate(
     now_ms: u64,
 ) -> DispatchOutcome {
     evaluate_paired(
+        agent,
         channel_name,
         msg,
         policy,
@@ -91,6 +98,7 @@ pub fn evaluate(
 /// the process.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_paired(
+    agent: &str,
     channel_name: &str,
     msg: &IncomingMessage,
     policy: &InboundPolicy,
@@ -146,7 +154,7 @@ pub fn evaluate_paired(
     }
 
     // 4. Route — derive the session key for the admitted turn.
-    let session_key = build_session_key(channel_name, msg, policy);
+    let session_key = build_session_key(agent, channel_name, msg, policy);
     DispatchOutcome {
         admission: TurnAdmission::Dispatch,
         session_key: Some(session_key),
@@ -175,7 +183,7 @@ mod tests {
         // Default policy: dm Allowlist with EMPTY allowlist -> fail-closed.
         let policy = InboundPolicy::default();
         let mut c = cache();
-        let out = evaluate("slack", &dm("u1", "m1"), &policy, &mut c, 0);
+        let out = evaluate(DEFAULT_AGENT, "slack", &dm("u1", "m1"), &policy, &mut c, 0);
         assert_eq!(
             out.admission,
             TurnAdmission::Drop {
@@ -196,7 +204,7 @@ mod tests {
             ..Default::default()
         };
         let mut c = cache();
-        let out = evaluate("slack", &dm("u1", "m1"), &policy, &mut c, 0);
+        let out = evaluate(DEFAULT_AGENT, "slack", &dm("u1", "m1"), &policy, &mut c, 0);
         assert_eq!(out.admission, TurnAdmission::Dispatch);
         assert_eq!(
             out.session_key.as_deref(),
@@ -213,10 +221,10 @@ mod tests {
         };
         let mut c = cache();
         // First sight dispatches.
-        let first = evaluate("slack", &dm("u1", "m1"), &policy, &mut c, 0);
+        let first = evaluate(DEFAULT_AGENT, "slack", &dm("u1", "m1"), &policy, &mut c, 0);
         assert_eq!(first.admission, TurnAdmission::Dispatch);
         // Re-delivery of the same id within ttl drops silently.
-        let dup = evaluate("slack", &dm("u1", "m1"), &policy, &mut c, 10);
+        let dup = evaluate(DEFAULT_AGENT, "slack", &dm("u1", "m1"), &policy, &mut c, 10);
         assert_eq!(
             dup.admission,
             TurnAdmission::Drop {
@@ -239,7 +247,7 @@ mod tests {
         m.sender_id = "u1".into();
         m.chat_type = ChatType::Group;
         m.was_mentioned = false;
-        let out = evaluate("slack", &m, &policy, &mut c, 0);
+        let out = evaluate(DEFAULT_AGENT, "slack", &m, &policy, &mut c, 0);
         assert_eq!(out.admission, TurnAdmission::ObserveOnly);
         assert!(out.session_key.is_none());
         // ObserveOnly short-circuits before dedup, so the cache stays empty.
@@ -255,7 +263,7 @@ mod tests {
         let mut c = cache();
         let mut m = dm("u1", "m1");
         m.is_self = true;
-        let out = evaluate("slack", &m, &policy, &mut c, 0);
+        let out = evaluate(DEFAULT_AGENT, "slack", &m, &policy, &mut c, 0);
         assert_eq!(
             out.admission,
             TurnAdmission::Drop {
@@ -277,7 +285,7 @@ mod tests {
         let mut m = dm("u1", "m1");
         m.platform = Some("telegram".into());
         m.account_id = Some("bot7".into());
-        let out = evaluate("chan-a", &m, &policy, &mut c, 0);
+        let out = evaluate(DEFAULT_AGENT, "chan-a", &m, &policy, &mut c, 0);
         assert_eq!(out.admission, TurnAdmission::Dispatch);
         // The recorded key should be (telegram, bot7, m1), not the channel.
         assert!(c.peek(&DedupeKey::new("telegram", "bot7", "m1"), 1));
@@ -301,7 +309,16 @@ mod tests {
 
         let mut cold = dm("u1", "m1");
         cold.text = "let me in".into();
-        let out = evaluate_paired("slack", &cold, &policy, &mut c, 0, &mut book, 1_000);
+        let out = evaluate_paired(
+            DEFAULT_AGENT,
+            "slack",
+            &cold,
+            &policy,
+            &mut c,
+            0,
+            &mut book,
+            1_000,
+        );
         assert_eq!(
             out.admission,
             TurnAdmission::Drop {
@@ -313,7 +330,16 @@ mod tests {
 
         let mut redeem = dm("u1", "m2");
         redeem.text = code.clone();
-        let out = evaluate_paired("slack", &redeem, &policy, &mut c, 1, &mut book, 1_001);
+        let out = evaluate_paired(
+            DEFAULT_AGENT,
+            "slack",
+            &redeem,
+            &policy,
+            &mut c,
+            1,
+            &mut book,
+            1_001,
+        );
         assert_eq!(out.admission, TurnAdmission::Dispatch);
         assert_eq!(
             out.session_key.as_deref(),
@@ -325,13 +351,31 @@ mod tests {
         let mut c2 = cache();
         let mut later = dm("u1", "m3");
         later.text = "hello again".into();
-        let out = evaluate_paired("slack", &later, &policy, &mut c2, 0, &mut restarted, 9_000);
+        let out = evaluate_paired(
+            DEFAULT_AGENT,
+            "slack",
+            &later,
+            &policy,
+            &mut c2,
+            0,
+            &mut restarted,
+            9_000,
+        );
         assert_eq!(out.admission, TurnAdmission::Dispatch);
 
         // A different sender replaying the burnt code is still dropped.
         let mut replay = dm("u2", "m4");
         replay.text = code;
-        let out = evaluate_paired("slack", &replay, &policy, &mut c2, 1, &mut restarted, 9_001);
+        let out = evaluate_paired(
+            DEFAULT_AGENT,
+            "slack",
+            &replay,
+            &policy,
+            &mut c2,
+            1,
+            &mut restarted,
+            9_001,
+        );
         assert_eq!(
             out.admission,
             TurnAdmission::Drop {
@@ -355,7 +399,7 @@ mod tests {
         let mut m = IncomingMessage::new("m1", "g1", "Bob", "hi", 0);
         m.sender_id = "u1".into();
         m.chat_type = ChatType::Group;
-        let out = evaluate("slack", &m, &policy, &mut c, 0);
+        let out = evaluate(DEFAULT_AGENT, "slack", &m, &policy, &mut c, 0);
         assert_eq!(out.admission, TurnAdmission::Dispatch);
         assert_eq!(out.session_key.as_deref(), Some("agent:main:slack:g1:u1"));
     }
