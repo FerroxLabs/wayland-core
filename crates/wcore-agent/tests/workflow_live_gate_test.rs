@@ -66,6 +66,7 @@ fn usage() -> TokenUsage {
         output_tokens: 5,
         cache_creation_tokens: 0,
         cache_read_tokens: 0,
+        ..Default::default()
     }
 }
 
@@ -82,10 +83,10 @@ fn text_turn(text: &str) -> Vec<LlmEvent> {
 }
 
 /// Returns a pre-configured event sequence per `stream` call, in order. Past
-/// the configured list it falls back to an empty `EndTurn` (matching the shared
-/// `MockLlmProvider` tail) so workflow-execution sub-agents resolve cleanly with
-/// empty stage output. Shared across the engine's main stream AND every
-/// sub-agent spawn because it is held behind `Arc`.
+/// the configured list it falls back to a one-line `EndTurn` so
+/// workflow-execution sub-agents produce a real (if trivial) stage output.
+/// Shared across the engine's main stream AND every sub-agent spawn because it
+/// is held behind `Arc`.
 struct SequencedProvider {
     turns: Mutex<Vec<Vec<LlmEvent>>>,
     cursor: Mutex<usize>,
@@ -119,11 +120,22 @@ impl LlmProvider for SequencedProvider {
                 .get(n)
                 .cloned()
                 .unwrap_or_else(|| {
-                    vec![LlmEvent::Done {
-                        stop_reason: StopReason::EndTurn,
-                        finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
-                        usage: TokenUsage::default(),
-                    }]
+                    // #1140: the tail emits real text. It used to be a Done
+                    // with NO content at all, and a sub-agent that returns
+                    // literally nothing is now what it always was — a failure
+                    // the engine itself reports ("Provider returned an empty
+                    // response"), not a stage that "resolved cleanly". The
+                    // wording is deliberately free of `audit-flow` and
+                    // `completed` so the interception proof below still fails
+                    // if a model turn ever supplies the run's output.
+                    vec![
+                        LlmEvent::TextDelta("stage output".to_string()),
+                        LlmEvent::Done {
+                            stop_reason: StopReason::EndTurn,
+                            finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                            usage: TokenUsage::default(),
+                        },
+                    ]
                 })
         };
         let (tx, rx) = mpsc::channel(64);
@@ -300,10 +312,10 @@ fn deny_when_pending(manager: Arc<ToolApprovalManager>, emitter: Arc<CapturingEm
 #[tokio::test]
 async fn live_gate_approved_runs_workflow_and_yields_result() {
     // PRE-LLM intercept: call 0 = synthesis (RON); calls 1.. = workflow
-    // execution sub-agents (empty-EndTurn tail). Nothing else is queued: if the
+    // execution sub-agents (one-line tail). Nothing else is queued: if the
     // gate failed to intercept and the parent turn loop ran a model turn, that
-    // turn would have to pull from the empty-EndTurn fallback and the run output
-    // would NOT be the workflow completion summary.
+    // turn would have to pull from the tail fallback and the run output would
+    // NOT be the workflow completion summary.
     let provider = Arc::new(SequencedProvider::new(vec![text_turn(VALID_RON)]));
     let (mut engine, manager, emitter, _session_root) = live_engine(provider);
 

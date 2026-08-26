@@ -41,6 +41,7 @@ const FIXED_USAGE: TokenUsage = TokenUsage {
     output_tokens: 200,
     cache_creation_tokens: 0,
     cache_read_tokens: 0,
+    reported_cost_usd: None,
 };
 
 /// A proposer/aggregator mock that emits a text reply then a `Done` carrying a

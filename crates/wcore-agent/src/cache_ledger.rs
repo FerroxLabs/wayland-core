@@ -81,6 +81,12 @@ pub const LEDGER_DIR: &str = "cache-ledger";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CostSource {
+    /// #1139 — the PROVIDER reported this round-trip's dollar figure itself
+    /// (`usage.cost_usd` on the OpenAI wire). This outranks [`Self::Catalog`]:
+    /// a catalog row is our model of what a call costs, this is what the
+    /// account was billed for the call that actually happened — including any
+    /// routing, surcharge or discount the catalog cannot see.
+    ProviderReported,
     /// Exact `wcore-pricing` catalog row for this provider×model.
     Catalog,
     /// `ProviderCompat` family defaults — the catalog did not know this model.
@@ -92,6 +98,7 @@ pub enum CostSource {
 impl CostSource {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::ProviderReported => "provider_reported",
             Self::Catalog => "catalog",
             Self::ProviderDefaults => "provider_defaults",
             Self::Unpriced => "unpriced",
@@ -442,6 +449,7 @@ impl CacheLedger {
             s.cost_usd += t.cost_usd;
             s.uncached_equivalent_usd += t.uncached_equivalent_usd;
             match t.cost_source {
+                CostSource::ProviderReported => s.provider_reported_round_trips += 1,
                 CostSource::Catalog => s.catalog_priced_round_trips += 1,
                 CostSource::ProviderDefaults => s.estimated_round_trips += 1,
                 CostSource::Unpriced => s.unpriced_round_trips += 1,
@@ -568,6 +576,10 @@ pub struct LedgerSummary {
     // cost truth
     pub cost_usd: f64,
     pub uncached_equivalent_usd: f64,
+    /// Round-trips whose figure the provider reported itself — spend, not a
+    /// price model. See [`CostSource::ProviderReported`].
+    #[serde(default)]
+    pub provider_reported_round_trips: u64,
     /// Round-trips priced from an exact catalog row.
     pub catalog_priced_round_trips: u64,
     /// Round-trips priced from provider-family defaults — an estimate for a
@@ -627,7 +639,9 @@ impl LedgerSummary {
 
     /// Round-trips that produced a price of any kind.
     pub fn priced_round_trips(&self) -> u64 {
-        self.catalog_priced_round_trips + self.estimated_round_trips
+        self.provider_reported_round_trips
+            + self.catalog_priced_round_trips
+            + self.estimated_round_trips
     }
 
     /// Grade the trustworthiness of [`Self::cost_usd`].
@@ -642,6 +656,9 @@ impl LedgerSummary {
         } else if self.estimated_round_trips > 0 {
             CostTruth::Estimated
         } else {
+            // Only `ProviderReported` and `Catalog` rows are left, and both are
+            // statements about this provider×model rather than a family-rate
+            // guess — so the total is a fact.
             CostTruth::Priced
         }
     }

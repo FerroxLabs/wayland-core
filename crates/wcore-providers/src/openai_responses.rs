@@ -687,6 +687,7 @@ pub(crate) fn parse_responses_event(data: &str, state: &mut ResponsesStreamState
                     output_tokens: state.output_tokens,
                     cache_creation_tokens: 0,
                     cache_read_tokens: state.cache_read_tokens,
+                    ..Default::default()
                 },
             });
         }
@@ -709,6 +710,7 @@ pub(crate) fn parse_responses_event(data: &str, state: &mut ResponsesStreamState
                     output_tokens: state.output_tokens,
                     cache_creation_tokens: 0,
                     cache_read_tokens: state.cache_read_tokens,
+                    ..Default::default()
                 },
             });
         }

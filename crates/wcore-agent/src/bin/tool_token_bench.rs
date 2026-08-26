@@ -208,6 +208,7 @@ fn scripted_provider_with_size(result_chars: usize) -> ScriptedProvider {
                 output_tokens: 5, // "got tool result" is 4 words → ≈5 tokens
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ])

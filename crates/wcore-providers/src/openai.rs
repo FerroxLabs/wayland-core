@@ -1366,6 +1366,15 @@ struct StreamState {
     /// Cache-read (prompt cache hit) tokens reported by the chat path's usage
     /// chunk. Disjoint from `input_tokens`, which contains cache misses only.
     cache_read_tokens: u64,
+    /// #1139 — the per-call USD figure the PROVIDER reported on the usage
+    /// chunk (`usage.cost_usd` on FluxRouter; `usage.total_cost_usd` on other
+    /// OpenAI-wire aggregators). `None` when the provider said nothing, and
+    /// deliberately never `0.0`: the media-tool path already draws this
+    /// distinction (`tool_backends::shared::cost_from_headers` — "unknown" and
+    /// "free" are not the same claim) and the chat path was dropping the field
+    /// on the floor, so a real spend reached the ledger as a pure-pricing
+    /// estimate — or as `$0.000000`.
+    reported_cost_usd: Option<f64>,
     /// Deferred Done event: populated when finish_reason arrives, emitted on
     /// [DONE] so the final usage-only chunk has a chance to update token counts.
     pending_done: Option<LlmEvent>,
@@ -1389,6 +1398,7 @@ impl StreamState {
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
+            reported_cost_usd: None,
             pending_done: None,
             citations: Vec::new(),
             search_results: Vec::new(),
@@ -1451,6 +1461,7 @@ impl StreamState {
                     output_tokens: self.output_tokens,
                     cache_creation_tokens: 0,
                     cache_read_tokens: self.cache_read_tokens,
+                    reported_cost_usd: self.reported_cost_usd,
                 },
             },
             other => other,
@@ -2013,6 +2024,12 @@ pub(crate) async fn process_responses_sse_stream(
     Ok(())
 }
 
+/// Keys under `usage` at which an OpenAI-wire provider reports a per-call
+/// dollar figure. Mirrors the media path's `COST_BODY_POINTERS`
+/// (`wcore_agent::tool_backends::shared`), minus the top-level `/cost_usd`
+/// pointer that has no analogue inside a streamed usage object.
+const USAGE_COST_KEYS: &[&str] = &["cost_usd", "total_cost_usd"];
+
 fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
     let mut events = Vec::new();
 
@@ -2079,6 +2096,18 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
             .and_then(|d| d.get("cached_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        // #1139: the provider's OWN dollar figure for this call. Only a finite,
+        // non-negative number counts; anything else leaves the field `None`
+        // (unknown), never `Some(0.0)` (free). A later usage frame that omits
+        // the key does not erase an earlier one — `usage` may arrive split.
+        if let Some(reported) = USAGE_COST_KEYS
+            .iter()
+            .filter_map(|key| usage.get(*key))
+            .filter_map(Value::as_f64)
+            .find(|v| v.is_finite() && *v >= 0.0)
+        {
+            state.reported_cost_usd = Some(reported);
+        }
         if let Some(prompt_tokens) = usage.get("prompt_tokens").and_then(Value::as_u64) {
             if let Some(cache_hit) = deepseek_cache_hit {
                 state.input_tokens =

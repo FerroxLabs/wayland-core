@@ -898,6 +898,7 @@ mod tests {
                 output_tokens: 50,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
             latency_ms: 12,
         }

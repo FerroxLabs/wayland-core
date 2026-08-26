@@ -101,12 +101,12 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 let s = ledger.summarize();
                 println!(
                     "F23_CACHE=session id={} round_trips={} compactions={} hit_ratio={:.4} \
-                     cost_usd={:.6} cost_truth={} complete={} updated={} path={}",
+                     cost_usd={} cost_truth={} complete={} updated={} path={}",
                     s.session_id,
                     s.round_trips,
                     s.compactions,
                     s.hit_ratio(),
-                    s.cost_usd,
+                    render_cost_usd(s.cost_usd, s.cost_truth()),
                     s.cost_truth().as_str(),
                     s.session_complete,
                     s.updated_at,
@@ -191,15 +191,17 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
             let s = ledger.summarize();
             let truth = s.cost_truth();
             println!(
-                "F23_CACHE=verify trustworthy={} cost_truth={} catalog_priced_round_trips={} \
-                 estimated_round_trips={} unpriced_round_trips={} cost_usd={:.6} \
+                "F23_CACHE=verify trustworthy={} cost_truth={} \
+                 provider_reported_round_trips={} catalog_priced_round_trips={} \
+                 estimated_round_trips={} unpriced_round_trips={} cost_usd={} \
                  session_complete={} session={} path={}",
                 truth.is_trustworthy(),
                 truth.as_str(),
+                s.provider_reported_round_trips,
                 s.catalog_priced_round_trips,
                 s.estimated_round_trips,
                 s.unpriced_round_trips,
-                s.cost_usd,
+                render_cost_usd(s.cost_usd, truth),
                 s.session_complete,
                 s.session_id,
                 path.display(),
@@ -210,12 +212,15 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 eprintln!(
                     "wayland-core cache verify: cost is {} — of {} round-trips, {} were priced \
                      from provider-family defaults rather than a catalog row and {} could not be \
-                     priced at all, so ${:.6} must not be reported as spend.",
+                     priced at all, so {} must not be reported as spend.",
                     truth.as_str(),
                     s.round_trips,
                     s.estimated_round_trips,
                     s.unpriced_round_trips,
-                    s.cost_usd,
+                    match truth {
+                        CostTruth::Unpriced => "the reported figure".to_string(),
+                        _ => format!("${:.6}", s.cost_usd),
+                    },
                 );
                 Ok(ExitCode::from(EXIT_COST_NOT_TRUSTWORTHY))
             }
@@ -261,6 +266,7 @@ pub struct StoreTotals {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub uncached_equivalent_usd: f64,
+    pub provider_reported_round_trips: u64,
     pub catalog_priced_round_trips: u64,
     pub estimated_round_trips: u64,
     pub unpriced_round_trips: u64,
@@ -282,6 +288,9 @@ impl StoreTotals {
             t.output_tokens = t.output_tokens.saturating_add(s.output_tokens);
             t.cost_usd += s.cost_usd;
             t.uncached_equivalent_usd += s.uncached_equivalent_usd;
+            t.provider_reported_round_trips = t
+                .provider_reported_round_trips
+                .saturating_add(s.provider_reported_round_trips);
             t.catalog_priced_round_trips = t
                 .catalog_priced_round_trips
                 .saturating_add(s.catalog_priced_round_trips);
@@ -304,6 +313,7 @@ impl StoreTotals {
     #[must_use]
     pub fn cost_truth(&self) -> CostTruth {
         LedgerSummary {
+            provider_reported_round_trips: self.provider_reported_round_trips,
             catalog_priced_round_trips: self.catalog_priced_round_trips,
             estimated_round_trips: self.estimated_round_trips,
             unpriced_round_trips: self.unpriced_round_trips,
@@ -321,16 +331,18 @@ fn print_totals(t: &StoreTotals, dir: &std::path::Path) {
     let truth = t.cost_truth();
     println!(
         "F23_CACHE=total sessions={} incomplete_sessions={} round_trips={} input_tokens={} \
-         output_tokens={} cost_usd={:.6} uncached_equivalent_usd={:.6} cost_truth={} \
-         catalog_priced_round_trips={} estimated_round_trips={} unpriced_round_trips={} dir={}",
+         output_tokens={} cost_usd={} uncached_equivalent_usd={:.6} cost_truth={} \
+         provider_reported_round_trips={} catalog_priced_round_trips={} \
+         estimated_round_trips={} unpriced_round_trips={} dir={}",
         t.sessions,
         t.incomplete_sessions,
         t.round_trips,
         t.input_tokens,
         t.output_tokens,
-        t.cost_usd,
+        render_cost_usd(t.cost_usd, truth),
         t.uncached_equivalent_usd,
         truth.as_str(),
+        t.provider_reported_round_trips,
         t.catalog_priced_round_trips,
         t.estimated_round_trips,
         t.unpriced_round_trips,
@@ -345,6 +357,22 @@ fn print_totals(t: &StoreTotals, dir: &std::path::Path) {
             },
             truth.as_str()
         );
+    }
+}
+
+/// #1139 — render a USD figure, or the word `unpriced` when nothing could be
+/// priced at all.
+///
+/// `cost_usd=0.000000` is a claim: it says the calls were free. An
+/// [`CostTruth::Unpriced`] ledger has made no such claim — it has no number —
+/// and printing the zero is exactly how a real spend reads as no spend. The
+/// media-tool path already draws this line (`cost_from_headers` returns
+/// `None`, "never a zero"); this is the same rule at the render edge.
+fn render_cost_usd(cost_usd: f64, truth: CostTruth) -> String {
+    if truth == CostTruth::Unpriced {
+        "unpriced".to_string()
+    } else {
+        format!("{cost_usd:.6}")
     }
 }
 
@@ -366,7 +394,7 @@ fn print_turn(t: &TurnSample) {
     println!(
         "F23_CACHE=turn round_trip={} turn={} provider={} model={} retention={} \
          uncached_input={} cache_read={} cache_write={} output={} hit={} hit_ratio={:.4} \
-         invalidation={} cost_usd={:.6} cost_source={} uncached_equivalent_usd={:.6} \
+         invalidation={} cost_usd={} cost_source={} uncached_equivalent_usd={:.6} \
          saving_usd={:.6} watermark={} threshold={} emergency_limit={} pressure={:.4}",
         t.round_trip,
         t.turn,
@@ -380,7 +408,13 @@ fn print_turn(t: &TurnSample) {
         t.is_hit(),
         t.hit_ratio(),
         t.invalidation_cause.map(|c| c.as_str()).unwrap_or("-"),
-        t.cost_usd,
+        // Same rule one level down: an unpriced round-trip has no number, and
+        // `cost_usd=0.000000` beside `cost_source=unpriced` reads as "free".
+        if t.cost_source.is_priced() {
+            format!("{:.6}", t.cost_usd)
+        } else {
+            "unpriced".to_string()
+        },
         t.cost_source.as_str(),
         t.uncached_equivalent_usd,
         t.cache_saving_usd(),
@@ -457,14 +491,15 @@ fn print_report(s: &LedgerSummary, path: &std::path::Path) {
 
     // 4 — cost truth
     println!(
-        "F23_CACHE=cost usd={:.6} uncached_equivalent_usd={:.6} saving_usd={:.6} \
-         saving_ratio={:.4} cost_truth={} catalog_priced_round_trips={} \
-         estimated_round_trips={} unpriced_round_trips={}",
-        s.cost_usd,
+        "F23_CACHE=cost usd={} uncached_equivalent_usd={:.6} saving_usd={:.6} \
+         saving_ratio={:.4} cost_truth={} provider_reported_round_trips={} \
+         catalog_priced_round_trips={} estimated_round_trips={} unpriced_round_trips={}",
+        render_cost_usd(s.cost_usd, s.cost_truth()),
         s.uncached_equivalent_usd,
         s.cache_saving_usd(),
         s.cache_saving_ratio(),
         s.cost_truth().as_str(),
+        s.provider_reported_round_trips,
         s.catalog_priced_round_trips,
         s.estimated_round_trips,
         s.unpriced_round_trips,

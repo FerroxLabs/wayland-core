@@ -296,6 +296,7 @@ mod tests {
                 output_tokens: output,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
             latency_ms: 0,
         }
@@ -320,6 +321,7 @@ mod tests {
             output_tokens: 50,
             cache_creation_tokens: 20,
             cache_read_tokens: 80,
+            ..Default::default()
         };
         let proposals = vec![Proposal {
             provider: "anthropic".to_string(),
@@ -373,6 +375,7 @@ mod tests {
             output_tokens: 200,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
+            ..Default::default()
         };
         let spend = CouncilSpend::from_run(&proposals, Some(("anthropic", None, &agg_usage)));
         assert_eq!(spend.total_input_tokens, 600);

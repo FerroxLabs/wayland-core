@@ -594,6 +594,7 @@ mod production_landing {
                     output_tokens: output,
                     cache_creation_tokens: 0,
                     cache_read_tokens: 0,
+                    ..Default::default()
                 },
             }
         }
