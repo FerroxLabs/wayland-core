@@ -464,6 +464,22 @@ pub struct AgentBootstrap {
     /// local shells whose connects are bounded and cheap. Default `false`
     /// keeps TUI/one-shot behavior unchanged.
     defer_config_mcp: bool,
+    /// Suppress the "still waiting on MCP servers" notice for this build.
+    ///
+    /// Default `false` — ANNOUNCE — and the default is the decision. Every
+    /// surface that reaches `build()` puts a user or a host on the other end
+    /// of a wait that can run to `wcore_mcp::manager::CONNECT_TIMEOUT` per
+    /// server with nothing on the wire, and a surface added later inherits
+    /// the silent treatment if silence is the default. The exception has to
+    /// justify itself, not the disclosure.
+    ///
+    /// Exactly ONE production caller sets this: the interactive TUI, which
+    /// enters its alternate screen before `build()` specifically so this
+    /// window runs behind a branded splash. It has already told the user, on
+    /// a surface built for it, and a second telling into a live frame is
+    /// noise. `main.rs`'s `the_mcp_dial_notice_is_waived_only_where_a_splash_
+    /// already_covers_it` pins that count at one.
+    quiet_mcp_dial: bool,
     /// #111 — the host-supplied active assistant identity for per-assistant MCP
     /// scoping. `None` (the default, and always the case for a bare CLI/TUI
     /// session) means no assistant is identified, so any config MCP server
@@ -616,6 +632,7 @@ impl AgentBootstrap {
             channel_tool_posture: None,
             persona_tool_allowlist: None,
             defer_config_mcp: false,
+            quiet_mcp_dial: false,
             active_assistant: None,
             dangerous_grant: None,
             baseline_policy: None,
@@ -722,6 +739,14 @@ impl AgentBootstrap {
     /// or recurse.
     pub fn without_channels(mut self, v: bool) -> Self {
         self.without_channels = v;
+        self
+    }
+
+    /// Waive the slow-MCP-dial notice for a surface that already covers this
+    /// window itself. See [`AgentBootstrap::quiet_mcp_dial`] — there is one
+    /// legitimate caller and a test that says so.
+    pub fn without_mcp_dial_notice(mut self, v: bool) -> Self {
+        self.quiet_mcp_dial = v;
         self
     }
 
@@ -1804,7 +1829,18 @@ impl AgentBootstrap {
                     .expect("session egress policy is installed before scoped bootstrap")
                     .clone(),
             );
-            match McpManager::connect_all_with_policy(&resolved_servers, egress_policy).await {
+            // The boot dial is the last unannounced wait on the path to a
+            // session. It is bounded per server, but a bound nobody is told
+            // about is indistinguishable from a wedge — see
+            // `announce_slow_mcp_dial`. The TUI is the one surface that opts
+            // out, because its splash already covers this exact window.
+            let dial = McpManager::connect_all_with_policy(&resolved_servers, egress_policy);
+            let dialled = if self.quiet_mcp_dial {
+                dial.await
+            } else {
+                crate::mcp_dial_notice::announce_slow_mcp_dial(dial, &self.output).await
+            };
+            match dialled {
                 Ok(mgr) => {
                     let mgr = Arc::new(mgr);
                     wcore_mcp::tool_proxy::register_mcp_tools(

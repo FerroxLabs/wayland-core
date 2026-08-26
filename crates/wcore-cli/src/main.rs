@@ -2859,6 +2859,12 @@ async fn run_tui_mode(
     // channel messages into agent turns for the lifetime of this session).
     let mut bootstrap = execution
         .apply(AgentBootstrap::new(config, cwd, output.clone()))
+        // The ONLY production waiver of the MCP dial notice. The alt screen is
+        // entered immediately below, precisely so the dial runs behind a
+        // branded splash — this surface has already told the user, on a
+        // surface built to say it, and a second line into a live frame is
+        // noise. Every other entry point announces by default.
+        .without_mcp_dial_notice(true)
         .active_assistant(active_assistant.clone())
         .with_approval_manager(approval_manager.clone())
         .plugin_provider_router(make_plugin_provider_router())
@@ -3866,55 +3872,18 @@ fn session_command_readiness(command: &ProtocolCommand) -> SessionCommandReadine
 /// boundary. Hosts may send setup commands (`InitHistory`, `SetMode`, etc.)
 /// before their first `Message`; those commands must not let the message race
 /// ahead of the already-running MCP handshake.
-/// How long a turn waits on the MCP dial before it says that it is waiting.
-///
-/// Five seconds, the same budget the rest of the pre-provider path uses
-/// (`wcore_providers::http_client::STREAM_SILENCE_NOTICE_AFTER`, and the
-/// credential-store budget in `wcore_agent`). From the user's side these are
-/// not three waits, they are one wait, and three different patience budgets
-/// on it would be three answers to one question.
-const MCP_CONNECT_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// Wait for the deferred MCP dial to settle, and say so if it takes a while.
 ///
-/// The dial IS bounded — `wcore_mcp::manager::CONNECT_TIMEOUT` per server,
-/// every server dialed concurrently — so this always ends. But a bound
-/// nobody is told about is indistinguishable at the host from a wedge:
-/// measured on 0.13.8, a `message` sent with one stdio server that never
-/// speaks produced no event of any kind for 30.3 s, then `mcp_failed`, then
-/// `stream_start`. Thirty seconds of a blank turn is the symptom, whatever
-/// the cause, and the cause was never on the wire.
-///
-/// Shape and channel are copied deliberately from the engine's provider
-/// silence notice (`AgentEngine`'s "Still waiting on the provider"): one
-/// latched line on the shared `OutputSink`, which renders as
-/// `ProtocolEvent::Info` for a json-stream host and as a terminal line for a
-/// TUI or CLI run. `tracing::warn!` would have reached NEITHER — with
-/// `RUST_LOG` unset only `ERROR` goes to stderr and the rest goes to a log
-/// file nobody has open during a turn.
-///
-/// One line, not a repeating ticker, for the same reason the provider notice
-/// is latched: the point is to break the silence and name the cause, and a
-/// line every five seconds during a bounded wait is noise the user learns to
-/// scroll past. It names the deadline so the reader knows what they are
-/// waiting for and that the turn will proceed either way.
+/// The session loop's readiness boundary reaches this; the boot dial in
+/// `wcore_agent::bootstrap` reaches the same notice from the other side. One
+/// notice, one budget, one deadline read from `wcore_mcp` — see
+/// [`wcore_agent::mcp_dial_notice::announce_slow_mcp_dial`] for why a bounded
+/// wait still has to be announced and why it cannot be a `tracing` line.
 async fn await_deferred_mcp_connect(
     rx: DeferredMcpReceiver,
     output: &Arc<dyn OutputSink>,
 ) -> Result<DeferredMcpConnectResult, tokio::sync::oneshot::error::RecvError> {
-    let mut rx = rx;
-    tokio::select! {
-        settled = &mut rx => settled,
-        _ = tokio::time::sleep(MCP_CONNECT_NOTICE_AFTER) => {
-            output.emit_info(&format!(
-                "Still waiting on MCP servers to connect - no output for {}s. Each server is \
-                 bounded at {}s, then this turn starts without it.",
-                MCP_CONNECT_NOTICE_AFTER.as_secs(),
-                wcore_mcp::manager::CONNECT_TIMEOUT.as_secs(),
-            ));
-            rx.await
-        }
-    }
+    wcore_agent::mcp_dial_notice::announce_slow_mcp_dial(rx, output).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9200,6 +9169,78 @@ mod tests {
             other => panic!("expected McpReady, got {other:?}"),
         }
         assert_eq!(dynamic_managers.len(), 1, "manager must remain alive");
+    }
+
+    /// The dial notice is ON by default, and exactly one surface waives it.
+    ///
+    /// This is a COUNT, not an opinion: the whole failure mode being closed is
+    /// a wait that some surface takes silently, so the thing worth pinning is
+    /// how many surfaces are allowed to. Walks the crate's real sources rather
+    /// than one file, because a waiver added in `acp_engine.rs` or `tui/` would
+    /// be exactly the drift this exists to catch and a single-file gate would
+    /// never see it.
+    #[test]
+    fn the_mcp_dial_notice_is_waived_only_where_a_splash_already_covers_it() {
+        fn rust_sources(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+            for entry in std::fs::read_dir(dir).expect("crate sources must be readable") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    rust_sources(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("readable source");
+                    out.push((path, text));
+                }
+            }
+        }
+        let mut sources = Vec::new();
+        rust_sources(
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src")),
+            &mut sources,
+        );
+
+        // Known-positive control: prove the walk actually read this crate,
+        // so "zero waivers" can never be produced by an empty scan.
+        let bootstraps: usize = sources
+            .iter()
+            .map(|(_, text)| text.matches("AgentBootstrap::new").count())
+            .sum();
+        assert!(
+            bootstraps >= 3,
+            "the source walk found only {bootstraps} AgentBootstrap::new sites — it is not \
+             reading this crate, so every count below it is meaningless"
+        );
+
+        let waivers: Vec<&std::path::Path> = sources
+            .iter()
+            .filter(|(_, text)| text.contains(".without_mcp_dial_notice(true)"))
+            .map(|(path, _)| path.as_path())
+            .collect();
+        assert_eq!(
+            waivers.len(),
+            1,
+            "exactly one surface may take the MCP dial silently — the TUI, whose splash covers \
+             this window. Waivers found in: {waivers:?}"
+        );
+
+        let (path, text) = sources
+            .iter()
+            .find(|(_, text)| text.contains(".without_mcp_dial_notice(true)"))
+            .expect("asserted present above");
+        assert!(
+            path.ends_with("main.rs"),
+            "the one waiver moved out of main.rs, to {path:?}"
+        );
+        let waiver = text
+            .find(".without_mcp_dial_notice(true)")
+            .expect("asserted present above");
+        let enclosing = text[..waiver]
+            .rfind("async fn ")
+            .expect("the waiver must sit inside a function");
+        assert!(
+            text[enclosing..].starts_with("async fn run_tui_mode("),
+            "the waiver must stay in the splash-covered TUI entry point, found it in {:?}",
+            &text[enclosing..enclosing + 40]
+        );
     }
 
     /// A turn held open by the MCP dial must SAY it is being held open.

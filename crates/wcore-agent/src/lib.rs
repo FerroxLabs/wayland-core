@@ -98,6 +98,7 @@ pub mod journal_effects;
 pub mod journal_provider;
 pub mod late_mcp;
 pub mod mcp_curator;
+pub mod mcp_dial_notice;
 pub mod mcp_lifecycle;
 pub mod orchestration;
 pub mod output;
