@@ -111,7 +111,12 @@ pub async fn run(
     let version = &report.version;
     println!("wayland-core doctor v{version}\n");
 
-    let checks = &report.checks;
+    // `br-default`: the browser-policy row is config-derived, so it is added
+    // here rather than in `collect()` -- which takes no config and is shared
+    // verbatim with the TUI `/doctor` surface (that surface has its own
+    // config-posture section, `scan_config_health`).
+    let owned_checks = with_config_rows(report.checks, cli_args);
+    let checks = &owned_checks;
 
     let mut passed = 0usize;
     let mut failed = 0usize;
@@ -290,6 +295,98 @@ async fn check_browser_binary() -> CheckResult {
 /// in the PASS detail and in the install hints, both of which come from the
 /// compiled-in backend list rather than from this string.
 const BROWSER_BACKEND_LABEL: &str = "browser backend";
+
+/// The policy row label. Sits directly under [`BROWSER_BACKEND_LABEL`] because
+/// the two rows answer the same question -- "will a browser op work?" -- and
+/// either one alone gives the wrong answer.
+const BROWSER_POLICY_LABEL: &str = "browser policy";
+
+/// `br-default` -- insert the config-derived rows into a [`collect`] report.
+///
+/// Kept as its own function, taking and returning the row list, so the WIRING
+/// is gradable: that the policy row is present at all, and that it lands
+/// immediately after the backend row rather than at the bottom of the table.
+/// Adjacency is the entire point. `[PASS] browser backend -> /usr/bin/...` on a
+/// machine where every URL is refused is a true statement that reads as a clean
+/// bill of health, and a reader who sees it stops reading.
+fn with_config_rows(
+    mut checks: Vec<CheckResult>,
+    cli_args: &wcore_config::config::CliArgs,
+) -> Vec<CheckResult> {
+    let row = check_browser_policy(cli_args);
+    match checks.iter().position(|c| c.label == BROWSER_BACKEND_LABEL) {
+        Some(i) => checks.insert(i + 1, row),
+        None => checks.push(row),
+    }
+    checks
+}
+
+/// Report whether the operator's `[browser.policy]` actually permits anything.
+///
+/// The doctor used to probe only whether a browser BINARY resolves, and on a
+/// host with the sidecar installed it printed `[PASS] browser backend` while
+/// `BrowserPolicy` refused every URL the tool was asked for -- the fail-closed
+/// default posture, which is deliberate design and is NOT relaxed here. What
+/// was missing is that nothing said so before the user hit it: the denial is
+/// only reachable by running a browser op and reading the tool card.
+///
+/// The verdict is deliberately the same predicate `wcore_browser`'s own
+/// `denial_message` uses to decide the posture is the fail-closed default
+/// (`default_action` deny AND no allowed origins), and the hints are that same
+/// module's [`wcore_browser::config_hint::policy_disabled_hint`] verbatim, so
+/// the doctor cannot advertise a remedy the tool would not.
+fn check_browser_policy(cli_args: &wcore_config::config::CliArgs) -> CheckResult {
+    match wcore_config::config::Config::resolve(cli_args) {
+        // Not a WARN: with no config there is no policy to report, and
+        // inventing a verdict from the compiled defaults would claim to have
+        // read a file that never loaded.
+        Err(e) => CheckResult {
+            label: BROWSER_POLICY_LABEL,
+            outcome: Outcome::Skip {
+                reason: format!("config did not resolve: {e}"),
+            },
+        },
+        Ok(cfg) => browser_policy_row(&cfg.browser.policy),
+    }
+}
+
+/// The verdict for one resolved [`wcore_config::browser::BrowserPolicyConfig`].
+///
+/// Split from [`check_browser_policy`] so both branches are gradable without a
+/// resolvable config on the host running the tests.
+fn browser_policy_row(policy: &wcore_config::browser::BrowserPolicyConfig) -> CheckResult {
+    let denies_everything = policy.default_action.trim().eq_ignore_ascii_case("deny")
+        && policy.allowed_origins.is_empty();
+    if !denies_everything {
+        return CheckResult {
+            label: BROWSER_POLICY_LABEL,
+            outcome: Outcome::Pass {
+                detail: format!(
+                    "default_action={}, {} allowed origin(s)",
+                    policy.default_action.trim(),
+                    policy.allowed_origins.len()
+                ),
+            },
+        };
+    }
+    // WARN, never FAIL: fail-closed is the intended posture for an operator who
+    // does not want the browser, and a doctor that exits 1 on the default
+    // install would be crying wolf.
+    CheckResult {
+        label: BROWSER_POLICY_LABEL,
+        outcome: Outcome::Warn {
+            detail: "default_action=deny with no allowed_origins — every URL is refused".into(),
+            // The POLICY half only: the `browser backend` row directly above
+            // carries the install line, and printing it twice on one screen
+            // teaches the reader to skip the block.
+            hints: wcore_browser::config_hint::policy_disabled_hint()
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(str::to_string)
+                .collect(),
+        },
+    }
+}
 
 async fn check_which(prog: &'static str, hints: &[String]) -> CheckResult {
     match which(prog).await {
@@ -1032,6 +1129,133 @@ fn grim_hints() -> Vec<String> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    // -- `br-default`: the browser-policy row ----------------------------
+    //
+    // A fresh install cannot run a browser op for two independent reasons:
+    // the sidecar is not shipped, and `[browser.policy]` denies every URL.
+    // `--doctor` reported the first and was silent about the second, so on a
+    // host where somebody HAD installed the sidecar the whole table read
+    // clean while every navigation was refused. Neither test below relaxes
+    // the fail-closed default -- that is recorded design -- they only require
+    // the doctor to say it out loud, with the remedy the tool itself prints.
+
+    fn deny_all_policy() -> wcore_config::browser::BrowserPolicyConfig {
+        wcore_config::browser::BrowserPolicyConfig::default()
+    }
+
+    /// The default posture is the fresh-install posture, so this is the row
+    /// almost every reader gets. It must WARN, and it must carry a remedy
+    /// that names the section the loader reads and a file that exists.
+    #[test]
+    fn the_policy_row_warns_when_the_default_posture_refuses_every_url() {
+        let policy = deny_all_policy();
+        // Control: this really is the shipped default, not a value the test
+        // arranged. If either of these ever changes, the WARN below is about
+        // a posture no user has.
+        assert_eq!(policy.default_action, "deny");
+        assert!(policy.allowed_origins.is_empty());
+
+        let row = browser_policy_row(&policy);
+        let Outcome::Warn { detail, hints } = row.outcome else {
+            panic!(
+                "the doctor reports the fail-closed default browser policy as {:?}. A reader \
+                 sees a clean table on a machine where every browser op is refused.",
+                row.outcome
+            )
+        };
+        assert!(
+            detail.contains("deny"),
+            "the WARN detail never says the policy denies: {detail}"
+        );
+        let hints = hints.join("\n");
+        assert!(
+            hints.contains("[browser.policy]"),
+            "the doctor's remedy does not name the section the loader reads. A key written \
+             at `[browser]` parses cleanly and is silently discarded:\n{hints}"
+        );
+        assert!(
+            hints.contains("allowed_origins"),
+            "the doctor's remedy never names the setting to add:\n{hints}"
+        );
+        assert!(
+            !hints.contains("npm install"),
+            "the policy row repeats the sidecar install line that the `browser backend` row \
+             directly above already prints. One screen, the same instruction twice, is how a \
+             reader learns to skip the block:\n{hints}"
+        );
+        let global = wcore_config::config::global_config_path();
+        assert!(
+            hints.contains(&global.display().to_string()),
+            "the doctor's remedy names no resolved config file, so a reader has nowhere to \
+             put it -- the gh#900 defect, reproduced on a second surface:\n{hints}"
+        );
+    }
+
+    /// The inverse: an operator who HAS allow-listed something, or who has
+    /// flipped the default, must not be nagged. A row that warns
+    /// unconditionally carries no information.
+    #[test]
+    fn the_policy_row_passes_once_the_operator_has_opened_it() {
+        let mut allowlisted = deny_all_policy();
+        allowlisted.allowed_origins = vec!["example.com".into()];
+        assert!(
+            matches!(
+                browser_policy_row(&allowlisted).outcome,
+                Outcome::Pass { .. }
+            ),
+            "an allow-listed origin still reports as denied"
+        );
+
+        let mut allow_all = deny_all_policy();
+        allow_all.default_action = "allow".into();
+        assert!(
+            matches!(browser_policy_row(&allow_all).outcome, Outcome::Pass { .. }),
+            "`default_action = \"allow\"` still reports as denied"
+        );
+    }
+
+    /// WIRING, not the function. Two things a passing `browser_policy_row`
+    /// cannot prove: that the row reaches the printed table at all, and that
+    /// it sits next to the backend row. Adjacency is the point -- `[PASS]
+    /// browser backend` immediately above is what made the silence readable
+    /// as health.
+    #[test]
+    fn the_policy_row_lands_directly_under_the_backend_row() {
+        let seeded = vec![
+            check_version("9.9.9"),
+            CheckResult {
+                label: BROWSER_BACKEND_LABEL,
+                outcome: Outcome::Pass {
+                    detail: "Camoufox sidecar -> /somewhere/camofox-browser".into(),
+                },
+            },
+            skip("wlrctl", "Linux-only"),
+        ];
+        let rows = with_config_rows(seeded, &wcore_config::config::CliArgs::default());
+
+        let backend = rows
+            .iter()
+            .position(|r| r.label == BROWSER_BACKEND_LABEL)
+            .expect("backend row survived");
+        let policy = rows
+            .iter()
+            .position(|r| r.label == BROWSER_POLICY_LABEL)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no browser-policy row reached the doctor table; the function may be \
+                     correct but nothing calls it. Rows: {:?}",
+                    rows.iter().map(|r| r.label).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            policy,
+            backend + 1,
+            "the policy row is not adjacent to the backend row; a reader who stops at \
+             `[PASS] browser backend` never reaches it. Rows: {:?}",
+            rows.iter().map(|r| r.label).collect::<Vec<_>>()
+        );
+    }
 
     /// gh#491 — `--doctor` must recommend the browser backend this binary
     /// actually compiled, and must not recommend one it did not.

@@ -134,8 +134,50 @@ fn config_target_block() -> String {
 
 /// The full remediation message shown when the browser tool denies solely
 /// because it is in its fail-closed default posture.
+///
+/// ## Why this message also reports the BACKEND (`br-default`)
+///
+/// A fresh install has two independent things wrong with it, and
+/// `BrowserTool::dispatch` can only ever report the first: the policy check
+/// (`tool.rs`, `policy_check`) runs BEFORE `ensure_session`, so the sidecar is
+/// never probed and the not-installed diagnosis is unreachable. An operator
+/// who follows this message verbatim therefore fixes the policy, restarts —
+/// `configured_camoufox_download` and friends are `OnceLock`-cached per
+/// process — and walks straight into a SECOND wall the first message never
+/// mentioned.
+///
+/// Core does not bundle a browser. The Camoufox sidecar is a separate npm
+/// package, auto-provisioning is off by default and has no built-in artifact
+/// (`binary.rs`, `provision_camoufox`), so on a fresh machine nothing installs
+/// it. That is deliberate — Core does not fetch executable code from the
+/// network unpinned — but it means the remedy is TWO steps, and a message that
+/// prints only one is not followable.
+///
+/// So the backend is resolved here, at message-build time, and the second step
+/// is named in the same breath as the first when it is actually outstanding.
+/// It is deliberately NOT printed when a backend does resolve: telling an
+/// operator to install software they already have is how a real instruction
+/// gets skimmed past.
 pub fn disabled_by_default_hint() -> String {
-    format!(
+    disabled_by_default_hint_for(crate::install::resolve_any().is_some())
+}
+
+/// The POLICY half of [`disabled_by_default_hint`], with no backend paragraph.
+///
+/// For surfaces that report the backend separately and would otherwise print
+/// the same install line twice -- `--doctor` has a `browser backend` row of its
+/// own directly above its `browser policy` row.
+pub fn policy_disabled_hint() -> String {
+    disabled_by_default_hint_for(true)
+}
+
+/// The body of [`disabled_by_default_hint`], with the host probe lifted out.
+///
+/// Split so both branches are gradable without mutating `PATH` or
+/// `WAYLAND_CAMOUFOX_BIN` in a test process. The binding to the real probe is
+/// graded separately by [`tests::the_hint_reports_the_backend_this_host_has`].
+pub(crate) fn disabled_by_default_hint_for(backend_installed: bool) -> String {
+    let mut out = format!(
         "Browser tool is disabled by default. \
          Add allowed domains to enable it.\n\n\
          {}\n\
@@ -143,7 +185,17 @@ pub fn disabled_by_default_hint() -> String {
          Alternatively, permit all origins — not recommended, exposes SSRF risk:\n\n\
          {ENABLE_BY_DEFAULT_ACTION_TOML}",
         config_target_block()
-    )
+    );
+    if !backend_installed {
+        let backend = &crate::install::CAMOUFOX;
+        out.push_str(&format!(
+            "\nOpening the policy is not the only step on this machine. wayland-core does \
+             not bundle a browser and nothing installs one for you, so the next browser op \
+             would stop here even with the policy above applied:\n\n{}\n",
+            backend.not_installed(&backend.configured_program(), None)
+        ));
+    }
+    out
 }
 
 /// Remediation for a loopback denial (gh#826 / gh#911).
@@ -207,6 +259,91 @@ mod tests {
         assert!(
             hint.contains(ENABLE_BY_DEFAULT_ACTION_TOML),
             "hint dropped the default_action snippet:\n{hint}"
+        );
+    }
+
+    /// `br-default` — the fresh-install journey has TWO walls and the policy
+    /// wall is the only one `dispatch` can ever reach, because `policy_check`
+    /// runs before `ensure_session`. An operator who applies this snippet and
+    /// restarts must not be ambushed by a missing sidecar nobody mentioned, so
+    /// when no backend resolves the message has to name that step too — with
+    /// the same install line `--doctor` and the runtime refusal print, not a
+    /// second hand-written one that can drift.
+    #[test]
+    fn the_disabled_hint_names_the_second_wall_when_no_backend_is_installed() {
+        let hint = disabled_by_default_hint_for(false);
+        assert!(
+            hint.contains(ENABLE_BY_ALLOWLIST_TOML),
+            "the backend paragraph displaced the policy remedy:\n{hint}"
+        );
+        assert!(
+            hint.contains(crate::install::CAMOUFOX_SIDECAR_PACKAGE),
+            "the message never names the package that installs the sidecar, so an operator \
+             who applies the policy snippet hits an unannounced second wall:\n{hint}"
+        );
+        assert!(
+            hint.contains(crate::install::CAMOUFOX_SIDECAR_ENV),
+            "the message never names the env override the supervisor actually reads:\n{hint}"
+        );
+        let lowered = hint.to_ascii_lowercase();
+        assert!(
+            lowered.contains("does not bundle"),
+            "the message must say plainly that Core ships no browser. Without that an \
+             operator reasonably concludes the install is broken rather than \
+             incomplete:\n{hint}"
+        );
+        assert!(
+            lowered.contains("not the only step"),
+            "the message must say the policy edit alone is insufficient; naming the install \
+             line further down is easy to read as optional background:\n{hint}"
+        );
+    }
+
+    /// The inverse, and the reason the probe exists at all: an operator who
+    /// already has the sidecar must not be told to install it. A message that
+    /// prints every remedy unconditionally trains readers to skim past the one
+    /// that applies.
+    #[test]
+    fn the_disabled_hint_stays_quiet_about_install_when_a_backend_resolves() {
+        assert_eq!(
+            policy_disabled_hint(),
+            disabled_by_default_hint_for(true),
+            "the policy-only entry point drifted from the backend-installed branch"
+        );
+        let hint = disabled_by_default_hint_for(true);
+        assert!(
+            hint.contains(ENABLE_BY_ALLOWLIST_TOML),
+            "the policy remedy went missing:\n{hint}"
+        );
+        assert!(
+            !hint.contains(crate::install::CAMOUFOX_SIDECAR_PACKAGE),
+            "a host that HAS the backend is still told to install it:\n{hint}"
+        );
+        assert!(
+            !hint.to_ascii_lowercase().contains("does not bundle"),
+            "a host that HAS the backend is still told Core ships no browser:\n{hint}"
+        );
+    }
+
+    /// WIRING, not the function. The two bodies above prove what each branch
+    /// says; this proves the public message actually consults the real host
+    /// probe to choose between them, on whatever host it runs.
+    ///
+    /// The `assert_ne` is the control: without it this test would still pass if
+    /// the two branches were made identical, i.e. if the feature were deleted.
+    #[test]
+    fn the_hint_reports_the_backend_this_host_has() {
+        assert_ne!(
+            disabled_by_default_hint_for(true),
+            disabled_by_default_hint_for(false),
+            "the two branches are identical, so the equality below proves nothing"
+        );
+        let installed = crate::install::resolve_any().is_some();
+        assert_eq!(
+            disabled_by_default_hint(),
+            disabled_by_default_hint_for(installed),
+            "the public hint does not reflect this host: `install::resolve_any()` says \
+             installed={installed}, but the emitted message is the other branch"
         );
     }
 
