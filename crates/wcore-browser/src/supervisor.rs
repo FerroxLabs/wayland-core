@@ -101,7 +101,19 @@ impl Default for SupervisorConfig {
             sidecar_program: None,
             startup_timeout: Duration::from_secs(15),
             camoufox_download: wcore_config::browser::CamoufoxDownloadConfig::default(),
-            sidecar_auto_install: wcore_config::browser::SidecarAutoInstall::default(),
+            // OFF here, ON in `local_camoufox`. `SidecarAutoInstall::default()`
+            // is enabled - that is the operator-facing default - but
+            // `SupervisorConfig::default()` is the PROGRAMMATIC one, reached by
+            // every test that does not name the field. Inheriting "enabled"
+            // here means any such test npm-installs into the developer's home
+            // directory over the real network; measured, two arms raced each
+            // other into ENOTEMPTY doing exactly that. A constructor whose
+            // default performs a network install is a trap regardless of who
+            // steps in it.
+            sidecar_auto_install: wcore_config::browser::SidecarAutoInstall {
+                enabled: false,
+                ..Default::default()
+            },
             binary_install_root: home_bin_dir(),
             egress_policy: None,
             allow_unproxied_sidecar: false,
@@ -695,7 +707,16 @@ impl BrowserSupervisor {
                 // npm reported success but left no shim where one belongs.
                 // Fall through to the spawn, which names the manual command.
                 Ok(None) => Ok(program.to_string()),
-                Err(error) => Err(format!("Camoufox sidecar auto-install failed: {error}")),
+                // Best effort, and a failure must still tell the caller what to
+                // DO. The pre-existing refusal names the package and
+                // WAYLAND_CAMOUFOX_BIN; reporting a raw npm error in its place
+                // reports the failure WITHOUT the remedy, which is the exact
+                // shape this whole path exists to remove.
+                Err(error) => Err(format!(
+                    "{}\nCore also tried to install it automatically, and that failed: {error}",
+                    crate::install::CAMOUFOX
+                        .not_installed(program, Some(&self.config.healthcheck_url))
+                )),
             };
         }
         match manager
