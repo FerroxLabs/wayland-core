@@ -4610,7 +4610,14 @@ fn try_load_config_file_with_disposition(
             // release, so we surface rather than reject.
             warn_unknown_config_keys(&content, path);
             toml::from_str(&content)
-                .map(|config| (config, ConfigSourceDisposition::Loaded))
+                .map(|config: ConfigFile| {
+                    // #1137 follow-up: a key can be perfectly spelled, parse,
+                    // merge — and still be read by nothing. `warn_unknown_config_keys`
+                    // above cannot see those: `serde_ignored` only reports keys
+                    // the struct REJECTS, and these are accepted.
+                    warn_inert_config_keys(&config, path);
+                    (config, ConfigSourceDisposition::Loaded)
+                })
                 .map_err(|source| ConfigLoadError::ParseFailed {
                     path: path.display().to_string(),
                     source,
@@ -4707,6 +4714,105 @@ fn unknown_config_key_hint(key: &str) -> Option<&'static str> {
         ),
         _ => None,
     }
+}
+
+/// One config key that parses, merges, and is then consulted by nothing.
+struct InertConfigKey {
+    /// Dotted TOML path, as the operator would write it.
+    key: &'static str,
+    /// The value they set, rendered for the notice.
+    value: String,
+    /// What to do instead. Never just "unsupported" — a user who set this
+    /// wanted something, and the notice has to say how to get it.
+    remedy: &'static str,
+}
+
+/// The keys that are accepted and then discarded.
+///
+/// This list is deliberately hand-maintained rather than derived: "is this
+/// field ever read?" is not a question the type system answers, and a wrong
+/// entry here would tell a user their working setting is inert. Each entry was
+/// established by grepping every reader of the field across the workspace, with
+/// a consumed sibling field as the known-positive control.
+///
+/// `[browser.stealth]` (both fields) is the whole list today. `wcore-config`
+/// parses it and merges project over global; NOTHING outside `wcore-config`
+/// reads it. The Browser plugin shell hardcodes `ProviderHint::Auto`, so the
+/// operator's choice never reaches selection.
+///
+/// Only NON-DEFAULT values are reported. A key absent from the file, or written
+/// at its default, expressed no intent for us to be discarding — and a notice
+/// everyone sees for a knob they never touched is noise, and noise gets muted.
+fn inert_config_keys(config: &ConfigFile) -> Vec<InertConfigKey> {
+    let stealth = &config.browser.stealth;
+    let mut keys = Vec::new();
+    if stealth.preferred_provider != crate::browser::BrowserProvider::default() {
+        keys.push(InertConfigKey {
+            key: "browser.stealth.preferred_provider",
+            value: format!("{:?}", stealth.preferred_provider).to_ascii_lowercase(),
+            remedy: "there is no browser backend to choose between: Core always uses the \
+                     Camoufox sidecar, and installs it on first use. To control that install \
+                     use [browser.sidecar_auto_install]; to point Core at a sidecar you \
+                     already have, set the WAYLAND_CAMOUFOX_BIN environment variable. This \
+                     key can be deleted.",
+        });
+    }
+    if stealth.allow_cloud_fallback {
+        keys.push(InertConfigKey {
+            key: "browser.stealth.allow_cloud_fallback",
+            value: "true".to_string(),
+            remedy: "the Browserbase cloud backend is not compiled into shipped builds, so \
+                     there is nothing to fall back to and no cloud browsing is happening \
+                     either way. This key can be deleted.",
+        });
+    }
+    keys
+}
+
+/// Emit the inert-key notice: the `tracing` line is the RECORD, the stderr
+/// block is the CHANNEL.
+///
+/// Both, for the reason [`unknown_config_keys_notice`] documents: with
+/// `RUST_LOG` unset only ERROR reaches stderr, so a `warn!` alone would tell
+/// this user exactly as little as the silence it is replacing.
+fn warn_inert_config_keys(config: &ConfigFile, path: &Path) {
+    let keys = inert_config_keys(config);
+    for key in &keys {
+        tracing::warn!(
+            target: "wcore_config",
+            key = %key.key,
+            path = %path.display(),
+            "config key `{}` in {} is accepted but read by nothing — it has no effect",
+            key.key,
+            path.display(),
+        );
+    }
+    if let Some(notice) = inert_config_keys_notice(&keys, path) {
+        warn_ignored_config_keys_once(&notice);
+    }
+}
+
+/// Render the operator-facing stderr block. Split out so the exact words the
+/// user reads are under test, matching [`unknown_config_keys_notice`].
+fn inert_config_keys_notice(keys: &[InertConfigKey], path: &Path) -> Option<String> {
+    if keys.is_empty() {
+        return None;
+    }
+    let mut lines = vec![format!(
+        "warning: {} setting(s) in {} are accepted but are read by nothing:",
+        keys.len(),
+        path.display()
+    )];
+    for key in keys {
+        lines.push(format!("  {} = {}", key.key, key.value));
+        lines.push(format!("    what to do instead: {}", key.remedy));
+    }
+    lines.push(
+        "warning: the settings above had no effect. They are not typos — Core parses them \
+         and then discards them."
+            .to_string(),
+    );
+    Some(lines.join("\n"))
 }
 
 /// Print an ignored-key notice on stderr, at most once per distinct notice.
@@ -11415,5 +11521,90 @@ require_priced = true
             unknown_config_keys_notice(&[], Path::new("/home/u/config.toml")).is_none(),
             "a config with no unknown keys must produce no notice"
         );
+    }
+
+    // -- inert (accepted-but-unread) config keys -----------------------------
+
+    /// A key the operator SET, that nothing reads, must be named — with what to
+    /// do instead, not just "unsupported".
+    #[test]
+    fn an_inert_key_is_named_with_a_remedy() {
+        let mut config = ConfigFile::default();
+        config.browser.stealth.preferred_provider = crate::browser::BrowserProvider::Chromium;
+        let keys = inert_config_keys(&config);
+        assert_eq!(
+            keys.len(),
+            1,
+            "the set key must be reported, got {}",
+            keys.len()
+        );
+
+        let notice = inert_config_keys_notice(&keys, Path::new("/home/u/config.toml"))
+            .expect("an inert key must produce a notice");
+        assert!(
+            notice.contains("/home/u/config.toml"),
+            "the notice must name the file, got:\n{notice}"
+        );
+        assert!(
+            notice.contains("browser.stealth.preferred_provider"),
+            "the notice must name the key, got:\n{notice}"
+        );
+        assert!(
+            notice.contains("read by nothing"),
+            "the notice must say the key is never consulted, got:\n{notice}"
+        );
+        assert!(
+            notice.contains("WAYLAND_CAMOUFOX_BIN")
+                && notice.contains("[browser.sidecar_auto_install]"),
+            "the notice must say what to do instead, not just that it is ignored, got:\n{notice}"
+        );
+    }
+
+    /// THE constraint that keeps this from becoming noise: a default config,
+    /// and a key written AT its default, must both stay silent. A notice
+    /// everyone sees for a knob they never touched gets muted, and then the
+    /// notice that matters is muted with it.
+    #[test]
+    fn a_default_or_unset_knob_is_silent() {
+        let untouched = ConfigFile::default();
+        assert!(
+            inert_config_keys(&untouched).is_empty(),
+            "an untouched config must produce no inert-key notice"
+        );
+
+        let mut explicit_default = ConfigFile::default();
+        explicit_default.browser.stealth.preferred_provider = crate::browser::BrowserProvider::Auto;
+        explicit_default.browser.stealth.allow_cloud_fallback = false;
+        assert!(
+            inert_config_keys(&explicit_default).is_empty(),
+            "a knob written at its own default discarded no intent, so it must stay silent"
+        );
+
+        assert!(
+            inert_config_keys_notice(&[], Path::new("/home/u/config.toml")).is_none(),
+            "no inert keys must produce no notice at all"
+        );
+    }
+
+    /// CONTROL for the test above: the silence is because the values are
+    /// DEFAULT, not because the detector never fires. Same struct, same
+    /// fields, one non-default value each.
+    #[test]
+    fn the_detector_fires_on_each_field_it_covers() {
+        let mut provider_set = ConfigFile::default();
+        provider_set.browser.stealth.preferred_provider =
+            crate::browser::BrowserProvider::Browserbase;
+        assert_eq!(inert_config_keys(&provider_set).len(), 1);
+
+        let mut cloud_set = ConfigFile::default();
+        cloud_set.browser.stealth.allow_cloud_fallback = true;
+        let keys = inert_config_keys(&cloud_set);
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].key.ends_with("allow_cloud_fallback"));
+
+        let mut both = ConfigFile::default();
+        both.browser.stealth.preferred_provider = crate::browser::BrowserProvider::Camoufox;
+        both.browser.stealth.allow_cloud_fallback = true;
+        assert_eq!(inert_config_keys(&both).len(), 2);
     }
 }
