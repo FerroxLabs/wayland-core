@@ -19,7 +19,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use wcore_tools::vfs::{RealFs, SandboxedFs, VfsError, VirtualFs};
+use wcore_tools::vfs::{
+    FileMutationOutcome, FilePrecondition, IntendedFileMutation, RealFs, SandboxedFs, VfsError,
+    VirtualFs,
+};
 use wcore_tools::workspace_policy::{PathGrantError, WorkspacePolicy};
 
 /// A genuinely-local session on a backend that DOES confine the filesystem —
@@ -160,6 +163,18 @@ async fn a_read_only_grant_on_the_same_folder_still_refuses_the_write() {
 /// three of four is a guard that looks tested and is not — this codebase has
 /// shipped exactly that (a fully unit-tested guard past four ungated `BashTool`
 /// call sites).
+///
+/// `compare_exchange_file` is the fourth, and the arms below say plainly what
+/// they cannot hold. Downgrading ITS `contain_write` to `contain_read` is
+/// behaviourally invisible from here: `bind_identity` searches the WRITE grants
+/// one step later and returns the same `OutsideSandbox` for the same path, so
+/// the read-grant arm cannot tell the two apart. MEASURED rather than assumed —
+/// with that single call site swapped this file still passes 14/14, and no
+/// other test in the crate distinguishes it either, so the write-vs-read LEVEL
+/// of that one call site is currently ungraded. What the arms below DO hold is
+/// the fourth operation's presence in both directions: it is refused under a
+/// read grant, and — the wrong-refusal direction this file exists for — it is
+/// NOT refused at the boundary under a write grant.
 #[tokio::test]
 async fn every_mutating_operation_is_gated_on_write_not_read() {
     let ws = tempfile::tempdir().unwrap();
@@ -185,6 +200,11 @@ async fn every_mutating_operation_is_gated_on_write_not_read() {
         read_fs.remove_file(&victim).await,
         Err(VfsError::OutsideSandbox { .. })
     ));
+    let swap = IntendedFileMutation::new(FilePrecondition::Absent, b"x".to_vec());
+    assert!(matches!(
+        read_fs.compare_exchange_file(&victim, &swap).await,
+        Err(VfsError::OutsideSandbox { .. })
+    ));
     assert!(
         read_fs.exists(&victim).await.unwrap(),
         "WRONG-REFUSAL CONTROL: the read side of the same jail still works, so \
@@ -201,6 +221,18 @@ async fn every_mutating_operation_is_gated_on_write_not_read() {
 
     write_fs.observe_file(&victim).await.expect("observe_file");
     write_fs.write(&victim, b"edited").await.expect("write");
+    // `SandboxedFs<RealFs>` cannot APPLY a compare-exchange — the host has no
+    // non-cooperative pathname CAS — so the reachable proof is that the write
+    // grant carries this operation all the way to the PRECONDITION check,
+    // which sits strictly past both `contain_write` and `bind_identity`.
+    assert!(
+        matches!(
+            write_fs.compare_exchange_file(&victim, &swap).await,
+            Ok(FileMutationOutcome::Conflict { .. })
+        ),
+        "WRONG-REFUSAL CONTROL: the write grant does not refuse the fourth \
+         mutating operation at the boundary"
+    );
     write_fs.remove_file(&victim).await.expect("remove_file");
     assert!(!victim.exists());
 }
