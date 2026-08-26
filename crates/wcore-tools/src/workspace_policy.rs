@@ -837,6 +837,44 @@ impl WorkspacePolicy {
         is_secret_path_static(&canon) && canon.starts_with(&self.root)
     }
 
+    /// FerroxLabs/wayland-core#244 + #322: true when `path` is inside a VCS
+    /// CONTENT store — `.git/objects`, `.git/modules`, `.git/lfs`, `.hg/store`,
+    /// `.svn/pristine`, `.bzr/repository`.
+    ///
+    /// The IN-PROCESS sibling of the OS-sandbox deny [`vcs_content_stores`]
+    /// builds. Those two layers had drifted: `Bash` could not `git show
+    /// HEAD:.env`, but the file tools read `.git/objects/ab/cdef...` straight
+    /// off disk, because the only `SecretDenyFs` predicate
+    /// ([`is_project_secret`](Self::is_project_secret)) matches secret NAMES and
+    /// an object file is named after its hash. The blobs are zlib-compressed, so
+    /// #244 is a gap rather than a plaintext leak — but a gap between two layers
+    /// that are supposed to agree is how a boundary stops being one.
+    ///
+    /// Two arms, cheap one first:
+    ///
+    /// 1. **Lexical, any depth, under this workspace root** — the #322 half.
+    ///    Costs nothing beyond the canonicalization the caller pays anyway, and
+    ///    covers the nested/vendored store that root-relative discovery never
+    ///    sees.
+    /// 2. **The stores this root's own `.git` NAMES** — a gitfile's gitdir and
+    ///    commondir (#242), an `objects/info/alternates` borrow, and a `.git`
+    ///    SYMLINK whose target sits outside the root. None of those resolve to a
+    ///    path whose parent component is still `.git`, so arm 1 cannot see them.
+    ///    Reached only when arm 1 misses.
+    ///
+    /// NOT routed through any sandbox-backend capability, for the reason
+    /// `crates/wcore-tools/tests/vfs_secret_deny_backend_independent.rs` pins:
+    /// this refusal is enforced by THIS process.
+    pub fn is_vcs_content_store(&self, path: &Path) -> bool {
+        let canon = canon_for_scope(path);
+        if canon.starts_with(&self.root) && inside_vcs_store(&canon) {
+            return true;
+        }
+        vcs_content_stores(&self.root)
+            .iter()
+            .any(|store| canon.starts_with(store))
+    }
+
     /// True when `path` names this workspace's own REPOSITORY-CONTROL surface
     /// ([`REPO_CONTROL_DIRS`]) — the directories whose contents are executed or
     /// obeyed rather than merely read back.
@@ -2339,6 +2377,9 @@ fn project_committed_secrets(
                 if let Some(secret) = secret_entry(&entry, &under_mounted) {
                     out.push(secret);
                 }
+                if let Some(store) = vcs_store_entry(&entry, &under_mounted) {
+                    out.push(store);
+                }
             }
         }
         if !oversized {
@@ -2370,6 +2411,9 @@ fn project_committed_secrets(
                 }
                 if let Some(secret) = secret_entry(&entry, &under_mounted) {
                     found.lock().expect(POISONED).push(secret);
+                }
+                if let Some(store) = vcs_store_entry(&entry, &under_mounted) {
+                    found.lock().expect(POISONED).push(store);
                 }
             }
             ignore::WalkState::Continue
@@ -2434,6 +2478,31 @@ pub const SERIAL_WALK_BUDGET: usize = 256;
 /// The lock is taken only to push a path that has already been canonicalized,
 /// so nothing that can panic runs while it is held and this cannot fire.
 const POISONED: &str = "secret-deny walk mutex poisoned";
+
+/// The DIRECTORY half of the per-entry decision of
+/// [`project_committed_secrets`]: a VCS content store found at any depth under
+/// the walk root (#322).
+///
+/// Emits the store DIRECTORY, never its members. That is the whole reason the
+/// fix lives here rather than in [`is_secret_path_static`] / [`secret_entry`]:
+/// a real `.git/objects` holds hundreds of thousands of files, the walk
+/// deliberately does not prune, and classifying object FILES as secrets would
+/// buy one deny-list entry and one symlink-resolving `canonicalize` syscall per
+/// object. One entry per store is the same denial at a bounded cost, and it is
+/// exactly what the OS backends already consume from [`vcs_content_stores`].
+///
+/// Shared verbatim by the serial and parallel arms, like [`secret_entry`].
+fn vcs_store_entry(
+    entry: &ignore::DirEntry,
+    under_mounted: &impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if !entry.file_type().is_some_and(|t| t.is_dir()) || !is_vcs_store_dir(entry.path()) {
+        return None;
+    }
+    std::fs::canonicalize(entry.path())
+        .ok()
+        .filter(|canon| under_mounted(canon))
+}
 
 /// The per-entry decision of [`project_committed_secrets`], shared verbatim by
 /// its serial and parallel arms so the two cannot answer differently.
@@ -2521,8 +2590,8 @@ fn walk_root_is_covered(covering: &Path, candidate: &Path) -> bool {
 /// deny above silently covers nothing. See [`gitfile_content_stores`].
 fn vcs_content_stores(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for rel in VCS_CONTENT_STORES {
-        push_store(&mut out, root.join(rel));
+    for (dir, store) in VCS_CONTENT_STORES {
+        push_store(&mut out, root.join(dir).join(store));
     }
     out.extend(gitfile_content_stores(root));
     out.extend(alternate_object_dirs(root.join(".git/objects")));
@@ -2533,14 +2602,52 @@ fn vcs_content_stores(root: &Path) -> Vec<PathBuf> {
 /// one per VCS. Each holds committed CONTENT; none is needed to answer a
 /// metadata question (branch name, dirty state), which is what keeps the deny
 /// from breaking ordinary session work.
-const VCS_CONTENT_STORES: &[&str] = &[
-    ".git/objects",
-    ".git/modules",
-    ".git/lfs",
-    ".hg/store",
-    ".svn/pristine",
-    ".bzr/repository",
+///
+/// Held as (control directory, store leaf) PAIRS rather than joined strings so
+/// the same list drives two consumers that must not drift: the root-relative
+/// join in [`vcs_content_stores`], and the any-depth shape test in
+/// [`is_vcs_store_dir`] that #322 needs.
+const VCS_CONTENT_STORES: &[(&str, &str)] = &[
+    (".git", "objects"),
+    (".git", "modules"),
+    (".git", "lfs"),
+    (".hg", "store"),
+    (".svn", "pristine"),
+    (".bzr", "repository"),
 ];
+
+/// True when the last two components of `path` name a VCS content store — the
+/// [`VCS_CONTENT_STORES`] shape recognised at ANY depth, not only directly
+/// under the workspace root.
+///
+/// FerroxLabs/wayland-core#322: discovery was root-relative only
+/// (`root.join(".git/objects")`), so a vendored or nested checkout
+/// (`<root>/vendor/x/.git/objects`, a submodule working copy, a bundled example
+/// repo) reconstructed a committed secret through its own porcelain while the
+/// deny list covered nothing. Purely lexical over an already-canonicalized
+/// path, so it costs no syscall.
+///
+/// Deliberately matches the STORE directory only. `<root>/vendor/x/.git/HEAD`
+/// and `.../refs/heads/main` are not stores and stay readable, mirroring the
+/// `git rev-parse` carve-out [`vcs_content_stores`] documents for the root
+/// repository.
+fn is_vcs_store_dir(path: &Path) -> bool {
+    use std::path::Component;
+    let mut rev = path.components().rev();
+    let (Some(Component::Normal(leaf)), Some(Component::Normal(parent))) = (rev.next(), rev.next())
+    else {
+        return false;
+    };
+    VCS_CONTENT_STORES.iter().any(|(dir, store)| {
+        parent == std::ffi::OsStr::new(dir) && leaf == std::ffi::OsStr::new(store)
+    })
+}
+
+/// [`is_vcs_store_dir`] applied to `path` and every ancestor of it: true when
+/// `path` IS a content store or lives inside one.
+fn inside_vcs_store(path: &Path) -> bool {
+    path.ancestors().any(is_vcs_store_dir)
+}
 
 /// Canonicalize and record `p` when it exists. A path that does not exist is
 /// dropped rather than denied: the deny list is handed to the OS sandbox, and a
