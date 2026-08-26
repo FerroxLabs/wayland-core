@@ -2791,8 +2791,17 @@ impl Spawner for AgentSpawner {
 
 /// #269 — fleet sharding helper: serialize a `SubAgentResult` into the
 /// `AgentReport.payload` `serde_json::Value` so the fleet reducer can
-/// reconstruct it from the shard summary's payload array. Lossless for
-/// the wire-format fields we care about (name/text/usage/turns/is_error).
+/// reconstruct it from the shard summary's payload array.
+///
+/// This is a HAND-ROLLED codec, not `Serde`, so every field of
+/// `SubAgentResult` has to be named here and in
+/// [`payload_to_sub_agent_result`] or it is silently dropped between a
+/// fleet-dispatched child and its parent. #1139 added
+/// `TokenUsage::reported_cost_usd` and this pair did not carry it, so a
+/// FLEET-dispatched child's real billed cost went to zero on the way home
+/// while every other spawn path kept it. If you add a field to `TokenUsage`,
+/// the read side is exhaustive on purpose and will refuse to compile until
+/// you decide what happens to it here.
 fn sub_agent_result_to_payload(r: &SubAgentResult) -> serde_json::Value {
     serde_json::json!({
         "name": r.name,
@@ -2801,6 +2810,9 @@ fn sub_agent_result_to_payload(r: &SubAgentResult) -> serde_json::Value {
         "output_tokens": r.usage.output_tokens,
         "cache_creation_tokens": r.usage.cache_creation_tokens,
         "cache_read_tokens": r.usage.cache_read_tokens,
+        // `None` serializes as `null`, which the reader maps straight back to
+        // `None` — "the provider said nothing", never a zero.
+        "reported_cost_usd": r.usage.reported_cost_usd,
         "turns": r.turns,
         "is_error": r.is_error,
     })
@@ -2821,6 +2833,11 @@ fn payload_to_sub_agent_result(v: serde_json::Value) -> SubAgentResult {
         .and_then(|s| s.as_str())
         .unwrap_or("")
         .to_string();
+    // Exhaustive on purpose — NO `..Default::default()`. This is one half of a
+    // hand-rolled codec, and a defaulted tail is exactly how #1139's
+    // `reported_cost_usd` would have gone on being dropped here in silence:
+    // the compiler is the only thing that can notice a codec falling behind
+    // its type. Adding a field to `TokenUsage` must break this line.
     let usage = TokenUsage {
         input_tokens: v.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0),
         output_tokens: v.get("output_tokens").and_then(|n| n.as_u64()).unwrap_or(0),
@@ -2832,7 +2849,10 @@ fn payload_to_sub_agent_result(v: serde_json::Value) -> SubAgentResult {
             .get("cache_read_tokens")
             .and_then(|n| n.as_u64())
             .unwrap_or(0),
-        ..Default::default()
+        // Absent or `null` -> `None` (unknown), never `Some(0.0)` (free).
+        reported_cost_usd: v
+            .get("reported_cost_usd")
+            .and_then(serde_json::Value::as_f64),
     };
     let turns = v.get("turns").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
     let is_error = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(true);

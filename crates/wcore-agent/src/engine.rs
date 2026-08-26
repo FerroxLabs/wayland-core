@@ -748,6 +748,27 @@ fn provider_reported_usd(reported: Option<f64>) -> Option<f64> {
     reported.filter(|usd| usd.is_finite() && *usd >= 0.0)
 }
 
+/// #1139 — fold one round-trip's provider-reported cost into a running
+/// session/run aggregate.
+///
+/// `complete` stays true only while EVERY round-trip folded so far carried a
+/// figure. The first silent turn clears it and blanks the aggregate for good.
+///
+/// That is the point, and it is not caution for its own sake: summing only the
+/// turns that happened to report produces a FLOOR, and a floor rendered into a
+/// `cost_usd` field is indistinguishable from a total. An unknown total and a
+/// smaller total are different claims — the same distinction
+/// `reported_cost_usd` exists to keep one level down, at the round-trip.
+fn fold_reported_cost(total: &mut Option<f64>, complete: &mut bool, turn: Option<f64>) {
+    match provider_reported_usd(turn) {
+        Some(usd) if *complete => *total = Some(total.unwrap_or(0.0) + usd),
+        _ => {
+            *complete = false;
+            *total = None;
+        }
+    }
+}
+
 impl ResolvedTurnCost {
     /// #1139 — let a figure the PROVIDER reported outrank this resolution.
     ///
@@ -3796,6 +3817,12 @@ pub struct AgentEngine {
     /// `stream_end` protocol event's `usage_delta` sibling field; never
     /// persisted (a resumed session starts with a fresh zero delta).
     run_usage: TokenUsage,
+    /// #1139 — did EVERY round-trip folded into `total_usage` report its own
+    /// cost? Cleared by the first silent turn, which also blanks
+    /// `total_usage.reported_cost_usd` — see [`fold_reported_cost`].
+    total_reported_cost_complete: bool,
+    /// The same question, scoped to the current run (`run_usage`).
+    run_reported_cost_complete: bool,
     /// #1140 — provider round-trips this run has actually completed.
     ///
     /// `AgentResult.turns` reports this on the success path, but a run that
@@ -4562,6 +4589,8 @@ impl AgentEngine {
             total_usage: TokenUsage::default(),
             run_turns: 0,
             error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: TokenUsage::default(),
             thinking: config.thinking,
             compat: config.compat.clone(),
@@ -4845,6 +4874,13 @@ impl AgentEngine {
             // session; the per-run delta always starts fresh.
             run_turns: 0,
             error_tap: None,
+            // #1139: a restored total is complete only if it actually carries a
+            // figure. A persisted `None` cannot distinguish "no round-trips
+            // yet" from "already poisoned by a silent turn", so it is read as
+            // the latter — that can leave a resumed session reporting `None`
+            // (unknown), and never a number it cannot back.
+            total_reported_cost_complete: session.total_usage.reported_cost_usd.is_some(),
+            run_reported_cost_complete: true,
             run_usage: TokenUsage::default(),
             thinking: config.thinking,
             compat: config.compat.clone(),
@@ -5306,6 +5342,7 @@ impl AgentEngine {
         let session_usage = session.total_usage.clone();
         self.messages = canonical_messages;
         self.total_usage = session_usage.clone();
+        self.total_reported_cost_complete = self.total_usage.reported_cost_usd.is_some();
         self.run_usage = TokenUsage::default();
         self.current_session = Some(session);
         self.session_journal = Some(journal);
@@ -11605,6 +11642,11 @@ impl AgentEngine {
         // the same reason — a caller reading them after this run must not be
         // handed the PREVIOUS run's turn count or the previous run's error.
         self.run_turns = 0;
+        // #1139: a fresh run starts complete — nothing is missing yet. A
+        // RESUMED run inherits the checkpoint's aggregate under the same
+        // conservative reading as the restored session total above.
+        self.run_reported_cost_complete =
+            resume_checkpoint.is_none() || self.run_usage.reported_cost_usd.is_some();
         if let Some(tap) = self.error_tap.as_ref() {
             match tap.lock() {
                 Ok(mut slot) => *slot = None,
@@ -14596,6 +14638,15 @@ impl AgentEngine {
             self.total_usage.output_tokens += turn_usage.output_tokens;
             self.total_usage.cache_creation_tokens += turn_usage.cache_creation_tokens;
             self.total_usage.cache_read_tokens += turn_usage.cache_read_tokens;
+            // #1139: the provider's own dollar figure accumulates alongside the
+            // token counters, or the session total stays `None` forever and
+            // every consumer of `AgentResult.usage` — the Spawn tool's parent
+            // result above all — reports an unpriced child for a priced run.
+            fold_reported_cost(
+                &mut self.total_usage.reported_cost_usd,
+                &mut self.total_reported_cost_complete,
+                turn_usage.reported_cost_usd,
+            );
 
             // CORE-2: mirror into the run-scoped delta (reset per run()).
             // #1140: and the round-trip count alongside it, so a run that ends
@@ -14605,6 +14656,11 @@ impl AgentEngine {
             self.run_usage.output_tokens += turn_usage.output_tokens;
             self.run_usage.cache_creation_tokens += turn_usage.cache_creation_tokens;
             self.run_usage.cache_read_tokens += turn_usage.cache_read_tokens;
+            fold_reported_cost(
+                &mut self.run_usage.reported_cost_usd,
+                &mut self.run_reported_cost_complete,
+                turn_usage.reported_cost_usd,
+            );
 
             // B7 writer-side wiring: mirror this turn's token usage into the
             // live introspection state so `wayland_status` /
@@ -19757,6 +19813,8 @@ mod set_config_tests {
             total_usage: Default::default(),
             run_turns: 0,
             error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -21632,6 +21690,8 @@ mod phase6_tests {
             total_usage: Default::default(),
             run_turns: 0,
             error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -21958,6 +22018,8 @@ mod compact_tests {
             total_usage: Default::default(),
             run_turns: 0,
             error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -23668,6 +23730,8 @@ mod plan_mode_tests {
             total_usage: Default::default(),
             run_turns: 0,
             error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -24127,6 +24191,8 @@ mod hook_integration_tests {
             total_usage: Default::default(),
             run_turns: 0,
             error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -25297,6 +25363,8 @@ mod approval_bridge_engine_tests {
             total_usage: Default::default(),
             run_turns: 0,
             error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -26367,6 +26435,8 @@ mod user_model_writeback_tests {
             total_usage: Default::default(),
             run_turns: 0,
             error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
