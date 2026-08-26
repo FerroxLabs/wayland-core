@@ -155,6 +155,33 @@ fn is_credential_key(key: &str) -> bool {
     key == "API_KEY" || key.ends_with("_API_KEY")
 }
 
+/// Non-credential settings explicitly allowed to load from the Wayland `.env`.
+///
+/// A NAMED allowlist, never a relaxed suffix rule: the whole point of
+/// [`is_credential_key`] is that a shared dotenv may also hold `DATABASE_URL`,
+/// `PYTHONPATH`, … and injecting those has real side effects (a `DATABASE_URL`
+/// makes the engine eagerly resolve a Postgres backend at boot and hang if the
+/// DB is unreachable). Each entry here is one the user is actively told to set
+/// and had no way to persist:
+///
+/// * `WAYLAND_WEB_BACKEND` - the privacy escape hatch the keyless web-search
+///   disclosure instructs the user to use (`=off` / `=duckduckgo`). Being
+///   shell-export-only meant following the product's own advice did not
+///   survive closing the terminal.
+/// * `SEARXNG_URL` - the only self-hosted search option, and the only backend
+///   selector that is a URL rather than a key, so the `_API_KEY` rule missed
+///   it. It is also absent from the Config TUI.
+///
+/// Neither is a credential and neither reaches outside the web-search backend
+/// selection, so neither can alter unrelated engine behaviour the way the
+/// excluded entries can.
+const ALLOWED_SETTING_KEYS: [&str; 2] = ["WAYLAND_WEB_BACKEND", "SEARXNG_URL"];
+
+/// Whether `key` should be loaded from the Wayland `.env` at startup.
+fn is_loadable_key(key: &str) -> bool {
+    is_credential_key(key) || ALLOWED_SETTING_KEYS.contains(&key)
+}
+
 /// Load provider credential keys from the Wayland `.env` file
 /// (`~/.wayland/.env`, or `$WAYLAND_HOME/.env`) into the process environment at
 /// startup.
@@ -164,7 +191,8 @@ fn is_credential_key(key: &str) -> bool {
 /// never reached `resolve_api_key` on the next launch — the key only worked if
 /// it was also exported in the shell. This closes that seam.
 ///
-/// Scope: only `*_API_KEY`-shaped keys (see [`is_credential_key`]) are loaded —
+/// Scope: `*_API_KEY`-shaped keys (see [`is_credential_key`]) plus the named
+/// [`ALLOWED_SETTING_KEYS`] are loaded —
 /// arbitrary entries in the shared dotenv (`DATABASE_URL`, `PYTHONPATH`, …) are
 /// ignored so loading the file can't alter unrelated engine behavior.
 ///
@@ -177,7 +205,7 @@ fn is_credential_key(key: &str) -> bool {
 pub fn load_wayland_env_file() {
     let path = crate::config::profile_home().join(".env");
     for (key, value) in read_env_vars(&path) {
-        if is_credential_key(&key) && std::env::var_os(&key).is_none() {
+        if is_loadable_key(&key) && std::env::var_os(&key).is_none() {
             // SAFETY: called once at startup before any threads are spawned
             // (wcore-cli main() invokes this before building the Tokio runtime).
             unsafe { std::env::set_var(&key, value) };
@@ -306,6 +334,37 @@ fn serialise_env(entries: &BTreeMap<String, String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The escape hatch the keyless web-search disclosure instructs the user
+    /// to set could not be persisted anywhere: `WAYLAND_WEB_BACKEND` does not
+    /// end in `_API_KEY`, the loader dropped it, and the Config TUI never
+    /// wrote it. Following the product's own privacy advice therefore lasted
+    /// exactly as long as the terminal it was typed in.
+    #[test]
+    fn the_web_backend_escape_hatches_can_be_persisted() {
+        assert!(is_loadable_key("WAYLAND_WEB_BACKEND"));
+        assert!(is_loadable_key("SEARXNG_URL"));
+        // Control: the credential rule is untouched.
+        assert!(is_loadable_key("TAVILY_API_KEY"));
+        assert!(is_loadable_key("API_KEY"));
+    }
+
+    /// The allowlist is NAMED, not a relaxed suffix rule. Widening the rule
+    /// itself would re-admit the entries the filter exists to keep out - a
+    /// `DATABASE_URL` in the shared dotenv makes the engine eagerly resolve a
+    /// Postgres backend at boot and hang when that DB is unreachable.
+    #[test]
+    fn widening_the_allowlist_did_not_admit_arbitrary_settings() {
+        for key in [
+            "DATABASE_URL",
+            "PYTHONPATH",
+            "WAYLAND_SHARED_SECRET",
+            "SEARXNG_URL_EXTRA",
+            "WAYLAND_WEB_BACKEND_OLD",
+        ] {
+            assert!(!is_loadable_key(key), "{key} must not be injected");
+        }
+    }
+
     use super::*;
     use tempfile::TempDir;
 

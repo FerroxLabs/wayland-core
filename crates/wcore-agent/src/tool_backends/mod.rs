@@ -48,6 +48,7 @@ use wcore_tools::web_fetch::FetchBackend;
 use wcore_tools::web_tools::{CrawlRequest, ExtractRequest, WebBackend, WebOutcome};
 
 // -- Sub-modules: one file per backend (v0.9.0 W1 B0 split). --
+pub mod announcing_web;
 pub mod anthropic_vision;
 pub mod brave_web;
 pub mod chained_web;
@@ -85,6 +86,7 @@ pub mod video_analyze;
 pub mod voice_mode;
 
 // -- Re-exports so existing consumers keep using `wcore_agent::tool_backends::X`. --
+pub use announcing_web::{AnnouncingWebBackend, WebNotice};
 pub use anthropic_vision::AnthropicVisionBackend;
 pub use brave_web::BraveWebBackend;
 pub use chained_web::ChainedWebBackend;
@@ -190,75 +192,106 @@ enum WebBackendChoice {
     Parallel,
     DuckDuckGo,
     Off,
+    /// The variable was set to something nothing recognises. Distinct from
+    /// `Auto`: the user asked for a backend and did not get it, and collapsing
+    /// the two is what made `WAYLAND_WEB_BACKEND=tavily` a silent no-op.
+    Unknown,
 }
+
+/// The values `WAYLAND_WEB_BACKEND` actually accepts. Only these three plus
+/// unset select anything; a key-named value (`tavily`, `brave`, …) is NOT a
+/// selector — those backends are chosen by their key being present.
+const WEB_BACKEND_VALUES: &str = "off | duckduckgo | parallel (or unset for auto)";
 
 fn resolve_backend_choice(raw: Option<&str>) -> WebBackendChoice {
     match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("auto") => WebBackendChoice::Auto,
         Some("off") | Some("none") | Some("disabled") => WebBackendChoice::Off,
         Some("duckduckgo") | Some("ddg") => WebBackendChoice::DuckDuckGo,
         Some("parallel") => WebBackendChoice::Parallel,
-        _ => WebBackendChoice::Auto,
+        _ => WebBackendChoice::Unknown,
     }
+}
+
+/// What to tell the user when they set the variable to a value that does
+/// nothing. Fail-open — an unusable value must not make web search refuse to
+/// run, which would turn a typo into a second dead end — but never silent.
+fn unknown_backend_notice(raw: &str) -> String {
+    format!(
+        "web search: WAYLAND_WEB_BACKEND={raw} is not a recognised value and was ignored \
+         (accepted: {WEB_BACKEND_VALUES}). Backends with keys are selected by setting the key \
+         itself, not this variable: FIRECRAWL_API_KEY / PARALLEL_API_KEY / TAVILY_API_KEY / \
+         EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY."
+    )
 }
 
 /// One-time privacy disclosure for the anonymous Parallel default — emitted
 /// the first time the keyless/`parallel` path is selected, not on every search.
-const PARALLEL_DISCLOSURE: &str = "web search: using Parallel.ai free search (anonymous). Your search queries are sent \
-     to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, \
-     =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / \
-     SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.";
+const PARALLEL_DISCLOSURE: &str = "web search: no search key is set, so your search queries are sent to the free \
+     anonymous search at parallel.ai. To stop that: WAYLAND_WEB_BACKEND=off disables web \
+     search entirely, and WAYLAND_WEB_BACKEND=duckduckgo keeps queries on DuckDuckGo - but \
+     that endpoint is a free HTML scrape which rate-limits by IP after roughly two queries, \
+     with no fallback behind it, so it is not a durable answer. The durable one: get a free \
+     Tavily API key at https://app.tavily.com (no credit card, 1,000 searches/month) and set \
+     TAVILY_API_KEY. FIRECRAWL_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY are \
+     honoured too.";
 
 /// Marker recording that the disclosure has been shown to this user once.
 const PARALLEL_DISCLOSURE_MARKER: &str = ".parallel-disclosure-shown";
 
-fn disclose_parallel_once() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // The structured record always happens; it is what a support bundle
-        // reads back.
-        tracing::info!("{PARALLEL_DISCLOSURE}");
+/// The keyless privacy disclosure, as a pending notice - or `None` if this
+/// user has already been shown it.
+///
+/// gh#1080 established that the record alone is not a disclosure. What it got
+/// wrong was the sink: an `eprintln!` here runs inside `Bootstrap::build()`,
+/// and `main.rs` enters the TUI alt-screen BEFORE calling `build()`, so in the
+/// default mode the notice was painted onto a buffer the splash overwrote and
+/// `LeaveAlternateScreen` then discarded. Worse, the marker was written next
+/// to that unseen `eprintln!`, so the first (invisible) launch spent the
+/// once-per-user budget and suppressed every later headless run where stderr
+/// would have worked.
+///
+/// So this only PREPARES the notice. Delivery - and the marker write that
+/// records it - happens in [`AnnouncingWebBackend`], on the first search,
+/// where every mode renders it. Every failure here degrades to showing the
+/// notice rather than swallowing it: an unreadable config dir must never be
+/// the reason a disclosure is skipped.
+fn parallel_disclosure_notice() -> Option<WebNotice> {
+    // The structured record always happens; it is what a support bundle reads
+    // back, and it is independent of whether the user has seen the notice.
+    tracing::info!("{PARALLEL_DISCLOSURE}");
 
-        // gh#1080. The record alone is not a disclosure. With `RUST_LOG` unset
-        // the tracing layer routes INFO to `$WAYLAND_HOME/logs/wayland-core.log`
-        // and sends ONLY errors to stderr, so telling the user their search
-        // queries leave for a third party had been going somewhere they have no
-        // reason to look. This is the keyless DEFAULT backend, selected without
-        // the user choosing it, so the notice has to reach the terminal.
-        //
-        // Shown once PER USER, not once per process: this is a CLI people run
-        // constantly, and a privacy notice repeated on every invocation is
-        // noise that gets filtered out — which is the same failure as not
-        // showing it. A marker file in the config directory is the state.
-        //
-        // Every failure here degrades to showing the notice rather than
-        // swallowing it: an unwritable or unreadable config dir must never be
-        // the reason a disclosure is skipped.
-        let marker = wcore_config::config::wayland_config_dir().join(PARALLEL_DISCLOSURE_MARKER);
-        if marker.exists() {
-            return;
-        }
-        eprintln!("{PARALLEL_DISCLOSURE}");
-        if let Some(parent) = marker.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&marker, b"1");
-    });
+    let marker = wcore_config::config::wayland_config_dir().join(PARALLEL_DISCLOSURE_MARKER);
+    if marker.exists() {
+        return None;
+    }
+    Some(WebNotice {
+        text: PARALLEL_DISCLOSURE.to_string(),
+        marker_on_delivery: Some(marker),
+    })
 }
 
 /// Pick the active `WebBackend`. Explicit `WAYLAND_WEB_BACKEND` wins; otherwise
 /// the first configured key (the provider preference order) is used. Every selected
-/// primary is wrapped so it falls back to DuckDuckGo on failure — DDG is the
-/// floor for all tiers except an explicit `off`.
+/// primary is wrapped so it falls back to DuckDuckGo on failure - DDG is the
+/// floor for all tiers except an explicit `off` and an explicit `duckduckgo`
+/// (which IS the floor, and is left unchained deliberately: a user who asked to
+/// keep queries on DuckDuckGo must not have them silently sent elsewhere).
 ///
 /// Resolution order (first match wins):
 /// * `WAYLAND_WEB_BACKEND` = `off` | `duckduckgo` | `parallel` (explicit override)
-/// * `FIRECRAWL_API_KEY` → Firecrawl
-/// * `PARALLEL_API_KEY` → Parallel (keyed REST)
-/// * `TAVILY_API_KEY` → Tavily
-/// * `EXA_API_KEY` → Exa
-/// * `SEARXNG_URL` → SearXNG (public instance; URL-gated)
-/// * `BRAVE_SEARCH_API_KEY` → Brave
-/// * default → Parallel free MCP → DuckDuckGo
+/// * `FIRECRAWL_API_KEY` -> Firecrawl
+/// * `PARALLEL_API_KEY` -> Parallel (keyed REST)
+/// * `TAVILY_API_KEY` -> Tavily
+/// * `EXA_API_KEY` -> Exa
+/// * `SEARXNG_URL` -> SearXNG (public instance; URL-gated)
+/// * `BRAVE_SEARCH_API_KEY` -> Brave
+/// * default -> Parallel free MCP -> DuckDuckGo
+///
+/// Anything this function needs to TELL the user about the choice it made is
+/// returned as a [`WebNotice`] on the wrapper rather than printed here: this
+/// runs inside `Bootstrap::build()`, after the TUI alt-screen is already up,
+/// so nothing written to stdio at this point survives to be read.
 pub fn build_web_search_backend() -> Arc<dyn WebBackend> {
     fn ddg() -> Arc<dyn WebBackend> {
         Arc::new(DuckDuckGoWebBackend::new())
@@ -267,8 +300,11 @@ pub fn build_web_search_backend() -> Arc<dyn WebBackend> {
         Arc::new(ChainedWebBackend::new(primary, ddg()))
     }
 
+    let raw = std::env::var("WAYLAND_WEB_BACKEND").ok();
+    let mut notices: Vec<WebNotice> = Vec::new();
+
     // A. Explicit override always wins.
-    match resolve_backend_choice(std::env::var("WAYLAND_WEB_BACKEND").ok().as_deref()) {
+    match resolve_backend_choice(raw.as_deref()) {
         WebBackendChoice::Off => {
             tracing::info!("web search: disabled (WAYLAND_WEB_BACKEND=off)");
             return Arc::new(DisabledWebBackend);
@@ -278,41 +314,60 @@ pub fn build_web_search_backend() -> Arc<dyn WebBackend> {
             return ddg();
         }
         WebBackendChoice::Parallel => {
-            disclose_parallel_once();
-            return chain(Arc::new(ParallelWebBackend::free()));
+            notices.extend(parallel_disclosure_notice());
+            return AnnouncingWebBackend::wrap(
+                chain(Arc::new(ParallelWebBackend::free())),
+                notices,
+            );
+        }
+        WebBackendChoice::Unknown => {
+            // Fail-open onto the ladder, but say so. A value that selects
+            // nothing used to be indistinguishable from unset, so a user who
+            // typed `tavily` got a different backend than they asked for and
+            // was never told - the same dead end as a search that silently
+            // returns nothing.
+            let text = unknown_backend_notice(raw.as_deref().unwrap_or_default());
+            tracing::warn!("{text}");
+            notices.push(WebNotice {
+                text,
+                marker_on_delivery: None,
+            });
         }
         WebBackendChoice::Auto => {}
     }
 
-    // 1..6 — the provider preference order, first key present wins; each floors on DDG.
+    // 1..6 - the provider preference order, first key present wins; each floors on DDG.
     if let Some(key) = read_env_key("FIRECRAWL_API_KEY") {
         tracing::info!("web search: Firecrawl (FIRECRAWL_API_KEY found)");
-        return chain(Arc::new(FirecrawlWebBackend::new(key)));
+        return AnnouncingWebBackend::wrap(chain(Arc::new(FirecrawlWebBackend::new(key))), notices);
     }
     if let Some(key) = read_env_key("PARALLEL_API_KEY") {
         tracing::info!("web search: Parallel keyed (PARALLEL_API_KEY found)");
-        return chain(Arc::new(ParallelWebBackend::keyed(key)));
+        return AnnouncingWebBackend::wrap(
+            chain(Arc::new(ParallelWebBackend::keyed(key))),
+            notices,
+        );
     }
     if let Some(key) = read_env_key("TAVILY_API_KEY") {
         tracing::info!("web search: Tavily (TAVILY_API_KEY found)");
-        return chain(Arc::new(TavilyWebBackend::new(key)));
+        return AnnouncingWebBackend::wrap(chain(Arc::new(TavilyWebBackend::new(key))), notices);
     }
     if let Some(key) = read_env_key("EXA_API_KEY") {
         tracing::info!("web search: Exa (EXA_API_KEY found)");
-        return chain(Arc::new(ExaWebBackend::new(key)));
+        return AnnouncingWebBackend::wrap(chain(Arc::new(ExaWebBackend::new(key))), notices);
     }
     if let Some(url) = read_env_key("SEARXNG_URL") {
         tracing::info!("web search: SearXNG (SEARXNG_URL found)");
-        return chain(Arc::new(SearxngWebBackend::new(url)));
+        return AnnouncingWebBackend::wrap(chain(Arc::new(SearxngWebBackend::new(url))), notices);
     }
     if let Some(key) = read_env_key("BRAVE_SEARCH_API_KEY") {
         tracing::info!("web search: Brave (BRAVE_SEARCH_API_KEY found)");
-        return chain(Arc::new(BraveWebBackend::new(key)));
+        return AnnouncingWebBackend::wrap(chain(Arc::new(BraveWebBackend::new(key))), notices);
     }
 
-    // 7 — keyless default: Parallel free → DuckDuckGo, with privacy disclosure.
-    disclose_parallel_once();
-    chain(Arc::new(ParallelWebBackend::free()))
+    // 7 - keyless default: Parallel free -> DuckDuckGo, with privacy disclosure.
+    notices.extend(parallel_disclosure_notice());
+    AnnouncingWebBackend::wrap(chain(Arc::new(ParallelWebBackend::free())), notices)
 }
 
 /// `WebBackend` returned when `WAYLAND_WEB_BACKEND=off` — every call fails
@@ -1028,11 +1083,16 @@ mod tests {
             resolve_backend_choice(Some("parallel")),
             WebBackendChoice::Parallel
         );
+        // A value nothing recognises is NOT the same as unset. Collapsing the
+        // two is the defect: `WAYLAND_WEB_BACKEND=tavily` selected a different
+        // backend than the user asked for and said nothing about it.
         assert_eq!(
             resolve_backend_choice(Some("garbage")),
-            WebBackendChoice::Auto
+            WebBackendChoice::Unknown
         );
         assert_eq!(resolve_backend_choice(None), WebBackendChoice::Auto);
+        assert_eq!(resolve_backend_choice(Some("")), WebBackendChoice::Auto);
+        assert_eq!(resolve_backend_choice(Some("auto")), WebBackendChoice::Auto);
     }
 
     #[tokio::test]
@@ -1313,5 +1373,51 @@ mod tests {
             }
             other => panic!("expected NotionOutcome::Err for SSRF redirect, got: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod web_dead_end_tests {
+    use super::*;
+
+    /// RED ARM. `_ => Auto` silently discards five of the eight backend names.
+    /// A user who types the value the product's own disclosure text taught them
+    /// gets no error, no warning, and a different backend than they asked for.
+    #[test]
+    fn an_unrecognized_backend_value_is_not_silently_discarded() {
+        for raw in ["tavily", "brave", "exa", "firecrawl", "searxng", "typo"] {
+            assert_ne!(
+                resolve_backend_choice(Some(raw)),
+                WebBackendChoice::Auto,
+                "`WAYLAND_WEB_BACKEND={raw}` must not resolve to the same thing as unset"
+            );
+        }
+        // Control: unset and the blessed values still resolve as before.
+        assert_eq!(resolve_backend_choice(None), WebBackendChoice::Auto);
+        assert_eq!(resolve_backend_choice(Some("off")), WebBackendChoice::Off);
+        assert_eq!(
+            resolve_backend_choice(Some("duckduckgo")),
+            WebBackendChoice::DuckDuckGo
+        );
+    }
+
+    /// RED ARM. The disclosure offers `WAYLAND_WEB_BACKEND=duckduckgo` as a
+    /// plain privacy alternative. Measured: that path is UNCHAINED and the free
+    /// HTML endpoint locks an IP out after ~two queries for minutes, so the
+    /// advice lands the user on the one configuration where failure is
+    /// unrecoverable. Whatever it recommends, it must not recommend it silently.
+    #[test]
+    fn the_disclosure_does_not_recommend_duckduckgo_without_its_limit() {
+        let d = PARALLEL_DISCLOSURE.to_ascii_lowercase();
+        assert!(d.contains("duckduckgo"), "control: the text names DDG");
+        assert!(
+            d.contains("rate-limit") || d.contains("rate limit"),
+            "recommending the unchained scraped endpoint without saying it \
+             rate-limits by IP is the defect: {PARALLEL_DISCLOSURE}"
+        );
+        assert!(
+            d.contains("app.tavily.com"),
+            "the disclosure must name the concrete no-card remedy: {PARALLEL_DISCLOSURE}"
+        );
     }
 }

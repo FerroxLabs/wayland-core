@@ -537,15 +537,39 @@ so search never hard-fails — except when explicitly disabled.
 | default | *(no keys)* | **Parallel free → DDG** |
 
 `WAYLAND_WEB_BACKEND` is an explicit override that wins over key presence;
-`auto` (or unset / unrecognized) runs the ladder in the table order
+`auto` (or unset) runs the ladder in the table order
 (firecrawl → parallel → tavily → exa → searxng → brave → ddg), so a configured
 key always wins over the keyless default and DuckDuckGo is the final fallback.
+
+It accepts **only** `off`, `duckduckgo`, `parallel` and `auto`. The keyed
+backends are selected by setting their key, not by naming them here — so
+`WAYLAND_WEB_BACKEND=tavily` is not a selector. Any other value is ignored (the
+ladder still runs) and the reason is reported on the first search's tool card,
+rather than being discarded silently.
+
+Both `WAYLAND_WEB_BACKEND` and `SEARXNG_URL` can be persisted in
+`~/.wayland/.env` alongside the API keys.
 
 **Default (no config):** the engine uses Parallel.ai's free, anonymous Search
 MCP (`https://search.parallel.ai/mcp`) — ranked URLs with query-relevant
 excerpts, no API key. **Privacy:** your search queries are sent to parallel.ai.
-A one-time log notes this on first use; set `WAYLAND_WEB_BACKEND=duckduckgo` to
-keep queries on DuckDuckGo, or `=off` to disable web search entirely.
+A one-time notice says so on the first search's tool card (once per user), and
+the same text is in the log. Set `WAYLAND_WEB_BACKEND=off` to disable web
+search entirely.
+
+`WAYLAND_WEB_BACKEND=duckduckgo` also keeps queries off parallel.ai, but read
+the caveat below before choosing it as a durable setting.
+
+**DuckDuckGo is a floor, not a backend to run on.** It is a scrape of the free
+`html.duckduckgo.com` endpoint, which rate-limits **by IP**: measured
+2026-08-26, it serves roughly two queries and then returns a bot-challenge page
+for minutes (still refusing four minutes later). On a shared egress IP (CI, an
+office NAT, a VPN exit) the budget may be spent before your first query. It is
+also the one selection with nothing behind it — `WAYLAND_WEB_BACKEND=duckduckgo`
+is deliberately unchained, because a user who asked to keep queries on
+DuckDuckGo must not have them quietly sent elsewhere. For search that keeps
+working, set a key: a free Tavily key needs no credit card
+(<https://app.tavily.com>, 1,000 searches/month) — set `TAVILY_API_KEY`.
 
 **SearXNG** is gated by `SEARXNG_URL` (your own or a public instance — the
 engine ships the connector, not the instance). The instance must be **publicly

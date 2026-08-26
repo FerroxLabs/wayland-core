@@ -1564,10 +1564,11 @@ impl AgentBootstrap {
         }
         // `web` tool — wired to a real search backend so the model
         // gets actual results, not a "no backend configured" 404 wall.
-        // [`build_web_search_backend`] picks the best available:
-        //   - TAVILY_API_KEY → Tavily   (paid; best LLM-tuned)
-        //   - BRAVE_SEARCH_API_KEY → Brave (free tier 2k/mo)
-        //   - default → DuckDuckGo HTML scrape (free, no key)
+        // [`build_web_search_backend`] owns the whole choice; the ladder it
+        // walks is documented there and is SEVEN entries deep, not the three
+        // this comment used to claim (it named Tavily → Brave → DuckDuckGo
+        // and had been wrong since the ladder grew). Do not restate it here:
+        // a second copy is a second thing to go stale.
         // Extract/crawl operations still error out cleanly on the free
         // backend with a "set FIRECRAWL_API_KEY" message — the model
         // can fall back to `WebFetch` for single-URL reads.
