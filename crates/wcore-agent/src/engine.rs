@@ -3753,6 +3753,57 @@ impl<'a> UserTurnInput<'a> {
     }
 }
 
+/// Why a journaled turn is running without crash-replay protection.
+///
+/// Two conditions, one notice. They share every word that describes what
+/// is lost and what is still true, because that half is identical and a
+/// user comparing two nearly-identical paragraphs learns nothing; they
+/// differ only in the clause that names the condition and the clause that
+/// names the way out, because those are the only parts an operator can
+/// act on and acting on the wrong one wastes their time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayProtectionLoss {
+    /// The host has nowhere to keep a sealing key.
+    NoSecureStore,
+    /// The host has somewhere to keep it, and that somewhere did not
+    /// answer inside the budget the pre-provider path imposes on itself.
+    KeyStoreTimedOut,
+}
+
+impl ReplayProtectionLoss {
+    fn condition(self) -> &'static str {
+        match self {
+            Self::NoSecureStore => {
+                "this host has no usable OS keyring and no unlocked credentials vault"
+            }
+            Self::KeyStoreTimedOut => "this profile's credential store did not answer in time",
+        }
+    }
+
+    fn remedy(self) -> &'static str {
+        match self {
+            Self::NoSecureStore => {
+                "Set WAYLAND_VAULT_PASSPHRASE_FD or WAYLAND_VAULT_PASSPHRASE to restore \
+                 replay, or [session] require_durability = true to refuse to run this way \
+                 at all."
+            }
+            Self::KeyStoreTimedOut => {
+                "Unlock or repair the OS keyring for this profile to restore replay — a \
+                 store that answers later is picked up on a later turn without a restart \
+                 — or set [session] require_durability = true to refuse to run this way \
+                 at all."
+            }
+        }
+    }
+
+    fn log_cause(self) -> &'static str {
+        match self {
+            Self::NoSecureStore => "no-secure-store",
+            Self::KeyStoreTimedOut => "key-store-timed-out",
+        }
+    }
+}
+
 pub struct AgentEngine {
     provider: Arc<dyn LlmProvider>,
     /// Immutable outbound authority for this session. Runtime-lazy clients
@@ -8347,12 +8398,38 @@ impl AgentEngine {
         // both are decisions or mistakes with a specific fix, both must keep
         // failing loudly, and neither may be quietly reinterpreted as "this
         // host is just like a headless server".
+        //
+        // A SECOND cause degrades, and it is a different kind of thing from
+        // the first. `KeyStoreTimedOut` is not the store answering — it is
+        // the store not answering, inside a budget this path now imposes on
+        // itself (`KEY_STORE_ACQUIRE_BUDGET`). It is the one verdict here
+        // that `Config::resolve` cannot have screened at startup, because it
+        // is about a wait that had not happened yet, so unlike every other
+        // arm it must consult `require_durability` itself: an operator who
+        // demanded durability is refused, and everyone else is told and runs.
         match self.recovery_request_protection.preflight(&self.config) {
             Ok(()) => {}
             Err(
                 crate::recovery_confidential::RecoveryConfidentialError::NoSecureBackendAvailable,
             ) => {
-                self.announce_replay_protection_unavailable_for_this_turn();
+                self.announce_replay_protection_unavailable_for_this_turn(
+                    ReplayProtectionLoss::NoSecureStore,
+                );
+            }
+            Err(crate::recovery_confidential::RecoveryConfidentialError::KeyStoreTimedOut) => {
+                if self.config.session.require_durability {
+                    return Err(AgentError::SessionAuthority(
+                        "[session] require_durability = true, but this profile's credential \
+                         store did not answer in time, so this turn's provider request cannot \
+                         be sealed for crash recovery. Unlock or repair the OS keyring for this \
+                         profile and send the message again, or set [session] \
+                         require_durability = false to run turns that cannot be replayed."
+                            .to_string(),
+                    ));
+                }
+                self.announce_replay_protection_unavailable_for_this_turn(
+                    ReplayProtectionLoss::KeyStoreTimedOut,
+                );
             }
             Err(error) => return Err(AgentError::SessionAuthority(error.to_string())),
         }
@@ -11097,6 +11174,18 @@ impl AgentEngine {
             Arc::new(crate::recovery_confidential::RecoveryRequestProtector::with_test_key(bytes));
     }
 
+    /// Point this engine's request protection at a credential store that
+    /// never answers — the macOS keychain wedge that
+    /// `KEY_STORE_ACQUIRE_BUDGET` exists to bound, reproduced on a host whose
+    /// real store answers (or fails) immediately.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn use_wedged_recovery_key_store(&mut self) {
+        self.recovery_request_protection = Arc::new(
+            crate::recovery_confidential::RecoveryRequestProtector::with_wedged_key_store_for_test(
+            ),
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn commit_provider_recovery_checkpoint(
         &self,
@@ -11461,7 +11550,7 @@ impl AgentEngine {
     /// host still gets it every turn (asserted by `f14_sigkill_recovery`); a
     /// human gets it once, because they were already told at config
     /// resolution and the condition cannot change mid-process.
-    fn announce_replay_protection_unavailable_for_this_turn(&self) {
+    fn announce_replay_protection_unavailable_for_this_turn(&self, cause: ReplayProtectionLoss) {
         tracing::warn!(
             target: "wcore_agent::session",
             session = %self
@@ -11469,20 +11558,19 @@ impl AgentEngine {
                 .as_ref()
                 .map(|s| s.id.as_str())
                 .unwrap_or("<none>"),
-            "this turn cannot be replayed if it is interrupted: the host has no usable OS \
-             keyring and no unlocked credentials vault, so the exact provider request is not \
-             sealed. The turn IS journaled"
+            cause = cause.log_cause(),
+            "this turn cannot be replayed if it is interrupted: the exact provider request is \
+             not sealed. The turn IS journaled"
         );
-        self.output.emit_durability_degraded(
-            "crash replay protection is OFF for this run: this host has no usable OS \
-             keyring and no unlocked credentials vault, so the exact provider request \
-             cannot be sealed. This turn IS being recorded — the journal keeps its \
+        self.output.emit_durability_degraded(&format!(
+            "crash replay protection is OFF for this run: {}, so the exact provider \
+             request cannot be sealed. This turn IS being recorded — the journal keeps its \
              provider, tool, approval and delivery boundaries — but if it is interrupted \
              mid-dispatch it will not resume itself; you will be asked to resume, \
-             reconcile or cancel it. Set WAYLAND_VAULT_PASSPHRASE_FD or \
-             WAYLAND_VAULT_PASSPHRASE to restore replay, or \
-             [session] require_durability = true to refuse to run this way at all.",
-        );
+             reconcile or cancel it. {}",
+            cause.condition(),
+            cause.remedy(),
+        ));
     }
 
     /// Legacy loop body. `journal_turn_id` is present only for an engine that
@@ -28142,6 +28230,132 @@ mod audit_2026_05_22_tests {
         );
         // ...and it is still genuinely retried, not failed fast.
         assert!(sends > 1, "a 529 must be retried at all");
+    }
+
+    /// A journaled engine whose credential store never answers.
+    ///
+    /// The tempdir is returned because dropping it deletes the session the
+    /// journal is writing to.
+    ///
+    /// The mock server is the fixture's physical-attempt endpoint: a journaled
+    /// turn only completes when the provider's PHYSICAL attempt is durably
+    /// accepted, which needs a real 2xx. Returned so it outlives the turn, as
+    /// is the tempdir the journal writes into.
+    async fn journaled_engine_with_a_wedged_key_store() -> (
+        super::AgentEngine,
+        crate::test_utils::TestSinkHandle,
+        tempfile::TempDir,
+        MockServer,
+    ) {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("anthropic", "m-1", "/tmp", Some("deadbeefdead"))
+            .unwrap();
+        let (mut engine, events) = engine_and_events(Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("answered".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        ));
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
+        engine.use_wedged_recovery_key_store();
+        (engine, events, dir, server)
+    }
+
+    fn replay_protection_notices(handle: &crate::test_utils::TestSinkHandle) -> Vec<String> {
+        info_messages(handle)
+            .into_iter()
+            .filter(|m| m.contains("crash replay protection is OFF"))
+            .collect()
+    }
+
+    /// Nothing on the pre-provider path may hold a turn open without a bound
+    /// and without telling the user.
+    ///
+    /// This is the WIRING grade for the seal: a real journaled turn, the real
+    /// `RecoveryRequestProtector`, and a credential store that never answers.
+    /// Before the bound existed this turn produced nothing at all — no
+    /// provider dispatch, no notice, no error — for as long as anyone was
+    /// willing to wait.
+    ///
+    /// Three separate things are asserted because dropping any one of them
+    /// leaves a fix that is not a fix: the turn must REACH the provider, it
+    /// must SAY what it gave up, and it must do both inside the budget.
+    /// Multi-threaded on purpose — the store call is synchronous, so on a
+    /// single-threaded runtime it takes the whole runtime with it and even
+    /// this test's own deadline could not fire.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_wedged_key_store_still_lets_the_turn_reach_the_provider_and_says_so() {
+        let (mut engine, events, _dir, _server) = journaled_engine_with_a_wedged_key_store().await;
+
+        let started = std::time::Instant::now();
+        let result = engine.run("say something", "m-1").await;
+        let took = started.elapsed();
+
+        assert!(
+            result.is_ok(),
+            "a credential store that never answers must degrade the turn, not fail it: \
+             {result:?}"
+        );
+        assert_eq!(
+            result.unwrap().text.trim(),
+            "answered",
+            "the turn must actually have reached the provider"
+        );
+        assert!(
+            took < crate::recovery_confidential::KEY_STORE_ACQUIRE_BUDGET * 4,
+            "the turn must clear the wedged store at its budget, not wait on it: took {took:?}"
+        );
+
+        let notices = replay_protection_notices(&events);
+        assert_eq!(
+            notices.len(),
+            1,
+            "the user must be told exactly once that this turn is unreplayable: {notices:?}"
+        );
+        assert!(
+            notices[0].contains("did not answer in time"),
+            "the notice must name the condition an operator can act on, got {:?}",
+            notices[0]
+        );
+    }
+
+    /// An operator who demanded durability is refused, not quietly downgraded.
+    ///
+    /// This arm exists only because a seal timeout is the one verdict on this
+    /// path that `Config::resolve` cannot have screened at startup — it is
+    /// about a wait that had not happened yet. Without the check the timeout
+    /// would silently deliver exactly the posture `require_durability = true`
+    /// was set to forbid.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn require_durability_refuses_a_turn_whose_key_store_timed_out() {
+        let (mut engine, events, _dir, _server) = journaled_engine_with_a_wedged_key_store().await;
+        engine.config.session.require_durability = true;
+
+        let result = engine.run("say something", "m-1").await;
+
+        match result {
+            Err(super::AgentError::SessionAuthority(message)) => {
+                assert!(
+                    message.contains("require_durability"),
+                    "the refusal must name the setting that caused it, got {message:?}"
+                );
+                assert!(
+                    message.contains("did not answer in time"),
+                    "the refusal must name the condition, got {message:?}"
+                );
+            }
+            other => panic!("require_durability must refuse an unsealable turn, got {other:?}"),
+        }
+        assert!(
+            replay_protection_notices(&events).is_empty(),
+            "a refused turn must not also announce a downgrade it did not take"
+        );
     }
 
     /// An engine whose emitted events can be read back.
