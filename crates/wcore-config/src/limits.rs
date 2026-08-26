@@ -248,6 +248,21 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
 /// the gap between this table and the vendor headline figure is usually the
 /// deliberate safety margin, not an error.
 ///
+/// # Adding an entry here REVOKES the omitted-max-tokens contract
+///
+/// `wcore_agent::engine::should_omit_max_tokens` (#112) omits the wire
+/// `max_tokens` field ONLY while a model is UNKNOWN to this table, letting the
+/// SERVED model's natural output ceiling apply on omit-safe providers (gemini /
+/// openrouter / flux-router presets). The moment a model gains an arm here, its
+/// turns start sending OUR number instead. So an output figure that is merely
+/// "safely low" is not free: on those providers it REPLACES a natural ceiling
+/// that may be far higher, and an undersized turn ends visibly at
+/// `finish_reason: length` with no auto-continue. That is why the output column
+/// tracks the modal NON-DEGENERATE catalogue figure rather than the single
+/// lowest row -- a lone outlier (one `alibaba-cn` row reporting 16,384 for
+/// `kimi-k2.6` against 40+ rows at 65,536 and above) is noise, and treating it
+/// as the floor would truncate real work.
+///
 /// # What is deliberately NOT here
 ///
 /// Open-weights models whose served window is chosen by the HOST, not the
@@ -301,26 +316,36 @@ const CATALOGUE_CEILINGS: &[(&str, u32, u32)] = &[
     ("qwen3.5-flash", 64_000, 1_000_000),
     // -- Moonshot Kimi ------------------------------------------------------
     // `moonshotai` reports K3 as 1,048,576 / 131,072; eight independent
-    // providers report 1,000,000, so 1,000,000 is the floor. For the K2.x line
-    // `moonshotai` reports output == context (degenerate), so output falls to
-    // the lowest real reseller figure: `alibaba-cn` 16,384.
+    // providers report 1,000,000, so 1,000,000 is the floor, and 131,072 is
+    // the dominant output reading (38 of 63 rows) -> 128,000.
+    //
+    // For the K2.x line `moonshotai` reports output == context (degenerate),
+    // so output comes from the modal NON-DEGENERATE reading instead: 32,768
+    // (8 rows for k2.5, 4 for k2.7-code), not the lone 16,384 outlier -- see
+    // the omitted-max-tokens note above for why the lowest row is the wrong
+    // floor here.
     ("kimi-k3", 128_000, 1_000_000),
-    ("kimi-k2.7", 16_384, 256_000),
-    ("kimi-k2.6", 16_384, 256_000),
-    ("kimi-k2.5", 16_384, 256_000),
+    ("kimi-k2.7", 32_768, 256_000),
+    ("kimi-k2.6", 32_768, 256_000),
+    ("kimi-k2.5", 32_768, 256_000),
     // -- Mistral ------------------------------------------------------------
     // Version here is a DATE, not a semver, and the old dated ids are much
     // smaller than the `-latest` alias they share a prefix with:
     // `mistral-large-2411` is 131,072 where `mistral-large-latest` is 262,144.
-    // Every dated arm therefore precedes its family catch-all. Mistral only
-    // reports non-degenerate output figures of 16,384 across the whole line
-    // (4,096 for codestral), so those are used throughout.
+    // Every dated arm therefore precedes its family catch-all.
+    //
+    // Output splits the same way. The OLD dated ids and magistral state a real
+    // 16,384 at the vendor; the modern line (`-latest`, 2512/2603/2604) is
+    // degenerate at the vendor and its non-degenerate readings elsewhere are
+    // 209,715-262,144, so 65,536 is the conservative figure there. Using
+    // 16,384 across the whole family would have cut modern Mistral output by
+    // 16x on omit-safe providers -- see the note above.
     ("mistral-large-2411", 16_384, 131_072),
-    ("mistral-large", 16_384, 262_144),
-    ("mistral-medium-2505", 16_384, 131_072),
-    ("mistral-medium", 16_384, 262_144),
+    ("mistral-large", 65_536, 262_144),
+    ("mistral-medium-2505", 65_536, 131_072),
+    ("mistral-medium", 65_536, 262_144),
     ("mistral-small-2506", 16_384, 128_000),
-    ("mistral-small", 16_384, 256_000),
+    ("mistral-small", 65_536, 256_000),
     ("magistral", 16_384, 128_000),
     ("codestral", 4_096, 256_000),
     ("devstral-small-2505", 16_384, 128_000),
@@ -328,7 +353,7 @@ const CATALOGUE_CEILINGS: &[(&str, u32, u32)] = &[
     ("devstral-medium-2507", 16_384, 128_000),
     // Catch-all at 256,000, not the 262,144 that `devstral-latest` reports:
     // `labs-devstral-small-2512` lands here and is 256,000.
-    ("devstral", 16_384, 256_000),
+    ("devstral", 65_536, 256_000),
     // -- Meta Llama ---------------------------------------------------------
     // `llama` (llama.com) reports 128,000 / 4,096 for every id, and 4,096 is
     // the point: with no entry these fall to the UNKNOWN_CAP 8,192 output
@@ -753,19 +778,25 @@ mod tests {
         assert_eq!(
             model_output_ceiling("mistral", "mistral-large-2411"),
             Some((16_384, 131_072)),
-            "the 2411 large is 131k — it must NOT inherit mistral-large-latest's 262k"
+            "the 2411 large is 131k/16k — it must NOT inherit \
+             mistral-large-latest's 262k window or its larger output"
         );
         assert_eq!(
             model_output_ceiling("mistral", "mistral-large-latest"),
-            Some((16_384, 262_144))
+            Some((65_536, 262_144))
         );
         assert_eq!(
             model_output_ceiling("mistral", "mistral-medium-2505"),
-            Some((16_384, 131_072))
+            Some((65_536, 131_072))
         );
         assert_eq!(
             model_output_ceiling("mistral", "mistral-small-2506"),
-            Some((16_384, 128_000))
+            Some((16_384, 128_000)),
+            "the 2506 small states a real 16,384 output at the vendor"
+        );
+        assert_eq!(
+            model_output_ceiling("mistral", "mistral-small-2603"),
+            Some((65_536, 256_000))
         );
 
         // qwen3.6-max is a 240k model sitting between two 1M siblings.
@@ -851,10 +882,10 @@ mod tests {
         for id in ["kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5"] {
             assert_eq!(
                 model_output_ceiling("moonshotai", id),
-                Some((16_384, 256_000)),
-                "{id} must report the K2.x 256k window and the conservative \
-                 16,384 output (moonshotai reports output == context, which is \
-                 models.dev for `unknown`, not a real ceiling)"
+                Some((32_768, 256_000)),
+                "{id} must report the K2.x 256k window and the modal \
+                 non-degenerate 32,768 output (moonshotai reports output == \
+                 context, which is models.dev for `unknown`, not a ceiling)"
             );
         }
         assert_eq!(

@@ -266,9 +266,11 @@ impl ResilientProvider {
         let candidates = fallbacks
             .into_iter()
             .map(|(label, pricing_provider, model, provider)| {
+                // Same composed resolver as bootstrap's typed constructor —
+                // this legacy-tuple path is the SECOND production site and had
+                // the identical Flux-alias gap.
                 let context_window =
-                    wcore_config::limits::model_output_ceiling(&pricing_provider, &model)
-                        .map(|(_, window)| u64::from(window));
+                    wcore_config::context_window::static_context_window(&pricing_provider, &model);
                 let metadata = FailoverCandidateMetadata {
                     label,
                     provider: pricing_provider,
@@ -877,6 +879,63 @@ mod tests {
         fn report_failover(&self, receipt: &FailoverReceipt, _: Option<&str>) {
             self.receipts.lock().push(receipt.clone());
         }
+    }
+
+    /// WIRING grade, site 2 of 2. `new_with_fallback_identities` is the OTHER
+    /// production constructor of `CandidateCapabilities` (bootstrap's
+    /// `build_fallback_providers` is the first), and it had the same gap: it
+    /// derived `context_window` from `model_output_ceiling` alone, which
+    /// returns `None` for a Flux tier alias by design.
+    ///
+    /// Counting the construction sites is the point. Patching only the one that
+    /// was reported would have left this one silently wrong.
+    #[test]
+    fn flux_alias_via_the_legacy_identity_constructor_gets_the_core4_floor() {
+        use std::sync::Arc;
+
+        let provider = ResilientProvider::new_with_fallback_identities(
+            "primary",
+            Arc::new(RefusedProvider),
+            vec![
+                (
+                    "flux-auto".into(),
+                    "flux-router".into(),
+                    "flux-auto".into(),
+                    Arc::new(RefusedProvider) as Arc<dyn LlmProvider>,
+                ),
+                (
+                    "gpt-4o".into(),
+                    "openai".into(),
+                    "gpt-4o".into(),
+                    Arc::new(RefusedProvider) as Arc<dyn LlmProvider>,
+                ),
+                (
+                    "mystery".into(),
+                    "openai".into(),
+                    "totally-unknown-model".into(),
+                    Arc::new(RefusedProvider) as Arc<dyn LlmProvider>,
+                ),
+            ],
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(1),
+                cooldown: Duration::from_secs(1),
+            },
+            Arc::new(NoOpCircuitReporter),
+        );
+
+        let windows: Vec<Option<u64>> = provider
+            .fallbacks
+            .iter()
+            .map(|f| f.metadata.capabilities.context_window)
+            .collect();
+        assert_eq!(
+            windows,
+            vec![Some(128_000), Some(128_000), None],
+            "flux-auto must carry the CORE-4 floor; gpt-4o keeps its own real \
+             128k window; an unknown model must still be None (the floor is \
+             for the four tier aliases only, never fabricated generally)"
+        );
     }
 
     fn candidate(

@@ -4721,11 +4721,15 @@ fn build_fallback_providers(
                 tools: fallback.compat.supports_tools(),
                 vision: fallback.compat.supports_vision(),
                 structured_output: fallback.compat.supports_structured_output(),
-                context_window: wcore_config::limits::model_output_ceiling(
+                // MUST be the composed resolver, not `model_output_ceiling`
+                // alone: the latter returns None for the four Flux tier
+                // aliases by design, which advertised a Flux fallback with no
+                // window at all (CORE-4's 128k floor existed and was never
+                // consulted on this path).
+                context_window: wcore_config::context_window::static_context_window(
                     &provider_name,
                     &fallback.model,
-                )
-                .map(|(_, window)| u64::from(window)),
+                ),
             },
             pricing: PricingEvidence {
                 source: source.into(),
@@ -5071,6 +5075,83 @@ mod fallback_pricing_identity_tests {
         assert_eq!(metadata.provider, "anthropic");
         assert_eq!(metadata.model, "claude-haiku-4-5");
         assert!(metadata.capabilities.tools);
+    }
+
+    /// WIRING grade, site 1 of 2. `flux_tier_context_window` (CORE-4) exists to
+    /// give the four Flux tier aliases a conservative 128k window, and
+    /// `ContextWindow::resolve` has consulted it since #255. This path did not:
+    /// it called `model_output_ceiling` alone, which returns `None` for a tier
+    /// alias BY DESIGN (#112/#426 keep the aliases unknown to the OUTPUT
+    /// lookup), so a Flux fallback advertised `context_window: None` and the
+    /// routing policy had no denominator to admit it against.
+    ///
+    /// The table was correct and simply never consulted here -- graded the
+    /// function, not the wiring.
+    #[test]
+    fn flux_tier_fallback_advertises_the_core4_128k_floor() {
+        let mut config = Config {
+            provider_label: "flux-router".into(),
+            compat: wcore_config::compat::ProviderCompat::flux_router_defaults(),
+            ..Default::default()
+        };
+        config.provider_chain.enabled = true;
+        config.provider_chain.fallback_models = vec!["flux-auto".into()];
+        let mut fallback = config.clone();
+        fallback.model = "flux-auto".into();
+        fallback.resolved_fallbacks.clear();
+        config.resolved_fallbacks = vec![fallback];
+
+        let mut pricing_refresher_constructed = false;
+        let fallbacks =
+            build_fallback_providers(&config, &mut pricing_refresher_constructed).unwrap();
+
+        assert_eq!(fallbacks.len(), 1);
+        let (metadata, _) = &fallbacks[0];
+        assert_eq!(metadata.model, "flux-auto");
+        assert_eq!(
+            metadata.capabilities.context_window,
+            Some(128_000),
+            "a Flux tier alias fallback must carry the CORE-4 128k pool-minimum \
+             floor; `model_output_ceiling` alone returns None for the aliases \
+             by design, so this path must also consult flux_tier_context_window"
+        );
+    }
+
+    /// All four aliases, and a NON-alias control proving the assertion above
+    /// can fail: a pinned concrete model resolves its own real window through
+    /// `model_output_ceiling`, and an unknown one still yields `None`.
+    #[test]
+    fn every_flux_alias_gets_the_floor_and_non_aliases_are_unaffected() {
+        fn window_for(model: &str) -> Option<u64> {
+            let mut config = Config {
+                provider_label: "flux-router".into(),
+                compat: wcore_config::compat::ProviderCompat::flux_router_defaults(),
+                ..Default::default()
+            };
+            config.provider_chain.enabled = true;
+            config.provider_chain.fallback_models = vec![model.to_string()];
+            let mut fallback = config.clone();
+            fallback.model = model.to_string();
+            fallback.resolved_fallbacks.clear();
+            config.resolved_fallbacks = vec![fallback];
+            let mut constructed = false;
+            let built = build_fallback_providers(&config, &mut constructed).unwrap();
+            built[0].0.capabilities.context_window
+        }
+
+        for alias in ["flux-auto", "flux-fast", "flux-standard", "flux-reasoning"] {
+            assert_eq!(
+                window_for(alias),
+                Some(128_000),
+                "{alias} must get the floor"
+            );
+        }
+        // Controls. A concrete model keeps its OWN window (the Flux floor must
+        // not overwrite a real one), and a genuinely unknown model stays None
+        // (the floor must not be fabricated for everything).
+        assert_eq!(window_for("gpt-4o"), Some(128_000));
+        assert_eq!(window_for("claude-opus-4-8"), Some(1_000_000));
+        assert_eq!(window_for("totally-unknown-model"), None);
     }
 
     #[test]
