@@ -1997,6 +1997,85 @@ jobs:
           WCORE_CHROMIUM_PATH: /usr/bin/chromium-browser
         run: vx cargo nextest run -p wcore-browser --features browser-live-tests --test chromium_live_test
 
+  # ── Feature-union compile guard (Linux only) ──────────────────────────
+  # Nothing else in this repo ever builds the feature union. Measured on
+  # 2026-08-26 against the untouched base 7066118a: `--all-features` appears
+  # ZERO times across .github/workflows/ and the justfile, while `--workspace`
+  # appears 20 times and `--all-targets` 12 in the same search — so the flag is
+  # genuinely absent rather than the query being wrong. The only five hits
+  # anywhere in the repo are `cargo tree` recipes quoted in comments in
+  # .github/osv-scanner.toml, which compile nothing.
+  #
+  # The cost of that gap, measured: `cargo check --workspace --all-targets
+  # --all-features` exited 101 at the base with E0063 in
+  # crates/wcore-providers/tests/gemini_test.rs:602 — an `LlmRequest` literal
+  # that never gained `flux_loop_intent` / `flux_turn_nonce` when #863 added
+  # them. `minimal_request()` 570 lines up in the SAME file has both, because
+  # it compiles by default and the compiler forced the update. The broken site
+  # sits behind `#[cfg(feature = "live-gemini")]`, and `live-gemini` appears
+  # zero times in .github/ + justfile + scripts/ (control: `live-docker`, 28
+  # hits), so no CI job, no default build and no local `cargo test` has ever
+  # type-checked it. A whole build configuration rotted in silence.
+  #
+  # Linux-only, deliberately. This is a TYPE-CHECK of cfg-gated code, and the
+  # rot it catches is API drift in provider-neutral types, which is
+  # platform-independent — the gemini break would have shown identically on
+  # any host. Adding macOS and Windows arms would triple the runner cost for
+  # near-zero extra signal; platform-specific `#[cfg(windows)]` /
+  # `#[cfg(target_os = "macos")]` code is already covered by the `ci` matrix
+  # and the `build` matrix. If a future feature gates genuinely
+  # platform-specific code, add an arm THEN, on that evidence.
+  #
+  # NOT a required status check, and deliberately not wired into `report`
+  # (which needs only `ci`). It reports red on the PR without blocking the
+  # merge queue. Promoting it to required is a branch-protection change on
+  # `main` and is Sean's call, not this job's.
+  #
+  # `check`, not `build` or `test`: the point is to type-check every cfg-gated
+  # target, not to run any of it. Several of these features (`live-anthropic`,
+  # `live-openai`, `live-gemini`, `live-voyage`, `browser-live-tests`,
+  # `live-docker`) hit real endpoints or daemons WHEN RUN, and with the feature
+  # on a missing API key panics by design. None of them needs a credential or
+  # network access to COMPILE, which is what makes this job safe to run on
+  # every PR with no secrets attached — verified by measurement, and the
+  # property to preserve if this job is ever widened to `test`.
+  all-features-check:
+    name: All-features check (Linux)
+    runs-on: ubuntu-latest
+    # Measured cold on a comparable Linux box at ~7 min for the full union
+    # (1.1 GB target dir, `check` only). 45 leaves ample headroom for a cold
+    # registry without letting a wedge sit for GitHub's 6-hour default.
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v6
+
+      # Derived from the `-sys` crates the feature union actually compiles,
+      # not guessed: alsa-sys (`voice` / `piper_tts`), libdbus-sys,
+      # libseccomp-sys, and — the two no other job in this repo needs —
+      # leptonica-sys and tesseract-sys, pulled in by `wcore-cua/redact-ocr`
+      # via `leptess`, which also drags `clang-sys`/bindgen and therefore
+      # libclang. Without libtesseract-dev + libleptonica-dev this job CANNOT
+      # pass on a stock runner, which is the failure mode that gets a new gate
+      # switched off in its first week.
+      - name: Install system deps for the feature union
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config mold \
+            libasound2-dev libdbus-1-dev libseccomp-dev \
+            libtesseract-dev libleptonica-dev libclang-dev clang
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Check the feature union (compile only, nothing is run)
+        run: vx cargo check --workspace --all-targets --all-features --locked
+
   # ── Annotate PR / commit with test results ────────────────────────────
   report:
     # EXPLICIT, because `report` is a required status context on main and a job
