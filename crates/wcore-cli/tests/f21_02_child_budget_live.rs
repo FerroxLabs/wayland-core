@@ -51,7 +51,7 @@
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -510,5 +510,118 @@ fn f21_02_a_delegator_cannot_request_a_wider_envelope_than_the_session_root() {
         "the child neither gained nor lost turns from a widening request: it must \
          run exactly its script, bounded by the {ROOT_TOKENS_IN}-token root it \
          inherited. transcript: {transcript}"
+    );
+}
+
+// ── The read guard in `AcpServer::post` ──────────────────────────────────
+//
+// `post` used to end on `let _ = stream.read_to_end(&mut raw)`, which makes a
+// budget expiry indistinguishable from a clean EOF: it returned the PREFIX it
+// had managed to read as an ordinary `String`. Nothing downstream can tell —
+// `json_body` blames the server for invalid JSON, and a prompt assertion
+// blames the product for an SSE frame the harness never read. So a harness
+// timeout was reported as a product defect.
+//
+// Graded HERE, at the call site, and not on an extracted helper: the thing
+// that has to stay true is that `post` itself refuses to return a prefix.
+
+/// The frame the stalling listener emits only AFTER its stall. Its presence is
+/// what separates a whole body from a truncated one.
+const TERMINAL_FRAME: &str = "event: turn_complete\ndata: {\"done\":true}\n\n";
+
+/// A listener that writes the head of an SSE body immediately and the terminal
+/// frame only after `stall`. That is the wire shape of a turn whose tool
+/// dispatch is slow: headers and early frames are on the wire, completion is
+/// not. Returns the bound address.
+fn stalling_listener(stall: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the stalling listener");
+    let addr = listener
+        .local_addr()
+        .expect("the stalling listener bound an address")
+        .to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut conn = stream;
+                let mut scratch = [0u8; 4096];
+                // The request is not parsed — only its arrival matters.
+                let _ = conn.read(&mut scratch);
+                let _ = conn.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                      Connection: close\r\n\r\nevent: tool_call\ndata: {}\n\n",
+                );
+                let _ = conn.flush();
+                std::thread::sleep(stall);
+                let _ = conn.write_all(TERMINAL_FRAME.as_bytes());
+                let _ = conn.flush();
+                // Dropping `conn` closes the socket, which is the EOF the
+                // control arm below reads to completion.
+            });
+        }
+    });
+    addr
+}
+
+/// A real `AcpServer` aimed at `addr` instead of a spawned `acp serve`. The
+/// `child` field needs a genuine `Child`, so a short-lived `--version` run of
+/// the same binary fills it; `Drop` kills and reaps it either way.
+fn server_pointed_at(addr: String) -> AcpServer {
+    let mut cmd = Command::new(binary());
+    cmd.arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let vault = support::vault::configure_process(&mut cmd);
+    let child = cmd.spawn().expect("spawn the short-lived stand-in child");
+    AcpServer {
+        child,
+        addr,
+        key: "read-guard-test-key".to_owned(),
+        _vault: vault,
+    }
+}
+
+/// Pull a readable message out of a caught panic payload.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+        .unwrap_or_else(|| "<non-string panic payload>".to_owned())
+}
+
+#[test]
+fn post_reports_a_read_that_ran_out_of_budget_instead_of_returning_a_prefix() {
+    let stall = Duration::from_secs(2);
+    let server = server_pointed_at(stalling_listener(stall));
+
+    // CONTROL FIRST. With a budget above the stall the whole body arrives, so
+    // the red arm below cannot pass merely because this listener never emits a
+    // terminal frame, and a clean EOF is proved to still be a success.
+    let whole = server.post("/control", &json!({}), stall * 8);
+    assert!(
+        whole.contains("turn_complete"),
+        "control: a budget above the stall must return the WHOLE body and a \
+         clean EOF must stay a success — got {whole:?}"
+    );
+
+    // RED ARM. A budget below the stall must fail, not return the prefix that
+    // the control arm just proved is only part of the response.
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        server.post("/truncated", &json!({}), stall / 4)
+    }))
+    .expect_err(
+        "a read that ran out of budget returned a body as an ordinary success — \
+         that is the defect this test exists to hold closed",
+    );
+    let message = panic_text(payload.as_ref());
+    assert!(
+        message.contains("PREFIX of the response"),
+        "the failure must name the truncation so it is not misread as a product \
+         defect — got: {message}"
+    );
+    assert!(
+        message.contains("timed out: true"),
+        "the failure must report that the budget, not the peer, ended the read \
+         — got: {message}"
     );
 }
