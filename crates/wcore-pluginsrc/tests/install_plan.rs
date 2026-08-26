@@ -59,3 +59,43 @@ fn dry_run_plan_is_pure_no_store_written() {
     assert!(!std::path::Path::new("/nonexistent/store/x").exists());
     assert_eq!(plan.plugin, "db");
 }
+
+#[test]
+fn servers_the_commit_step_will_not_install_are_named_on_the_plan() {
+    // v1 writes one `[mcp_server]` and grants one spawn-consent key. A plugin
+    // declaring more must say which ones do not survive, or the plan reads as
+    // parity it does not have.
+    let mut d = draft();
+    d.mcp_servers.push(McpServerDraft {
+        name: "second".into(),
+        transport: McpTransport::Http {
+            url: "https://x/mcp".into(),
+        },
+        env: BTreeMap::new(),
+    });
+    d.mcp_servers.push(McpServerDraft {
+        name: "third".into(),
+        transport: McpTransport::Sse {
+            url: "https://y/mcp".into(),
+        },
+        env: BTreeMap::new(),
+    });
+
+    let plan = InstallPlan::from_draft(&d, "acme", "/store/x");
+    let extra = plan
+        .ignored
+        .iter()
+        .find(|i| i.kind == "mcp-extra-servers")
+        .expect("extra servers must be reported");
+    assert!(extra.detail.contains("second"), "{}", extra.detail);
+    assert!(extra.detail.contains("third"), "{}", extra.detail);
+    assert!(extra.detail.contains("database"), "{}", extra.detail);
+    assert!(plan.render().contains("mcp-extra-servers"));
+}
+
+#[test]
+fn a_single_server_plan_reports_no_extra_servers() {
+    // Polarity control: the report fires on real loss, not on every install.
+    let plan = InstallPlan::from_draft(&draft(), "acme", "/store/x");
+    assert!(!plan.ignored.iter().any(|i| i.kind == "mcp-extra-servers"));
+}

@@ -13,7 +13,8 @@
 //! Discovery scans one directory level and skips symlinks, so the install dir is
 //! a real, flat directory. The skills/agents loaders are taught (Lane D) to scan
 //! `plugins/*/skills` and `plugins/*/agents`. v1 emits a single `[mcp_server]`;
-//! any additional servers are already recorded as IgnoredFeatures on the draft.
+//! any additional servers are reported as an `mcp-extra-servers` IgnoredFeature
+//! by `InstallPlan::from_draft`, so the consent surface names what is dropped.
 
 use std::fs;
 use std::path::{Path, PathBuf};
