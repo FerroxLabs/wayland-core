@@ -88,15 +88,40 @@ fn clean_repo_with(root: &Path, files: usize) {
     git(root, &["commit", "-qm", "base"]);
 }
 
-/// Grow a clean work tree under `root` until ONE guard call on it costs at
-/// least `target`, and report that cost.
+/// Grow a clean work tree until ONE guard call on it costs at least `target`,
+/// then hand back an IDENTICAL tree the guard has never been asked about, plus
+/// the cost measured on its twin.
 ///
-/// Measured warm, which is the conservative direction: warm is the CHEAPEST
-/// the guard ever is, so a budget beaten on a warm tree is beaten on a cold
-/// one too.
+/// The twin is the whole point, and the first version of this file did not
+/// have one: `UnsavedWorkGuard::shared()` memoises recorded blobs by
+/// `(commit, path)` and baselines by directory, so a second guard call against
+/// the SAME tree answers most of it from process memory. Measured here: 604 ms
+/// calibrating, then under 200 ms for the graded call on that same tree — so
+/// the test budget was compared against a cache lookup and the command sailed
+/// through a bound that was really working. That is the same cold-vs-warm trap
+/// `bash_manifest_bound_live_backend.rs` records against #1111's deny memo.
+///
+/// A twin has a different commit oid and different paths, so nothing the
+/// calibration cached applies to it. Its page cache IS warm from having just
+/// been written, which is the conservative direction: warm is the cheapest the
+/// guard ever is, so a budget beaten warm is beaten cold.
 fn tree_whose_guard_costs_at_least(root: &Path, target: Duration) -> (PathBuf, Duration) {
-    for files in [128usize, 256, 512, 1024, 2048] {
-        let tree = root.join(format!("t{files}"));
+    // The floor is on the tree SIZE, not only on its measured cost, and it is
+    // the second thing this helper got wrong. Calibration measures under
+    // whatever load the host happens to be carrying, and per-file guard cost on
+    // hetzner-dsm swings between 1.3 ms idle and ~5 ms with the other lanes
+    // building. Cost alone therefore lets a busy moment certify a tree of 128
+    // files at 630 ms, and when the load lifts the graded call on that same
+    // size costs ~166 ms and slips under a 200 ms budget: measured, 2 failures
+    // in 6 interleaved runs of the FIXED build, which is a false red on a
+    // working bound.
+    //
+    // 512 files is derived from the FASTEST per-file cost ever measured here,
+    // 1.3 ms: 512 * 1.3 ms = 665 ms, still 3.3x `BUDGET_MS` on a completely
+    // idle host, and load can only push it further up. A floor derived from the
+    // fast end is the only one load cannot invalidate.
+    for files in [512usize, 1024, 2048, 4096] {
+        let tree = root.join(format!("cal{files}"));
         clean_repo_with(&tree, files);
         // KNOWN-POSITIVE CONTROL on the instrument, in the same call as the
         // measurement: the guard must SEE this tree and answer "allowed". If
@@ -114,10 +139,13 @@ fn tree_whose_guard_costs_at_least(root: &Path, target: Duration) -> (PathBuf, D
              fail-closed test below cannot tell a bound from a finding; got {verdict:?}"
         );
         if cost >= target {
-            return (tree, cost);
+            let subject = root.join(format!("subject{files}"));
+            clean_repo_with(&subject, files);
+            println!("instrument: files={files} calibrated guard cost={cost:?}");
+            return (subject, cost);
         }
     }
-    panic!("could not grow a work tree whose guard costs {target:?} within 2048 files");
+    panic!("could not grow a work tree whose guard costs {target:?} within 4096 files");
 }
 
 /// The opposite polarity of the control above: on the SAME shape of tree with
@@ -132,7 +160,11 @@ fn control_the_guard_refuses_the_same_command_when_a_line_is_unsaved() {
         wcore_tools::unsaved_work::shell_refusal("rm -rf sub", &root).is_none(),
         "clean tree must be allowed"
     );
-    std::fs::write(root.join("sub/f0.txt"), "committed line 0\nuser typed this\n").unwrap();
+    std::fs::write(
+        root.join("sub/f0.txt"),
+        "committed line 0\nuser typed this\n",
+    )
+    .unwrap();
     let verdict = wcore_tools::unsaved_work::shell_refusal("rm -rf sub", &root);
     assert!(
         verdict.is_some(),
@@ -172,14 +204,14 @@ async fn the_caller_budget_bounds_the_unsaved_work_guard() {
     let ctx = ctx_for(&tree);
     let started = Instant::now();
     let result = BashTool
-        .execute_with_ctx(
-            json!({"command": "rm -rf sub", "timeout": BUDGET_MS}),
-            &ctx,
-        )
+        .execute_with_ctx(json!({"command": "rm -rf sub", "timeout": BUDGET_MS}), &ctx)
         .await;
     let elapsed = started.elapsed();
 
-    println!("bound: guard cost={cost:?} elapsed={elapsed:?} msg={:?}", result.content);
+    println!(
+        "bound: guard cost={cost:?} elapsed={elapsed:?} msg={:?}",
+        result.content
+    );
     assert!(
         elapsed * 2 < cost,
         "the guard cost {cost:?} and the call took {elapsed:?} against a {BUDGET_MS}ms \
@@ -258,7 +290,10 @@ async fn the_streaming_path_refuses_on_expiry_too() {
         )
         .await;
 
-    println!("fail-closed (streaming): guard cost={cost:?} msg={:?}", result.content);
+    println!(
+        "fail-closed (streaming): guard cost={cost:?} msg={:?}",
+        result.content
+    );
     assert!(
         !tree.join("it-ran").exists(),
         "the streaming path RAN the shell despite the guard not finishing: {}",
