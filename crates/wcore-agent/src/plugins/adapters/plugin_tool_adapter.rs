@@ -241,6 +241,7 @@ mod tests {
             category: ToolCategory::Info,
             is_deferred: false,
             max_result_size: 1_234,
+            namespace_claim: false,
             execute: Arc::new(|inv: PluginToolInvocation| {
                 Box::pin(async move {
                     ToolResult {
@@ -293,6 +294,7 @@ mod tests {
             category: ToolCategory::Info,
             is_deferred: false,
             max_result_size: 1_000,
+            namespace_claim: false,
             execute: Arc::new(move |inv: PluginToolInvocation| {
                 capture.lock().unwrap().push(inv.caps.effect.clone());
                 Box::pin(async {

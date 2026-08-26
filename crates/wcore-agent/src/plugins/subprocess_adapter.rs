@@ -76,6 +76,8 @@ pub fn synthesize_initialize_outcome_subprocess(
                 category: ToolCategory::Info,
                 is_deferred: false,
                 max_result_size: 50_000,
+                // Real out-of-process tool, not a name reservation.
+                namespace_claim: false,
                 execute,
             },
         });

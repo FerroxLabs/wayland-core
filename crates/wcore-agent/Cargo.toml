@@ -251,6 +251,16 @@ wayland-ollama = { path = "../wayland-ollama" }
 # wcore-plugin-api/types/protocol (audit F2), so this edge is ACYCLIC and the
 # plugin's own `[dependencies]` are untouched.
 wayland-ijfw = { path = "../wayland-ijfw" }
+# `tests/plugin_namespace_claim_delivery.rs` drives the REAL browser/CUA
+# plugin factories through `PluginRunner` + `apply_initialize_outcome` so the
+# `namespace_claim` marker cannot be dropped from either shell without a red
+# test. Dev-only, and acyclic for the same reason as wayland-ijfw above: both
+# crates depend solely on wcore-plugin-api/types/protocol (audit F2).
+wayland-browser = { path = "../wayland-browser" }
+wayland-cua = { path = "../wayland-cua" }
+# Same test captures WARN-level tracing events to prove the spurious
+# tool-name collision warning is gone.
+tracing-subscriber.workspace = true
 wiremock.workspace    = true
 tokio-test.workspace  = true
 tempfile.workspace    = true
