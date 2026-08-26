@@ -64,7 +64,10 @@ import urllib.error
 import urllib.request
 
 CATALOGUE_URL = "https://models.dev/api.json"
-DEFAULT_LIMITS = "crates/wcore-config/src/limits.rs"
+# The table lives in its own module since limits.rs crossed 1000 lines.
+# parse_table() fails CLOSED if this path stops holding the const, so a future
+# move breaks the release loudly rather than silently scanning nothing.
+DEFAULT_LIMITS = "crates/wcore-config/src/limits/catalogue.rs"
 
 # Vendor-operated providers, per family. "First-party" means the vendor runs the
 # endpoint (or is a first-party tenant of it) -- these are the only rows allowed
