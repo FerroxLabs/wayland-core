@@ -101,6 +101,11 @@ use self::protocol_bridge::spawn_bridge;
 // rebuilds a restored session's transcript via this before constructing the
 // `TuiSession`, so the re-export is `pub` (not `pub(crate)`).
 pub use self::protocol_bridge::hydrate_history;
+// #1138 — re-exported for the same reason `tool_formatters` is `pub`: the
+// render-surface regression suite drives the REAL `RenderArtifactTool` over the
+// real `ChannelSink`, so it lives in its own integration binary
+// (`tests/render_artifact_tui_surface.rs`) rather than in the lib test binary.
+pub use self::protocol_bridge::apply_event;
 use self::surfaces::{Router, SurfaceId};
 use self::theme::Theme;
 // Re-export `TurnElement` so callers (and tests) can construct turn
