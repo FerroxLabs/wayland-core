@@ -132,3 +132,83 @@ fn reinstall_replaces_existing_directory() {
         "stale skill must be gone"
     );
 }
+
+#[test]
+fn a_multi_server_plugin_commits_only_the_first_and_grants_only_its_key() {
+    // The install plan tells the user "only the first MCP server is installed".
+    // That sentence is only true if the commit step behaves that way, and
+    // nothing graded it: every existing fixture ships exactly one server.
+    // Names are chosen so declaration order and the parser's ordering agree,
+    // so the assertion pins behaviour rather than a map`s iteration order.
+    let fetched = tempdir().unwrap();
+    let root = fetched.path();
+    write(&root.join(".claude-plugin/plugin.json"), r#"{"name":"db"}"#);
+    write(
+        &root.join("skills/query/SKILL.md"),
+        "---\nname: query\ndescription: q\n---\nbody",
+    );
+    write(
+        &root.join(".mcp.json"),
+        r#"{"mcpServers":{
+             "a-first":{"command":"one","args":[],"env":{"A_KEY":"${A_KEY}"}},
+             "b-second":{"command":"two","args":[]},
+             "c-third":{"command":"three","args":[]}
+           }}"#,
+    );
+
+    let entry = SourceEntry {
+        name: "db".into(),
+        kind: SourceKind::RelativePath("./db".into()),
+        strict: true,
+        declared_version: None,
+        description: None,
+        unsupported: Vec::new(),
+    };
+    let draft = ClaudeCodeAdapter.lower("acme", &entry, root).unwrap();
+    assert_eq!(draft.mcp_servers.len(), 3, "all three must lower");
+
+    let store = tempdir().unwrap();
+    let meta = CommitMeta {
+        marketplace: "acme",
+        format: "claude-code",
+        resolved_sha: None,
+    };
+    let dir = commit_plan(&draft, &meta, root, store.path()).unwrap();
+
+    // Exactly one `[mcp_server]` survives, and it is the first.
+    let toml_src = fs::read_to_string(dir.join("plugin.toml")).unwrap();
+    assert_eq!(
+        toml_src.matches("[mcp_server]").count(),
+        1,
+        "v1 emits one server table: {toml_src}"
+    );
+    let manifest = PluginManifest::from_toml_str(&toml_src).expect("must parse");
+    assert_eq!(manifest.mcp_server.as_ref().unwrap().name, "a-first");
+    assert!(!toml_src.contains("b-second"), "{toml_src}");
+    assert!(!toml_src.contains("c-third"), "{toml_src}");
+
+    // And exactly one spawn-consent key, keyed to that same server. A second
+    // key here would silently authorise a spawn the manifest cannot request.
+    let consent = wcore_plugin_api::McpSpawnConsent::load(&dir)
+        .unwrap()
+        .expect("a plugin with MCP servers records a grant");
+    let expected = wcore_plugin_api::consent_key_from_parts(
+        &wcore_plugin_api::mcp_server_spec::McpTransport::Stdio {
+            command: "one".into(),
+            args: Vec::new(),
+        },
+        ["A_KEY"].into_iter(),
+    );
+    assert_eq!(consent.mcp_spawn_keys, vec![expected]);
+
+    // The plan the user approved must have named the two that did not survive.
+    let plan = wcore_pluginsrc::InstallPlan::from_draft(&draft, "acme", store.path());
+    let extra = plan
+        .ignored
+        .iter()
+        .find(|i| i.kind == "mcp-extra-servers")
+        .expect("the dropped servers must be on the consent surface");
+    assert!(extra.detail.contains("b-second"), "{}", extra.detail);
+    assert!(extra.detail.contains("c-third"), "{}", extra.detail);
+    assert_eq!(plan.spawns.len(), 1, "{:?}", plan.spawns);
+}

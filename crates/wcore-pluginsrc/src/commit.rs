@@ -187,7 +187,9 @@ fn generate_plugin_toml(draft: &CanonicalDraft) -> Result<String> {
     root.insert("permissions".into(), Value::Table(perms));
     root.insert("runtime".into(), Value::Table(runtime));
 
-    // v1: a single MCP server. Extras are already on draft.ignored.
+    // v1: a single MCP server. Extras are named on the install plan as an
+    // `mcp-extra-servers` IgnoredFeature (`InstallPlan::from_draft`), which
+    // also previews only this server as spawnable.
     if let Some(server) = draft.mcp_servers.first() {
         let mut srv = toml::Table::new();
         srv.insert("name".into(), Value::String(server.name.clone()));

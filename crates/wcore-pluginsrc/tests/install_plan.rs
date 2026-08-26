@@ -91,6 +91,35 @@ fn servers_the_commit_step_will_not_install_are_named_on_the_plan() {
     assert!(extra.detail.contains("third"), "{}", extra.detail);
     assert!(extra.detail.contains("database"), "{}", extra.detail);
     assert!(plan.render().contains("mcp-extra-servers"));
+
+    // Off-by-one guard: the server that IS installed must be named as the
+    // survivor, never inside the not-installed list. An `[0..]` slice still
+    // satisfies every assertion above while telling the user their working
+    // server was dropped.
+    let (_, not_installed) = extra
+        .detail
+        .split_once("not installed: ")
+        .expect("the dropped servers must be a named list");
+    assert!(
+        !not_installed.contains("database"),
+        "the installed server must not be listed as dropped: {}",
+        extra.detail
+    );
+
+    // The other half of the same fact: the plan previews only the server the
+    // commit step actually grants a spawn-consent key for. Listing all three
+    // under "will be allowed to spawn" is the same parity lie in reverse, and
+    // it is what the TUI consent surface renders.
+    assert_eq!(plan.spawns.len(), 1, "{:?}", plan.spawns);
+    assert_eq!(plan.spawns[0].name, "database");
+    let rendered = plan.render();
+    let spawn_block = rendered
+        .split("will be allowed to spawn:")
+        .nth(1)
+        .and_then(|t| t.split("  ignores").next())
+        .expect("the spawn block must be rendered");
+    assert!(!spawn_block.contains("second"), "{spawn_block}");
+    assert!(!spawn_block.contains("third"), "{spawn_block}");
 }
 
 #[test]

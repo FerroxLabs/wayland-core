@@ -82,26 +82,28 @@ impl InstallPlan {
             });
         }
 
-        let spawns = draft.mcp_servers.iter().map(spawn_preview).collect();
         let grade = draft.effective_grade();
 
         // v1 commits a single `[mcp_server]` and grants a single spawn-consent
-        // key, so every server after the first is declared-but-not-installed.
-        // Report it HERE, format-blind, rather than in each adapter: the plan
-        // is the consent surface, and a plugin that ships three servers and
-        // gets one must not read as parity.
+        // key (`commit.rs`), so every server after the first is
+        // declared-but-not-installed. Both halves of that fact come off ONE
+        // split so they cannot drift: the spawn preview shows only what the
+        // install actually grants, and the extras are named as ignored. Report
+        // it HERE, format-blind, rather than in each adapter: the plan is the
+        // consent surface, and a plugin that ships three servers and gets one
+        // must not read as parity in either direction.
+        let (installed, dropped) = draft.mcp_servers.split_at(draft.mcp_servers.len().min(1));
+        let spawns = installed.iter().map(spawn_preview).collect();
+
         let mut ignored = draft.ignored.clone();
-        if draft.mcp_servers.len() > 1 {
-            let dropped: Vec<&str> = draft.mcp_servers[1..]
-                .iter()
-                .map(|s| s.name.as_str())
-                .collect();
+        if let Some(first) = installed.first().filter(|_| !dropped.is_empty()) {
+            let names: Vec<&str> = dropped.iter().map(|s| s.name.as_str()).collect();
             ignored.push(IgnoredFeature {
                 kind: "mcp-extra-servers".to_string(),
                 detail: format!(
                     "only the first MCP server ({}) is installed; not installed: {}",
-                    draft.mcp_servers[0].name,
-                    dropped.join(", ")
+                    first.name,
+                    names.join(", ")
                 ),
             });
         }
