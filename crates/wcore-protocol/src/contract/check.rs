@@ -143,20 +143,29 @@ impl ManifestDiff {
         }
     }
 
+    /// The report for a manifest that did not move at all, which must not
+    /// advertise a remedy for something with nothing to remedy.
+    ///
+    /// `Moved` can never reach this: `schema_digest` is itself one of the keys
+    /// compared, so a moved schema always leaves a key behind.
+    fn nothing_moved(&self) -> Option<String> {
+        let SchemaVerdict::Unchanged(digest) = &self.schema else {
+            return None;
+        };
+        if !self.keys.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "No {MANIFEST} key moved: this tree regenerates the manifest the corpus already \
+             publishes, schema_digest {digest} included. If the corpus is nonetheless reported \
+             as drifted, the drift is in the corpus FILES - a hand-edit or a partial commit - \
+             and regenerating restores them.\n"
+        ))
+    }
+
     fn report(&self) -> String {
-        // Nothing moved: say that, and do not advertise a remedy for a
-        // manifest that has nothing to remedy. `Moved` cannot land here -
-        // `schema_digest` is itself a key - so this only ever short-circuits
-        // the reassuring arm.
-        if self.keys.is_empty() {
-            if let SchemaVerdict::Unchanged(digest) = &self.schema {
-                return format!(
-                    "No {MANIFEST} key moved: this tree regenerates the manifest the corpus \
-                     already publishes, schema_digest {digest} included. If the corpus is \
-                     nonetheless reported as drifted, the drift is in the corpus FILES - a \
-                     hand-edit or a partial commit - and regenerating restores them.\n"
-                );
-            }
+        if let Some(unmoved) = self.nothing_moved() {
+            return unmoved;
         }
         let mut out = match &self.schema {
             SchemaVerdict::Unchanged(digest) => format!(
