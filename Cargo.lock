@@ -10145,7 +10145,6 @@ version = "0.13.8"
 dependencies = [
  "anyhow",
  "chrono",
- "dirs",
  "fd-lock",
  "hex",
  "rusqlite",
@@ -10155,7 +10154,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "toml",
+ "tracing",
  "wcore-config",
+ "wcore-protocol",
 ]
 
 [[package]]

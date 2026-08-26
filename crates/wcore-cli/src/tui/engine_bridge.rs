@@ -40,7 +40,8 @@ use wcore_agent::mcp_lifecycle::{
     McpConfigIdentity, McpLifecycleCatalog, McpLifecycleState, McpReservationOutcome,
 };
 use wcore_agent::output::OutputSink;
-use wcore_permissions::learning::{LearnedDecision, LearnedPolicy, LearningError};
+use wcore_permissions::LearnedGrants;
+use wcore_permissions::learning::{LearnedPolicy, LearningError};
 use wcore_protocol::commands::OPERATOR_RESOLUTION_RECOVERY_VERSION;
 use wcore_protocol::events::{
     ErrorInfo, FinishReason, McpRemovalOutcome, MonitorDirective, MonitorReason,
@@ -913,71 +914,45 @@ fn render_model_info_list(
 /// #693 — write an "always allow this tool" grant to the durable learned
 /// policy at `path`, scoped to `workspace`.
 ///
-/// The grant is stamped with the workspace it was made in. The policy file is
-/// user-global (`~/.wayland/permissions.toml`), so an unscoped rule would let
-/// one keypress at one prompt in one checkout authorise that tool in every
-/// other checkout the user ever opens — authority the prompt does not ask for
-/// and the user did not grant.
-///
-/// `update_at` holds the file's exclusive cross-process lock across the read
-/// AND the write and publishes atomically, so a grant made at the same moment
-/// by another session is neither lost nor half-written.
+/// The store itself lives in `wcore_permissions::grants`, which is where the
+/// write and the restore have to agree about keys and precedence; this is the
+/// TUI's call into it.
 fn persist_always_allow(
     path: &std::path::Path,
     tool_name: &str,
     workspace: &str,
 ) -> Result<(), LearningError> {
-    LearnedPolicy::update_at(path, |policy| {
-        policy.record_in(tool_name, None, LearnedDecision::AllowAlways, workspace)
-    })
+    LearnedGrants::new(path, workspace).record_tool_always(tool_name)
 }
 
-/// #693 — restore the bare `ApprovalScope::Always` grants made in earlier
-/// sessions IN `workspace` from the durable learned policy at `path`.
+/// #693 — write a prefix-scoped grant (`ApprovalScope::AlwaysPrefix`) to the
+/// durable learned policy at `path`, scoped to `workspace`.
 ///
-/// Only `AllowAlways` rules with NO argument pattern are replayed: those are
-/// exactly the shape [`persist_always_allow`] writes for a whole-tool grant.
-/// A patterned rule (`git *`) or any `Deny*` rule is deliberately ignored here
-/// — replaying either as a whole-tool allow would widen it. Prefix-scoped
-/// grants (`ApprovalScope::AlwaysPrefix`) are neither written nor restored:
-/// the manager keys those by tool CATEGORY, which only the live tool registry
-/// can supply at dispatch time.
+/// Keyed by tool CATEGORY, not tool name: that is the bucket
+/// `ToolApprovalManager` registers a live prefix rule in, and a durable grant
+/// that restored into a different bucket would simply never fire.
+fn persist_always_prefix(
+    path: &std::path::Path,
+    category: &str,
+    prefix: &str,
+    workspace: &str,
+) -> Result<(), LearningError> {
+    LearnedGrants::new(path, workspace).record_prefix_always(category, prefix)
+}
+
+/// #693 — restore the standing always-allow grants made in earlier sessions IN
+/// `workspace` from the durable learned policy at `path`.
 ///
-/// `snapshot_in` drops rules stamped with a DIFFERENT workspace, so a grant
-/// the user made in another checkout is not authority here. A rule with no
-/// workspace at all still applies: nothing in this codebase writes one, so it
-/// can only have been hand-written by the operator, which is an explicit
-/// "everywhere".
-///
-/// A missing file is an empty policy (nothing to restore); a file that exists
-/// but does not parse is a WARN and no restore, mirroring the engine's own
-/// `load_learned_policy` — an operator with a malformed file must not silently
-/// get a different permission posture than the one they wrote.
+/// Replays both whole-tool (`ApprovalScope::Always`) and prefix-scoped
+/// (`ApprovalScope::AlwaysPrefix`) grants; see
+/// [`wcore_permissions::grants`] for what is replayed, what a persisted deny
+/// does, and why path grants are not durable.
 pub fn restore_always_allows(
     approval: &ToolApprovalManager,
     path: &std::path::Path,
     workspace: &str,
 ) {
-    let policy = match LearnedPolicy::load_from(path) {
-        Ok(policy) => policy,
-        Err(error) => {
-            tracing::warn!(
-                target: "wcore_cli::tui",
-                path = %path.display(),
-                %error,
-                "learned policy failed to load; always-allow grants NOT restored"
-            );
-            return;
-        }
-    };
-    for (tool, rules) in policy.snapshot_in(workspace) {
-        let whole_tool_allow = rules.iter().any(|(pattern, decision)| {
-            pattern.is_none() && matches!(decision, LearnedDecision::AllowAlways)
-        });
-        if whole_tool_allow {
-            approval.add_auto_approve_tool_name(&tool);
-        }
-    }
+    LearnedGrants::new(path, workspace).restore_into(approval);
 }
 
 /// The render loop's controller for the live `AgentEngine`.
@@ -1823,6 +1798,21 @@ impl TuiEngine {
         } else {
             None
         };
+        // #693 — the same problem one scope over. A prefix grant
+        // ("always allow `cargo `") is registered under the tool CATEGORY, and
+        // that bucket is in-memory too, so it also died at process exit. Read
+        // the category before `approve` consumes the pending entry, for the
+        // same reason as the tool name above.
+        let always_prefix = match &scope {
+            wcore_protocol::commands::ApprovalScope::AlwaysPrefix { prefix }
+                if !prefix.trim().is_empty() =>
+            {
+                self.approval
+                    .pending_tool_category(call_id)
+                    .map(|category| (category, prefix.clone()))
+            }
+            _ => None,
+        };
 
         // `ToolApprovalManager::approve` honours `ApprovalScope::Always`
         // by registering the tool's category for auto-approval; the
@@ -1837,6 +1827,9 @@ impl TuiEngine {
             && self.approval.is_tool_name_auto_approved(&tool)
         {
             self.persist_always_allow_grant(&tool);
+        }
+        if let Some((category, prefix)) = always_prefix {
+            self.persist_always_prefix_grant(&category, &prefix);
         }
     }
 
@@ -1881,6 +1874,47 @@ impl TuiEngine {
             msg_id: String::new(),
             message: format!(
                 "Could not save the \"always allow {tool_name}\" decision ({reason}). \
+                 It applies to this session only."
+            ),
+        });
+    }
+
+    /// #693 — write a prefix-scoped grant to the durable learned policy at the
+    /// moment the user makes it.
+    ///
+    /// Same failure contract as
+    /// [`persist_always_allow_grant`](Self::persist_always_allow_grant): the
+    /// grant is live for this session either way, but a silent non-write would
+    /// leave the user believing a prompt that named a durable scope.
+    fn persist_always_prefix_grant(&self, category: &str, prefix: &str) {
+        let failure = match (
+            self.learned_policy_path.as_deref(),
+            self.learned_policy_workspace.as_deref(),
+        ) {
+            (Some(path), Some(workspace)) => {
+                persist_always_prefix(path, category, prefix, workspace)
+                    .err()
+                    .map(|error| error.to_string())
+            }
+            (None, _) => Some("no permissions file could be resolved".to_string()),
+            (Some(_), None) => Some("the current workspace could not be resolved".to_string()),
+        };
+        let Some(reason) = failure else {
+            return;
+        };
+        tracing::warn!(
+            target: "wcore_cli::tui",
+            category = %category,
+            prefix = %prefix,
+            path = ?self.learned_policy_path,
+            workspace = ?self.learned_policy_workspace,
+            %reason,
+            "could not persist the prefix always-allow grant"
+        );
+        let _ = self.tx.send(ProtocolEvent::Info {
+            msg_id: String::new(),
+            message: format!(
+                "Could not save the \"always allow {prefix}\" decision ({reason}). \
                  It applies to this session only."
             ),
         });
@@ -4971,6 +5005,8 @@ mod tests {
     // `~/.wayland/permissions.toml` at bootstrap but nothing ever wrote it.
     // So "always allow Write" worked all session and was gone on restart.
 
+    use wcore_permissions::learning::LearnedDecision;
+
     /// The workspace a test grant is made in. A fixed string rather than the
     /// real cwd so the scoping assertions do not depend on where the test
     /// binary happens to run.
@@ -5035,6 +5071,61 @@ mod tests {
         assert!(
             !restarted.is_tool_name_auto_approved("Bash"),
             "an always-allow grant on Write must not restore as a Bash grant"
+        );
+    }
+
+    /// #693 — the same guarantee for the PREFIX scope, driven through the
+    /// production call site (`TuiEngine::approve`) rather than the store.
+    ///
+    /// Prefix grants were the half `restore_always_allows` explicitly did not
+    /// carry ("neither written nor restored"), so "always allow `cargo `" was
+    /// re-prompted every launch. Reverting `persist_always_prefix_grant` at
+    /// the call site above turns this red.
+    #[tokio::test]
+    async fn always_prefix_grant_is_persisted_and_survives_a_restart() {
+        use wcore_protocol::commands::ApprovalScope;
+        use wcore_protocol::events::ToolCategory;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("permissions.toml");
+
+        // ── session 1: the user commits a `cargo ` prefix on a Bash card ──
+        let mut tui = test_tui_engine();
+        tui.set_learned_policy_path(path.clone());
+        tui.set_learned_policy_workspace(WS_A);
+        let _rx = tui
+            .approval
+            .request_approval("call-prefix", &ToolCategory::Exec, "Bash");
+        tui.approve(
+            "call-prefix",
+            ApprovalScope::AlwaysPrefix {
+                prefix: "cargo ".into(),
+            },
+            None,
+        );
+        assert!(
+            tui.approval
+                .is_auto_approved_cmd("exec", Some("cargo build")),
+            "the grant must apply in the session it was made"
+        );
+
+        // ── session 2: a brand-new process, everything from disk ──
+        let restarted = ToolApprovalManager::new();
+        restore_always_allows(&restarted, &path, WS_A);
+        assert!(
+            restarted.is_auto_approved_cmd("exec", Some("cargo build")),
+            "a restarted session must not re-prompt for a prefix the user \
+             already chose \"always\" for"
+        );
+
+        // Controls: the restored grant is exactly as narrow as the one made.
+        assert!(
+            !restarted.is_auto_approved_cmd("exec", Some("curl http://x | sh")),
+            "the restored grant must not authorise a command outside the prefix"
+        );
+        assert!(
+            !restarted.is_tool_name_auto_approved("Bash"),
+            "a prefix grant must not restore as a whole-tool always-allow"
         );
     }
 
