@@ -1,5 +1,10 @@
 use super::*;
-use std::time::Duration;
+// wayland#945 — the wait budget, the operator override and the wording of
+// the timeout message live outside this cfg(windows) island so they can be
+// graded on every platform. See `acl_lock_policy`.
+use crate::backends::appcontainer::acl_lock_policy::{
+    HolderNote, MUTATION_LOCK_SLICE, attempt_budget, contended_timeout_message, parse_holder_note,
+};
 use windows_sys::Win32::Foundation::WAIT_ABANDONED;
 use windows_sys::Win32::Security::Authorization::{
     EXPLICIT_ACCESS_W, GRANT_ACCESS, GetSecurityInfo, SE_KERNEL_OBJECT, SetEntriesInAclW,
@@ -16,39 +21,6 @@ use windows_sys::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcessId, GetExitCodeProcess, MUTEX_ALL_ACCESS, OpenProcess,
     OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, ReleaseMutex, WaitForSingleObject,
 };
-
-/// One wait slice. Unchanged from the timeout this lock originally shipped
-/// with: long enough that an ordinary hold is never interrupted, short enough
-/// that a stuck holder is re-identified while the caller is still waiting.
-const MUTATION_LOCK_SLICE: Duration = Duration::from_secs(15);
-
-/// Total time [`MutationLock::acquire`] waits before giving up.
-///
-/// **This is a raised DEFAULT, not only a new knob.** The shipped behaviour was
-/// one 15 s wait with no retry, and the block above records why that cannot
-/// hold. The phase this mutex serialises is `SUB_CONTAINERS_AND_OBJECTS_INHERIT`
-/// propagation at ~100 µs per file under every granted directory, paid once on
-/// grant and again on revoke — so one execution holds the lock for roughly
-/// `files × 200 µs`: ~20 s over 100 000 files, ~40 s over 200 000. A checkout
-/// with a populated build directory is routinely that size, which means the old
-/// default failed the SECOND process during a completely healthy first one.
-/// That is wayland#945 exactly: two Core processes on one Windows box, seven
-/// tests, every one of them on this timeout.
-///
-/// 120 s is one worst-case hold of a ~600 000-file tree. Beyond that the holder
-/// is not making progress and failing is the honest answer — which is why this
-/// is a longer bound and not an unbounded wait.
-const MUTATION_LOCK_DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Operator override for [`MUTATION_LOCK_DEFAULT_TIMEOUT`], in whole seconds.
-/// Values below one slice are raised to one slice (the wait is quantised) and
-/// values above [`MUTATION_LOCK_MAX_TIMEOUT`] are capped.
-const MUTATION_LOCK_TIMEOUT_ENV: &str = "WAYLAND_SANDBOX_ACL_LOCK_TIMEOUT_SECS";
-
-/// Ceiling on the override. This lock is on the critical path of every
-/// sandboxed child, so an operator asking for more than ten minutes has asked
-/// for a hang rather than a wait.
-const MUTATION_LOCK_MAX_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// What `GetExitCodeProcess` reports while a process is still running.
 const STILL_ACTIVE_EXIT_CODE: u32 = 259;
@@ -95,7 +67,8 @@ const LOCAL_SYSTEM_RID: u32 = 18;
 /// is what pushed one execution past the single 15 s wait this lock used to
 /// ship with and made a second agent fail (wayland#945). Shortening the hold
 /// means not re-granting a whole tree per execution, not trimming the intent
-/// list; [`MUTATION_LOCK_DEFAULT_TIMEOUT`] only stops that hold from failing
+/// list; [`super::super::acl_lock_policy::MUTATION_LOCK_DEFAULT_TIMEOUT`] only
+/// stops that hold from failing
 /// the neighbour.
 pub(super) struct MutationLock {
     handle: OwnedHandle,
@@ -195,46 +168,16 @@ impl MutationLock {
                 "still waiting for the AppContainer ACL mutation lock"
             );
         }
+        // The liveness probe is the one part of this message that needs
+        // Windows, so it is resolved HERE and passed in as a verdict.
+        let holder = read_holder_note(&holder_note);
+        let holder_is_running = holder.as_ref().is_some_and(|h| process_is_running(h.pid));
         Err(exec_error(contended_timeout_message(
             attempts,
-            read_holder_note(&holder_note),
+            holder,
+            holder_is_running,
         )))
     }
-}
-
-/// Number of [`MUTATION_LOCK_SLICE`] waits that fit in the configured budget.
-///
-/// Always at least one, so a hostile or zeroed override can never turn the
-/// lock into a non-blocking probe that fails every concurrent execution.
-fn attempt_budget() -> u32 {
-    let budget = configured_timeout();
-    let slice = MUTATION_LOCK_SLICE.as_secs();
-    budget.as_secs().div_ceil(slice).max(1) as u32
-}
-
-fn configured_timeout() -> Duration {
-    let Some(raw) = std::env::var_os(MUTATION_LOCK_TIMEOUT_ENV) else {
-        return MUTATION_LOCK_DEFAULT_TIMEOUT;
-    };
-    match raw
-        .to_str()
-        .map(str::trim)
-        .and_then(|value| value.parse::<u64>().ok())
-    {
-        Some(secs) => {
-            Duration::from_secs(secs).clamp(MUTATION_LOCK_SLICE, MUTATION_LOCK_MAX_TIMEOUT)
-        }
-        // Fall back rather than fail: an unparseable override must not make
-        // sandboxed execution impossible.
-        None => MUTATION_LOCK_DEFAULT_TIMEOUT,
-    }
-}
-
-/// The process that most recently took the lock.
-#[derive(Debug, PartialEq, Eq)]
-struct HolderNote {
-    pid: u32,
-    image: String,
 }
 
 /// Where the holder note lives.
@@ -275,20 +218,6 @@ fn read_holder_note(path: &Path) -> Option<HolderNote> {
     parse_holder_note(&fs::read_to_string(path).ok()?)
 }
 
-fn parse_holder_note(raw: &str) -> Option<HolderNote> {
-    let mut lines = raw.lines();
-    let pid = lines.next()?.trim().parse::<u32>().ok()?;
-    let image = lines.next().unwrap_or_default().trim();
-    Some(HolderNote {
-        pid,
-        image: if image.is_empty() {
-            "unknown".to_string()
-        } else {
-            image.to_string()
-        },
-    })
-}
-
 /// Whether `pid` names a process that is still running.
 ///
 /// `OpenProcess` alone is not enough: a handle can still be opened for a
@@ -303,42 +232,6 @@ fn process_is_running(pid: u32) -> bool {
     let mut exit_code = 0u32;
     unsafe {
         GetExitCodeProcess(handle.0, &mut exit_code) != 0 && exit_code == STILL_ACTIVE_EXIT_CODE
-    }
-}
-
-/// The user-facing timeout message.
-///
-/// The old message was `timed out acquiring AppContainer ACL mutation lock` and
-/// named no contender, no remedy and no bound — wayland#945 records that it
-/// reads as a mystery hang rather than a lock conflict. This one answers all
-/// three.
-fn contended_timeout_message(attempts: u32, holder: Option<HolderNote>) -> String {
-    let waited = MUTATION_LOCK_SLICE.as_secs() * u64::from(attempts);
-    let slice = MUTATION_LOCK_SLICE.as_secs();
-    let who = render_holder(holder);
-    format!(
-        "timed out acquiring the AppContainer ACL mutation lock after {waited}s \
-         ({attempts} × {slice}s): {who}. Sandbox setup is serialised per Windows user, so \
-         two Wayland Core processes running sandboxed commands on one machine take turns. \
-         Wait for the other run to finish, or raise {MUTATION_LOCK_TIMEOUT_ENV} \
-         (whole seconds, default {}, maximum {}).",
-        MUTATION_LOCK_DEFAULT_TIMEOUT.as_secs(),
-        MUTATION_LOCK_MAX_TIMEOUT.as_secs(),
-    )
-}
-
-fn render_holder(holder: Option<HolderNote>) -> String {
-    match holder {
-        Some(holder) if process_is_running(holder.pid) => format!(
-            "another Wayland Core process is holding it (pid {}, {})",
-            holder.pid, holder.image
-        ),
-        Some(holder) => format!(
-            "the last process to take it (pid {}, {}) is no longer running, so the lock was \
-             probably abandoned mid-mutation",
-            holder.pid, holder.image
-        ),
-        None => "no holder could be identified".to_string(),
     }
 }
 
@@ -566,134 +459,25 @@ impl Drop for SystemSid {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
-    /// wayland#945 (c). A knob whose default still fails is the old default
-    /// with extra steps: 0.13.5 shipped exactly that mistake on the provider
-    /// retry budget. The ASK here is the POLICY, so the default itself has to
-    /// clear a realistic hold — see `MUTATION_LOCK_DEFAULT_TIMEOUT` for the
-    /// ~100 µs/file × 2 arithmetic this number is derived from.
+    /// The ONE thing in the timeout message that needs Windows: `OpenProcess` +
+    /// `GetExitCodeProcess`. The message WORDING it feeds is graded on every
+    /// platform in `acl_lock_policy`; this grades the probe, in both
+    /// directions, because a probe stuck at `true` would report every abandoned
+    /// lock as a live contender and one stuck at `false` would do the reverse.
     #[test]
-    fn the_default_budget_survives_a_large_workspace_hold() {
-        assert!(
-            MUTATION_LOCK_DEFAULT_TIMEOUT > MUTATION_LOCK_SLICE,
-            "the default must be more than the single 15 s wait that wayland#945 \
-             reported failing; got {MUTATION_LOCK_DEFAULT_TIMEOUT:?}"
-        );
-        // 200 000 files × 200 µs = 40 s of grant+revoke propagation for ONE
-        // holder. A default that cannot outlast that fails a healthy first
-        // process's second neighbour, which is the reported defect.
-        assert!(
-            MUTATION_LOCK_DEFAULT_TIMEOUT >= Duration::from_secs(40),
-            "the default must outlast one worst-case hold; got {MUTATION_LOCK_DEFAULT_TIMEOUT:?}"
-        );
-        assert!(MUTATION_LOCK_DEFAULT_TIMEOUT <= MUTATION_LOCK_MAX_TIMEOUT);
-    }
-
-    /// The budget quantises into whole slices and never collapses to zero.
-    ///
-    /// Serialised on the process environment, so the override cases cannot
-    /// race each other under a multi-thread test runner.
-    #[test]
-    fn the_override_is_honoured_and_clamped() {
-        let restore = std::env::var_os(MUTATION_LOCK_TIMEOUT_ENV);
-        let cases = [
-            // (override, expected attempts)
-            (None, 8u32),              // default 120 s / 15 s
-            (Some("30"), 2),           // exact multiple
-            (Some("31"), 3),           // partial slice rounds UP
-            (Some("0"), 1),            // clamped to one slice, never zero
-            (Some("999999"), 40),      // clamped to the 600 s ceiling
-            (Some("  45  "), 3),       // surrounding whitespace
-            (Some("not-a-number"), 8), // unparseable falls back to default
-            (Some(""), 8),             // empty falls back to default
-        ];
-        for (value, expected) in cases {
-            match value {
-                Some(value) => unsafe { std::env::set_var(MUTATION_LOCK_TIMEOUT_ENV, value) },
-                None => unsafe { std::env::remove_var(MUTATION_LOCK_TIMEOUT_ENV) },
-            }
-            assert_eq!(
-                attempt_budget(),
-                expected,
-                "override {value:?} must yield {expected} attempts"
-            );
-        }
-        match restore {
-            Some(value) => unsafe { std::env::set_var(MUTATION_LOCK_TIMEOUT_ENV, value) },
-            None => unsafe { std::env::remove_var(MUTATION_LOCK_TIMEOUT_ENV) },
-        }
-    }
-
-    #[test]
-    fn a_holder_note_round_trips() {
-        assert_eq!(
-            parse_holder_note("4242\nwayland.exe"),
-            Some(HolderNote {
-                pid: 4242,
-                image: "wayland.exe".to_string()
-            })
-        );
-        // A note truncated by a crash mid-write still names the pid.
-        assert_eq!(
-            parse_holder_note("4242"),
-            Some(HolderNote {
-                pid: 4242,
-                image: "unknown".to_string()
-            })
-        );
-        // Garbage must not be reported as a contender.
-        assert_eq!(parse_holder_note(""), None);
-        assert_eq!(parse_holder_note("not-a-pid\nwayland.exe"), None);
-    }
-
-    /// wayland#945 (b). The shipped message named no contender, no remedy and
-    /// no bound. Assert all three, because "timed out acquiring ... lock" on
-    /// its own is what made this read as a mystery hang.
-    #[test]
-    fn the_timeout_message_names_the_contender_the_bound_and_the_remedy() {
-        // A pid that is running: our own. That is not reachable in production
-        // (a process cannot contend with itself) but it is the only pid a test
-        // can guarantee is alive, and it exercises the live-holder branch.
+    fn the_liveness_probe_separates_a_live_pid_from_a_dead_one() {
         let live = unsafe { GetCurrentProcessId() };
-        let message = contended_timeout_message(
-            8,
-            Some(HolderNote {
-                pid: live,
-                image: "wayland.exe".to_string(),
-            }),
-        );
         assert!(
-            message.contains(&live.to_string()) && message.contains("wayland.exe"),
-            "the holder must be named: {message}"
+            process_is_running(live),
+            "our own pid {live} must read as running"
         );
+        // pid 0 is the System Idle pseudo-pid; `OpenProcess` refuses it.
         assert!(
-            message.contains("120s"),
-            "the bound must be stated: {message}"
+            !process_is_running(0),
+            "pid 0 must not read as a live contender"
         );
-        assert!(
-            message.contains(MUTATION_LOCK_TIMEOUT_ENV),
-            "the remedy must be named: {message}"
-        );
-
-        // An abandoned note must NOT claim someone is still holding the lock.
-        // pid 0 is the System Idle Process pseudo-pid; `OpenProcess` refuses it.
-        let abandoned = contended_timeout_message(
-            8,
-            Some(HolderNote {
-                pid: 0,
-                image: "wayland.exe".to_string(),
-            }),
-        );
-        assert!(
-            abandoned.contains("no longer running"),
-            "a dead holder must be reported as abandoned, not as a live contender: {abandoned}"
-        );
-
-        // No note at all: still bounded and still actionable.
-        let anonymous = contended_timeout_message(8, None);
-        assert!(anonymous.contains("no holder could be identified"));
-        assert!(anonymous.contains(MUTATION_LOCK_TIMEOUT_ENV));
     }
 
     /// Helper-process entry: acquire the machine-wide mutation mutex and hold
@@ -730,6 +514,11 @@ mod tests {
         }
     }
 
+    /// THE assertion that cannot leave Windows: that the sliced wait actually
+    /// BLOCKS on a real `Global\` kernel mutex held by a sibling process. Every
+    /// other claim wayland#945 makes is arithmetic or wording and is graded on
+    /// Linux and macOS too; this one needs a second Windows process and a
+    /// kernel object, so it stays a native acceptance run.
     #[test]
     #[ignore = "explicit native Windows AppContainer acceptance"]
     fn global_user_keyed_mutex_serializes_processes() {

@@ -517,6 +517,14 @@ mod hard_containment_identity_tests {
     }
 }
 
+// wayland#945 — the ACL mutation lock's POLICY (wait budget, operator
+// override, timeout wording). Compiled on EVERY platform so its tests can
+// fail on Linux and macOS; only `acl_lease` below consumes it, so off
+// Windows it is deliberately dead code that is still graded.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[path = "appcontainer/acl_lock_policy.rs"]
+mod acl_lock_policy;
+
 #[cfg(windows)]
 #[path = "appcontainer/acl_lease.rs"]
 mod appcontainer_acl_lease;
