@@ -115,6 +115,7 @@ impl PluginFormatAdapter for CodexAdapter {
         report_apps(root, &manifest, &mut draft)?;
         report_interface(&manifest, &mut draft);
         report_metadata(&manifest, &mut draft);
+        report_unused_surfaces(root, &mut draft);
 
         // Same prompt-injection / credential-marker scan the Claude Code
         // adapter runs: a Codex plugin's skill and command bodies become part
@@ -643,6 +644,32 @@ fn report_metadata(manifest: &CodexPluginJson, draft: &mut CanonicalDraft) {
     });
 }
 
+/// Surfaces present in the fetched tree that this adapter deliberately does NOT
+/// read.
+///
+/// `detect_format` prefers `.codex-plugin/plugin.json`, so a plugin shipping
+/// both vendor manifests lowers through here — and its `.claude-plugin`
+/// manifest, and any `agents/` directory (a Claude Code concept with no Codex
+/// equivalent), go unread. Reporting them is the whole point of the exercise:
+/// choosing an adapter must never quietly discard what the other one would
+/// have picked up.
+fn report_unused_surfaces(root: &Path, draft: &mut CanonicalDraft) {
+    if root.join(".claude-plugin/plugin.json").is_file() {
+        draft.ignored.push(IgnoredFeature {
+            kind: "foreign-manifest".to_string(),
+            detail: "a .claude-plugin/plugin.json is also present; the Codex manifest was \
+                     used and the Claude Code one was not read"
+                .to_string(),
+        });
+    }
+    if root.join("agents").is_dir() {
+        draft.ignored.push(IgnoredFeature {
+            kind: "agents".to_string(),
+            detail: "agents/ is not a Codex plugin surface and was not lowered".to_string(),
+        });
+    }
+}
+
 fn json_type(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
@@ -741,6 +768,34 @@ mod tests {
         w(&d.path().join(MANIFEST_RELATIVE_PATH), body);
         let e = CodexAdapter.lower("m", &entry("p"), d.path()).unwrap_err();
         assert!(matches!(e, PluginSrcError::PathTraversal(_)), "got {e:?}");
+    }
+
+    #[test]
+    fn a_dual_manifest_tree_reports_what_this_adapter_did_not_read() {
+        let d = tempdir().unwrap();
+        w(&d.path().join(MANIFEST_RELATIVE_PATH), r#"{"name":"p"}"#);
+        w(
+            &d.path().join(".claude-plugin/plugin.json"),
+            r#"{"name":"p"}"#,
+        );
+        w(
+            &d.path().join("agents/helper.md"),
+            "---\nname: helper\n---\nbody",
+        );
+        w(&d.path().join("skills/a/SKILL.md"), "---\nname: a\n---\nx");
+
+        let draft = CodexAdapter.lower("m", &entry("p"), d.path()).unwrap();
+        let kinds: Vec<&str> = draft.ignored.iter().map(|i| i.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"foreign-manifest"),
+            "the unread Claude Code manifest must be reported: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"agents"),
+            "the unread agents/ dir must be reported: {kinds:?}"
+        );
+        // Polarity: it still lowered the Codex surfaces.
+        assert_eq!(draft.skills.len(), 1);
     }
 
     #[test]
