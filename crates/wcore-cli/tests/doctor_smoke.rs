@@ -79,6 +79,49 @@ fn doctor_includes_universal_checks() {
     );
 }
 
+/// `br-default` WIRING, through the real binary.
+///
+/// `doctor::with_config_rows` has unit coverage, but a unit test on it cannot
+/// notice if nothing in `run()` calls it -- the browser-policy verdict would be
+/// perfectly correct and never printed. This drives the shipped `--doctor`
+/// command and reads the rendered table.
+///
+/// Deliberately verdict-agnostic: the row is WARN on a default install, PASS
+/// once an operator opens the policy, and SKIP where the config does not
+/// resolve. All three are honest; a MISSING row is the defect.
+#[test]
+fn doctor_prints_a_browser_policy_row_adjacent_to_the_backend_row() {
+    let out = run_doctor();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Row lines are the ones the printer prefixes with `[PASS] `/`[WARN] `/...
+    let rows: Vec<&str> = stdout.lines().filter(|l| l.starts_with('[')).collect();
+    let backend = rows
+        .iter()
+        .position(|l| l.contains("browser backend"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no 'browser backend' row at all; the table is not what this test reads:\n{stdout}"
+            )
+        });
+    let policy = rows
+        .iter()
+        .position(|l| l.contains("browser policy"))
+        .unwrap_or_else(|| {
+            panic!(
+                "`--doctor` prints no 'browser policy' row. The doctor probes only whether a \
+                 browser BINARY resolves, so on a host with the sidecar installed it reports \
+                 `[PASS] browser backend` while `[browser.policy]` refuses every URL:\n{stdout}"
+            )
+        });
+    assert_eq!(
+        policy,
+        backend + 1,
+        "the policy row is not the row immediately after the backend row; a reader who stops \
+         at `[PASS] browser backend` never reaches it:\n{stdout}"
+    );
+}
+
 #[test]
 fn doctor_exit_code_is_deterministic() {
     // Don't assert WHICH code — that depends on whether the dev
