@@ -499,7 +499,11 @@ impl ProtocolToMessageStream {
                 result: ToolResult {
                     call_id,
                     output: serde_json::Value::String(output),
-                    is_error: matches!(status, ToolStatus::Error),
+                    // ACP has no third outcome: a call the dispatch deadline
+                    // killed produced no usable result, so the client must
+                    // treat it as an error. The distinction survives in the
+                    // `output` text and on the json-stream `tool_result`.
+                    is_error: matches!(status, ToolStatus::Error | ToolStatus::Timeout),
                 },
             }),
             ProtocolEvent::ToolCancelled {

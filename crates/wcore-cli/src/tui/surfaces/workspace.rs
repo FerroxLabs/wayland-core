@@ -3259,6 +3259,13 @@ fn push_tool_card_lines(
             push_tool_card_oneliner(lines, card, theme, "done", theme.success);
             push_tool_card_formatter_body(lines, card, theme, compact);
         }
+        ToolCardStatus::TimedOut => {
+            // wayland#372. Warning, not error: nothing failed, the call never
+            // finished. Rendered like `Err` (body always expanded) because the
+            // timeout message names the deadline the user has to act on.
+            push_tool_card_oneliner(lines, card, theme, "timed out", theme.warning);
+            push_tool_card_formatter_body(lines, card, theme, /* compact = */ false);
+        }
         ToolCardStatus::Err => {
             push_tool_card_oneliner(lines, card, theme, "error", theme.error);
             // Error continuation — always expanded (compact=false) so
@@ -3303,12 +3310,14 @@ fn push_tool_card_oneliner(
     // v0.9.2 W11-integ (S20): use the SAME glyph map W7 locked in the
     // standalone `widgets/toolcard.rs::status_icon` so the live inline
     // path matches the full-card variant — `◐` running · `●` done ·
-    // `○` cancelled · `⊘` awaiting-approval · `✗` error. (The `◑`
+    // `○` cancelled · `⊘` awaiting-approval · `✗` error · `◷` timed
+    // out. (The `◑`
     // stalled glyph is not reachable here; the inline card carries no
     // stall flag.)
     let icon = match card.status {
         ToolCardStatus::Ok => "●",
         ToolCardStatus::Err => "✗",
+        ToolCardStatus::TimedOut => "◷",
         ToolCardStatus::Running => "◐",
         ToolCardStatus::AwaitingApproval => "⊘",
         ToolCardStatus::Cancelled => "○",
@@ -3665,7 +3674,11 @@ fn render_activity_feed(frame: &mut Frame, area: Rect, app: &App, theme: &Theme)
         let verb = match card.status {
             ToolCardStatus::Running => "running",
             ToolCardStatus::AwaitingApproval => "awaiting",
-            ToolCardStatus::Ok | ToolCardStatus::Err | ToolCardStatus::Cancelled => continue,
+            // A timed-out call is terminal in the same sense as the rest.
+            ToolCardStatus::Ok
+            | ToolCardStatus::Err
+            | ToolCardStatus::TimedOut
+            | ToolCardStatus::Cancelled => continue,
         };
         // v0.9.1.1 F9: `card.summary` for an unknown tool falls back
         // to a compact JSON pretty-print (see `summarize_args` in

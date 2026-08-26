@@ -626,6 +626,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 card.status = match status {
                     ToolStatus::Success => ToolCardStatus::Ok,
                     ToolStatus::Error => ToolCardStatus::Err,
+                    ToolStatus::Timeout => ToolCardStatus::TimedOut,
                 };
                 card.output = Some(output);
             }

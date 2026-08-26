@@ -487,15 +487,29 @@ impl OutputSink for ChannelSink {
         });
     }
 
-    fn emit_provider_attempt(&self, failure: Option<&str>) {
+    fn emit_provider_attempt(
+        &self,
+        failure: Option<&str>,
+        endpoint: Option<&str>,
+        is_local: Option<bool>,
+    ) {
         self.send(ProtocolEvent::ProviderAttempt {
             failure: failure.map(String::from),
+            endpoint: endpoint.map(String::from),
+            is_local,
         });
     }
 
-    fn emit_provider_retry(&self, failure: Option<&str>) {
+    fn emit_provider_retry(
+        &self,
+        failure: Option<&str>,
+        attempt: Option<u32>,
+        max_attempts: Option<u32>,
+    ) {
         self.send(ProtocolEvent::ProviderRetry {
             failure: failure.map(String::from),
+            attempt,
+            max_attempts,
         });
     }
 

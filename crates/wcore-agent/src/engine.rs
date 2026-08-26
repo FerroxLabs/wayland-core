@@ -13173,10 +13173,20 @@ impl AgentEngine {
                             evidence.failure.clone();
                     }
                     if evidence.physical {
-                        attempt_output.emit_provider_attempt(evidence.failure.as_deref());
+                        // #372: the ROUTE this physical send actually took.
+                        // The evidence carries it because only the send helper
+                        // knows the URL; the engine never reconstructs one.
+                        attempt_output.emit_provider_attempt(
+                            evidence.failure.as_deref(),
+                            evidence.endpoint.as_deref(),
+                            evidence.is_local,
+                        );
                     }
                     if evidence.retrying {
-                        attempt_output.emit_provider_retry(evidence.failure.as_deref());
+                        // A PROVIDER-INTERNAL retry: no turn-level ordinal
+                        // exists for it, and inventing one would make the
+                        // host's retry counter disagree with the engine's own.
+                        attempt_output.emit_provider_retry(evidence.failure.as_deref(), None, None);
                     }
                 });
                 let attempt_provider: Arc<dyn LlmProvider> = match (
@@ -13470,7 +13480,8 @@ impl AgentEngine {
                         ..
                     }) if !overflow_retried => {
                         self.output.emit_provider_failure("context_overflow");
-                        self.output.emit_provider_retry(Some("context_overflow"));
+                        self.output
+                            .emit_provider_retry(Some("context_overflow"), None, None);
                         overflow_retried = true;
                         self.output.emit_info(&format!(
                             "context overflow on {routed_model} ({required_tokens} tokens > \
@@ -13579,7 +13590,11 @@ impl AgentEngine {
                             let demoted = self.demote_all_tool_blocks();
                             if demoted > 0 {
                                 orphan_repair_retried = true;
-                                self.output.emit_provider_retry(Some("orphaned_tool_pair"));
+                                self.output.emit_provider_retry(
+                                    Some("orphaned_tool_pair"),
+                                    None,
+                                    None,
+                                );
                                 let mut retry_note = format!(
                                     "provider rejected the conversation for a tool-pairing \
                                      fault — demoted {demoted} tool block(s) to text and \
@@ -14397,7 +14412,15 @@ impl AgentEngine {
                         MonitorAction::Continue => {}
                     }
                     stream_attempt += 1;
-                    self.output.emit_provider_retry(Some(failure_code.as_str()));
+                    // #372: the SAME two numbers the `emit_info` line below
+                    // prints, on the structured frame the desktop host reads.
+                    // `class_max_retries` is the budget in force, not the
+                    // configured one — see the `progress` block below.
+                    self.output.emit_provider_retry(
+                        Some(failure_code.as_str()),
+                        Some(stream_attempt),
+                        Some(class_max_retries),
+                    );
                     // One curve for every retryable class, and a server
                     // instruction outranks it. `stream_retry_after_ms` is the
                     // number the provider sent; when it is absent but the

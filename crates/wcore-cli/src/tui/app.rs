@@ -1134,6 +1134,11 @@ pub enum ToolCardStatus {
     Ok,
     /// The tool finished with an error.
     Err,
+    /// The tool never finished: the dispatcher's deadline fired and the call
+    /// was cancelled (wayland#372). Kept distinct from `Err` because a card
+    /// reading "error" for a hung tool is the exact confusion that report is
+    /// about, and distinct from `Cancelled` because nobody asked for it.
+    TimedOut,
     /// The tool call was cancelled (by the user or the engine).
     Cancelled,
 }

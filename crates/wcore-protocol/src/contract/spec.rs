@@ -2113,6 +2113,12 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             "events/provider_attempt.json".into(),
             ProtocolEvent::ProviderAttempt {
                 failure: Some("http_503".into()),
+                // wayland#372 route metadata. Carried in the fixture because
+                // the corpus describes the fields a host has to be able to
+                // read; `required` stays at the discriminator alone so an
+                // attempt that could not recover its URL still validates.
+                endpoint: Some("http://127.0.0.1:11434".into()),
+                is_local: Some(true),
             },
         ),
         (
@@ -2125,6 +2131,8 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             "events/provider_retry.json".into(),
             ProtocolEvent::ProviderRetry {
                 failure: Some("timeout".into()),
+                attempt: Some(1),
+                max_attempts: Some(3),
             },
         ),
         (

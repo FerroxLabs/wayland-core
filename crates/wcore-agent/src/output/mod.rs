@@ -248,10 +248,32 @@ pub trait OutputSink: Send + Sync {
 
     /// Emit one physical provider attempt with its typed outcome. Default
     /// no-op for non-protocol sinks; JSON-stream output is always-on evidence.
-    fn emit_provider_attempt(&self, _failure: Option<&str>) {}
+    ///
+    /// wayland#372: `endpoint` is the `scheme://host[:port]` the attempt was
+    /// dispatched to (origin only — never a query string, which is where a
+    /// provider key hides) and `is_local` says whether that is on this machine.
+    /// Both are `None` when the send's URL could not be recovered.
+    fn emit_provider_attempt(
+        &self,
+        _failure: Option<&str>,
+        _endpoint: Option<&str>,
+        _is_local: Option<bool>,
+    ) {
+    }
 
     /// Emit an actual Core retry decision, separately from the physical send.
-    fn emit_provider_retry(&self, _failure: Option<&str>) {}
+    ///
+    /// wayland#372: `attempt` / `max_attempts` are the engine's turn-level
+    /// retry ordinal and the budget IN FORCE, so a host can render a retry
+    /// count separately from the run timer. Both are `None` for a
+    /// provider-internal retry decision, which has no turn-level ordinal.
+    fn emit_provider_retry(
+        &self,
+        _failure: Option<&str>,
+        _attempt: Option<u32>,
+        _max_attempts: Option<u32>,
+    ) {
+    }
 
     /// Emit a typed provider failure without claiming another physical send or
     /// retry decision.

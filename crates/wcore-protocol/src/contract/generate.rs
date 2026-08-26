@@ -87,8 +87,27 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // gap: each records why a specific widening needed a signal, and rewriting them
 // to look consecutive would destroy that reasoning to tidy a sequence no host
 // reads. A pinned host moves 1.16 -> 1.19 and finds every capability named.
-pub const CONTRACT_MINOR: u64 = 19;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/19";
+//
+// 19 -> 20: `provider_route_observability_v1` + `tool_timeout_status_v1`
+// (wayland#372). Two widenings, both forced by the wire-shape gate.
+//
+// `provider_route_observability_v1`. `provider_attempt` gains `endpoint` /
+// `is_local` and `provider_retry` gains `attempt` / `max_attempts`. All four
+// are optional, so `major` holds; the capability exists because ABSENCE is
+// ambiguous without it. A host that sees no `endpoint` cannot tell "this Core
+// does not report routes" from "this attempt's URL could not be recovered",
+// and the reporter's whole complaint (#372) is that they could not tell which
+// route a stalling step used. Only the capability separates the two readings.
+//
+// `tool_timeout_status_v1`. `tool_result.status` gains `timeout`. No field
+// changes shape, so `major` holds at 1; what widens is one CLOSED enum, and
+// the closed-enum argument is the one `session_persistence_v2` already
+// records: a host that minted its switch when the vocabulary had two values
+// validates inbound frames against those two and rejects a third. A rejected
+// `tool_result` is not cosmetic — the desktop decoder fails closed on a
+// `tool_`-prefixed frame it cannot accept, which ends the turn.
+pub const CONTRACT_MINOR: u64 = 20;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/20";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -430,7 +449,12 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
             json!({"enum": ["stop", "length", "error", "max_turns"], "type": "string"})
         }
         ("tool_result", "status") => {
-            json!({"enum": ["success", "error"], "type": "string"})
+            // `timeout` added in 1.20 (wayland#372). The enum is CLOSED, so a
+            // host pinned to 1.19 validates against a two-value vocabulary and
+            // would reject a frame this producer now legitimately emits —
+            // which is why the widening is announced by
+            // `tool_timeout_status_v1` and not left to be discovered.
+            json!({"enum": ["success", "error", "timeout"], "type": "string"})
         }
         ("tool_result", "output_type") => {
             json!({"enum": ["text", "diff", "image"], "type": "string"})
@@ -1714,6 +1738,24 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         ),
         (
             "workflow_lifecycle_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        // wayland#372. Declared => every `provider_attempt` that reached a send
+        // names the origin it went to and whether that origin is on the user's
+        // machine, and every retry the ENGINE schedules names its ordinal and
+        // the budget in force. Undeclared => an older Core, whose missing
+        // `endpoint` means nothing in particular.
+        (
+            "provider_route_observability_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        // wayland#372. Declared => `tool_result.status` may be `timeout`: the
+        // dispatch deadline fired and NOTHING observed the call finish. A host
+        // whose validator was minted against the two-value vocabulary must widen
+        // it before it can accept such a frame, and a host that renders it as
+        // `error` tells the user a tool failed when it in fact hung.
+        (
+            "tool_timeout_status_v1".into(),
             ContractCapabilityStatus::Available,
         ),
     ])

@@ -3,7 +3,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use wcore_egress::{EgressError, EgressRequestBuilder};
+use wcore_egress::{EgressError, EgressRequestBuilder, EndpointRoute};
 
 use super::ProviderError;
 use crate::attempt_lifecycle::{
@@ -53,6 +53,15 @@ pub struct ProviderAttemptEvidence {
     pub failure: Option<String>,
     /// Whether Core immediately scheduled another physical attempt.
     pub retrying: bool,
+    /// wayland#372 — `scheme://host[:port]` of the endpoint this record belongs
+    /// to. `None` when no send helper scoped a route around this record: a
+    /// caller that records an attempt outside [`builder_send_with_retry`] /
+    /// [`send_physical_once`], or a request whose URL could not be recovered
+    /// from its builder. Never carries credentials; see [`EndpointRoute`].
+    pub endpoint: Option<String>,
+    /// wayland#372 — whether `endpoint` is on this machine or its private
+    /// network. `None` exactly when `endpoint` is `None`.
+    pub is_local: Option<bool>,
 }
 
 tokio::task_local! {
@@ -60,6 +69,11 @@ tokio::task_local! {
     static ATTEMPT_OBSERVER: Option<Arc<dyn Fn(ProviderAttemptEvidence) + Send + Sync>>;
     static MAX_RETRIES_OVERRIDE: u32;
     static CONFIGURED_FALLBACK_ADMITTER: Option<ConfiguredFallbackAdmitter>;
+    /// wayland#372 — the route of the request the enclosing send helper is
+    /// dispatching. A task-local rather than an argument because every
+    /// `record_*` helper below is reached from a dozen arms of two loops, and
+    /// the route is a property of the enclosing send, not of the arm.
+    static ATTEMPT_ROUTE: Option<EndpointRoute>;
 }
 
 pub type ProviderAttemptObserver = Arc<dyn Fn(ProviderAttemptEvidence) + Send + Sync>;
@@ -213,10 +227,13 @@ where
 /// Report a typed provider failure discovered after the physical response
 /// started (for example an SSE stream that closed before its terminal frame).
 pub fn record_provider_failure(failure: impl Into<String>) {
+    let (endpoint, is_local) = current_route();
     let evidence = ProviderAttemptEvidence {
         physical: false,
         failure: Some(failure.into()),
         retrying: false,
+        endpoint,
+        is_local,
     };
     let _ = ATTEMPT_OBSERVER.try_with(|observer| {
         if let Some(observer) = observer {
@@ -226,10 +243,13 @@ pub fn record_provider_failure(failure: impl Into<String>) {
 }
 
 fn record_not_attempted(failure: impl Into<String>) {
+    let (endpoint, is_local) = current_route();
     let evidence = ProviderAttemptEvidence {
         physical: false,
         failure: Some(failure.into()),
         retrying: false,
+        endpoint,
+        is_local,
     };
     let _ = ATTEMPT_OBSERVER.try_with(|observer| {
         if let Some(observer) = observer {
@@ -238,11 +258,35 @@ fn record_not_attempted(failure: impl Into<String>) {
     });
 }
 
+/// The route of the send currently in flight, if the caller scoped one.
+fn current_route() -> (Option<String>, Option<bool>) {
+    ATTEMPT_ROUTE
+        .try_with(|route| {
+            route
+                .as_ref()
+                .map(|route| (route.origin.clone(), route.is_local))
+        })
+        .ok()
+        .flatten()
+        .map_or((None, None), |(origin, local)| (Some(origin), Some(local)))
+}
+
+/// Run `future` with the route every physical attempt inside it dispatches to.
+async fn scope_attempt_route<F>(route: Option<EndpointRoute>, future: F) -> F::Output
+where
+    F: Future,
+{
+    ATTEMPT_ROUTE.scope(route, future).await
+}
+
 fn record_attempt(failure: Option<String>, retrying: bool) {
+    let (endpoint, is_local) = current_route();
     let evidence = ProviderAttemptEvidence {
         physical: true,
         failure,
         retrying,
+        endpoint,
+        is_local,
     };
     let _ = ATTEMPT_EVIDENCE.try_with(|slot| slot.borrow_mut().push(evidence.clone()));
     let _ = ATTEMPT_OBSERVER.try_with(|observer| {
@@ -263,6 +307,8 @@ pub fn mark_last_attempt_retrying() {
                 physical: false,
                 failure: last.failure.clone(),
                 retrying: true,
+                endpoint: last.endpoint.clone(),
+                is_local: last.is_local,
             };
             let _ = ATTEMPT_OBSERVER.try_with(|observer| {
                 if let Some(observer) = observer {
@@ -804,6 +850,13 @@ pub fn provider_error_from_egress(e: EgressError) -> ProviderError {
 pub(crate) async fn send_physical_once(
     builder: EgressRequestBuilder,
 ) -> Result<reqwest::Response, ProviderError> {
+    let route = builder.endpoint_route();
+    scope_attempt_route(route, send_physical_once_inner(builder)).await
+}
+
+async fn send_physical_once_inner(
+    builder: EgressRequestBuilder,
+) -> Result<reqwest::Response, ProviderError> {
     let lifecycle_attempt = begin_physical_attempt().await?;
     let dispatch_attempt = lifecycle_attempt.clone();
     let builder = builder.before_dispatch(move || {
@@ -865,6 +918,16 @@ pub(crate) async fn send_physical_once(
 /// request is sent **once** without retry rather than failing outright —
 /// a non-cloneable streaming body is still a valid single-shot request.
 pub async fn builder_send_with_retry(
+    builder: EgressRequestBuilder,
+) -> Result<reqwest::Response, ProviderError> {
+    // Captured ONCE, before the loop: every attempt in this helper re-sends the
+    // same request to the same place, and `try_clone` on a per-attempt basis
+    // would pay for the body clone twice.
+    let route = builder.endpoint_route();
+    scope_attempt_route(route, builder_send_with_retry_inner(builder)).await
+}
+
+async fn builder_send_with_retry_inner(
     builder: EgressRequestBuilder,
 ) -> Result<reqwest::Response, ProviderError> {
     let max_retries = effective_max_retries(DEFAULT_MAX_RETRIES);
@@ -1369,11 +1432,17 @@ mod tests {
                     physical: true,
                     failure: Some("http_503".to_string()),
                     retrying: true,
+                    // No enclosing send helper scoped a route, so the record
+                    // carries none rather than inventing one.
+                    endpoint: None,
+                    is_local: None,
                 },
                 ProviderAttemptEvidence {
                     physical: true,
                     failure: None,
                     retrying: false,
+                    endpoint: None,
+                    is_local: None,
                 },
             ]
         );

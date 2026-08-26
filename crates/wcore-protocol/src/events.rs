@@ -1191,6 +1191,22 @@ pub enum ProtocolEvent {
         /// Stable failure class (`http_503`, `timeout`, `stream_truncated`, ...).
         #[serde(skip_serializing_if = "Option::is_none")]
         failure: Option<String>,
+        /// wayland#372 — `scheme://host[:port]` this attempt was dispatched to.
+        ///
+        /// The ORIGIN only: userinfo, path, query and fragment are stripped
+        /// before this reaches the wire, because a provider key routinely rides
+        /// in a query parameter. Absent when the attempt never reached a send
+        /// or the URL could not be recovered.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+        /// wayland#372 — whether `endpoint` is on this machine or its private
+        /// network, so a host can show "local" against "cloud" for each step.
+        ///
+        /// Decided lexically from the host literal and NEVER by resolving a
+        /// name, so it means "definitely local", not "definitely not remote".
+        /// Absent exactly when `endpoint` is absent.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_local: Option<bool>,
     },
     /// Core scheduled another provider attempt after a typed failure. Kept
     /// separate from `ProviderAttempt` so a retry decision never inflates the
@@ -1198,6 +1214,20 @@ pub enum ProtocolEvent {
     ProviderRetry {
         #[serde(skip_serializing_if = "Option::is_none")]
         failure: Option<String>,
+        /// wayland#372 — 1-based ordinal of the attempt this retry schedules.
+        ///
+        /// Present on the ENGINE's turn-level retry loop, which is the one a
+        /// user experiences as "it is taking another run at it". Absent on a
+        /// provider-internal retry decision, which has no turn-level ordinal to
+        /// report and must not be rendered as one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        /// wayland#372 — the retry budget IN FORCE for this failure class, not
+        /// the configured maximum. After a ceiling has cut the budget,
+        /// reporting the configured number would promise attempts that will not
+        /// happen. Absent whenever `attempt` is absent.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_attempts: Option<u32>,
     },
     /// A typed provider failure discovered after the physical send completed
     /// (for example a truncated SSE body). It does not imply a retry.
@@ -1923,6 +1953,24 @@ impl std::fmt::Display for ToolCategory {
 pub enum ToolStatus {
     Success,
     Error,
+    /// The dispatcher's own deadline fired and the call was cancelled: no tool
+    /// ran to completion and nothing observed the effect finish.
+    ///
+    /// wayland#372 asked to be told "whether the tool call succeeded/failed/
+    /// timed out". Before this variant a stalled call and a call that ran and
+    /// returned an error were the SAME frame, which is the ambiguity the report
+    /// is about.
+    ///
+    /// NOT free for a validating host, and the contract says so. The published
+    /// `tool_result.status` is a CLOSED enum — it was `["success", "error"]`
+    /// through contract 1.19 — so a host whose inbound validator was minted
+    /// against that vocabulary REJECTS this value rather than falling through
+    /// to a default arm, and the desktop decoder fails closed on a
+    /// `tool_`-prefixed frame it cannot accept, which ends the turn. The
+    /// widening is therefore announced: contract 1.20 plus the named
+    /// `tool_timeout_status_v1` capability. A host that has not widened must
+    /// read that capability and not the shape.
+    Timeout,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]

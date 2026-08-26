@@ -3529,7 +3529,16 @@ async fn execute_tool_calls_with_approval_budget_effects_inner(
             content, is_error, ..
         } = &result
         {
-            let status = if *is_error {
+            // wayland#372 — three outcomes, not two. `was_cancelled` is set at
+            // exactly one place (`execute_single_with_streaming`, the
+            // `Err(_elapsed)` arm of the dispatch deadline) and its own
+            // signature documents it as "true only when the dispatch
+            // timeout-cancel path won", so it is the timeout and nothing else.
+            // Before this the host saw `error` for a call nothing observed
+            // finish, byte-identical to a tool that ran and returned a failure.
+            let status = if was_cancelled {
+                ToolStatus::Timeout
+            } else if *is_error {
                 ToolStatus::Error
             } else {
                 ToolStatus::Success
@@ -5188,6 +5197,96 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    /// wayland#372 asks the host to be told "whether the tool call
+    /// succeeded/failed/timed out". Today it is told two of the three: the
+    /// dispatch-deadline path synthesises a `ToolResult { is_error: true }`
+    /// and the wire carries `status: "error"`, byte-identical to a tool that
+    /// ran to completion and returned a failure. The reporter's whole
+    /// complaint is that a stalled run is indistinguishable from a failing
+    /// one, and this is one of the places that is literally true.
+    ///
+    /// Graded on the WIRE (`ProtocolEvent::ToolResult` off the real emitter),
+    /// never on the log line `[tool-timeout]` that the dispatcher already
+    /// prints — the desktop host reads events, not our stderr.
+    #[tokio::test]
+    async fn a_dispatch_timeout_is_reported_to_the_host_as_a_timeout() {
+        use wcore_protocol::ToolApprovalManager;
+        use wcore_protocol::events::{ProtocolEvent, ToolStatus};
+
+        let registry = make_registry_with_deferred();
+        let mgr = Arc::new(ToolApprovalManager::new());
+        let emitter = Arc::new(CapturingEmitter(Mutex::new(Vec::new())));
+        let writer: Arc<dyn wcore_protocol::writer::ProtocolEmitter> =
+            Arc::clone(&emitter) as Arc<dyn wcore_protocol::writer::ProtocolEmitter>;
+
+        // `MockNonDeferred` with `cmd: "sleep"` sleeps 1 s; a 20 ms tool-runtime
+        // budget makes the dispatcher's own deadline win, which is the ONLY
+        // path that sets `was_cancelled`.
+        let budget = crate::budget::ExecutionBudget {
+            max_tool_runtime: Some(Duration::from_millis(20)),
+            ..Default::default()
+        }
+        .start_root();
+        let tracker = ToolBudgetTracker::with_execution_budget(budget);
+
+        let calls = vec![ContentBlock::ToolUse {
+            id: "timed-out-call".into(),
+            name: "MockNonDeferred".into(),
+            input: json!({"cmd": "sleep"}),
+            extra: None,
+        }];
+
+        let outcome = execute_tool_calls_with_approval_and_budget(
+            &registry,
+            &calls,
+            &mgr,
+            &writer,
+            "msg-timeout",
+            // Allow-listed, so the call auto-approves and no host is needed to
+            // answer an approval prompt.
+            &["MockNonDeferred".to_string()],
+            None,
+            wcore_compact::CompactionLevel::Off,
+            false,
+            Some(&tracker),
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("dispatch must not return ExecutionControl");
+        assert_eq!(outcome.results.len(), 1, "the call must produce a result");
+
+        let events = emitter.0.lock().expect("emitter mutex").clone();
+        let (status, output) = events
+            .iter()
+            .find_map(|event| match event {
+                ProtocolEvent::ToolResult {
+                    call_id,
+                    status,
+                    output,
+                    ..
+                } if call_id == "timed-out-call" => Some((*status, output.clone())),
+                _ => None,
+            })
+            .expect("the host must receive a tool_result for the timed-out call");
+
+        // CONTROL. If the tool finished inside the budget the deadline path was
+        // never entered and every claim below is vacuous. Assert the branch
+        // fired using the message that branch — and only that branch — writes.
+        assert!(
+            output.contains("timed out after"),
+            "control failed: the dispatch deadline never fired, so this test \
+             graded a completed tool run. Output was: {output}"
+        );
+
+        assert!(
+            matches!(status, ToolStatus::Timeout),
+            "wayland#372: a tool killed by the dispatch deadline reached the \
+             host as {status:?}, which is what a tool that ran and returned an \
+             error also reports. The host cannot tell a stall from a failure."
+        );
     }
 
     /// Desktop -> Core, 2026-08-12: an auto-approved call emitted `tool_running`

@@ -61,7 +61,7 @@ pub use policy::{
     default_policy, global_policy_installed, install_global_policy, with_default_policy,
     with_default_policy_sync,
 };
-pub use request::EgressRequestBuilder;
+pub use request::{EgressRequestBuilder, EndpointRoute};
 pub use url_allow::host_in_allowlist;
 
 // Re-export the reqwest surface that migrated call sites still need to name

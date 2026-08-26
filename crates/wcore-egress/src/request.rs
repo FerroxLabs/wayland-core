@@ -151,6 +151,18 @@ impl EgressRequestBuilder {
         self
     }
 
+    /// Where this request will be dispatched, and whether that is somewhere on
+    /// this machine or its private network (wayland#372).
+    ///
+    /// `None` when the request cannot be built (a non-cloneable streaming body)
+    /// or carries no host. `reqwest::RequestBuilder` does not expose its URL and
+    /// `build()` consumes it, so this goes through `try_clone` — the same call
+    /// the provider retry ring already makes once per attempt, and cheap for
+    /// the reusable `Bytes` bodies every LLM call uses.
+    pub fn endpoint_route(&self) -> Option<EndpointRoute> {
+        EndpointRoute::of(self.inner.try_clone()?.build().ok()?.url())
+    }
+
     /// Try to clone this builder. Returns `None` when the body is a non-cloneable
     /// stream — same semantics as [`reqwest::RequestBuilder::try_clone`]. Used by
     /// the retry layer, which re-sends a request on transient failure.
@@ -203,5 +215,139 @@ impl EgressRequestBuilder {
                 Err(EgressError::Denied(reason))
             }
         }
+    }
+}
+
+/// Where a request is going, in the two terms wayland#372 asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointRoute {
+    /// `scheme://host[:port]`, and DELIBERATELY nothing else.
+    ///
+    /// Userinfo, path, query and fragment are dropped. That is not tidiness: a
+    /// provider key routinely rides in a query parameter or in userinfo, and
+    /// this value is emitted on the protocol wire to a host UI. The origin is
+    /// the whole of what "which route did this step use" needs. The port is
+    /// carried only when the URL states one, so a default-port cloud endpoint
+    /// stays readable while a local `:11434` never loses the digits that
+    /// identify it.
+    pub origin: String,
+    /// Whether `origin` addresses this machine or its private network.
+    pub is_local: bool,
+}
+
+impl EndpointRoute {
+    /// Classify a URL. `None` for a URL with no host (`data:`, `mailto:`).
+    pub fn of(url: &reqwest::Url) -> Option<Self> {
+        let host = url.host_str()?;
+        let origin = match url.port() {
+            Some(port) => format!("{}://{host}:{port}", url.scheme()),
+            None => format!("{}://{host}", url.scheme()),
+        };
+        Some(Self {
+            is_local: host_is_local(host),
+            origin,
+        })
+    }
+}
+
+/// Whether a host literal addresses this machine or its private network.
+///
+/// PURELY LEXICAL — this never resolves a name. A classifier that did would put
+/// a blocking network call on the dispatch path and would fail closed under a
+/// DNS outage, which is one of the conditions it exists to report on. A name
+/// that is not obviously local is therefore reported as NOT local: the field
+/// says "this is definitely on your machine", never "this is definitely not".
+fn host_is_local(host: &str) -> bool {
+    // `Url::host_str` keeps the brackets on an IPv6 literal.
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    match bare.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                // fc00::/7 unique-local and fe80::/10 link-local, written out
+                // because `is_unique_local` / `is_unicast_link_local` are not
+                // stable.
+                || (ip.segments()[0] & 0xfe00) == 0xfc00
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
+        Err(_) => {
+            let name = bare.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost") || name.ends_with(".local")
+        }
+    }
+}
+
+#[cfg(test)]
+mod endpoint_route_tests {
+    use super::*;
+
+    fn route(raw: &str) -> Option<EndpointRoute> {
+        EndpointRoute::of(&reqwest::Url::parse(raw).unwrap())
+    }
+
+    /// The reported configuration in wayland#372: a local Ollama-compatible
+    /// endpoint on loopback.
+    #[test]
+    fn a_loopback_endpoint_is_local() {
+        let route = route("http://127.0.0.1:11434/v1/chat/completions").unwrap();
+        assert_eq!(route.origin, "http://127.0.0.1:11434");
+        assert!(route.is_local);
+    }
+
+    /// POLARITY CONTROL. Without this, a classifier stuck at `true` would pass
+    /// every local case above and the field would mean nothing.
+    #[test]
+    fn a_public_endpoint_is_not_local() {
+        for raw in [
+            "https://api.anthropic.com/v1/messages",
+            "https://api.openai.com/v1/chat/completions",
+            "https://8.8.8.8/v1",
+            // Not obviously local, and never resolved to find out.
+            "http://ollama.example.com:11434/v1",
+        ] {
+            let route = route(raw).unwrap();
+            assert!(!route.is_local, "{raw} must not be reported as local");
+        }
+        assert_eq!(
+            route("https://api.anthropic.com/v1/messages")
+                .unwrap()
+                .origin,
+            "https://api.anthropic.com",
+            "an implicit default port must not be invented into the origin"
+        );
+    }
+
+    #[test]
+    fn the_private_ranges_and_local_names_are_local() {
+        for raw in [
+            "http://localhost:11434/v1",
+            "http://LOCALHOST:11434/v1",
+            "http://box.local:11434/v1",
+            "http://192.168.1.5:11434/v1",
+            "http://10.0.0.7:11434/v1",
+            "http://172.16.4.1:11434/v1",
+            "http://169.254.1.1:11434/v1",
+            "http://[::1]:11434/v1",
+            "http://[fe80::1]:11434/v1",
+            "http://[fd00::1]:11434/v1",
+        ] {
+            assert!(route(raw).unwrap().is_local, "{raw} must be local");
+        }
+    }
+
+    /// The origin must not carry a credential. Both shapes below put a live key
+    /// on the wire if the whole URL were reported.
+    #[test]
+    fn the_origin_drops_credentials_and_everything_after_the_authority() {
+        let route =
+            route("https://user:sk-secret@api.example.com/v1/x?key=sk-also-secret#frag").unwrap();
+        assert_eq!(route.origin, "https://api.example.com");
+        assert!(!route.origin.contains("sk-"), "{}", route.origin);
+        assert!(!route.origin.contains('@'), "{}", route.origin);
+    }
+
+    #[test]
+    fn a_hostless_url_has_no_route() {
+        assert!(EndpointRoute::of(&reqwest::Url::parse("data:text/plain,hi").unwrap()).is_none());
     }
 }

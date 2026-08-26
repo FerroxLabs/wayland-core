@@ -172,6 +172,7 @@ fn status_icon(status: ToolCardStatus) -> &'static str {
     match status {
         ToolCardStatus::Ok => "●",
         ToolCardStatus::Err => "✗",
+        ToolCardStatus::TimedOut => "◷",
         ToolCardStatus::Running => "◐",
         ToolCardStatus::AwaitingApproval => "⊘",
         ToolCardStatus::Cancelled => "○",
@@ -208,6 +209,8 @@ fn status_color(status: ToolCardStatus, t: &Theme) -> ratatui::style::Color {
         ToolCardStatus::Running => t.orange,
         ToolCardStatus::Ok => t.success,
         ToolCardStatus::Err => t.error,
+        // Warning, not error: nothing failed, something is unfinished.
+        ToolCardStatus::TimedOut => t.warning,
         ToolCardStatus::Cancelled => t.text_muted,
     }
 }
@@ -303,6 +306,7 @@ fn status_chip(card: &ToolCardModel) -> String {
         ToolCardStatus::Running => "running".into(),
         ToolCardStatus::Ok => "done".into(),
         ToolCardStatus::Err => "error".into(),
+        ToolCardStatus::TimedOut => "timed out".into(),
         ToolCardStatus::Cancelled => "cancelled".into(),
     }
 }
@@ -373,10 +377,11 @@ mod tests {
         // Each lifecycle status has its own glyph; the widget must paint
         // the right one with the right color. Tracks the v0.9.2 S20
         // (variant A) palette: `◐` running · `●` done · `○` cancelled ·
-        // `⊘` awaiting-approval · `✗` error.
+        // `⊘` awaiting-approval · `✗` error · `◷` timed out (wayland#372).
         let icon_for = |s: ToolCardStatus| match s {
             ToolCardStatus::Ok => "●",
             ToolCardStatus::Err => "✗",
+            ToolCardStatus::TimedOut => "◷",
             ToolCardStatus::Running => "◐",
             ToolCardStatus::AwaitingApproval => "⊘",
             ToolCardStatus::Cancelled => "○",
@@ -384,6 +389,7 @@ mod tests {
         for s in [
             ToolCardStatus::Ok,
             ToolCardStatus::Err,
+            ToolCardStatus::TimedOut,
             ToolCardStatus::Running,
             ToolCardStatus::AwaitingApproval,
             ToolCardStatus::Cancelled,
@@ -407,7 +413,23 @@ mod tests {
             (ToolCardStatus::Cancelled, "○"),        // cancelled
             (ToolCardStatus::AwaitingApproval, "⊘"), // kept distinct
             (ToolCardStatus::Err, "✗"),              // error
+            (ToolCardStatus::TimedOut, "◷"),         // wayland#372: unfinished
         ];
+        // A timed-out card must not be readable as any other outcome: that
+        // collision is the whole point of the variant.
+        for other in [
+            ToolCardStatus::Err,
+            ToolCardStatus::Cancelled,
+            ToolCardStatus::Ok,
+            ToolCardStatus::Running,
+            ToolCardStatus::AwaitingApproval,
+        ] {
+            assert_ne!(
+                status_icon(ToolCardStatus::TimedOut),
+                status_icon(other),
+                "a timed-out card must not render as {other:?}"
+            );
+        }
         for (status, glyph) in expected {
             assert_eq!(
                 status_icon(status),

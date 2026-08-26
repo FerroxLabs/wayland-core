@@ -183,8 +183,14 @@ fn golden_provider_circuit_event_closed_w7() {
 
 #[test]
 fn golden_provider_attempt() {
+    // wayland#372 added `endpoint` / `is_local` / `attempt` / `max_attempts`.
+    // All four are `skip_serializing_if`, so an event that carries none of them
+    // must still be BYTE-IDENTICAL to the pre-#372 wire shape a shipped desktop
+    // host decodes. That is what this arm pins.
     let failed = ProtocolEvent::ProviderAttempt {
         failure: Some("http_503".into()),
+        endpoint: None,
+        is_local: None,
     };
     let got = serde_json::to_value(&failed).unwrap();
     assert_eq!(
@@ -195,16 +201,49 @@ fn golden_provider_attempt() {
         })
     );
 
-    let success = ProtocolEvent::ProviderAttempt { failure: None };
+    let success = ProtocolEvent::ProviderAttempt {
+        failure: None,
+        endpoint: None,
+        is_local: None,
+    };
     let got = serde_json::to_value(&success).unwrap();
     assert!(got.get("failure").is_none());
 
+    // And when they ARE carried, they reach the wire under these exact names.
+    let routed = ProtocolEvent::ProviderAttempt {
+        failure: None,
+        endpoint: Some("http://127.0.0.1:11434".into()),
+        is_local: Some(true),
+    };
+    let got = serde_json::to_value(&routed).unwrap();
+    assert_eq!(
+        got,
+        json!({
+            "type": "provider_attempt",
+            "endpoint": "http://127.0.0.1:11434",
+            "is_local": true,
+        })
+    );
+
     let retry = ProtocolEvent::ProviderRetry {
         failure: Some("http_503".into()),
+        attempt: None,
+        max_attempts: None,
     };
     let got = serde_json::to_value(&retry).unwrap();
     assert_eq!(got["type"], "provider_retry");
     assert_eq!(got["failure"], "http_503");
+    assert!(got.get("attempt").is_none());
+    assert!(got.get("max_attempts").is_none());
+
+    let counted = ProtocolEvent::ProviderRetry {
+        failure: Some("http_503".into()),
+        attempt: Some(2),
+        max_attempts: Some(10),
+    };
+    let got = serde_json::to_value(&counted).unwrap();
+    assert_eq!(got["attempt"], 2);
+    assert_eq!(got["max_attempts"], 10);
 
     let failure = ProtocolEvent::ProviderFailure {
         failure: "stream_truncated".into(),
