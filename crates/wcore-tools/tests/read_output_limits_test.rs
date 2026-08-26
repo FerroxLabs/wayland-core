@@ -41,7 +41,12 @@ fn sandboxed_ctx(root: &std::path::Path) -> ToolContext {
 }
 
 /// Write `n` lines of `width` printable bytes each. Returns the path.
-fn write_wide_file(dir: &std::path::Path, name: &str, n: usize, width: usize) -> std::path::PathBuf {
+fn write_wide_file(
+    dir: &std::path::Path,
+    name: &str,
+    n: usize,
+    width: usize,
+) -> std::path::PathBuf {
     let path = dir.join(name);
     let mut f = std::io::BufWriter::new(std::fs::File::create(&path).expect("create"));
     let filler = "x".repeat(width);
@@ -117,7 +122,9 @@ async fn line_cap_is_disclosed_with_a_continuation_offset() {
         .unwrap_or_else(|| panic!("no truncation notice in result"));
 
     assert!(
-        notice.contains(&format!("showing {DEFAULT_MAX_LINES} of {HUGE_LINES} lines")),
+        notice.contains(&format!(
+            "showing {DEFAULT_MAX_LINES} of {HUGE_LINES} lines"
+        )),
         "notice must name both the shown and the available line counts: {notice}"
     );
     assert!(
@@ -185,7 +192,11 @@ async fn explicit_limit_below_the_cap_is_untouched() {
         .await;
 
     let lines = body_lines(&result.content);
-    assert_eq!(lines.len(), 5, "explicit limit must not be widened to the cap");
+    assert_eq!(
+        lines.len(),
+        5,
+        "explicit limit must not be widened to the cap"
+    );
     assert!(
         !result.content.contains("... [truncated"),
         "a fully-satisfied request must not claim truncation"

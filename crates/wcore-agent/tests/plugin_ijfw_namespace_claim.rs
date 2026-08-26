@@ -29,8 +29,6 @@
 //! `PluginRunner` → `apply_initialize_outcome` path, not a fixture, so the
 //! marker cannot be dropped from `wayland-ijfw` without failing here.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use wcore_agent::plugins::{DiscoveredPlugin, PluginRunner, apply_initialize_outcome};

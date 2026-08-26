@@ -89,7 +89,9 @@ fn fifo_streaming_past_the_limit(dir: &std::path::Path) -> std::path::PathBuf {
 /// not the size guard, are what actually holds.
 #[test]
 fn pseudo_sources_really_do_report_a_length_of_zero() {
-    let dev_zero = std::fs::metadata("/dev/zero").expect("stat /dev/zero").len();
+    let dev_zero = std::fs::metadata("/dev/zero")
+        .expect("stat /dev/zero")
+        .len();
     let proc_maps = std::fs::metadata("/proc/self/maps")
         .expect("stat /proc/self/maps")
         .len();
