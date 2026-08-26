@@ -107,6 +107,20 @@ pub fn reported_cost(
 /// `OPENAI_API_KEY=""` should NOT count as "configured"). Every new
 /// Wave-1 backend resolves credentials through this helper so the
 /// "key set but empty" pathology is handled in one place.
+/// The single next step every web-search dead end points at.
+///
+/// Verified 2026-08-26 against Tavily's own pricing page and quickstart:
+/// 1,000 API credits per month, refilling monthly, "No credit card required".
+/// It is the only option in the surveyed free-tier field a user can complete
+/// without a payment form - Brave removed its keyless free tier in Feb 2026
+/// (a card is now mandatory and its ToS requires a "POWERED BY BRAVE"
+/// attribution), and Google's Custom Search JSON API is closed to new
+/// customers. Do NOT widen this text with an unverified URL or quota; a
+/// remedy the user cannot complete is worse than no remedy, because they
+/// spend the attempt before finding out.
+pub const WEB_SEARCH_KEY_REMEDY: &str = "Next step: get a free Tavily API key at https://app.tavily.com (no credit card, \
+     1,000 searches/month), then set TAVILY_API_KEY and start wayland-core again.";
+
 pub fn read_env_key(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }

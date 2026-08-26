@@ -5790,6 +5790,16 @@ fn merge_config_files_with_trust(
         } else {
             global.browser.camoufox_download
         },
+        // Same "project overrides when it set a non-default" rule as
+        // `camoufox_download` above. The default is ENABLED, so a project that
+        // says nothing inherits the working browser rather than a broken one.
+        sidecar_auto_install: if project.browser.sidecar_auto_install
+            != crate::browser::SidecarAutoInstall::default()
+        {
+            project.browser.sidecar_auto_install
+        } else {
+            global.browser.sidecar_auto_install
+        },
         // gh#1117 opt-out. A bool whose only non-default value is `true`, so
         // "project overrides when non-default" and OR are the same rule the
         // loopback grant above uses. An UNTRUSTED project cannot reach this:

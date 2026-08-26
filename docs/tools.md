@@ -377,6 +377,73 @@ Available capability flag: `capabilities.browser_suite` (W8c.1). The
 engine emits `browser_event` and `browser_policy_denied` while ops
 run; see `docs/json-stream-protocol.md` §§1.N+6 and 1.N+7.
 
+### Two things a fresh install needs before a browser op works
+
+A first browser op on an untouched install has two gates. Core clears the
+first one for you; the second is yours, deliberately. The tool card names
+whichever step is outstanding.
+
+**1. The sidecar — Core installs it.** Core does *not* bundle a browser; it
+drives the Camoufox sidecar, a separate npm package. When that sidecar does
+not resolve, Core installs it on first use:
+
+```bash
+npm install -g --prefix <profile>/browser/bin/node @askjo/camofox-browser
+```
+
+The prefix is Core-owned, so this never needs `sudo` and never writes to a
+system-wide npm root. `npm` must be on `PATH`; if it is not, the tool refuses
+and names the manual command.
+
+The install deliberately does **not** pass `--ignore-scripts`. That package
+ships the control server (a ~181 KB tarball with no browser in it); its
+`postinstall` is what fetches the Camoufox browser itself. Skipping it would
+install a server with nothing behind it and move the failure from install time
+to your first `Browser::navigate`.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `[browser.sidecar_auto_install] enabled` | `true` | Install the sidecar on first use when it does not resolve. |
+| `[browser.sidecar_auto_install] timeout_secs` | `600` | Budget for that install. The postinstall downloads a browser, so this is minutes. |
+| `[browser.camoufox_download] enabled` | `false` | Operator-pinned artifact instead — takes precedence when on. Requires a `url` **and** a `sha256` per platform; enabling it without a digest is an error, not permission to fetch-and-trust. |
+
+Already have one somewhere else? Point `WAYLAND_CAMOUFOX_BIN` at the
+`camofox-browser` executable and Core skips both paths. Setting
+`[browser.sidecar_auto_install] enabled = false` restores the older behaviour,
+in which a fresh machine is refused and told to run the command itself.
+
+**2. Open the policy — this one is yours.** `[browser.policy]` is fail-closed
+since v0.2.1 — `default_action = "deny"` with no `allowed_origins`, so every
+URL that reaches `Browser::navigate` / `download` / `new_tab { url }` is
+refused. This is the SSRF posture, not an oversight; the fix is to name the
+origins you intend to visit, including any search engine you expect the agent
+to use:
+
+```toml
+[browser.policy]
+# Glob patterns supported. This is an allow-list: an origin that is not
+# named here stays refused.
+allowed_origins = ["example.com", "*.mysite.com"]
+```
+
+Or, not recommended (it re-opens the SSRF surface):
+
+```toml
+[browser.policy]
+default_action = "allow"
+```
+
+Put it in a file the loader actually reads — the global
+`config.toml` under the app config dir (`wayland-core --config-path`) or
+`<project dir>/.wayland-core.toml`. A bare `config.toml` in the working
+directory is **not** a config source in any layer.
+
+Loopback (`http://localhost:…`) is refused even by an allow-list; it
+needs the separate port-scoped grant at `[browser.policy.loopback]`.
+
+`wayland-core --doctor` reports both steps: a `browser backend` row for
+the sidecar and a `browser policy` row directly under it.
+
 ## Computer use (W8c.2)
 
 `Cua::*` tools are registered by the `wayland-cua` plugin (via
@@ -470,15 +537,39 @@ so search never hard-fails — except when explicitly disabled.
 | default | *(no keys)* | **Parallel free → DDG** |
 
 `WAYLAND_WEB_BACKEND` is an explicit override that wins over key presence;
-`auto` (or unset / unrecognized) runs the ladder in the table order
+`auto` (or unset) runs the ladder in the table order
 (firecrawl → parallel → tavily → exa → searxng → brave → ddg), so a configured
 key always wins over the keyless default and DuckDuckGo is the final fallback.
+
+It accepts **only** `off`, `duckduckgo`, `parallel` and `auto`. The keyed
+backends are selected by setting their key, not by naming them here — so
+`WAYLAND_WEB_BACKEND=tavily` is not a selector. Any other value is ignored (the
+ladder still runs) and the reason is reported on the first search's tool card,
+rather than being discarded silently.
+
+Both `WAYLAND_WEB_BACKEND` and `SEARXNG_URL` can be persisted in
+`~/.wayland/.env` alongside the API keys.
 
 **Default (no config):** the engine uses Parallel.ai's free, anonymous Search
 MCP (`https://search.parallel.ai/mcp`) — ranked URLs with query-relevant
 excerpts, no API key. **Privacy:** your search queries are sent to parallel.ai.
-A one-time log notes this on first use; set `WAYLAND_WEB_BACKEND=duckduckgo` to
-keep queries on DuckDuckGo, or `=off` to disable web search entirely.
+A one-time notice says so on the first search's tool card (once per user), and
+the same text is in the log. Set `WAYLAND_WEB_BACKEND=off` to disable web
+search entirely.
+
+`WAYLAND_WEB_BACKEND=duckduckgo` also keeps queries off parallel.ai, but read
+the caveat below before choosing it as a durable setting.
+
+**DuckDuckGo is a floor, not a backend to run on.** It is a scrape of the free
+`html.duckduckgo.com` endpoint, which rate-limits **by IP**: measured
+2026-08-26, it serves roughly two queries and then returns a bot-challenge page
+for minutes (still refusing four minutes later). On a shared egress IP (CI, an
+office NAT, a VPN exit) the budget may be spent before your first query. It is
+also the one selection with nothing behind it — `WAYLAND_WEB_BACKEND=duckduckgo`
+is deliberately unchained, because a user who asked to keep queries on
+DuckDuckGo must not have them quietly sent elsewhere. For search that keeps
+working, set a key: a free Tavily key needs no credit card
+(<https://app.tavily.com>, 1,000 searches/month) — set `TAVILY_API_KEY`.
 
 **SearXNG** is gated by `SEARXNG_URL` (your own or a public instance — the
 engine ships the connector, not the instance). The instance must be **publicly

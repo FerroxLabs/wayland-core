@@ -534,7 +534,7 @@ separately under [API Key Resolution Order](#api-key-resolution-order).
 | `WAYLAND_BASH_SHELL` | Windows only: `powershell` (5.1) or `pwsh` (7+) instead of the default `cmd` for BashTool. No-op on Unix ([advanced.md](advanced.md)) |
 | `WAYLAND_SANDBOX` | `appcontainer` opts Windows into the AppContainer backend instead of the default Job Object ([architecture.md](architecture.md)) |
 | `WAYLAND_VAULT_PASSPHRASE` / `WAYLAND_VAULT_PASSPHRASE_FD` | Unlocks the encrypted credential vault on a host with no OS keyring; the `_FD` form reads the passphrase from a file descriptor ([advanced.md](advanced.md)) |
-| `WAYLAND_WEB_BACKEND` | Pins the web-search backend: `off`, `duckduckgo`, or `parallel` ([tools.md](tools.md)) |
+| `WAYLAND_WEB_BACKEND` | Pins the web-search backend: `off`, `duckduckgo`, `parallel`, or `auto`. Other values are ignored and reported ([tools.md](tools.md)) |
 | `WAYLAND_CORE_SKIP_UPDATE_CHECK` | `1` opts out of the launcher's update check ([troubleshooting.md](troubleshooting.md)) |
 | `WCORE_MEMORY_DIR` | Overrides where long-term memory is stored ([advanced.md](advanced.md)) |
 | `WCORE_CHROMIUM_PATH` | Points the browser tools at a Chromium or Chrome binary ([troubleshooting.md](troubleshooting.md)) |

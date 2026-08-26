@@ -25,6 +25,9 @@
 
 use std::sync::Arc;
 
+#[path = "support/mod.rs"]
+mod support;
+
 use wcore_agent::engine::AgentEngine;
 use wcore_agent::output::OutputSink;
 use wcore_agent::output::null_sink::NullSink;
@@ -352,4 +355,100 @@ fn rebind_force_pinned_preserves_force_posture() {
         !manager.is_auto_approved("exec"),
         "non-force: applying the disk Default posture on rebind must re-gate exec"
     );
+}
+
+/// wayland#1133 (e) — the RUNTIME rebind path must announce a failover.
+///
+/// `/provider`, `/profile` and every post-onboarding disk re-resolve rebuild
+/// the provider through `TuiEngine::rebind_with_config`. The provider it
+/// builds carries a REAL fallback chain when `[provider_chain] enabled = true`,
+/// so from that moment the session can be answered by a different provider,
+/// running a different model, at a different price — silently. The boot path
+/// is enforced and covered (`bootstrap.rs` + `bootstrap_test.rs`); this seam
+/// is the other half, and reverting its one line to the no-op-reporting
+/// `create_provider_with_oauth` compiles clean and breaks nothing else.
+///
+/// Driven end to end on purpose: a real `ResilientProvider` is built by the
+/// real rebind, its primary is pointed at a CLOSED port, its fallback at a
+/// local Anthropic-shaped mock that answers — and the assertion is on the
+/// `ProtocolEvent` channel the transcript actually renders from.
+#[tokio::test]
+async fn rebind_with_a_chain_announces_the_failover_on_the_live_channel() {
+    use wcore_cli::tui::TuiEngine;
+    use wcore_protocol::ToolApprovalManager;
+    use wcore_protocol::events::ProtocolEvent;
+    use wcore_types::llm::LlmRequest;
+
+    // A fallback that really answers, so the chain reaches its SELECTED branch
+    // — the only one that renders the #1133 notice.
+    let server = support::mock_llm::MockLlm::new()
+        .text("the fallback answered")
+        .start()
+        .await;
+
+    // A primary that cannot: bind a port, then drop it, so connecting is
+    // refused rather than left hanging on a firewalled address.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a scratch port");
+    let closed_port = closed.local_addr().expect("scratch port").port();
+    drop(closed);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProtocolEvent>();
+    let tui = TuiEngine::new(boot_engine(), Arc::new(ToolApprovalManager::new()), tx);
+
+    let mut fallback = onboarded_config();
+    fallback.base_url = server.uri();
+    fallback.model = "claude-fallback".to_string();
+
+    let mut config = onboarded_config();
+    config.base_url = format!("http://127.0.0.1:{closed_port}");
+    config.provider_chain.enabled = true;
+    config.provider_chain.fallback_models = vec!["anthropic:claude-fallback".to_string()];
+    config.resolved_fallbacks = vec![fallback];
+
+    tui.rebind_with_config(config, false)
+        .expect("the rebind must apply (resolve + provider build both succeed)");
+
+    // Make the freshly bound provider fail over for real.
+    let request = LlmRequest {
+        model: "claude-3-7-sonnet-latest".to_string(),
+        max_tokens: 64,
+        ..Default::default()
+    };
+    tui.live_provider()
+        .await
+        .stream(&request)
+        .await
+        .expect("the mock fallback must serve the turn");
+
+    let mut infos = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ProtocolEvent::Info { message, .. } = event {
+            infos.push(message);
+        }
+    }
+
+    let notice = infos
+        .iter()
+        .find(|message| message.contains("provider failover"))
+        .unwrap_or_else(|| {
+            panic!(
+                "a runtime rebind built a fallback chain, the chain routed around the \
+                 primary, and the session was never told: no failover notice reached the \
+                 protocol channel. Infos seen: {infos:?}"
+            )
+        });
+
+    // The notice must be the useful one: who failed, who answered, and WHY the
+    // primary was skipped (#1133 (c)).
+    for fact in [
+        "anthropic",
+        "claude-3-7-sonnet-latest",
+        "claude-fallback",
+        "connection_refused",
+    ] {
+        assert!(
+            notice.contains(fact),
+            "the rebind notice drops `{fact}`: {notice}"
+        );
+    }
 }

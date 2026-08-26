@@ -1400,6 +1400,16 @@ impl TuiEngine {
         self.tx.clone()
     }
 
+    /// The provider the LIVE engine is bound to right now.
+    ///
+    /// Exists for `tests/engine_rebind.rs`: a rebind installs a provider that
+    /// may carry a real failover chain, and the only way to prove the chain is
+    /// wired to a reporter that reaches the transcript (#1133) is to make that
+    /// provider fail over and watch the channel.
+    pub async fn live_provider(&self) -> Arc<dyn wcore_providers::LlmProvider> {
+        self.engine.lock().await.provider().clone()
+    }
+
     /// Build a `TuiEngine` from an already-constructed engine, the shared
     /// approval manager, and the event channel sender.
     pub fn new(
@@ -2218,7 +2228,12 @@ impl TuiEngine {
     ///
     /// [`rebind_with_provider`]: Self::rebind_with_provider
     /// [`rebind_with_profile`]: Self::rebind_with_profile
-    fn rebind_with_config(
+    ///
+    /// Public alongside its three callers so the rebind seam can be driven from
+    /// an already-resolved `Config` — `tests/engine_rebind.rs` needs that to
+    /// exercise the #1133 chain wiring below without touching the on-disk
+    /// config the other three entry points re-resolve.
+    pub fn rebind_with_config(
         &self,
         config: wcore_config::config::Config,
         force_pinned: bool,
