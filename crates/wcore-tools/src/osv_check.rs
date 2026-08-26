@@ -34,20 +34,15 @@
 //!   human-readable BLOCKED message format the Python emits.
 //! * SSRF validation on the endpoint URL (Python had none — the
 //!   default endpoint is public, but `$OSV_ENDPOINT` could redirect).
-//! * `OsvTool` wraps the helper as an agent-facing tool with a
-//!   `command` + `args` schema. The helper itself remains usable
-//!   from anywhere in `wcore-tools` (e.g. an MCP-launch pre-flight
-//!   in a future wave) without going through the tool dispatcher.
-
-use std::sync::Arc;
+//! * No agent-facing tool wrapper. The Python original exposed this
+//!   as something the model could choose to call; a malware gate the
+//!   model may simply decline to call is not a control. The single
+//!   consumer is `wcore_mcp::malware_gate`, which runs the check
+//!   automatically on the stdio MCP launch path before the package
+//!   runner is executed.
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
 
-use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolResult};
-
-use crate::Tool;
 use crate::url_safety::is_safe_url;
 
 /// Default OSV API endpoint (the public Google-maintained service).
@@ -197,21 +192,121 @@ pub fn infer_ecosystem(command: &str) -> Option<Ecosystem> {
     }
 }
 
-/// Parse `(package, version)` from launcher args for the given
-/// `ecosystem`. Returns `(None, None)` when args are empty or every
-/// token looks like a flag.
-pub fn parse_package_from_args(
-    args: &[String],
-    ecosystem: Ecosystem,
-) -> (Option<String>, Option<String>) {
-    // Skip flags to find the first positional token.
-    let token = args.iter().find(|a| !a.starts_with('-'));
-    let Some(token) = token else {
-        return (None, None);
-    };
+/// What a launcher argv names, or that it names nothing readable.
+///
+/// [`Self::Unidentified`] is deliberately distinct from `infer_ecosystem`
+/// returning `None`. "Not a package runner" means there is nothing to check;
+/// "package runner with an argv I cannot read" means the check could not be
+/// performed, and a caller enforcing a gate must treat those differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageRef {
+    Identified {
+        package: String,
+        version: Option<String>,
+    },
+    Unidentified,
+}
+
+/// Launcher flags that consume the FOLLOWING argv token as their value.
+///
+/// Getting this wrong is not cosmetic: `uvx --python 3.12 pkg==1.0` read by a
+/// flag-unaware scanner yields `3.12` as the package, so the real package is
+/// never queried and the gate reports clean on a name nobody installed.
+///
+/// Anything NOT listed is assumed to be a bare switch, so the token after it
+/// stays a package candidate. That direction is the safe one: an unknown flag
+/// costs a wasted query, where over-listing costs a missed check.
+fn value_taking_flags(ecosystem: Ecosystem) -> &'static [&'static str] {
     match ecosystem {
+        Ecosystem::Npm => &["--package", "-p", "-c", "--call", "--userconfig", "--cache"],
+        Ecosystem::PyPI => &[
+            "--python",
+            "-p",
+            "--with",
+            "--with-editable",
+            "--with-requirements",
+            "--from",
+            "--spec",
+            "--index",
+            "--index-url",
+            "--extra-index-url",
+            "--constraints",
+            "-c",
+            "--refresh-package",
+            "--reinstall-package",
+            "--index-strategy",
+            "--pip-args",
+        ],
+    }
+}
+
+/// Flags whose value IS the package being installed, rather than a token to
+/// step over. `npx --package X -c cmd` installs `X`; `uvx --from X app` installs
+/// `X` and runs `app` out of it. In both cases the positional token is the
+/// ENTRY POINT, not the package, so these win over any positional.
+fn package_naming_flags(ecosystem: Ecosystem) -> &'static [&'static str] {
+    match ecosystem {
+        Ecosystem::Npm => &["--package", "-p"],
+        Ecosystem::PyPI => &["--from", "--spec"],
+    }
+}
+
+/// Resolve which package a launcher argv refers to.
+pub fn parse_package_from_args(args: &[String], ecosystem: Ecosystem) -> PackageRef {
+    let value_flags = value_taking_flags(ecosystem);
+    let naming_flags = package_naming_flags(ecosystem);
+
+    let mut named: Option<&str> = None;
+    let mut positional: Option<&str> = None;
+    let mut past_terminator = false;
+    let mut i = 0;
+
+    while i < args.len() {
+        let arg = args[i].as_str();
+
+        // After `--`, and for any token that is not a flag, this is a
+        // positional. A bare `-` is a conventional stdin placeholder, not a flag.
+        if past_terminator || !arg.starts_with('-') || arg == "-" {
+            if positional.is_none() {
+                positional = Some(arg);
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            past_terminator = true;
+            i += 1;
+            continue;
+        }
+        // `--flag=value`: the value is attached, so nothing to skip.
+        if let Some((flag, value)) = arg.split_once('=') {
+            if named.is_none() && !value.is_empty() && naming_flags.contains(&flag) {
+                named = Some(&arg[flag.len() + 1..]);
+            }
+            i += 1;
+            continue;
+        }
+        if value_flags.contains(&arg) {
+            if named.is_none() && naming_flags.contains(&arg) {
+                named = args.get(i + 1).map(|s| s.as_str());
+            }
+            // Step over the flag AND the value it consumes.
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+
+    let Some(token) = named.or(positional) else {
+        return PackageRef::Unidentified;
+    };
+    let (package, version) = match ecosystem {
         Ecosystem::Npm => parse_npm_package(token),
         Ecosystem::PyPI => parse_pypi_package(token),
+    };
+    match package {
+        Some(package) if !package.is_empty() => PackageRef::Identified { package, version },
+        _ => PackageRef::Unidentified,
     }
 }
 
@@ -330,34 +425,53 @@ fn truncate_chars(s: &str, max_chars: usize) -> &str {
     }
 }
 
-/// Top-level helper: check whether a package referenced by
-/// `(command, args)` has any malware advisories. Returns
-/// `Some(message)` on a hit, `None` for clean / unknown / network
-/// errors (fail-open). Mirrors `check_package_for_malware` in the
-/// Python original.
+/// The four answers a caller enforcing a launch gate has to tell apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MalwareCheckOutcome {
+    /// `command` is not a recognised package runner. Nothing was fetched from
+    /// a registry, so there is nothing to check.
+    NotApplicable,
+    /// `command` IS a package runner, but its argv named no package this
+    /// helper could read. Nothing was queried. An argv the gate cannot read is
+    /// an argv it cannot clear.
+    Unidentified,
+    /// Either the query came back with no malware advisories, or the query
+    /// itself failed. A malware feed that cannot be reached must not wedge the
+    /// user's MCP servers, so a backend error fails OPEN — and ONLY a backend
+    /// error does.
+    Allowed,
+    /// Known malware advisories, with the operator-facing message.
+    Blocked(String),
+}
+
+/// Check whether the package referenced by `(command, args)` has any malware
+/// advisories.
 ///
 /// `endpoint` is the OSV endpoint URL (typically [`DEFAULT_OSV_ENDPOINT`]).
-/// If the endpoint fails [`is_safe_url`] (SSRF gate), the check
-/// short-circuits to `None` — there is no legitimate reason for the
-/// OSV endpoint to point at an internal address.
+/// If the endpoint fails [`is_safe_url`] (SSRF gate), the check short-circuits
+/// to [`MalwareCheckOutcome::Allowed`] — there is no legitimate reason for the
+/// OSV endpoint to point at an internal address, and refusing every MCP server
+/// over one misconfigured URL is a worse failure than the check not running.
 pub async fn check_package_for_malware(
     command: &str,
     args: &[String],
     endpoint: &str,
     backend: &dyn OsvBackend,
-) -> Option<String> {
+) -> MalwareCheckOutcome {
+    let Some(ecosystem) = infer_ecosystem(command) else {
+        return MalwareCheckOutcome::NotApplicable;
+    };
     if !is_safe_url(endpoint) {
-        // Refuse to query an unsafe endpoint, but fail open per the
-        // overall helper contract. Logged at WARN so operators see SSRF
-        // attempts at default log levels — an endpoint that fails the
-        // SSRF gate is always operator-visible misconfiguration or an
-        // active attack, never normal traffic.
+        // Logged at WARN so operators see SSRF attempts at default log levels —
+        // an endpoint that fails the SSRF gate is always operator-visible
+        // misconfiguration or an active attack, never normal traffic.
         tracing::warn!(target: "wcore::osv_check", endpoint, "refusing to query unsafe OSV endpoint (SSRF gate)");
-        return None;
+        return MalwareCheckOutcome::Allowed;
     }
-    let ecosystem = infer_ecosystem(command)?;
-    let (package, version) = parse_package_from_args(args, ecosystem);
-    let package = package?;
+    let PackageRef::Identified { package, version } = parse_package_from_args(args, ecosystem)
+    else {
+        return MalwareCheckOutcome::Unidentified;
+    };
     match backend
         .query(endpoint, ecosystem, &package, version.as_deref())
         .await
@@ -365,132 +479,24 @@ pub async fn check_package_for_malware(
         Ok(advisories) => {
             let malware = filter_malware(advisories);
             if malware.is_empty() {
-                None
+                MalwareCheckOutcome::Allowed
             } else {
-                Some(format_block_message(&package, ecosystem, &malware))
+                MalwareCheckOutcome::Blocked(format_block_message(&package, ecosystem, &malware))
             }
         }
         Err(exc) => {
-            tracing::debug!(
+            // Fail OPEN, and say so at WARN rather than DEBUG: `warn!` is the
+            // lowest level that reaches a user with no RUST_LOG set, and "the
+            // malware gate did not run" is exactly the thing they must be told.
+            tracing::warn!(
                 target: "wcore::osv_check",
                 error = %exc,
                 ecosystem = ecosystem.as_str(),
                 package = %package,
-                "OSV check failed (allowing)",
+                "OSV malware check could not be performed; allowing the launch",
             );
-            None
+            MalwareCheckOutcome::Allowed
         }
-    }
-}
-
-/// Agent-facing tool wrapper. Inputs:
-/// * `command` — launcher (e.g. `npx`, `uvx`).
-/// * `args` — argv tail.
-/// * Optional `endpoint` override (defaults to [`DEFAULT_OSV_ENDPOINT`]).
-pub struct OsvTool {
-    backend: Arc<dyn OsvBackend>,
-    endpoint: String,
-}
-
-impl OsvTool {
-    pub fn new(backend: Arc<dyn OsvBackend>) -> Self {
-        Self {
-            backend,
-            endpoint: DEFAULT_OSV_ENDPOINT.to_string(),
-        }
-    }
-
-    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
-        self.endpoint = endpoint.into();
-        self
-    }
-}
-
-#[async_trait]
-impl Tool for OsvTool {
-    fn name(&self) -> &str {
-        "osv_check"
-    }
-
-    fn description(&self) -> &str {
-        "Query the OSV (Open Source Vulnerabilities) database for malware advisories against an npm/PyPI package referenced by a (command, args) launcher pair. Returns a BLOCKED message if malware is found; null otherwise. Network / parse failures fail open."
-    }
-
-    fn input_schema(&self) -> JsonSchema {
-        json!({
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "Launcher binary (npx, uvx, pipx, ...).",
-                },
-                "args": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "argv tail passed to the launcher.",
-                },
-                "endpoint": {
-                    "type": "string",
-                    "description": "Optional OSV API endpoint override; defaults to https://api.osv.dev/v1/query.",
-                }
-            },
-            "required": ["command", "args"],
-            "additionalProperties": false
-        })
-    }
-
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        true
-    }
-
-    async fn execute(&self, input: Value) -> ToolResult {
-        let command = match input.get("command").and_then(|v| v.as_str()) {
-            Some(s) => s.to_string(),
-            None => {
-                return ToolResult {
-                    content: "osv_check: missing required string 'command'".to_string(),
-                    is_error: true,
-                };
-            }
-        };
-        let args = match input.get("args").and_then(|v| v.as_array()) {
-            Some(arr) => arr
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect::<Vec<_>>(),
-            None => {
-                return ToolResult {
-                    content: "osv_check: missing required array 'args'".to_string(),
-                    is_error: true,
-                };
-            }
-        };
-        let endpoint = input
-            .get("endpoint")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.endpoint.clone());
-
-        let outcome =
-            check_package_for_malware(&command, &args, &endpoint, self.backend.as_ref()).await;
-        match outcome {
-            Some(msg) => ToolResult {
-                content: msg,
-                is_error: false,
-            },
-            None => ToolResult {
-                content: "ok: no malware advisories".to_string(),
-                is_error: false,
-            },
-        }
-    }
-
-    fn category(&self) -> ToolCategory {
-        // OSV check is a read-only network query against a public DB;
-        // ToolCategory has no Security variant — Info is the closest fit
-        // and matches how Wayland classifies other read-only network
-        // probes (e.g. vision_analyze, web_fetch).
-        ToolCategory::Info
     }
 }
 
@@ -509,6 +515,8 @@ mod tests {
     // `check_refuses_unsafe_endpoint` below keeps a literal metadata IP, so
     // the SSRF gate itself is still graded.
     const TEST_OSV_ENDPOINT: &str = "https://93.184.216.34/v1/query";
+    use std::sync::Arc;
+
     use super::*;
 
     fn s(v: &[&str]) -> Vec<String> {
@@ -563,22 +571,93 @@ mod tests {
         assert_eq!(parse_pypi_package("httpx"), (Some("httpx".into()), None));
     }
 
+    fn identified(package: &str, version: Option<&str>) -> PackageRef {
+        PackageRef::Identified {
+            package: package.to_string(),
+            version: version.map(|v| v.to_string()),
+        }
+    }
+
     #[test]
     fn parse_package_skips_flags() {
         let args = s(&["-y", "--quiet", "left-pad@1.0.0"]);
         assert_eq!(
             parse_package_from_args(&args, Ecosystem::Npm),
-            (Some("left-pad".into()), Some("1.0.0".into()))
+            identified("left-pad", Some("1.0.0"))
         );
         let only_flags = s(&["-y", "--quiet"]);
         assert_eq!(
             parse_package_from_args(&only_flags, Ecosystem::Npm),
-            (None, None)
+            PackageRef::Unidentified
         );
         let empty: Vec<String> = vec![];
         assert_eq!(
             parse_package_from_args(&empty, Ecosystem::PyPI),
-            (None, None)
+            PackageRef::Unidentified
+        );
+    }
+
+    /// The defect the flag-unaware scanner had: a launcher flag that takes a
+    /// SEPARATE value donated that value as the package name, so the package
+    /// actually being installed was never queried.
+    #[test]
+    fn value_taking_flags_do_not_donate_their_value_as_the_package() {
+        assert_eq!(
+            parse_package_from_args(&s(&["--python", "3.12", "pkg==1.0"]), Ecosystem::PyPI),
+            identified("pkg", Some("1.0")),
+            "`--python 3.12` must not make 3.12 the package"
+        );
+        assert_eq!(
+            parse_package_from_args(&s(&["--python=3.12", "pkg==1.0"]), Ecosystem::PyPI),
+            identified("pkg", Some("1.0")),
+            "the `--flag=value` spelling consumes no following token"
+        );
+        assert_eq!(
+            parse_package_from_args(&s(&["--userconfig", "npmrc", "left-pad"]), Ecosystem::Npm),
+            identified("left-pad", None)
+        );
+    }
+
+    /// `--from` / `--spec` / `--package` NAME the package; the positional after
+    /// them is the entry point to run out of it.
+    #[test]
+    fn package_naming_flags_beat_the_positional() {
+        assert_eq!(
+            parse_package_from_args(
+                &s(&["--with", "pydantic<2.12", "--from", "pkg==1.0", "pkg"]),
+                Ecosystem::PyPI
+            ),
+            identified("pkg", Some("1.0"))
+        );
+        assert_eq!(
+            parse_package_from_args(&s(&["--from", "real-pkg==2.0", "app"]), Ecosystem::PyPI),
+            identified("real-pkg", Some("2.0")),
+            "the installed package is --from's value, not the entry point"
+        );
+        assert_eq!(
+            parse_package_from_args(&s(&["run", "--spec", "real-pkg", "app"]), Ecosystem::PyPI),
+            identified("real-pkg", None),
+            "pipx's `run` subcommand must not be mistaken for the package"
+        );
+        assert_eq!(
+            parse_package_from_args(&s(&["--package", "real-pkg", "-c", "cmd"]), Ecosystem::Npm),
+            identified("real-pkg", None)
+        );
+    }
+
+    /// A launcher whose argv names nothing readable must be distinguishable
+    /// from a launcher that is not a package runner at all — the caller
+    /// refuses one and ignores the other.
+    #[test]
+    fn an_argv_with_no_package_is_unidentified_not_a_silent_none() {
+        assert_eq!(
+            parse_package_from_args(&s(&["--python", "3.12"]), Ecosystem::PyPI),
+            PackageRef::Unidentified
+        );
+        assert_eq!(
+            parse_package_from_args(&s(&["--from", "pkg"]), Ecosystem::PyPI),
+            identified("pkg", None),
+            "control: the same shape WITH a naming flag is still identified"
         );
     }
 
@@ -615,14 +694,16 @@ mod tests {
                 summary: "not malware".into(),
             },
         ]));
-        let msg = check_package_for_malware(
+        let MalwareCheckOutcome::Blocked(msg) = check_package_for_malware(
             "npx",
             &s(&["-y", "evil-pkg@1.0.0"]),
             TEST_OSV_ENDPOINT,
             backend.as_ref(),
         )
         .await
-        .expect("malware should produce a block message");
+        else {
+            panic!("malware should produce a Blocked outcome");
+        };
         assert!(msg.contains("BLOCKED"));
         assert!(msg.contains("evil-pkg"));
         assert!(msg.contains("(npm)"));
@@ -646,7 +727,7 @@ mod tests {
         let outcome =
             check_package_for_malware("python", &s(&["evil"]), TEST_OSV_ENDPOINT, backend.as_ref())
                 .await;
-        assert!(outcome.is_none());
+        assert_eq!(outcome, MalwareCheckOutcome::NotApplicable);
         // Backend must NOT be called for unrecognized commands.
         assert!(backend.calls.lock().is_empty());
     }
@@ -663,7 +744,11 @@ mod tests {
             backend.as_ref(),
         )
         .await;
-        assert!(outcome.is_none(), "network errors must fail open");
+        assert_eq!(
+            outcome,
+            MalwareCheckOutcome::Allowed,
+            "network errors must fail open"
+        );
         assert_eq!(backend.calls.lock().len(), 1);
     }
 
@@ -681,7 +766,7 @@ mod tests {
             backend.as_ref(),
         )
         .await;
-        assert!(outcome.is_none());
+        assert_eq!(outcome, MalwareCheckOutcome::Allowed);
         // Backend MUST NOT be called when endpoint is unsafe.
         assert!(backend.calls.lock().is_empty());
     }
@@ -696,53 +781,12 @@ mod tests {
             backend.as_ref(),
         )
         .await;
-        assert!(outcome.is_none());
+        assert_eq!(outcome, MalwareCheckOutcome::Allowed);
         let calls = backend.calls.lock();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].ecosystem, Ecosystem::PyPI);
         assert_eq!(calls[0].package, "requests");
         assert_eq!(calls[0].version.as_deref(), Some("2.31.0"));
-    }
-
-    #[tokio::test]
-    async fn osv_tool_execute_success_path() {
-        let backend = Arc::new(CapturingOsvBackend::with_response(vec![OsvAdvisory {
-            id: "MAL-2024-XYZ".into(),
-            summary: "credential exfiltration on install".into(),
-        }]));
-        let tool = OsvTool::new(backend).with_endpoint(TEST_OSV_ENDPOINT);
-        let result = tool
-            .execute(json!({
-                "command": "npx",
-                "args": ["-y", "@evil/pkg@9.9.9"],
-            }))
-            .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("BLOCKED"));
-        assert!(result.content.contains("@evil/pkg"));
-        assert!(result.content.contains("MAL-2024-XYZ"));
-    }
-
-    #[tokio::test]
-    async fn osv_tool_execute_clean_returns_ok() {
-        let backend = Arc::new(CapturingOsvBackend::with_response(vec![]));
-        let tool = OsvTool::new(backend).with_endpoint(TEST_OSV_ENDPOINT);
-        let result = tool
-            .execute(json!({
-                "command": "uvx",
-                "args": ["httpx"],
-            }))
-            .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("ok"));
-    }
-
-    #[tokio::test]
-    async fn osv_tool_execute_missing_command_errors() {
-        let backend = Arc::new(CapturingOsvBackend::with_response(vec![]));
-        let tool = OsvTool::new(backend).with_endpoint(TEST_OSV_ENDPOINT);
-        let result = tool.execute(json!({ "args": [] })).await;
-        assert!(result.is_error);
     }
 
     #[test]

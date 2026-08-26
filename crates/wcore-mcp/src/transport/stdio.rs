@@ -486,6 +486,14 @@ impl StdioTransport {
         launch_context: McpStdioLaunchContext,
         rpc_timeout: Duration,
     ) -> Result<Self, McpError> {
+        // FerroxLabs/wayland#1137 — the supply-chain gate. `npx`/`uvx`/`pipx`
+        // FETCH a package from a public registry and execute it, so the check
+        // has to happen before the process exists; there is no "inspect it
+        // afterwards". Every stdio MCP launch funnels through this function
+        // (`spawn` -> `spawn_with_timeout` -> here, and `spawn_with_context`
+        // -> here), which is why the gate sits here and not at the manager's
+        // single call site: a future direct caller of `spawn` inherits it.
+        crate::malware_gate::refuse_if_malware(command, args).await?;
         // Windows: bypass shell_command_builder when the command is already
         // cmd[.exe]. shell_command_builder wraps everything in `cmd /C ...`
         // for PATHEXT shim resolution (npx.cmd, node.cmd) — but when the
