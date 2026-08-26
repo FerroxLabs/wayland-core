@@ -1085,6 +1085,77 @@ mod tests {
         assert_eq!(large.0.load(Ordering::SeqCst), 1);
     }
 
+    /// Wiring grade for the unknown-context-window admission rule.
+    ///
+    /// This exercises the production `evaluate_candidate` call site in
+    /// `stream()`, not the policy function in isolation: a candidate whose
+    /// window is not statically known must be physically DISPATCHED, while a
+    /// candidate with a known-too-small window must still be skipped.
+    ///
+    /// `wcore_config::limits::model_output_ceiling` returns `None` for every
+    /// model outside its static table, which is what both
+    /// `new_with_fallback_identities` and the production
+    /// `wcore_agent::bootstrap::build_fallback_providers` feed into
+    /// `CandidateCapabilities::context_window`. The Flux tier aliases are the
+    /// headline case. Before this rule the chain below dispatched NOTHING and
+    /// the turn died with no answer and no evidence.
+    #[tokio::test]
+    async fn unknown_context_window_candidate_is_dispatched() {
+        struct CountOk(AtomicUsize);
+        #[async_trait]
+        impl LlmProvider for CountOk {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(ok_done_channel())
+            }
+        }
+
+        let too_small = Arc::new(CountOk(AtomicUsize::new(0)));
+        let unknown = Arc::new(CountOk(AtomicUsize::new(0)));
+        let reporter = Arc::new(ReceiptReporter::default());
+        let resilient = ResilientProvider::new_with_policy(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![
+                (
+                    candidate("too-small", true, Some(10_000)),
+                    too_small.clone(),
+                ),
+                (candidate("flux-auto", true, None), unknown.clone()),
+            ],
+            CircuitConfig::default(),
+            reporter.clone(),
+            FailoverRoutingPolicy::default(),
+        );
+        let mut request = dummy_request();
+        request.client_context_tokens = Some(50_000);
+
+        resilient.stream(&request).await.unwrap();
+
+        assert_eq!(
+            too_small.0.load(Ordering::SeqCst),
+            0,
+            "a known-too-small window must still be refused"
+        );
+        assert_eq!(
+            unknown.0.load(Ordering::SeqCst),
+            1,
+            "an unknown window must be attempted, not refused"
+        );
+
+        let receipts = reporter.receipts.lock().clone();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts[0].candidates[0].disposition,
+            Err(CandidateRejection::ContextWindowTooSmall)
+        );
+        assert_eq!(receipts[0].candidates[1].disposition, Ok(()));
+        assert_eq!(receipts[0].selected_model.as_deref(), Some("flux-auto"));
+    }
+
     #[tokio::test]
     async fn permanent_candidate_cooldown_is_named_and_never_dispatched() {
         struct CountOk(AtomicUsize);
