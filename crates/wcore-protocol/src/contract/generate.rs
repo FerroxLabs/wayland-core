@@ -67,10 +67,28 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // one - it would have to parse refusal prose. The version and the capability
 // are the only honest signals.
 //
+// 18 -> 19: `turn_abandon_v1` (#326, Desktop-side FerroxLabs/wayland#1116). `resume_turn`
+// gains a fourth `action`. The command union does not widen and no field
+// changes shape, so `major` holds at 1; what widens is one closed enum, which a
+// pinned host validates against and would otherwise reject before the frame
+// ever reached the wire. Desktop reported exactly that: it cannot offer "give
+// up on this stuck turn" because its own outbound validation refuses the value.
+// A host cannot feature-detect this by sending one and reading the refusal —
+// the refusal happens inside the host, against the pinned corpus.
+//
 // `contract.minor` plus the named capabilities are the only signals a pinned
-// host reads, so the version moves once and both capabilities name themselves.
-pub const CONTRACT_MINOR: u64 = 18;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/18";
+// host reads, so the version moves once and all three capabilities name
+// themselves.
+//
+// ON THE GAP BETWEEN 16 AND 19. The last TAGGED contract is 1.16 — v0.13.5,
+// v0.13.6 and `main` all publish it. 17 and 18 were assembled on this branch
+// and never reached a tag, so no host has ever pinned them. The entries above
+// are kept as the decision log they are, rather than renumbered to close the
+// gap: each records why a specific widening needed a signal, and rewriting them
+// to look consecutive would destroy that reasoning to tidy a sequence no host
+// reads. A pinned host moves 1.16 -> 1.19 and finds every capability named.
+pub const CONTRACT_MINOR: u64 = 19;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/19";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -322,7 +340,7 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
             json!({"minimum": 0, "maximum": 65535, "type": "integer"})
         }
         ("resume_turn", "action") => {
-            json!({"enum": ["continue", "reconcile", "cancel"], "type": "string"})
+            json!({"enum": ["continue", "reconcile", "cancel", "abandon"], "type": "string"})
         }
         ("resolve_interrupted_approval", "decision") => {
             json!({"enum": ["approve", "deny"], "type": "string"})
@@ -1525,6 +1543,19 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         // way, which is the part a host renders off.
         (
             "inline_reasoning_split_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        // #326. `resume_turn` accepts a fourth action, `abandon`, which ends a
+        // stuck turn permanently and tolerates the three disagreements
+        // `cancel` refuses: a stale cursor, a session with nothing interrupted,
+        // and a turn id the engine does not hold. `Available`, not `ShapeOnly`:
+        // the enum value is published AND the dispatcher answers it, in the
+        // same change. Declared because a pinned host validates its own
+        // outbound frames against this corpus, so before the value is
+        // published the host refuses it internally and the verb is
+        // unreachable — which is the state FerroxLabs/wayland#1116 reports.
+        (
+            "turn_abandon_v1".into(),
             ContractCapabilityStatus::Available,
         ),
         // F22-C1. Promoted ShapeOnly -> Available in the SAME change that

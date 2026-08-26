@@ -9625,6 +9625,60 @@ impl AgentEngine {
         self.finish_budget_turn(turn_id)
     }
 
+    /// End an interrupted turn permanently, tolerating every way the host and
+    /// the engine can disagree about whether it is still there.
+    ///
+    /// This is deliberately NOT [`Self::cancel_interrupted_turn`] under another
+    /// name. Cancel refuses in three places, and each refusal is right for
+    /// cancel and wrong here:
+    ///
+    /// * **a stale cursor.** Cancel refuses because acting on a moved session
+    ///   head would act on a world it did not observe. Abandon observes nothing
+    ///   and resumes nothing. It exists FOR the case where the two sides
+    ///   disagree, so refusing on disagreement would defeat the verb. The
+    ///   cursor is not consulted at all, and the caller does not pass one.
+    /// * **`RecoveryDisposition::Ready`.** Cancel calls this "session has no
+    ///   interrupted turn to cancel". For abandon, the turn already being gone
+    ///   is the goal state, not an error. This is what makes a second click
+    ///   safe.
+    /// * **a different turn id.** Likewise: the turn named is not the one in
+    ///   flight, so it is already over.
+    ///
+    /// In all three cases this returns `Ok(())` and writes NOTHING. An
+    /// idempotent verb must not append an effect per call, and the caller emits
+    /// the terminal frame either way so the host can settle its UI without
+    /// inferring completion from silence.
+    ///
+    /// A journal that cannot be read is NOT one of the tolerated cases. That is
+    /// `recovery_plan`'s own fail-closed signal and it still propagates, so a
+    /// corrupt journal is reported rather than reported as "already gone".
+    pub async fn abandon_interrupted_turn(&mut self, turn_id: &str) -> Result<(), AgentError> {
+        let recovery = self.recovery_plan()?;
+        let recoverable_turn_id = match recovery.disposition {
+            crate::recovery::RecoveryDisposition::ContinueTurnStart { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::ContinueCheckpoint { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::AwaitApproval { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::ReconciliationRequired { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::Blocked { turn_id, .. } => turn_id,
+            crate::recovery::RecoveryDisposition::Ready => return Ok(()),
+        };
+        if recoverable_turn_id != turn_id {
+            return Ok(());
+        }
+
+        // The turn IS terminated, so it takes the same terminal receipt and the
+        // same journal event as a cancellation. Reusing `TurnCancelled` keeps
+        // the journal format unchanged: a new variant would have to be readable
+        // by every already-shipped Core that opens this session file.
+        self.terminalize_interrupted_turn_for_cancellation(turn_id)
+            .await?;
+        self.append_journal_event(SessionEvent::TurnCancelled {
+            turn_id: turn_id.to_owned(),
+        })
+        .await?;
+        self.finish_budget_turn(turn_id)
+    }
+
     /// Bring a crash-interrupted session back to a boundary a new user turn
     /// can start from, without re-running or assuming the outcome of anything
     /// that was in flight.

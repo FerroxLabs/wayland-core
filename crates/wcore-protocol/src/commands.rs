@@ -604,12 +604,21 @@ pub enum ApprovalScope {
 /// `Reconcile` invokes only Core-registered authoritative reconcilers. It does
 /// not carry, and must never be interpreted as, a free-form operator claim
 /// that an external effect succeeded or failed.
+///
+/// `Abandon` is NOT a spelling of `Cancel`. Cancel is an authority-checked
+/// operation on a turn both sides agree exists: it refuses a stale `cursor`, a
+/// session with nothing interrupted, and a turn id that is not the one in
+/// flight. Abandon is the escape hatch for exactly those disagreements — the
+/// host believes a turn is running that the engine no longer holds — so it
+/// treats all three as already-done rather than as errors. See
+/// `AgentEngine::abandon_interrupted_turn`.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ResumeTurnAction {
     Continue,
     Reconcile,
     Cancel,
+    Abandon,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]

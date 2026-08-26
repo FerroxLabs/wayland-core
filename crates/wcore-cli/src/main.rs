@@ -4545,7 +4545,18 @@ async fn handle_resume_turn<C>(
             return;
         }
     };
-    if plan.cursor() != cursor {
+    // `Abandon` is exempt, and this exemption is the whole feature. The cursor
+    // gate refuses a host whose view of the session head has drifted, which is
+    // correct for every action that goes on to ACT on that head. Abandon acts on
+    // nothing: it exists precisely for the case where the host believes a turn
+    // is running that the engine no longer holds, and that belief is what makes
+    // the cursor stale in the first place. Gating it here would make the verb
+    // unreachable in the only situation it was added for (#326), which is the
+    // state Desktop cannot currently escape without restarting the app.
+    //
+    // The version and session gates above are NOT relaxed: those are about
+    // addressing the right process at all, not about agreeing on turn state.
+    if action != ResumeTurnAction::Abandon && plan.cursor() != cursor {
         emit_recovery_unavailable(
             writer,
             request_id.clone(),
@@ -4556,87 +4567,96 @@ async fn handle_resume_turn<C>(
         return;
     }
 
-    let result =
-        match action {
-            ResumeTurnAction::Continue => {
-                // #1083: clone the shared bridge handle BEFORE `future` takes
-                // its `&mut` borrow of the engine.
-                let approval_bridge = engine.approval_bridge().clone();
-                let future = engine.resume_interrupted_turn(&turn_id, &cursor, &request_id);
-                match drive_active_recovery(
-                    future,
-                    cmd_rx,
-                    approval_manager,
-                    &approval_bridge,
-                    writer,
-                    cancel_active_turn,
-                )
-                .await
-                {
-                    ActiveRecoveryOutcome::Finished(result) => result.map(|result| {
-                        emit_recovered_stream_end(output, &request_id, &result);
-                        RecoveryLifecycle::Completed
-                    }),
-                    ActiveRecoveryOutcome::Stopped(result) => {
-                        let terminal_if_ready = match result {
-                            Ok(_) => RecoveryLifecycle::Completed,
-                            Err(wcore_agent::engine::AgentError::UserAborted) => {
-                                RecoveryLifecycle::Cancelled
-                            }
-                            Err(error) => {
-                                output.emit_error(&format!("resume_turn refused: {error}"), false);
-                                emit_recovered_terminal(output, &request_id, FinishReason::Error);
-                                emit_recovery_unavailable(
-                                    writer,
-                                    request_id,
-                                    session_id,
-                                    RecoveryUnavailableReason::UnknownCriticalState,
-                                );
-                                return;
-                            }
-                        };
-                        emit_recovered_terminal(output, &request_id, FinishReason::Stop);
-                        let next = match engine.recovery_plan() {
-                            Ok(plan) => plan,
-                            Err(_) => {
-                                emit_recovery_unavailable(
-                                    writer,
-                                    request_id,
-                                    session_id,
-                                    RecoveryUnavailableReason::JournalCorrupt,
-                                );
-                                return;
-                            }
-                        };
-                        let (lifecycle, reconcile_reason) =
-                            interrupted_action_lifecycle(&next, terminal_if_ready);
-                        let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
-                            recovery_version: RECOVERY_PROTOCOL_VERSION,
-                            session_id,
-                            turn_id,
-                            cursor: next.cursor(),
-                            lifecycle,
-                            reconcile_reason,
-                        });
-                        return;
-                    }
+    let result = match action {
+        ResumeTurnAction::Continue => {
+            // #1083: clone the shared bridge handle BEFORE `future` takes
+            // its `&mut` borrow of the engine.
+            let approval_bridge = engine.approval_bridge().clone();
+            let future = engine.resume_interrupted_turn(&turn_id, &cursor, &request_id);
+            match drive_active_recovery(
+                future,
+                cmd_rx,
+                approval_manager,
+                &approval_bridge,
+                writer,
+                cancel_active_turn,
+            )
+            .await
+            {
+                ActiveRecoveryOutcome::Finished(result) => result.map(|result| {
+                    emit_recovered_stream_end(output, &request_id, &result);
+                    RecoveryLifecycle::Completed
+                }),
+                ActiveRecoveryOutcome::Stopped(result) => {
+                    let terminal_if_ready = match result {
+                        Ok(_) => RecoveryLifecycle::Completed,
+                        Err(wcore_agent::engine::AgentError::UserAborted) => {
+                            RecoveryLifecycle::Cancelled
+                        }
+                        Err(error) => {
+                            output.emit_error(&format!("resume_turn refused: {error}"), false);
+                            emit_recovered_terminal(output, &request_id, FinishReason::Error);
+                            emit_recovery_unavailable(
+                                writer,
+                                request_id,
+                                session_id,
+                                RecoveryUnavailableReason::UnknownCriticalState,
+                            );
+                            return;
+                        }
+                    };
+                    emit_recovered_terminal(output, &request_id, FinishReason::Stop);
+                    let next = match engine.recovery_plan() {
+                        Ok(plan) => plan,
+                        Err(_) => {
+                            emit_recovery_unavailable(
+                                writer,
+                                request_id,
+                                session_id,
+                                RecoveryUnavailableReason::JournalCorrupt,
+                            );
+                            return;
+                        }
+                    };
+                    let (lifecycle, reconcile_reason) =
+                        interrupted_action_lifecycle(&next, terminal_if_ready);
+                    let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                        recovery_version: RECOVERY_PROTOCOL_VERSION,
+                        session_id,
+                        turn_id,
+                        cursor: next.cursor(),
+                        lifecycle,
+                        reconcile_reason,
+                    });
+                    return;
                 }
             }
-            ResumeTurnAction::Reconcile => engine
-                .reconcile_interrupted_turn(&turn_id, &cursor)
-                .await
-                .map(|_| {
-                    emit_recovered_terminal(output, &request_id, FinishReason::Error);
-                    RecoveryLifecycle::Failed
-                }),
-            ResumeTurnAction::Cancel => engine
+        }
+        ResumeTurnAction::Reconcile => engine
+            .reconcile_interrupted_turn(&turn_id, &cursor)
+            .await
+            .map(|_| {
+                emit_recovered_terminal(output, &request_id, FinishReason::Error);
+                RecoveryLifecycle::Failed
+            }),
+        ResumeTurnAction::Cancel => {
+            engine
                 .cancel_interrupted_turn(&turn_id, &cursor)
                 .await
                 .map(|_| {
                     emit_recovered_terminal(output, &request_id, FinishReason::Stop);
                     RecoveryLifecycle::Cancelled
-                }),
-        };
+                })
+        }
+        // `cursor` is deliberately NOT forwarded. The command still carries
+        // one because every recovery command does, but gating on it would
+        // refuse precisely the case this verb exists for — a host and an
+        // engine that disagree about the session head.
+        ResumeTurnAction::Abandon => engine.abandon_interrupted_turn(&turn_id).await.map(|_| {
+            emit_recovered_terminal(output, &request_id, FinishReason::Stop);
+            RecoveryLifecycle::Cancelled
+        }),
+    };
     match result {
         Ok(lifecycle) => {
             let next = match engine.recovery_plan() {
@@ -7438,6 +7458,233 @@ mod tests {
         assert_eq!(
             *output.stream_ends.lock().unwrap(),
             vec![("request-cancel".into(), FinishReason::Stop)]
+        );
+    }
+
+    /// Helper: drive `handle_resume_turn` once and hand back what the host saw.
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_resume(
+        engine: &mut wcore_agent::engine::AgentEngine,
+        session: &str,
+        request_id: &str,
+        turn_id: &str,
+        cursor: wcore_protocol::events::RecoveryCursor,
+        action: ResumeTurnAction,
+    ) -> (CapturingProtocolEmitter, CapturingOutputSink) {
+        let writer = CapturingProtocolEmitter::default();
+        let output = CapturingOutputSink::default();
+        let approval_manager = ToolApprovalManager::new();
+        let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+        handle_resume_turn(
+            engine,
+            &writer,
+            &output,
+            &mut cmd_rx,
+            &approval_manager,
+            &|| {},
+            RECOVERY_PROTOCOL_VERSION,
+            request_id.into(),
+            session.into(),
+            turn_id.into(),
+            cursor,
+            action,
+        )
+        .await;
+        (writer, output)
+    }
+
+    fn lifecycles(writer: &CapturingProtocolEmitter) -> Vec<RecoveryLifecycle> {
+        writer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                ProtocolEvent::TurnRecoveryLifecycle { lifecycle, .. } => Some(*lifecycle),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn json_recovery_abandon_terminates_the_turn() {
+        let (_directory, mut engine, _journal, cursor) = recovery_engine("f14a0010");
+        let (writer, output) = drive_resume(
+            &mut engine,
+            "f14a0010",
+            "request-abandon",
+            "turn-recovery",
+            cursor,
+            ResumeTurnAction::Abandon,
+        )
+        .await;
+
+        assert_eq!(lifecycles(&writer), vec![RecoveryLifecycle::Cancelled]);
+        assert!(matches!(
+            engine.recovery_plan().unwrap().disposition,
+            wcore_agent::recovery::RecoveryDisposition::Ready
+        ));
+        // The host must be able to settle its UI from a frame, not from silence.
+        assert_eq!(
+            *output.stream_ends.lock().unwrap(),
+            vec![("request-abandon".into(), FinishReason::Stop)]
+        );
+    }
+
+    #[tokio::test]
+    async fn json_recovery_abandon_is_idempotent() {
+        let (_directory, mut engine, _journal, cursor) = recovery_engine("f14a0011");
+        let (first, _) = drive_resume(
+            &mut engine,
+            "f14a0011",
+            "abandon-1",
+            "turn-recovery",
+            cursor.clone(),
+            ResumeTurnAction::Abandon,
+        )
+        .await;
+        assert_eq!(lifecycles(&first), vec![RecoveryLifecycle::Cancelled]);
+
+        // Second click. The turn is gone, the cursor the host still holds is now
+        // stale, and BOTH of those are the ordinary case for this verb.
+        let (second, output) = drive_resume(
+            &mut engine,
+            "f14a0011",
+            "abandon-2",
+            "turn-recovery",
+            cursor,
+            ResumeTurnAction::Abandon,
+        )
+        .await;
+        assert_eq!(
+            lifecycles(&second),
+            vec![RecoveryLifecycle::Cancelled],
+            "a second abandon must succeed, not error"
+        );
+        assert_eq!(
+            *output.stream_ends.lock().unwrap(),
+            vec![("abandon-2".into(), FinishReason::Stop)],
+            "and must still emit a terminal frame so the UI settles"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_recovery_abandon_survives_a_stale_cursor_where_cancel_refuses() {
+        // ANTI-VACUITY: the same stale cursor is driven through Cancel FIRST. If
+        // this arm did not refuse, the "abandon tolerates it" assertion below
+        // would be passing on a cursor that was never actually stale.
+        let (_dir_a, mut cancel_engine, _j_a, mut stale) = recovery_engine("f14a0012");
+        stale.journal_digest = "stale".into();
+        let (cancel_writer, _) = drive_resume(
+            &mut cancel_engine,
+            "f14a0012",
+            "cancel-stale",
+            "turn-recovery",
+            stale.clone(),
+            ResumeTurnAction::Cancel,
+        )
+        .await;
+        assert!(
+            !lifecycles(&cancel_writer).contains(&RecoveryLifecycle::Cancelled),
+            "control: cancel must REFUSE a stale cursor, or this test grades nothing"
+        );
+        assert!(
+            !matches!(
+                cancel_engine.recovery_plan().unwrap().disposition,
+                wcore_agent::recovery::RecoveryDisposition::Ready
+            ),
+            "control: the turn must still be interrupted after a refused cancel"
+        );
+
+        // Same stale cursor, same starting state, abandon instead.
+        let (_dir_b, mut engine, _j_b, mut also_stale) = recovery_engine("f14a0013");
+        also_stale.journal_digest = "stale".into();
+        let (writer, output) = drive_resume(
+            &mut engine,
+            "f14a0013",
+            "abandon-stale",
+            "turn-recovery",
+            also_stale,
+            ResumeTurnAction::Abandon,
+        )
+        .await;
+        assert_eq!(
+            lifecycles(&writer),
+            vec![RecoveryLifecycle::Cancelled],
+            "abandon exists for the case where host and engine disagree"
+        );
+        assert!(matches!(
+            engine.recovery_plan().unwrap().disposition,
+            wcore_agent::recovery::RecoveryDisposition::Ready
+        ));
+        assert_eq!(
+            *output.stream_ends.lock().unwrap(),
+            vec![("abandon-stale".into(), FinishReason::Stop)]
+        );
+    }
+
+    #[tokio::test]
+    async fn json_recovery_abandon_of_a_turn_the_engine_never_had_is_a_no_op() {
+        let (_directory, mut engine, _journal, cursor) = recovery_engine("f14a0014");
+        let (writer, output) = drive_resume(
+            &mut engine,
+            "f14a0014",
+            "abandon-ghost",
+            "turn-the-engine-never-heard-of",
+            cursor,
+            ResumeTurnAction::Abandon,
+        )
+        .await;
+
+        assert_eq!(
+            lifecycles(&writer),
+            vec![RecoveryLifecycle::Cancelled],
+            "a turn the engine does not hold is already over; that is success"
+        );
+        assert_eq!(
+            *output.stream_ends.lock().unwrap(),
+            vec![("abandon-ghost".into(), FinishReason::Stop)]
+        );
+        // ANTI-VACUITY: the REAL interrupted turn must be untouched. A no-op that
+        // silently terminated whatever happened to be in flight would pass every
+        // assertion above.
+        assert!(
+            matches!(
+                engine.recovery_plan().unwrap().disposition,
+                wcore_agent::recovery::RecoveryDisposition::ContinueTurnStart { .. }
+                    | wcore_agent::recovery::RecoveryDisposition::ContinueCheckpoint { .. }
+                    | wcore_agent::recovery::RecoveryDisposition::AwaitApproval { .. }
+                    | wcore_agent::recovery::RecoveryDisposition::ReconciliationRequired { .. }
+                    | wcore_agent::recovery::RecoveryDisposition::Blocked { .. }
+            ),
+            "abandoning an unknown turn must not terminate the one that IS in flight"
+        );
+    }
+
+    #[test]
+    fn abandon_is_accepted_on_the_wire() {
+        let cmd: wcore_protocol::commands::ResumeTurnCommand = serde_json::from_value(json!({
+            "recovery_version": 1,
+            "request_id": "r",
+            "session_id": "s",
+            "turn_id": "t",
+            "cursor": {"journal_sequence": 1, "journal_digest": "d"},
+            "action": "abandon"
+        }))
+        .expect("`abandon` must deserialize");
+        assert_eq!(cmd.action, ResumeTurnAction::Abandon);
+        // Control: an action that does NOT exist must still be refused, or the
+        // assertion above would pass against a permissive deserializer.
+        assert!(
+            serde_json::from_value::<wcore_protocol::commands::ResumeTurnCommand>(json!({
+                "recovery_version": 1,
+                "request_id": "r",
+                "session_id": "s",
+                "turn_id": "t",
+                "cursor": {"journal_sequence": 1, "journal_digest": "d"},
+                "action": "give_up"
+            }))
+            .is_err()
         );
     }
 
