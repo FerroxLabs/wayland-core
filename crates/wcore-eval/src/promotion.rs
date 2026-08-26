@@ -77,6 +77,27 @@ impl GateResult {
     }
 }
 
+/// The evidence an artifact that could **not** be scored carries.
+///
+/// A caller that hits an [`EvalError`] has two honest options: abort, or hand governance
+/// evidence that cannot clear any threshold. It must not have a third, which is to carry on
+/// with no evidence at all.
+///
+/// The second option exists because aborting at the call site reorders the refusals a user
+/// sees: `promote_existing` refuses a **revoked** artifact before it looks at any score, and
+/// user intent should not be pre-empted by "and also we could not parse it". Handing the
+/// governance boundary failing evidence keeps that ordering while leaving the artifact
+/// unpromotable by construction — the score is 0.0 against the real cutoff, so it fails the
+/// same comparison every other refusal fails.
+pub fn unscorable_evidence() -> PromotionEvidence {
+    PromotionEvidence {
+        evaluator: EVALUATOR.to_string(),
+        score: 0.0,
+        threshold: LOCKED.acceptance_cutoff(),
+        verdict: "unscorable".to_string(),
+    }
+}
+
 /// Score the artifact installed at `skill_dir`.
 ///
 /// `skill_dir` is the directory the loader sees, and its file name is what the declared

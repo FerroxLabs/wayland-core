@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use wcore_skills::govern::{GovernanceStore, JournalEvent, read_signature};
-use wcore_skills::promote::{PromoteError, PromotionState};
+use wcore_skills::promote::{PromoteError, PromotionEvidence, PromotionState};
 
 /// The authority string recorded on grants issued through this surface.
 ///
@@ -278,10 +278,10 @@ fn promote_named(name: &str) -> Result<()> {
     let store = store()?;
     let dir = find_skill(name)
         .with_context(|| format!("no skill named '{name}' is installed. Run --skills-govern."))?;
-    let gate = evaluate(&dir)?;
+    let (evidence, why) = evaluate(&dir);
     let grant = store
-        .promote_existing(&dir, None, AUTHORITY, &gate.evidence)
-        .map_err(explain)?;
+        .promote_existing(&dir, None, AUTHORITY, &evidence)
+        .map_err(|e| explain(e, why))?;
     report_grant(&grant, &dir);
     Ok(())
 }
@@ -292,27 +292,38 @@ fn promote_named(name: &str) -> Result<()> {
 /// only ever shown when it blocks something reads as an obstacle; shown on every promotion
 /// it is what the grant actually rests on, and the operator can see how much headroom a
 /// draft had before the next edit changes its bytes.
-fn evaluate(dir: &Path) -> Result<wcore_eval::GateResult> {
-    let gate = wcore_eval::evaluate_skill_dir(dir).with_context(|| {
-        format!(
-            "cannot evaluate {} for promotion. This is a refusal, not a skip: nothing is \
-             promoted on the strength of an evaluation that did not happen.",
-            dir.display()
-        )
-    })?;
-    let d = gate.outcome.dimensions;
-    println!(
-        "evaluated '{}': score {:.3} (threshold {:.3}) -- {}",
-        dir.file_name().unwrap_or_default().to_string_lossy(),
-        gate.evidence.score,
-        gate.evidence.threshold,
-        gate.evidence.verdict,
-    );
-    println!(
-        "  outcome {:.3} | cost penalty {:.3} | size penalty {:.3}",
-        d.outcome, d.cost_penalty, d.size_penalty
-    );
-    Ok(gate)
+///
+/// **A failure to score returns failing evidence rather than aborting here**, and the
+/// distinction is not cosmetic. Aborting would put "we could not parse it" ahead of
+/// `promote_existing`'s own refusals, and the first of those is the revocation fence — a
+/// standing user decision, which should not be pre-empted by a parse problem. The artifact
+/// is still unpromotable: `unscorable_evidence` scores 0.0 against the real cutoff, so it
+/// fails the gate by construction rather than by anyone remembering to check. The original
+/// error is carried alongside and surfaced iff the gate is what actually refused.
+fn evaluate(dir: &Path) -> (PromotionEvidence, Option<anyhow::Error>) {
+    let name = dir.file_name().unwrap_or_default().to_string_lossy();
+    match wcore_eval::evaluate_skill_dir(dir) {
+        Ok(gate) => {
+            let d = gate.outcome.dimensions;
+            println!(
+                "evaluated '{name}': score {:.3} (threshold {:.3}) -- {}",
+                gate.evidence.score, gate.evidence.threshold, gate.evidence.verdict,
+            );
+            println!(
+                "  outcome {:.3} | cost penalty {:.3} | size penalty {:.3}",
+                d.outcome, d.cost_penalty, d.size_penalty
+            );
+            (gate.evidence, None)
+        }
+        Err(e) => {
+            let why = anyhow::Error::from(e).context(format!(
+                "cannot evaluate {} for promotion. This is a refusal, not a skip: nothing is \
+                 promoted on the strength of an evaluation that did not happen.",
+                dir.display()
+            ));
+            (wcore_eval::unscorable_evidence(), Some(why))
+        }
+    }
 }
 
 /// Promote through a reviewed P4 procedure.
@@ -364,10 +375,10 @@ async fn promote_procedure(id: uuid::Uuid) -> Result<()> {
         )
     })?;
 
-    let gate = evaluate(&dir)?;
+    let (evidence, why) = evaluate(&dir);
     let grant = store
-        .promote_existing(&dir, Some(&id.to_string()), AUTHORITY, &gate.evidence)
-        .map_err(explain)?;
+        .promote_existing(&dir, Some(&id.to_string()), AUTHORITY, &evidence)
+        .map_err(|e| explain(e, why))?;
 
     let mut updated = target.clone();
     updated.status = ProcedureStatus::Active;
@@ -476,11 +487,23 @@ fn report_grant(grant: &wcore_skills::promote::Promotion, dir: &Path) {
 }
 
 /// Surface a refusal as a plain error. A `Refusal` is a governance decision and its
-/// `Display` already says what to do about it, so nothing is added here beyond the
+/// `Display` already says what to do about it, so little is added here beyond the
 /// conversion.
-fn explain(e: PromoteError) -> anyhow::Error {
-    match e {
-        PromoteError::Refused(r) => anyhow::anyhow!("{r}"),
-        PromoteError::Govern(g) => anyhow::anyhow!("{g}"),
+///
+/// The exception is `EvalBelowThreshold` when the artifact could not be scored at all. The
+/// generic wording ("scored it 0.000") would be true and useless; `why` carries the reason
+/// the evaluator could not produce a number, which is the only thing the operator can act
+/// on. Every other refusal wins over it, which is the point of deferring to here.
+fn explain(e: PromoteError, why: Option<anyhow::Error>) -> anyhow::Error {
+    let gate_refused = matches!(
+        e,
+        PromoteError::Refused(wcore_skills::promote::Refusal::EvalBelowThreshold { .. })
+    );
+    match (gate_refused, why) {
+        (true, Some(w)) => w,
+        _ => match e {
+            PromoteError::Refused(r) => anyhow::anyhow!("{r}"),
+            PromoteError::Govern(g) => anyhow::anyhow!("{g}"),
+        },
     }
 }
