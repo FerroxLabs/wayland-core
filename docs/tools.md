@@ -377,6 +377,57 @@ Available capability flag: `capabilities.browser_suite` (W8c.1). The
 engine emits `browser_event` and `browser_policy_denied` while ops
 run; see `docs/json-stream-protocol.md` §§1.N+6 and 1.N+7.
 
+### Two things a fresh install needs before a browser op works
+
+Neither is done for you, and both are deliberate. A first browser op on
+an untouched install is refused, and the tool card names whichever step
+is outstanding.
+
+**1. Install the sidecar.** Core does *not* bundle a browser. It drives
+the Camoufox sidecar, a separate npm package:
+
+```bash
+npm install -g @askjo/camofox-browser
+```
+
+Already have one somewhere else? Point `WAYLAND_CAMOUFOX_BIN` at the
+`camofox-browser` executable instead. Auto-download
+(`[browser.camoufox_download]`) is off by default and has no built-in
+artifact: Core never fetches executable code from the network without an
+operator-supplied URL *and* a pinned SHA-256 per platform.
+
+**2. Open the policy.** `[browser.policy]` is fail-closed since v0.2.1 —
+`default_action = "deny"` with no `allowed_origins`, so every URL that
+reaches `Browser::navigate` / `download` / `new_tab { url }` is refused.
+This is the SSRF posture, not an oversight; the fix is to name the
+origins you intend to visit, including any search engine you expect the
+agent to use:
+
+```toml
+[browser.policy]
+# Glob patterns supported. This is an allow-list: an origin that is not
+# named here stays refused.
+allowed_origins = ["example.com", "*.mysite.com"]
+```
+
+Or, not recommended (it re-opens the SSRF surface):
+
+```toml
+[browser.policy]
+default_action = "allow"
+```
+
+Put it in a file the loader actually reads — the global
+`config.toml` under the app config dir (`wayland-core --config-path`) or
+`<project dir>/.wayland-core.toml`. A bare `config.toml` in the working
+directory is **not** a config source in any layer.
+
+Loopback (`http://localhost:…`) is refused even by an allow-list; it
+needs the separate port-scoped grant at `[browser.policy.loopback]`.
+
+`wayland-core --doctor` reports both steps: a `browser backend` row for
+the sidecar and a `browser policy` row directly under it.
+
 ## Computer use (W8c.2)
 
 `Cua::*` tools are registered by the `wayland-cua` plugin (via
