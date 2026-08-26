@@ -297,7 +297,9 @@ fn unsaved_guard_unanswered(why: &str) -> String {
          would destroy lines that are on disk and in no commit is therefore UNKNOWN, \
          and an unknown answer has to refuse: of the two ways to be wrong, only \
          letting it through cannot be undone. Name the paths you actually mean, or \
-         raise `timeout`, and run it again."
+         commit the work first, and run it again. Raising `timeout` only helps while \
+         it is still below the guard's own {UNSAVED_GUARD_BUDGET_MS}ms ceiling — above \
+         that the ceiling binds and the answer will not change."
     )
 }
 
