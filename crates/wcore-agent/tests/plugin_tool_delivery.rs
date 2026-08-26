@@ -56,6 +56,7 @@ fn shouting_tool() -> PluginTool {
         category: ToolCategory::Info,
         is_deferred: false,
         max_result_size: 4_096,
+        namespace_claim: false,
         execute: Arc::new(|inv: PluginToolInvocation| {
             Box::pin(async move {
                 let text = inv
@@ -94,6 +95,7 @@ fn chunking_tool() -> PluginTool {
         category: ToolCategory::Info,
         is_deferred: false,
         max_result_size: 4_096,
+        namespace_claim: false,
         execute: Arc::new(|inv: PluginToolInvocation| {
             Box::pin(async move {
                 inv.emit.chunk("hello from plugin");

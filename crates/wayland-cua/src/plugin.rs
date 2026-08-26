@@ -95,7 +95,7 @@ impl Plugin for WaylandCua {
         // is reified host-side from `cua_spec()` (wayland-cua cannot
         // construct it directly — audit F2). The `PluginTool` carries
         // honest metadata; its closure is never the live execution path.
-        registry.register_tool(wcore_plugin_api::tool::PluginTool::host_delegated(
+        registry.register_tool(wcore_plugin_api::tool::PluginTool::namespace_claim(
             "execute",
             "Computer-use tool — reified host-side from the CUA spec.",
             wcore_protocol::events::ToolCategory::Exec,

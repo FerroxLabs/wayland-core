@@ -47,6 +47,20 @@ pub struct PluginTool {
     pub is_deferred: bool,
     /// Maps onto `Tool::max_result_size()`.
     pub max_result_size: usize,
+    /// `true` when this `PluginTool` exists ONLY to claim a name in the
+    /// plugin's tool namespace (`NamespaceLedger` duplicate protection)
+    /// and carries no behavior at all — the real tool arrives host-side
+    /// through a different delivery path (`BrowserToolSpec` /
+    /// `CuaToolSpec` reification).
+    ///
+    /// Deliberately DISTINCT from `host_delegated`: a host-delegated tool
+    /// still executes (IJFW's `ijfw_run` runs through the IJFW MCP
+    /// server's tool proxy); a namespace claim never does. The host
+    /// (`wcore-agent`'s `deliver_tools`) drops marked entries before
+    /// they reach the tool registry, so the claim can neither trip the
+    /// bare-name collision check against the real host-reified tool nor
+    /// be advertised to the model as a tool that always errors.
+    pub namespace_claim: bool,
 
     // --- behavior ---
     /// Execution closure. `Fn` (NOT `FnOnce`) — a tool is invoked many
@@ -62,15 +76,16 @@ impl PluginTool {
     /// Construct a `PluginTool` whose behavior is delivered by the host
     /// (or an MCP server) rather than an in-process closure.
     ///
-    /// Browser/CUA plugins claim a tool namespace through
-    /// `ScopedToolRegistry` purely for the `NamespaceLedger` duplicate
-    /// protection — their real tool is reified host-side from a
-    /// `BrowserToolSpec` / `CuaToolSpec`. IJFW's `ijfw_run` /
-    /// `ijfw_update_apply` likewise execute via the IJFW MCP server's
-    /// tool proxy, not an in-process body. For all of these the
-    /// `PluginTool` carries honest metadata and a closure that returns
-    /// an error if it is ever invoked directly — the host-side path
-    /// supersedes it before that can happen.
+    /// IJFW's `ijfw_run` / `ijfw_update_apply` execute via the IJFW MCP
+    /// server's tool proxy, not an in-process body. The `PluginTool`
+    /// carries honest metadata and a closure that returns an error if it
+    /// is ever invoked directly — the delegated path supersedes it before
+    /// that can happen.
+    ///
+    /// This is NOT the constructor for a pure name reservation: a
+    /// host-delegated tool still runs somewhere. Use
+    /// [`PluginTool::namespace_claim`] when nothing will ever execute
+    /// under this name.
     pub fn host_delegated(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -85,6 +100,7 @@ impl PluginTool {
             category,
             is_deferred: false,
             max_result_size: 50_000, // inert — closure never runs for host-delegated tools
+            namespace_claim: false,
             execute: Arc::new(move |_inv| {
                 let n = err_name.clone();
                 Box::pin(async move {
@@ -98,6 +114,32 @@ impl PluginTool {
                     }
                 })
             }),
+        }
+    }
+
+    /// Construct a `PluginTool` that ONLY reserves a name inside the
+    /// plugin's tool namespace. Nothing ever executes under it.
+    ///
+    /// `wayland-browser` and `wayland-cua` register one so a second copy
+    /// of the same plugin trips the `NamespaceLedger` duplicate-claim
+    /// check; their real tool is reified host-side from a
+    /// `BrowserToolSpec` / `CuaToolSpec` (audit F2 forbids the plugin
+    /// shell from constructing it directly).
+    ///
+    /// The host drops `namespace_claim` entries in `deliver_tools`
+    /// before the tool registry ever sees them. That matters twice over:
+    /// the registry dedupes on the BARE name (`execute`), so an
+    /// un-dropped claim both collides with its sibling plugin's identical
+    /// claim AND — as the survivor — gets advertised to the model as a
+    /// callable tool whose only possible result is an error.
+    pub fn namespace_claim(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        category: ToolCategory,
+    ) -> Self {
+        Self {
+            namespace_claim: true,
+            ..Self::host_delegated(name, description, category)
         }
     }
 }
@@ -243,6 +285,7 @@ mod tests {
             category: ToolCategory::Info,
             is_deferred: false,
             max_result_size: 1_000,
+            namespace_claim: false,
             execute: Arc::new(|inv: PluginToolInvocation| {
                 Box::pin(async move {
                     ToolResult {
