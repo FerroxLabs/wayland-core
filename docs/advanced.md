@@ -357,7 +357,7 @@ A three-tier automatic compaction strategy that prevents context window overflow
 
 ### How It Works
 
-- **Microcompact** runs automatically: replaces old Read/Bash/Grep/Glob/Write/Edit results with `[Tool result cleared]`, keeping the 5 most recent results intact. Triggered by count (>10 compactable results) or time (>1 hour since the last assistant message) — and, either way, only once real input pressure reaches `micro_pressure_fraction` of the autocompact threshold.
+- **Microcompact** runs automatically: replaces old tool results with `[Tool result cleared]`, keeping the 5 most recent results intact. A result is eligible when its tool is listed in `compactable_tools` (Read/Bash/Grep/Glob/Write/Edit by default) **or** its body is larger than `micro_large_result_bytes` — the size rule is what reaches delegated sub-agent transcripts, fetched pages, RepoMap dumps and MCP results, whose names an allow-list cannot enumerate. Triggered by count (>10 compactable results) or time (>1 hour since the last assistant message) — and, either way, only once real input pressure reaches `micro_pressure_fraction` of the autocompact threshold.
 
 - **Autocompact** triggers when input tokens reach `effective_context_window - output_reserve - autocompact_buffer`. The agent calls the LLM to produce a conversation summary, then replaces history with a compact boundary marker. A circuit breaker stops retrying after 3 consecutive failures.
 
@@ -378,6 +378,15 @@ autocompact_buffer = 13000  # Buffer before autocompact triggers
 emergency_buffer = 3000     # Buffer before emergency block
 max_failures = 3            # Circuit breaker threshold
 micro_keep_recent = 5       # Keep N most recent tool results
+micro_large_result_bytes = 20000
+                            # A tool result this large is compactable whatever
+                            # tool produced it. compactable_tools is an
+                            # allow-list of names, and the results that dominate
+                            # an agentic loop -- delegated transcripts, fetched
+                            # pages, RepoMap dumps, every MCP tool -- have names
+                            # it cannot know at build time, so without this they
+                            # were exempt at any size and any pressure.
+                            # Set 0 to restore the name-only behaviour.
 micro_pressure_fraction = 0.5
                             # Neither microcompact trigger is a pressure signal,
                             # so both are gated on this share of the autocompact
