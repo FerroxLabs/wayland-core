@@ -191,11 +191,11 @@ async fn narrows_when_no_backend_can_start() {
 fn indeterminate_never_narrows() {
     assert!(
         !BrowserLiveness::Indeterminate {
-            backend: "chromium"
+            backend: "browserbase"
         }
         .should_narrow(),
         "an undecidable browser backend dropped the capability — this strips browsing \
-         from working Chromium/Browserbase deployments"
+         from working Browserbase deployments"
     );
     assert!(
         !CuaLiveness::Indeterminate { platform: "macos" }.should_narrow(),

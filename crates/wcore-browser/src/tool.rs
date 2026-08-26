@@ -398,7 +398,7 @@ impl Tool for BrowserTool {
     }
 
     fn description(&self) -> &str {
-        "Interactive browser (Camoufox / Chromium sidecar required): navigate, \
+        "Interactive browser (Camoufox sidecar required): navigate, \
          snapshot ARIA tree, read main content, click/fill/press by element-ref \
          (@e1, @e2, ...), screenshot, network/console logs, tab management. No \
          JavaScript evaluation. Use this ONLY when a page requires interaction \

@@ -4,8 +4,8 @@
 //!
 //! The `Browser` tool (in `wcore-browser`) targets the interactive
 //! browsing case: click, fill, screenshot, multi-step navigation through
-//! JS-heavy SPAs. It dispatches into a Camoufox / Chromium / Browserbase
-//! backend - none of which are present on a fresh `wayland-core` install
+//! JS-heavy SPAs. It dispatches into a Camoufox / Browserbase
+//! backend - neither of which is present on a fresh `wayland-core` install
 //! out of the box. A user asking "fetch github.com/trending and summarize
 //! it" does NOT need a full browser; they need an HTTP GET against a
 //! static HTML page, and a model can do everything else from the response.

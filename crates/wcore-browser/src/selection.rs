@@ -1,12 +1,9 @@
-//! Provider selection — Camoufox primary → Chromium fallback → Browserbase cloud.
+//! Provider selection — Camoufox primary → Browserbase cloud.
 //!
 //! Order:
 //!   1. If `ProviderHint::Browserbase` AND `BROWSERBASE_*` env present → Browserbase.
-//!   2. If `ProviderHint::Camoufox` or `Auto` → Camoufox (it's a sidecar; assume
-//!      reachable; the first op gets a typed error if not).
-//!   3. If `ProviderHint::Chromium` AND the `chromium` feature is on AND no
-//!      `BrowserPolicy` is in force → Chromium.
-//!   4. Otherwise default Camoufox.
+//!   2. Otherwise Camoufox (it's a sidecar; assume reachable; the first op gets
+//!      a typed error if not).
 //!
 //! The function returns a `Box<dyn BrowserProvider>` so the tool layer is
 //! provider-neutral.
@@ -18,8 +15,6 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "browserbase")]
 use crate::backends::BrowserbaseBackend;
 use crate::backends::CamoufoxBackend;
-#[cfg(feature = "chromium")]
-use crate::backends::ChromiumBackend;
 
 use crate::policy::BrowserPolicy;
 use crate::provider::BrowserProvider;
@@ -31,7 +26,6 @@ pub enum ProviderHint {
     #[default]
     Auto,
     Camoufox,
-    Chromium,
     Browserbase,
 }
 
@@ -76,7 +70,7 @@ pub fn select_provider(inputs: SelectionInputs) -> Arc<dyn BrowserProvider> {
                      Browserbase backend cannot enforce the URL policy (navigation + redirects \
                      happen server-side in the cloud browser). Refusing Browserbase and falling \
                      back to Camoufox so the policy is enforced. Clear the policy to use \
-                     Browserbase, or use Camoufox/Chromium for policy-enforced browsing."
+                     Browserbase, or use Camoufox for policy-enforced browsing."
                 );
             } else {
                 return Arc::new(bb) as Arc<dyn BrowserProvider>;
@@ -96,48 +90,7 @@ pub fn select_provider(inputs: SelectionInputs) -> Arc<dyn BrowserProvider> {
              `--features browserbase` (and set BROWSERBASE_* env) to honor the hint."
         );
     }
-    // 2. Chromium: explicit hint AND feature on.
-    #[cfg(feature = "chromium")]
-    {
-        if matches!(inputs.hint, ProviderHint::Chromium) {
-            // gh#1112: `ChromiumBackend` enforces NO part of `BrowserPolicy`
-            // — it calls `page.goto(url)` raw, with no pre-flight check, no
-            // allow/deny lists, no loopback-capability gate, no RFC1918 /
-            // metadata / loopback refusal and no post-navigation landing-URL
-            // re-check. Selecting it under a policy silently drops every
-            // guarantee the policy is documented to provide.
-            //
-            // Same shape as the Browserbase arm above, for the same reason:
-            // when a policy is in force we refuse the backend that cannot
-            // enforce it and fall through to Camoufox, which can. Only
-            // `policy == None` (the legacy "no enforcement expectation" mode)
-            // still honours the hint.
-            if inputs.policy.is_some() {
-                tracing::warn!(
-                    "ProviderHint::Chromium requested with a BrowserPolicy set, but the \
-                     Chromium backend enforces none of it (no URL policy check on \
-                     navigation, no post-navigation re-check). Refusing Chromium and \
-                     falling back to Camoufox so the policy is enforced. Clear the policy \
-                     to use Chromium."
-                );
-            } else {
-                return Arc::new(ChromiumBackend::new()) as Arc<dyn BrowserProvider>;
-            }
-        }
-    }
-    // 2b. Chromium requested but feature compiled out: surface the
-    // misconfiguration instead of silently dropping the hint and using
-    // Camoufox. The selection is provider-neutral (`Arc<...>`, not a
-    // `Result`), so we warn rather than error and still fall through.
-    #[cfg(not(feature = "chromium"))]
-    if matches!(inputs.hint, ProviderHint::Chromium) {
-        tracing::warn!(
-            "ProviderHint::Chromium requested but wcore-browser was built without the \
-             `chromium` feature; falling back to Camoufox. Rebuild with `--features chromium` \
-             to honor the hint."
-        );
-    }
-    // 3. Camoufox (default). Wire the policy in when provided.
+    // 2. Camoufox (default). Wire the policy in when provided.
     let url = inputs
         .camoufox_url
         .unwrap_or_else(|| CamoufoxBackend::default_url().to_string());
@@ -175,29 +128,6 @@ mod tests {
     fn camoufox_hint_picks_camoufox() {
         let p = select_provider(SelectionInputs {
             hint: ProviderHint::Camoufox,
-            ..Default::default()
-        });
-        assert_eq!(p.backend_name(), "camoufox");
-    }
-
-    #[cfg(feature = "chromium")]
-    #[test]
-    fn chromium_hint_picks_chromium_when_feature_on() {
-        let p = select_provider(SelectionInputs {
-            hint: ProviderHint::Chromium,
-            ..Default::default()
-        });
-        assert_eq!(p.backend_name(), "chromium");
-    }
-
-    #[cfg(not(feature = "chromium"))]
-    #[test]
-    fn chromium_hint_without_feature_warns_and_falls_back_to_camoufox() {
-        // When the `chromium` feature is compiled out, a Chromium hint must
-        // not be silently dropped: the warn-log path runs and selection still
-        // falls back to Camoufox (the only non-cloud default).
-        let p = select_provider(SelectionInputs {
-            hint: ProviderHint::Chromium,
             ..Default::default()
         });
         assert_eq!(p.backend_name(), "camoufox");
