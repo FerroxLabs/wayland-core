@@ -236,7 +236,7 @@ async fn promotion_lifts_quarantine_and_an_edit_puts_it_back() {
     );
 
     store
-        .promote_existing(&dir, None, "test")
+        .promote_existing(&dir, None, "test", &clearing_evidence())
         .expect("promote the draft");
 
     let after = catalog(project.path()).await;
@@ -274,7 +274,9 @@ async fn revocation_withdraws_the_promotion_grant() {
 
     let dir = install_draft(home.path(), "auto-both", "body");
     let store = GovernanceStore::open_default().unwrap();
-    store.promote_existing(&dir, None, "test").unwrap();
+    store
+        .promote_existing(&dir, None, "test", &clearing_evidence())
+        .unwrap();
     assert_eq!(
         store.promotions().unwrap().len(),
         1,
@@ -296,4 +298,68 @@ async fn revocation_withdraws_the_promotion_grant() {
         "a revoked-then-restored artifact re-entered the catalog. Catalog: {:?}",
         names(&after)
     );
+}
+
+/// Evidence that clears any threshold, for the tests in this file.
+///
+/// These cases are about the catalog effect of a grant, not about scoring, so they supply
+/// the passing input explicitly rather than depending on how a fixture body happens to
+/// score. The gate's own behaviour is exercised in `wcore-eval`'s
+/// `tests/promotion_gate.rs` and in `promotion_refuses_below_threshold` below.
+fn clearing_evidence() -> wcore_skills::promote::PromotionEvidence {
+    wcore_skills::promote::PromotionEvidence {
+        evaluator: "test".into(),
+        score: 1.0,
+        threshold: 0.65,
+        verdict: "good".into(),
+    }
+}
+
+/// The gate, at the governance boundary rather than at a caller.
+///
+/// `promote_existing` takes the evidence as a required argument, so no promotion path can
+/// omit the check; this asserts the *refusal* half — that supplying failing evidence stops
+/// the grant being written, rather than merely being recorded alongside it.
+#[tokio::test]
+#[serial]
+async fn promotion_refuses_below_threshold() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    set_home(home.path());
+
+    let dir = install_draft(home.path(), "auto-unscored", "body");
+    let store = GovernanceStore::open_default().unwrap();
+
+    // Known-positive in the same test: the identical call with clearing evidence DOES
+    // promote. Without it, a refusal could equally be caused by anything else in the setup.
+    let failing = wcore_skills::promote::PromotionEvidence {
+        evaluator: "test".into(),
+        score: 0.10,
+        threshold: 0.65,
+        verdict: "bad".into(),
+    };
+    let err = store
+        .promote_existing(&dir, None, "test", &failing)
+        .expect_err("a below-threshold artifact must not be promoted");
+    assert!(
+        err.to_string()
+            .contains("below the 0.650 promotion threshold"),
+        "the refusal must say what it refused on: {err}"
+    );
+    assert_eq!(
+        store.promotions().unwrap().len(),
+        0,
+        "a refused promotion still wrote a grant"
+    );
+    let still = catalog(project.path()).await;
+    let q = still.iter().find(|m| m.name == "auto-unscored").unwrap();
+    assert!(
+        q.disable_model_invocation,
+        "a refused promotion left the artifact model-facing"
+    );
+
+    store
+        .promote_existing(&dir, None, "test", &clearing_evidence())
+        .expect("known-positive: the same call with clearing evidence must succeed");
+    assert_eq!(store.promotions().unwrap().len(), 1);
 }

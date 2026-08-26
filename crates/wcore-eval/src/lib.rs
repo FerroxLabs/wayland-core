@@ -23,6 +23,7 @@ pub mod bench;
 pub mod corpus;
 pub mod error;
 pub mod harness;
+pub mod promotion;
 pub mod report;
 pub mod scorer;
 
@@ -33,6 +34,7 @@ pub use bench::{
 pub use corpus::{Candidate, Corpus, ExpectedOutcome, ReferenceCase, Verdict, Winner};
 pub use error::EvalError;
 pub use harness::Harness;
+pub use promotion::{EVALUATOR, GateResult, evaluate_skill_dir, unscorable_evidence};
 pub use report::{CaseResult, EvalReport};
 pub use scorer::{
     DefaultScorer, DefaultScorerConstants, LOCKED, ScoreDimensions, ScoreOutcome, Scorer,

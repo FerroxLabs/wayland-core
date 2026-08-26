@@ -37,11 +37,27 @@ fn bin() -> Command {
 }
 
 /// Install a generated draft under an isolated `WAYLAND_HOME`, exactly as the auto-draft
-/// loop would: a `SKILL.md` plus a manifest marking it `auto_drafted`.
+/// loop would: a `SKILL.md` **with frontmatter** plus a manifest marking it `auto_drafted`.
+///
+/// The frontmatter was added on 2026-08-26 with the wayland#694 eval gate, and it is not
+/// scaffolding — it is what `wcore_skills::draft::synth_skill_body` actually writes. These
+/// fixtures previously carried a bare `# heading` and a word of body, which declares no
+/// name, no description and no `when-to-use`; the gate refuses to score that at all, so
+/// promoting it would never have been the behaviour under test. Asserting that the
+/// advertised flag promotes *a real draft* is the claim this file is for.
 fn install_draft(home: &Path, name: &str, body: &str) -> std::path::PathBuf {
     let dir = home.join("skills").join(name);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+    let skill_md = format!(
+        "---\n\
+         name: {name}\n\
+         description: Replay the observed tool sequence recorded for {name}\n\
+         when-to-use: When the same sequence of steps comes round again\n\
+         ---\n\
+         \n\
+         {body}"
+    );
+    std::fs::write(dir.join("SKILL.md"), skill_md).unwrap();
     std::fs::write(
         dir.join("manifest.json"),
         format!(r#"{{"auto_drafted":true,"signature":"sig-{name}"}}"#),
@@ -315,5 +331,160 @@ fn status_field_matcher_self_test() {
         status_field(sample, "auto-two"),
         Some("promoted".into()),
         "the repaired matcher borrowed a neighbouring row's status"
+    );
+}
+
+/// The eval gate, at the product surface (wayland#694).
+///
+/// `wcore-eval`'s own tests drive the scorer and `GovernanceStore` directly. This one drives
+/// the shipped `wayland-core` binary, because the question those cannot answer is whether the
+/// gate is reachable from the command a customer actually runs.
+///
+/// Both directions, in one test and one fixture set, because a refusal on its own is
+/// satisfied by any broken promote path.
+#[test]
+fn the_eval_gate_refuses_a_bad_draft_through_the_shipped_binary() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    std::fs::create_dir(project.path().join(".git")).unwrap();
+
+    // Known-positive: a real draft promotes.
+    install_draft(home.path(), "auto-good", "# Auto-drafted skill\n\nbody\n");
+    let good = bin()
+        .args(["--skills-promote", "auto-good"])
+        .current_dir(project.path())
+        .env("WAYLAND_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(
+        good.status.success(),
+        "known-positive failed: a well-formed draft must still promote, or the refusal \
+         below is satisfied by a promote path that is simply broken.\nstderr:\n{}",
+        String::from_utf8_lossy(&good.stderr)
+    );
+    let good_out = String::from_utf8_lossy(&good.stdout);
+    assert!(
+        good_out.contains("score") && good_out.contains("threshold"),
+        "the score the grant rests on must be shown to the operator; got:\n{good_out}"
+    );
+
+    // The refusal: a draft whose declared name is somewhere else, with no description, an
+    // off-allowlist model pin, and a body reaching for tools it never declared.
+    let bad_dir = home.path().join("skills").join("auto-bad");
+    std::fs::create_dir_all(&bad_dir).unwrap();
+    std::fs::write(
+        bad_dir.join("SKILL.md"),
+        "---\nname: something-else-entirely\nmodel: gpt-4o-mini\n---\n\n\
+         Use Bash and Write and Edit and Spawn to do whatever seems useful at the time.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        bad_dir.join("manifest.json"),
+        r#"{"auto_drafted":true,"signature":"sig-auto-bad"}"#,
+    )
+    .unwrap();
+
+    let bad = bin()
+        .args(["--skills-promote", "auto-bad"])
+        .current_dir(project.path())
+        .env("WAYLAND_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(
+        !bad.status.success(),
+        "a draft below the acceptance cutoff was promoted. Generated content is data until \
+         something looks at it.\nstdout:\n{}",
+        String::from_utf8_lossy(&bad.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(
+        stderr.contains("promotion threshold"),
+        "the refusal must name the gate so the operator knows to repair the draft rather \
+         than retry; got:\n{stderr}"
+    );
+
+    // Exactly one grant: the good one. A second would mean the refusal still wrote one.
+    let grants = home.path().join("skills-governance").join("promotions");
+    let n = std::fs::read_dir(&grants)
+        .map(|d| d.flatten().count())
+        .unwrap_or(0);
+    assert_eq!(
+        n, 1,
+        "expected exactly the known-positive's grant, found {n}"
+    );
+}
+
+/// An artifact that cannot be scored is refused, and the refusal says why — but a REVOKED
+/// artifact is refused for being revoked first.
+///
+/// The ordering is the point. A parse problem must not pre-empt a standing user decision,
+/// and the only reason it could is that the CLI evaluates before it calls into governance.
+/// `unscorable_evidence` is what keeps both true at once.
+#[test]
+fn an_unscorable_artifact_is_refused_and_revocation_still_wins() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    std::fs::create_dir(project.path().join(".git")).unwrap();
+
+    // No frontmatter at all: nothing to score.
+    let dir = home.path().join("skills").join("auto-bare");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "# Bare\n\nbody\n").unwrap();
+    std::fs::write(
+        dir.join("manifest.json"),
+        r#"{"auto_drafted":true,"signature":"sig-auto-bare"}"#,
+    )
+    .unwrap();
+
+    let out = bin()
+        .args(["--skills-promote", "auto-bare"])
+        .current_dir(project.path())
+        .env("WAYLAND_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "an artifact that could not be evaluated was promoted anyway. 'Could not evaluate' \
+         must never read as 'nothing to object to'."
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no YAML frontmatter"),
+        "the refusal must say why the evaluator could not produce a number, which is the \
+         only thing the operator can act on; got:\n{stderr}"
+    );
+
+    // Now revoke it and try again: the fence reports first, over the scoring problem.
+    let revoke = bin()
+        .args(["--skills-revoke", "auto-bare"])
+        .current_dir(project.path())
+        .env("WAYLAND_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(
+        revoke.status.success(),
+        "revoke failed:\n{}",
+        String::from_utf8_lossy(&revoke.stderr)
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "# Bare\n\nbody\n").unwrap();
+    std::fs::write(
+        dir.join("manifest.json"),
+        r#"{"auto_drafted":true,"signature":"sig-auto-bare"}"#,
+    )
+    .unwrap();
+
+    let after = bin()
+        .args(["--skills-promote", "auto-bare"])
+        .current_dir(project.path())
+        .env("WAYLAND_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(!after.status.success());
+    let stderr = String::from_utf8_lossy(&after.stderr);
+    assert!(
+        stderr.contains("revoked"),
+        "a standing user decision must be reported ahead of a scoring problem, or the user \
+         is told to fix a draft they had already asked never to see again; got:\n{stderr}"
     );
 }

@@ -693,6 +693,13 @@ service_url = "https://smba.trafficmanager.net/emea/"
 
     #[test]
     fn max_message_len_is_msteams_cap() {
+        // wayland#934: this asserts the literal the function returns one line above, so it
+        // restates the code rather than testing it. It is retained as a change-detector, but
+        // the check that can actually catch a wrong cap is
+        // `wcore-channels-registry/tests/delivery_semantics_declaration.rs`, which binds this
+        // number to `msteams.cap` in `docs/delivery-semantics.md` through the PRODUCTION
+        // factory. Whether either number equals the PLATFORM's real limit is still
+        // unmeasured -- see `cap_measured` and §4.2 of that document.
         let ch = MsTeamsChannel::new("test", cfg(), MemCreds::empty());
         assert_eq!(ch.max_message_len(), Some(28_000));
     }

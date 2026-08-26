@@ -9639,6 +9639,7 @@ dependencies = [
  "wcore-cron",
  "wcore-cua",
  "wcore-egress",
+ "wcore-eval",
  "wcore-eval-scenarios",
  "wcore-exec-backend",
  "wcore-gateway",

@@ -45,6 +45,25 @@
 //! removed — and the promotion path is the only path with the authority to do that, which
 //! is why the fence belongs here rather than downstream.
 //!
+//! # The evaluation gate
+//!
+//! Promotion also requires **evidence**: a [`PromotionEvidence`] whose score clears its
+//! own threshold. It is a required argument, not an option, so there is no promotion path
+//! that forgets to ask — the refusal lives beside the resurrection fence rather than in
+//! whichever caller happened to remember it.
+//!
+//! Governance owns the *rule* ("nothing becomes model-facing without a score that clears
+//! its threshold") and deliberately not the *scorer*. `wcore-eval` depends on this crate,
+//! so the dependency cannot run the other way; and it should not, because what counts as
+//! good enough is an evaluation policy that is expected to change, while the rule is not.
+//! `wcore-eval::promotion` is the production producer of this evidence.
+//!
+//! The evidence is copied into the grant. A grant therefore answers "on whose say-so, over
+//! which bytes, **and against what score**" — the score is as much a part of the provenance
+//! as the authority is, and a threshold that is later raised does not silently reinterpret
+//! grants issued under the old one, because each grant carries the threshold it was judged
+//! against.
+//!
 //! # Crash safety of the install
 //!
 //! `promote_new` materialises an artifact into the user's global skills directory. That
@@ -102,7 +121,7 @@ const MAX_DIGEST_DEPTH: usize = 8;
 ///
 /// This is the "what was promoted, from where, on whose authority" record that makes the
 /// operation checkable after the fact.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Promotion {
     pub promotion_id: String,
     /// Skill directory name, as the loader will see it.
@@ -123,10 +142,47 @@ pub struct Promotion {
     pub promoted_at: String,
     pub file_count: usize,
     pub byte_count: u64,
+    /// The evaluation this grant was issued against.
+    ///
+    /// `Option` for one reason only: grants written before the gate existed have no
+    /// evidence, and reading them back as "scored 0" would be a fabrication. Every grant
+    /// this code writes carries `Some`. A `None` in the wild means "issued before the
+    /// product evaluated anything", which is a fact worth being able to say.
+    #[serde(default)]
+    pub evidence: Option<PromotionEvidence>,
+}
+
+/// Machine-checkable evidence that an artifact was evaluated before it was promoted.
+///
+/// Carries the threshold as well as the score. A grant read a year later has to be
+/// interpretable on its own: "0.71" means nothing without the number it had to beat, and
+/// looking the threshold up at read time would silently re-judge old grants under new
+/// policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PromotionEvidence {
+    /// Which evaluator produced `score`, so a reader knows whose judgement they inherit.
+    pub evaluator: String,
+    /// Combined score, in `[0.0, 1.0]`.
+    pub score: f64,
+    /// The cutoff `score` had to reach.
+    pub threshold: f64,
+    /// The evaluator's own verdict word, recorded verbatim for the audit trail.
+    pub verdict: String,
+}
+
+impl PromotionEvidence {
+    /// Does this evidence permit promotion?
+    ///
+    /// Non-finite values refuse. `NaN >= x` is already false, so a NaN score would refuse
+    /// anyway; the explicit check is here so a NaN *threshold* — which would otherwise make
+    /// every comparison false and look like a scorer bug — refuses for a stated reason.
+    pub fn clears(&self) -> bool {
+        self.score.is_finite() && self.threshold.is_finite() && self.score >= self.threshold
+    }
 }
 
 /// Why a promotion was refused. Each variant is a governance decision, not an I/O failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Refusal {
     /// The artifact is revoked. The resurrection fence.
     Revoked { skill_name: String },
@@ -139,6 +195,13 @@ pub enum Refusal {
     },
     /// The install target is occupied and promotion never overwrites.
     TargetOccupied { path: String },
+    /// The artifact was evaluated and did not clear the promotion threshold.
+    EvalBelowThreshold {
+        skill_name: String,
+        evaluator: String,
+        score: f64,
+        threshold: f64,
+    },
 }
 
 impl std::fmt::Display for Refusal {
@@ -166,6 +229,18 @@ impl std::fmt::Display for Refusal {
                 "refusing to install over {path}: promotion never overwrites an existing \
                  directory. Remove or rename it first."
             ),
+            Refusal::EvalBelowThreshold {
+                skill_name,
+                evaluator,
+                score,
+                threshold,
+            } => write!(
+                f,
+                "refusing to promote '{skill_name}': {evaluator} scored it {score:.3}, below \
+                 the {threshold:.3} promotion threshold. A generated skill stays data until \
+                 it earns model-facing status. Review and repair the artifact, then promote \
+                 again -- the score is recomputed from the bytes on disk every time."
+            ),
         }
     }
 }
@@ -175,7 +250,7 @@ impl std::fmt::Display for Refusal {
 /// Three states rather than a `bool`, because "not promoted" and "promoted, but the bytes
 /// changed since" are different facts and collapsing them is what would make a silent
 /// reversion to quarantine look like a bug.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PromotionState {
     NotPromoted,
     Promoted(Box<Promotion>),
@@ -273,6 +348,7 @@ impl GovernanceStore {
         skill_dir: &Path,
         procedure_id: Option<&str>,
         authority: &str,
+        evidence: &PromotionEvidence,
     ) -> Result<Promotion, PromoteError> {
         if !skill_dir.is_dir() {
             let refusal = Refusal::NoSuchSkill {
@@ -291,6 +367,18 @@ impl GovernanceStore {
         if self.is_revoked(&skill_name, signature.as_deref()) {
             let refusal = Refusal::Revoked {
                 skill_name: skill_name.clone(),
+            };
+            self.record_refusal(&skill_name, &refusal)?;
+            return Err(PromoteError::Refused(refusal));
+        }
+
+        // ---- the evaluation gate ----
+        if !evidence.clears() {
+            let refusal = Refusal::EvalBelowThreshold {
+                skill_name: skill_name.clone(),
+                evaluator: evidence.evaluator.clone(),
+                score: evidence.score,
+                threshold: evidence.threshold,
             };
             self.record_refusal(&skill_name, &refusal)?;
             return Err(PromoteError::Refused(refusal));
@@ -316,6 +404,7 @@ impl GovernanceStore {
             promoted_at: now_rfc3339(),
             file_count,
             byte_count,
+            evidence: Some(evidence.clone()),
         };
         self.write_grant(&grant)?;
         Ok(grant)
@@ -332,11 +421,24 @@ impl GovernanceStore {
         files: &[(String, Vec<u8>)],
         procedure_id: Option<&str>,
         authority: &str,
+        evidence: &PromotionEvidence,
     ) -> Result<Promotion, PromoteError> {
         // ---- the resurrection fence, before any filesystem work ----
         if self.is_revoked(skill_name, None) {
             let refusal = Refusal::Revoked {
                 skill_name: skill_name.to_string(),
+            };
+            self.record_refusal(skill_name, &refusal)?;
+            return Err(PromoteError::Refused(refusal));
+        }
+
+        // ---- the evaluation gate, still before any filesystem work ----
+        if !evidence.clears() {
+            let refusal = Refusal::EvalBelowThreshold {
+                skill_name: skill_name.to_string(),
+                evaluator: evidence.evaluator.clone(),
+                score: evidence.score,
+                threshold: evidence.threshold,
             };
             self.record_refusal(skill_name, &refusal)?;
             return Err(PromoteError::Refused(refusal));
@@ -375,6 +477,7 @@ impl GovernanceStore {
             promoted_at: now_rfc3339(),
             file_count,
             byte_count,
+            evidence: Some(evidence.clone()),
         };
         self.write_grant(&grant)?;
         Ok(grant)
