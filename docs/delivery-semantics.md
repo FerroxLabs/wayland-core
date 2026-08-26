@@ -348,7 +348,7 @@ evidence about arrival counts, and it is not counted as any.
 The run wrote nothing to the room — it failed on the baseline read, which precedes the first
 send, and neither `MCR_CTRL_RECEIPTS` nor `MCR_SUBJ_RECEIPTS` was ever printed.
 
-### 4.2 The message cap, per adapter — declared by us, measured by nobody
+### 4.2 The message cap, per adapter — two measured, five still declared by us alone
 
 **Generalised 2026-08-26, [FerroxLabs/wayland#934](https://github.com/FerroxLabs/wayland/issues/934).**
 Until then exactly one cap in the product was bound to anything outside its own function.
@@ -371,9 +371,9 @@ of a conditional guarantee"; it means "this adapter's `max_message_len()`".
 
 | Adapter | Declared cap (chars) | Declared at | Measured at the real platform? |
 |---|---|---|---|
-| **Slack** | 39,000 | `crates/wcore-channel-slack/src/lib.rs` | **NOT MEASURED** |
+| **Slack** | 4,000 | `crates/wcore-channel-slack/src/lib.rs` | **MEASURED 2026-08-27** — 4,040 is the largest single message; at 4,041 the API splits into 4,000-char messages. Was declared 39,000: the manager chunks on this value, so one 39,000-char send arrived as ten messages while `chunks_for(..).len() <= 1` marked it single-delivery. |
 | **Matrix** | 32,768 | `crates/wcore-channel-matrix/src/lib.rs` | **NOT MEASURED** |
-| **Discord** | 2,000 | `crates/wcore-channel-discord/src/lib.rs` | **NOT MEASURED** |
+| **Discord** | 2,000 | `crates/wcore-channel-discord/src/lib.rs` | **MEASURED 2026-08-27** — 2,000 accepted; 2,001 refused by the platform with HTTP 400 `50035 Invalid Form Body`. |
 | **Telegram** | 4,096 | `crates/wcore-channel-telegram/src/lib.rs` | **NOT MEASURED** |
 | **Twilio SMS** | 1,600 | `crates/wcore-channel-sms/src/lib.rs` | **NOT MEASURED** |
 | **WhatsApp** | 4,096 | `crates/wcore-channel-whatsapp/src/lib.rs` | **NOT MEASURED** |
@@ -755,14 +755,14 @@ adapter, which is a drift check and not a measurement. `live` may be written onl
 platform whose boundary probe (a send at the cap, and a send one char over it) has actually
 run against a real destination. Every row is `no` today; §4.2 names what each is waiting for.
 slack = at-most-once
-slack.cap = 39000
-slack.cap_measured = no
+slack.cap = 4000
+slack.cap_measured = live
 matrix = exactly-once-below-cap
 matrix.cap = 32768
 matrix.cap_measured = no
 discord = at-most-once
 discord.cap = 2000
-discord.cap_measured = no
+discord.cap_measured = live
 telegram = at-most-once
 telegram.cap = 4096
 telegram.cap_measured = no

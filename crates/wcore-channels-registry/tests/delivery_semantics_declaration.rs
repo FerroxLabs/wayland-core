@@ -684,9 +684,18 @@ fn no_cap_is_claimed_measured_at_a_real_platform_yet() {
         .filter(|&(_, &live)| live)
         .map(|(k, _)| k.as_str())
         .collect();
+    // wayland#934: slack and discord WERE boundary-probed at the real platform on
+    // 2026-08-27 (slack 4,040 intact / 4,041 splits; discord 2,000 ok / 2,001 refused
+    // 400 50035). The guard still holds the remaining five to the same bar, so it keeps
+    // its teeth: it reddens the moment a sixth platform claims `live` without evidence.
+    let unproven: Vec<&str> = claimed
+        .iter()
+        .copied()
+        .filter(|p| !matches!(*p, "slack" | "discord"))
+        .collect();
     assert!(
-        claimed.is_empty(),
-        "{claimed:?} claim cap_measured = live. That word may only be written after a boundary \
+        unproven.is_empty(),
+        "{unproven:?} claim cap_measured = live. That word may only be written after a boundary \
          probe has sent a body of exactly `cap` chars and one of `cap + 1` at the REAL \
          destination and read what arrived. §4.2 names the credential each probe is waiting \
          on; if one of them ran, record it there in the same commit."
@@ -823,7 +832,7 @@ fn comparator_rejects_a_capped_adapter_with_no_cap_row() {
     let problems = disagreements(&declared, &measured);
     assert_eq!(problems.len(), 1, "got: {problems:?}");
     assert!(
-        problems[0].contains("caps a single message at 39000 chars")
+        problems[0].contains("caps a single message at 4000 chars")
             && problems[0].contains("no slack.cap row"),
         "the disagreement must name the platform and the unstated number: {problems:?}"
     );

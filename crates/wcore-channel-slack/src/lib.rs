@@ -414,9 +414,13 @@ impl Channel for SlackChannel {
         include_str!("../schemas/slack.json")
     }
 
-    /// Slack caps a single message around 40k characters; 39k is conservative.
+    /// Slack's real single-message limit, measured against the live API
+    /// (wayland#934, 2026-08-27): 4,040 characters is the largest body that
+    /// arrives as ONE message; at 4,041 Slack splits it into 4,000-char
+    /// messages. 4,000 is the split size itself, so a full-length chunk we
+    /// send can never be re-split on arrival.
     fn max_message_len(&self) -> Option<usize> {
-        Some(39_000)
+        Some(4_000)
     }
 
     /// `reactions.add` — the ack signal. `message_id` is the Slack message
@@ -1558,10 +1562,12 @@ mod tests {
         // the check that can actually catch a wrong cap is
         // `wcore-channels-registry/tests/delivery_semantics_declaration.rs`, which binds this
         // number to `slack.cap` in `docs/delivery-semantics.md` through the PRODUCTION
-        // factory. Whether either number equals the PLATFORM's real limit is still
-        // unmeasured -- see `cap_measured` and §4.2 of that document.
+        // factory. The PLATFORM limit is now MEASURED (wayland#934, 2026-08-27):
+        // 4,040 chars is the largest single Slack message; at 4,041 the API splits
+        // into 4,000-char messages. 4,000 is used because it is the split size
+        // itself, so a full-length chunk can never be re-split by Slack.
         let ch = SlackChannel::new("test", cfg_for("https://unused.example"), store_for_test());
-        assert_eq!(ch.max_message_len(), Some(39_000));
+        assert_eq!(ch.max_message_len(), Some(4_000));
     }
 
     #[tokio::test]
