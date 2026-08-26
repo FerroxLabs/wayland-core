@@ -1,7 +1,8 @@
 use std::process::ExitCode;
 
 use wcore_protocol::contract::{
-    GENERATOR_VERSION, WireShapeBaseline, check_contract, manifest_digests, write_contract,
+    GENERATOR_VERSION, WireShapeBaseline, check_contract, manifest_diff_report, manifest_digests,
+    write_contract,
 };
 
 fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -26,6 +27,15 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             check_contract()?;
             println!("Desktop contract corpus is current ({GENERATOR_VERSION})");
         }
+        // Read-only sibling of `check`: the same manifest key diff, printed
+        // without writing a byte. `check` is the gate and answers whether the
+        // corpus is current; this answers WHAT moved, which is the question an
+        // author actually has once the gate is already red. It exits 0 either
+        // way - duplicating the gate here would give a red build two verdicts
+        // to disagree about.
+        Some("diff") => {
+            print!("{}", manifest_diff_report()?);
+        }
         Some("digest") => {
             let (fixtures, schemas, sources) = manifest_digests()?;
             println!("fixture_digest={fixtures}");
@@ -35,7 +45,8 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         _ => {
             return Err(
-                "usage: wcore-contract <generate [--bootstrap-wire-shapes]|check|digest>".into(),
+                "usage: wcore-contract <generate [--bootstrap-wire-shapes]|check|diff|digest>"
+                    .into(),
             );
         }
     }
