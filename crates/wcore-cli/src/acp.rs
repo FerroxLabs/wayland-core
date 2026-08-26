@@ -313,6 +313,111 @@ fn mint_server_key() -> String {
     buf.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// The one-time announcement for a freshly minted server key.
+///
+/// Returns `None` when nothing was minted (an injected or re-read key is not
+/// news, and reprinting a persisted key on every boot would scatter it through
+/// logs).
+///
+/// # Why the value is gated on stderr being a terminal
+///
+/// Printing the key was defensible when a host minted exactly one, once. It is
+/// not any more: since the server key became per-profile (an isolated home no
+/// longer shares the process-global keychain entry), EVERY `WAYLAND_HOME`
+/// profile mints its own on first boot. A supervised `acp serve` — systemd, a
+/// container, `nohup`, a CI job, which is precisely the headless case
+/// FerroxLabs/wayland#305 is about — would then write one live credential per
+/// profile into whatever captures stderr, where it outlives the process and is
+/// readable by anything that can read the log.
+///
+/// So: a human at a terminal still gets the key, because a first run where you
+/// cannot find your own credential is a bad first run. Everything else gets a
+/// POINTER — the store and how to read the value back — and never the value.
+///
+/// The rule is uniform, `Ephemeral` included, even though that combination
+/// (no keychain, no writable file, captured stderr) leaves the key genuinely
+/// unreachable. An exception there would make the property "the key never
+/// reaches a non-terminal stderr, EXCEPT…", and that exception is the kind
+/// that erodes. Instead the ephemeral notice says outright that the server is
+/// unreachable until `WAYLAND_ACP_SERVER_KEY` is set, which is an instruction
+/// the operator can act on rather than a credential in a log file.
+///
+/// Terminal detection is `std::io::IsTerminal` on stderr — the same mechanism
+/// `main.rs`, `profile.rs`, `migrate/` and `crucible.rs` already use, not a
+/// second one. It is not airtight: a supervisor that allocates a PTY for its
+/// child reads as a terminal. `WAYLAND_ACP_SERVER_KEY` is the deterministic
+/// lever for those, and every non-terminal notice names it.
+fn new_key_notice(store: &ServerKeyStore, key: &str, stderr_is_tty: bool) -> Option<String> {
+    if !store.is_new() {
+        return None;
+    }
+    if stderr_is_tty {
+        return Some(format!(
+            "wayland-core acp: generated API key (first run) — \
+             pass as X-API-Key header:\n  {key}"
+        ));
+    }
+    let recovery = match store {
+        ServerKeyStore::File { path, .. } => format!(
+            "Read it from the {:?} entry in {}",
+            server_key_file_slot(ACP_SERVER_KEY_ACCOUNT),
+            path.display()
+        ),
+        ServerKeyStore::Keychain { .. } => format!(
+            "Read it from the OS keychain entry {:?} / {:?}",
+            // The NAMESPACED service, not the bare `KEYCHAIN_SERVICE` constant:
+            // `keychain::store_secret` prefixes it, so the bare name is not what
+            // an operator would find in Keychain Access / secret-tool.
+            wcore_config::keychain::service_name(wcore_acp::auth::KEYCHAIN_SERVICE),
+            ACP_SERVER_KEY_ACCOUNT
+        ),
+        // Nothing persisted it, so there is nothing to read it back from.
+        ServerKeyStore::Ephemeral => "It was not persisted anywhere, so this server is \
+             UNREACHABLE until you set a key yourself"
+            .to_string(),
+        // `is_new()` is false for this arm; kept total rather than `unreachable!`.
+        ServerKeyStore::Environment => "It came from the environment".to_string(),
+    };
+    Some(format!(
+        "wayland-core acp: generated an API key (first run). stderr is NOT a terminal, so the \
+         key is not printed here — a supervised or redirected run would write this credential \
+         into whatever captures stderr. {recovery}, or set WAYLAND_ACP_SERVER_KEY before \
+         startup to choose the key yourself."
+    ))
+}
+
+/// One-time notice about the SHARED OS keychain entry an isolated profile used
+/// to use, now that it uses its own file instead.
+///
+/// The old entry is deliberately LEFT IN PLACE. Deleting it would be a
+/// destructive write to a process-global store that other profiles — and any
+/// older binary, including the one an operator rolls back to — may still read;
+/// a rollback that silently loses a credential is worse than an orphan. But an
+/// orphan nobody is told about is a credential nobody knows exists, so it is
+/// named here and the operator decides.
+///
+/// Deliberately does NOT probe the keychain to confirm the entry exists. That
+/// probe is exactly the call this change removed from the isolated-home path,
+/// and it is not free: on macOS a read of an item written by a differently
+/// signed binary can raise an interactive prompt, and on a headless Linux box
+/// it can stall on an absent Secret Service. Paying that on every isolated
+/// boot to make a cosmetic notice unconditional is the wrong trade, so the
+/// wording is conditional instead.
+fn legacy_shared_keychain_notice(store: &ServerKeyStore, isolated_home: bool) -> Option<String> {
+    if !isolated_home || !matches!(store, ServerKeyStore::File { minted: true, .. }) {
+        return None;
+    }
+    Some(format!(
+        "wayland-core acp: this profile no longer uses the SHARED OS keychain entry \
+         ({:?} / {:?}) — that entry gave every profile on this host the same server key. If an \
+         earlier version stored one there it is left in place, because other profiles and older \
+         binaries may still use it; clear it yourself once nothing does.",
+        // Namespaced, so the operator can actually find the entry.
+        wcore_config::keychain::service_name(wcore_acp::auth::KEYCHAIN_SERVICE),
+        ACP_SERVER_KEY_ACCOUNT
+    ))
+}
+
 /// Resolve this process's ACP server key, minting and persisting one on first
 /// run. NEVER fails: a host with no credential store at all still gets a
 /// server, it just gets an ephemeral key and is told so.
@@ -470,11 +575,19 @@ async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
         "wayland-core acp: server API key store: {}",
         key_store.describe()
     );
-    if key_store.is_new() {
-        eprintln!(
-            "wayland-core acp: generated API key (first run) — \
-             pass as X-API-Key header:\n  {api_key}"
-        );
+    // The key VALUE, on the other hand, is printed only to a human at a
+    // terminal. See `new_key_notice`.
+    if let Some(notice) = new_key_notice(
+        &key_store,
+        &api_key,
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    ) {
+        eprintln!("{notice}");
+    }
+    if let Some(notice) =
+        legacy_shared_keychain_notice(&key_store, std::env::var_os("WAYLAND_HOME").is_some())
+    {
+        eprintln!("{notice}");
     }
 
     // Resolve a runtime Config for the engine. Provider/model/api-key flags
@@ -1085,5 +1198,131 @@ mod tests {
         // equal, "ephemeral" would be a mislabelled durable store.
         let (second, _) = load_or_create_server_key("acp-server-key", None, true, path);
         assert_ne!(first, second);
+    }
+
+    // ── #305 follow-up: the key VALUE is terminal-only ──────────────────
+
+    const FAKE_KEY: &str = "deadbeef00112233445566778899aabbccddeeff00112233445566778899aabb";
+
+    fn minted_file_store() -> ServerKeyStore {
+        ServerKeyStore::File {
+            path: PathBuf::from("/tmp/profile-x/credentials.toml"),
+            minted: true,
+        }
+    }
+
+    /// A human at a terminal still gets the key — the interactive first run is
+    /// unchanged. This is the POSITIVE CONTROL for the guard: it fails if the
+    /// condition is inverted, not only if it is deleted.
+    #[test]
+    fn a_terminal_still_gets_the_key_value() {
+        let notice = new_key_notice(&minted_file_store(), FAKE_KEY, true).expect("a notice");
+        assert!(
+            notice.contains(FAKE_KEY),
+            "an interactive first run must still print the key: {notice}"
+        );
+    }
+
+    /// THE GUARD. A supervised / redirected run must get a pointer and never
+    /// the value, on every store that can mint one.
+    #[test]
+    fn a_non_terminal_never_gets_the_key_value() {
+        let path = PathBuf::from("/tmp/profile-x/credentials.toml");
+        for store in [
+            ServerKeyStore::File {
+                path: path.clone(),
+                minted: true,
+            },
+            ServerKeyStore::Keychain { minted: true },
+            ServerKeyStore::Ephemeral,
+        ] {
+            let notice = new_key_notice(&store, FAKE_KEY, false)
+                .unwrap_or_else(|| panic!("{store:?} mints, so it must announce something"));
+            assert!(
+                !notice.contains(FAKE_KEY),
+                "{store:?} leaked the key to a non-terminal stderr: {notice}"
+            );
+            assert!(
+                notice.contains("WAYLAND_ACP_SERVER_KEY"),
+                "{store:?} must name the deterministic lever: {notice}"
+            );
+        }
+
+        // Each store points somewhere USEFUL, not just somewhere.
+        let file = new_key_notice(&minted_file_store(), FAKE_KEY, false).unwrap();
+        assert!(file.contains("/tmp/profile-x/credentials.toml"), "{file}");
+        assert!(file.contains("acp.acp-server-key"), "{file}");
+        let keychain =
+            new_key_notice(&ServerKeyStore::Keychain { minted: true }, FAKE_KEY, false).unwrap();
+        assert!(
+            keychain.contains("wayland-core.acp") && keychain.contains("acp-server-key"),
+            "the pointer must name the NAMESPACED service an operator can \
+             actually look up, not the bare constant: {keychain}"
+        );
+        // Ephemeral has NO store to point at, so it must say the server is
+        // unreachable rather than pretend there is somewhere to look.
+        let ephemeral = new_key_notice(&ServerKeyStore::Ephemeral, FAKE_KEY, false).unwrap();
+        assert!(ephemeral.contains("UNREACHABLE"), "{ephemeral}");
+    }
+
+    /// Nothing minted, nothing announced — an injected or re-read key is not
+    /// news, and reprinting a persisted key every boot would scatter it.
+    #[test]
+    fn a_key_that_was_not_minted_is_never_announced() {
+        for store in [
+            ServerKeyStore::Environment,
+            ServerKeyStore::Keychain { minted: false },
+            ServerKeyStore::File {
+                path: PathBuf::from("/tmp/x/credentials.toml"),
+                minted: false,
+            },
+        ] {
+            for tty in [true, false] {
+                assert_eq!(
+                    new_key_notice(&store, FAKE_KEY, tty),
+                    None,
+                    "{store:?} (tty={tty}) announced a key it did not mint"
+                );
+            }
+        }
+    }
+
+    /// The orphaned shared keychain entry is NAMED, not deleted, and only for
+    /// the case that creates it: an isolated profile that just minted its own
+    /// file-backed key.
+    #[test]
+    fn the_orphaned_shared_keychain_entry_is_named_not_deleted() {
+        let notice = legacy_shared_keychain_notice(&minted_file_store(), true)
+            .expect("an isolated profile that minted its own key must say this");
+        assert!(
+            notice.contains("wayland-core.acp") && notice.contains("acp-server-key"),
+            "an operator told to clear an entry must be given the name the OS \
+             keychain actually holds: {notice}"
+        );
+        assert!(
+            notice.contains("left in place"),
+            "the operator must be told it was NOT deleted: {notice}"
+        );
+
+        // CONTROL: not on a shared home, not when nothing was minted, and not
+        // for a keychain-backed key — none of those orphan anything.
+        assert_eq!(
+            legacy_shared_keychain_notice(&minted_file_store(), false),
+            None
+        );
+        assert_eq!(
+            legacy_shared_keychain_notice(
+                &ServerKeyStore::File {
+                    path: PathBuf::from("/tmp/x/credentials.toml"),
+                    minted: false,
+                },
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            legacy_shared_keychain_notice(&ServerKeyStore::Keychain { minted: true }, true),
+            None
+        );
     }
 }

@@ -16,8 +16,18 @@
 //! The control that keeps (b) from degenerating into "auth is off" is asserted
 //! in the SAME live process: `/v1/sessions` must still refuse an
 //! unauthenticated caller with 401, and must accept the key the server just
-//! printed. Without both halves this file would pass on a server with no auth
+//! minted. Without both halves this file would pass on a server with no auth
 //! at all.
+//!
+//! * **(c) the key value never reaches a non-terminal stderr.** Because the
+//!   server key is now per-profile, every `WAYLAND_HOME` profile mints one on
+//!   first boot; a supervised run that printed it would write one live
+//!   credential per profile into whatever captures stderr.
+//!   [`headless_serve_boots_reports_its_key_store_and_exposes_only_health`]
+//!   drives that path (stderr is a pipe) and asserts the key is ABSENT, and
+//!   [`an_interactive_first_run_still_prints_the_key`] is its positive control
+//!   — the same binary on a real PTY must still print it. Two legs, because a
+//!   single leg cannot tell a guard from an inverted guard.
 //!
 //! ## Hermetic by construction
 //!
@@ -36,6 +46,23 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+
+/// The credentials-store slot `acp.rs` writes the server key into.
+const KEY_SLOT: &str = "acp.acp-server-key";
+
+/// Pull the server key out of a profile's `credentials.toml` without a TOML
+/// dependency: the store writes one `"acp.acp-server-key" = "<hex>"` line.
+fn key_from_store(credentials: &Path) -> String {
+    let text = std::fs::read_to_string(credentials).expect("read credentials.toml");
+    let line = text
+        .lines()
+        .find(|l| l.contains(KEY_SLOT))
+        .unwrap_or_else(|| panic!("no {KEY_SLOT} entry in:\n{text}"));
+    line.rsplit('"')
+        .nth(1)
+        .unwrap_or_else(|| panic!("no quoted value in {line:?}"))
+        .to_string()
+}
 
 /// Path to the debug binary under test (Cargo wires this env var).
 fn binary() -> &'static str {
@@ -209,18 +236,31 @@ fn headless_serve_boots_reports_its_key_store_and_exposes_only_health() {
             & 0o777;
         assert_eq!(mode, 0o600, "the fallback store must be owner-only");
     }
-    let key = lines
-        .iter()
-        .position(|l| l.contains("pass as X-API-Key header"))
-        .and_then(|i| lines.get(i + 1))
-        .map(|l| l.trim().to_string())
-        .unwrap_or_else(|| panic!("the minted key was never printed:\n{transcript}"));
+    let key = key_from_store(&credentials);
     assert_eq!(key.len(), 64, "expected a 64-char hex key, got {key:?}");
+
+    // ── (c) THE GUARD. stderr here is a PIPE, not a terminal — the supervised
+    // shape. The key value must appear NOWHERE in it, and the operator must be
+    // told where to read it instead.
     assert!(
-        std::fs::read_to_string(&credentials)
-            .unwrap()
-            .contains(&key),
-        "the printed key is not the one that was persisted"
+        !transcript.contains(&key),
+        "the server key was written to a non-terminal stderr, where it outlives \
+         the process and is readable by anything that can read the log:\n{transcript}"
+    );
+    assert!(
+        transcript.contains("stderr is NOT a terminal"),
+        "a suppressed key must say WHY it is suppressed:\n{transcript}"
+    );
+    assert!(
+        transcript.contains(KEY_SLOT) && transcript.contains("WAYLAND_ACP_SERVER_KEY"),
+        "a suppressed key must point at where to read it back:\n{transcript}"
+    );
+    // The orphaned shared keychain entry is named rather than deleted.
+    assert!(
+        transcript.contains("no longer uses the SHARED OS keychain entry")
+            && transcript.contains("left in place"),
+        "the now-unused shared keychain entry must be named, not silently \
+         deleted and not silently abandoned:\n{transcript}"
     );
 
     // ── (b) liveness answers with NO credential.
@@ -246,6 +286,112 @@ fn headless_serve_boots_reports_its_key_store_and_exposes_only_health() {
     assert_eq!(
         status, 200,
         "the persisted key must authenticate against the running server"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// POSITIVE CONTROL for the terminal guard, on the real binary.
+///
+/// The pipe-driven test above asserts the key is absent. On its own that
+/// passes just as well against a build that never announces a key at all, and
+/// against one whose condition is INVERTED. This leg drives the same binary on
+/// a real pseudo-terminal and asserts the key IS printed and IS the persisted
+/// one, so the pair fails in one direction or the other for every way the
+/// guard can be wrong.
+///
+/// Reads the master side RAW rather than through the shared vt100 `Pty`
+/// harness: that harness renders into a 120-column grid, which would wrap a
+/// 64-character key across two rows and make an exact-match assertion depend
+/// on terminal width rather than on the guard.
+///
+/// `#![cfg(unix)]`-style gate for the same reason every other PTY test here
+/// carries one: `portable_pty`'s ConPTY backend does not surface the child's
+/// output to the master end on a headless Windows runner. The Windows terminal
+/// leg of this behaviour is NOT measured here; the pure `new_key_notice` unit
+/// tests cover the decision cross-platform.
+#[cfg(unix)]
+#[test]
+fn an_interactive_first_run_still_prints_the_key() {
+    use std::io::Read;
+
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+    let home = TempDir::new().expect("tempdir");
+    write_config(home.path());
+    let port = free_port();
+
+    let pty = native_pty_system()
+        .openpty(PtySize {
+            rows: 40,
+            cols: 200,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open PTY");
+
+    let mut cmd = CommandBuilder::new(binary());
+    for arg in ["acp", "serve", "--bind", &format!("127.0.0.1:{port}")] {
+        cmd.arg(arg);
+    }
+    cmd.cwd(home.path());
+    cmd.env("WAYLAND_HOME", home.path());
+    cmd.env("HOME", home.path());
+    cmd.env("TERM", "xterm-256color");
+    cmd.env_remove("WAYLAND_ACP_SERVER_KEY");
+    for k in STRIPPED_PROVIDER_ENV {
+        cmd.env_remove(k);
+    }
+    let mut child = pty
+        .slave
+        .spawn_command(cmd)
+        .expect("spawn acp serve on a PTY");
+
+    let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut out = String::new();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(chunk) => {
+                out.push_str(&String::from_utf8_lossy(&chunk));
+                if out.contains("serving on http://") {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let credentials = home.path().join("credentials.toml");
+    assert!(
+        out.contains("serving on http://"),
+        "acp serve never bound a port on a PTY; output was:\n{out}"
+    );
+    let key = key_from_store(&credentials);
+    assert!(
+        out.contains(&key),
+        "an interactive first run must still print the key it minted; output \
+         was:\n{out}"
+    );
+    assert!(
+        out.contains("pass as X-API-Key header"),
+        "the interactive wording must be unchanged:\n{out}"
+    );
+    assert!(
+        !out.contains("stderr is NOT a terminal"),
+        "the suppressed-key notice must not appear on a real terminal:\n{out}"
     );
 
     let _ = child.kill();
