@@ -36,6 +36,7 @@ fn entry(name: &str) -> SourceEntry {
         strict: true,
         declared_version: None,
         description: None,
+        unsupported: Vec::new(),
     }
 }
 

@@ -18,7 +18,16 @@ pub trait PluginFormatAdapter: Send + Sync {
 }
 
 /// First format whose marker matches, by priority. Returns the adapter id.
+///
+/// An explicit vendor manifest wins over the loose `skills/` + `.mcp.json`
+/// heuristic, and `.codex-plugin/plugin.json` is checked before
+/// `.claude-plugin/plugin.json` — the same order Codex itself uses in
+/// `DISCOVERABLE_PLUGIN_MANIFEST_PATHS`, so a plugin shipping both manifests
+/// resolves to the one its own vendor would pick.
 pub fn detect_format(root: &Path) -> Option<String> {
+    if root.join(".codex-plugin/plugin.json").exists() {
+        return Some("codex".to_string());
+    }
     if root.join(".claude-plugin/plugin.json").exists()
         || (root.join("skills").is_dir() && root.join(".mcp.json").exists())
     {
@@ -42,6 +51,48 @@ mod tests {
             r#"{"name":"x"}"#,
         )
         .unwrap();
+        assert_eq!(detect_format(d.path()).as_deref(), Some("claude-code"));
+    }
+
+    #[test]
+    fn detects_codex_by_marker_dir() {
+        let d = tempdir().unwrap();
+        fs::create_dir_all(d.path().join(".codex-plugin")).unwrap();
+        fs::write(
+            d.path().join(".codex-plugin/plugin.json"),
+            r#"{"name":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_format(d.path()).as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn codex_marker_wins_when_both_manifests_are_present() {
+        // Deterministic, and matches Codex's own discovery order. Without this
+        // the winner would depend on the order of the `if` arms.
+        let d = tempdir().unwrap();
+        fs::create_dir_all(d.path().join(".codex-plugin")).unwrap();
+        fs::create_dir_all(d.path().join(".claude-plugin")).unwrap();
+        fs::write(
+            d.path().join(".codex-plugin/plugin.json"),
+            r#"{"name":"x"}"#,
+        )
+        .unwrap();
+        fs::write(
+            d.path().join(".claude-plugin/plugin.json"),
+            r#"{"name":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_format(d.path()).as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn loose_marker_still_detects_claude_code() {
+        // Polarity control for the arm reordering above: the pre-existing
+        // heuristic path must survive.
+        let d = tempdir().unwrap();
+        fs::create_dir_all(d.path().join("skills")).unwrap();
+        fs::write(d.path().join(".mcp.json"), "{}").unwrap();
         assert_eq!(detect_format(d.path()).as_deref(), Some("claude-code"));
     }
 

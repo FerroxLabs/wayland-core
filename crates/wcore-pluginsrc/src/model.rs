@@ -104,6 +104,12 @@ pub struct SourceEntry {
     /// Used by the browse UI; not needed for install resolution.
     #[serde(default)]
     pub description: Option<String>,
+    /// Catalog-level fields this entry declared that Wayland does not honor
+    /// (foreign install/auth policy, product gating, display category). Merged
+    /// onto the `InstallPlan`'s ignore list so marketplace-level degradation is
+    /// as visible as plugin-level degradation, never silent parity.
+    #[serde(default)]
+    pub unsupported: Vec<IgnoredFeature>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
