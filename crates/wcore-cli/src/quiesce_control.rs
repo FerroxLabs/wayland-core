@@ -35,17 +35,6 @@ use wcore_protocol::quiescence::{
     validate_acquire, validate_release, validate_status,
 };
 
-/// True when this command belongs to the quiescence surface.
-#[must_use]
-pub fn is_quiesce_command(command: &ProtocolCommand) -> bool {
-    matches!(
-        command,
-        ProtocolCommand::QuiesceAcquire(_)
-            | ProtocolCommand::QuiesceRelease(_)
-            | ProtocolCommand::QuiesceStatus(_)
-    )
-}
-
 /// Answer one quiescence command.
 ///
 /// Returns an empty vec ONLY for a command that is not a quiescence command;
@@ -350,14 +339,16 @@ mod tests {
         }
     }
 
+    /// The empty vec is reserved for a command that is not ours. Every
+    /// quiescence command answers with at least one receipt, or a host cannot
+    /// tell a rejected capture from an accepted one that did nothing.
     #[test]
-    fn a_non_quiescence_command_produces_nothing() {
+    fn only_a_non_quiescence_command_produces_nothing() {
         assert!(handle_quiesce_control(&ProtocolCommand::Ping).is_empty());
-        assert!(!is_quiesce_command(&ProtocolCommand::Ping));
-        assert!(is_quiesce_command(&acquire_command(
-            QUIESCENCE_PROTOCOL_VERSION,
-            60_000
-        )));
+        assert!(
+            !handle_quiesce_control(&acquire_command(QUIESCENCE_PROTOCOL_VERSION, 60_000))
+                .is_empty()
+        );
     }
 
     /// Every mechanism refusal must reach the wire as its OWN reason. A mapping
