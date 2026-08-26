@@ -139,6 +139,13 @@ fn a_repeated_exec_walks_the_workspace_once_and_revalidates() {
     tree_with_a_secret(&root);
     let policy = WorkspacePolicy::contained(&root);
 
+    // #1145: the memo may not answer for a tree that changed within one
+    // filesystem timestamp tick of the walk - a change that recent leaves an
+    // mtime identical to the recorded one, so it cannot be witnessed. Let the
+    // fixture settle past that tick before asking for a HIT; the walk counts
+    // asserted below are unchanged.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+
     let before = walk_calls();
     let first = denied(&policy);
     let second = denied(&policy);
