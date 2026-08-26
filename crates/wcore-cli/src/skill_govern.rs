@@ -16,6 +16,20 @@
 //!
 //! # The four verbs
 //!
+//! # The evaluation gate (0.12.0 L5, wayland#694)
+//!
+//! Promotion is scored before it is granted. `wcore_eval::evaluate_skill_dir` reads the
+//! artifact's `SKILL.md` and returns a `PromotionEvidence`; `GovernanceStore` refuses
+//! unless the score clears the evaluator's threshold. The evidence is a required argument
+//! there, so this is not a check this surface can forget to run — it is the only way to
+//! call the function at all.
+//!
+//! **Failing to score is a refusal, not a skip.** A missing or frontmatter-less `SKILL.md`
+//! aborts the promotion with the evaluator's error. The alternative — treating "could not
+//! evaluate" as "nothing to object to" — is the shape of gate that goes green having
+//! examined nothing, and the whole point of L5 is that generated artifacts are data until
+//! something looks at them.
+//!
 //! ```text
 //!   --skills-promote  <NAME|UUID>   grant a reviewed skill model-facing status
 //!   --skills-revoke   <NAME>        retain the bytes, remove it, suppress re-drafting
@@ -264,11 +278,41 @@ fn promote_named(name: &str) -> Result<()> {
     let store = store()?;
     let dir = find_skill(name)
         .with_context(|| format!("no skill named '{name}' is installed. Run --skills-govern."))?;
+    let gate = evaluate(&dir)?;
     let grant = store
-        .promote_existing(&dir, None, AUTHORITY)
+        .promote_existing(&dir, None, AUTHORITY, &gate.evidence)
         .map_err(explain)?;
     report_grant(&grant, &dir);
     Ok(())
+}
+
+/// Score the artifact, and report the score whichever way it goes.
+///
+/// The breakdown is printed on the way past rather than only on refusal. A number that is
+/// only ever shown when it blocks something reads as an obstacle; shown on every promotion
+/// it is what the grant actually rests on, and the operator can see how much headroom a
+/// draft had before the next edit changes its bytes.
+fn evaluate(dir: &Path) -> Result<wcore_eval::GateResult> {
+    let gate = wcore_eval::evaluate_skill_dir(dir).with_context(|| {
+        format!(
+            "cannot evaluate {} for promotion. This is a refusal, not a skip: nothing is \
+             promoted on the strength of an evaluation that did not happen.",
+            dir.display()
+        )
+    })?;
+    let d = gate.outcome.dimensions;
+    println!(
+        "evaluated '{}': score {:.3} (threshold {:.3}) -- {}",
+        dir.file_name().unwrap_or_default().to_string_lossy(),
+        gate.evidence.score,
+        gate.evidence.threshold,
+        gate.evidence.verdict,
+    );
+    println!(
+        "  outcome {:.3} | cost penalty {:.3} | size penalty {:.3}",
+        d.outcome, d.cost_penalty, d.size_penalty
+    );
+    Ok(gate)
 }
 
 /// Promote through a reviewed P4 procedure.
@@ -320,8 +364,9 @@ async fn promote_procedure(id: uuid::Uuid) -> Result<()> {
         )
     })?;
 
+    let gate = evaluate(&dir)?;
     let grant = store
-        .promote_existing(&dir, Some(&id.to_string()), AUTHORITY)
+        .promote_existing(&dir, Some(&id.to_string()), AUTHORITY, &gate.evidence)
         .map_err(explain)?;
 
     let mut updated = target.clone();
@@ -330,6 +375,8 @@ async fn promote_procedure(id: uuid::Uuid) -> Result<()> {
         .upsert_procedure(updated, AccessToken::System)
         .await
         .map_err(|e| anyhow::anyhow!("failed to upsert procedure: {e}"))?;
+
+    record_promotion_provenance(mem.api(), &target, &grant).await;
 
     report_grant(&grant, &dir);
     println!(
@@ -340,11 +387,84 @@ async fn promote_procedure(id: uuid::Uuid) -> Result<()> {
     Ok(())
 }
 
+/// Write the promotion into the knowledge graph.
+///
+/// The grant on disk already records what was promoted and against what score. This is the
+/// same fact where the *procedure* lives, so a later reader of the memory store — the
+/// curator, a `dream` cycle, anything asking "why is this skill active" — finds the answer
+/// beside the row rather than having to know that a governance directory exists.
+///
+/// Best-effort by design. The grant is the authority and it is already durable; failing to
+/// annotate the graph must not turn a completed promotion into an error, because a retry
+/// would then hit `AlreadyPromoted` and look like a different failure.
+async fn record_promotion_provenance(
+    api: &dyn wcore_memory::MemoryApi,
+    procedure: &wcore_memory::v2_types::Procedure,
+    grant: &wcore_skills::promote::Promotion,
+) {
+    use wcore_memory::v2_types::{Episode, EpisodeId, EpisodeStatus, Source, Tier};
+
+    let (score, threshold, evaluator) = match &grant.evidence {
+        Some(e) => (e.score, e.threshold, e.evaluator.as_str()),
+        // Unreachable through this path -- `promote_existing` writes `Some` -- but stating
+        // the absence beats fabricating a zero.
+        None => (f64::NAN, f64::NAN, "unrecorded"),
+    };
+    let episode = Episode {
+        id: EpisodeId::new(),
+        tier: Tier::Project,
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        episode_type: "skill_promoted".to_string(),
+        summary: format!(
+            "promoted skill '{}' (procedure {}) to active: {evaluator} scored {score:.3} \
+             against a {threshold:.3} threshold",
+            procedure.name, procedure.id.0
+        ),
+        atomic_facts: vec![
+            format!("promotion_id={}", grant.promotion_id),
+            format!("skill_name={}", grant.skill_name),
+            format!("procedure_id={}", procedure.id.0),
+            format!("content_digest={}", grant.content_digest),
+            format!("authority={}", grant.authority),
+            format!("evaluator={evaluator}"),
+            format!("eval_score={score:.6}"),
+            format!("eval_threshold={threshold:.6}"),
+        ],
+        source: Source::User.as_str(),
+        source_product: "wcore-cli".to_string(),
+        session_id: None,
+        project_root: None,
+        decay_score: 1.0,
+        status: EpisodeStatus::Active,
+    };
+    if let Err(e) = api
+        .record_episode(episode, wcore_memory::AccessToken::System)
+        .await
+    {
+        tracing::warn!(
+            target: "wcore_cli::skill_govern",
+            error = %e,
+            promotion_id = %grant.promotion_id,
+            "promotion succeeded but its provenance episode could not be recorded"
+        );
+    }
+}
+
 fn report_grant(grant: &wcore_skills::promote::Promotion, dir: &Path) {
     println!("promoted '{}'", grant.skill_name);
     println!("  artifact:     {}", dir.display());
     println!("  digest:       {}", grant.content_digest);
     println!("  authority:    {}", grant.authority);
+    match &grant.evidence {
+        Some(e) => println!(
+            "  evaluation:   {} scored {:.3} (threshold {:.3})",
+            e.evaluator, e.score, e.threshold
+        ),
+        None => println!("  evaluation:   none recorded"),
+    }
     println!("  promotion id: {}", grant.promotion_id);
     println!(
         "  covers:       {} file(s), {} byte(s)",

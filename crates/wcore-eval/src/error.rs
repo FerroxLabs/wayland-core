@@ -17,6 +17,19 @@ pub enum EvalError {
     #[error("skill body for case {case} not found at {path}")]
     SkillBodyMissing { case: String, path: PathBuf },
 
+    #[error(
+        "cannot evaluate the artifact at {path}: {source}. Promotion is refused rather \
+         than skipped -- a gate with nothing to score reports that, it does not pass"
+    )]
+    ArtifactMissing {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("cannot evaluate the artifact at {path}: {reason}")]
+    ArtifactMalformed { path: PathBuf, reason: String },
+
     #[error("trace fixture for case {case} not found at {path}")]
     TraceMissing { case: String, path: PathBuf },
 

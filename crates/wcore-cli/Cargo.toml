@@ -135,6 +135,10 @@ wcore-protocol.workspace = true
 # current provider's models.
 wcore-types.workspace    = true
 wcore-skills.workspace   = true
+# 0.12.0 L5 (wayland#694): governed promotion is eval-gated. `wcore-skills` owns the
+# rule and refuses without evidence; `wcore-eval` is what produces the score, and this
+# binary is where the two are wired together.
+wcore-eval.workspace          = true
 # v0.7.0 Task 1.A.10: `acp` subcommand wires `wcore-acp` into the CLI.
 wcore-acp = { path = "../wcore-acp" }
 # v0.7.0 Task 1.A.10: `StreamExt::next` for the streaming `acp request send`
