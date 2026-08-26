@@ -29,6 +29,56 @@ const DIFF_RESEND_HEADER: &str = "File changed since your last read. Showing onl
 /// fraction of the full numbered content it would replace.
 const DIFF_RESEND_MAX_RATIO: f64 = 0.6;
 
+/// Hard ceiling on the on-disk size of a file `Read` will load
+/// (FerroxLabs/wayland#946).
+///
+/// Both entry points materialise the WHOLE file and then build several derived
+/// copies of it — a UTF-8 conversion, a `Vec<&str>` of line slices, and a
+/// numbered `String`. MEASURED on the pre-bound tree: a 125,829,120-byte
+/// (120 MiB) text file drove process peak RSS from 5,344 kB to 469,248 kB, a
+/// 453 MiB delta (~3.8x the file), and returned a 137,412,032-byte
+/// `ToolResult`. A modestly larger file exhausts the process, and the agent
+/// dies mid-turn on an ordinary tool call.
+///
+/// 25 MiB is the figure this codebase already uses as the ceiling for a single
+/// file (`wcore_config::file_cache::FileCacheConfig::max_size_bytes`,
+/// `crate::transcription_tools::TRANSCRIPTION_MAX_BYTES`), and at the measured
+/// ~3.8x amplification it holds worst-case transient allocation near 95 MiB —
+/// survivable on any host that can run the engine at all. It is deliberately
+/// NOT configurable: this is a process-survival bound, not a policy knob, and
+/// the codebase's rule is not to invent a config surface for one constant. A
+/// user who legitimately needs a bigger file is not blocked — they are routed
+/// to a streaming tool by the refusal below.
+///
+/// Residual, out of scope here: this is a stat-based bound, so a pseudo-file
+/// that reports length 0 and then streams unbounded content (procfs/sysfs)
+/// still passes it. Closing that needs a capped `read_to_end`, which the
+/// `VirtualFs::read` signature does not currently allow.
+pub const READ_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Refusal for a file past [`READ_MAX_BYTES`].
+///
+/// Names the actual size, the limit, and a route that actually works on a file
+/// this size. It deliberately does NOT suggest `offset`/`limit`: those select
+/// lines only after the whole file has been materialised, so they do not
+/// reduce what this tool allocates. MEASURED on the pre-bound tree,
+/// `{"offset":0,"limit":1}` against a 120 MiB file returned 86 bytes of
+/// content and still took peak RSS from 4,872 kB to 151,296 kB. Sending the
+/// model there would be sending it back into the same wall.
+fn too_large_result(file_path: &str, size: u64) -> ToolResult {
+    ToolResult {
+        content: format!(
+            "Refused to read {file_path}: the file is {size} bytes, over the Read tool's \
+             {READ_MAX_BYTES}-byte limit. Read loads the whole file, so offset/limit will not \
+             help — they select lines only after it is in memory. Use Bash to take just the part \
+             you need (`head -n N {file_path}`, `tail -n N {file_path}`, or \
+             `sed -n 'START,ENDp' {file_path}` for a line range), or the Grep tool to locate the \
+             lines first and then read that range with Bash."
+        ),
+        is_error: true,
+    }
+}
+
 /// Token-opt (semantic slicing): build the Read result for a `symbol=` request.
 /// Returns the symbol's line window (numbered, with a header + expansion hint),
 /// or a recoverable message when the symbol isn't found / the language has no
@@ -208,6 +258,17 @@ impl Tool for ReadTool {
                 content: FILE_UNCHANGED_STUB.to_string(),
                 is_error: false,
             };
+        }
+
+        // Bound the read BEFORE it allocates. `fs::read` sizes its buffer from
+        // the file length, so any check placed after it has already paid the
+        // cost it was meant to prevent. A stat failure is left to fall through:
+        // the read below fails for the same reason and its own error names it
+        // better than a guard could.
+        if let Ok(meta) = std::fs::metadata(&validated)
+            && meta.len() > READ_MAX_BYTES
+        {
+            return too_large_result(file_path, meta.len());
         }
 
         // Read file from disk.
@@ -401,6 +462,15 @@ impl Tool for ReadTool {
                     dedup_base = Some(cached.content.clone());
                 }
             }
+        }
+
+        // Same bound as `execute`, stated through the vfs so a sandboxed
+        // sub-agent's jail decides what may be stat'd exactly as it decides
+        // what may be read. Stat before reading, for the reason above.
+        if let Ok(meta) = ctx.vfs.metadata(path).await
+            && meta.size > READ_MAX_BYTES
+        {
+            return too_large_result(file_path, meta.size);
         }
 
         let content = match ctx.vfs.read(path).await {

@@ -97,6 +97,11 @@ pub enum CandidateRejection {
     ToolsUnsupported,
     VisionUnsupported,
     StructuredOutputUnsupported,
+    /// Reserved; no longer produced by [`evaluate_candidate`] — see the
+    /// admission rule there. Retained because `CandidateReceipt` is a
+    /// serialized wire type read by hosts and enumerated by the protocol
+    /// contract corpus, so removing the token would be a breaking protocol
+    /// change unrelated to this fix.
     ContextWindowUnknown,
     ContextWindowTooSmall,
     PricingStale,
@@ -183,13 +188,28 @@ pub fn evaluate_candidate(
     if requirements.structured_output && !candidate.capabilities.structured_output {
         return Err(CandidateRejection::StructuredOutputUnsupported);
     }
-    if let Some(required) = requirements.context_tokens {
-        let Some(window) = candidate.capabilities.context_window else {
-            return Err(CandidateRejection::ContextWindowUnknown);
-        };
-        if window < required {
-            return Err(CandidateRejection::ContextWindowTooSmall);
-        }
+    // An UNKNOWN window is not a known-bad one (FerroxLabs/wayland#946).
+    //
+    // `wcore_config::limits::model_output_ceiling` returns `None` for every
+    // model outside its static table — the Flux tier aliases (`flux-auto`,
+    // `flux-fast`, `flux-standard`, `flux-reasoning`) among them — and that
+    // `None` is what both `ResilientProvider::new_with_fallback_identities` and
+    // the production `wcore_agent::bootstrap::build_fallback_providers` put in
+    // `CandidateCapabilities::context_window`. Refusing on it made such a
+    // candidate unselectable, so the chain collapsed to "nothing attempted"
+    // and the user saw a dead turn.
+    //
+    // Admitting is the conservative choice, not the permissive one. The two
+    // outcomes are not symmetric: an admitted candidate that turns out to be
+    // too small comes back as a provider overflow error, which this chain
+    // records on the receipt and carries on from to the next candidate. A
+    // refused one produces no attempt, no evidence and no answer. Only a
+    // window we KNOW is too small is grounds to skip a candidate.
+    if let Some(required) = requirements.context_tokens
+        && let Some(window) = candidate.capabilities.context_window
+        && window < required
+    {
+        return Err(CandidateRejection::ContextWindowTooSmall);
     }
     if policy.require_fresh_pricing && candidate.pricing.stale {
         return Err(CandidateRejection::PricingStale);
@@ -279,8 +299,24 @@ mod tests {
         );
     }
 
+    /// Was `rejects_unknown_or_too_small_context`, which asserted that a
+    /// candidate with `context_window: None` is rejected as
+    /// `ContextWindowUnknown`. That assertion enshrined a defect rather than
+    /// covering a behaviour: an unknown window is not a known-bad one. Every
+    /// model absent from the static `wcore_config::limits::model_output_ceiling`
+    /// table carries `None` — the Flux tier aliases (`flux-auto`, `flux-fast`,
+    /// `flux-standard`, `flux-reasoning`) among them — so the whole fallback
+    /// chain refused before any call and the turn died with nothing attempted.
+    /// The old test could never fail while that was true, so it could never
+    /// report it.
+    ///
+    /// The genuinely-too-small arm was correct and is kept verbatim below. The
+    /// unknown arm is inverted: unknown must be ADMITTED, because an admitted
+    /// candidate that turns out to be too small fails with a provider error the
+    /// chain can carry on from, while a refused one produces no evidence and no
+    /// answer.
     #[test]
-    fn rejects_unknown_or_too_small_context() {
+    fn rejects_too_small_context_but_admits_an_unknown_window() {
         let policy = FailoverRoutingPolicy::default();
         let mut candidate = candidate();
         candidate.capabilities.context_window = None;
@@ -292,12 +328,19 @@ mod tests {
         };
         assert_eq!(
             evaluate_candidate(&candidate, requirements, &policy),
-            Err(CandidateRejection::ContextWindowUnknown)
+            Ok(())
         );
         candidate.capabilities.context_window = Some(200_000);
         assert_eq!(
             evaluate_candidate(&candidate, requirements, &policy),
             Err(CandidateRejection::ContextWindowTooSmall)
+        );
+        // A known window that is large enough still passes — the arm that
+        // proves the check is doing work, not just returning Ok.
+        candidate.capabilities.context_window = Some(250_000);
+        assert_eq!(
+            evaluate_candidate(&candidate, requirements, &policy),
+            Ok(())
         );
     }
 
