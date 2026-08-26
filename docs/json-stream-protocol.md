@@ -363,10 +363,13 @@ The model's private reasoning. Two producers land on this one event:
    `capabilities.thinking`.
 2. **Inline reasoning** — open-weights models (DeepSeek-R1 / Qwen-QwQ class,
    reached through Flux or Ollama) that emit reasoning INSIDE the ordinary text
-   stream wrapped in `<think>…</think>`, `<thinking>…</thinking>` or
-   `<reasoning>…</reasoning>` (case-insensitive, attributes and self-closing
-   forms included). The agent strips those from `text_delta` and re-emits the
-   body here. `capabilities.thinking` may be `false` for these providers — it
+   stream wrapped in `<think>…</think>`, `<thinking>…</thinking>`,
+   `<reasoning>…</reasoning>` or `<thought>…</thought>` (case-insensitive,
+   attributes and self-closing forms included). The agent strips those from
+   `text_delta` and re-emits the body here. This holds for a SPAWNED SUB-AGENT
+   too: the relayed `text_delta` inside `sub_agent_event.inner` is split the
+   same way, and the child's reasoning arrives as a relayed `thinking` on the
+   same `parent_call_id`. `capabilities.thinking` may be `false` for these providers — it
    describes the provider's native reasoning feature, not this split.
 
 Case 2 is advertised as the `inline_reasoning_split_v1` contract capability
