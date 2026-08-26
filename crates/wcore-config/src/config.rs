@@ -3760,14 +3760,39 @@ fn resolve_api_key_from_env_with_source(
         ProviderType::Xai => {
             // Grok "Sign in with X" authenticates via OAuth tokens resolved
             // out-of-band by the bootstrap-built bearer source (same shape as
-            // ChatGPT). Exempt from the api-key gate when an xAI OAuth
-            // credential exists — otherwise a plain `xai` API key still works
-            // via XAI_API_KEY below.
-            if xai_oauth_credentials_present() {
-                return Ok((String::new(), CredentialSource::OutOfBand));
-            }
-            if let Ok(key) = std::env::var("XAI_API_KEY") {
+            // ChatGPT); a plain `xai` API key rides `XAI_API_KEY`.
+            //
+            // #1141 — EXPLICIT BEATS AMBIENT. The OAuth probe used to run
+            // FIRST, so a credential file merely sitting on this host (a stale
+            // `~/.grok/auth.json`, or an OAuth login stored by some earlier
+            // session) silently outranked an `XAI_API_KEY` the user had
+            // deliberately exported for THIS run — with no way to override it
+            // short of deleting the file. Same ruling as the bare `API_KEY`
+            // gate above: the credential the user named on purpose wins over
+            // the one that is simply present.
+            //
+            // An empty / whitespace-only `XAI_API_KEY` is treated as absent.
+            // Without that, `XAI_API_KEY=` — the usual way to blank a variable
+            // in a wrapper script — would beat a working OAuth login and then
+            // fail the turn with a missing-key error.
+            let explicit_key = std::env::var("XAI_API_KEY")
+                .ok()
+                .filter(|key| !key.trim().is_empty());
+            let oauth_present = xai_oauth_credentials_present();
+            if let Some(key) = explicit_key {
+                // Both credentials exist: which one applies is invisible from
+                // the user's side, so say it rather than let them guess.
+                if oauth_present {
+                    emit_credential_notice_once(
+                        "notice: provider 'xai' is using the XAI_API_KEY credential from this \
+                         environment; the stored xAI OAuth login was NOT used. Unset \
+                         XAI_API_KEY to sign in with X instead.",
+                    );
+                }
                 return Ok((key, CredentialSource::EnvVar("XAI_API_KEY")));
+            }
+            if oauth_present {
+                return Ok((String::new(), CredentialSource::OutOfBand));
             }
         }
         ProviderType::Groq => {
@@ -8201,6 +8226,61 @@ mod tests {
         assert_eq!(result, "");
     }
 
+    /// #1141 — an explicitly set `XAI_API_KEY` outranks an xAI OAuth
+    /// credential that merely exists on this host.
+    ///
+    /// Graded with BOTH present: the env var set AND a fixture
+    /// `oauth/xai.json` under a redirected `WAYLAND_HOME`. A test with only the
+    /// env var set passes with the ordering reverted, so it would grade
+    /// nothing. The second half is the known-positive control — it removes the
+    /// env var and proves the SAME fixture is detected, so the first assertion
+    /// cannot pass merely because the OAuth probe found nothing.
+    #[test]
+    #[serial_test::serial(wayland_home_env, provider_env_vars)]
+    fn explicit_xai_api_key_outranks_ambient_oauth_credentials() {
+        let _cred_env = CredEnvGuard::new();
+        // Fixture: an xAI OAuth credential file exactly where
+        // `xai_oauth_credentials_present` looks, under the guarded home.
+        let oauth_dir = profile_home().join("oauth");
+        std::fs::create_dir_all(&oauth_dir).unwrap();
+        std::fs::write(oauth_dir.join("xai.json"), r#"{"access_token":"t"}"#).unwrap();
+
+        unsafe { std::env::set_var("XAI_API_KEY", "xai-explicit") };
+        let (key, source) = resolve_api_key_from_env_with_source(ProviderType::Xai)
+            .expect("xAI must resolve when a key is set");
+        assert_eq!(
+            key, "xai-explicit",
+            "the explicit env var must supply the key"
+        );
+        assert_eq!(
+            source,
+            CredentialSource::EnvVar("XAI_API_KEY"),
+            "an ambient OAuth credential must not outrank a deliberately set XAI_API_KEY"
+        );
+
+        // Known-positive control: same fixture, no env var → the OAuth
+        // credential IS found and wins.
+        unsafe { std::env::remove_var("XAI_API_KEY") };
+        let (key, source) = resolve_api_key_from_env_with_source(ProviderType::Xai)
+            .expect("the OAuth credential must still resolve on its own");
+        assert!(key.is_empty(), "an OAuth credential carries no inline key");
+        assert_eq!(
+            source,
+            CredentialSource::OutOfBand,
+            "control: the fixture is detectable, so the assertion above graded the ORDER"
+        );
+
+        // An empty XAI_API_KEY is not a credential — it must not beat OAuth.
+        unsafe { std::env::set_var("XAI_API_KEY", "   ") };
+        let (_, source) = resolve_api_key_from_env_with_source(ProviderType::Xai)
+            .expect("a blank env var must fall through to OAuth");
+        assert_eq!(
+            source,
+            CredentialSource::OutOfBand,
+            "a blank XAI_API_KEY must not shadow a working OAuth login"
+        );
+    }
+
     /// Every env var name [`provider_for_credential_env_var`] claims for a
     /// provider must be one [`resolve_api_key_from_env`] actually reads for that
     /// provider.
@@ -8217,8 +8297,17 @@ mod tests {
     /// mapping that points at a provider whose chain happens to accept the same
     /// var cannot pass by coincidence.
     #[test]
-    #[serial_test::serial(provider_env_vars)]
+    #[serial_test::serial(wayland_home_env, provider_env_vars)]
     fn provider_for_credential_env_var_round_trips_the_resolver() {
+        // #1141 — the resolver is NOT env-only for every provider: the xAI arm
+        // consults `xai_oauth_credentials_present()`, which reads
+        // `$WAYLAND_HOME/oauth/xai.json`, the credential ladder, and
+        // `~/.grok/auth.json`. Without redirecting HOME/WAYLAND_HOME this test
+        // read the OPERATOR's real credential store, so its verdict depended on
+        // whether whoever ran it happened to be signed in to Grok. `CredEnvGuard`
+        // points both at fresh tempdirs (hence the added `wayland_home_env`
+        // serial key — the two groups are process-global and must not interleave).
+        let _cred_env = CredEnvGuard::new();
         const PAIRS: &[(&str, ProviderType)] = &[
             ("ANTHROPIC_API_KEY", ProviderType::Anthropic),
             ("OPENAI_API_KEY", ProviderType::OpenAI),
