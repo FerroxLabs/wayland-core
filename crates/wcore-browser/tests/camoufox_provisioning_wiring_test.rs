@@ -101,6 +101,14 @@ fn cfg(port: u16, tmp: &std::path::Path, download: CamoufoxDownloadConfig) -> Su
         startup_timeout: Duration::from_secs(20),
         camoufox_download: download,
         binary_install_root: tmp.join("bin"),
+        // These arms grade the PINNED-artifact path. `sidecar_auto_install`
+        // now defaults ON, and leaving it on would let the disabled-download
+        // control arm satisfy itself by npm-installing the sidecar instead -
+        // which is a different path, and would stop that arm being a control.
+        sidecar_auto_install: wcore_config::browser::SidecarAutoInstall {
+            enabled: false,
+            ..Default::default()
+        },
         ..SupervisorConfig::default()
     }
 }

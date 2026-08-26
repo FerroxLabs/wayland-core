@@ -40,6 +40,37 @@ pub struct BinaryArtifact {
     pub archive_exe_path: String,
 }
 
+/// First-use installation of the Camoufox sidecar from npm. **ON by default.**
+///
+/// This is the difference between a browser tool that works on a fresh machine
+/// and one that does not. [`CamoufoxDownloadConfig`] stays the operator's
+/// pinned-artifact path and is still off by default; it resolves to a
+/// self-contained sidecar executable per platform, and upstream publishes no
+/// such artifact - it publishes the Camoufox *browser* and the
+/// `camofox-browser` *control server* separately. That is why the pinned path
+/// was never a working default.
+///
+/// Set `enabled = false` to restore the previous behaviour, in which the tool
+/// refuses on a fresh machine and names the manual command instead.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SidecarAutoInstall {
+    /// Master switch. ON by default.
+    pub enabled: bool,
+    /// How long the install may run. The package's postinstall fetches the
+    /// Camoufox browser itself, which is hundreds of MB, so this is minutes.
+    pub timeout_secs: u64,
+}
+
+impl Default for SidecarAutoInstall {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            timeout_secs: 600,
+        }
+    }
+}
+
 /// Opt-in auto-provisioning of the Camoufox sidecar binary.
 ///
 /// [`Self::enabled`] defaults to **false**: Core does not fetch executable
@@ -150,6 +181,9 @@ pub struct BrowserConfig {
     /// Opt-in auto-download of the Camoufox sidecar binary
     /// (`[browser.camoufox_download]`). Disabled by default.
     pub camoufox_download: CamoufoxDownloadConfig,
+    /// First-use npm install of the Camoufox sidecar
+    /// (`[browser.sidecar_auto_install]`). **Enabled by default.**
+    pub sidecar_auto_install: SidecarAutoInstall,
     /// gh#1117 opt-out: use a Camoufox sidecar that is NOT behind Core's
     /// egress proxy.
     ///
@@ -210,6 +244,7 @@ mod tests {
             download_dir: Some("/tmp/downloads".into()),
             persist_profile: false,
             camoufox_download: CamoufoxDownloadConfig::default(),
+            sidecar_auto_install: SidecarAutoInstall::default(),
             allow_unproxied_sidecar: false,
         };
         let s = toml::to_string(&cfg).unwrap();
