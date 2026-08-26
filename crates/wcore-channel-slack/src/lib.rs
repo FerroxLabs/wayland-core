@@ -1297,6 +1297,76 @@ mod tests {
         mock.assert_async().await;
     }
 
+    /// core#253 §5 — the destination thread reaches Slack as `thread_ts`
+    /// through `OutgoingMessage::thread_id`, not only through `reply_to`.
+    #[tokio::test]
+    async fn send_message_takes_thread_ts_from_the_destination_thread() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/chat.postMessage")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "channel": "C1",
+                "thread_ts": "1700000001.000100"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"ts":"1234.567","channel":"C1"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+        let _ = ch.poll_events().await.unwrap();
+
+        ch.send_message(OutgoingMessage {
+            conversation_id: "C1".into(),
+            text: "in the thread".into(),
+            thread_id: Some("1700000001.000100".into()),
+            // Deliberately empty: before the split this was the ONLY field that
+            // could carry a Slack thread, so a green here with `reply_to`
+            // populated would prove nothing about the new one.
+            reply_to: None,
+            attachments: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+        mock.assert_async().await;
+    }
+
+    /// The pre-split spelling still works: a caller that only sets `reply_to`
+    /// (every caller written before `thread_id` existed) keeps threading.
+    #[tokio::test]
+    async fn send_message_still_accepts_a_legacy_reply_to_as_thread_ts() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/chat.postMessage")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "thread_ts": "1700000002.000200"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"ts":"1234.567","channel":"C1"}"#)
+            .create_async()
+            .await;
+
+        let mut ch = SlackChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+        let _ = ch.poll_events().await.unwrap();
+
+        ch.send_message(OutgoingMessage {
+            conversation_id: "C1".into(),
+            text: "legacy".into(),
+            thread_id: None,
+            reply_to: Some("1700000002.000200".into()),
+            attachments: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+        mock.assert_async().await;
+    }
+
     /// A keyed send still puts the key on the wire — **and that is a different
     /// claim from the capability bit.**
     ///

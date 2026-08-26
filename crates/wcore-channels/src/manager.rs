@@ -1481,6 +1481,38 @@ mod tests {
         assert_eq!(receipt.id, "capped-out-2");
     }
 
+    /// core#253 §5 — a chunked body must not fall out of its topic partway
+    /// through. Every chunk carries the DESTINATION thread, not just the
+    /// first, or a long reply starts in the topic and finishes in the room.
+    #[tokio::test]
+    async fn every_chunk_of_a_split_body_keeps_the_destination_thread() {
+        let (ch, sent) = CappedChannel::new("capped", 10);
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+
+        mgr.send_to(
+            "capped",
+            OutgoingMessage {
+                conversation_id: "c1".into(),
+                text: "abcdefghijklmnopqrstuvwxy".into(),
+                thread_id: Some("topic-9".into()),
+                reply_to: None,
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .expect("send_to");
+
+        let log = sent.lock().await;
+        assert_eq!(log.len(), 3, "25 chars at cap 10 -> 3 sends");
+        assert!(
+            log.iter()
+                .all(|m| m.thread_id.as_deref() == Some("topic-9")),
+            "a chunk lost its destination thread: {:?}",
+            log.iter().map(|m| m.thread_id.clone()).collect::<Vec<_>>()
+        );
+    }
+
     #[tokio::test]
     async fn send_to_does_not_chunk_when_within_cap() {
         let (ch, sent) = CappedChannel::new("capped", 100);
