@@ -432,3 +432,88 @@ fn a_repeat_safe_tool_is_settled_by_cancel_alone_in_one_command() {
             .contains("interrupted=0")
     );
 }
+
+/// The gate on the line above: it is the reconciler NAME that buys the
+/// automatic receipt, not the repeat-safe kind.
+///
+/// Same crash, same kind, one character different in the identifier — and the
+/// product must go back to asking. Without this the two arms are
+/// indistinguishable, because both use a name the build happens to know, and
+/// `determined_disposition` could check nothing at all and still pass. Then
+/// any tool — a plugin, an MCP proxy from a server that made the name up —
+/// could have `session cancel` write "no external effect is possible" into the
+/// journal on its behalf.
+#[test]
+fn a_repeat_safe_kind_with_a_reconciler_this_build_does_not_know_is_still_asked_about() {
+    let registered = wcore_types::tool::READ_ONLY_FILESYSTEM_RECONCILER;
+    assert!(
+        wcore_types::tool::repeat_safe_reconciler_is_registered(registered),
+        "positive control: the name the arm above uses IS registered"
+    );
+    let invented = format!("{registered}-but-invented");
+    assert!(!wcore_types::tool::repeat_safe_reconciler_is_registered(
+        &invented
+    ));
+
+    let home = tempfile::tempdir().unwrap();
+    let (sessions, id, tool_execution_id) = crashed_mid_tool_session_with(
+        home.path(),
+        "Grep",
+        wcore_types::tool::ToolEffectContract {
+            kind: wcore_types::tool::ToolEffectKind::RepeatSafe,
+            reconciler: Some(invented),
+        },
+    );
+    let dir = sessions.to_str().unwrap();
+
+    let cancelled = run(&["session", "--dir", dir, "cancel", &id], home.path());
+    assert_eq!(
+        code(&cancelled),
+        5,
+        "an unrecognised reconciler must leave the item outstanding; stdout: {} stderr: {}",
+        stdout(&cancelled),
+        String::from_utf8_lossy(&cancelled.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&cancelled.stderr).contains("outstanding reconcile item"),
+        "stderr: {}",
+        String::from_utf8_lossy(&cancelled.stderr)
+    );
+    assert!(
+        !stdout(&cancelled).contains("cancel_auto_resolved"),
+        "nothing may be resolved on the operator's behalf here; got:\n{}",
+        stdout(&cancelled)
+    );
+
+    // And the manual verb refuses just the same rather than defaulting.
+    let guessed = run(
+        &[
+            "session",
+            "--dir",
+            dir,
+            "reconcile",
+            &id,
+            "--resolve",
+            &tool_execution_id,
+        ],
+        home.path(),
+    );
+    assert_eq!(
+        code(&guessed),
+        4,
+        "an unrecognised reconciler is not an answer; stdout: {} stderr: {}",
+        stdout(&guessed),
+        String::from_utf8_lossy(&guessed.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&guessed.stderr).contains("only you can say what happened"),
+        "stderr: {}",
+        String::from_utf8_lossy(&guessed.stderr)
+    );
+
+    // The refusal wrote nothing.
+    assert!(
+        stdout(&run(&["session", "--dir", dir, "show", &id], home.path()))
+            .contains("interrupted=1")
+    );
+}
