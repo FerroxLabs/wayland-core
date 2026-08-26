@@ -2325,7 +2325,7 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
             "lease_id":"lease-desktop-008",
             "session_id":"session-desktop-001",
             "epoch":"sha256:quiesceepoch",
-            "coverage":{"roots":[{"identity":{"kind":"default"},"path":"/home/desktop/.wayland","root_digest":"sha256:defaultroot","file_count":128,"byte_count":4194304}],"complete":false},
+            "coverage":{"roots":[{"identity":{"kind":"default"},"path":"/home/user/.wayland","root_digest":"sha256:defaultroot","file_count":128,"byte_count":4194304}],"complete":false},
             "acquired_unix_ms":1767225600000u64,
             "expires_unix_ms":1767225720000u64,
             "idempotent_replay":false

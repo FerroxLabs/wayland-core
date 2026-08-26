@@ -1887,7 +1887,7 @@ fn quiesce_coverage() -> QuiesceCoverage {
         roots: vec![
             QuiesceRoot {
                 identity: QuiesceProfileIdentity::Default,
-                path: "/home/desktop/.wayland".into(),
+                path: "/home/user/.wayland".into(),
                 root_digest: "sha256:defaultroot".into(),
                 file_count: 128,
                 byte_count: 4_194_304,
@@ -1896,7 +1896,7 @@ fn quiesce_coverage() -> QuiesceCoverage {
                 identity: QuiesceProfileIdentity::Named {
                     name: "work".into(),
                 },
-                path: "/home/desktop/.config/wayland-core-profiles/work".into(),
+                path: "/home/user/.config/wayland-core-profiles/work".into(),
                 root_digest: "sha256:workroot".into(),
                 file_count: 42,
                 byte_count: 1_048_576,
