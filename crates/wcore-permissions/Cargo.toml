@@ -24,17 +24,21 @@ sqlite-revocation = ["dep:rusqlite"]
 # across crates. wcore-config depends only on wcore-{types,compact,budget},
 # so this cannot close a cycle.
 wcore-config.workspace = true
+# #693 — `grants` replays standing approvals into `ToolApprovalManager`, which
+# lives here. `wcore-protocol` depends only on `wcore-types`, so this edge
+# cannot close a cycle; nothing in `wcore-protocol` may ever depend on us.
+wcore-protocol.workspace = true
 fd-lock.workspace      = true
 serde.workspace      = true
 serde_json.workspace = true
 thiserror.workspace  = true
 anyhow.workspace     = true
 chrono.workspace     = true
+tracing.workspace    = true
 sha2.workspace       = true
 hex                  = "0.4"
 # 3.C.3 — per-tool learned-permissions persistence (`learning` module).
 toml.workspace       = true
-dirs.workspace       = true
 # M5.9 — gated by `sqlite-revocation`. Workspace-pinned to the same bundled
 # build used by wcore-memory so static-link drift on Windows is impossible.
 rusqlite             = { workspace = true, optional = true }

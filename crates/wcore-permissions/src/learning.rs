@@ -1,9 +1,8 @@
-//! v0.8.1 U11 — building block reserved for the future sub-agent ACL
-//! pre-filter wave. Today no production caller constructs a LearnedPolicy
-//! or runs its evaluate() in the dispatch path; the module is kept
-//! self-contained so a future wave can wire it without re-inventing the
-//! types. See node_executor::dispatch_once for the removed pre-filter
-//! site.
+//! v0.8.1 U11 — originally a building block reserved for a future wave. It is
+//! wired now: `wcore_agent::bootstrap::load_learned_policy` constructs a
+//! `LearnedPolicy` and `node_executor::dispatch_once` runs its `evaluate()` as
+//! the sub-agent ACL pre-filter, and [`crate::grants`] uses the same store to
+//! make an interactive always-allow grant survive a restart.
 //!
 //! ## Original v0.7.0 Task 3.C.3 spec
 //!
@@ -73,16 +72,44 @@ struct StoredRule {
     workspace: Option<String>,
 }
 
+/// #693 — a PREFIX-scoped rule, the durable form of
+/// `ApprovalScope::AlwaysPrefix`.
+///
+/// Kept in its own list rather than folded into [`StoredRule`] because the two
+/// are keyed by different things: a `StoredRule` names a tool (`"Bash"`) and is
+/// what [`LearnedPolicy::evaluate`] matches against, while a prefix grant is
+/// keyed by tool CATEGORY (`"exec"`) — the key `ToolApprovalManager` stores its
+/// in-memory prefix rules under. Sharing one list would put two namespaces in
+/// one key space, where a category that happened to spell a tool name would
+/// silently answer that tool's `evaluate()`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredPrefixRule {
+    /// Tool category the grant applies to (`ToolCategory`'s string form).
+    category: String,
+    /// The literal command head, exactly as the granting surface committed it.
+    /// Matching (including the trailing-glob normalization) is the approval
+    /// manager's `prefix_matches`; nothing here re-implements it.
+    prefix: String,
+    decision: LearnedDecision,
+    /// Workspace the grant was made in — same semantics, and the same reason,
+    /// as [`StoredRule::workspace`].
+    #[serde(default)]
+    workspace: Option<String>,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct StoredPolicy {
     #[serde(default)]
     rules: Vec<StoredRule>,
+    /// #693 — absent in every file written before prefix grants persisted, so
+    /// `default` (not a hard parse error) is what keeps an existing
+    /// `permissions.toml` loadable.
+    #[serde(default)]
+    prefix_rules: Vec<StoredPrefixRule>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum LearningError {
-    #[error("could not resolve user permissions directory (HOME unset?)")]
-    NoHomeDir,
     #[error("failed to read {path}: {source}")]
     Read {
         path: PathBuf,
@@ -112,6 +139,7 @@ pub enum LearningError {
 #[derive(Debug, Clone, Default)]
 pub struct LearnedPolicy {
     rules: Vec<StoredRule>,
+    prefix_rules: Vec<StoredPrefixRule>,
 }
 
 impl LearnedPolicy {
@@ -120,11 +148,22 @@ impl LearnedPolicy {
         Self::default()
     }
 
-    /// Resolve the default on-disk path (`~/.wayland/permissions.toml`).
+    /// Resolve the default on-disk path
+    /// (`$WAYLAND_HOME/permissions.toml`, else `~/.wayland/permissions.toml`).
+    ///
+    /// #693 — routed through [`wcore_config::config::profile_home`], the
+    /// canonical profile-home resolver, rather than `dirs::home_dir()`
+    /// directly. A learned grant is per-PROFILE authority: an isolated profile
+    /// (`WAYLAND_HOME`) exists so a session's state is its own, and a
+    /// permissions file resolved off the OS home would have every profile on
+    /// the machine — including a hermetic test or sandbox run — reading and
+    /// writing the operator's real grants.
+    ///
+    /// Still returns `Result` (rather than the infallible `PathBuf`
+    /// `profile_home` produces) because callers already branch on it and the
+    /// warn-and-carry-on arm is the behaviour we want if that ever changes.
     pub fn default_path() -> Result<PathBuf, LearningError> {
-        dirs::home_dir()
-            .map(|h| h.join(".wayland").join("permissions.toml"))
-            .ok_or(LearningError::NoHomeDir)
+        Ok(wcore_config::config::profile_home().join("permissions.toml"))
     }
 
     /// The workspace key for the process's current directory: its canonical
@@ -172,6 +211,7 @@ impl LearnedPolicy {
         let stored: StoredPolicy = toml::from_str(&raw)?;
         Ok(Self {
             rules: stored.rules,
+            prefix_rules: stored.prefix_rules,
         })
     }
 
@@ -185,6 +225,7 @@ impl LearnedPolicy {
         }
         let stored = StoredPolicy {
             rules: self.rules.clone(),
+            prefix_rules: self.prefix_rules.clone(),
         };
         let toml = toml::to_string_pretty(&stored)?;
         // #693 — `std::fs::write` truncates in place, so a crash (or a full
@@ -433,13 +474,56 @@ impl LearnedPolicy {
         map
     }
 
-    /// Total rule count (mostly useful for tests).
+    /// Record a PREFIX-scoped decision for a tool `category`, scoped to the
+    /// `workspace` it was made in (#693).
+    ///
+    /// This is [`record_in`](Self::record_in)'s twin for
+    /// `ApprovalScope::AlwaysPrefix`. Keyed by (category, prefix, workspace),
+    /// so re-answering the same prompt replaces the rule instead of stacking
+    /// duplicates, and a grant in one checkout is not authority in another.
+    pub fn record_prefix_in(
+        &mut self,
+        category: impl Into<String>,
+        prefix: impl Into<String>,
+        decision: LearnedDecision,
+        workspace: &str,
+    ) {
+        let category = category.into();
+        let prefix = prefix.into();
+        let workspace = Some(workspace.to_string());
+        self.prefix_rules.retain(|r| {
+            !(r.category == category && r.prefix == prefix && r.workspace == workspace)
+        });
+        self.prefix_rules.push(StoredPrefixRule {
+            category,
+            prefix,
+            decision,
+            workspace,
+        });
+    }
+
+    /// The prefix rules that apply in `workspace`, as
+    /// `(category, prefix, decision)`.
+    ///
+    /// Same filter as [`snapshot_in`](Self::snapshot_in): rules granted in
+    /// this workspace, plus unscoped ones (which only a hand-edit produces and
+    /// are therefore a deliberate "everywhere").
+    pub fn prefix_snapshot_in(&self, workspace: &str) -> Vec<(String, String, LearnedDecision)> {
+        self.prefix_rules
+            .iter()
+            .filter(|r| r.workspace.as_deref().is_none_or(|ws| ws == workspace))
+            .map(|r| (r.category.clone(), r.prefix.clone(), r.decision.clone()))
+            .collect()
+    }
+
+    /// Total rule count (mostly useful for tests). Counts BOTH rule kinds —
+    /// a prefix grant that did not move this number would look unpersisted.
     pub fn len(&self) -> usize {
-        self.rules.len()
+        self.rules.len() + self.prefix_rules.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rules.is_empty()
+        self.rules.is_empty() && self.prefix_rules.is_empty()
     }
 }
 
