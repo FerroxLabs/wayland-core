@@ -1,0 +1,63 @@
+name: npm dist-tag sync
+
+# Point an npm dist-tag at a version that is ALREADY PUBLISHED.
+#
+# This publishes nothing. It exists because a dist-tag can drift out of step
+# with the registry — `next` sat on 0.12.26-rc.2 across eight stable releases —
+# and correcting that otherwise requires a human with a publish token on their
+# own machine. `release.yml` now advances `next` on every stable publish, so
+# this is for repairing existing drift and for deliberately parking a tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dist_tag:
+        description: "dist-tag to move (e.g. next)"
+        required: true
+        type: string
+      version:
+        description: "already-published version to point it at (e.g. 0.13.7)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Move the dist-tag
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DIST_TAG: ${{ inputs.dist_tag }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NPM_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN is not set — refusing to report success for a tag that did not move."
+            exit 1
+          fi
+          # The version must ALREADY exist. Pointing a tag at an unpublished
+          # version is the one way this job could make things worse.
+          if ! npm view "@ferroxlabs/wayland-core@${VERSION}" version >/dev/null 2>&1; then
+            echo "::error::@ferroxlabs/wayland-core@${VERSION} is not published — nothing to point ${DIST_TAG} at."
+            exit 1
+          fi
+          echo "before: $(npm view @ferroxlabs/wayland-core dist-tags --json)"
+          npm dist-tag add "@ferroxlabs/wayland-core@${VERSION}" "${DIST_TAG}"
+          echo "after:  $(npm view @ferroxlabs/wayland-core dist-tags --json)"
+          # Read it back. `dist-tag add` exiting 0 is not evidence the registry
+          # agrees, and this job exists precisely because a tag was wrong.
+          ACTUAL="$(npm view "@ferroxlabs/wayland-core" "dist-tags.${DIST_TAG}")"
+          if [ "${ACTUAL}" != "${VERSION}" ]; then
+            echo "::error::${DIST_TAG} reads back as ${ACTUAL}, expected ${VERSION}."
+            exit 1
+          fi
+          echo "${DIST_TAG} -> ${VERSION} confirmed by read-back"

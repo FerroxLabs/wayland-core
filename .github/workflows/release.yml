@@ -1223,3 +1223,36 @@ jobs:
           done
           ( cd npm-dist/wayland-core && npm publish --provenance --access public --tag "${NPM_DIST_TAG}" )
           echo "Published @ferroxlabs/wayland-core@${VERSION} (dist-tag ${NPM_DIST_TAG}) + platform packages"
+
+          # A stable release SUPERSEDES an older `next`, and nothing here used to
+          # say so. The case statement above only ever WRITES `next` for a
+          # pre-release; a stable publish writes `latest` and leaves `next`
+          # pointing wherever the last RC left it, forever.
+          #
+          # Measured consequence: `next` sat on 0.12.26-rc.2 (published
+          # 2026-08-05) across EIGHT stable releases — 0.13.0, .1, .2, .3, .4,
+          # .5, .6 and .7 — so for three weeks
+          # `npm install @ferroxlabs/wayland-core@next` served a release
+          # candidate from the previous minor line, and any tooling pinned to
+          # `@next` was pinned to it too.
+          #
+          # Only ever moves `next` FORWARD: if an RC newer than this stable is
+          # deliberately parked there, `sort -V` picks the RC and this no-ops.
+          # `dist-tag add` on the version already tagged is also a no-op, so a
+          # re-run cannot thrash the tag.
+          if [ "${NPM_DIST_TAG}" = "latest" ]; then
+            CURRENT_NEXT="$(npm view @ferroxlabs/wayland-core dist-tags.next 2>/dev/null || true)"
+            if [ -z "${CURRENT_NEXT}" ]; then
+              echo "dist-tag next: not set — nothing to advance"
+            elif [ "${CURRENT_NEXT}" = "${VERSION}" ]; then
+              echo "dist-tag next: already ${VERSION}"
+            else
+              NEWEST="$(printf '%s\n%s\n' "${CURRENT_NEXT}" "${VERSION}" | sort -V | tail -1)"
+              if [ "${NEWEST}" = "${VERSION}" ]; then
+                npm dist-tag add "@ferroxlabs/wayland-core@${VERSION}" next
+                echo "dist-tag next advanced: ${CURRENT_NEXT} -> ${VERSION}"
+              else
+                echo "dist-tag next left at ${CURRENT_NEXT}: newer than ${VERSION}"
+              fi
+            fi
+          fi
