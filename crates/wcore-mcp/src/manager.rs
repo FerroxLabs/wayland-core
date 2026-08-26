@@ -32,7 +32,12 @@ use wcore_config::shell::{LaunchValueSource, McpStdioLaunchContext};
 /// before it ever speaks MCP. 30s covers a legitimately slow server (npm
 /// cold start, slow network init) while still converting a hung server into
 /// a skip so `bootstrap.build()` — and therefore the CLI/TUI — can start.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// `pub` so the user-facing "still connecting" notice can state the deadline
+/// it is counting towards without keeping a second literal of it. This repo
+/// has already been bitten by a copied deadline drifting from the live one
+/// (see `wcore_providers::http_client::CONNECT_TIMEOUT`'s note); the notice is
+/// exactly the kind of place that copy would have gone.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A connected MCP server with its discovered tools and capabilities
 struct McpServer {

@@ -3866,6 +3866,57 @@ fn session_command_readiness(command: &ProtocolCommand) -> SessionCommandReadine
 /// boundary. Hosts may send setup commands (`InitHistory`, `SetMode`, etc.)
 /// before their first `Message`; those commands must not let the message race
 /// ahead of the already-running MCP handshake.
+/// How long a turn waits on the MCP dial before it says that it is waiting.
+///
+/// Five seconds, the same budget the rest of the pre-provider path uses
+/// (`wcore_providers::http_client::STREAM_SILENCE_NOTICE_AFTER`, and the
+/// credential-store budget in `wcore_agent`). From the user's side these are
+/// not three waits, they are one wait, and three different patience budgets
+/// on it would be three answers to one question.
+const MCP_CONNECT_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Wait for the deferred MCP dial to settle, and say so if it takes a while.
+///
+/// The dial IS bounded — `wcore_mcp::manager::CONNECT_TIMEOUT` per server,
+/// every server dialed concurrently — so this always ends. But a bound
+/// nobody is told about is indistinguishable at the host from a wedge:
+/// measured on 0.13.8, a `message` sent with one stdio server that never
+/// speaks produced no event of any kind for 30.3 s, then `mcp_failed`, then
+/// `stream_start`. Thirty seconds of a blank turn is the symptom, whatever
+/// the cause, and the cause was never on the wire.
+///
+/// Shape and channel are copied deliberately from the engine's provider
+/// silence notice (`AgentEngine`'s "Still waiting on the provider"): one
+/// latched line on the shared `OutputSink`, which renders as
+/// `ProtocolEvent::Info` for a json-stream host and as a terminal line for a
+/// TUI or CLI run. `tracing::warn!` would have reached NEITHER — with
+/// `RUST_LOG` unset only `ERROR` goes to stderr and the rest goes to a log
+/// file nobody has open during a turn.
+///
+/// One line, not a repeating ticker, for the same reason the provider notice
+/// is latched: the point is to break the silence and name the cause, and a
+/// line every five seconds during a bounded wait is noise the user learns to
+/// scroll past. It names the deadline so the reader knows what they are
+/// waiting for and that the turn will proceed either way.
+async fn await_deferred_mcp_connect(
+    rx: DeferredMcpReceiver,
+    output: &Arc<dyn OutputSink>,
+) -> Result<DeferredMcpConnectResult, tokio::sync::oneshot::error::RecvError> {
+    let mut rx = rx;
+    tokio::select! {
+        settled = &mut rx => settled,
+        _ = tokio::time::sleep(MCP_CONNECT_NOTICE_AFTER) => {
+            output.emit_info(&format!(
+                "Still waiting on MCP servers to connect - no output for {}s. Each server is \
+                 bounded at {}s, then this turn starts without it.",
+                MCP_CONNECT_NOTICE_AFTER.as_secs(),
+                wcore_mcp::manager::CONNECT_TIMEOUT.as_secs(),
+            ));
+            rx.await
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn settle_deferred_mcp_before_message(
     deferred_mcp_rx: &mut Option<DeferredMcpReceiver>,
@@ -3878,7 +3929,7 @@ async fn settle_deferred_mcp_before_message(
     late_mcp: &mut LateMcpBinder,
 ) -> bool {
     if let Some(rx) = deferred_mcp_rx.take()
-        && let Ok(result) = rx.await
+        && let Ok(result) = await_deferred_mcp_connect(rx, output).await
     {
         *pending_deferred_mcp = note_deferred_mcp_connect(
             result,
@@ -5612,7 +5663,7 @@ async fn run_json_stream_mode(
                 // `McpManager` bounds every server handshake independently.
                 if matches!(&other, ProtocolCommand::Message { .. })
                     && let Some(rx) = deferred_mcp_rx.take()
-                    && let Ok(result) = rx.await
+                    && let Ok(result) = await_deferred_mcp_connect(rx, &output).await
                 {
                     pending_deferred_mcp = note_deferred_mcp_connect(
                         result,
@@ -9149,6 +9200,120 @@ mod tests {
             other => panic!("expected McpReady, got {other:?}"),
         }
         assert_eq!(dynamic_managers.len(), 1, "manager must remain alive");
+    }
+
+    /// A turn held open by the MCP dial must SAY it is being held open.
+    ///
+    /// Measured on 0.13.8 with one stdio server that never speaks
+    /// (`command = "sleep"`): the host got NOTHING for 30.3 s — no event of
+    /// any kind — then `mcp_failed`, then `stream_start`. Identical on
+    /// 0.13.7, so this is not a regression; it is a hole in what the turn
+    /// discloses about itself, and thirty seconds of a blank turn reads as a
+    /// dead app whatever caused it.
+    ///
+    /// Grades the real call site (`settle_deferred_mcp_before_message`, the
+    /// session loop's readiness boundary), not the notice helper in
+    /// isolation. Deleting the `sleep` arm from the `select!` inside
+    /// `await_deferred_mcp_connect` turns this red.
+    ///
+    /// `start_paused` so the clock is driven by the runtime rather than by
+    /// the wall: the fixture's dial settles one second short of the real
+    /// per-server deadline, which is the window the notice exists to fill,
+    /// and the whole test still runs in milliseconds.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_mcp_dial_announces_itself_instead_of_showing_a_blank_turn() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _engine_sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable")
+            .refresh_tool_search_catalog(&defer_cold);
+
+        let resolved = HashMap::from([(
+            "slow".to_string(),
+            to_mcp_server_config(
+                "stdio",
+                Some("unused-test-command".to_string()),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .expect("valid test server config"),
+        )]);
+        let reservations = lifecycle_reservations(&resolved);
+        let manager = McpManager::new_for_test_with_tools(vec![(
+            "slow",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("slow_after_dial")],
+        )]);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(wcore_mcp::manager::CONNECT_TIMEOUT - Duration::from_secs(1)).await;
+            let _ = tx.send(DeferredMcpConnectResult {
+                outcome: Ok(manager),
+                resolved,
+                reservations,
+            });
+        });
+
+        let sink = wcore_agent::test_utils::TestSink::new();
+        let events = sink.handle();
+        let output: Arc<dyn OutputSink> = Arc::new(sink);
+        let writer = ProtocolWriter::new();
+        let mut deferred_mcp_rx = Some(rx);
+        let mut pending_deferred_mcp = None;
+        let mut dynamic_managers = Vec::new();
+        let mut late_mcp = inert_late_binder();
+
+        let ready = settle_deferred_mcp_before_message(
+            &mut deferred_mcp_rx,
+            &mut pending_deferred_mcp,
+            &mut engine,
+            &writer,
+            &output,
+            &mut dynamic_managers,
+            None,
+            &mut late_mcp,
+        )
+        .await;
+
+        assert!(
+            ready,
+            "the notice must not change the outcome — the dial still settles"
+        );
+        let notices: Vec<String> = events
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("info"))
+            .filter_map(|e| e["message"].as_str().map(str::to_string))
+            .filter(|m| m.contains("Still waiting on MCP servers"))
+            .collect();
+        assert_eq!(
+            notices.len(),
+            1,
+            "a host must be told once that the turn is waiting on MCP, got {notices:?}"
+        );
+        assert!(
+            notices[0].contains(&format!(
+                "{}s",
+                wcore_mcp::manager::CONNECT_TIMEOUT.as_secs()
+            )),
+            "the notice must name the deadline it is counting towards, got {:?}",
+            notices[0]
+        );
+        assert!(
+            engine
+                .tools()
+                .to_tool_defs()
+                .iter()
+                .any(|def| def.name == "slow_after_dial"),
+            "the settled dial must still have registered its tools"
+        );
     }
 
     /// #562 structural ordering regression: execute the same readiness seam
