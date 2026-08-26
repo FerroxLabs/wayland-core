@@ -23,6 +23,8 @@
 //! | 4    | The engine stopped the run at a limit (`max_turns`) instead of the model finishing. |
 //! | 5    | The model's response was cut off by the provider's OUTPUT token cap (`finish_reason=length`) — the answer, or a tool call it was writing, is incomplete. |
 //! | 6    | The run stopped because it needs a human and the outbound route to one is down. The session is durable; `--resume <id>` continues it. |
+//! | 7    | The provider turn ended in an error (`finish_reason=error`) — the model never finished the turn, so the run has no verdict at all. |
+//! | 8    | The run completed but produced NO answer text. Nothing was written to stdout for a caller to consume. |
 //! | 130  | Interrupted (SIGINT / Ctrl-C). |
 //! | 143  | Terminated (SIGTERM). |
 //! | 129  | Hung up (SIGHUP). |
@@ -30,7 +32,7 @@
 //! 128 + N for signals is the shell convention, so `$?` reads the same as it
 //! would for any other interrupted Unix program.
 
-use wcore_types::message::StopReason;
+use wcore_types::message::{FinishReason, StopReason};
 
 /// The run completed normally.
 pub const OK: u8 = 0;
@@ -58,6 +60,30 @@ pub const OUTPUT_TRUNCATED: u8 = 5;
 /// inbound poller until something killed it, so `$?` was 137/-9 and
 /// indistinguishable from a crash.
 pub const AWAITING_HUMAN: u8 = 6;
+
+/// The provider turn ended in an error.
+///
+/// `FinishReason::Error` is what the provider layer reports when the API
+/// returned an unrecognized stop signal, refused, or the engine never received
+/// a `Done` event (a mid-stream error). It is NOT a verdict on the task: the
+/// turn did not finish, so the softer readings below it — the human latch, the
+/// trailing tool state, the presence of answer text — describe a turn that
+/// never happened and cannot be trusted. Distinct from [`FAILURE`] because
+/// that code means the process never got as far as a run at all, which is a
+/// different thing to debug (config / auth / transport vs. this turn).
+pub const PROVIDER_ERROR: u8 = 7;
+
+/// The run ended without producing any answer text.
+///
+/// The remainder of the #946 corpus rows: a headless `-p` run whose every
+/// tool call was denied, or whose model emitted only reasoning, ends its turn
+/// cleanly and writes nothing to stdout — and exited `0`, so a script could
+/// not tell a total no-op from a completed task. The TUI already says this out
+/// loud (#1109, "ended without producing any answer"); this is the same fact
+/// on the channel a caller actually reads. Ranked BELOW [`TOOL_FAILURE`]
+/// deliberately: when the engine knows why nothing came back, the specific
+/// diagnosis is the more useful one and this is the catch-all.
+pub const NO_OUTPUT: u8 = 8;
 
 /// Shell convention for a process killed by signal N.
 const SIGNALLED_BASE: u8 = 128;
@@ -96,6 +122,14 @@ impl ShutdownSignal {
 /// to recover from is NOT one — otherwise an agent that probes for a missing
 /// file and moves on would report failure.
 ///
+/// `finish_reason` is the protocol-level outcome of the model's LAST turn.
+/// `FinishReason::Error` outranks every soft reading below it — see
+/// [`PROVIDER_ERROR`].
+///
+/// `final_text` is the run's answer. An empty one is [`NO_OUTPUT`]: the
+/// process finished having written nothing for the caller to consume, which
+/// before this was indistinguishable from a successful run.
+///
 /// A limit stop wins over a tool failure: "we ran out of turns" is the more
 /// actionable fact, and the trailing tool state of a truncated run is not a
 /// verdict on the task.
@@ -108,17 +142,25 @@ impl ShutdownSignal {
 /// stopped.
 pub fn for_run_outcome(
     stop_reason: StopReason,
+    finish_reason: FinishReason,
+    final_text: &str,
     unrecovered_tool_failure: bool,
     awaiting_human: bool,
 ) -> u8 {
     match stop_reason {
         StopReason::MaxTurns => LIMIT,
         StopReason::MaxTokens => OUTPUT_TRUNCATED,
+        // Outranks every reading below it: those all describe HOW a completed
+        // turn ended, and this says the turn did not complete.
+        _ if finish_reason == FinishReason::Error => PROVIDER_ERROR,
         // Outranks TOOL_FAILURE: on the row this was measured on the two are
         // the SAME event (the failed sends are the trailing tool errors), and
         // of the two readings only this one names the remedy.
         _ if awaiting_human => AWAITING_HUMAN,
         _ if unrecovered_tool_failure => TOOL_FAILURE,
+        // The catch-all remainder: the run ended cleanly and still handed the
+        // caller nothing. Trimmed because whitespace is not an answer.
+        _ if final_text.trim().is_empty() => NO_OUTPUT,
         _ => OK,
     }
 }
@@ -127,26 +169,70 @@ pub fn for_run_outcome(
 mod tests {
     use super::*;
 
+    /// Every pre-existing test in this module described a run that DID answer,
+    /// so they all pass a real `final_text`. Passing "" would now be
+    /// [`NO_OUTPUT`], which is the point of that code.
+    const ANSWERED: &str = "here is the answer";
+
     #[test]
     fn a_clean_end_turn_is_zero() {
-        assert_eq!(for_run_outcome(StopReason::EndTurn, false, false), OK);
+        assert_eq!(
+            for_run_outcome(
+                StopReason::EndTurn,
+                FinishReason::Stop,
+                ANSWERED,
+                false,
+                false
+            ),
+            OK
+        );
     }
 
     #[test]
     fn an_unrecovered_tool_failure_is_distinguishable_from_success() {
-        let failed = for_run_outcome(StopReason::EndTurn, true, false);
+        let failed = for_run_outcome(
+            StopReason::EndTurn,
+            FinishReason::Stop,
+            ANSWERED,
+            true,
+            false,
+        );
         assert_eq!(failed, TOOL_FAILURE);
         assert_ne!(
             failed,
-            for_run_outcome(StopReason::EndTurn, false, false),
+            for_run_outcome(
+                StopReason::EndTurn,
+                FinishReason::Stop,
+                ANSWERED,
+                false,
+                false
+            ),
             "a failed run must not share the success code"
         );
     }
 
     #[test]
     fn a_limit_stop_is_its_own_code_and_outranks_the_tool_state() {
-        assert_eq!(for_run_outcome(StopReason::MaxTurns, false, false), LIMIT);
-        assert_eq!(for_run_outcome(StopReason::MaxTurns, true, false), LIMIT);
+        assert_eq!(
+            for_run_outcome(
+                StopReason::MaxTurns,
+                FinishReason::MaxTurns,
+                ANSWERED,
+                false,
+                false
+            ),
+            LIMIT
+        );
+        assert_eq!(
+            for_run_outcome(
+                StopReason::MaxTurns,
+                FinishReason::MaxTurns,
+                ANSWERED,
+                true,
+                false
+            ),
+            LIMIT
+        );
         assert_ne!(LIMIT, TOOL_FAILURE);
         assert_ne!(LIMIT, OK);
     }
@@ -157,11 +243,23 @@ mod tests {
     #[test]
     fn an_output_cap_truncation_is_not_the_turn_cap() {
         assert_eq!(
-            for_run_outcome(StopReason::MaxTokens, false, false),
+            for_run_outcome(
+                StopReason::MaxTokens,
+                FinishReason::Length,
+                ANSWERED,
+                false,
+                false
+            ),
             OUTPUT_TRUNCATED
         );
         assert_eq!(
-            for_run_outcome(StopReason::MaxTokens, true, false),
+            for_run_outcome(
+                StopReason::MaxTokens,
+                FinishReason::Length,
+                ANSWERED,
+                true,
+                false
+            ),
             OUTPUT_TRUNCATED,
             "a limit stop still outranks the trailing tool state"
         );
@@ -175,7 +273,13 @@ mod tests {
     /// pre-fix behaviour) as a signal death.
     #[test]
     fn needing_a_human_is_not_success_and_not_a_bare_tool_failure() {
-        let waiting = for_run_outcome(StopReason::EndTurn, true, true);
+        let waiting = for_run_outcome(
+            StopReason::EndTurn,
+            FinishReason::Stop,
+            ANSWERED,
+            true,
+            true,
+        );
         assert_eq!(waiting, AWAITING_HUMAN);
         assert_ne!(waiting, OK);
         assert_ne!(waiting, TOOL_FAILURE);
@@ -185,12 +289,24 @@ mod tests {
         );
         // Same trailing tool state, latch clear: still the old answer.
         assert_eq!(
-            for_run_outcome(StopReason::EndTurn, true, false),
+            for_run_outcome(
+                StopReason::EndTurn,
+                FinishReason::Stop,
+                ANSWERED,
+                true,
+                false
+            ),
             TOOL_FAILURE
         );
         // Latch armed with a clean tool tail still reports the latch.
         assert_eq!(
-            for_run_outcome(StopReason::EndTurn, false, true),
+            for_run_outcome(
+                StopReason::EndTurn,
+                FinishReason::Stop,
+                ANSWERED,
+                false,
+                true
+            ),
             AWAITING_HUMAN
         );
     }
@@ -199,10 +315,86 @@ mod tests {
     /// have ended needing a person, so the limit keeps precedence.
     #[test]
     fn a_limit_stop_outranks_the_human_latch() {
-        assert_eq!(for_run_outcome(StopReason::MaxTurns, false, true), LIMIT);
         assert_eq!(
-            for_run_outcome(StopReason::MaxTokens, false, true),
+            for_run_outcome(
+                StopReason::MaxTurns,
+                FinishReason::MaxTurns,
+                ANSWERED,
+                false,
+                true
+            ),
+            LIMIT
+        );
+        assert_eq!(
+            for_run_outcome(
+                StopReason::MaxTokens,
+                FinishReason::Length,
+                ANSWERED,
+                false,
+                true
+            ),
             OUTPUT_TRUNCATED
+        );
+    }
+
+    /// #946 — a provider turn that ended in error must not read as success.
+    /// The engine returns `Ok(AgentResult)` for this: the run mechanically
+    /// completed, the TURN did not, and `stop_reason` alone cannot tell them
+    /// apart because both are `EndTurn`.
+    #[test]
+    fn a_provider_error_turn_is_not_success() {
+        let errored = for_run_outcome(
+            StopReason::EndTurn,
+            FinishReason::Error,
+            ANSWERED,
+            false,
+            false,
+        );
+        assert_eq!(errored, PROVIDER_ERROR);
+        assert_ne!(errored, OK);
+        // It outranks the soft readings: they describe a turn that finished.
+        assert_eq!(
+            for_run_outcome(StopReason::EndTurn, FinishReason::Error, "", true, true),
+            PROVIDER_ERROR
+        );
+    }
+
+    /// #946 — the seven-row remainder: every tool denied, so the model ends
+    /// its turn cleanly having written nothing. `stop_reason` is `EndTurn`,
+    /// `finish_reason` is `Stop`, no tool error is recorded, and the run
+    /// exited 0 — identical to a completed task.
+    #[test]
+    fn a_run_that_produced_no_answer_is_not_success() {
+        let silent = for_run_outcome(StopReason::EndTurn, FinishReason::Stop, "", false, false);
+        assert_eq!(silent, NO_OUTPUT);
+        assert_ne!(silent, OK);
+        // Whitespace is not an answer.
+        assert_eq!(
+            for_run_outcome(
+                StopReason::EndTurn,
+                FinishReason::Stop,
+                "  \n ",
+                false,
+                false
+            ),
+            NO_OUTPUT
+        );
+        // NEGATIVE CONTROL: the same shape with real text is still a success.
+        // Without this the fix could simply always return non-zero.
+        assert_eq!(
+            for_run_outcome(
+                StopReason::EndTurn,
+                FinishReason::Stop,
+                ANSWERED,
+                false,
+                false
+            ),
+            OK
+        );
+        // A known cause outranks the catch-all.
+        assert_eq!(
+            for_run_outcome(StopReason::EndTurn, FinishReason::Stop, "", true, false),
+            TOOL_FAILURE
         );
     }
 
@@ -215,6 +407,8 @@ mod tests {
             LIMIT,
             OUTPUT_TRUNCATED,
             AWAITING_HUMAN,
+            PROVIDER_ERROR,
+            NO_OUTPUT,
             INTERRUPTED,
             TERMINATED,
             HUNG_UP,
@@ -225,6 +419,8 @@ mod tests {
             codes.len(),
             "two outcomes share an exit code, so a caller cannot tell them apart: {codes:?}"
         );
+        // 2 is clap's usage error and is never produced by this function.
+        assert!(!codes.contains(&2));
     }
 
     #[test]

@@ -38,6 +38,21 @@ async fn drive(
     extra_args: &[&str],
     steps: Vec<OpenAiStep>,
 ) -> Run {
+    drive_with_env(name, seed, extra_args, steps, &[]).await
+}
+
+/// [`drive`] plus extra environment for the child.
+///
+/// The child runs under `env_clear()`, so a variable the run must SEE (the
+/// Goal attachment pair, for one) has to be passed here — setting it in the
+/// test process would not reach the binary.
+async fn drive_with_env(
+    name: &str,
+    seed: &[(&str, &str)],
+    extra_args: &[&str],
+    steps: Vec<OpenAiStep>,
+    extra_env: &[(&str, String)],
+) -> Run {
     let root = std::env::temp_dir().join(format!("wlc-exit-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let home = root.join("home");
@@ -81,6 +96,9 @@ async fn drive(
         .env("WAYLAND_HOME", &home)
         .env("NO_COLOR", "1");
     pass_through_os_prerequisites(&mut cmd);
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
     cmd.args([
         "-p",
         "rec",
@@ -595,5 +613,228 @@ async fn a_resumed_turn_that_ends_on_its_own_unrecovered_failure_still_reports_i
          it to the current run; stdout={:?} stderr={:?}",
         second.stdout,
         second.stderr
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// #946 — the live remainder of seven corpus rows: a headless run that
+// produced NOTHING, and a run whose provider turn ended in error, both
+// exited 0. `for_run_outcome` read only `stop_reason`, which is `EndTurn`
+// for both, and the Goal-attached arm never consulted the contract at all.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A run that answered nothing must not report success.
+///
+/// The wire shape is a 200 stream that reaches `[DONE]` with no text, no
+/// thinking and no tool call — what an endpoint produces when every tool the
+/// model wanted was refused, or when reasoning consumed the whole budget. The
+/// engine already TELLS the user (it emits an error line) and still returned
+/// `Ok` with an empty answer, so `$?` said the task was done.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_that_produced_no_answer_does_not_exit_zero() {
+    let run = drive("no-output", &[], &[], vec![OpenAiStep::empty_response()]).await;
+
+    assert_ne!(
+        run.code,
+        Some(exit_code::OK as i32),
+        "a run that wrote no answer at all must not report success; \
+         stdout={:?} stderr={:?}",
+        run.stdout,
+        run.stderr
+    );
+    assert_eq!(
+        run.code,
+        Some(exit_code::NO_OUTPUT as i32),
+        "and it must be the no-output code specifically, so a caller can tell \
+         it from a tool failure or a limit stop; stdout={:?} stderr={:?}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+/// A provider turn that ended on an unrecognised stop signal must not report
+/// success. `StopReason` is `EndTurn` here — identical to a clean finish — so
+/// only `finish_reason` can tell them apart, and the CLI never read it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_error_turn_does_not_exit_zero() {
+    let run = drive(
+        "provider-error",
+        &[],
+        &[],
+        vec![OpenAiStep::text_with_finish_reason(
+            "partial thoughts",
+            "content_filter",
+        )],
+    )
+    .await;
+
+    assert_ne!(
+        run.code,
+        Some(exit_code::OK as i32),
+        "a turn the provider ended in error must not report success; \
+         stdout={:?} stderr={:?}",
+        run.stdout,
+        run.stderr
+    );
+    assert_eq!(
+        run.code,
+        Some(exit_code::PROVIDER_ERROR as i32),
+        "and it must be the provider-error code, not the no-output catch-all; \
+         stdout={:?} stderr={:?}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+/// NEGATIVE CONTROL for both codes above. Without it, "the fix works" and
+/// "the fix returns non-zero unconditionally" are indistinguishable — an
+/// always-non-zero `for_run_outcome` would pass every assertion above.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ordinary_answered_run_still_exits_zero() {
+    let run = drive(
+        "no-output-negative",
+        &[("present.txt", "SEEDED-CONTENT\n")],
+        &[],
+        vec![
+            read("{WORK}/present.txt"),
+            OpenAiStep::text("the file says SEEDED-CONTENT"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        run.code,
+        Some(exit_code::OK as i32),
+        "an ordinary run that answered must still exit 0; \
+         stdout={:?} stderr={:?}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains("SEEDED-CONTENT"),
+        "the control must actually have produced an answer, or it proves \
+         nothing about the empty-answer code; stdout={:?}",
+        run.stdout
+    );
+}
+
+/// Open a durable Goal for the `direct` strategy and return its journal dir.
+fn open_direct_goal(dir_tag: &str, goal_id: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "wlc-exit-{dir_tag}-{}-{goal_id}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("goal root");
+    let journal = root.join("goal.journal");
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_wayland-core"));
+    let opened = Command::new(&bin)
+        .args([
+            "goal",
+            "open",
+            "--journal",
+            journal.to_string_lossy().as_ref(),
+            "--goal",
+            goal_id,
+            "--objective",
+            "grade the exit code of a Goal-attached headless run",
+            "--strategy",
+            "direct",
+            "--iterations",
+            "1",
+        ])
+        .output()
+        .expect("spawn goal open");
+    assert!(
+        opened.status.success(),
+        "goal open must succeed or the test grades nothing: {}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    root
+}
+
+fn goal_env(goal_id: &str, root: &std::path::Path) -> Vec<(&'static str, String)> {
+    vec![
+        ("WAYLAND_GOAL_ID", goal_id.to_string()),
+        (
+            "WAYLAND_GOAL_JOURNAL",
+            root.join("goal.journal").to_string_lossy().into_owned(),
+        ),
+    ]
+}
+
+/// The GOAL-ATTACHED headless arm has its own return path, and it returned
+/// `ExitCode::SUCCESS` unconditionally — the exit-code contract did not exist
+/// for it at all. Same silent run as
+/// `a_run_that_produced_no_answer_does_not_exit_zero`, driven through the
+/// `WAYLAND_GOAL_ID` + `WAYLAND_GOAL_JOURNAL` attachment.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_goal_attached_run_that_produced_no_answer_does_not_exit_zero() {
+    let root = open_direct_goal("goaljrnl", "g-exit-code");
+    let run = drive_with_env(
+        "goal-no-output",
+        &[],
+        &[],
+        vec![OpenAiStep::empty_response()],
+        &goal_env("g-exit-code", &root),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        run.stdout.contains("GOAL: canonical_transition"),
+        "the run must actually have taken the Goal-attached arm, or this \
+         test grades the ordinary headless path a second time; \
+         stdout={:?} stderr={:?}",
+        run.stdout,
+        run.stderr
+    );
+    assert_ne!(
+        run.code,
+        Some(exit_code::OK as i32),
+        "a Goal-attached run that wrote no answer must not report success; \
+         stdout={:?} stderr={:?}",
+        run.stdout,
+        run.stderr
+    );
+    assert_eq!(
+        run.code,
+        Some(exit_code::NO_OUTPUT as i32),
+        "the Goal arm must reach the SAME contract as the plain headless arm; \
+         stdout={:?} stderr={:?}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+/// NEGATIVE CONTROL for the Goal arm: an answered Goal-attached run must
+/// still exit 0, so the code above is not just "the Goal arm always fails".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_goal_attached_run_that_answered_still_exits_zero() {
+    let root = open_direct_goal("goalok", "g-exit-ok");
+    let run = drive_with_env(
+        "goal-answered",
+        &[],
+        &[],
+        vec![OpenAiStep::text("goal answered")],
+        &goal_env("g-exit-ok", &root),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        run.stdout.contains("GOAL: canonical_transition"),
+        "the run must have taken the Goal-attached arm; stdout={:?} stderr={:?}",
+        run.stdout,
+        run.stderr
+    );
+    assert_eq!(
+        run.code,
+        Some(exit_code::OK as i32),
+        "an answered Goal-attached run must still exit 0; \
+         stdout={:?} stderr={:?}",
+        run.stdout,
+        run.stderr
     );
 }
