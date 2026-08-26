@@ -362,6 +362,7 @@ fn budget_config_into_execution_budget_translates_seconds_to_duration() {
     use wcore_config::budget::BudgetConfig;
 
     let cfg = BudgetConfig {
+        preset: None,
         max_wall_time_secs: Some(600),
         max_tool_runtime_secs: Some(30),
         max_processes: Some(4),

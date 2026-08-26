@@ -2367,7 +2367,7 @@ impl Config {
         files: ResolvedConfigFiles,
     ) -> anyhow::Result<Self> {
         let ResolvedConfigFiles {
-            merged,
+            mut merged,
             workspace_trust,
             ..
         } = files;
@@ -2636,14 +2636,29 @@ impl Config {
             }
         }
 
+        // #174 item 6: expand `[budget] preset = "..."` into concrete caps
+        // HERE, before validation and before `merged.budget` is moved into the
+        // resolved `Config`. Everything downstream — `AgentBootstrap`'s
+        // `ExecutionBudget` and `BudgetCap`, every sub-agent view — reads
+        // `Config.budget`, so expanding at this single point is what makes the
+        // preset reach the engine at all. A `preset_to_config()` helper that
+        // nothing on this path called would be inert.
+        merged.budget = merged
+            .budget
+            .resolve_preset()
+            .map_err(|error| anyhow::anyhow!("invalid [budget]: {error}"))?;
         merged
             .budget
             .validate()
             .map_err(|error| anyhow::anyhow!("invalid [budget]: {error}"))?;
         if let Some(session_cap) = merged.session_cap.as_ref() {
+            let session_cap = session_cap
+                .resolve_preset()
+                .map_err(|error| anyhow::anyhow!("invalid [session_cap]: {error}"))?;
             session_cap
                 .validate()
                 .map_err(|error| anyhow::anyhow!("invalid [session_cap]: {error}"))?;
+            merged.session_cap = Some(session_cap);
         }
 
         let provider_organization = provider_config.organization.clone();
@@ -5544,6 +5559,12 @@ fn merge_config_files_with_trust(
     // merge keeps a project-level cap if set, else falls back to the
     // global cap, else None.
     let budget = crate::budget::BudgetConfig {
+        // A project may name its own envelope; absent one it inherits the
+        // global choice. Same project-over-global rule as the scalar caps
+        // below — and it cannot be used to WIDEN a global cap, because
+        // `resolve_preset` refuses a merged field that is looser than the
+        // merged preset regardless of which layer contributed which.
+        preset: project.budget.preset.or(global.budget.preset),
         max_wall_time_secs: project
             .budget
             .max_wall_time_secs

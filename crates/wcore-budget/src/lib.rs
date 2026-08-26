@@ -39,7 +39,7 @@ pub enum BudgetSnapshotError {
     UnsupportedVersion { found: u32, expected: u32 },
 }
 
-pub use config::{BudgetConfig, BudgetConfigError};
+pub use config::{BudgetConfig, BudgetConfigError, BudgetPreset};
 pub use daily::{
     DAILY_LEDGER_SCHEMA_VERSION, DailyAuthority, DailyGrant, DailyPosition, DailySpendError,
     DailySpendStore,

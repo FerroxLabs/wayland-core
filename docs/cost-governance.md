@@ -61,8 +61,54 @@ max_cost_usd          = 5.00
 | `[budget].max_tokens_in` | `Option<u64>` | `None` | Input-token cap for the tree |
 | `[budget].max_tokens_out` | `Option<u64>` | `None` | Output-token cap for the tree |
 | `[budget].max_cost_usd` | `Option<f64>` | `None` | USD cost cap for the tree (checked last) |
+| `[budget].preset` | `Option<String>` | `None` | A named envelope to start from — see below |
 
 Every field is optional; leave one unset to leave that dimension uncapped.
+
+### Presets
+
+Instead of naming eight numbers, name one envelope:
+
+```toml
+[budget]
+preset = "tiny"
+```
+
+| Preset | Wall | Tool run | Procs | Depth | Tokens in / out | USD | Daily USD |
+|--------|------|----------|-------|-------|-----------------|-----|-----------|
+| `tiny` | 5 min | 60 s | 2 | 0 | 200,000 / 192,000 | 4.00 | – |
+| `small` | 30 min | 5 min | 8 | 1 | 2,000,000 / 640,000 | 16.00 | – |
+| `normal` | 8 h | 4 h | 32 | 8 | 10,000,000 / 1,000,000 | 25.00 | – |
+| `large` | 24 h | 8 h | 64 | 12 | 100,000,000 / 9,984,000 | 450.00 | – |
+| `no-hosted-spend` | as `normal` | as `normal` | as `normal` | as `normal` | as `normal` | **0.00** | **0.00** |
+
+`normal` is the Smart default every installation already runs under — naming it
+changes nothing. The other sizes step the token and dollar axes geometrically
+and the host-bound axes (wall time, tool runtime, processes, delegation depth)
+additively; each dollar cap is the Sonnet-4 list price of that preset's own
+token envelope, rounded up, so on the default model the token envelope is what
+stops you first. Output caps are whole multiples of the 64,000 tokens the
+engine reserves per provider call — a smaller cap would refuse the first turn.
+
+`no-hosted-spend` means it: the engine reserves a call's worst-case cost
+*before* dispatching it, so a priced model is refused pre-flight, an unpriced
+model is refused too (an explicit `max_cost_usd` arms the `unpriced_provider`
+refusal rather than treating an unknown price as `$0`), and only a model whose
+published price really is `$0.00` — a local runtime — still runs. It forbids
+spend, not work.
+
+**An explicit field alongside a preset may TIGHTEN it, never widen it.** A
+looser field is a config error naming the field, the preset and both values —
+not a silent clamp and not a silent override, because either of those would
+leave you believing a number that is not the one in force (and would let a
+single `max_cost_usd` line quietly undo `no-hosted-spend`).
+
+```toml
+[budget]
+preset       = "tiny"
+max_cost_usd = 0.50   # OK: stricter than tiny's 4.00
+# max_cost_usd = 100.0  # error: would widen tiny
+```
 
 ---
 
