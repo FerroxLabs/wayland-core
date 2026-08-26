@@ -7,6 +7,7 @@ use wcore_types::goal::GoalStrategy;
 
 use crate::diagnostics::GetRuntimeDiagnosticsCommand;
 use crate::events::{OperatorToolEffectResolution, RecoveryCursor};
+use crate::quiescence::QuiesceScope;
 
 pub const OPERATOR_RESOLUTION_RECOVERY_VERSION: u16 = 1;
 pub const RECOVERED_APPROVAL_VERSION: u16 = 1;
@@ -255,6 +256,52 @@ pub struct GoalResyncCommand {
     pub goal_id: Option<String>,
 }
 
+/// wayland#896 — acquire a read-consistent quiescence lease across the default
+/// profile home and named profile state, so a host can take a recovery point
+/// without inventing quiescence out of filesystem timestamps.
+///
+/// Idempotent by `lease_id`: re-issuing a live lease returns the SAME grant,
+/// epoch included. A retry that answered with a fresher epoch would not be a
+/// retry of the call it repeats.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QuiesceAcquireCommand {
+    pub quiescence_version: u16,
+    pub request_id: String,
+    /// Host-chosen lease identity. Stable across retries of one capture.
+    pub lease_id: String,
+    pub session_id: String,
+    pub scope: QuiesceScope,
+    /// Bounded write freeze. An unbounded lease is an outage with a receipt.
+    pub ttl_ms: u64,
+}
+
+/// wayland#896 — release a lease and settle whether the covered state moved
+/// while it was held.
+///
+/// `epoch` is the epoch the grant carried. It is echoed rather than looked up
+/// so a stale actor cannot free a live lease it never held.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QuiesceReleaseCommand {
+    pub quiescence_version: u16,
+    pub request_id: String,
+    pub lease_id: String,
+    pub session_id: String,
+    pub epoch: String,
+}
+
+/// wayland#896 — read the lease control plane without changing capture
+/// authority. Also the call a host makes to discover which roots exist before
+/// asking for complete coverage of them.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QuiesceStatusCommand {
+    pub quiescence_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+}
+
 /// Commands sent from the client to the agent (Client -> Agent)
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "type")]
@@ -419,6 +466,12 @@ pub enum ProtocolCommand {
         #[serde(default)]
         error: Option<String>,
     },
+    /// wayland#896 — acquire a quiesced snapshot lease over profile state.
+    QuiesceAcquire(QuiesceAcquireCommand),
+    /// wayland#896 — release a lease and receive the mutation verdict.
+    QuiesceRelease(QuiesceReleaseCommand),
+    /// wayland#896 — observe the lease control plane.
+    QuiesceStatus(QuiesceStatusCommand),
     Ping,
 }
 

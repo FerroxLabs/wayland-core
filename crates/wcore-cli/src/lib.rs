@@ -119,6 +119,10 @@ pub mod doctor;
 // Secret-safe live state projection for the JSON-stream diagnostics contract.
 pub mod runtime_diagnostics;
 
+/// wayland#896 — JSON-stream bridge for the quiesced snapshot lease. The one
+/// place `wcore_protocol::quiescence` meets `wcore_config::quiesce`.
+pub mod quiesce_control;
+
 // Wave 0 (CLI/TUI redesign): the ratatui terminal UI. `tui::run()` is the
 // entry point; the `main.rs` default-mode dispatch into it is deferred to
 // T2.3 (the binary is intentionally untouched in Wave 0).

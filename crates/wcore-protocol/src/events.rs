@@ -1634,6 +1634,93 @@ pub enum ProtocolEvent {
         goal_id: String,
         reason: GoalControlRefusalReason,
     },
+    /// wayland#896 — a quiescence lease was granted over profile state.
+    ///
+    /// `coverage.complete` is always true here: incomplete coverage is refused
+    /// with `quiesce_refused`, never reported as a partial grant. `epoch` is
+    /// the opaque mutation token the host echoes on release; it is the ONLY
+    /// thing that settles whether the capture taken under this lease is a valid
+    /// recovery point.
+    QuiesceLeaseGranted {
+        quiescence_version: u16,
+        request_id: String,
+        lease_id: String,
+        session_id: String,
+        epoch: String,
+        coverage: crate::quiescence::QuiesceCoverage,
+        acquired_unix_ms: u64,
+        expires_unix_ms: u64,
+        /// True when this grant re-observed a lease the same `lease_id` already
+        /// held, rather than taking a fresh one. The epoch is unchanged.
+        idempotent_replay: bool,
+    },
+    /// wayland#896 — a lease was released, with the verdict on whether the
+    /// covered state moved while it was held.
+    ///
+    /// A `mutated` verdict is not an error: the lease worked exactly as
+    /// designed and is telling the host its capture is torn. A host that
+    /// stores the capture anyway has stored a snapshot that never existed.
+    QuiesceLeaseReleased {
+        quiescence_version: u16,
+        request_id: String,
+        lease_id: String,
+        session_id: String,
+        epoch_at_acquire: String,
+        epoch_at_release: String,
+        verdict: crate::quiescence::QuiesceReleaseVerdict,
+        released_unix_ms: u64,
+    },
+    /// wayland#896 — a lapsed lease was observed and reclaimed.
+    ///
+    /// Expiry is OBSERVED, not scheduled: Core is not a daemon, so a holder
+    /// that crashed is reported by the next acquire, release or status that
+    /// meets its record. That is what makes a dead holder reclaimable rather
+    /// than a permanent wedge, and this receipt is how the trail stays gapless.
+    QuiesceLeaseExpired {
+        quiescence_version: u16,
+        /// The lease that lapsed. `<unparsable>` when the record on disk could
+        /// not be decoded — such a record has no expiry to reach, so it is
+        /// reclaimed rather than left to wedge the control plane forever.
+        lease_id: String,
+        /// Owner recorded by the lapsed lease.
+        owner: String,
+        /// Session that OBSERVED the expiry, which is not the owner.
+        session_id: String,
+        /// Request during which the expiry was observed.
+        request_id: String,
+        epoch_at_acquire: String,
+        expires_unix_ms: u64,
+        observed_unix_ms: u64,
+    },
+    /// wayland#896 — the lease control plane, without granting anything.
+    QuiesceStatusReport {
+        quiescence_version: u16,
+        request_id: String,
+        session_id: String,
+        held: Option<crate::quiescence::QuiesceHeldLease>,
+        /// Roots a lease could cover right now. A host asks for these rather
+        /// than hardcoding a list that silently misses a new profile.
+        available: Vec<crate::quiescence::QuiesceProfileIdentity>,
+    },
+    /// wayland#896 — a quiescence command was refused, with a closed reason.
+    ///
+    /// Mandatory rather than convenient, for the same reason
+    /// `goal_control_refused` is: without an explicit refusal frame a rejected
+    /// capture is indistinguishable from one that was accepted and did nothing,
+    /// and a host that cannot tell those apart will store an empty recovery
+    /// point believing it succeeded.
+    QuiesceRefused {
+        quiescence_version: u16,
+        request_id: String,
+        /// The lease the refused command named. Carried even when no such lease
+        /// exists, so a host can attribute the refusal without its own table.
+        lease_id: String,
+        session_id: String,
+        reason: crate::quiescence::QuiesceRefusalReason,
+        /// Operator-facing detail. Never a second reason vocabulary — a host
+        /// branches on `reason` alone.
+        detail: String,
+    },
     Pong,
 }
 

@@ -10,6 +10,8 @@ pub mod events;
 pub mod execution_policy;
 pub mod goal;
 pub mod output_pump;
+/// wayland#896 — versioned quiesced-snapshot-lease wire contract.
+pub mod quiescence;
 pub mod reader;
 pub mod workflow;
 pub mod writer;
