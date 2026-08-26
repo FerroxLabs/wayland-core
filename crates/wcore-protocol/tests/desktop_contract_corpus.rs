@@ -260,6 +260,9 @@ protocol_command_surface! {
     ProtocolCommand::RevokePath { .. } => "revoke_path",
     ProtocolCommand::ApprovalResume { .. } => "approval_resume",
     ProtocolCommand::HostSendMessageResult { .. } => "host_send_message_result",
+    ProtocolCommand::QuiesceAcquire(_) => "quiesce_acquire",
+    ProtocolCommand::QuiesceRelease(_) => "quiesce_release",
+    ProtocolCommand::QuiesceStatus(_) => "quiesce_status",
     ProtocolCommand::Ping => "ping",
 }
 

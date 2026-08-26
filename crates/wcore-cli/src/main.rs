@@ -4438,6 +4438,21 @@ where
                 Some(ProtocolCommand::Ping) => {
                     let _ = writer.emit(&ProtocolEvent::Pong);
                 }
+                // wayland#896 — quiescence is a PROCESS-level operation, not a
+                // turn-level one, so it is answered at every command site
+                // rather than only between turns. A host that could take a
+                // recovery point only while Core happened to be idle would be
+                // back to guessing at quiescence, which is what this contract
+                // removes.
+                Some(quiesce_command @ (ProtocolCommand::QuiesceAcquire(_)
+                | ProtocolCommand::QuiesceRelease(_)
+                | ProtocolCommand::QuiesceStatus(_))) => {
+                    for event in
+                        wcore_cli::quiesce_control::handle_quiesce_control(&quiesce_command)
+                    {
+                        let _ = writer.emit(&event);
+                    }
+                }
                 Some(ProtocolCommand::SessionResync(command)) => {
                     emit_recovery_unavailable(
                         writer,
@@ -5352,6 +5367,16 @@ async fn run_json_stream_mode(
                     writer.as_ref(),
                 );
             }
+            // wayland#896 — see the note at the recovery-loop arm. Available
+            // before the first Message too: Desktop's recovery capture must not
+            // have to start a turn to reach it.
+            ref quiesce_command @ (ProtocolCommand::QuiesceAcquire(_)
+            | ProtocolCommand::QuiesceRelease(_)
+            | ProtocolCommand::QuiesceStatus(_)) => {
+                for event in wcore_cli::quiesce_control::handle_quiesce_control(quiesce_command) {
+                    let _ = writer.emit(&event);
+                }
+            }
             ProtocolCommand::AddMcpServer {
                 name,
                 transport,
@@ -6099,6 +6124,23 @@ async fn run_json_stream_mode(
                                     ProtocolCommand::Ping => {
                                         let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Pong);
                                     }
+                                    // wayland#896 — see the note at the
+                                    // recovery-loop arm. MID-turn matters most
+                                    // of all: a long turn is exactly when a
+                                    // host wants a recovery point, and it is
+                                    // also exactly when Core is most likely to
+                                    // be writing profile state.
+                                    ref quiesce_command @ (ProtocolCommand::QuiesceAcquire(_)
+                                    | ProtocolCommand::QuiesceRelease(_)
+                                    | ProtocolCommand::QuiesceStatus(_)) => {
+                                        for event in
+                                            wcore_cli::quiesce_control::handle_quiesce_control(
+                                                quiesce_command,
+                                            )
+                                        {
+                                            let _ = writer.emit(&event);
+                                        }
+                                    }
                                     ProtocolCommand::ApprovalResume {
                                         resume_token,
                                         approved,
@@ -6521,6 +6563,14 @@ async fn run_json_stream_mode(
             }
             ProtocolCommand::Ping => {
                 let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Pong);
+            }
+            // wayland#896 — see the note at the recovery-loop arm.
+            ref quiesce_command @ (ProtocolCommand::QuiesceAcquire(_)
+            | ProtocolCommand::QuiesceRelease(_)
+            | ProtocolCommand::QuiesceStatus(_)) => {
+                for event in wcore_cli::quiesce_control::handle_quiesce_control(quiesce_command) {
+                    let _ = writer.emit(&event);
+                }
             }
             ProtocolCommand::ApprovalResume {
                 resume_token,
