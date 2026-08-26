@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
+use std::path::Path;
 
 use serde_json::{Map, Value};
 
@@ -14,14 +15,23 @@ const MANIFEST: &str = "manifest.json";
 
 /// Regenerate in memory and reject missing, extra, or byte-drifted artifacts.
 pub fn check_contract() -> ContractResult<()> {
-    let root = contract_path();
+    check_contract_at(&contract_path())
+}
+
+/// The check, against an arbitrary corpus root.
+///
+/// The parameter is what makes the drift path drivable from a test. A corpus
+/// that is current in every checkout is a failure message nobody ever reads,
+/// and this one shipped a remedy sentence that was wrong for half the causes
+/// that reach it.
+fn check_contract_at(root: &Path) -> ContractResult<()> {
     let expected = generated_artifacts()?;
     // Before the drift report, because "run `wcore-contract generate`" is the
     // wrong remedy for a moved wire shape and running it used to certify the
     // break as green.
     enforce_wire_shape_version(&expected, WireShapeBaseline::Required)?;
     let expected_paths = expected.keys().cloned().collect::<BTreeSet<_>>();
-    let actual_paths = all_relative_files(&root)?;
+    let actual_paths = all_relative_files(root)?;
 
     let missing = expected_paths
         .difference(&actual_paths)
@@ -41,7 +51,7 @@ pub fn check_contract() -> ContractResult<()> {
         return Ok(());
     }
 
-    // The path list alone cannot tell a source-hash rebase from a moved wire
+    // The path lists alone cannot tell a source-hash rebase from a moved wire
     // schema, and those two have opposite remedies. The regeneration is
     // already in hand, so say which one this is.
     let diff = ManifestDiff::of(
@@ -49,7 +59,8 @@ pub fn check_contract() -> ContractResult<()> {
         expected.get(MANIFEST).map(Vec::as_slice),
     );
     Err(io::Error::other(format!(
-        "Desktop contract corpus drift: missing={missing:?}, extra={extra:?}, drifted={drifted:?}.\n{}",
+        "Desktop contract corpus drift: missing={missing:?}, extra={extra:?}, drifted={drifted:?}.\n\
+         {}Run `wcore-contract diff` to re-read this key diff without writing anything.\n",
         diff.report()
     ))
     .into())
@@ -58,10 +69,10 @@ pub fn check_contract() -> ContractResult<()> {
 /// The same key diff `check_contract` reports, computed without writing
 /// anything.
 ///
-/// `check` is the gate; this is the diagnostic an author reaches for once the
-/// gate has gone red and the question is *what moved*. It regenerates in
-/// memory exactly as `check` does, so it answers about the tree in front of the
-/// author rather than about the last commit.
+/// `check` is the gate and answers whether the corpus is current; this answers
+/// WHAT moved, which is the question an author actually has once the gate is
+/// already red. It regenerates in memory exactly as `check` does, so it speaks
+/// about the tree in front of the author rather than about the last commit.
 pub fn manifest_diff_report() -> ContractResult<String> {
     let root = contract_path();
     let expected = generated_artifacts()?;
@@ -82,7 +93,10 @@ pub fn manifest_diff_report() -> ContractResult<String> {
 enum SchemaVerdict {
     /// Both manifests publish the same `schema_digest`.
     Unchanged(String),
-    Moved { from: String, to: String },
+    Moved {
+        from: String,
+        to: String,
+    },
     /// One side had no readable manifest, or no `schema_digest` in it.
     Unknown(String),
 }
@@ -130,6 +144,20 @@ impl ManifestDiff {
     }
 
     fn report(&self) -> String {
+        // Nothing moved: say that, and do not advertise a remedy for a
+        // manifest that has nothing to remedy. `Moved` cannot land here -
+        // `schema_digest` is itself a key - so this only ever short-circuits
+        // the reassuring arm.
+        if self.keys.is_empty() {
+            if let SchemaVerdict::Unchanged(digest) = &self.schema {
+                return format!(
+                    "No {MANIFEST} key moved: this tree regenerates the manifest the corpus \
+                     already publishes, schema_digest {digest} included. If the corpus is \
+                     nonetheless reported as drifted, the drift is in the corpus FILES - a \
+                     hand-edit or a partial commit - and regenerating restores them.\n"
+                );
+            }
+        }
         let mut out = match &self.schema {
             SchemaVerdict::Unchanged(digest) => format!(
                 "schema_digest is UNCHANGED ({digest}): no wire schema moved. This is a \
@@ -154,11 +182,7 @@ impl ManifestDiff {
             ),
         };
         if self.keys.is_empty() {
-            out.push_str(&format!(
-                "No {MANIFEST} key moved. If the corpus is nonetheless reported as drifted, that \
-                 drift is in the corpus files themselves - a hand-edit or a partial commit - not \
-                 a regeneration gap.\n"
-            ));
+            out.push_str(&format!("No {MANIFEST} key moved.\n"));
         } else {
             out.push_str(&format!("{MANIFEST} keys that moved:\n"));
             for (key, from, to) in &self.keys {
@@ -168,7 +192,6 @@ impl ManifestDiff {
                 }
             }
         }
-        out.push_str("Run `wcore-contract diff` to see this key diff without writing anything.\n");
         out
     }
 }
@@ -211,6 +234,7 @@ fn render(value: Option<&Value>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -224,7 +248,7 @@ mod tests {
 
     /// The rebase arm: only the source hash moved, so regenerating is safe and
     /// the message has to say so rather than leave the author hand-diffing
-    /// digests.
+    /// digests out of `wcore-contract digest`.
     #[test]
     fn an_unchanged_schema_digest_reports_a_source_hash_rebase() {
         let a = manifest("sha256:aaa", "sha256:111", json!({"x": "1"}));
@@ -257,14 +281,15 @@ mod tests {
         assert!(report.contains("wire_shapes: changed"), "{report}");
     }
 
-    /// Drift with an identical manifest is a hand-edited or partially
-    /// committed corpus, and reads as neither of the two above.
+    /// An identical manifest must not advertise a remedy for a manifest with
+    /// nothing to remedy, and must point at the corpus files instead.
     #[test]
     fn an_identical_manifest_points_at_the_corpus_files_instead() {
         let a = manifest("sha256:aaa", "sha256:111", json!({"x": "1"}));
         let report = ManifestDiff::of(Some(&a), Some(&a)).report();
         assert!(report.contains("No manifest.json key moved"), "{report}");
         assert!(report.contains("hand-edit or a partial commit"), "{report}");
+        assert!(!report.contains("source-hash rebase"), "{report}");
     }
 
     /// An unreadable side must fail loud rather than fall back to the
@@ -279,5 +304,73 @@ mod tests {
 
         let absent = ManifestDiff::of(None, Some(&a)).report();
         assert!(absent.contains("could not be compared"), "{absent}");
+    }
+
+    /// Lay this tree's own regeneration down as a corpus root.
+    ///
+    /// Deliberately NOT a copy of the checked-in corpus: that would make every
+    /// test here fail for a second, unrelated reason during the ordinary
+    /// window between editing a `SOURCE_INPUTS` file and regenerating, which
+    /// `desktop_contract_corpus.rs` already reports on its own. A regenerated
+    /// root is current by construction, so the only drift these tests see is
+    /// the one they introduce.
+    fn current_corpus(into: &Path) {
+        for (relative, bytes) in generated_artifacts().expect("regenerate the corpus") {
+            let target = into.join(&relative);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).expect("create the corpus directory");
+            }
+            fs::write(target, bytes).expect("write a corpus artifact");
+        }
+    }
+
+    fn perturb_manifest(root: &Path, key: &str, value: &str) {
+        let path = root.join(MANIFEST);
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&path).expect("read the copied manifest"))
+                .expect("the copied manifest is json");
+        manifest[key] = Value::String(value.to_owned());
+        fs::write(&path, serde_json::to_vec(&manifest).expect("reserialize")).expect("write");
+    }
+
+    /// Wiring, not formatting: the verdict has to reach the error
+    /// `check_contract` actually returns. The formatter being right is worth
+    /// nothing if the failure path never calls it.
+    #[test]
+    fn the_drift_error_carries_the_rebase_verdict() {
+        let tmp = TempDir::new().expect("corpus root dir");
+        current_corpus(tmp.path());
+        // The control: an unperturbed root reports CURRENT, so the drift below
+        // is the perturbation and not the harness.
+        check_contract_at(tmp.path()).expect("an unperturbed corpus root must be current");
+
+        perturb_manifest(tmp.path(), "source_inputs_digest", "sha256:deadbeef");
+        let error = check_contract_at(tmp.path())
+            .expect_err("a moved source_inputs_digest must be reported as drift")
+            .to_string();
+        assert!(error.contains("Desktop contract corpus drift"), "{error}");
+        assert!(error.contains("schema_digest is UNCHANGED"), "{error}");
+        assert!(error.contains("source-hash rebase"), "{error}");
+        assert!(
+            error.contains("source_inputs_digest: sha256:deadbeef -> sha256:"),
+            "{error}"
+        );
+    }
+
+    /// The same wiring for the arm where regeneration is the WRONG answer.
+    #[test]
+    fn the_drift_error_carries_the_schema_moved_verdict() {
+        let tmp = TempDir::new().expect("corpus root dir");
+        current_corpus(tmp.path());
+        perturb_manifest(tmp.path(), "schema_digest", "sha256:deadbeef");
+        let error = check_contract_at(tmp.path())
+            .expect_err("a moved schema_digest must be reported as drift")
+            .to_string();
+        assert!(
+            error.contains("schema_digest MOVED: sha256:deadbeef"),
+            "{error}"
+        );
+        assert!(error.contains("is NOT a safe remedy"), "{error}");
+        assert!(!error.contains("source-hash rebase"), "{error}");
     }
 }
