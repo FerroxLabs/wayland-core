@@ -397,14 +397,6 @@ pub enum ProtocolCommand {
     /// W7 S4: resume a session that emitted `ApprovalRequired`. The
     /// host echoes the `resume_token` from the corresponding event so
     /// the engine can route the decision to the right pending bridge.
-    ///
-    /// **F-005 (CRIT app-side gap — TODO Cluster L):** The engine correctly
-    /// waits for this command at `wcore-cli/src/main.rs` (ApprovalResume arm
-    /// in the command loop), but the Wayland app's `WCoreCommand` union in
-    /// `app/src/process/agent/wcore/protocol.ts` is missing this arm. Until
-    /// Cluster L adds it, HITL-gated tools started from the app hang
-    /// indefinitely because the host can never send the resume frame.
-    /// Engine contract is correct; the fix belongs entirely in app-side code.
     ApprovalResume {
         resume_token: String,
         approved: bool,
