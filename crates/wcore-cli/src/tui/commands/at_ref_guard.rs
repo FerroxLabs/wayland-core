@@ -50,13 +50,50 @@ const SECRET_SUFFIXES: &[&str] = &[
     "_ed25519",
 ];
 
-/// True if `path`'s file name matches the secret denylist. UX doc §3b:
-/// `@` "respects the gitignore + a denylist (`.env`, key files) — never
-/// silently attach a secret."
+/// True if `path` is on EITHER secret denylist. UX doc §3b: `@` "respects
+/// the gitignore + a denylist (`.env`, key files) — never silently attach a
+/// secret."
 ///
-/// Matching is on the file name only (case-insensitive) so the rule holds
-/// wherever the file lives in the tree.
+/// The union is the whole point. This module's file-name rules and
+/// [`wcore_tools::workspace_policy::is_secret_path_static`] — the list
+/// `Read`, `Grep` and `SecretDenyFs` enforce — had drifted apart in BOTH
+/// directions, so neither is a superset of the other: nineteen credential
+/// paths (`.git-credentials`, `.kube/config`, `.ssh/*`, `terraform.tfstate`,
+/// …) were denied to the file tools yet attachable by `@`, and ten
+/// (`.pgpass`, `.envrc`, `secrets.yml`, `*.jks`, …) only ever appeared here.
+/// Consulting one list would have re-opened whichever half it dropped.
+///
+/// Two rule shapes, so two matching scopes:
+///
+/// * this module's rules match the FILE NAME (case-insensitively), so they
+///   hold wherever the file lives;
+/// * the shared list matches separator-anchored PATH FRAGMENTS (`/.ssh/`,
+///   `/.git-credentials`), so a bare relative path misses every one of them.
+///   Fourteen of the nineteen need the anchoring below to match at all.
+///
+/// Anchoring uses a synthetic root rather than the process CWD: it only ever
+/// adds the leading separator the fragment rules need, and cannot import an
+/// ambient directory that would deny an unrelated file. Purely lexical — this
+/// runs inside the completion loop, on paths that need not exist.
 pub fn is_secret_path(path: &Path) -> bool {
+    if is_secret_file_name(path) {
+        return true;
+    }
+    let anchored;
+    let for_fragments = if path.is_absolute() {
+        path
+    } else {
+        anchored = Path::new(std::path::MAIN_SEPARATOR_STR).join(path);
+        anchored.as_path()
+    };
+    wcore_tools::workspace_policy::is_secret_path_static(for_fragments)
+}
+
+/// This module's own half of the union: the file-name rules
+/// ([`SECRET_FILENAMES`] / [`SECRET_PREFIXES`] / [`SECRET_SUFFIXES`]).
+/// Kept separate so the two halves stay individually readable — and so a
+/// change to one is visibly a change to one.
+fn is_secret_file_name(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
@@ -269,6 +306,90 @@ mod tests {
         assert!(!is_secret_path(Path::new("src/main.rs")));
         assert!(!is_secret_path(Path::new("README.md")));
         assert!(!is_secret_path(Path::new("environment.rs")));
+    }
+
+    /// Every path on which the `@`-attach denylist and the `wcore-tools`
+    /// workspace-policy denylist DIVERGED before they were unioned.
+    ///
+    /// Nineteen are carried only by `workspace_policy::is_secret_path_static`
+    /// — the list `Read`, `Grep` and `SecretDenyFs` already enforce — and were
+    /// invisible to this module's file-name rules. Ten are carried only by
+    /// this module's rules. Neither list is a superset of the other, which is
+    /// exactly why the guard has to consult BOTH.
+    ///
+    /// Every entry here is denied by exactly ONE of the two lists, so this
+    /// table goes red if EITHER of them loses an entry. No single-list test
+    /// can have that property, and its absence is what let the two lists
+    /// drift apart in the first place.
+    const DIVERGENT_SECRET_PATHS: &[&str] = &[
+        // ── carried only by wcore-tools' workspace policy ────────────────
+        ".git-credentials",
+        ".git/config",
+        ".git/hooks/pre-commit",
+        ".hg/hgrc",
+        ".dockercfg",
+        ".docker/config.json",
+        ".kube/config",
+        ".ssh/config",
+        ".ssh/known_hosts",
+        ".gnupg/secring.gpg",
+        ".aws/config",
+        ".azure/accessTokens.json",
+        ".gcloud/credentials.db",
+        "gradle.properties",
+        "terraform.tfstate",
+        "terraform.tfstate.backup",
+        "service-account.json",
+        "key.json",
+        "gcp-key.json",
+        // ── carried only by this module's file-name rules ────────────────
+        ".pgpass",
+        ".envrc",
+        "secrets.json",
+        "secrets.yaml",
+        "secrets.yml",
+        "credentials.json",
+        "release.keystore",
+        "signing.jks",
+        "deploy_rsa",
+        "deploy_ed25519",
+    ];
+
+    /// Ordinary files that must stay attachable. Without this control the
+    /// table above would be satisfied by a guard that denies everything.
+    /// `turnkey.json` / `monkey.json` additionally pin the `*-key.json`
+    /// rule's separator boundary.
+    const ATTACHABLE_PATHS: &[&str] = &[
+        "src/main.rs",
+        "README.md",
+        "Cargo.toml",
+        "environment.rs",
+        "config",
+        "notes/turnkey.json",
+        "docs/monkey.json",
+    ];
+
+    #[test]
+    fn the_attach_guard_denies_every_path_either_denylist_carries() {
+        let escaped: Vec<&str> = DIVERGENT_SECRET_PATHS
+            .iter()
+            .copied()
+            .filter(|p| !is_secret_path(Path::new(p)))
+            .collect();
+        assert!(
+            escaped.is_empty(),
+            "these secret paths would be attached to a prompt: {escaped:?}"
+        );
+
+        let refused: Vec<&str> = ATTACHABLE_PATHS
+            .iter()
+            .copied()
+            .filter(|p| is_secret_path(Path::new(p)))
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "ordinary files must stay attachable, but these were denied: {refused:?}"
+        );
     }
 
     // ── gitignore ────────────────────────────────────────────────────────

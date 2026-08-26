@@ -27774,6 +27774,7 @@ mod audit_2026_05_22_tests {
     ///
     /// Runs on a paused clock, so neither arm costs real time.
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
     async fn an_unserved_outage_is_bounded_by_the_count_and_by_the_window() {
         let slow_step = wcore_providers::http_client::READ_TIMEOUT;
         let (fast_sends, fast_elapsed) = unserved_outage(std::time::Duration::ZERO).await;
@@ -27895,6 +27896,7 @@ mod audit_2026_05_22_tests {
     /// same shape misclassified as SERVED would spend the whole count and
     /// send more. The arms differ, so the assertion can fail.
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
     async fn an_http_529_outage_is_classified_unserved_and_capped_by_the_window() {
         struct Overloaded {
             calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -27992,6 +27994,7 @@ mod audit_2026_05_22_tests {
     /// saying "some requests" would satisfy a weaker test and tell the user
     /// nothing they could act on.
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
     async fn a_turn_reports_how_many_requests_never_returned_a_response() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (mut engine, events) = engine_and_events(Arc::new(SlowStreamErrProvider {
@@ -34647,6 +34650,7 @@ mod retry_wedge_protection_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn failing_stream_with_failed_tool_round_stubs_body_and_stops_at_progress_gate() {
         let huge_error = format!("CONTAMINATED-MARKER {}", "x".repeat(50_000));
         let provider = Arc::new(RecordingProvider::new(vec![
@@ -35845,7 +35849,12 @@ mod stream_retry_budget_tests {
         for (requested, expected_sends) in [("0", 1usize), ("1", 2usize)] {
             let prior = std::env::var(super::MAX_STREAM_RETRIES_ENV).ok();
             // SAFETY: same contract as the clamp test above — every test in
-            // this module that reads the budget is `#[serial_test::serial]`.
+            // this module that READS the budget is `#[serial_test::serial]`,
+            // not just the ones that write it. Six readers were untagged when
+            // this comment first claimed otherwise, and `serial_test` does not
+            // exclude an untagged test from running beside a tagged one: the
+            // lock binds only the tests that take it, so an untagged reader
+            // shares the process with a tagged writer and sees its value.
             unsafe {
                 std::env::set_var(super::MAX_STREAM_RETRIES_ENV, requested);
             }
@@ -36180,6 +36189,7 @@ mod stream_retry_budget_tests {
     /// user was told the wrong cause for the stop. At the shipped retry
     /// budget one failed turn eats 70 % of a 1 000 000-token session.
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
     async fn a_503_releases_its_reservation_instead_of_being_billed_for_it() {
         let (sends, surface, charged) = run_under_output_cap(api_503, 100).await;
         assert_eq!(
@@ -36432,6 +36442,7 @@ mod stream_retry_budget_tests {
     /// Without this, a notice that only ever printed a hard-coded string
     /// would satisfy the 7 s assertion.
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
     async fn a_sub_second_wait_is_named_in_milliseconds() {
         let events = wcore_providers::backoff::scope_jitter(0.0, async {
             let sends = Arc::new(std::sync::Mutex::new(Vec::new()));

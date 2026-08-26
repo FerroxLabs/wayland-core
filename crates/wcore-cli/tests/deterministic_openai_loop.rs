@@ -227,6 +227,7 @@ async fn packaged_core_recovers_after_a_real_read_timeout() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn packaged_core_exhausts_a_real_read_timeout() {
     // Budget STATED, not inherited. This scenario scripts exactly three
     // stalling provider steps and asserts the run gives up; the shipped
