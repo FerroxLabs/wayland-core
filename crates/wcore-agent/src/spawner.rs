@@ -585,7 +585,11 @@ fn retained_workspace_allocation_count(
 /// found nothing", so it reasoned from false info. Instead derive `is_error`
 /// from the finish reason, and when the terminated body is empty synthesize a
 /// cause line so the failure is legible rather than a silent empty success.
-fn subagent_ok_result(name: String, result: crate::engine::AgentResult) -> SubAgentResult {
+fn subagent_ok_result(
+    name: String,
+    result: crate::engine::AgentResult,
+    diagnostic: Option<String>,
+) -> SubAgentResult {
     // A clean EndTurn is `Stop`. `MaxTurns`/`Error` are unambiguous abnormal
     // terminations. `Length` is ambiguous: a run aborted at the context/budget
     // ceiling returns `Length` with EMPTY text (a real failure), but a complete
@@ -598,13 +602,29 @@ fn subagent_ok_result(name: String, result: crate::engine::AgentResult) -> SubAg
         FinishReason::Length => result.text.trim().is_empty(),
         FinishReason::MaxTurns | FinishReason::Error => true,
     };
-    let text = if is_error && result.text.trim().is_empty() {
-        format!(
-            "[sub-agent terminated without completing its task: {}]",
-            describe_finish_reason(result.finish_reason)
-        )
-    } else {
-        result.text
+    // #1140 — a child that produced only reasoning ends here: `Stop`, empty
+    // text, `is_error == false`, and the parent is handed a blank success. The
+    // engine DID say what happened ("The model produced only reasoning — no
+    // answer text and no tool calls…"), into the child's own sink. Carry that
+    // text out whenever the body is empty, whichever way the run graded: an
+    // empty answer with a known cause is a failure with a cause, not a silence.
+    let empty_body = result.text.trim().is_empty();
+    let (is_error, text) = match (empty_body, diagnostic) {
+        (true, Some(detail)) => (
+            true,
+            format!(
+                "[sub-agent produced no answer: {}]\n{detail}",
+                describe_finish_reason(result.finish_reason)
+            ),
+        ),
+        (true, None) if is_error => (
+            is_error,
+            format!(
+                "[sub-agent terminated without completing its task: {}]",
+                describe_finish_reason(result.finish_reason)
+            ),
+        ),
+        _ => (is_error, result.text),
     };
     SubAgentResult {
         name,
@@ -2383,6 +2403,16 @@ impl AgentSpawner {
         {
             return SubAgentResult::error(&launch.request.name, &error);
         }
+        // #1140 — the child's real diagnostic goes to the CHILD's sink
+        // (`NullSink` here, or a `ChannelSink` feeding `--json-stream`), never
+        // to the parent's tool result. So a child that failed for a knowable
+        // reason — "The model produced only reasoning…", an exhausted provider,
+        // a budget cap — reached the parent LLM as a generic termination line,
+        // and the parent reasoned from no information at all. Tap it here, at
+        // the one seam that owns the child engine, and put the text in the
+        // result below.
+        let child_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        engine.set_error_tap(std::sync::Arc::clone(&child_error));
         engine.set_egress_policy(self.egress_policy.clone());
         // #863 F2 — an Anvil child is a builder fork of a CLIENT-side climb, so
         // every turn it takes is mid-loop material. Declare the loop ownership
@@ -2470,6 +2500,10 @@ impl AgentSpawner {
         self.publish_first_message(&launch.request.name, &launch.request.prompt);
         let mut guard = self.lifecycle_guard(&launch.request.name);
         let result = engine.run(&launch.request.prompt, "").await;
+        let diagnostic = match child_error.lock() {
+            Ok(slot) => slot.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
         let out = match result {
             Ok(result) => {
                 self.publish_completed(
@@ -2478,16 +2512,26 @@ impl AgentSpawner {
                     result.usage.output_tokens,
                 );
                 guard.outcome = TerminalOutcome::Published;
-                subagent_ok_result(launch.request.name, result)
+                subagent_ok_result(launch.request.name, result, diagnostic)
             }
             Err(error) => {
                 self.publish_errored(&launch.request.name, &error.to_string());
                 guard.outcome = TerminalOutcome::Published;
+                // #1140 — the child ran. It may have taken several turns and
+                // burned real tokens before failing, and `TokenUsage::default()`
+                // here reported that spend to the parent (and to every cost
+                // surface downstream) as zero. Read what the engine actually
+                // accumulated instead; a run that failed on its first request
+                // still reports the honest zero.
+                let (usage, _) = engine.usage_snapshot();
                 SubAgentResult {
                     name: launch.request.name,
-                    text: format!("Sub-agent error: {error}"),
-                    usage: TokenUsage::default(),
-                    turns: 0,
+                    text: match diagnostic {
+                        Some(detail) => format!("Sub-agent error: {error}\n{detail}"),
+                        None => format!("Sub-agent error: {error}"),
+                    },
+                    usage,
+                    turns: engine.run_turns(),
                     is_error: true,
                 }
             }
@@ -6295,7 +6339,11 @@ mod fail_loud_tests {
     fn terminated_empty_run_is_error_with_synthesized_cause() {
         // #661: a sub-agent that hit the turn cap with no output must be an
         // error carrying a legible cause, not a silent empty success.
-        let out = subagent_ok_result("child".into(), agent_result("", FinishReason::MaxTurns));
+        let out = subagent_ok_result(
+            "child".into(),
+            agent_result("", FinishReason::MaxTurns),
+            None,
+        );
         assert!(out.is_error, "a non-Stop finish must be flagged is_error");
         assert!(
             out.text.contains("terminated") && out.text.contains("turn limit"),
@@ -6312,6 +6360,7 @@ mod fail_loud_tests {
         let out = subagent_ok_result(
             "child".into(),
             agent_result("the answer", FinishReason::Length),
+            None,
         );
         assert!(!out.is_error, "a non-empty Length result must stay usable");
         assert_eq!(out.text, "the answer");
@@ -6321,7 +6370,7 @@ mod fail_loud_tests {
     fn empty_length_termination_is_error_with_cause() {
         // An EMPTY Length (the context/budget-ceiling abort path) produced no
         // answer → error with a synthesized cause, not a silent empty success.
-        let out = subagent_ok_result("child".into(), agent_result("", FinishReason::Length));
+        let out = subagent_ok_result("child".into(), agent_result("", FinishReason::Length), None);
         assert!(
             out.is_error,
             "an empty Length termination is a real failure"
@@ -6336,7 +6385,11 @@ mod fail_loud_tests {
     #[test]
     fn clean_completion_is_success() {
         // A clean EndTurn (FinishReason::Stop) is the only unconditional success.
-        let out = subagent_ok_result("child".into(), agent_result("done", FinishReason::Stop));
+        let out = subagent_ok_result(
+            "child".into(),
+            agent_result("done", FinishReason::Stop),
+            None,
+        );
         assert!(!out.is_error);
         assert_eq!(out.text, "done");
     }
@@ -6352,7 +6405,11 @@ mod fail_loud_tests {
             stream_tx,
             terminal_tx,
         );
-        let result = subagent_ok_result("scan".into(), agent_result("", FinishReason::MaxTurns));
+        let result = subagent_ok_result(
+            "scan".into(),
+            agent_result("", FinishReason::MaxTurns),
+            None,
+        );
 
         relay_subagent_terminal(Some(&sink), &result);
 

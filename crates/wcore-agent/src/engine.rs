@@ -3796,6 +3796,24 @@ pub struct AgentEngine {
     /// `stream_end` protocol event's `usage_delta` sibling field; never
     /// persisted (a resumed session starts with a fresh zero delta).
     run_usage: TokenUsage,
+    /// #1140 — provider round-trips this run has actually completed.
+    ///
+    /// `AgentResult.turns` reports this on the success path, but a run that
+    /// returns `Err` carries no `AgentResult` at all, so a caller (the spawner,
+    /// reporting a failed child to its parent) had nothing to read and printed
+    /// `turns: 0` over work that really happened.
+    run_turns: usize,
+    /// #1140 — optional tap recording the last error text this engine emitted.
+    ///
+    /// A sub-agent's `OutputSink` is the CHILD's sink (`NullSink`, or a
+    /// `ChannelSink` feeding `--json-stream`), never the parent's tool result.
+    /// So the engine's real diagnostic — "The model produced only reasoning…",
+    /// the exhausted-provider remedy, the budget-cap line — was emitted into a
+    /// channel the parent LLM cannot see, and the parent was handed a generic
+    /// "terminated without completing its task" instead. The tap gives the
+    /// spawner a way to read that text back and put the real cause in the tool
+    /// result. `None` on a top-level engine, whose sink IS the user's.
+    error_tap: Option<Arc<std::sync::Mutex<Option<String>>>>,
     thinking: Option<wcore_types::llm::ThinkingConfig>,
     /// Resolved provider compat settings (for capability validation)
     compat: wcore_config::compat::ProviderCompat,
@@ -4542,6 +4560,8 @@ impl AgentEngine {
             temperature: config.temperature,
             max_turns: config.max_turns,
             total_usage: TokenUsage::default(),
+            run_turns: 0,
+            error_tap: None,
             run_usage: TokenUsage::default(),
             thinking: config.thinking,
             compat: config.compat.clone(),
@@ -4823,6 +4843,8 @@ impl AgentEngine {
             total_usage: session.total_usage.clone(),
             // CORE-2: cumulative usage carries over from the persisted
             // session; the per-run delta always starts fresh.
+            run_turns: 0,
+            error_tap: None,
             run_usage: TokenUsage::default(),
             thinking: config.thinking,
             compat: config.compat.clone(),
@@ -5339,6 +5361,38 @@ impl AgentEngine {
         self.clear_file_cache();
         self.output.bind_session_id(&session_id);
         Ok(())
+    }
+
+    /// #1140 — install a tap that records the last error this engine emits.
+    ///
+    /// Set by the spawner on a CHILD engine so the parent can report the real
+    /// cause instead of a generic termination line. Nothing else reads it, and
+    /// a top-level engine leaves it `None`.
+    pub fn set_error_tap(&mut self, tap: Arc<std::sync::Mutex<Option<String>>>) {
+        self.error_tap = Some(tap);
+    }
+
+    /// #1140 — provider round-trips completed by the current (or last) run.
+    ///
+    /// Readable after `run()` returns `Err`, which is the whole point: the
+    /// success path already reports `AgentResult.turns`.
+    pub fn run_turns(&self) -> usize {
+        self.run_turns
+    }
+
+    /// #1140 — the single funnel for engine-emitted errors.
+    ///
+    /// Every `emit_error` in this file goes through here so the tap cannot be
+    /// bypassed by a new call site. Forwards verbatim to the sink; the tap is
+    /// a side-channel, not a filter.
+    fn emit_error(&self, msg: &str, retryable: bool) {
+        if let Some(tap) = self.error_tap.as_ref() {
+            match tap.lock() {
+                Ok(mut slot) => *slot = Some(msg.to_string()),
+                Err(poisoned) => *poisoned.into_inner() = Some(msg.to_string()),
+            }
+        }
+        self.output.emit_error(msg, retryable);
     }
 
     /// CORE-2 — snapshot of the engine's usage counters:
@@ -11547,6 +11601,16 @@ impl AgentEngine {
             .map_or_else(TokenUsage::default, |checkpoint| {
                 checkpoint.run_usage.clone()
             });
+        // #1140: the round-trip counter and the error tap are run-scoped for
+        // the same reason — a caller reading them after this run must not be
+        // handed the PREVIOUS run's turn count or the previous run's error.
+        self.run_turns = 0;
+        if let Some(tap) = self.error_tap.as_ref() {
+            match tap.lock() {
+                Ok(mut slot) => *slot = None,
+                Err(poisoned) => *poisoned.into_inner() = None,
+            }
+        }
         // #403: clear tool circuit breakers at the start of each user turn.
         // A transient burst of `web`/`WebFetch` failures in one turn opened the
         // breaker and, with no per-turn reset, left every web tool short-circuited
@@ -12449,7 +12513,7 @@ impl AgentEngine {
                              (smaller) session is still resumable; reopen it or \
                              start a new chat."
                                 };
-                                self.output.emit_error(
+                                self.emit_error(
                                     &format!(
                                         "Run stopped: estimated request size ({sent} tokens) \
                                  reached the context-window ceiling ({ceiling}) for model \
@@ -12782,7 +12846,7 @@ impl AgentEngine {
                             })
                             .collect::<Vec<_>>()
                             .join(", ");
-                        self.output.emit_error(
+                        self.emit_error(
                             &format!(
                                 "Run stopped: the recovered turn had been cut off by the \
                                  model's output token limit while writing a tool call \
@@ -12855,7 +12919,7 @@ impl AgentEngine {
                         &request.tools,
                     ) == wedge
                 {
-                    self.output.emit_error(
+                    self.emit_error(
                         &format!(
                             "Run stopped: the conversation has exceeded the context \
                              window of model '{}' (a previous attempt ended with \
@@ -12916,7 +12980,7 @@ impl AgentEngine {
                             &format!("{reservation_provider}/{effective_model}"),
                             "a provider/model with known pricing",
                         );
-                        self.output.emit_error(
+                        self.emit_error(
                             &format!(
                                 "Provider call not started: pricing is unavailable for \
                                  {reservation_provider}/{effective_model}, so the explicit or \
@@ -12977,7 +13041,7 @@ impl AgentEngine {
                             observed,
                         }) => {
                             self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                            self.output.emit_error(
+                            self.emit_error(
                                 &format!(
                                     "Provider call not started: budget cap '{kind}' would be exceeded \
                                      (limit {limit}, reserved total {observed}). Continue with \
@@ -13012,7 +13076,7 @@ impl AgentEngine {
                             observed,
                         }) => {
                             self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                            self.output.emit_error(
+                            self.emit_error(
                                 &format!(
                                     "Provider call not started: budget cap '{kind}' would be exceeded \
                                      (limit {limit}, reserved total {observed}). Continue with \
@@ -13335,7 +13399,7 @@ impl AgentEngine {
                             ),
                         ) => {
                             self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                            self.output.emit_error(
+                            self.emit_error(
                                 &format!(
                                     "Configured provider fallback not started: budget cap \
                                      '{kind}' would be exceeded (limit {limit}, reserved total \
@@ -13355,7 +13419,7 @@ impl AgentEngine {
                                 &format!("{provider}/{model}"),
                                 "a provider/model with known pricing",
                             );
-                            self.output.emit_error(
+                            self.emit_error(
                                 &format!(
                                     "Configured provider fallback not started: pricing is \
                                      unavailable for {provider}/{model}, so the explicit or \
@@ -13438,7 +13502,7 @@ impl AgentEngine {
                                     },
                                 ) => {
                                     self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                                    self.output.emit_error(
+                                    self.emit_error(
                                         &format!(
                                             "Run stopped after an unknown provider outcome exhausted \
                                              budget cap '{kind}' (limit {limit}, observed {observed})."
@@ -13640,7 +13704,7 @@ impl AgentEngine {
                                  not re-sent, because a second send would be identical.",
                             );
                         }
-                        self.output.emit_error(&surfaced, false);
+                        self.emit_error(&surfaced, false);
                         // #923(2) — fail the TURN, not the session. The dispatch
                         // left this turn's provider attempt nonterminal, and the
                         // reducer will not let a turn holding one take ANY
@@ -13945,7 +14009,7 @@ impl AgentEngine {
                                 },
                             ) => {
                                 self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                                self.output.emit_error(
+                                self.emit_error(
                                     &format!(
                                         "Run stopped after a failed provider attempt exhausted budget \
                                          cap '{kind}' (limit {limit}, observed {observed})."
@@ -14112,7 +14176,7 @@ impl AgentEngine {
                                  session is still resumable; reopen it or start a new \
                                  session."
                             };
-                            self.output.emit_error(
+                            self.emit_error(
                                 &format!(
                                     "Run stopped: the conversation has exceeded the context \
                                      window of model '{}' (finish_reason=length at \
@@ -14182,7 +14246,7 @@ impl AgentEngine {
                             self.midflight_monitor.record_stream_attempt(false, false);
                             continue 'stream;
                         }
-                        self.output.emit_error(
+                        self.emit_error(
                             &format!(
                                 "Run stopped: the model hit the output token limit while \
                                  writing a tool call ({cut}), and again on the retry. The \
@@ -14404,7 +14468,7 @@ impl AgentEngine {
                                 MonitorDirective::Stop,
                                 MonitorReason::OutputStall,
                             );
-                            self.output.emit_error(&gate_msg, false);
+                            self.emit_error(&gate_msg, false);
                             self.emit_midflight_monitor_occurrence();
                             return Err(AgentError::ApiError(gate_msg));
                         }
@@ -14534,6 +14598,9 @@ impl AgentEngine {
             self.total_usage.cache_read_tokens += turn_usage.cache_read_tokens;
 
             // CORE-2: mirror into the run-scoped delta (reset per run()).
+            // #1140: and the round-trip count alongside it, so a run that ends
+            // in `Err` can still say how many turns it took.
+            self.run_turns = turn.saturating_add(1);
             self.run_usage.input_tokens += turn_usage.input_tokens;
             self.run_usage.output_tokens += turn_usage.output_tokens;
             self.run_usage.cache_creation_tokens += turn_usage.cache_creation_tokens;
@@ -14764,7 +14831,7 @@ impl AgentEngine {
                      The endpoint or model may be incompatible (verify it speaks the OpenAI \
                      chat-completions streaming format and that the model name is valid)."
                 };
-                self.output.emit_error(message, false);
+                self.emit_error(message, false);
             }
 
             // …and do not COMMIT the empty turn either. The error above is the
@@ -14814,7 +14881,7 @@ impl AgentEngine {
                 };
                 self.repair_orphaned_tool_use();
                 self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                self.output.emit_error(
+                self.emit_error(
                     &format!(
                         "Run stopped: budget cap '{kind}' exceeded \
                      (limit {limit}, observed {observed}). The session has reached \
@@ -15487,7 +15554,7 @@ impl AgentEngine {
             // hence `turn + 1`).
             if let Some((failing_tool, count)) = failure_break {
                 self.repair_orphaned_tool_use();
-                self.output.emit_error(
+                self.emit_error(
                     &format!(
                         "Run stopped: tool calls failed {count} times in a row (most \
                          recently `{failing_tool}`). Retrying with new guesses is burning \
@@ -15516,7 +15583,7 @@ impl AgentEngine {
             // yet, hence `turn + 1`).
             if let Some((looping_tool, count)) = loop_break {
                 self.repair_orphaned_tool_use();
-                self.output.emit_error(
+                self.emit_error(
                     &format!(
                         "Run stopped: the `{looping_tool}` tool was called with the same \
                          arguments and produced the same result {count} times in a row — \
@@ -15549,7 +15616,7 @@ impl AgentEngine {
                         MonitorDirective::Stop,
                         MonitorReason::RepeatedError,
                     );
-                    self.output.emit_error(
+                    self.emit_error(
                         "Run stopped: the same underlying tool error repeated after the \
                          mid-flight monitor required a strategy change. Continue with a \
                          materially different approach or explain the blocker.",
@@ -15574,7 +15641,7 @@ impl AgentEngine {
                         MonitorDirective::Stop,
                         MonitorReason::RepeatedToolRoute,
                     );
-                    self.output.emit_error(
+                    self.emit_error(
                         "Run stopped: the same normalized tool route repeated after the \
                          mid-flight monitor required a strategy change. Continue with a \
                          materially different tool sequence or explain the blocker.",
@@ -15594,7 +15661,7 @@ impl AgentEngine {
                         MonitorDirective::Stop,
                         MonitorReason::BudgetExceeded,
                     );
-                    self.output.emit_error(
+                    self.emit_error(
                         &format!(
                             "Run stopped: execution budget cap '{reason}' exceeded \
                              (limit {limit}, observed {observed})."
@@ -19688,6 +19755,8 @@ mod set_config_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -21561,6 +21630,8 @@ mod phase6_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -21885,6 +21956,8 @@ mod compact_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -23593,6 +23666,8 @@ mod plan_mode_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -24050,6 +24125,8 @@ mod hook_integration_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -25218,6 +25295,8 @@ mod approval_bridge_engine_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -26286,6 +26365,8 @@ mod user_model_writeback_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
