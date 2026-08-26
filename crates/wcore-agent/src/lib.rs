@@ -101,7 +101,12 @@ pub mod mcp_curator;
 pub mod mcp_lifecycle;
 pub mod orchestration;
 pub mod output;
-mod output_redaction;
+// #1138 - `pub` because the active-token scrub is a PROCESS-WIDE chokepoint and
+// `wcore-cli`'s TUI `ChannelSink` is the second `OutputSink` implementation
+// that has to pass render content through it. Keeping it crate-private would
+// have meant the TUI sink emitting unscrubbed, which is the #584 gap one sink
+// over.
+pub mod output_redaction;
 pub mod plan;
 pub mod plugins;
 pub mod provider_recovery;
