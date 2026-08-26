@@ -51,10 +51,33 @@ const DIFF_RESEND_MAX_RATIO: f64 = 0.6;
 /// user who legitimately needs a bigger file is not blocked — they are routed
 /// to a streaming tool by the refusal below.
 ///
-/// Residual, out of scope here: this is a stat-based bound, so a pseudo-file
-/// that reports length 0 and then streams unbounded content (procfs/sysfs)
-/// still passes it. Closing that needs a capped `read_to_end`, which the
-/// `VirtualFs::read` signature does not currently allow.
+/// This bound is stat-based, which looks like it should be defeated by a
+/// source that under-reports its length — and the premise is true:
+/// `/dev/zero` and `/proc/self/maps` both stat as 0 bytes (MEASURED). The
+/// conclusion does not follow, because none of them reaches this guard.
+/// `validate_user_path` runs first at BOTH entry points and refuses them:
+/// its file-type rule is an ALLOWLIST (`!is_file() && !is_dir()` -> reject,
+/// #644) that excludes FIFOs, devices and sockets, and `is_denied_proc_path`
+/// excludes the per-process procfs subtree and `/proc/kcore` by location.
+/// Both predate this bound and both were written for this exact hazard. The
+/// guard those rules leave for this one is therefore honest regular files,
+/// whose length can be trusted at the moment it is read.
+///
+/// `tests/wl947_pseudo_file_refusal_test.rs` holds that closed, because it is
+/// the refusals — not this constant — that make a stat-based bound sufficient.
+///
+/// The one residual that IS reachable: a regular file APPENDED to between the
+/// stat and the read. `fs::read` / `VirtualFs::read` both read to EOF, so a
+/// file growing faster than it is consumed can exceed this limit, and neither
+/// entry point can currently stop it — the bound would have to move onto the
+/// stream, and `VirtualFs::read` cannot express one. It is left open
+/// deliberately rather than half-closed: fixing only the legacy `execute`
+/// path would change nothing a user meets, because the engine dispatches
+/// through `execute_with_ctx` (`ToolRegistry::dispatch_with_ctx`). Close it
+/// by adding a bounded read to the `VirtualFs` trait, forwarded through
+/// `SandboxedFs` / `SecretDenyFs` / `RepoControlDenyFs` the way `read_pinned`
+/// already is; trigger to do that work is the first report of a Read against
+/// an actively-written log.
 pub const READ_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 /// Refusal for a file past [`READ_MAX_BYTES`].
