@@ -12,7 +12,7 @@ mod observation;
 mod spec;
 
 pub use canonical::{canonical_json, digest_named_bytes};
-pub use check::check_contract;
+pub use check::{check_contract, manifest_diff_report};
 pub use generate::{
     CONTRACT_MAJOR, CONTRACT_MINOR, CONTRACT_NAME, CONTRACT_ROOT, GENERATOR_VERSION,
     WireShapeBaseline, enforce_wire_shape_version, generated_artifacts, manifest_digests,

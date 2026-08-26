@@ -122,6 +122,48 @@ fn child_tool_registries(mock: &MockServer, rt: &tokio::runtime::Runtime) -> Vec
     })
 }
 
+/// How long to keep looking for the delegated child's provider request after
+/// the parent's stream has ended.
+const CHILD_TURN_DEADLINE: Duration = Duration::from_secs(30);
+
+/// [`child_tool_registries`], polled until a child provider turn has been
+/// served or `within` elapses.
+///
+/// # Why a poll, and not the bare read this replaced
+///
+/// The delegation itself is synchronous end to end — `DelegateTool::execute`
+/// `join_all`s its children, `spawn_durable` awaits `engine.run`, and the ACP
+/// `done` frame is only emitted after the whole parent turn returns — so on a
+/// CLEAN end of stream the child's request is already recorded and the first
+/// poll returns it.
+///
+/// The hazard is that `AcpServer::post` cannot tell a clean end of stream from
+/// a socket read timeout: it ends on `let _ = stream.read_to_end(..)` and
+/// returns whatever accumulated. Its 180s read budget is shorter than the 600s
+/// `ToolCategory::Exec` ceiling the `Delegate` dispatch runs under, so on a
+/// loaded runner the read can end while the child is still mid-turn. The bare
+/// read then saw an empty registry and fired the anti-vacuity guard below —
+/// correctly reporting that the run measured nothing, but for a scheduling
+/// reason rather than a product one.
+///
+/// The deadline is what keeps the guard's teeth. When no child turn is ever
+/// served this still returns empty, and the caller's assertion fails with its
+/// own message.
+fn await_child_tool_registries(
+    mock: &MockServer,
+    rt: &tokio::runtime::Runtime,
+    within: Duration,
+) -> Vec<Vec<String>> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let registries = child_tool_registries(mock, rt);
+        if !registries.is_empty() || std::time::Instant::now() >= deadline {
+            return registries;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// The persona id, and the two tools it is allowed. `Bash` is deliberately
 /// absent: that is what makes the parent narrower than the child's request.
 const PERSONA: &str = "narrowed";
@@ -444,7 +486,7 @@ fn f21_02_01_delegated_child_cannot_obtain_a_tool_the_parent_lacks() {
     // Anti-vacuity: a child must have EXISTED and taken its own provider turn,
     // or "the child had no Bash" is a statement about the harness rather than
     // about the product.
-    let registries = child_tool_registries(&mock, &rt);
+    let registries = await_child_tool_registries(&mock, &rt, CHILD_TURN_DEADLINE);
     assert!(
         !registries.is_empty(),
         "no delegated child provider turn was served, so this run measures nothing about child \
@@ -487,7 +529,7 @@ fn f21_02_01_control_unnarrowed_parent_still_delegates_bash() {
     let server = spawn_acp(home.path(), &workspace);
     let transcript = drive_one_turn(&server, None);
 
-    let registries = child_tool_registries(&mock, &rt);
+    let registries = await_child_tool_registries(&mock, &rt, CHILD_TURN_DEADLINE);
     let granted = registries
         .iter()
         .any(|names| names.iter().any(|n| n == "Bash"));
