@@ -2788,6 +2788,7 @@ fn payload_to_sub_agent_result(v: serde_json::Value) -> SubAgentResult {
             .get("cache_read_tokens")
             .and_then(|n| n.as_u64())
             .unwrap_or(0),
+        ..Default::default()
     };
     let turns = v.get("turns").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
     let is_error = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(true);
@@ -4269,6 +4270,7 @@ mod production_durable_spawn_tests {
                     output_tokens: 4,
                     cache_creation_tokens: 0,
                     cache_read_tokens: 0,
+                    ..Default::default()
                 },
             })
             .await

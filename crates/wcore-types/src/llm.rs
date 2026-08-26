@@ -373,6 +373,7 @@ mod tests {
             output_tokens: 20,
             cache_creation_tokens: 0,
             cache_read_tokens: 5,
+            ..Default::default()
         };
         let event = LlmEvent::Done {
             stop_reason: StopReason::EndTurn,

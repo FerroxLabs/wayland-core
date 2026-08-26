@@ -103,6 +103,7 @@ async fn agent_emits_one_turn_trace_per_turn() {
                 output_tokens: 30,
                 cache_creation_tokens: 500,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -116,6 +117,7 @@ async fn agent_emits_one_turn_trace_per_turn() {
                 output_tokens: 5,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 900, // 75% of 1,200 total input
+                ..Default::default()
             },
         },
     ];
@@ -198,6 +200,7 @@ async fn cache_hit_rate_exceeds_threshold_from_turn_two() {
                 output_tokens: 20,
                 cache_creation_tokens: 0,
                 cache_read_tokens: cache_read,
+                ..Default::default()
             },
         }
     }

@@ -738,7 +738,34 @@ struct ResolvedTurnCost {
     bounded: bool,
 }
 
+/// #1139 — accept a provider-reported per-call USD figure, or reject it.
+///
+/// A non-finite or negative number is not a cost; rejecting it leaves the
+/// caller on its catalog/compat resolution rather than propagating garbage.
+/// `None` in means `None` out: the provider said nothing, which is "unknown",
+/// and must never be turned into a `0.0` that reads as "free".
+fn provider_reported_usd(reported: Option<f64>) -> Option<f64> {
+    reported.filter(|usd| usd.is_finite() && *usd >= 0.0)
+}
+
 impl ResolvedTurnCost {
+    /// #1139 — let a figure the PROVIDER reported outrank this resolution.
+    ///
+    /// A catalog row is our model of what a call costs; `usage.cost_usd` is
+    /// what the account was billed for the call that actually happened, so it
+    /// wins — and it is `priced`, because it is spend rather than an estimate
+    /// of spend. Absent (or invalid) provider figure leaves `self` untouched.
+    fn with_provider_reported(self, reported: Option<f64>) -> Self {
+        match provider_reported_usd(reported) {
+            Some(usd) => Self {
+                usd,
+                priced: true,
+                bounded: true,
+            },
+            None => self,
+        }
+    }
+
     /// The figure that may be shown to the user as spend.
     ///
     /// A conservative preset ceiling is not spend, so it reports zero
@@ -13882,6 +13909,10 @@ impl AgentEngine {
                                 attempt_usage.cache_creation_tokens,
                                 &self.compat,
                             )
+                            // #1139: settle the reservation at the figure the
+                            // provider reported, when it reported one — that is
+                            // the billed amount this envelope is tracking.
+                            .with_provider_reported(attempt_usage.reported_cost_usd)
                             .usd;
                             (input_tokens, attempt_usage.output_tokens, cost)
                         } else {
@@ -14819,7 +14850,10 @@ impl AgentEngine {
                     turn_usage.cache_read_tokens,
                     turn_usage.cache_creation_tokens,
                     &self.compat,
-                );
+                )
+                // #1139: a figure the provider reported for THIS call outranks the
+                // catalog estimate — it is spend, not a model of spend.
+                .with_provider_reported(turn_usage.reported_cost_usd);
                 let trace = TurnTrace {
                     turn,
                     // Finding #174: attribute to the model ACTUALLY dispatched
@@ -15589,7 +15623,10 @@ impl AgentEngine {
                 turn_usage.cache_read_tokens,
                 turn_usage.cache_creation_tokens,
                 &self.compat,
-            );
+            )
+            // #1139: a figure the provider reported for THIS call outranks the
+            // catalog estimate — it is spend, not a model of spend.
+            .with_provider_reported(turn_usage.reported_cost_usd);
             let trace = TurnTrace {
                 turn,
                 // Finding #174: attribute to the dispatched model (see the
@@ -16578,13 +16615,20 @@ impl AgentEngine {
             turn_usage.cache_read_tokens,
             turn_usage.cache_creation_tokens,
             &self.compat,
-        );
+        )
+        .with_provider_reported(turn_usage.reported_cost_usd);
         // `resolve_turn_cost` reports `priced = true` for BOTH an exact catalog
         // row and the `ProviderCompat` family fallback. Ask the catalog
         // separately so the ledger can tell an operator which one they are
         // looking at — measured: model `test-model` came back `priced = true`
         // at Anthropic's generic rate, which is an estimate, not spend.
-        let cost_source = if pricing_turn_cost_with_cache(
+        let cost_source = if provider_reported_usd(turn_usage.reported_cost_usd).is_some() {
+            // #1139: the provider billed this call and told us the number. That
+            // is the strongest provenance there is, and it was being discarded
+            // in favour of a catalog estimate — or, with no catalog row, in
+            // favour of `$0.000000`.
+            CostSource::ProviderReported
+        } else if pricing_turn_cost_with_cache(
             &provider,
             effective_model,
             turn_usage.input_tokens,
@@ -28592,6 +28636,7 @@ mod audit_2026_05_22_tests {
                 output_tokens: 5,
                 cache_creation_tokens: 3,
                 cache_read_tokens: 7,
+                ..Default::default()
             }),
         ]]));
         let mut engine = engine_with(provider);
@@ -29270,6 +29315,7 @@ mod audit_2026_05_22_tests {
             output_tokens: output,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
+            ..Default::default()
         }
     }
 
@@ -29330,6 +29376,7 @@ mod audit_2026_05_22_tests {
                         output_tokens: 10,
                         cache_creation_tokens: 7,
                         cache_read_tokens: 3,
+                        ..Default::default()
                     },
                 },
             ],
@@ -29414,6 +29461,7 @@ mod audit_2026_05_22_tests {
                         output_tokens: 10,
                         cache_creation_tokens: 7,
                         cache_read_tokens: 3,
+                        ..Default::default()
                     },
                 },
             ],
