@@ -377,6 +377,36 @@ Available capability flag: `capabilities.browser_suite` (W8c.1). The
 engine emits `browser_event` and `browser_policy_denied` while ops
 run; see `docs/json-stream-protocol.md` §§1.N+6 and 1.N+7.
 
+### Getting a browser backend
+
+`Browser::*` drives a **Camoufox sidecar** — an HTTP control server that Core
+starts and supervises. On a machine that does not already have it, Core
+installs it on first use:
+
+```bash
+npm install -g --prefix <profile>/browser/bin/node @askjo/camofox-browser
+```
+
+The prefix is Core-owned, so this never needs `sudo` and never writes to a
+system-wide npm root. `npm` must be on `PATH`; if it is not, the tool refuses
+and names the manual command.
+
+The install deliberately does **not** pass `--ignore-scripts`. That package
+ships the control server (a ~181 KB tarball with no browser in it); its
+`postinstall` is what fetches the Camoufox browser itself. Skipping it would
+install a server with nothing behind it and move the failure from install time
+to your first `Browser::navigate`.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `[browser.sidecar_auto_install] enabled` | `true` | Install the sidecar on first use when it does not resolve. |
+| `[browser.sidecar_auto_install] timeout_secs` | `600` | Budget for that install. The postinstall downloads a browser, so this is minutes. |
+| `[browser.camoufox_download] enabled` | `false` | Operator-pinned artifact instead — takes precedence when on. Requires a `url` **and** a `sha256` per platform; enabling it without a digest is an error, not permission to fetch-and-trust. |
+
+Set `enabled = false` to keep the previous behaviour, in which the tool refuses
+on a fresh machine and names the manual command. `WAYLAND_CAMOUFOX_BIN` points
+Core at a `camofox-browser` you installed yourself and skips both paths.
+
 ## Computer use (W8c.2)
 
 `Cua::*` tools are registered by the `wayland-cua` plugin (via
