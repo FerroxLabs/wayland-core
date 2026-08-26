@@ -61,17 +61,10 @@ impl JsonlTool {
     }
 
     /// Cap each line to `max_line_length`, appending an ellipsis marker
-    /// when the line was longer than the cap.
+    /// when the line was longer than the cap. Delegates to
+    /// [`ToolOutputLimits::clamp_line`], which `ReadTool` shares.
     fn clamp_line(&self, line: &str) -> String {
-        let max = self.limits.max_line_length;
-        if line.len() <= max {
-            return line.to_string();
-        }
-        let mut end = max;
-        while end > 0 && !line.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}... [truncated]", &line[..end])
+        self.limits.clamp_line(line)
     }
 
     /// Join collected output lines, applying the `max_lines` cap with a
