@@ -139,7 +139,12 @@ fn count_trigger(messages: &[Message], config: &CompactConfig) -> bool {
         .map(String::as_str)
         .collect();
 
-    let count = count_compactable_results(messages, &tool_names, &compactable_set);
+    let count = count_compactable_results(
+        messages,
+        &tool_names,
+        &compactable_set,
+        config.micro_large_result_bytes,
+    );
     count > config.micro_keep_recent * 2
 }
 
@@ -166,7 +171,12 @@ pub fn microcompact(messages: &mut [Message], config: &CompactConfig) -> Microco
 
     // Collect (message_index, block_index) of all compactable, non-cleared
     // tool results, in conversation order.
-    let targets = collect_compactable_locations(messages, &tool_names, &compactable_set);
+    let targets = collect_compactable_locations(
+        messages,
+        &tool_names,
+        &compactable_set,
+        config.micro_large_result_bytes,
+    );
 
     let keep = config.micro_keep_recent.max(1);
     if targets.len() <= keep {
@@ -550,11 +560,12 @@ fn count_compactable_results(
     messages: &[Message],
     tool_names: &HashMap<String, String>,
     compactable_set: &HashSet<&str>,
+    large_result_bytes: usize,
 ) -> usize {
     messages
         .iter()
         .flat_map(|m| &m.content)
-        .filter(|b| is_compactable_and_live(b, tool_names, compactable_set))
+        .filter(|b| is_compactable_and_live(b, tool_names, compactable_set, large_result_bytes))
         .count()
 }
 
@@ -564,11 +575,12 @@ fn collect_compactable_locations(
     messages: &[Message],
     tool_names: &HashMap<String, String>,
     compactable_set: &HashSet<&str>,
+    large_result_bytes: usize,
 ) -> Vec<(usize, usize)> {
     let mut locations = Vec::new();
     for (mi, msg) in messages.iter().enumerate() {
         for (bi, block) in msg.content.iter().enumerate() {
-            if is_compactable_and_live(block, tool_names, compactable_set) {
+            if is_compactable_and_live(block, tool_names, compactable_set, large_result_bytes) {
                 locations.push((mi, bi));
             }
         }
@@ -576,14 +588,27 @@ fn collect_compactable_locations(
     locations
 }
 
-/// A tool result is "compactable and live" when:
-/// 1. It is a `ToolResult` variant.
-/// 2. Its corresponding tool name is in the compactable set.
-/// 3. Its content has not already been cleared.
+/// A tool result is "compactable and live" when it is a `ToolResult` whose
+/// content has not already been cleared, AND either
+/// 1. its tool name is in `compactable_set`, or
+/// 2. its body is longer than `large_result_bytes` (`0` disables this arm).
+///
+/// The second arm exists because the first is an ALLOW-LIST OF NAMES, and the
+/// results that dominate an agentic loop have names it cannot enumerate:
+/// delegated sub-agent transcripts, fetched pages, search results, RepoMap
+/// dumps, and every MCP tool — whose names are not knowable at build time.
+/// Before it, those were exempt at any size and any pressure, and a turn
+/// re-billed them on every one of its sub-calls (wayland#559 ask 2).
+///
+/// It also catches an ORPHANED result — one whose `ToolUse` is no longer in
+/// the buffer, so `tool_names` cannot name it. Name-only, those were exempt
+/// too, and a compaction that folded the assistant message away is exactly
+/// what leaves them behind.
 fn is_compactable_and_live(
     block: &ContentBlock,
     tool_names: &HashMap<String, String>,
     compactable_set: &HashSet<&str>,
+    large_result_bytes: usize,
 ) -> bool {
     if let ContentBlock::ToolResult {
         tool_use_id,
@@ -593,6 +618,9 @@ fn is_compactable_and_live(
     {
         if content == CLEARED_TOOL_RESULT || content.starts_with(SUPERSEDED_TOOL_RESULT_PREFIX) {
             return false;
+        }
+        if large_result_bytes > 0 && content.len() > large_result_bytes {
+            return true;
         }
         if let Some(name) = tool_names.get(tool_use_id) {
             return compactable_set.contains(name.as_str());
@@ -653,6 +681,99 @@ mod tests {
         CompactConfig::default()
     }
 
+    // ── wayland#559 ask 2: trimming intermediate context between sub-calls ─
+
+    /// A leader's agentic loop: twelve large delegated / web / MCP results,
+    /// none of which is one of the six names in `compactable_tools`.
+    fn delegation_heavy_conversation() -> Vec<Message> {
+        let names = [
+            "Delegate",
+            "WebFetch",
+            "web",
+            "mcp__linear__issues",
+            "RepoMap",
+            "pdf_extract",
+        ];
+        let mut msgs = Vec::new();
+        for i in 0..12 {
+            let id = format!("t{i}");
+            let name = names[i % names.len()];
+            msgs.push(assistant_msg(vec![tool_use_block(&id, name)]));
+            msgs.push(user_msg(vec![tool_result_block(&id, &"x".repeat(50_000))]));
+        }
+        msgs
+    }
+
+    /// Pressure well past the 50% gate.
+    fn high_pressure() -> ContextPressure {
+        ContextPressure {
+            real_input_tokens: 150_000,
+            autocompact_threshold: 167_000,
+        }
+    }
+
+    #[test]
+    fn a_large_result_is_trimmable_whatever_tool_produced_it() {
+        // RED ARM. `compactable_tools` is an ALLOWLIST of six built-in names
+        // (Read/Bash/Grep/Glob/Write/Edit). Every other tool — delegation,
+        // web fetch, RepoMap, and EVERY MCP tool, whose names are not even
+        // knowable at build time — is exempt from microcompact at any size and
+        // any pressure. That is 600 KB of stale bodies re-billed on every
+        // sub-call of the turn, which is wayland#559 ask 2.
+        let mut msgs = delegation_heavy_conversation();
+        let cfg = default_config();
+
+        assert!(
+            should_microcompact(&msgs, &cfg, high_pressure()),
+            "600 KB of tool results at 90% of the autocompact threshold must              trigger a microcompact"
+        );
+        let result = microcompact(&mut msgs, &cfg);
+        assert!(result.cleared_count > 0, "nothing was trimmed: {result:?}");
+        // The protected tail survives.
+        let live = msgs
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(
+                |b| matches!(b, ContentBlock::ToolResult { content, .. } if content.len() > 1000),
+            )
+            .count();
+        assert_eq!(
+            live, cfg.micro_keep_recent,
+            "exactly the `micro_keep_recent` most recent results keep their bodies"
+        );
+    }
+
+    #[test]
+    fn a_small_result_from_an_unlisted_tool_is_still_left_alone() {
+        // The size rule must not become a licence to erase everything: small
+        // bodies from unlisted tools (a `todo` list, an `AskUserQuestion`
+        // answer) carry state the model still needs and are not the burn.
+        let mut msgs = Vec::new();
+        for i in 0..12 {
+            let id = format!("s{i}");
+            msgs.push(assistant_msg(vec![tool_use_block(&id, "todo")]));
+            msgs.push(user_msg(vec![tool_result_block(&id, "3 items pending")]));
+        }
+        let cfg = default_config();
+        let bodies = |ms: &[Message]| -> Vec<String> {
+            ms.iter()
+                .flat_map(|m| &m.content)
+                .filter_map(|b| match b {
+                    ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let before = bodies(&msgs);
+        let result = microcompact(&mut msgs, &cfg);
+        assert_eq!(result.cleared_count, 0, "{result:?}");
+        assert_eq!(
+            bodies(&msgs),
+            before,
+            "small unlisted results must be untouched by the size rule"
+        );
+    }
+
     // ── build_tool_name_map ─────────────────────────────────────────────
 
     #[test]
@@ -684,7 +805,7 @@ mod tests {
             [("t1".into(), "Read".into())].into_iter().collect();
         let set: HashSet<&str> = ["Read"].into_iter().collect();
         let block = tool_result_block("t1", "file content here");
-        assert!(is_compactable_and_live(&block, &tool_names, &set));
+        assert!(is_compactable_and_live(&block, &tool_names, &set, 0));
     }
 
     #[test]
@@ -693,7 +814,7 @@ mod tests {
             [("t1".into(), "Read".into())].into_iter().collect();
         let set: HashSet<&str> = ["Read"].into_iter().collect();
         let block = tool_result_block("t1", CLEARED_TOOL_RESULT);
-        assert!(!is_compactable_and_live(&block, &tool_names, &set));
+        assert!(!is_compactable_and_live(&block, &tool_names, &set, 0));
     }
 
     #[test]
@@ -702,7 +823,7 @@ mod tests {
             [("t1".into(), "Skill".into())].into_iter().collect();
         let set: HashSet<&str> = ["Read", "Bash"].into_iter().collect();
         let block = tool_result_block("t1", "result");
-        assert!(!is_compactable_and_live(&block, &tool_names, &set));
+        assert!(!is_compactable_and_live(&block, &tool_names, &set, 0));
     }
 
     #[test]
@@ -710,7 +831,7 @@ mod tests {
         let tool_names = HashMap::new();
         let set: HashSet<&str> = ["Read"].into_iter().collect();
         let block = text_block("hello");
-        assert!(!is_compactable_and_live(&block, &tool_names, &set));
+        assert!(!is_compactable_and_live(&block, &tool_names, &set, 0));
     }
 
     #[test]
@@ -718,7 +839,7 @@ mod tests {
         let tool_names = HashMap::new(); // no ToolUse registered
         let set: HashSet<&str> = ["Read"].into_iter().collect();
         let block = tool_result_block("orphan", "data");
-        assert!(!is_compactable_and_live(&block, &tool_names, &set));
+        assert!(!is_compactable_and_live(&block, &tool_names, &set, 0));
     }
 
     // ── time_trigger ────────────────────────────────────────────────────

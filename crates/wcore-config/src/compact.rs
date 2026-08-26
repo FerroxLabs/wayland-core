@@ -91,6 +91,25 @@ pub struct CompactConfig {
     /// `0.0..=1.0` at the use site.
     #[serde(default = "default_micro_pressure_fraction")]
     pub micro_pressure_fraction: f64,
+    /// Byte length above which a tool result is compactable **whatever tool
+    /// produced it**. `0` disables the rule and restores the name-only
+    /// behaviour.
+    ///
+    /// `compactable_tools` is an allow-list of six built-in names, and an
+    /// allow-list of names cannot cover the results that actually dominate an
+    /// agentic loop: delegated sub-agent transcripts, fetched pages, search
+    /// results, RepoMap dumps, and every MCP tool — whose names are not
+    /// knowable at build time at all. Those were exempt at any size and any
+    /// pressure, so a leader turn re-billed hundreds of KB of stale bodies on
+    /// every sub-call (wayland#559 ask 2).
+    ///
+    /// Size is the property that matters here, not provenance: a body this
+    /// large, already older than the `micro_keep_recent` protected tail, and
+    /// under real context pressure, is stale working data by construction.
+    /// Small results from unlisted tools (a todo list, a question answer) stay
+    /// untouched — those carry state and are not the burn.
+    #[serde(default = "default_micro_large_result_bytes")]
+    pub micro_large_result_bytes: usize,
 
     /// Tool names whose results are eligible for microcompact content clearing.
     #[serde(default = "default_compactable_tools")]
@@ -284,6 +303,7 @@ impl Default for CompactConfig {
             micro_keep_recent: default_micro_keep_recent(),
             micro_gap_seconds: default_micro_gap_seconds(),
             micro_pressure_fraction: default_micro_pressure_fraction(),
+            micro_large_result_bytes: default_micro_large_result_bytes(),
             compactable_tools: default_compactable_tools(),
             enabled: default_true(),
             cache_diagnostics: false,
@@ -323,6 +343,12 @@ fn default_micro_gap_seconds() -> u64 {
 }
 fn default_micro_pressure_fraction() -> f64 {
     0.5
+}
+/// ~5k tokens. Big enough that ordinary chatty results never qualify, small
+/// enough that a fetched page, a delegated transcript or a large MCP payload
+/// does.
+fn default_micro_large_result_bytes() -> usize {
+    20_000
 }
 fn default_compactable_tools() -> Vec<String> {
     vec![
