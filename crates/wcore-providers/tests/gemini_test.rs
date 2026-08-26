@@ -600,6 +600,13 @@ async fn gemini_live_api_smoke_test() {
     );
 
     let request = LlmRequest {
+        // #863 F2/F3. Spelled out rather than filled by `..Default::default()`
+        // to match `minimal_request` above and the type's own greppability
+        // note: every construction site names these explicitly. This site is
+        // behind `live-gemini`, so nothing compiled it and nothing caught it
+        // when the fields landed.
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "gemini-2.5-flash".to_string(), // use Flash for cheaper smoke
         system: "Be very brief. One word only.".to_string(),
         messages: vec![
