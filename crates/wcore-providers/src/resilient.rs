@@ -149,7 +149,16 @@ pub trait CircuitReporter: Send + Sync {
         error: Option<&str>,
     );
 
-    fn report_failover(&self, _receipt: &FailoverReceipt) {}
+    /// A chain routed around its primary.
+    ///
+    /// `primary_failure_code` is the machine-readable class of the fault that
+    /// took the primary out (`retry::provider_failure_code`) — the same value
+    /// `ProviderError::NotAttempted` carries for #1127. `FailoverReceipt::reason`
+    /// cannot stand in for it: `FailoverReason` classifies a refused connection
+    /// and a read timeout identically as `timeout`, so a reporter that rendered
+    /// the reason would send the reader hunting the wrong fault. `None` when the
+    /// primary was never classified (nothing upstream failed).
+    fn report_failover(&self, _receipt: &FailoverReceipt, _primary_failure_code: Option<&str>) {}
 }
 
 #[derive(Default)]
@@ -336,6 +345,21 @@ impl ResilientProvider {
     /// constructed" asks the thing that would own it.
     pub fn cooldown_tracker_count(&self) -> usize {
         1 + self.fallbacks.len()
+    }
+
+    /// Report a failover receipt together with the primary's fault CLASS.
+    ///
+    /// #1133. The class is already in hand — `stream` stores it in
+    /// `primary_failure_code` the moment the primary fails — and it is what a
+    /// reader needs to act: `connection_refused` and `timeout` both arrive as
+    /// `FailoverReason::Timeout` on the receipt, so the receipt alone cannot
+    /// tell a closed port from a slow one. Reading the lock here (rather than
+    /// at each of the four call sites) keeps the guard off the call stack of
+    /// the reporter, which is host code and must never run under our mutex.
+    fn report_failover(&self, receipt: &FailoverReceipt) {
+        let primary_failure_code = self.primary_failure_code.lock().clone();
+        self.reporter
+            .report_failover(receipt, primary_failure_code.as_deref());
     }
 
     /// F32: forward every event from the primary's stream onto a fresh channel,
@@ -696,7 +720,7 @@ impl LlmProvider for ResilientProvider {
                         retry_after_ms: None,
                         pricing: fallback.metadata.pricing.clone(),
                     });
-                    self.reporter.report_failover(&receipt);
+                    self.report_failover(&receipt);
                     return Err(error);
                 }
             };
@@ -727,7 +751,7 @@ impl LlmProvider for ResilientProvider {
                     });
                     receipt.selected_provider = Some(fallback.pricing_provider.clone());
                     receipt.selected_model = Some(fallback.model.clone());
-                    self.reporter.report_failover(&receipt);
+                    self.report_failover(&receipt);
                     self.reporter.report(
                         &self.primary_name,
                         Some(&fallback.label),
@@ -757,7 +781,7 @@ impl LlmProvider for ResilientProvider {
                         pricing,
                     });
                     if is_request_fatal(&e) {
-                        self.reporter.report_failover(&receipt);
+                        self.report_failover(&receipt);
                         return Err(e);
                     }
                     previous_provider = &fallback.label;
@@ -767,7 +791,7 @@ impl LlmProvider for ResilientProvider {
                 }
             }
         }
-        self.reporter.report_failover(&receipt);
+        self.report_failover(&receipt);
         let primary_failure_code = self.primary_failure_code.lock().clone();
         Err(last_error.unwrap_or_else(|| ProviderError::NotAttempted {
             reason: nothing_attempted_reason(&receipt, primary_failure_code.as_deref()),
@@ -850,7 +874,7 @@ mod tests {
     impl CircuitReporter for ReceiptReporter {
         fn report(&self, _: &str, _: Option<&str>, _: CircuitState, _: Option<&str>) {}
 
-        fn report_failover(&self, receipt: &FailoverReceipt) {
+        fn report_failover(&self, receipt: &FailoverReceipt, _: Option<&str>) {
             self.receipts.lock().push(receipt.clone());
         }
     }

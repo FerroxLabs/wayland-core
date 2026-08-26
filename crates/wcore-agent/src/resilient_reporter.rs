@@ -60,25 +60,35 @@ impl ProtocolCircuitReporter {
 /// Split out and pure so the exact words are under test, the same shape as
 /// `bootstrap::local_shell_notice`.
 ///
-/// **The failover CLASS is deliberately not printed.** `receipt.reason` is a
-/// `FailoverReason`, which classifies a refused connection and a read timeout
-/// identically as `timeout` (the finding that made #1127 prefer
-/// `primary_failure_code`). The precise code is not reachable here: it lives on
-/// `ResilientProvider`, and widening `FailoverReceipt` to carry it would break
-/// the desktop wire schema, which pins the receipt with
-/// `additionalProperties: false`. A sentence that named the wrong fault class
-/// would send the reader hunting timeouts for a closed port, so this one names
-/// what is certainly true and points at the checks that discriminate.
-fn failover_notice(receipt: &FailoverReceipt) -> Option<String> {
+/// **The fault class comes from `primary_failure_code`, never from
+/// `receipt.reason`.** The receipt's `FailoverReason` classifies a refused
+/// connection and a read timeout identically as `timeout` — the finding that
+/// made #1127 introduce `primary_failure_code` in the first place — so
+/// rendering it would send the reader hunting timeouts for a closed port.
+/// `ResilientProvider` classifies the primary's failure with
+/// `retry::provider_failure_code` in the SAME function that reports this
+/// failover, and passes that value down the `CircuitReporter` trait. The
+/// receipt itself is untouched, so the desktop wire schema (which pins it with
+/// `additionalProperties: false`) is unaffected.
+///
+/// `None` means nothing upstream was ever classified; the sentence then omits
+/// the parenthetical rather than inventing a class.
+fn failover_notice(
+    receipt: &FailoverReceipt,
+    primary_failure_code: Option<&str>,
+) -> Option<String> {
     let selected_provider = receipt.selected_provider.as_ref()?;
     let selected_model = receipt.selected_model.as_ref()?;
+    let fault = primary_failure_code
+        .map(|code| format!(" ({code})"))
+        .unwrap_or_default();
     Some(format!(
         "notice: provider failover — '{failed_provider}' ({failed_model}) did not serve this \
-         request, so '{selected_provider}' ({selected_model}) answered it instead. This turn's \
-         reply, tool behaviour and cost come from {selected_provider}/{selected_model}, not from \
-         the provider you configured. Check '{failed_provider}' — its `base_url`, credentials \
-         and quota — or set `[provider_chain] enabled = false` to stop routing around it and see \
-         the underlying error instead.",
+         request{fault}, so '{selected_provider}' ({selected_model}) answered it instead. This \
+         turn's reply, tool behaviour and cost come from {selected_provider}/{selected_model}, \
+         not from the provider you configured. Check '{failed_provider}' — its `base_url`, \
+         credentials and quota — or set `[provider_chain] enabled = false` to stop routing \
+         around it and see the underlying error instead.",
         failed_provider = receipt.failed_provider,
         failed_model = receipt.failed_model,
     ))
@@ -117,13 +127,13 @@ impl CircuitReporter for ProtocolCircuitReporter {
         }
     }
 
-    fn report_failover(&self, receipt: &FailoverReceipt) {
+    fn report_failover(&self, receipt: &FailoverReceipt, primary_failure_code: Option<&str>) {
         // #1133 — the human half. The structured receipt below is for the
         // desktop host; `emit_provider_failover_receipt` is a default no-op on
         // every other sink, so without this line a TUI or headless user is
         // never told that a different provider is answering, at a different
         // price. `emit_info` is the channel the retry notices already use.
-        if let Some(notice) = failover_notice(receipt)
+        if let Some(notice) = failover_notice(receipt, primary_failure_code)
             && self.first_time(&notice)
         {
             self.output.emit_info(&notice);
@@ -349,7 +359,7 @@ mod tests {
         receipt.selected_provider = Some("openai".into());
         receipt.selected_model = Some("gpt-5".into());
 
-        reporter.report_failover(&receipt);
+        reporter.report_failover(&receipt, Some("http_429"));
 
         let receipts = rec.receipts.lock().unwrap();
         assert_eq!(receipts.len(), 1);
@@ -413,7 +423,8 @@ mod failover_notice_tests {
     /// who failed, what they asked for, who answered, and what to check.
     #[test]
     fn the_notice_names_both_providers_and_the_check() {
-        let notice = failover_notice(&served_by_fallback()).expect("a served failover");
+        let notice = failover_notice(&served_by_fallback(), Some("connection_refused"))
+            .expect("a served failover");
         for fact in [
             "anthropic",
             "claude-sonnet-4-6",
@@ -423,13 +434,46 @@ mod failover_notice_tests {
         ] {
             assert!(notice.contains(fact), "the notice drops `{fact}`: {notice}");
         }
-        // The class is deliberately absent: `Timeout` here is a REFUSED
-        // connection as often as a real timeout, and naming it would send the
-        // reader hunting the wrong fault.
+        // #1133 (c): the CLASS must be there too. Without it the sentence is a
+        // pointer ("check base_url, credentials and quota") where a run with no
+        // chain configured would have shown the diagnosis outright.
+        assert!(
+            notice.contains("connection_refused"),
+            "the notice drops the primary's fault class, so it never says WHY the \
+             primary was skipped: {notice}"
+        );
+        // And it must be the PRECISE class, not the receipt's coarse reason —
+        // `served_by_fallback` is a `FailoverReason::Timeout` receipt whose real
+        // fault was a refused connection, which is exactly the pair
+        // `FailoverReason` cannot tell apart.
         assert!(
             !notice.contains("timeout"),
             "the notice printed the coarse failover class, which cannot tell a refused \
              connection from a read timeout: {notice}"
+        );
+    }
+
+    /// The class is READ, not printed. A `None` code (nothing upstream was ever
+    /// classified) must omit the parenthetical rather than invent one — and a
+    /// different code must render differently. Without this half, a notice that
+    /// hardcoded `connection_refused` would satisfy the test above.
+    #[test]
+    fn the_class_is_the_one_supplied_and_absent_when_unknown() {
+        let unknown = failover_notice(&served_by_fallback(), None).expect("a served failover");
+        assert!(
+            !unknown.contains("connection_refused") && !unknown.contains("()"),
+            "an unclassified primary must not be given a fault class: {unknown}"
+        );
+        assert!(
+            unknown.contains("anthropic") && unknown.contains("openai"),
+            "instrument dead: the unclassified notice is not the #1133 sentence: {unknown}"
+        );
+
+        let throttled =
+            failover_notice(&served_by_fallback(), Some("http_429")).expect("a served failover");
+        assert!(
+            throttled.contains("http_429") && !throttled.contains("connection_refused"),
+            "the notice did not render the class it was given: {throttled}"
         );
     }
 
@@ -441,7 +485,7 @@ mod failover_notice_tests {
         let collapsed =
             FailoverReceipt::new(FailoverReason::Timeout, "anthropic", "claude-sonnet-4-6");
         assert_eq!(
-            failover_notice(&collapsed),
+            failover_notice(&collapsed, Some("connection_refused")),
             None,
             "a chain that dispatched nobody announced a failover anyway"
         );
@@ -454,9 +498,9 @@ mod failover_notice_tests {
         let sink = Arc::new(InfoSink::default());
         let reporter = ProtocolCircuitReporter::new(sink.clone() as Arc<dyn OutputSink>);
         let receipt = served_by_fallback();
-        reporter.report_failover(&receipt);
-        reporter.report_failover(&receipt);
-        reporter.report_failover(&receipt);
+        reporter.report_failover(&receipt, Some("connection_refused"));
+        reporter.report_failover(&receipt, Some("connection_refused"));
+        reporter.report_failover(&receipt, Some("connection_refused"));
 
         // Snapshot before asserting: a message that re-locks the same mutex the
         // assertion is already holding DEADLOCKS on failure, and a test that
@@ -476,7 +520,7 @@ mod failover_notice_tests {
         let mut elsewhere = served_by_fallback();
         elsewhere.selected_provider = Some("vertex".into());
         elsewhere.selected_model = Some("gemini-2.5-pro".into());
-        reporter.report_failover(&elsewhere);
+        reporter.report_failover(&elsewhere, Some("connection_refused"));
         let said = sink.infos.lock().unwrap().clone();
         assert_eq!(
             said.len(),
