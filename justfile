@@ -223,7 +223,7 @@ _auto-commit-fixes:
 # muting it is TRUE against the real graph. See the recipe above.
 # `check-no-personal-identifiers` added 2026-08-02 (lane identifier-scrub): a
 # ~3s pure text scan, no toolchain, so it runs first and costs nothing.
-check-all: check-no-personal-identifiers fmt-check lint test-ci hakari-verify audit deny verify-suppressions
+check-all: check-no-personal-identifiers check-model-limits fmt-check lint test-ci hakari-verify audit deny verify-suppressions
 
 # ── User-flow harness (CLI + TUI + failure injection) ────────────────────
 # Drives the COMPILED wayland-core binary the way a user does:
@@ -350,6 +350,35 @@ check-no-vacuous-cargo-test:
 check-no-personal-identifiers:
     python3 scripts/check-no-personal-identifiers.py --self-test
     python3 scripts/check-no-personal-identifiers.py
+
+# ── Model-limits freshness gate ───────────────────────────────────────────
+# `crates/wcore-config/src/limits.rs` is hand-maintained, and #165 is what
+# happens when the world ships a model and this table does not hear about it:
+# no error, just a silently wrong window and a run that dies mid-flight.
+# `every_routed_catalog_model_has_a_known_window` covers our own catalog; this
+# covers the catalogue moving without us.
+#
+# TWO recipes on purpose:
+#   * `check-model-limits`           — SELF-TEST ONLY. No network, ~0.1s. Chained
+#     into `check-all` so the checker itself cannot rot between releases.
+#   * `check-model-limits-freshness` — self-test THEN the live models.dev scan.
+#     Needs the network, so it runs at RELEASE time (release.yml
+#     `prepare-release`), not on every CI run: a third-party catalogue in the
+#     main test path buys flakiness for nothing.
+#
+# FAILS when an in-scope first-party model has no arm or an arm over-claims.
+# REPORTS (exit 0) a brand-new family — failing a release on someone else's
+# launch is not this gate's call, but the release owner must see it. If
+# models.dev is unreachable it prints a SKIPPED banner and exits 0; the banner
+# says "THIS IS NOT A PASS" in as many words, because a skip that reads as a
+# pass is the defect class this repo keeps finding.
+# Run: `just check-model-limits-freshness`
+check-model-limits:
+    python3 scripts/check-model-limits-freshness.py --self-test
+
+check-model-limits-freshness:
+    python3 scripts/check-model-limits-freshness.py --self-test
+    python3 scripts/check-model-limits-freshness.py
 
 # ── P0 smoke gate (pre-release) ───────────────────────────────────────────
 # Runs the live P0 smoke suite (crates/wcore-cli/tests/smoke_p0.rs) via
