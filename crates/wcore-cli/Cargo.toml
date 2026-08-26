@@ -292,6 +292,12 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
+# `start_paused` tests need tokio's `test-util`, which the workspace `full`
+# feature set does NOT include. Without this line the crate compiles only when
+# some other crate in the same cargo invocation happens to turn the feature on
+# (wcore-agent does), so `cargo nextest run -p wcore-cli` alone fails to build
+# while a whole-workspace run passes. Declare it where it is used.
+tokio = { workspace = true, features = ["test-util"] }
 libc.workspace = true
 # P2: `p2_open_admission_entry_points` asserts the refusal carries a real
 # admission-shape token. It pins the CURRENT encoding via
