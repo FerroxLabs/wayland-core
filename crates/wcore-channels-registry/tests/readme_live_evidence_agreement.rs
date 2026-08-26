@@ -164,6 +164,25 @@ fn spelled(word: &str) -> Option<usize> {
     }
 }
 
+/// The byte range of §2, so the row lookups below cannot wander into another table.
+///
+/// **Added 2026-08-26.** These helpers always claimed to read §2 and in fact read the whole
+/// document, taking the first row whose first cell matched. That was correct only because §2
+/// happened to be the first table using those labels — a property of document order, not of
+/// anything asserted. §4.2's per-adapter cap table now uses the same labels, and
+/// `doctor_evidence_cell`'s `hits == 1` guard caught it, exactly as it was written to.
+fn section_2_bounds(doc: &str) -> (usize, usize) {
+    let lo = doc
+        .find("## 2. The table")
+        .expect("docs/delivery-semantics.md has lost its §2 heading");
+    let rest = &doc[lo..];
+    let hi = lo
+        + rest
+            .find("\n## 3.")
+            .expect("§2 is not terminated by a §3 heading");
+    (lo, hi)
+}
+
 /// Parse §2's table into `platform -> was it driven at a real destination`.
 ///
 /// Reads the **last** cell of each row rather than searching the whole line,
@@ -171,11 +190,16 @@ fn spelled(word: &str) -> Option<usize> {
 /// a whole-row search would collide with it.
 fn driven_per_platform(doc: &str, problems: &mut Vec<String>) -> BTreeMap<&'static str, bool> {
     let mut out = BTreeMap::new();
+    let (lo, hi) = section_2_bounds(doc);
+    let section = &doc[lo..hi];
 
     for platform in PLATFORMS {
         let label = prose_label(platform);
         let needle = format!("| {label}");
-        let Some(row) = doc.lines().find(|l| l.trim_start().starts_with(&needle)) else {
+        let Some(row) = section
+            .lines()
+            .find(|l| l.trim_start().starts_with(&needle))
+        else {
             problems.push(format!(
                 "docs/delivery-semantics.md has no §2 table row starting with {label} \
                  for {platform:?}"
@@ -336,11 +360,15 @@ fn disagreements(readme: &str, doc: &str) -> Vec<String> {
 /// Replace the final cell of one §2 row, and prove the replacement happened.
 fn doctor_evidence_cell(doc: &str, label: &str, new_cell: &str) -> String {
     let needle = format!("| {label}");
+    let (lo, hi) = section_2_bounds(doc);
     let mut hits = 0usize;
+    let mut offset = 0usize;
     let out = doc
         .lines()
         .map(|line| {
-            if !line.trim_start().starts_with(&needle) {
+            let here = offset;
+            offset += line.len() + 1;
+            if here < lo || here >= hi || !line.trim_start().starts_with(&needle) {
                 return line.to_string();
             }
             let mut parts: Vec<&str> = line.split('|').collect();

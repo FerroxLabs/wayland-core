@@ -273,7 +273,7 @@ and the one this programme initially mis-filed as a Windows duplication defect.
 **The Matrix row has a precondition, and until 2026-07-31 this document did not state it.**
 
 Every adapter declares a single-message length cap through `Channel::max_message_len()`;
-Matrix's is **32,768 characters** (`crates/wcore-channel-matrix/src/lib.rs:165-167`). When a body
+Matrix's is **32,768 characters** (`max_message_len()` in `crates/wcore-channel-matrix/src/lib.rs`; every cap is tabulated in [§4.2](#42-the-message-cap-per-adapter--declared-by-us-measured-by-nobody)). When a body
 exceeds it, `ChannelManager::send_to_keyed`
 (`crates/wcore-channels/src/manager.rs:776-812`) splits it and sends the pieces **with no
 idempotency key at all**.
@@ -347,6 +347,90 @@ evidence about arrival counts, and it is not counted as any.
 
 The run wrote nothing to the room — it failed on the baseline read, which precedes the first
 send, and neither `MCR_CTRL_RECEIPTS` nor `MCR_SUBJ_RECEIPTS` was ever printed.
+
+### 4.2 The message cap, per adapter — declared by us, measured by nobody
+
+**Generalised 2026-08-26, [FerroxLabs/wayland#934](https://github.com/FerroxLabs/wayland/issues/934).**
+Until then exactly one cap in the product was bound to anything outside its own function.
+`matrix.cap` was in the machine-readable block because §4.1's conditional guarantee needs a
+boundary; the other six were each "covered" by a unit test of this shape:
+
+```rust
+assert_eq!(ch.max_message_len(), Some(1600));
+```
+
+That asserts the literal the function returns on the line above it. It restates the code. It
+cannot fail except by someone editing both halves in one commit, and — the part that matters
+— **it would keep passing if the number were wrong about the platform**, which is the only
+way a cap can be wrong that anybody notices.
+
+Every cap now has a row here and in the machine-readable block, and
+`crates/wcore-channels-registry/tests/delivery_semantics_declaration.rs` compares each one
+against the adapter **the production factory builds**. `.cap` no longer means "the boundary
+of a conditional guarantee"; it means "this adapter's `max_message_len()`".
+
+| Adapter | Declared cap (chars) | Declared at | Measured at the real platform? |
+|---|---|---|---|
+| **Slack** | 39,000 | `crates/wcore-channel-slack/src/lib.rs` | **NOT MEASURED** |
+| **Matrix** | 32,768 | `crates/wcore-channel-matrix/src/lib.rs` | **NOT MEASURED** |
+| **Discord** | 2,000 | `crates/wcore-channel-discord/src/lib.rs` | **NOT MEASURED** |
+| **Telegram** | 4,096 | `crates/wcore-channel-telegram/src/lib.rs` | **NOT MEASURED** |
+| **Twilio SMS** | 1,600 | `crates/wcore-channel-sms/src/lib.rs` | **NOT MEASURED** |
+| **WhatsApp** | 4,096 | `crates/wcore-channel-whatsapp/src/lib.rs` | **NOT MEASURED** |
+| **MS Teams** | 28,000 | `crates/wcore-channel-msteams/src/lib.rs` | **NOT MEASURED** |
+| **Email** | none | inherits the trait default in `crates/wcore-channels/src/lib.rs` | n/a — no cap to be wrong about |
+| **Signal** | none | inherits the trait default | n/a — no cap to be wrong about |
+| **iMessage** | none | inherits the trait default | n/a — no cap to be wrong about |
+
+The **WhatsApp bridge** declares `Some(4096)` in
+`crates/wcore-channel-whatsapp/src/bridge/mod.rs` and has no row above, for the same reason it
+has no row in §2: the declaration test enumerates platforms the registry constructs from a
+platform string, and the bridge adds none. Its cap is checked by nothing.
+
+#### What "NOT MEASURED" costs, and it is not symmetric
+
+The generalisation above kills the **tautology**. It does not answer the question the issue was
+filed about: *does the declared cap equal the platform's real limit?* Both numbers in every
+comparison are still ours.
+
+Being wrong is not cosmetic, and the two directions differ by platform:
+
+- **Cap set too high — every platform.** The send exceeds what the destination accepts and is
+  rejected. Chunking exists precisely so an over-long reply is not rejected and dropped
+  (HIGH-6), so a too-high cap silently reinstates that bug. This is the dangerous direction and
+  it applies to all seven.
+- **Cap set too low — Matrix, materially; the rest, cosmetically.** Bodies are chunked that did
+  not need to be, and per [§4.1](#41-exactly-once-stops-at-the-message-cap) chunking is what
+  drops the idempotency key. On Matrix that **downgrades exactly-once to at-least-once for
+  messages that should have been covered by it**. On the other six the guarantee is
+  `at-most-once` at every length already, so an unnecessary split costs readability and
+  nothing else.
+
+Only a live boundary probe answers it: send a body of exactly `cap` chars and expect the
+platform to accept it, then send `cap + 1` chars **unchunked** and expect the platform's own
+rejection. Both halves are needed — an accept at `cap` alone is equally well explained by a cap
+that is far higher than we think.
+
+#### Which probe is blocked on which credential
+
+The probe is per-platform and each needs a real destination. Following the
+`live_twilio_whatsapp_identity.rs` pattern, each would be `#[ignore]`d, gated on a home
+directory holding a real `channels/` config plus `credentials.toml`, and **panic rather than
+skip** when that configuration is absent.
+
+| Platform | Probe needs | Held? |
+|---|---|---|
+| **Slack** | `WL_LIVE_SLACK_HOME` (bot token with `chat:write`) + `WL_SLACK_CHANNEL` | **Yes** — `live_slack_actions.rs` drives a real workspace today |
+| **Discord** | `WL_LIVE_DISCORD_HOME` (bot token) + `WL_LIVE_DISCORD_CHANNEL` (a real snowflake in a guild the bot has joined) | **Yes** — `live_discord_actions.rs` drives a real guild today |
+| **Matrix** | `MATRIX_HOMESERVER` + `MATRIX_ACCESS_TOKEN` + `MATRIX_USER_ID` + `MATRIX_ROOM_ID` | **Token is DEAD.** matrix.org answered `M_UNKNOWN_TOKEN — "Token is not active"` on 2026-07-31 and it has not been replaced. A working token is a Sean-only input |
+| **Telegram** | a `TELEGRAM_BOT_TOKEN` from BotFather + a chat id the bot may post to | **No.** Measured: the only hits for that name in `crates/` are the redaction pattern in `wcore-safety/src/pii.rs` |
+| **Twilio SMS** | `WL_LIVE_TWILIO_HOME` (a `credentials.toml` carrying an account SID + auth token) + `WL_LIVE_TWILIO_TO`, and a Twilio-provisioned `from_number`. Costs real money per send | **No.** We hold no Twilio credential — see the 2026-07-30 correction in §2 |
+| **WhatsApp** (Meta Cloud) | `WL_LIVE_WHATSAPP_HOME` (a Meta business app's access token + `phone_number_id`) + `WL_LIVE_WHATSAPP_TO`, with the recipient inside the 24-hour customer-service window | **No.** We hold no Meta credential |
+| **MS Teams** | a Bot Framework app id + app password, a bot registered in a tenant, and a `serviceUrl`/conversation id from a real Teams conversation | **No.** No test in `crates/` references one |
+
+Two of the seven are runnable today with credentials the programme already holds; one needs a
+token refresh; four need a credential nobody here has. That is the whole of what remains, and
+it is a procurement list rather than an engineering estimate.
 
 ---
 
@@ -497,30 +581,33 @@ A declaration that drifts from the code is worse than no declaration. This one i
    table says `exactly-once` or `exactly-once-below-cap`;
 4. asserts the row set and the constructible-adapter set are **the same set** — a new adapter
    with no row here fails the build, and a row here naming no adapter fails it too;
-5. asserts the **cap** half of a conditional row against the wire: `exactly-once-below-cap`
-   requires a `<platform>.cap` line, and the number must equal what the constructed adapter's
-   `max_message_len()` returns. Matrix's cap had **no test of any kind** before 2026-07-31 — the
+5. asserts **every** cap against the wire, not only the conditional row's: a `<platform>.cap`
+   line is present exactly when the constructed adapter returns `Some(n)` from
+   `max_message_len()`, and equals that `n`. Generalised on 2026-08-26 (#934) from the
+   Matrix-only rule added on 2026-07-31, when Matrix's cap had **no test of any kind** — the
    one number the surviving exactly-once claim is conditional on was the one number nothing
    checked;
-6. asserts the converse, which is what stops this document sliding back: a row claiming bare
-   `exactly-once` must belong to an adapter reporting **no** cap. An adapter with a finite cap
-   can only honestly claim `exactly-once-below-cap`, so the unconditional sentence cannot be
-   written about it.
+6. asserts the guarantee-specific rules on top of that: `exactly-once-below-cap` requires a cap
+   row, so a conditional promise cannot be made with its condition left unstated; and a row
+   claiming bare `exactly-once` must belong to an adapter reporting **no** cap, which is what
+   stops this document sliding back to the unconditional sentence it carried until 2026-07-31;
+7. asserts every cap row carries a `<platform>.cap_measured` verdict, and that the verdict
+   agrees with §4.2's table. Without it an `assert_eq!` against a number implies the number was
+   verified; the verdict makes the difference between "checked against our adapter" and
+   "checked against the platform" a thing the file has to state rather than imply.
 
 If you change an adapter's capability **or its `max_message_len`**, this file is part of the
 change.
 
-**What checks 5 and 6 still do NOT establish — tracked as
+**What checks 5, 6 and 7 still do NOT establish — tracked as
 [FerroxLabs/wayland#934](https://github.com/FerroxLabs/wayland/issues/934).** They compare the
 cap in this document against the cap the adapter returns. Both numbers are ours. Whether either
-equals the *platform's* real limit is unmeasured, and the six adapters that do have a cap test
-assert `max_message_len()` against the literal the function returns one line above — which
-restates the code rather than testing it. Being wrong is not cosmetic in either direction: a cap
-set too high reinstates HIGH-6 (the platform rejects the message and it is dropped), and a cap
-set too low chunks bodies that did not need it, which per [§4.1](#41-exactly-once-stops-at-the-message-cap)
-**drops the idempotency key and downgrades exactly-once for messages that should have been
-covered by it.** Closing it needs a live boundary probe per platform, at `cap` and `cap + 1`,
-against eight destinations we do not all hold credentials for.
+equals the *platform's* real limit is unmeasured — which is why every row reads
+`cap_measured = no` rather than being left to look verified.
+[§4.2](#42-the-message-cap-per-adapter--declared-by-us-measured-by-nobody) states what being
+wrong costs in each direction, and names, per platform, the exact credential the live boundary
+probe is waiting on. Two of the seven are runnable today, one needs a token refresh, and four
+need a credential nobody on the programme holds.
 
 ---
 
@@ -645,26 +732,50 @@ having been redacted. Grade a delete by reading the event back and checking that
 is gone — never by the status code.
 
 <!-- DELIVERY-SEMANTICS-MACHINE-READABLE
-Do not edit by hand. Kept in step with the table in §2; the test reads BOTH and requires
-them to agree, so a table edit that misses this block fails, and vice versa.
+Do not edit by hand. Kept in step with the tables in §2 and §4.2; the test reads BOTH and
+requires them to agree, so a table edit that misses this block fails, and vice versa.
 
 Vocabulary: exactly-once | exactly-once-below-cap | at-most-once | at-least-once.
 
 `exactly-once-below-cap` is the CONDITIONAL guarantee of §4.1 — the key rides only while the
-body fits in one platform message. A row declaring it MUST also carry a `<platform>.cap` line
-giving that platform's `max_message_len()` in chars, and the test asserts the number against
-the adapter the production factory builds. Conversely a row declaring bare `exactly-once` MUST
-have `max_message_len() == None`: a finite cap with an unconditional claim is the drift this
-vocabulary exists to make unsayable.
+body fits in one platform message. A row declaring it MUST also carry a `<platform>.cap` line.
+Conversely a row declaring bare `exactly-once` MUST have `max_message_len() == None`: a finite
+cap with an unconditional claim is the drift this vocabulary exists to make unsayable.
+
+`<platform>.cap` is that adapter's `max_message_len()` in chars, for EVERY adapter that
+declares one — not only the conditional row. Generalised 2026-08-26 (wayland#934) from the
+Matrix-only meaning it had before, because a cap is a fact about the adapter rather than the
+boundary of a guarantee, and it is load-bearing on every platform: `send_to_keyed` chunks on
+it. A cap row is present exactly when the constructed adapter returns `Some(n)`, and equals
+that `n`; an adapter returning `None` carries no cap row.
+
+`<platform>.cap_measured` is REQUIRED beside every cap row. Vocabulary: no | live.
+`no` means the number has never been checked against the PLATFORM — only against our own
+adapter, which is a drift check and not a measurement. `live` may be written only for a
+platform whose boundary probe (a send at the cap, and a send one char over it) has actually
+run against a real destination. Every row is `no` today; §4.2 names what each is waiting for.
 slack = at-most-once
+slack.cap = 39000
+slack.cap_measured = no
 matrix = exactly-once-below-cap
 matrix.cap = 32768
+matrix.cap_measured = no
 discord = at-most-once
+discord.cap = 2000
+discord.cap_measured = no
 telegram = at-most-once
+telegram.cap = 4096
+telegram.cap_measured = no
 sms = at-most-once
+sms.cap = 1600
+sms.cap_measured = no
 whatsapp = at-most-once
+whatsapp.cap = 4096
+whatsapp.cap_measured = no
 email = at-most-once
 signal = at-most-once
 imessage = at-most-once
 msteams = at-most-once
+msteams.cap = 28000
+msteams.cap_measured = no
 -->

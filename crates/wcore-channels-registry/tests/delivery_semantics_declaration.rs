@@ -170,6 +170,26 @@ fn parse_declaration(doc: &str) -> Declaration {
             continue;
         }
 
+        // `.cap_measured` first: it is the longer suffix, and a `<platform>.cap_measured`
+        // line falling through to the guarantee arm below would panic on an unknown
+        // guarantee word rather than being read as the verdict it is.
+        if let Some(platform) = k.strip_suffix(".cap_measured") {
+            assert!(
+                matches!(v.as_str(), "no" | "live"),
+                "unknown cap_measured verdict {v:?} for {k:?} -- the vocabulary is no / live. \
+                 `live` means a boundary probe ran against the real platform; there is no \
+                 third state, because \"we are fairly confident\" is what this file exists \
+                 to stop being written down"
+            );
+            assert!(
+                out.cap_measured
+                    .insert(platform.to_string(), v == "live")
+                    .is_none(),
+                "{k:?} is declared twice"
+            );
+            continue;
+        }
+
         if let Some(platform) = k.strip_suffix(".cap") {
             let n: usize = v.parse().unwrap_or_else(|_| {
                 panic!("{k:?} must be a plain char count in decimal, got {v:?}")
@@ -204,14 +224,26 @@ fn parse_declaration(doc: &str) -> Declaration {
 
 /// The machine-readable block, parsed.
 ///
-/// `caps` is separate from `guarantees` because a cap is a *qualifier* on a
-/// guarantee rather than one of its values: only `exactly-once-below-cap` rows
-/// carry one, and the cross-checks between the two maps are the point (see
-/// [`disagreements`]).
+/// `caps` is separate from `guarantees` because a cap is a fact about the
+/// adapter rather than one of the guarantee's values, and the cross-checks
+/// between the maps are the point (see [`disagreements`]).
+///
+/// **Generalised 2026-08-26 (wayland#934).** Until then a `.cap` row meant "the
+/// boundary of a conditional guarantee" and was legal only on the one
+/// `exactly-once-below-cap` row; every other adapter's cap was checked by an
+/// `assert_eq!` against the literal its own function returns one line above.
+/// A cap row now means `max_message_len()`, for every adapter that declares
+/// one, and the old arm rejecting a cap row on an unconditional guarantee is
+/// gone rather than merely relaxed.
 #[derive(Default, Clone)]
 struct Declaration {
     guarantees: BTreeMap<String, String>,
     caps: BTreeMap<String, usize>,
+    /// `platform -> was the cap measured against the real platform`. Required beside every
+    /// cap row. `false` for all seven today, and that is the point: an `assert_eq!` against
+    /// a number implies the number was verified, and until a boundary probe runs, nothing
+    /// has verified it against anything but our own adapter.
+    cap_measured: BTreeMap<String, bool>,
 }
 
 /// What an adapter, as the production factory builds it, actually reports.
@@ -279,32 +311,42 @@ fn disagreements(declared: &Declaration, measured: &BTreeMap<String, Measured>) 
                     ));
                 }
 
-                // The cap half. This is what makes the conditional row a
-                // measurement rather than a caveat: the number in the document
-                // has to be the number the shipped adapter reports.
-                match (guarantee.as_str(), declared.caps.get(platform)) {
-                    ("exactly-once-below-cap", None) => out.push(format!(
-                        "{platform}: declared exactly-once-below-cap but the block carries no \
-                         {platform}.cap row, so the condition the guarantee depends on is \
-                         unstated"
+                // The cap, for EVERY adapter. A cap row is present exactly
+                // when the adapter reports one, and carries the same number.
+                // This is the half that stops the six `assert_eq!`s in the
+                // adapter crates from being the only thing checking a number
+                // the chunker reads on every send.
+                match (m.max_message_len, declared.caps.get(platform)) {
+                    (Some(actual), None) => out.push(format!(
+                        "{platform}: the adapter caps a single message at {actual} chars but the \
+                         block carries no {platform}.cap row. send_to_keyed chunks on that \
+                         number, so it is load-bearing whether or not the guarantee mentions it"
                     )),
-                    ("exactly-once-below-cap", Some(&cap)) => match m.max_message_len {
-                        None => out.push(format!(
-                            "{platform}: the document says the guarantee stops at {cap} chars, \
-                             but the adapter reports max_message_len() == None (no cap), so the \
-                             condition describes nothing"
-                        )),
-                        Some(actual) if actual != cap => out.push(format!(
-                            "{platform}: the document says the guarantee stops at {cap} chars \
-                             but the adapter's max_message_len() is {actual}"
-                        )),
-                        Some(_) => {}
-                    },
-                    // The converse, and the rule that stops this document
-                    // sliding back to the unconditional sentence it carried
-                    // until 2026-07-31: a finite cap makes bare `exactly-once`
-                    // false above that length.
-                    ("exactly-once", _) => {
+                    (Some(actual), Some(&cap)) if actual != cap => out.push(format!(
+                        "{platform}: the document says the cap is {cap} chars but the adapter's \
+                         max_message_len() is {actual}"
+                    )),
+                    (None, Some(&cap)) => out.push(format!(
+                        "{platform}: carries a {platform}.cap row ({cap}) but the adapter reports \
+                         max_message_len() == None, so the row describes a cap that does not exist"
+                    )),
+                    _ => {}
+                }
+
+                // The guarantee-specific rules, on top of the cap agreement.
+                match guarantee.as_str() {
+                    // A conditional promise with its condition left unstated.
+                    "exactly-once-below-cap" if !declared.caps.contains_key(platform) => {
+                        out.push(format!(
+                            "{platform}: declared exactly-once-below-cap but the block carries no \
+                             {platform}.cap row, so the condition the guarantee depends on is \
+                             unstated"
+                        ))
+                    }
+                    // The rule that stops this document sliding back to the
+                    // unconditional sentence it carried until 2026-07-31: a
+                    // finite cap makes bare `exactly-once` false above it.
+                    "exactly-once" => {
                         if let Some(actual) = m.max_message_len {
                             out.push(format!(
                                 "{platform}: declared bare exactly-once, but the adapter caps a \
@@ -315,15 +357,7 @@ fn disagreements(declared: &Declaration, measured: &BTreeMap<String, Measured>) 
                             ));
                         }
                     }
-                    _ => {
-                        if let Some(&cap) = declared.caps.get(platform) {
-                            out.push(format!(
-                                "{platform}: carries a {platform}.cap row ({cap}) but its \
-                                 guarantee is {guarantee:?}, which has no cap condition — the cap \
-                                 row implies a guarantee it does not have"
-                            ));
-                        }
-                    }
+                    _ => {}
                 }
             }
         }
@@ -334,6 +368,24 @@ fn disagreements(declared: &Declaration, measured: &BTreeMap<String, Measured>) 
         if !declared.guarantees.contains_key(platform) {
             out.push(format!(
                 "{platform}: has a {platform}.cap row but no guarantee row"
+            ));
+        }
+        // A number with no statement about where it came from reads as verified.
+        if !declared.cap_measured.contains_key(platform) {
+            out.push(format!(
+                "{platform}: has a {platform}.cap row but no {platform}.cap_measured verdict. \
+                 A cap asserted with nothing said about its provenance reads as though the \
+                 platform confirmed it, and no platform has"
+            ));
+        }
+    }
+
+    // The converse: a verdict about a cap that is not declared.
+    for platform in declared.cap_measured.keys() {
+        if !declared.caps.contains_key(platform) {
+            out.push(format!(
+                "{platform}: has a {platform}.cap_measured verdict but no {platform}.cap row, so \
+                 the verdict is about a number the block does not carry"
             ));
         }
     }
@@ -382,14 +434,24 @@ fn declaration_matches_every_adapter() {
          macOS-only iMessage), found {}",
         declared.guarantees.len()
     );
-    // The cap rows are the conditional half of §4.1. Zero of them would mean
-    // the parser had silently stopped seeing `<platform>.cap` lines, which
-    // would make every cap assertion below vacuously satisfied.
-    assert!(
-        !declared.caps.is_empty(),
-        "parsed zero <platform>.cap rows. At least Matrix declares one, so an empty cap map is \
-         a broken parser rather than a document with no conditional guarantees — and it would \
-         make every cap check silently pass"
+    // Seven adapters declare a finite cap; three inherit `None` from the trait
+    // default. Zero cap rows -- or a shrinking count -- would mean the parser
+    // had silently stopped seeing `<platform>.cap` lines, and every cap check
+    // below would then be vacuously satisfied.
+    assert_eq!(
+        declared.caps.len(),
+        7,
+        "expected seven <platform>.cap rows (slack, matrix, discord, telegram, sms, whatsapp, \
+         msteams -- email, signal and iMessage report None). Found {}: {:?}",
+        declared.caps.len(),
+        declared.caps
+    );
+    assert_eq!(
+        declared.cap_measured.len(),
+        declared.caps.len(),
+        "every cap row needs a cap_measured verdict beside it; got {} caps and {} verdicts",
+        declared.caps.len(),
+        declared.cap_measured.len()
     );
 
     let problems = disagreements(&declared, &measured);
@@ -499,23 +561,20 @@ fn comparator_rejects_a_downgraded_row() {
         .guarantees
         .insert("matrix".into(), "at-most-once".into());
 
-    // Also two since 2026-07-31: downgrading the guarantee leaves the
-    // `matrix.cap` row behind, and a cap row under a guarantee with no cap
-    // condition is itself drift — it implies a conditional promise the row no
-    // longer makes.
+    // Back to ONE disagreement since 2026-08-26. It was two between 07-31 and
+    // then, because a leftover `matrix.cap` row under an unconditional
+    // guarantee was itself drift. Under the generalised meaning a cap row is a
+    // fact about the adapter, so it is *correct* to keep carrying it here —
+    // Matrix really does cap at 32,768 whatever guarantee the row claims. The
+    // count is pinned so this reduction is a deliberate consequence of the
+    // wayland#934 change rather than a rule quietly ceasing to fire.
     let problems = disagreements(&declared, &measured);
-    assert_eq!(problems.len(), 2, "got: {problems:?}");
+    assert_eq!(problems.len(), 1, "got: {problems:?}");
     assert!(
         problems
             .iter()
             .any(|p| p.starts_with("matrix:") && p.contains("returns true")),
         "got: {problems:?}"
-    );
-    assert!(
-        problems
-            .iter()
-            .any(|p| p.starts_with("matrix:") && p.contains("has no cap condition")),
-        "the orphaned cap row must also be reported: {problems:?}"
     );
 }
 
@@ -528,6 +587,7 @@ fn comparator_rejects_a_missing_row() {
     // cannot see on its own — there is no row to disagree with.
     declared.guarantees.remove("matrix");
     declared.caps.remove("matrix");
+    declared.cap_measured.remove("matrix");
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(problems.len(), 1, "got: {problems:?}");
@@ -564,26 +624,72 @@ fn comparator_rejects_a_row_for_an_adapter_that_does_not_exist() {
 // reason a reader cares about.
 // ---------------------------------------------------------------------------
 
-/// Can it pass: the real document's cap against the real adapter.
+/// Can it pass: every declared cap against the adapter that declares it.
+///
+/// **Was Matrix-only until 2026-08-26 (wayland#934).** The other six caps were each covered
+/// by an `assert_eq!` in their own adapter crate against the literal the function returns one
+/// line above, which restates the code and would keep passing if the number were wrong. This
+/// binds all seven to an independent artifact.
 #[test]
-fn the_declared_cap_is_the_adapters_real_cap() {
+fn every_declared_cap_is_the_adapters_real_cap() {
     let declared = parse_declaration(DECLARATION);
     let measured = measured_capabilities();
 
-    // Not vacuous: there is at least one conditional row, and it is Matrix.
+    // Not vacuous, and pinned: a shrinking set would make the loop below check less while
+    // still reporting green.
+    let mut platforms: Vec<&str> = declared.caps.keys().map(String::as_str).collect();
+    platforms.sort_unstable();
     assert_eq!(
-        declared.caps.keys().collect::<Vec<_>>(),
-        vec!["matrix"],
-        "the set of cap-conditional rows changed"
+        platforms,
+        vec![
+            "discord", "matrix", "msteams", "slack", "sms", "telegram", "whatsapp"
+        ],
+        "the set of capped adapters changed. Email, Signal and iMessage inherit the trait \
+         default of None and must NOT gain a cap row; anything else that reports Some(n) must."
     );
-    let cap = declared.caps["matrix"];
-    let actual = measured["matrix"].max_message_len;
-    assert_eq!(
-        actual,
-        Some(cap),
-        "docs/delivery-semantics.md §4.1 says the Matrix guarantee stops at {cap} chars, but the \
-         adapter the production factory builds reports max_message_len() == {actual:?}. One of \
-         the two is wrong, and the document is the customer-facing one."
+
+    for (platform, &cap) in &declared.caps {
+        let actual = measured[platform].max_message_len;
+        assert_eq!(
+            actual,
+            Some(cap),
+            "docs/delivery-semantics.md §4.2 says {platform} caps a single message at {cap} \
+             chars, but the adapter the production factory builds reports \
+             max_message_len() == {actual:?}. One of the two is wrong, and the document is \
+             the customer-facing one."
+        );
+    }
+}
+
+/// **No cap has been measured at its real platform, and the file has to say so.**
+///
+/// This is the half of wayland#934 that the generalisation above does NOT close. Comparing
+/// the document's number to the adapter's number is a drift check; both numbers are ours.
+/// The `cap_measured` verdict exists so that fact is stated rather than left to be inferred
+/// from an `assert_eq!` that looks like verification.
+///
+/// If a boundary probe ever runs and this assertion fails, that is the intended way to find
+/// out: flip the row to `live`, record the run in §4.2, and narrow this test to the rows that
+/// are still `no`.
+#[test]
+fn no_cap_is_claimed_measured_at_a_real_platform_yet() {
+    let declared = parse_declaration(DECLARATION);
+    assert!(
+        !declared.cap_measured.is_empty(),
+        "parsed zero cap_measured verdicts, which would make the claim below vacuous"
+    );
+    let claimed: Vec<&str> = declared
+        .cap_measured
+        .iter()
+        .filter(|&(_, &live)| live)
+        .map(|(k, _)| k.as_str())
+        .collect();
+    assert!(
+        claimed.is_empty(),
+        "{claimed:?} claim cap_measured = live. That word may only be written after a boundary \
+         probe has sent a body of exactly `cap` chars and one of `cap + 1` at the REAL \
+         destination and read what arrived. §4.2 names the credential each probe is waiting \
+         on; if one of them ran, record it there in the same commit."
     );
 }
 
@@ -614,12 +720,22 @@ fn comparator_rejects_a_conditional_row_with_no_cap() {
     let measured = measured_capabilities();
 
     declared.caps.remove("matrix");
+    declared.cap_measured.remove("matrix");
 
+    // Two since 2026-08-26, and both are real: the guarantee has lost the condition it
+    // depends on, AND a capped adapter has lost its cap row. Pinning the count means a rule
+    // silently ceasing to fire still reddens.
     let problems = disagreements(&declared, &measured);
-    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert_eq!(problems.len(), 2, "got: {problems:?}");
     assert!(
-        problems[0].contains("no matrix.cap row"),
-        "got: {problems:?}"
+        problems.iter().any(|p| p.contains("no matrix.cap row")),
+        "the unstated condition must be reported: {problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("caps a single message at 32768 chars but the block carries no")),
+        "the missing cap row must be reported in its own right: {problems:?}"
     );
 }
 
@@ -640,33 +756,107 @@ fn comparator_rejects_bare_exactly_once_over_a_capped_adapter() {
         .guarantees
         .insert("matrix".into(), "exactly-once".into());
     declared.caps.remove("matrix");
+    declared.cap_measured.remove("matrix");
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(
         problems.len(),
-        1,
+        2,
         "the old, false, unconditional wording must be rejected: {problems:?}"
     );
     assert!(
-        problems[0].contains("declared bare exactly-once") && problems[0].contains("32768"),
+        problems
+            .iter()
+            .any(|p| p.contains("declared bare exactly-once") && p.contains("32768")),
         "the disagreement must say why the unconditional claim is false and name the cap: \
+         {problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("but the block carries no matrix.cap row")),
+        "dropping the cap row is separately wrong now that every capped adapter needs one: \
          {problems:?}"
     );
 }
 
-/// Can it fail, 4: a cap row attached to a guarantee that has no cap condition,
-/// which would imply a conditional promise the row does not actually make.
+/// Can it fail, 4: a cap row for an adapter that has no cap.
+///
+/// **This replaces `comparator_rejects_a_cap_row_on_an_unconditional_guarantee`**, which
+/// asserted that `telegram.cap = 4096` was drift. Under the generalised meaning (wayland#934)
+/// that row is not drift, it is required — Telegram really does cap at 4096 — so the old test
+/// would have been asserting the opposite of the new rule. The rule that survives is the one
+/// that was doing the work: a cap row has to describe a cap the adapter actually reports.
 #[test]
-fn comparator_rejects_a_cap_row_on_an_unconditional_guarantee() {
+fn comparator_rejects_a_cap_row_for_an_uncapped_adapter() {
     let mut declared = parse_declaration(DECLARATION);
     let measured = measured_capabilities();
+    assert!(
+        disagreements(&declared, &measured).is_empty(),
+        "the unmutated comparison must be green for this test to mean anything"
+    );
 
-    declared.caps.insert("telegram".into(), 4096);
+    // Email inherits the trait default and reports None.
+    declared.caps.insert("email".into(), 1000);
+    declared.cap_measured.insert("email".into(), false);
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(problems.len(), 1, "got: {problems:?}");
     assert!(
-        problems[0].contains("has no cap condition"),
+        problems[0].contains("max_message_len() == None"),
+        "got: {problems:?}"
+    );
+}
+
+/// Can it fail, 5 — **the rule wayland#934 added.** A capped adapter with no cap row.
+///
+/// This is the state six of the seven adapters were in until 2026-08-26: a real cap, read by
+/// `send_to_keyed` on every send, and nothing outside its own function checking the number.
+#[test]
+fn comparator_rejects_a_capped_adapter_with_no_cap_row() {
+    let mut declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+
+    declared.caps.remove("slack");
+    declared.cap_measured.remove("slack");
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert!(
+        problems[0].contains("caps a single message at 39000 chars")
+            && problems[0].contains("no slack.cap row"),
+        "the disagreement must name the platform and the unstated number: {problems:?}"
+    );
+}
+
+/// Can it fail, 6: a cap asserted with nothing said about where it came from.
+#[test]
+fn comparator_rejects_a_cap_row_with_no_measured_verdict() {
+    let mut declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+
+    declared.cap_measured.remove("slack");
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert!(
+        problems[0].contains("no slack.cap_measured verdict"),
+        "got: {problems:?}"
+    );
+}
+
+/// Can it fail, 7: a verdict about a cap the block does not carry.
+#[test]
+fn comparator_rejects_a_measured_verdict_with_no_cap_row() {
+    let mut declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+
+    declared.cap_measured.insert("email".into(), false);
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert!(
+        problems[0].contains("no email.cap row"),
         "got: {problems:?}"
     );
 }
@@ -846,4 +1036,129 @@ fn the_recurrence_section_keeps_its_measurement_and_its_correction() {
         "§5 quotes the old claim but no longer states that it is wrong — which leaves the \
          document asserting the refuted sentence"
     );
+}
+
+/// §4.2's human-readable cap table and the machine-readable block are two statements of the
+/// same facts, and the block is the cheap one to update — which makes it the cheap one to
+/// update *alone*, leaving the table a reader actually reads stale. That would satisfy every
+/// test above while lying.
+///
+/// Added 2026-08-26 with the wayland#934 generalisation.
+#[test]
+fn the_cap_table_agrees_with_the_machine_readable_block() {
+    let declared = parse_declaration(DECLARATION);
+
+    // Scope the search to §4.2. The §2 table uses the same row labels and comes first, so an
+    // unscoped `lines().find()` would silently read the wrong table and assert nothing about
+    // this one.
+    let start = DECLARATION
+        .find("### 4.2 ")
+        .expect("docs/delivery-semantics.md has lost §4.2, the per-adapter cap table");
+    let rest = &DECLARATION[start..];
+    let end = rest
+        .find("\n## ")
+        .expect("§4.2 is not terminated by a following section");
+    let section = &rest[..end];
+
+    let label = |platform: &str| -> &'static str {
+        match platform {
+            "slack" => "**Slack**",
+            "matrix" => "**Matrix**",
+            "discord" => "**Discord**",
+            "telegram" => "**Telegram**",
+            "sms" => "**Twilio SMS**",
+            "whatsapp" => "**WhatsApp**",
+            "msteams" => "**MS Teams**",
+            other => panic!("§4.2 has no row label for {other:?}"),
+        }
+    };
+
+    for (platform, &cap) in &declared.caps {
+        let needle = format!("| {}", label(platform));
+        let row = section
+            .lines()
+            .find(|l| l.trim_start().starts_with(&needle))
+            .unwrap_or_else(|| panic!("§4.2 has no cap row for {platform:?} ({needle})"));
+
+        // The number, as the table renders it (thousands separator).
+        let plain = cap.to_string();
+        let grouped = format!(
+            "{},{}",
+            &plain[..plain.len() - 3],
+            &plain[plain.len() - 3..]
+        );
+        assert!(
+            row.contains(&grouped) || row.contains(&plain),
+            "§4.2's row for {platform:?} must state the cap ({grouped}):\n  {row}"
+        );
+
+        // And the verdict, which is the honesty half.
+        let live = declared.cap_measured[platform];
+        if live {
+            assert!(
+                !row.contains("NOT MEASURED"),
+                "the block says {platform}.cap_measured = live but §4.2 still reads NOT \
+                 MEASURED:\n  {row}"
+            );
+        } else {
+            assert!(
+                row.contains("NOT MEASURED"),
+                "the block says {platform}.cap_measured = no, so §4.2's row must say NOT \
+                 MEASURED rather than leaving the number looking verified:\n  {row}"
+            );
+        }
+    }
+}
+
+/// The blocked half of wayland#934 has to stay a named, actionable list rather than decaying
+/// into "later".
+///
+/// §4.2 records, per platform, the exact credential its boundary probe is waiting on. This
+/// asserts the list is still there and still names every capped platform — otherwise the
+/// remaining work becomes invisible the moment someone tidies the section, and an invisible
+/// blocker is indistinguishable from a closed one.
+#[test]
+fn every_unmeasured_cap_names_the_credential_its_probe_is_waiting_on() {
+    let declared = parse_declaration(DECLARATION);
+
+    let start = DECLARATION
+        .find("#### Which probe is blocked on which credential")
+        .expect("§4.2 has lost the per-platform blocked-probe table");
+    let rest = &DECLARATION[start..];
+    let end = rest.find("\n## ").unwrap_or(rest.len());
+    let section = &rest[..end];
+
+    let label = |platform: &str| -> &'static str {
+        match platform {
+            "slack" => "**Slack**",
+            "matrix" => "**Matrix**",
+            "discord" => "**Discord**",
+            "telegram" => "**Telegram**",
+            "sms" => "**Twilio SMS**",
+            "whatsapp" => "**WhatsApp**",
+            "msteams" => "**MS Teams**",
+            other => panic!("no blocked-probe label for {other:?}"),
+        }
+    };
+
+    for platform in declared.caps.keys() {
+        if declared.cap_measured[platform] {
+            continue; // measured: nothing left to be blocked on.
+        }
+        let needle = format!("| {}", label(platform));
+        let row = section
+            .lines()
+            .find(|l| l.trim_start().starts_with(&needle))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{platform:?} has an unmeasured cap but no row saying what its probe is \
+                     waiting on. Every blocked item names its blocker or it is not tracked."
+                )
+            });
+        // A row that says nothing about whether we hold the credential is not actionable.
+        assert!(
+            row.contains("**Yes**") || row.contains("**No.**") || row.contains("DEAD"),
+            "the row for {platform:?} must state whether the credential is held:\n  {row}"
+        );
+    }
 }
