@@ -71,30 +71,112 @@ fn write_and_edit_declare_a_filesystem_transactional_effect() {
     }
 }
 
-/// `Opaque` on every other tool is a decision, not an unfinished migration.
+/// `Opaque` is still a decision, not an unfinished migration.
 ///
-/// Each of these mutates state this process cannot photograph beforehand and
-/// cannot re-read afterwards: a shell command touches arbitrary host state, a
-/// fetch touches a remote service's rate limit, a nested step aggregates
-/// effects it does not own. There is no preimage, no intended postimage and
-/// no object identity to compare, so there is nothing a reconciler could be
-/// right about. Promoting any of them requires that same three-way evidence
-/// first; without it the honest answer stays "ask the operator".
+/// F23 (#889) certified the invocations that provably request no state change
+/// at all — a fetch is one GET, a web *search* reads. It did not weaken this
+/// rule, it drew the line the rule always implied: what stays opaque is every
+/// invocation whose effect this process cannot bound. There is no preimage,
+/// no intended postimage and no object identity to compare, so there is
+/// nothing a reconciler could be right about, and the honest answer stays
+/// "ask the operator".
+///
+/// Each case below is asserted with the input that reaches the classifier, not
+/// with `{}`. An empty object is opaque because a field is missing, which
+/// would pass against a classifier that had been deleted outright.
 #[test]
 fn the_tools_without_reconcilable_evidence_stay_opaque_on_purpose() {
-    let opaque: Vec<Box<dyn Tool>> = vec![
-        Box::new(wcore_tools::bash::BashTool),
-        Box::new(wcore_tools::web_fetch::WebFetchTool::default()),
+    let opaque: Vec<(Box<dyn Tool>, serde_json::Value, &str)> = vec![
+        // A shell command that can write. Nothing can photograph the host
+        // afterwards, so this is the case the narrow classifier must refuse.
+        (
+            Box::new(wcore_tools::bash::BashTool),
+            json!({ "command": "rm -rf /tmp/x" }),
+            "a mutating shell command",
+        ),
+        // A shell command the classifier does not model. Unmodelled is opaque,
+        // never optimistically certified.
+        (
+            Box::new(wcore_tools::bash::BashTool),
+            json!({ "command": "cat a.txt > b.txt" }),
+            "an unmodelled shell construct",
+        ),
+        // No command at all: absence is not evidence of harmlessness.
+        (
+            Box::new(wcore_tools::bash::BashTool),
+            json!({}),
+            "a shell call with no command",
+        ),
+        // A crawl creates a server-side job with its own lifecycle and
+        // billing. That is a state change the operator still owns.
+        (
+            Box::new(wcore_tools::web_tools::WebTool::default()),
+            json!({ "operation": "crawl", "url": "https://example.com" }),
+            "a web crawl",
+        ),
+        (
+            Box::new(wcore_tools::web_tools::WebTool::default()),
+            json!({ "operation": "extract", "url": "https://example.com" }),
+            "a web extract",
+        ),
     ];
-    for tool in opaque {
-        let contract = tool.effect_contract(&json!({}));
+    for (tool, input, what) in opaque {
+        let contract = tool.effect_contract(&input);
         assert_eq!(
             contract.kind,
             ToolEffectKind::Opaque,
-            "{} must stay opaque",
+            "{} ({}) must stay opaque",
+            tool.name(),
+            what
+        );
+        assert!(contract.reconciler.is_none(), "{} ({})", tool.name(), what);
+    }
+}
+
+/// The other half of the line above, so neither direction can pass alone.
+///
+/// A test that only asserts what stays opaque is satisfied by a build that
+/// certifies nothing, and #889's whole point is that some invocations now
+/// settle without an operator. Both arms are named here so deleting either
+/// rule is visible from one file.
+#[test]
+fn the_invocations_that_request_no_state_change_are_certified() {
+    let certified: Vec<(Box<dyn Tool>, serde_json::Value, &str)> = vec![
+        (
+            Box::new(wcore_tools::bash::BashTool),
+            json!({ "command": "ls -l" }),
+            wcore_types::tool::READ_ONLY_SHELL_RECONCILER,
+        ),
+        (
+            Box::new(wcore_tools::web_fetch::WebFetchTool::default()),
+            json!({ "url": "https://example.com" }),
+            wcore_types::tool::READ_ONLY_NETWORK_RECONCILER,
+        ),
+        (
+            Box::new(wcore_tools::web_tools::WebTool::default()),
+            json!({ "operation": "search", "query": "rust" }),
+            wcore_types::tool::READ_ONLY_NETWORK_RECONCILER,
+        ),
+    ];
+    for (tool, input, reconciler) in certified {
+        let contract = tool.effect_contract(&input);
+        assert_eq!(
+            contract.kind,
+            ToolEffectKind::RepeatSafe,
+            "{} must be certified",
             tool.name()
         );
-        assert!(contract.reconciler.is_none(), "{}", tool.name());
+        assert_eq!(
+            contract.reconciler.as_deref(),
+            Some(reconciler),
+            "{} must name the reconciler recovery will look up",
+            tool.name()
+        );
+        assert!(
+            wcore_types::tool::repeat_safe_reconciler_is_registered(reconciler),
+            "{}: a name recovery does not recognise resolves nothing",
+            tool.name()
+        );
     }
 }
 
