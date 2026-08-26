@@ -146,9 +146,12 @@ fn interpret_search_response(status: reqwest::StatusCode, html: &str, limit: usi
         // of taking the format guess on faith.
         return WebOutcome::Err {
             message: format!(
-                "duckduckgo returned HTTP {} with no parseable results (their HTML format may \
-                 have changed; try setting BRAVE_SEARCH_API_KEY for a structured API)",
-                status.as_u16()
+                "duckduckgo returned HTTP {} with no parseable results and no bot challenge. This \
+                 backend cannot tell a genuinely empty result set apart from a change to their \
+                 HTML, so it will not guess — either way nothing usable came back and the answer above \
+                 it must not be built on this. {}",
+                status.as_u16(),
+                crate::tool_backends::shared::WEB_SEARCH_KEY_REMEDY
             ),
         };
     }
@@ -201,10 +204,12 @@ fn rate_limit_message(status: reqwest::StatusCode) -> String {
     format!(
         "duckduckgo refused this query as automated traffic (HTTP {}) and returned a bot \
          challenge page instead of search results — nothing was searched, and this is NOT a \
-         parsing failure. The free HTML endpoint rate-limits by IP after a couple of rapid \
-         queries. Wait a minute and retry, or set BRAVE_SEARCH_API_KEY / TAVILY_API_KEY (or \
-         WAYLAND_WEB_BACKEND) to use a structured search API that does not throttle scrapers.",
-        status.as_u16()
+         parsing failure. The free HTML endpoint rate-limits by IP: measured against the live \
+         endpoint it serves about two queries and then refuses for minutes (still refusing four minutes later), so retrying does \
+         not clear it — and on a shared egress IP (CI, an office NAT, a VPN exit) the budget \
+         may have been spent by someone else before your first query. {}",
+        status.as_u16(),
+        crate::tool_backends::shared::WEB_SEARCH_KEY_REMEDY
     )
 }
 
@@ -521,5 +526,43 @@ mod tests {
             decode_ddg_url("//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F&rut=x"),
             "https://www.rust-lang.org/"
         );
+    }
+}
+
+#[cfg(test)]
+mod dead_end_remedy_tests {
+    use super::*;
+
+    /// RED ARM. Measured 2026-08-26 against the live endpoint: after two
+    /// queries from one IP the free HTML endpoint serves the challenge, and it
+    /// was STILL serving it four minutes later. "Wait a minute and retry" is
+    /// therefore a false remedy that costs the user a support cycle.
+    #[test]
+    fn rate_limit_message_does_not_advise_a_wait_that_does_not_work() {
+        let m = rate_limit_message(reqwest::StatusCode::from_u16(202).unwrap());
+        assert!(
+            !m.to_ascii_lowercase().contains("wait a minute"),
+            "the advertised wait is measurably false: {m}"
+        );
+    }
+
+    /// RED ARM. The dead end has to carry a remedy the user can actually
+    /// complete. Brave stopped issuing keyless free tiers in Feb 2026 (card
+    /// required), so naming it alone sends the user into a payment form.
+    #[test]
+    fn every_dead_end_names_a_verified_no_card_remedy() {
+        let msgs = [
+            rate_limit_message(reqwest::StatusCode::from_u16(202).unwrap()),
+            match interpret_search_response(reqwest::StatusCode::OK, "<html></html>", 5) {
+                WebOutcome::Err { message } => message,
+                other => panic!("an unparseable body must be an Err, got {other:?}"),
+            },
+        ];
+        for m in msgs {
+            assert!(
+                m.contains("https://app.tavily.com") && m.contains("TAVILY_API_KEY"),
+                "a dead end must name the concrete free option and its env var: {m}"
+            );
+        }
     }
 }
