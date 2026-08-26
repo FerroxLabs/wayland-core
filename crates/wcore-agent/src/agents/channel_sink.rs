@@ -33,6 +33,7 @@ use tokio::sync::mpsc;
 use wcore_protocol::events::{ErrorInfo, ProtocolEvent, WorkflowChildTerminalState};
 use wcore_tools::ToolOutputSink;
 use wcore_types::message::FinishReason;
+use wcore_types::reasoning_filter::ReasoningFilter;
 
 use crate::output::OutputSink;
 
@@ -72,6 +73,28 @@ pub struct ChannelSink {
     /// Authoritative once-only terminal lane. Diagnostics never enter it.
     terminal_tx: Option<mpsc::Sender<SubAgentTerminalRelay>>,
     terminal_sent: AtomicBool,
+    /// #1129 - inline-reasoning split for the child's MODEL TEXT lane.
+    ///
+    /// `ProtocolSink` strips `<think>`-class tags out of `text_delta` and
+    /// re-emits the body as `thinking`, because the shipped spec (S1.3)
+    /// promises UNCONDITIONALLY that `text` never carries inline reasoning
+    /// and tells hosts not to write their own stripper. A spawned child does
+    /// not write to a `ProtocolSink` - its `OutputSink` is THIS type, and the
+    /// parent's `emit_sub_agent_event` clones `inner` without inspecting it.
+    /// Without this filter an R1/Qwen-class child put a literal
+    /// `<think>...</think>` on the wire at `sub_agent_event.inner.text`.
+    ///
+    /// Per-child by construction: `spawn_tool` builds one `ChannelSink` per
+    /// task, so one child's straddling tag can never eat a sibling's text.
+    reasoning: parking_lot::Mutex<ReasoningFilter>,
+    /// #1129 - a SEPARATE filter for the streaming-tool-output lane.
+    ///
+    /// `ToolOutputSink::emit_chunk` deliberately relays tool output on the
+    /// same `text_delta` wire shape, so it is bound by the same S1.3 promise.
+    /// It must NOT share the model-text filter: the two lanes interleave, and
+    /// a `<` in a file a child happens to `cat` would otherwise swallow the
+    /// child's answer (and vice versa).
+    chunk_reasoning: parking_lot::Mutex<ReasoningFilter>,
 }
 
 impl ChannelSink {
@@ -90,6 +113,8 @@ impl ChannelSink {
             tx,
             terminal_tx: None,
             terminal_sent: AtomicBool::new(false),
+            reasoning: parking_lot::Mutex::new(ReasoningFilter::new()),
+            chunk_reasoning: parking_lot::Mutex::new(ReasoningFilter::new()),
         }
     }
 
@@ -106,6 +131,8 @@ impl ChannelSink {
             tx,
             terminal_tx: Some(terminal_tx),
             terminal_sent: AtomicBool::new(false),
+            reasoning: parking_lot::Mutex::new(ReasoningFilter::new()),
+            chunk_reasoning: parking_lot::Mutex::new(ReasoningFilter::new()),
         }
     }
 
@@ -123,6 +150,30 @@ impl ChannelSink {
             agent_name: self.agent_name.clone(),
             inner,
         });
+    }
+
+    /// The msg_id the streaming-tool-output lane relays under.
+    fn chunk_msg_id(&self) -> String {
+        format!("{}-chunk", self.parent_call_id)
+    }
+
+    /// #1129 - drain whatever inline reasoning `filter` is holding and relay
+    /// it as a typed `thinking` instead of deleting it.
+    ///
+    /// Called after every chunk (so reasoning streams incrementally rather
+    /// than as one end-of-turn blob) and again at the turn boundaries, which
+    /// is what recovers an UNCLOSED `<think>`: the filter eats to end of
+    /// stream rather than leak a runaway tail, and without this flush that
+    /// tail would be silently dropped instead of shown.
+    fn flush_reasoning(&self, filter: &parking_lot::Mutex<ReasoningFilter>, msg_id: &str) {
+        let captured = filter.lock().take_captured_delta();
+        if !captured.is_empty() {
+            self.relay(ProtocolEvent::Thinking {
+                text: captured,
+                msg_id: msg_id.to_string(),
+                subject: None,
+            });
+        }
     }
 
     /// Emit the single authoritative terminal after the child result is known.
@@ -170,8 +221,24 @@ impl ChannelSink {
 
 impl OutputSink for ChannelSink {
     fn emit_text_delta(&self, text: &str, msg_id: &str) {
+        // #1129: split inline reasoning out of the relayed visible stream,
+        // mirroring `ProtocolSink::emit_text_delta`. The withheld body rides
+        // the typed `thinking` relay rather than being deleted, so a host
+        // renders a child's reasoning collapsed exactly as it does the
+        // parent's.
+        let visible = self.reasoning.lock().process(text);
+        self.flush_reasoning(&self.reasoning, msg_id);
+        // A chunk the filter consumed WHOLE (pure reasoning, or the leading
+        // half of a tag straddling the boundary) must not become an empty
+        // `text_delta`: a host that counts deltas to decide "the child
+        // answered" would read a reasoning-only turn as an answer. An
+        // already-empty input still passes through - that is the producer's
+        // frame, not the filter's doing.
+        if visible.is_empty() && !text.is_empty() {
+            return;
+        }
         self.relay(ProtocolEvent::TextDelta {
-            text: text.to_string(),
+            text: visible,
             msg_id: msg_id.to_string(),
         });
     }
@@ -196,6 +263,14 @@ impl OutputSink for ChannelSink {
         // legacy bridge unused for relay
     }
     fn emit_stream_start(&self, msg_id: &str) {
+        // #1129: a runaway unclosed `<think>` from a cancelled turn must not
+        // suppress the next turn's visible output. Flush first so the tool
+        // lane's tail - tool execution runs BETWEEN a `stream_end` and the
+        // next `stream_start` - is shown rather than discarded by the reset.
+        self.flush_reasoning(&self.chunk_reasoning, &self.chunk_msg_id());
+        self.flush_reasoning(&self.reasoning, msg_id);
+        self.reasoning.lock().reset();
+        self.chunk_reasoning.lock().reset();
         self.relay(ProtocolEvent::StreamStart {
             msg_id: msg_id.to_string(),
         });
@@ -210,6 +285,10 @@ impl OutputSink for ChannelSink {
         _cache_read: u64,
         finish_reason: FinishReason,
     ) {
+        // #1129: an unclosed reasoning block reaches the host instead of
+        // vanishing with the turn.
+        self.flush_reasoning(&self.reasoning, msg_id);
+        self.flush_reasoning(&self.chunk_reasoning, &self.chunk_msg_id());
         self.relay(ProtocolEvent::StreamEnd {
             msg_id: msg_id.to_string(),
             finish_reason,
@@ -292,9 +371,19 @@ impl ToolOutputSink for ChannelSink {
         // Reuse the existing TextDelta path so host decoders that
         // already render sub-agent text show streaming tool output
         // inline with no schema change.
+        //
+        // #1129: because this IS a `text_delta` on the wire, it is bound by
+        // the same S1.3 promise as model text. Filtered through the lane's
+        // OWN state machine, never the model-text one - the lanes interleave.
+        let msg_id = self.chunk_msg_id();
+        let visible = self.chunk_reasoning.lock().process(chunk);
+        self.flush_reasoning(&self.chunk_reasoning, &msg_id);
+        if visible.is_empty() && !chunk.is_empty() {
+            return;
+        }
         self.relay(ProtocolEvent::TextDelta {
-            text: chunk.to_string(),
-            msg_id: format!("{}-chunk", self.parent_call_id),
+            text: visible,
+            msg_id,
         });
     }
 

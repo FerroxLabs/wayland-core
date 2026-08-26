@@ -29,7 +29,8 @@
 //! has arrived to decide.
 //!
 //! Behaviour:
-//! - Recognises `<think>`, `<thinking>`, `<reasoning>` (case-insensitive)
+//! - Recognises `<think>`, `<thinking>`, `<reasoning>`, `<thought>`
+//!   (case-insensitive)
 //!   and their corresponding closing tags. Other tags (e.g. `<b>`) pass
 //!   through untouched — this is a reasoning filter, not an HTML sanitiser.
 //! - Handles nested same-name blocks via a depth counter.
@@ -65,7 +66,7 @@ enum FilterState {
 const MAX_TAG_BUFFER: usize = 256;
 
 /// The tracked reasoning tag names, lowercase.
-const TAG_NAMES: &[&str] = &["think", "thinking", "reasoning"];
+const TAG_NAMES: &[&str] = &["think", "thinking", "reasoning", "thought"];
 
 #[derive(Debug)]
 pub struct ReasoningFilter {
@@ -864,5 +865,27 @@ mod tests {
         assert_eq!(f.take_captured(), "one");
         f.process("<think>two</think>");
         assert_eq!(f.take_captured(), "two");
+    }
+
+    /// #1129 asked for EVERY spelling; `thought` was missing from
+    /// `TAG_NAMES`, so a model emitting `<thought>` leaked it verbatim.
+    #[test]
+    fn thought_is_a_recognised_spelling_1129() {
+        let mut f = ReasoningFilter::new();
+        let visible = f.process("before<thought>musing</thought>after");
+        assert_eq!(visible, "beforeafter");
+        assert_eq!(f.take_captured(), "musing");
+    }
+
+    /// The hazard the `thought` addition introduces: `thou`/`though` is now
+    /// a live tag-name prefix, so a tag that merely STARTS like one must
+    /// still reach the user byte for byte, and the word in prose untouched.
+    #[test]
+    fn thought_prefix_does_not_swallow_lookalikes_1129() {
+        let mut f = ReasoningFilter::new();
+        let src = "I thought <thoughtful>x</thoughtful> though <tho> ok";
+        let visible = f.process(src);
+        assert_eq!(visible, src);
+        assert_eq!(f.take_captured(), "");
     }
 }
