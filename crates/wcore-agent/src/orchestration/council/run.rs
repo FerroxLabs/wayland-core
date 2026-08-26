@@ -475,6 +475,7 @@ mod tests {
                 Some(Ok(())) => unreachable!("provider build not exercised in these tests"),
                 Some(Err(ResolveError::Keyless(s))) => Err(ResolveError::Keyless(s.clone())),
                 Some(Err(ResolveError::Unknown(s))) => Err(ResolveError::Unknown(s.clone())),
+                Some(Err(ResolveError::Disabled(s))) => Err(ResolveError::Disabled(s.clone())),
                 Some(Err(ResolveError::Build(a, b))) => {
                     Err(ResolveError::Build(a.clone(), b.clone()))
                 }
@@ -702,6 +703,11 @@ mod tests {
     // Same route, concurrency 2: four `flux:*` members share one permit pool, so
     // no more than 2 may stream at once even though all four are spawned together.
     #[tokio::test]
+    // `PinnedRetryBudget::pin` writes the process-global
+    // WAYLAND_MAX_STREAM_RETRIES. Under plain `cargo test` this binary is one
+    // process, so an unserialized pin is read by every budget-reading test
+    // running beside it — see the helper's own contract note.
+    #[serial_test::serial]
     async fn same_route_bounds_concurrent_spawns() {
         // Budget PINNED, not inherited. This test drives a provider that fails
         // every attempt; the shipped default is 10 retries on the shared backoff
@@ -752,6 +758,11 @@ mod tests {
     // Different routes, concurrency 1: each route gets its OWN one-permit pool, so
     // the two members are NOT throttled against each other — they can overlap.
     #[tokio::test]
+    // `PinnedRetryBudget::pin` writes the process-global
+    // WAYLAND_MAX_STREAM_RETRIES. Under plain `cargo test` this binary is one
+    // process, so an unserialized pin is read by every budget-reading test
+    // running beside it — see the helper's own contract note.
+    #[serial_test::serial]
     async fn distinct_routes_have_independent_pools() {
         // Budget PINNED, not inherited. This test drives a provider that fails
         // every attempt; the shipped default is 10 retries on the shared backoff

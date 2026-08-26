@@ -28,6 +28,11 @@ pub mod config_hint;
 mod dns_gate_e2e;
 
 pub mod egress_proxy;
+/// gh#491 — the single source of truth for which backend this build
+/// compiled and what installs it. Every surface that reports a missing
+/// browser (the supervisor refusal, the liveness remedy, `--doctor`)
+/// derives its text from here.
+pub mod install;
 pub mod liveness;
 pub mod op;
 pub mod policy;

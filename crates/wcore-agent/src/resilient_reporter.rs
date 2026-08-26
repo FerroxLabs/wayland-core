@@ -9,7 +9,8 @@
 //! the parent's `OutputSink` for `ProtocolEvent::ProviderCircuitEvent`
 //! emission.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use wcore_providers::{CircuitReporter, CircuitState, FailoverReceipt};
 
@@ -17,12 +18,70 @@ use crate::output::OutputSink;
 
 pub struct ProtocolCircuitReporter {
     output: Arc<dyn OutputSink>,
+    /// Failover sentences already said this session (#1133). Keyed on the
+    /// rendered text: a chain working as designed fails over on every turn,
+    /// and repeating the same line each time is noise, while a failover to a
+    /// DIFFERENT provider is a new fact and is worth saying.
+    announced: Mutex<HashSet<String>>,
 }
 
 impl ProtocolCircuitReporter {
     pub fn new(output: Arc<dyn OutputSink>) -> Self {
-        Self { output }
+        Self {
+            output,
+            announced: Mutex::new(HashSet::new()),
+        }
     }
+
+    /// True the first time this exact sentence is offered.
+    ///
+    /// A poisoned lock must never swallow the notice — the same rule
+    /// `wcore_config::config::emit_credential_notice_once` follows.
+    fn first_time(&self, notice: &str) -> bool {
+        match self.announced.lock() {
+            Ok(mut seen) => seen.insert(notice.to_string()),
+            Err(_) => true,
+        }
+    }
+}
+
+/// The operator-facing line for a chain that ROUTED AROUND its primary, or
+/// `None` when the receipt records no successful selection.
+///
+/// #1133. A configured chain that works told the user nothing at all: the run
+/// looked like an ordinary success while the answer came from a different
+/// provider, a different model and a different bill. The receipt was already
+/// built, already reported and already carried every fact in this sentence —
+/// it just went to `emit_provider_failover_receipt`, which is a default no-op
+/// on every sink except the JSON-stream one. So a TUI or headless user saw
+/// nothing, and — worse — configuring a fallback REMOVED the `base_url`
+/// diagnosis they would have got with no chain at all.
+///
+/// Split out and pure so the exact words are under test, the same shape as
+/// `bootstrap::local_shell_notice`.
+///
+/// **The failover CLASS is deliberately not printed.** `receipt.reason` is a
+/// `FailoverReason`, which classifies a refused connection and a read timeout
+/// identically as `timeout` (the finding that made #1127 prefer
+/// `primary_failure_code`). The precise code is not reachable here: it lives on
+/// `ResilientProvider`, and widening `FailoverReceipt` to carry it would break
+/// the desktop wire schema, which pins the receipt with
+/// `additionalProperties: false`. A sentence that named the wrong fault class
+/// would send the reader hunting timeouts for a closed port, so this one names
+/// what is certainly true and points at the checks that discriminate.
+fn failover_notice(receipt: &FailoverReceipt) -> Option<String> {
+    let selected_provider = receipt.selected_provider.as_ref()?;
+    let selected_model = receipt.selected_model.as_ref()?;
+    Some(format!(
+        "notice: provider failover — '{failed_provider}' ({failed_model}) did not serve this \
+         request, so '{selected_provider}' ({selected_model}) answered it instead. This turn's \
+         reply, tool behaviour and cost come from {selected_provider}/{selected_model}, not from \
+         the provider you configured. Check '{failed_provider}' — its `base_url`, credentials \
+         and quota — or set `[provider_chain] enabled = false` to stop routing around it and see \
+         the underlying error instead.",
+        failed_provider = receipt.failed_provider,
+        failed_model = receipt.failed_model,
+    ))
 }
 
 impl CircuitReporter for ProtocolCircuitReporter {
@@ -59,6 +118,16 @@ impl CircuitReporter for ProtocolCircuitReporter {
     }
 
     fn report_failover(&self, receipt: &FailoverReceipt) {
+        // #1133 — the human half. The structured receipt below is for the
+        // desktop host; `emit_provider_failover_receipt` is a default no-op on
+        // every other sink, so without this line a TUI or headless user is
+        // never told that a different provider is answering, at a different
+        // price. `emit_info` is the channel the retry notices already use.
+        if let Some(notice) = failover_notice(receipt)
+            && self.first_time(&notice)
+        {
+            self.output.emit_info(&notice);
+        }
         match serde_json::to_value(receipt) {
             Ok(receipt) => self.output.emit_provider_failover_receipt(receipt),
             Err(error) => self.output.emit_info(&format!(
@@ -71,7 +140,6 @@ impl CircuitReporter for ProtocolCircuitReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use wcore_types::message::FinishReason;
 
     /// (primary, fallback?, state, error?) captured per report.
@@ -290,6 +358,130 @@ mod tests {
         assert_eq!(
             receipts[0]["candidates"][0]["pricing"]["estimated_microcents"],
             4242
+        );
+    }
+}
+
+#[cfg(test)]
+mod failover_notice_tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+    use wcore_providers::{FailoverReason, FailoverReceipt};
+    use wcore_types::message::FinishReason;
+
+    #[derive(Default)]
+    struct InfoSink {
+        infos: StdMutex<Vec<String>>,
+        receipts: StdMutex<usize>,
+    }
+    impl OutputSink for InfoSink {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(
+            &self,
+            _: &str,
+            _: usize,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_info(&self, msg: &str) {
+            self.infos.lock().unwrap().push(msg.to_string());
+        }
+        fn emit_provider_circuit_event(&self, _: &str, _: Option<&str>, _: &str, _: Option<&str>) {}
+        fn emit_provider_failover_receipt(&self, _: serde_json::Value) {
+            *self.receipts.lock().unwrap() += 1;
+        }
+    }
+
+    fn served_by_fallback() -> FailoverReceipt {
+        let mut receipt =
+            FailoverReceipt::new(FailoverReason::Timeout, "anthropic", "claude-sonnet-4-6");
+        receipt.selected_provider = Some("openai".into());
+        receipt.selected_model = Some("gpt-4o".into());
+        receipt
+    }
+
+    /// The sentence has to carry the four facts a user cannot otherwise get:
+    /// who failed, what they asked for, who answered, and what to check.
+    #[test]
+    fn the_notice_names_both_providers_and_the_check() {
+        let notice = failover_notice(&served_by_fallback()).expect("a served failover");
+        for fact in [
+            "anthropic",
+            "claude-sonnet-4-6",
+            "openai",
+            "gpt-4o",
+            "base_url",
+        ] {
+            assert!(notice.contains(fact), "the notice drops `{fact}`: {notice}");
+        }
+        // The class is deliberately absent: `Timeout` here is a REFUSED
+        // connection as often as a real timeout, and naming it would send the
+        // reader hunting the wrong fault.
+        assert!(
+            !notice.contains("timeout"),
+            "the notice printed the coarse failover class, which cannot tell a refused \
+             connection from a read timeout: {notice}"
+        );
+    }
+
+    /// CAN-FAIL half of the same instrument: a receipt with no selection is a
+    /// COLLAPSED chain, which ends on its own error message (`#1127`). A notice
+    /// there would claim a provider served the turn when none did.
+    #[test]
+    fn a_chain_that_selected_nothing_says_nothing() {
+        let collapsed =
+            FailoverReceipt::new(FailoverReason::Timeout, "anthropic", "claude-sonnet-4-6");
+        assert_eq!(
+            failover_notice(&collapsed),
+            None,
+            "a chain that dispatched nobody announced a failover anyway"
+        );
+    }
+
+    /// A chain working as designed fails over on EVERY turn. Saying it once is
+    /// a notice; saying it every turn is noise the user learns to ignore.
+    #[test]
+    fn the_notice_is_said_once_per_session_and_the_receipt_every_time() {
+        let sink = Arc::new(InfoSink::default());
+        let reporter = ProtocolCircuitReporter::new(sink.clone() as Arc<dyn OutputSink>);
+        let receipt = served_by_fallback();
+        reporter.report_failover(&receipt);
+        reporter.report_failover(&receipt);
+        reporter.report_failover(&receipt);
+
+        // Snapshot before asserting: a message that re-locks the same mutex the
+        // assertion is already holding DEADLOCKS on failure, and a test that
+        // hangs instead of failing is not an instrument.
+        let said = sink.infos.lock().unwrap().clone();
+        assert_eq!(said.len(), 1, "the failover notice repeated: {said:?}");
+        // Instrument liveness: the suppression must be of the NOTICE only. If
+        // the receipts had also stopped, the assertion above would pass for a
+        // reporter that had simply gone dead after the first call.
+        assert_eq!(
+            *sink.receipts.lock().unwrap(),
+            3,
+            "the structured receipt was suppressed too — the host loses failover evidence"
+        );
+
+        // A failover to a DIFFERENT provider is a new fact, not a repeat.
+        let mut elsewhere = served_by_fallback();
+        elsewhere.selected_provider = Some("vertex".into());
+        elsewhere.selected_model = Some("gemini-2.5-pro".into());
+        reporter.report_failover(&elsewhere);
+        let said = sink.infos.lock().unwrap().clone();
+        assert_eq!(
+            said.len(),
+            2,
+            "a failover to a different provider was suppressed as a repeat: {said:?}"
         );
     }
 }

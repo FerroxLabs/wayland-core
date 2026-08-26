@@ -39,6 +39,8 @@ use wcore_types::message::{ContentBlock, Message, Role, StopReason};
 /// shape of the response, not the request.
 fn minimal_request() -> LlmRequest {
     LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "claude-mock".to_string(),
         system: "You are a test harness.".to_string(),
         messages: vec![Message::new(

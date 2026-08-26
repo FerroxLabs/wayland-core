@@ -227,7 +227,24 @@ pub struct WorkspaceSurface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TranscriptSig {
     turns: usize,
-    last_turn_elements: usize,
+    /// FerroxLabs/wayland#1126: the number of elements across EVERY turn, not
+    /// just the last one. `StreamEnd` does not always append to the tail —
+    /// the v0.9.1.2 F12 path (`protocol_bridge.rs`, `in_flight_turn_idx`)
+    /// appends the closing turn's Markdown/Sources/Thinking to the assistant
+    /// turn that was opened when a tool call interleaved, and any system
+    /// notice raised after that point (an approval decision, a grant) sits
+    /// BELOW it in `turns`. A `last_turn_elements` reading of the tail alone
+    /// is blind to that append: `turns` is unchanged, the tail's element count
+    /// is unchanged, the streaming buffer went from N to 0 but the windowed
+    /// live path already reported it as 0 — so the whole signature is
+    /// identical across the flush, the settled cache HITs, and the answer that
+    /// is sitting in `App` state is never painted. Measured: the run wedges
+    /// with `hit=true` repeating on the 1 s heartbeat forever, until an
+    /// unrelated turn changes `turns` and the rebuild finally paints the
+    /// answer in its correct historical position. Summing every turn's element
+    /// count is O(turns) over `Vec::len` reads — no bodies are hashed — and it
+    /// flips on an append to ANY turn.
+    elements_total: usize,
     streaming_len: usize,
     thinking_len: usize,
     tool_cards: usize,
@@ -1629,7 +1646,7 @@ impl WorkspaceSurface {
 
         let settled_sig = TranscriptSig {
             turns: session.turns.len(),
-            last_turn_elements: session.turns.last().map(|t| t.elements.len()).unwrap_or(0),
+            elements_total: session.turns.iter().map(|t| t.elements.len()).sum(),
             // The settled cache never holds the live stream/thinking; those go
             // into the per-frame live tail. When NOT windowing the live stream
             // (idle, or streaming-while-scrolled-up) the cache holds the FULL
@@ -8168,6 +8185,113 @@ mod tests {
         );
     }
 
+    /// FerroxLabs/wayland#1126 — a `StreamEnd` whose body lands on an EARLIER
+    /// turn must still be painted.
+    ///
+    /// The v0.9.1.2 F12 path (`protocol_bridge.rs`, `in_flight_turn_idx`)
+    /// appends the closing turn's Markdown to the assistant turn that was
+    /// opened when a tool call interleaved — NOT to the tail of `turns`. Any
+    /// system notice raised after that point (an approval decision, a grant)
+    /// sits below it. Across that flush every field of the pre-fix signature
+    /// was identical: `turns` unchanged, the TAIL turn's element count
+    /// unchanged, and the streaming length already reported as `0` because the
+    /// bottom-anchored windowed path zeroes it. So the settled cache HIT, and
+    /// the answer — already in `App` state — was never painted.
+    ///
+    /// Measured on the shipped binary (Linux, with the frames that would have
+    /// shown the live tail suppressed): after the flush the TUI logged
+    /// `hit=true … needle=false` on every 1 s heartbeat for the full 30 s test
+    /// timeout, with the render loop alive the whole time. That is the macOS
+    /// flake in `path_boundary_tui_pty.rs` — macOS just loses the race in
+    /// which one frame is painted while the text is still in the live tail.
+    ///
+    /// Red arm: revert `elements_total` to `last_turn_elements` and the final
+    /// assertion fails — the sentinel is absent from the repainted frame.
+    #[test]
+    fn stream_end_onto_an_earlier_turn_is_repainted_1126() {
+        use wcore_protocol::events::{
+            FinishReason, OutputType, ProtocolEvent, ToolCategory, ToolInfo, ToolStatus,
+        };
+
+        const SENTINEL: &str = "ZZQQANSWERZZQQ";
+
+        let mut app = App::new();
+        let mut surface = WorkspaceSurface::new();
+        for event in [
+            ProtocolEvent::StreamStart {
+                msg_id: "m1".into(),
+            },
+            // Opens the in-flight assistant turn (F12).
+            ProtocolEvent::ToolRequest {
+                msg_id: "m1".into(),
+                call_id: "call-1".into(),
+                tool: ToolInfo {
+                    name: "Read".into(),
+                    category: ToolCategory::Info,
+                    args: serde_json::json!({ "file_path": "/outside/q3.md" }),
+                    description: "Read /outside/q3.md".into(),
+                    escalation: None,
+                },
+            },
+            ProtocolEvent::ToolResult {
+                msg_id: "m1".into(),
+                call_id: "call-1".into(),
+                tool_name: "Read".into(),
+                status: ToolStatus::Success,
+                output: "file contents".into(),
+                output_type: OutputType::Text,
+                metadata: None,
+            },
+            // A system notice raised AFTER the in-flight turn was opened, so
+            // the flush target is no longer the tail of `turns`.
+            ProtocolEvent::Info {
+                msg_id: "m1".into(),
+                message: "granted /outside".into(),
+            },
+            ProtocolEvent::TextDelta {
+                msg_id: "m1".into(),
+                text: SENTINEL.into(),
+            },
+        ] {
+            apply_event(&mut app, event);
+        }
+
+        // The live frame. The settled cache is populated WITHOUT the answer —
+        // it rides the per-frame live tail, by design.
+        let live = render_to_string(&mut surface, &app, 100, 30);
+        assert!(
+            live.contains(SENTINEL),
+            "the streamed answer must show on the live tail:\n{live}"
+        );
+        let in_flight = app
+            .session
+            .in_flight_turn_idx
+            .expect("an interleaved tool call must open an in-flight assistant turn");
+        assert!(
+            in_flight + 1 < app.session.turns.len(),
+            "this test is only meaningful when the flush target is NOT the tail \
+             turn; in_flight={in_flight}, turns={}",
+            app.session.turns.len()
+        );
+
+        apply_event(
+            &mut app,
+            ProtocolEvent::StreamEnd {
+                msg_id: "m1".into(),
+                finish_reason: FinishReason::Stop,
+                usage: None,
+                usage_delta: None,
+                agent_run_id: None,
+            },
+        );
+        let settled = render_to_string(&mut surface, &app, 100, 30);
+        assert!(
+            settled.contains(SENTINEL),
+            "the answer flushed onto turn {in_flight} must be painted on the \
+             frame after StreamEnd, not held behind a stale layout cache:\n{settled}"
+        );
+    }
+
     // ── D009 (render-livelock) — viewport windowing ───────────────────────
 
     #[test]
@@ -8605,7 +8729,7 @@ mod tests {
 
         // The tool finishes — status flips Running→Ok and output is set IN PLACE
         // on the existing card. The turn is STILL streaming (no StreamEnd), so
-        // `turns`, `last_turn_elements`, and `tool_cards` (the count) are all
+        // `turns`, `elements_total`, and `tool_cards` (the count) are all
         // unchanged; only the card's status + output changed. Pre-fix this left
         // the settled signature identical → cache HIT → frozen "running…".
         apply_event(

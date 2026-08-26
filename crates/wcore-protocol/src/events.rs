@@ -1885,8 +1885,11 @@ pub enum ToolEscalation {
     PathBoundary {
         /// The path the call actually named, canonicalized.
         target: String,
-        /// Always `read` today. Write access outside the workspace is not
-        /// grantable, so it never raises this escalation.
+        /// Always `read`. Write access outside the workspace IS grantable
+        /// (#1104), but only from a folder the OPERATOR chose in a picker —
+        /// this escalation's `suggested_root` is derived from a path the MODEL
+        /// named, and offering "always allow writes here" for that would be a
+        /// prompt-injection lever rather than a convenience.
         access: crate::commands::PathGrantAccess,
         /// The CONTAINING DIRECTORY of `target`, which is what a grant opens.
         /// Putting `target` on an "always allow this folder" button would be a

@@ -17,6 +17,22 @@ Windows (arm64/x64) are on the
 [Releases](https://github.com/FerroxLabs/wayland-core/releases) page, each
 verifiable against `wayland-core-checksums.txt`.
 
+**Linux system requirements.** The Linux binaries are glibc-linked (glibc
+2.34+, i.e. Debian 12 / Ubuntu 22.04 / RHEL 9 or newer). Beyond the C runtime
+they need exactly one shared library, `libseccomp.so.2`, which the sandbox uses
+to apply its seccomp-bpf filter:
+
+```bash
+apt-get install -y libseccomp2   # Debian/Ubuntu
+dnf install -y libseccomp        # RHEL/Fedora
+```
+
+Debian- and Ubuntu-derived images already ship it, `node:22-slim` included.
+TLS (OpenSSL, for IMAP) and the D-Bus secret-service keyring backend are
+statically linked, so `libssl.so.3` and `libdbus-1.so.3` are **not** required.
+Alpine and other musl distributions are not supported. To see the full list for
+an artifact you have on disk, run `ldd ./wayland-core`.
+
 **From source** (Rust 1.95+):
 
 ```bash
@@ -309,8 +325,14 @@ the process, do not add writable roots, and are refused for strict sessions.
 
 1. `--api-key` CLI parameter
 2. Config file `providers.<name>.api_key`
-3. Env var `API_KEY`
+3. Credentials store (`wayland-core auth add`) — OS keyring or encrypted vault
 4. Env var `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` (depends on provider)
+5. Env var `API_KEY` — **only when `WAYLAND_ALLOW_BARE_API_KEY=1` is set**
+
+> **`API_KEY` is opt-in.** The bare variable names no provider, so an `API_KEY`
+> exported in your shell for an unrelated service would otherwise be adopted as
+> this provider's credential and sent to its endpoint. It is ignored unless you
+> set `WAYLAND_ALLOW_BARE_API_KEY=1`. Prefer the provider-specific variable.
 
 > **Note**: `bedrock` and `vertex` providers use their own cloud credentials and do not require a traditional API key. See [Providers & Auth](providers.md).
 
@@ -435,6 +457,9 @@ export ANTHROPIC_API_KEY=sk-ant-xxx
 wayland-core "List all Rust files in this project"
 ```
 
+Provider keys are the common case; see [Environment
+Variables](#environment-variables) for the rest.
+
 ---
 
 ## TUI commands
@@ -480,6 +505,48 @@ Allow? [y]es / [n]o / [a]lways / [q]uit > y
   approved silently, narrow `tools.allow_list`.
 - `--auto-approve` skips all confirmations
 - `tools.allow_list` in config customizes the whitelist
+
+A prompt that nobody answers is **denied after 5 minutes**, not left waiting.
+Stdin being a terminal does not prove anyone is reading it — a detached
+`tmux`/`screen` pane, a `script` wrapper, and CI that allocated a tty nobody
+types into all used to park the run forever with no output and no way to
+answer. The bound is fail-closed: a timeout denies, it never approves. It
+covers the whole answer, not only its first keystroke, so a partial line left
+at the prompt in a terminal that is not in canonical mode expires the same way.
+Change or remove it with
+[`WAYLAND_APPROVAL_TIMEOUT_SECS`](#environment-variables).
+
+
+---
+
+## Environment Variables
+
+Read from the process environment at launch. Every one of these is optional —
+wayland-core runs with none of them set. Provider credentials are covered
+separately under [API Key Resolution Order](#api-key-resolution-order).
+
+| Variable | What it does |
+|----------|--------------|
+| `WAYLAND_APPROVAL_TIMEOUT_SECS` | Seconds to wait for an answer at a tool-confirmation prompt before denying. Default `300`. `0` waits forever, which was the behaviour before the bound existed. A timeout always **denies** — this knob cannot make it approve |
+| `WAYLAND_HOME` | Roots config, credentials, memory and skills at a chosen directory instead of `~/.wayland`. The basis of [isolated profiles](profiles.md) |
+| `WAYLAND_PROFILES_ROOT` | Where the `profile` command family stores profiles. Must be an absolute path — a relative override is ignored ([profiles.md](profiles.md)) |
+| `WAYLAND_ASSISTANT` | Assistant identity that `only_for_assistant` config scoping matches against, when `--assistant` is not on the argv ([mcp.md](mcp.md)) |
+| `WAYLAND_BASH_SHELL` | Windows only: `powershell` (5.1) or `pwsh` (7+) instead of the default `cmd` for BashTool. No-op on Unix ([advanced.md](advanced.md)) |
+| `WAYLAND_SANDBOX` | `appcontainer` opts Windows into the AppContainer backend instead of the default Job Object ([architecture.md](architecture.md)) |
+| `WAYLAND_VAULT_PASSPHRASE` / `WAYLAND_VAULT_PASSPHRASE_FD` | Unlocks the encrypted credential vault on a host with no OS keyring; the `_FD` form reads the passphrase from a file descriptor ([advanced.md](advanced.md)) |
+| `WAYLAND_WEB_BACKEND` | Pins the web-search backend: `off`, `duckduckgo`, or `parallel` ([tools.md](tools.md)) |
+| `WAYLAND_CORE_SKIP_UPDATE_CHECK` | `1` opts out of the launcher's update check ([troubleshooting.md](troubleshooting.md)) |
+| `WCORE_MEMORY_DIR` | Overrides where long-term memory is stored ([advanced.md](advanced.md)) |
+| `WCORE_CHROMIUM_PATH` | Points the browser tools at a Chromium or Chrome binary ([troubleshooting.md](troubleshooting.md)) |
+| `RUST_LOG` | Standard `tracing` filter, e.g. `RUST_LOG=wcore_agent::plugins=debug` |
+
+Plugin authoring adds `WAYLAND_PLUGINS_DIR`, `WAYLAND_TRUSTED_KEYS_DIR`, and
+the development-only `WAYLAND_PLUGIN_TRUST_UNSIGNED`; all three are documented
+in [plugin-authors.md](plugin-authors.md).
+
+There is deliberately **no** environment variable that opens the sandboxed
+shell — see [architecture.md](architecture.md) for why the removed
+`WAYLAND_BASH_ALLOW_NETWORK` is not coming back.
 
 ---
 

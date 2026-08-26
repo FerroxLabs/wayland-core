@@ -506,7 +506,15 @@ pub fn provider_failure_code(error: &ProviderError) -> String {
             classify_connect_chain(false, std::slice::from_ref(message)).to_string()
         }
         ProviderError::MissingApiKey => "missing_api_key".to_string(),
-        ProviderError::NotAttempted { .. } => "provider_not_attempted".to_string(),
+        // #1127. "Not attempted" names the wrapper's control flow, not the
+        // fault. When the caller proved which failure led here — a refused
+        // endpoint that opened every circuit in a configured chain — that
+        // class is what the engine must price retries with
+        // (`class_retry_budget`) and what the host must be told. Without it
+        // the refused endpoint's cap of 2 silently became the full budget.
+        ProviderError::NotAttempted { failure_code, .. } => failure_code
+            .clone()
+            .unwrap_or_else(|| "provider_not_attempted".to_string()),
         ProviderError::PremiumLocked { .. } => "premium_locked".to_string(),
         ProviderError::UpgradeRequired { .. } => "upgrade_required".to_string(),
         ProviderError::SpendCeilingUnresolved { .. } => "spend_ceiling_unresolved".to_string(),
@@ -778,6 +786,7 @@ pub fn provider_error_from_egress(e: EgressError) -> ProviderError {
         EgressError::Denied(reason) => ProviderError::Egress(EgressError::Denied(reason)),
         EgressError::BeforeDispatch(error) => ProviderError::NotAttempted {
             reason: error.to_string(),
+            failure_code: None,
         },
         // Terminal — surfaced like Denied, never retried.
         EgressError::BodyTooLarge { limit } => {

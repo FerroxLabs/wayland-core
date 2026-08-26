@@ -115,6 +115,14 @@ pub(crate) fn build_responses_body(request: &LlmRequest, compat: &ProviderCompat
         body["reasoning"] = json!({ "effort": effort });
     }
 
+    // #863 F2/F3 — loop-ownership marking on the Responses wire shape, which
+    // carries a top-level `metadata` object just as chat completions does.
+    // Endpoint-gated inside the helper, so the Codex backend (which also builds
+    // its body here and is aggressive about unknown fields) sees nothing: its
+    // compat does not declare the handshake. The matching REQUEST HEADERS ride
+    // `OpenAIProvider::try_send`, which is the send funnel for this surface.
+    crate::flux_loop::apply_loop_metadata(&mut body, request, compat);
+
     body
 }
 

@@ -57,6 +57,8 @@ fn provider_for(server: &MockServer) -> BedrockProvider {
 /// A minimal request routed to a Cohere model (uses `invoke_buffered` path).
 fn cohere_request() -> LlmRequest {
     LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "cohere.command-r-v1:0".to_string(),
         system: String::new(),
         messages: vec![Message::new(
@@ -83,6 +85,8 @@ fn cohere_request() -> LlmRequest {
 /// A minimal request routed to an Anthropic-on-Bedrock model (stream path).
 fn anthropic_request() -> LlmRequest {
     LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "anthropic.claude-3-5-sonnet-20241022-v2:0".to_string(),
         system: String::new(),
         messages: vec![Message::new(

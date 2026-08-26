@@ -152,7 +152,7 @@ members = [
 exclude = ["templates/**", "examples/**"]
 
 [workspace.package]
-version = "0.13.6"
+version = "0.13.7"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -471,7 +471,11 @@ socket2    = "0.6"
 
 # Wave SD: OS keyring backend for CredentialsStore (feature-gated in wcore-config)
 # v0.7.0 1.D.2: exact-pinned (OS-keychain trust-boundary).
-keyring = { version = "=3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service"] }
+# `vendored` statically links libdbus (libdbus-sys/vendored is a `cc` build of
+# the bundled C source) so the shipped Linux binary does not require
+# libdbus-1.so.3 from the host. keyring gates dbus-secret-service to
+# linux/freebsd/openbsd, so this is a no-op on macOS and Windows. See #1128.
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "vendored"] }
 
 # T1-E1: Encrypted-file credentials backend (Argon2id KDF + XChaCha20-Poly1305 AEAD).
 # Crypto patterns adopted from Forge vault.ts (Apache-2.0); this is a Rust

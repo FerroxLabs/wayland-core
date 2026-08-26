@@ -598,6 +598,44 @@ pub trait Tool: Send + Sync {
     /// Tools must explicitly opt into any stronger guarantee. The conservative
     /// default is opaque so an interrupted invocation is never assumed safe to
     /// repeat based on its name, category, or execution class.
+    ///
+    /// # `Opaque` is a decision, not an unfinished migration
+    ///
+    /// Do not read a tool that returns [`ToolEffectContract::default`] as one
+    /// nobody has got round to yet. Reconciliation needs evidence that can be
+    /// captured BEFORE the effect and compared AFTER it: a preimage, an exact
+    /// intended postimage, and an identity for the thing being changed. A
+    /// tool whose effects leave this process has none of the three, so there
+    /// is nothing a reconciler could be right about, and one that guessed
+    /// would be strictly worse than the honest question it replaced.
+    ///
+    /// That is why each of these stays opaque, permanently, unless the world
+    /// underneath it changes:
+    ///
+    /// * `Bash` and `Script` — a shell command mutates arbitrary host state.
+    /// * `WebFetch` and the web search/extract/crawl tools — a remote service's
+    ///   state and rate limits are not re-readable.
+    /// * `send_message` — external delivery cannot be proven or deduplicated
+    ///   after an interruption.
+    /// * `Spawn`, `Delegate`, workflow stages and the Anvil forge — an
+    ///   aggregate of nested effects has no aggregate reconciler.
+    /// * MCP proxies, plugin closures and browser actions — untrusted or
+    ///   remote effect surfaces the host cannot photograph.
+    ///
+    /// The reachable exceptions are exactly two, and both earn it:
+    ///
+    /// * `Read`, `Grep`, `Glob` are [`wcore_types::tool::ToolEffectKind::RepeatSafe`] because
+    ///   they mutate nothing.
+    /// * `Write` and `Edit` are [`wcore_types::tool::ToolEffectKind::FilesystemTransactional`]
+    ///   because [`effects::prepare_filesystem_effect`] can bind all three
+    ///   pieces of evidence before the write. Note what that does NOT claim:
+    ///   no supported host filesystem offers pathname compare-and-swap against
+    ///   a non-cooperating writer, so the write is never exclusive — only
+    ///   classifiable afterwards, and a target matching neither bound identity
+    ///   still ends up in front of an operator.
+    ///
+    /// Adding a third exception means producing that same three-way evidence
+    /// first. Without it, opaque is the correct answer, not a placeholder.
     fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
         ToolEffectContract::default()
     }

@@ -204,6 +204,7 @@ pub(crate) async fn begin_physical_attempt()
         .await
         .map_err(|error| ProviderError::NotAttempted {
             reason: format!("provider attempt prepare was not durable: {error}"),
+            failure_code: None,
         })?;
     Ok(Some(attempt))
 }
@@ -220,6 +221,7 @@ pub(crate) async fn start_physical_attempt(
             .try_with(Clone::clone)
             .map_err(|_| ProviderError::NotAttempted {
                 reason: "provider attempt lifecycle scope disappeared before dispatch".into(),
+                failure_code: None,
             })?;
     scope
         .lifecycle
@@ -227,6 +229,7 @@ pub(crate) async fn start_physical_attempt(
         .await
         .map_err(|error| ProviderError::NotAttempted {
             reason: format!("provider attempt start was not durable: {error}"),
+            failure_code: None,
         })
 }
 
@@ -339,6 +342,8 @@ mod tests {
 
     fn request(model: &str) -> LlmRequest {
         LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: model.into(),
             system: String::new(),
             messages: vec![],

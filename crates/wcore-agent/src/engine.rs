@@ -1987,8 +1987,8 @@ fn is_provider_auth_failure(reason: &str) -> bool {
 const AUTH_FAILURE_REMEDY: &str = "The provider rejected this API key — not retried, because an authentication \
      failure fails identically on every attempt. Replace it with \
      `wayland-core auth add <provider> <key>` (stored in the OS keyring or the \
-     encrypted vault), pass --api-key for a one-off, or set an environment \
-     variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).";
+     encrypted vault), pass --api-key for a one-off, or set the provider's \
+     environment variable (ANTHROPIC_API_KEY, OPENAI_API_KEY, …).";
 
 /// #923(3) — does this provider refusal name an orphaned `tool_use` /
 /// `tool_result` pair?
@@ -4257,6 +4257,23 @@ pub struct AgentEngine {
     /// the `x-wl-conversation-id` request header on tier-alias turns. Survives
     /// `/clear` and `/resume` so a continued session keeps routing affinity.
     conversation_id: String,
+    /// #863 F2 — loop-ownership provenance stamped onto every `LlmRequest` this
+    /// engine builds. `Some(ClientOwned("anvil"))` on an Anvil builder fork, so
+    /// the router knows this turn is mid-loop material of a CLIENT-side climb
+    /// and must not run its own server-side ladder on it.
+    ///
+    /// Set once, from OUTSIDE, at the single durable-spawn site that knows the
+    /// child's `ChildOrigin` (`AgentSpawner::execute_durable_launch`). The
+    /// engine cannot infer it: origin is a property of how the engine was
+    /// launched, not of anything the engine can see about itself.
+    ///
+    /// `None` for an ordinary session turn — Core only claims the loop where it
+    /// really is running one.
+    flux_loop_intent: Option<wcore_types::llm::FluxLoopIntent>,
+    /// #863 F2 — count of turns on which the router replied
+    /// `x-flux-loop-engaged: elevation` while this engine held the loop. A
+    /// non-zero value means both ladders climbed the same task.
+    flux_loop_collisions: u32,
     /// #282 contract V1: the REAL context window of the model Flux routed the
     /// LAST turn to (`x-flux-model-window`). `None` until Flux signals back.
     /// Used to reconcile the #255 pre-flight overflow guard against the actual
@@ -4481,6 +4498,7 @@ impl AgentEngine {
         let memory_enabled = config.memory.enabled;
 
         Self {
+            flux_loop_intent: None,
             provider,
             egress_policy: wcore_egress::default_policy(),
             tools: Arc::new(tools),
@@ -4634,6 +4652,7 @@ impl AgentEngine {
             pending_hook_phase_consumptions: Vec::new(),
             // #282: mint the stable Flux conversation id once per engine.
             conversation_id: uuid::Uuid::new_v4().to_string(),
+            flux_loop_collisions: 0,
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
             flux_context_pressure: None,
@@ -4759,6 +4778,7 @@ impl AgentEngine {
         let memory_enabled = config.memory.enabled;
 
         Self {
+            flux_loop_intent: None,
             provider,
             egress_policy: wcore_egress::default_policy(),
             tools: Arc::new(tools),
@@ -4910,6 +4930,7 @@ impl AgentEngine {
             // #282: mint the stable Flux conversation id once per engine. A
             // resumed session gets a fresh id (sticky routing is best-effort).
             conversation_id: uuid::Uuid::new_v4().to_string(),
+            flux_loop_collisions: 0,
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
             flux_context_pressure: None,
@@ -5940,6 +5961,18 @@ impl AgentEngine {
     /// Install the policy minted by `AgentBootstrap` for this exact session.
     pub fn set_egress_policy(&mut self, policy: wcore_egress::SharedPolicy) {
         self.egress_policy = policy;
+    }
+
+    /// #863 F2 — declare that this engine's turns are mid-loop material of a
+    /// client-side climb Core owns. Called at the durable-spawn seam for an
+    /// `Anvil`-origin child; see [`AgentEngine::flux_loop_intent`].
+    pub fn set_flux_loop_intent(&mut self, intent: wcore_types::llm::FluxLoopIntent) {
+        self.flux_loop_intent = Some(intent);
+    }
+
+    /// #863 F2 — how many turns collided with a server-side Flux ladder.
+    pub fn flux_loop_collisions(&self) -> u32 {
+        self.flux_loop_collisions
     }
 
     /// W7 Pre-flight 0: read access to the engine's `MemoryApi` handle.
@@ -9592,6 +9625,60 @@ impl AgentEngine {
         self.finish_budget_turn(turn_id)
     }
 
+    /// End an interrupted turn permanently, tolerating every way the host and
+    /// the engine can disagree about whether it is still there.
+    ///
+    /// This is deliberately NOT [`Self::cancel_interrupted_turn`] under another
+    /// name. Cancel refuses in three places, and each refusal is right for
+    /// cancel and wrong here:
+    ///
+    /// * **a stale cursor.** Cancel refuses because acting on a moved session
+    ///   head would act on a world it did not observe. Abandon observes nothing
+    ///   and resumes nothing. It exists FOR the case where the two sides
+    ///   disagree, so refusing on disagreement would defeat the verb. The
+    ///   cursor is not consulted at all, and the caller does not pass one.
+    /// * **`RecoveryDisposition::Ready`.** Cancel calls this "session has no
+    ///   interrupted turn to cancel". For abandon, the turn already being gone
+    ///   is the goal state, not an error. This is what makes a second click
+    ///   safe.
+    /// * **a different turn id.** Likewise: the turn named is not the one in
+    ///   flight, so it is already over.
+    ///
+    /// In all three cases this returns `Ok(())` and writes NOTHING. An
+    /// idempotent verb must not append an effect per call, and the caller emits
+    /// the terminal frame either way so the host can settle its UI without
+    /// inferring completion from silence.
+    ///
+    /// A journal that cannot be read is NOT one of the tolerated cases. That is
+    /// `recovery_plan`'s own fail-closed signal and it still propagates, so a
+    /// corrupt journal is reported rather than reported as "already gone".
+    pub async fn abandon_interrupted_turn(&mut self, turn_id: &str) -> Result<(), AgentError> {
+        let recovery = self.recovery_plan()?;
+        let recoverable_turn_id = match recovery.disposition {
+            crate::recovery::RecoveryDisposition::ContinueTurnStart { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::ContinueCheckpoint { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::AwaitApproval { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::ReconciliationRequired { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::Blocked { turn_id, .. } => turn_id,
+            crate::recovery::RecoveryDisposition::Ready => return Ok(()),
+        };
+        if recoverable_turn_id != turn_id {
+            return Ok(());
+        }
+
+        // The turn IS terminated, so it takes the same terminal receipt and the
+        // same journal event as a cancellation. Reusing `TurnCancelled` keeps
+        // the journal format unchanged: a new variant would have to be readable
+        // by every already-shipped Core that opens this session file.
+        self.terminalize_interrupted_turn_for_cancellation(turn_id)
+            .await?;
+        self.append_journal_event(SessionEvent::TurnCancelled {
+            turn_id: turn_id.to_owned(),
+        })
+        .await?;
+        self.finish_budget_turn(turn_id)
+    }
+
     /// Bring a crash-interrupted session back to a boundary a new user turn
     /// can start from, without re-running or assuming the outcome of anything
     /// that was in flight.
@@ -9628,9 +9715,23 @@ impl AgentEngine {
             | crate::recovery::RecoveryDisposition::ReconciliationRequired { turn_id, .. }
             | crate::recovery::RecoveryDisposition::Blocked { turn_id, .. } => turn_id,
         };
-        // Read the account of what was in flight BEFORE terminalizing it.
-        // Afterwards the journal records only that an outcome is unknown, not
-        // which operation it is unknown about.
+        // Answer what can be ANSWERED before writing the account, so the model
+        // is not sent to re-verify a file whose receipt already proves what
+        // happened to it. This path used to skip the reconciler entirely: it
+        // resolved every unknown to "the effect may or may not have landed",
+        // including the ones a durable receipt could settle outright.
+        //
+        // The order is forced. `requires_reconciliation` is only true once a
+        // still-running tool has become `Unknown`, so the nonterminal starts
+        // are terminalized first; the reconciler then gets its chance; and
+        // only then is the account written, naming exactly what is genuinely
+        // still in doubt.
+        self.admit_interrupted_tool_starts(&turn_id).await?;
+        self.reconcile_authoritative_filesystem_effects("resume_after_interruption")
+            .await?;
+        // Read the account of what was in flight BEFORE terminalizing the
+        // rest. Afterwards the journal records only that an outcome is
+        // unknown, not which operation it is unknown about.
         let report = self.describe_interrupted_turn(&turn_id)?;
         self.admit_unobserved_effects(&turn_id).await?;
         self.abandon_nonterminal_hook_phases(&turn_id).await?;
@@ -9655,8 +9756,18 @@ impl AgentEngine {
             if tool.turn_id != turn_id {
                 continue;
             }
+            // `Unknown { Interrupted }` IS "was still running when the process
+            // died" — it is the receipt that state takes. Keying the phrase on
+            // the reason rather than on whether this routine has already
+            // terminalized the start keeps the account stable no matter which
+            // recovery surface ran first, and stops an engine-startup-recovered
+            // interruption from being described as an ambiguous completion.
             let phrase = match &tool.effect {
-                ToolEffectState::Running => "was still running when the process died",
+                ToolEffectState::Running
+                | ToolEffectState::Unknown {
+                    reason: ToolUnknownReason::Interrupted,
+                    ..
+                } => "was still running when the process died",
                 ToolEffectState::Unknown { .. } => "ran and its outcome was never observed",
                 _ => continue,
             };
@@ -9708,7 +9819,15 @@ impl AgentEngine {
     /// class this routine has never seen fail would be a guess. If one is
     /// outstanding, [`Self::cancel_interrupted_turn`] refuses and the caller
     /// surfaces that refusal.
-    async fn admit_unobserved_effects(&self, turn_id: &str) -> Result<(), AgentError> {
+    /// Terminalize the two nonterminal tool states a crash leaves behind,
+    /// without claiming anything about either.
+    ///
+    /// Split out of [`Self::admit_unobserved_effects`] so it can run BEFORE
+    /// the account handed to the model is written: `requires_reconciliation`
+    /// is only true once a running tool has become `Unknown`, so an
+    /// authoritative reconciler cannot be given its chance until this has
+    /// happened. Idempotent — a second call finds nothing in either state.
+    async fn admit_interrupted_tool_starts(&self, turn_id: &str) -> Result<(), AgentError> {
         let evidence = serde_json::json!({
             "recovery": "resume_after_interruption",
             "turn_id": turn_id,
@@ -9736,6 +9855,16 @@ impl AgentEngine {
             })
             .await?;
         }
+        Ok(())
+    }
+
+    async fn admit_unobserved_effects(&self, turn_id: &str) -> Result<(), AgentError> {
+        let evidence = serde_json::json!({
+            "recovery": "resume_after_interruption",
+            "turn_id": turn_id,
+        });
+
+        self.admit_interrupted_tool_starts(turn_id).await?;
 
         for tool_execution_id in self.turn_tools_in_state(turn_id, |effect| {
             matches!(effect, ToolEffectState::Unknown { .. })
@@ -10264,10 +10393,53 @@ impl AgentEngine {
             }
         }
 
-        let refreshed = journal
+        self.reconcile_authoritative_filesystem_effects("engine_startup")
+            .await?;
+
+        let unresolved = self.tool_effects_requiring_reconciliation()?;
+        if !unresolved.is_empty() {
+            return Err(AgentError::SessionAuthority(format!(
+                "unresolved tool effects require reconciliation before continuation: {}",
+                unresolved.join(", ")
+            )));
+        }
+
+        if let Some(turn_id) = interrupted.into_iter().next() {
+            self.append_journal_event(SessionEvent::TurnFailed {
+                turn_id: turn_id.clone(),
+                error: "interrupted before a terminal journal event".to_string(),
+            })
+            .await?;
+            self.finish_budget_turn(&turn_id)?;
+        }
+        Ok(())
+    }
+
+    /// Run the one authoritative reconciler Core registers — the filesystem
+    /// compare-exchange receipt — over every tool effect that still requires
+    /// reconciliation.
+    ///
+    /// Read-only, and deliberately silent about anything it cannot decide. A
+    /// receipt whose checkpoint will not load, whose bytes match neither the
+    /// prepared preimage nor the prepared postimage, or whose target is no
+    /// longer the prepared object is SKIPPED, not guessed at: it stays
+    /// `Unknown` for the caller to deal with. `reconcile_interrupted_turn`
+    /// then refuses to continue, and the headless resume path records the
+    /// honest "may or may not have landed" admission instead.
+    ///
+    /// `recovery` names the surface that ran it, and lands in the durable
+    /// resolution evidence.
+    async fn reconcile_authoritative_filesystem_effects(
+        &self,
+        recovery: &'static str,
+    ) -> Result<(), AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
             .state()
             .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
-        let filesystem_unknowns = refreshed
+        let filesystem_unknowns = state
             .tools
             .iter()
             .filter_map(|(tool_execution_id, tool)| {
@@ -10343,27 +10515,10 @@ impl AgentEngine {
                 resolution,
                 ToolResolutionSource::Reconciler { reconciler },
                 serde_json::json!({
-                    "recovery": "engine_startup",
+                    "recovery": recovery,
                     "observed": observed,
                 }),
             )?;
-        }
-
-        let unresolved = self.tool_effects_requiring_reconciliation()?;
-        if !unresolved.is_empty() {
-            return Err(AgentError::SessionAuthority(format!(
-                "unresolved tool effects require reconciliation before continuation: {}",
-                unresolved.join(", ")
-            )));
-        }
-
-        if let Some(turn_id) = interrupted.into_iter().next() {
-            self.append_journal_event(SessionEvent::TurnFailed {
-                turn_id: turn_id.clone(),
-                error: "interrupted before a terminal journal event".to_string(),
-            })
-            .await?;
-            self.finish_budget_turn(&turn_id)?;
         }
         Ok(())
     }
@@ -11939,6 +12094,21 @@ impl AgentEngine {
                         // context-routing headers on tier-alias turns.
                         conversation_id: Some(self.conversation_id.clone()),
                         client_context_tokens: Some(input_token_estimate as u64),
+                        // #863 F2 — loop-ownership provenance. `None` on an
+                        // ordinary session turn; `ClientOwned("anvil")` on an
+                        // Anvil builder fork.
+                        flux_loop_intent: self.flux_loop_intent.clone(),
+                        // #863 F3 — per-turn cache variance for loop traffic.
+                        // DERIVED, never randomly minted: the session journal
+                        // digests the prepared request, so a value that changed
+                        // between preparing a turn and replaying it would break
+                        // recovery. `conversation_id` is stable for the session
+                        // and `turn` is monotonic within it, so this is unique
+                        // per turn and identical on replay.
+                        flux_turn_nonce: self
+                            .flux_loop_intent
+                            .as_ref()
+                            .map(|_| format!("{}:{}", self.conversation_id, turn)),
                         // Crucible #3: per-session sampling temperature (council child
                         // engines set it; top-level session leaves it `None`).
                         temperature: self.temperature,
@@ -13601,7 +13771,51 @@ impl AgentEngine {
                             model_window,
                             context_pressure,
                             tokens_counted,
+                            loop_engaged,
                         } => {
+                            // #863 F2 — the runtime collision detector. Core
+                            // declared it owns the climb for this turn; if the
+                            // router ran its OWN server-side ladder anyway, both
+                            // ladders climbed the same task and whatever came
+                            // back is contaminated mid-loop material. Record it
+                            // and fault the turn — a candidate produced under a
+                            // doubled ladder must never be accepted, and a
+                            // receipt that counted it would be the exact "one
+                            // receipt lying about the other" this contract
+                            // exists to prevent.
+                            //
+                            // `cascade` is NOT a collision: F1 explicitly
+                            // permits Cascade's single-tier climb-on-failure.
+                            // A missing header is not one either — a non-Flux
+                            // endpoint never sends one.
+                            if let Some(owner) = self
+                                .flux_loop_intent
+                                .as_ref()
+                                .and_then(|i| i.owner())
+                                .map(str::to_string)
+                                && wcore_providers::flux_loop::collides(
+                                    Some(owner.as_str()),
+                                    loop_engaged.as_deref(),
+                                )
+                            {
+                                let engaged = loop_engaged
+                                    .as_deref()
+                                    .unwrap_or(wcore_providers::flux_loop::LOOP_ENGAGED_ELEVATION)
+                                    .to_string();
+                                self.flux_loop_collisions =
+                                    self.flux_loop_collisions.saturating_add(1);
+                                // One message, defined next to the predicate, so
+                                // the wording the operator sees and the wording
+                                // the contract tests assert cannot drift apart.
+                                let detail =
+                                    wcore_providers::flux_loop::collision_message(&owner, &engaged);
+                                tracing::error!(
+                                    loop_owner = %owner,
+                                    loop_engaged = %engaged,
+                                    "{detail}"
+                                );
+                                return Err(AgentError::ApiError(detail));
+                            }
                             // #282 contract V1: Flux SIGNALS-BACK. Capture the
                             // pressure for future #280 scheduling (not yet acted
                             // on) and the REAL served-model window so the #255
@@ -19415,6 +19629,8 @@ mod set_config_tests {
 
     fn make_engine(model: &str) -> super::AgentEngine {
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -21286,6 +21502,8 @@ mod phase6_tests {
 
     fn make_engine(model: &str, allow_list: Vec<String>) -> super::AgentEngine {
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -21608,6 +21826,8 @@ mod compact_tests {
         messages: Vec<Message>,
     ) -> super::AgentEngine {
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -22410,6 +22630,71 @@ mod compact_tests {
             0,
             "microcompact erased tool results at 16k/167k pressure (the A-6 defect)"
         );
+    }
+
+    /// The same twelve results, stamped the way a REAL session stamps them
+    /// (`Message::now`), after the user stepped away for an hour.
+    ///
+    /// `twelve_read_results` above carries no timestamps, so the time trigger
+    /// is dormant there and the A-6 test only ever grades the count trigger.
+    /// A live session has a timestamp on every message, and a resumed one
+    /// carries yesterday's — so an idle gap re-opens A-6 on exactly the
+    /// conversation A-6 was fixed for. Bodies are realistically sized (4 KiB
+    /// per read) so the failure message reports what is actually destroyed.
+    fn twelve_aged_read_results(age_seconds: i64) -> Vec<Message> {
+        let ts = chrono::Utc::now() - chrono::Duration::seconds(age_seconds);
+        let stamp = |mut m: Message| {
+            m.timestamp = Some(ts);
+            m
+        };
+        let mut messages = Vec::new();
+        for i in 0..12 {
+            let id = format!("t{i}");
+            messages.push(stamp(tool_use_msg(&id, "Read")));
+            messages.push(stamp(tool_result_msg(&id, &"x".repeat(4096))));
+        }
+        messages
+    }
+
+    /// A-6 through the TIME trigger: an idle gap must not wipe the working set
+    /// in a near-empty window either. Graded on the ENGINE path for the same
+    /// reason the count-trigger test is.
+    #[tokio::test]
+    async fn microcompact_leaves_results_alone_after_an_idle_gap_at_low_pressure() {
+        let config = CompactConfig {
+            micro_keep_recent: 3,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        // ~16k in a 200k window: 9.6% of the 167k autocompact threshold.
+        state.last_real_input_tokens = 16_000;
+
+        let mut engine = make_compact_engine(config, state, twelve_aged_read_results(3_601));
+        engine.run_compaction().await.unwrap();
+
+        assert_eq!(
+            cleared_results(&engine),
+            0,
+            "an hour of idle erased tool results at 16k/167k pressure"
+        );
+    }
+
+    /// Negative control for the gate above: past the pressure gate the idle
+    /// gap must STILL fire. Without this the fix could be a trigger that can
+    /// never pass.
+    #[tokio::test]
+    async fn microcompact_still_clears_after_an_idle_gap_at_high_pressure() {
+        let config = CompactConfig {
+            micro_keep_recent: 3,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_real_input_tokens = 120_000;
+
+        let mut engine = make_compact_engine(config, state, twelve_aged_read_results(3_601));
+        engine.run_compaction().await.unwrap();
+
+        assert_eq!(cleared_results(&engine), 9);
     }
 
     // -- Manual /compact runs deterministic micro-compaction, not the
@@ -23249,6 +23534,8 @@ mod plan_mode_tests {
     fn make_plan_engine(allow_list: Vec<String>) -> super::AgentEngine {
         let flag = Arc::new(AtomicBool::new(false));
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -23704,6 +23991,8 @@ mod hook_integration_tests {
 
     fn make_engine(model: &str) -> super::AgentEngine {
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -24870,6 +25159,8 @@ mod approval_bridge_engine_tests {
 
     fn make_engine() -> super::AgentEngine {
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -25936,6 +26227,8 @@ mod user_model_writeback_tests {
 
     fn make_engine() -> super::AgentEngine {
         super::AgentEngine {
+            flux_loop_collisions: 0,
+            flux_loop_intent: None,
             provider: Arc::new(NullProvider),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
@@ -27269,6 +27562,11 @@ mod audit_2026_05_22_tests {
     }
 
     #[tokio::test]
+    // `PinnedRetryBudget::pin` writes the process-global
+    // WAYLAND_MAX_STREAM_RETRIES. Under plain `cargo test` this binary is one
+    // process, so an unserialized pin is read by every budget-reading test
+    // running beside it — see the helper's own contract note.
+    #[serial_test::serial]
     async fn stream_error_exhausts_retries_then_fails_the_turn() {
         // AUDIT A3 / E-C2 — when every attempt fails the turn ends as a
         // hard error (NOT a silent empty success).
@@ -27903,6 +28201,87 @@ mod audit_2026_05_22_tests {
         assert!(
             tracker.lock().session_totals(&session_id).0 > 0,
             "the ambiguous failed primary send must be conservatively charged"
+        );
+    }
+
+    /// #1127 — the refused-endpoint cap must survive a configured provider
+    /// chain.
+    ///
+    /// `REFUSED_ENDPOINT_MAX_RETRIES` exists because a refused connection
+    /// fails in a millisecond, so the whole budget is spent asleep in the
+    /// backoff curve for a fault a re-send almost never heals. Measured on
+    /// 0.13.6, that cap vanished the moment a fallback was configured: the
+    /// chain surfaced its own control flow (`provider_not_attempted`) instead
+    /// of the refusal, and `class_retry_budget` priced the full budget.
+    #[tokio::test]
+    async fn a_collapsed_chain_keeps_the_refused_class_cap() {
+        struct RefusedProvider;
+        #[async_trait]
+        impl LlmProvider for RefusedProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::Connection(
+                    "error sending request: Connection refused (os error 111) (endpoint \
+                     127.0.0.1:9)"
+                        .into(),
+                ))
+            }
+        }
+        struct UnavailableProvider;
+        #[async_trait]
+        impl LlmProvider for UnavailableProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::Api {
+                    status: 503,
+                    message: "service unavailable".into(),
+                })
+            }
+        }
+
+        async fn collapse(primary: Arc<dyn LlmProvider>, fallback: Arc<dyn LlmProvider>) -> String {
+            let resilient = wcore_providers::ResilientProvider::new(
+                "primary",
+                primary,
+                vec![("fallback".to_string(), fallback)],
+                wcore_providers::CircuitConfig {
+                    fail_threshold: 1,
+                    window: std::time::Duration::from_secs(60),
+                    cooldown: std::time::Duration::from_secs(60),
+                },
+                Arc::new(wcore_providers::NoOpCircuitReporter),
+            );
+            let request = LlmRequest::default();
+            resilient
+                .stream(&request)
+                .await
+                .expect_err("the first call opens both circuits");
+            let error = resilient
+                .stream(&request)
+                .await
+                .expect_err("the second call is refused with nothing dispatched");
+            wcore_providers::retry::provider_failure_code(&error)
+        }
+
+        let refused = collapse(Arc::new(RefusedProvider), Arc::new(RefusedProvider)).await;
+        assert_eq!(
+            super::class_retry_budget(&refused, super::DEFAULT_MAX_STREAM_RETRIES),
+            super::REFUSED_ENDPOINT_MAX_RETRIES,
+            "a chain that collapsed on a refused endpoint must still be priced \
+             at the refused cap; got class {refused}"
+        );
+        // Known-positive control: a chain that collapsed on something else
+        // keeps the full budget, so the assertion above is not vacuous.
+        let unavailable =
+            collapse(Arc::new(UnavailableProvider), Arc::new(UnavailableProvider)).await;
+        assert_eq!(
+            super::class_retry_budget(&unavailable, super::DEFAULT_MAX_STREAM_RETRIES),
+            super::DEFAULT_MAX_STREAM_RETRIES,
+            "only the refused class is capped; got class {unavailable}"
         );
     }
 

@@ -661,14 +661,45 @@ fn cases() -> Vec<AttackCase> {
     v
 }
 
+/// Strip the absolute worktree path out of a recorded line (#1132).
+///
+/// A refusal names the path it could not resolve, and that path is absolute:
+/// it is `repo_root()` plus the reference. Written verbatim, the capture
+/// records the machine it ran on rather than the thing under test, and every
+/// lane worktree produces a different one.
+fn worktree_independent(text: &str, root: &Path) -> String {
+    text.replace(&format!("{}", root.display()), "<repo>")
+}
+
 /// Runs every pair and RECORDS the outcome. The TSV is a record of something that ran,
 /// not a set of lines someone typed.
+///
+/// **The captures are written OUTSIDE the repository (#1132).** They used to be
+/// written over the tracked evidence files under `.planning/`, so every run in
+/// every lane worktree left a modified tracked file holding that worktree's
+/// absolute path. `git add -A` — the obvious thing to type — then carried an
+/// unrelated diff into an unrelated commit, and two lanes running the suite
+/// conflicted over a file neither had touched on purpose. A test that mutates
+/// tracked evidence is recording its own environment, not the thing under test;
+/// the committed captures stay as the phase's evidence and are read, never
+/// rewritten.
 #[test]
 fn the_attack_corpus_pairs_every_case_and_records_what_fired() {
     let root = repo_root();
-    let ev = evidence_dir();
+    let out = tempfile::tempdir().expect("capture output dir");
+    let ev = out.path().to_path_buf();
     let caps = ev.join("attack-captures");
     fs::create_dir_all(&caps).expect("capture dir");
+    // The guard, not a comment: a capture directory inside the repository is
+    // the defect itself. `evidence_dir()` is still what the corpus POINTS at;
+    // it is no longer what the corpus WRITES to.
+    assert!(
+        !ev.starts_with(&root) && ev != evidence_dir(),
+        "captures would be written inside the repository ({}), over the tracked evidence \
+         tree at {} — that dirties a tracked file on every run (#1132)",
+        ev.display(),
+        evidence_dir().display()
+    );
 
     let mut tsv = String::new();
     let mut accepted = 0usize;
@@ -690,14 +721,17 @@ fn the_attack_corpus_pairs_every_case_and_records_what_fired() {
         let pcap = format!("attack-captures/{}-pristine.txt", c.id);
         fs::write(
             ev.join(&pcap),
-            format!(
-                "case: {}\nwhat: {}\nhalf: PRISTINE\nclass: {}\nscope: {}\ntext: {}\noutcome: \
+            worktree_independent(
+                &format!(
+                    "case: {}\nwhat: {}\nhalf: PRISTINE\nclass: {}\nscope: {}\ntext: {}\noutcome: \
                  ACCEPTED\nrule: NONE\n",
-                c.id,
-                c.what,
-                c.pristine.class.token(),
-                c.pristine.scope.token(),
-                c.pristine.text
+                    c.id,
+                    c.what,
+                    c.pristine.class.token(),
+                    c.pristine.scope.token(),
+                    c.pristine.text
+                ),
+                &root,
             ),
         )
         .expect("write pristine capture");
@@ -718,17 +752,20 @@ fn the_attack_corpus_pairs_every_case_and_records_what_fired() {
         let mcap = format!("attack-captures/{}-mutation.txt", c.id);
         fs::write(
             ev.join(&mcap),
-            format!(
-                "case: {}\nwhat: {}\nhalf: MUTATION\nclass: {}\nscope: {}\ntext: {}\noutcome: \
+            worktree_independent(
+                &format!(
+                    "case: {}\nwhat: {}\nhalf: MUTATION\nclass: {}\nscope: {}\ntext: {}\noutcome: \
                  REFUSED\nrule: {}\nrefusal: {}\nmissing: {}\n",
-                c.id,
-                c.what,
-                c.mutation.class.token(),
-                c.mutation.scope.token(),
-                c.mutation.text,
-                m.rule(),
-                m,
-                m.missing()
+                    c.id,
+                    c.what,
+                    c.mutation.class.token(),
+                    c.mutation.scope.token(),
+                    c.mutation.text,
+                    m.rule(),
+                    m,
+                    m.missing()
+                ),
+                &root,
             ),
         )
         .expect("write mutation capture");
@@ -744,6 +781,30 @@ fn the_attack_corpus_pairs_every_case_and_records_what_fired() {
     }
 
     fs::write(ev.join("attack-corpus.tsv"), &tsv).expect("write corpus tsv");
+
+    // Every capture must be readable on a machine that is not this one. The
+    // absolute worktree path is the one thing a refusal carries that no other
+    // host can reproduce, so a capture holding it is not evidence, it is a
+    // fingerprint of the box that ran the suite (#1132).
+    let root_str = format!("{}", root.display());
+    let mut checked = 0usize;
+    for entry in fs::read_dir(&caps).expect("read captures") {
+        let path = entry.expect("capture entry").path();
+        let body = fs::read_to_string(&path).expect("read capture");
+        assert!(
+            !body.contains(&root_str),
+            "{} embeds the absolute worktree path `{root_str}`, so its content differs on \
+             every host — #1132",
+            path.display()
+        );
+        checked += 1;
+    }
+    // The absence above proves nothing if the loop never ran.
+    assert!(
+        checked >= 16,
+        "only {checked} capture(s) were checked for host-specific content; the scan is \
+         reading the wrong directory"
+    );
 
     // A corpus that only refuses is passed by a checker that refuses everything; a
     // corpus that only accepts proves nothing at all. Both halves are asserted.

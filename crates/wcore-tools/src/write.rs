@@ -5,10 +5,14 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolEffectKind, ToolResult};
 
 use crate::Tool;
 use crate::context::ToolContext;
+use crate::effects::{
+    FILESYSTEM_EFFECT_RECONCILER, FilesystemWriteAttempt, PreparedToolEffect, ToolEffectExecution,
+    classify_filesystem_execution, prepare_filesystem_effect,
+};
 use crate::file_cache::{FileStateCache, update_cache_after_write};
 use crate::path_validation::validate_user_path;
 use crate::unsaved_work::{Mode, UnsavedWorkGuard, Verdict};
@@ -56,6 +60,178 @@ impl WriteTool {
     pub fn with_unsaved_guard(mut self, guard: Arc<UnsavedWorkGuard>) -> Self {
         self.unsaved = guard;
         self
+    }
+
+    /// W8b — vfs-aware write body. Routes the write through `ctx.vfs`
+    /// (RealFs at top-level, SandboxedFs for sub-agents) so sandbox
+    /// enforcement applies. Wave SD adds the same `validate_user_path`
+    /// shape check as the legacy entry so a top-level (non-sandboxed)
+    /// ctx can't be used as a bypass for the path discipline.
+    /// Trades the legacy tmp+rename atomicity for VFS-trait portability;
+    /// the `RealFs::write` impl still creates parent dirs.
+    async fn write_through_vfs(
+        &self,
+        input: Value,
+        ctx: &ToolContext,
+        attempt: &mut FilesystemWriteAttempt,
+    ) -> ToolResult {
+        let Some(file_path) = input["file_path"].as_str() else {
+            return ToolResult {
+                content: "Missing required parameter: file_path".to_string(),
+                is_error: true,
+            };
+        };
+        let Some(content) = input["content"].as_str() else {
+            return ToolResult {
+                content: "Missing required parameter: content".to_string(),
+                is_error: true,
+            };
+        };
+
+        let validated = match validate_user_path(Path::new(file_path)) {
+            Ok(p) => p,
+            Err(e) => {
+                return ToolResult {
+                    content: format!("Refused to write {file_path}: {e}"),
+                    is_error: true,
+                };
+            }
+        };
+        let path = validated.as_path();
+        let existed = ctx.vfs.exists(path).await.unwrap_or(false);
+
+        // INV-2: same unsaved-work assessment as the legacy path, before the
+        // write. The pre-image is read back through the SAME vfs this call
+        // will write to, so a sandboxed sub-agent is judged against the bytes
+        // it can actually see rather than against the real filesystem. A path
+        // the sandbox would reject never reaches the guard at all — the
+        // sandbox denial, not a message quoting that file's lines, is the
+        // right answer there.
+        // ADV-8, vfs side: the same fail-open in the same shape. A read that
+        // failed, and bytes that are not UTF-8, both became an empty
+        // pre-image that the gate below waved through. Only the vfs saying
+        // definitely "there is nothing here" may do that.
+        let mut attributable = true;
+        let mut judged: Option<Vec<u8>> = None;
+        let previous = match ctx.vfs.read(path).await {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => {
+                    judged = Some(text.as_bytes().to_vec());
+                    text
+                }
+                Err(e) => {
+                    let raw = e.into_bytes();
+                    judged = Some(raw.clone());
+                    if let Verdict::Refuse(refusal) = self.unsaved.assess_opaque(
+                        path,
+                        file_path,
+                        Some(&raw),
+                        "the bytes on disk are not valid UTF-8",
+                    ) {
+                        return ToolResult {
+                            content: refusal,
+                            is_error: true,
+                        };
+                    }
+                    attributable = false;
+                    String::new()
+                }
+            },
+            Err(e) => match ctx.vfs.exists(path).await {
+                // Definitely nothing there: an ordinary create.
+                Ok(false) => String::new(),
+                _ => {
+                    if let Verdict::Refuse(refusal) =
+                        self.unsaved
+                            .assess_opaque(path, file_path, None, &e.to_string())
+                    {
+                        return ToolResult {
+                            content: refusal,
+                            is_error: true,
+                        };
+                    }
+                    attributable = false;
+                    String::new()
+                }
+            },
+        };
+        let mut unsaved_note = String::new();
+        if !previous.is_empty() {
+            match self
+                .unsaved
+                .assess(path, file_path, &previous, content, Mode::Rewrite)
+            {
+                Verdict::Proceed => {}
+                Verdict::ProceedWithNote(note) => unsaved_note = note,
+                Verdict::Refuse(refusal) => {
+                    return ToolResult {
+                        content: refusal,
+                        is_error: true,
+                    };
+                }
+            }
+        }
+
+        // W8b.2.A D.4 — mark this write as engine-originated BEFORE the
+        // actual write so an upstream FileWatcher can debounce its own
+        // change event and not feed it back as an "external edit".
+        // Skipped when no notifier is wired (the test-default case).
+        if let Some(n) = ctx.file_write_notifier.as_ref() {
+            n.note_self_originated_write(path).await;
+        }
+
+        // ADV-7, vfs side: same re-check, through the same vfs the write
+        // goes to.
+        let still = match ctx.vfs.read(path).await {
+            Ok(now) => match judged.as_deref() {
+                Some(before) if now == before => Ok(()),
+                Some(_) => Err("its contents changed on disk".to_owned()),
+                None => Err("something else created it".to_owned()),
+            },
+            Err(e) if judged.is_none() => match ctx.vfs.exists(path).await {
+                Ok(false) => Ok(()),
+                _ => Err(format!("it could no longer be read ({e})")),
+            },
+            Err(e) => Err(format!("it could no longer be read ({e})")),
+        };
+        if let Err(why) = still {
+            return ToolResult {
+                content: crate::unsaved_work::changed_under_write(file_path, &why),
+                is_error: true,
+            };
+        }
+
+        // F13: everything above this line left the target untouched, and
+        // everything below it may not have. The filesystem cannot be asked
+        // afterwards which side a failure fell on.
+        *attempt = FilesystemWriteAttempt::Attempted;
+        if let Err(e) = ctx.vfs.write(path, content.as_bytes()).await {
+            return ToolResult {
+                content: format!("Failed to write file: {e}"),
+                is_error: true,
+            };
+        }
+        *attempt = FilesystemWriteAttempt::Completed;
+
+        if let Some(cache_arc) = &self.file_cache {
+            update_cache_after_write(cache_arc, path, content);
+        }
+        // Not `previous` when the pre-image was not text: claiming the file
+        // was empty would make every line of `content` agent-authored, and so
+        // exempt from this guard for the rest of the session.
+        let attribution_pre = if attributable {
+            previous.as_str()
+        } else {
+            content
+        };
+        self.unsaved.note_written(path, attribution_pre, content);
+
+        let line_count = content.lines().count();
+        let action = if existed { "Updated" } else { "Created" };
+        ToolResult {
+            content: format!("{action} {file_path} ({line_count} lines){unsaved_note}"),
+            is_error: false,
+        }
     }
 }
 
@@ -285,166 +461,9 @@ impl Tool for WriteTool {
         }
     }
 
-    /// W8b — vfs-aware variant. Routes the write through `ctx.vfs`
-    /// (RealFs at top-level, SandboxedFs for sub-agents) so sandbox
-    /// enforcement applies. Wave SD adds the same `validate_user_path`
-    /// shape check as the legacy entry so a top-level (non-sandboxed)
-    /// ctx can't be used as a bypass for the path discipline.
-    /// Trades the legacy tmp+rename atomicity for VFS-trait portability;
-    /// the `RealFs::write` impl still creates parent dirs.
     async fn execute_with_ctx(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let Some(file_path) = input["file_path"].as_str() else {
-            return ToolResult {
-                content: "Missing required parameter: file_path".to_string(),
-                is_error: true,
-            };
-        };
-        let Some(content) = input["content"].as_str() else {
-            return ToolResult {
-                content: "Missing required parameter: content".to_string(),
-                is_error: true,
-            };
-        };
-
-        let validated = match validate_user_path(Path::new(file_path)) {
-            Ok(p) => p,
-            Err(e) => {
-                return ToolResult {
-                    content: format!("Refused to write {file_path}: {e}"),
-                    is_error: true,
-                };
-            }
-        };
-        let path = validated.as_path();
-        let existed = ctx.vfs.exists(path).await.unwrap_or(false);
-
-        // INV-2: same unsaved-work assessment as the legacy path, before the
-        // write. The pre-image is read back through the SAME vfs this call
-        // will write to, so a sandboxed sub-agent is judged against the bytes
-        // it can actually see rather than against the real filesystem. A path
-        // the sandbox would reject never reaches the guard at all — the
-        // sandbox denial, not a message quoting that file's lines, is the
-        // right answer there.
-        // ADV-8, vfs side: the same fail-open in the same shape. A read that
-        // failed, and bytes that are not UTF-8, both became an empty
-        // pre-image that the gate below waved through. Only the vfs saying
-        // definitely "there is nothing here" may do that.
-        let mut attributable = true;
-        let mut judged: Option<Vec<u8>> = None;
-        let previous = match ctx.vfs.read(path).await {
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(text) => {
-                    judged = Some(text.as_bytes().to_vec());
-                    text
-                }
-                Err(e) => {
-                    let raw = e.into_bytes();
-                    judged = Some(raw.clone());
-                    if let Verdict::Refuse(refusal) = self.unsaved.assess_opaque(
-                        path,
-                        file_path,
-                        Some(&raw),
-                        "the bytes on disk are not valid UTF-8",
-                    ) {
-                        return ToolResult {
-                            content: refusal,
-                            is_error: true,
-                        };
-                    }
-                    attributable = false;
-                    String::new()
-                }
-            },
-            Err(e) => match ctx.vfs.exists(path).await {
-                // Definitely nothing there: an ordinary create.
-                Ok(false) => String::new(),
-                _ => {
-                    if let Verdict::Refuse(refusal) =
-                        self.unsaved
-                            .assess_opaque(path, file_path, None, &e.to_string())
-                    {
-                        return ToolResult {
-                            content: refusal,
-                            is_error: true,
-                        };
-                    }
-                    attributable = false;
-                    String::new()
-                }
-            },
-        };
-        let mut unsaved_note = String::new();
-        if !previous.is_empty() {
-            match self
-                .unsaved
-                .assess(path, file_path, &previous, content, Mode::Rewrite)
-            {
-                Verdict::Proceed => {}
-                Verdict::ProceedWithNote(note) => unsaved_note = note,
-                Verdict::Refuse(refusal) => {
-                    return ToolResult {
-                        content: refusal,
-                        is_error: true,
-                    };
-                }
-            }
-        }
-
-        // W8b.2.A D.4 — mark this write as engine-originated BEFORE the
-        // actual write so an upstream FileWatcher can debounce its own
-        // change event and not feed it back as an "external edit".
-        // Skipped when no notifier is wired (the test-default case).
-        if let Some(n) = ctx.file_write_notifier.as_ref() {
-            n.note_self_originated_write(path).await;
-        }
-
-        // ADV-7, vfs side: same re-check, through the same vfs the write
-        // goes to.
-        let still = match ctx.vfs.read(path).await {
-            Ok(now) => match judged.as_deref() {
-                Some(before) if now == before => Ok(()),
-                Some(_) => Err("its contents changed on disk".to_owned()),
-                None => Err("something else created it".to_owned()),
-            },
-            Err(e) if judged.is_none() => match ctx.vfs.exists(path).await {
-                Ok(false) => Ok(()),
-                _ => Err(format!("it could no longer be read ({e})")),
-            },
-            Err(e) => Err(format!("it could no longer be read ({e})")),
-        };
-        if let Err(why) = still {
-            return ToolResult {
-                content: crate::unsaved_work::changed_under_write(file_path, &why),
-                is_error: true,
-            };
-        }
-
-        if let Err(e) = ctx.vfs.write(path, content.as_bytes()).await {
-            return ToolResult {
-                content: format!("Failed to write file: {e}"),
-                is_error: true,
-            };
-        }
-
-        if let Some(cache_arc) = &self.file_cache {
-            update_cache_after_write(cache_arc, path, content);
-        }
-        // Not `previous` when the pre-image was not text: claiming the file
-        // was empty would make every line of `content` agent-authored, and so
-        // exempt from this guard for the rest of the session.
-        let attribution_pre = if attributable {
-            previous.as_str()
-        } else {
-            content
-        };
-        self.unsaved.note_written(path, attribution_pre, content);
-
-        let line_count = content.lines().count();
-        let action = if existed { "Updated" } else { "Created" };
-        ToolResult {
-            content: format!("{action} {file_path} ({line_count} lines){unsaved_note}"),
-            is_error: false,
-        }
+        self.write_through_vfs(input, ctx, &mut FilesystemWriteAttempt::default())
+            .await
     }
 
     fn max_result_size(&self) -> usize {
@@ -455,8 +474,55 @@ impl Tool for WriteTool {
         ToolCategory::Edit
     }
 
+    /// F13: a whole-file rewrite is filesystem-transactional *when the
+    /// target can be identified before the write*.
+    ///
+    /// The kind is declared unconditionally because `effect_contract` sees
+    /// only the input; whether THIS call actually gets a receipt is decided
+    /// by [`Self::prepare_effect`], and orchestration narrows the recorded
+    /// contract back to opaque when no receipt was produced.
     fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
-        ToolEffectContract::default()
+        ToolEffectContract {
+            kind: ToolEffectKind::FilesystemTransactional,
+            reconciler: Some(FILESYSTEM_EFFECT_RECONCILER.to_string()),
+        }
+    }
+
+    /// Bind this call to the exact preimage and postimage identities, so a
+    /// crash between here and the terminal journal append can be answered by
+    /// one read of the target instead of by a human.
+    async fn prepare_effect(
+        &self,
+        input: &Value,
+        ctx: &ToolContext,
+    ) -> Result<Option<PreparedToolEffect>, ToolResult> {
+        // Malformed input stays the ordinary path's error to report, with the
+        // wording it already has; preparation only ever declines.
+        let (Some(file_path), Some(content)) =
+            (input["file_path"].as_str(), input["content"].as_str())
+        else {
+            return Ok(None);
+        };
+        let intended = content.as_bytes().to_vec();
+        Ok(prepare_filesystem_effect(
+            ctx.vfs.as_ref(),
+            Path::new(file_path),
+            input,
+            move |_preimage| Some(intended),
+        )
+        .await)
+    }
+
+    async fn execute_prepared_effect(
+        &self,
+        prepared: PreparedToolEffect,
+        ctx: &ToolContext,
+    ) -> ToolEffectExecution {
+        let mut attempt = FilesystemWriteAttempt::default();
+        let result = self
+            .write_through_vfs(prepared.invocation().clone(), ctx, &mut attempt)
+            .await;
+        classify_filesystem_execution(&prepared, ctx.vfs.as_ref(), attempt, result).await
     }
 
     fn describe(&self, input: &Value) -> String {

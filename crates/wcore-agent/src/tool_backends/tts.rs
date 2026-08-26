@@ -40,7 +40,8 @@ use wcore_config::config::Config;
 
 use super::build_ssrf_safe_tool_client;
 use super::shared::{
-    OPENAI_API_BASE, cost_from_headers, join_openai_endpoint, openai_wire_media_base, read_env_key,
+    OPENAI_API_BASE, cost_from_headers, http_error_detail, join_openai_endpoint,
+    openai_wire_media_base, read_env_key,
 };
 use wcore_tools::media_cost::{MediaAccounting, MediaCostRecord, MediaOutcome, MediaUnits};
 use wcore_tools::tts_tool::{
@@ -447,7 +448,10 @@ impl TtsBackend for OpenAiTtsBackend {
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string);
                 let txt = resp.text().await.unwrap_or_default();
-                let snippet: String = txt.chars().take(400).collect();
+                // #938: a recognised FluxRouter 402 becomes the typed
+                // entitlement message. Only this arm can be pointed at Flux
+                // (the ElevenLabs arm below always talks to ElevenLabs).
+                let snippet = http_error_detail("text-to-speech", status.as_u16(), &txt);
                 let mut msg = format!("openai tts returned HTTP {}: {snippet}", status.as_u16());
                 if let Some(ra) = retry_after {
                     msg.push_str(&format!(" (Retry-After: {ra})"));
@@ -1351,5 +1355,41 @@ mod tests {
             .is_ok();
         assert!(ok);
         assert_eq!(unbound.summary().calls, 0);
+    }
+
+    /// #938. A FluxRouter 402 on `/v1/audio/speech` must read as the
+    /// entitlement lock it is, not as the provider's JSON envelope.
+    #[tokio::test]
+    async fn flux_402_on_speech_yields_the_typed_entitlement_message() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            .respond_with(ResponseTemplate::new(402).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "speech is available on paid plans only",
+                    "code": "premium_locked"
+                }
+            })))
+            .mount(&server)
+            .await;
+        let tmp = TempDir::new().unwrap();
+        let backend = OpenAiTtsBackend::with_endpoint(
+            "sk-flux-test".to_string(),
+            format!("{}/v1/audio/speech", server.uri()),
+        );
+        let msg = backend
+            .synthesize(make_request(tmp.path().join("speech.mp3")))
+            .await
+            .expect_err("a 402 must not succeed")
+            .to_string();
+        assert!(msg.contains("requires a paid Flux plan"), "got: {msg}");
+        assert!(
+            !msg.contains("\"code\""),
+            "the provider's raw JSON envelope must not reach the user, got: {msg}"
+        );
+        assert!(msg.contains("402"), "got: {msg}");
     }
 }

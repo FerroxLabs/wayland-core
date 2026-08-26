@@ -68,7 +68,7 @@ fn a_leaf_swapped_for_a_symlink_between_the_check_and_the_open_is_refused() {
 
     let policy = Arc::new(local_policy(ws.path()));
     let jail = SandboxedFs::new(RealFs, ws.path().to_path_buf())
-        .with_read_grants(policy.session_read_grant_handle());
+        .with_path_grants(policy.session_path_grant_handle());
     policy
         .grant_session_read_root(granted.path(), false)
         .unwrap();

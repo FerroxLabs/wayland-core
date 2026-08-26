@@ -72,24 +72,7 @@ impl WebBackend for TavilyWebBackend {
                 };
             }
         };
-        let raw_results = parsed
-            .get("results")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let results: Vec<serde_json::Value> = raw_results
-            .into_iter()
-            .map(|r| {
-                serde_json::json!({
-                    "title": r.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    "url": r.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    "snippet": r.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                })
-            })
-            .collect();
-        WebOutcome::Ok {
-            payload: serde_json::json!({ "web": results }),
-        }
+        map_tavily_results(&parsed)
     }
 
     async fn extract(&self, _req: ExtractRequest) -> WebOutcome {
@@ -106,5 +89,106 @@ impl WebBackend for TavilyWebBackend {
 
     fn backend_id(&self) -> &str {
         "tavily"
+    }
+}
+/// Map a Tavily `POST /search` 200 body into a `WebOutcome`.
+///
+/// Split out of `search` so the payload contract is testable without network
+/// I/O, mirroring `parallel_web::map_parallel_results`.
+fn map_tavily_results(parsed: &serde_json::Value) -> WebOutcome {
+    let raw_results = parsed
+        .get("results")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let results = super::shared::map_validated_rows(&raw_results, "content");
+    if results.is_empty() {
+        return WebOutcome::Err {
+            message: "tavily returned no valid results".to_string(),
+        };
+    }
+    WebOutcome::Ok {
+        payload: serde_json::json!({ "web": results }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err_message(outcome: WebOutcome) -> String {
+        match outcome {
+            WebOutcome::Err { message } => message,
+            WebOutcome::Ok { payload } => {
+                panic!("expected Err, got Ok({payload})")
+            }
+        }
+    }
+
+    fn web_len(outcome: WebOutcome) -> usize {
+        match outcome {
+            WebOutcome::Ok { payload } => payload
+                .get("web")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or_else(|| panic!("no web array in {payload}")),
+            WebOutcome::Err { message } => panic!("expected Ok, got Err({message})"),
+        }
+    }
+
+    /// gh#452 — an empty `results` array must be `Err`, not a successful empty
+    /// search. `ChainedWebBackend` treats every `Ok` as final, so `Ok{web:[]}`
+    /// silently disables the DuckDuckGo floor and the user sees a paid key
+    /// return nothing with no error to explain it.
+    #[test]
+    fn empty_results_array_is_an_error_not_an_empty_success() {
+        let parsed = serde_json::json!({ "results": [] });
+        let msg = err_message(map_tavily_results(&parsed));
+        assert!(
+            msg.contains("tavily"),
+            "message must name the backend: {msg}"
+        );
+    }
+
+    /// The same requirement when the key is absent entirely (schema drift):
+    /// `unwrap_or_default()` must not launder a missing array into a success.
+    #[test]
+    fn missing_results_key_is_an_error() {
+        let parsed = serde_json::json!({ "query": "rust" });
+        let msg = err_message(map_tavily_results(&parsed));
+        assert!(
+            msg.contains("tavily"),
+            "message must name the backend: {msg}"
+        );
+    }
+
+    /// Rows with no title or a non-http url carry no usable information; if
+    /// they are all that came back, that is the empty case too.
+    #[test]
+    fn rows_without_title_or_http_url_do_not_count_as_results() {
+        let parsed = serde_json::json!({
+            "results": [
+                { "title": "", "url": "https://example.com", "content": "x" },
+                { "title": "ok", "url": "ftp://example.com", "content": "x" },
+            ]
+        });
+        let msg = err_message(map_tavily_results(&parsed));
+        assert!(
+            msg.contains("tavily"),
+            "message must name the backend: {msg}"
+        );
+    }
+
+    /// Positive control: a well-formed body still maps to Ok, so the guards
+    /// above cannot pass by rejecting everything.
+    #[test]
+    fn valid_results_are_returned() {
+        let parsed = serde_json::json!({
+            "results": [
+                { "title": "Rust", "url": "https://rust-lang.org", "content": "snippet" },
+                { "title": "Docs", "url": "http://doc.rust-lang.org", "content": "more" },
+            ]
+        });
+        assert_eq!(web_len(map_tavily_results(&parsed)), 2);
     }
 }

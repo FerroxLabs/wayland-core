@@ -76,6 +76,30 @@ This fits scenarios like DeepSeek gateways and internal OpenAI-compatible servic
 
 ---
 
+## Turning a provider off
+
+```toml
+[providers.anthropic]
+enabled = false
+```
+
+`enabled = false` is the OFF switch, and it is checked **before** any credential
+is read. Clearing `api_key` is not an off switch: the key can equally come from
+`--api-key`, the credentials store (`wayland-core auth add`), a provider
+environment variable, or `~/.wayland/.env`, which Core re-loads into the
+environment at every startup. A disabled provider refuses with a message naming
+the setting, regardless of which of those still holds a key -- so quota cannot
+drain through a source you did not know was live.
+
+Selecting a disabled provider is an error, not a silent fallback. An alias
+(`[providers.<id>].provider = "anthropic"`) inherits the underlying entry's
+`enabled` value unless it sets its own. In a council roster a disabled member is
+skipped with `provider '<id>' is disabled`, the same way a keyless member is.
+
+Remove the line, or set `enabled = true`, to use the provider again.
+
+---
+
 ## Multiple accounts on one provider
 
 A team that holds several accounts with the *same* provider — a dozen OpenRouter

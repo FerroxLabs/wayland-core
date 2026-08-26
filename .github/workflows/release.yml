@@ -279,6 +279,19 @@ jobs:
       # The allowlist is what a stock enterprise Linux provides. Adding a name
       # here is a deliberate decision to raise the runtime requirements of every
       # Linux user, and should be argued for in the PR that does it.
+      #
+      # libssl.so.3 / libcrypto.so.3 / libdbus-1.so.3 were removed from this
+      # list in #1128, because node:22-slim -- an entirely ordinary landing place
+      # for a Node-distributed CLI -- ships none of the three and the artifact
+      # could not start there. They stay removed, by two different mechanisms:
+      # OpenSSL is no longer a dependency at all (`wcore-channel-email` drives
+      # IMAP TLS on rustls; `cargo tree -i openssl-sys --target all -e all`
+      # prints nothing), and libdbus (keyring -> dbus-secret-service) is vendored
+      # and statically linked. Keeping them listed would let a future dependency
+      # edge silently re-introduce the failure. libseccomp.so.2
+      # stays: wcore-tools enables wcore-sandbox/seccomp on Linux so the bwrap
+      # backend can apply its seccomp-bpf filter, dropping it is a security
+      # regression, and every base image we target already provides it.
       - name: Verify no unexpected shared-library dependency (both Linux targets)
         if: runner.os == 'Linux'
         shell: bash
@@ -296,7 +309,7 @@ jobs:
           if printf 'libasound.so.2\n' | grep -qxvF -f <(printf '%s\n' \
                 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 \
                 libgcc_s.so.1 ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 \
-                libssl.so.3 libcrypto.so.3 libseccomp.so.2 libdbus-1.so.3); then
+                libseccomp.so.2); then
             echo "self-test: gate correctly rejects libasound.so.2"
           else
             echo "ERROR: self-test failed — this gate cannot reject anything"; exit 1
@@ -305,7 +318,7 @@ jobs:
           unexpected="$(printf '%s\n' "${needed}" | grep -vxF -f <(printf '%s\n' \
                 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 \
                 libgcc_s.so.1 ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 \
-                libssl.so.3 libcrypto.so.3 libseccomp.so.2 libdbus-1.so.3) || true)"
+                libseccomp.so.2) || true)"
           if [ -n "${unexpected}" ]; then
             echo "ERROR: artifact requires shared libraries outside the allowlist:"
             echo "${unexpected}" | sed 's/^/  /'
@@ -985,12 +998,41 @@ jobs:
         run: |
           set -euo pipefail
           out=$(docker run --rm -v "$PWD/smoke/extracted:/s:ro" rockylinux:9 bash -c '
-            dnf -y -q install openssl-libs libseccomp dbus-libs >/dev/null 2>&1
+            dnf -y -q install libseccomp >/dev/null 2>&1
             /s/wayland-core --version
           ')
           echo "version output on rockylinux:9 (glibc 2.34): ${out}"
           echo "${out}" | grep -E 'wayland-core[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+' \
             || { echo "ERROR: artifact did not run at the declared glibc floor"; exit 1; }
+
+      # #1128. The glibc-floor smoke above installs what it needs, so it stayed
+      # green through a release whose artifact could not start on node:22-slim
+      # at all -- CI images, slim Docker bases and minimal cloud instances being
+      # exactly where a Node-distributed CLI lands. This leg installs NOTHING.
+      # It is the only check that fails when a dependency edge re-introduces a
+      # shared object a stock slim image does not carry.
+      #
+      # THE TWO LEGS DISAGREE ON libseccomp, AND THAT IS THE POINT. Measured
+      # 2026-08-25: libseccomp.so.2 is present in node:22-slim, debian:12-slim
+      # and ubuntu:22.04, and ABSENT from rockylinux:9 -- which is why the leg
+      # above installs it and this one does not. So the last remaining
+      # non-libc dependency is carried by the Debian family and not by the RHEL
+      # family, and only ONE of these two legs can ever observe that.
+      #
+      # If you change either base image, re-measure BOTH. Swapping this leg to a
+      # RHEL-family base, or adding an install line to it "to make it pass",
+      # silently recreates #1128 for every Debian-derived user: the artifact
+      # would again require a library the check no longer proves is there.
+      - name: Execute the artifact on clean node:22-slim (no packages installed)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=$(docker run --rm -v "$PWD/smoke/extracted:/s:ro" node:22-slim \
+                  /s/wayland-core --version)
+          echo "version output on clean node:22-slim: ${out}"
+          echo "${out}" | grep -E 'wayland-core[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+' \
+            || { echo "ERROR: artifact did not run on a clean node:22-slim"; exit 1; }
 
       - name: Verify Linux aarch64 binary file shape only (cannot execute on amd64 runner)
         if: matrix.use_qemu == true

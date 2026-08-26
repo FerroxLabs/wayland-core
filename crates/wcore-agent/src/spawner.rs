@@ -1025,6 +1025,16 @@ impl AgentSpawner {
         }
     }
 
+    /// The session's own configured output-token cap.
+    ///
+    /// #862 — the Spawn tool floors a fork's output budget at this so a child
+    /// is never given LESS room than the session that spawned it. Deliberate
+    /// per-spawn caps (Crucible proposers, skills, delegate) pass their own
+    /// value and never consult this, so their narrowing is untouched.
+    pub fn base_max_tokens(&self) -> u32 {
+        self.base_config.max_tokens
+    }
+
     /// #1118 — declare the parent session's shell principal, so a delegated
     /// child inherits it instead of falling to the strict default.
     ///
@@ -2310,7 +2320,8 @@ impl AgentSpawner {
         // `execute_resolved_launch` carries the full child-engine state machine.
         // Keep that large future off Tokio's worker stack before the durable
         // cancellation/terminal-evidence wrapper adds its own select state.
-        let execution = Box::pin(self.execute_resolved_launch(launch, extras, child_cancel));
+        let execution =
+            Box::pin(self.execute_resolved_launch(launch, extras, child_cancel, origin));
         match admitted
             .execute_with_parent_cancel(execution, parent_cancel)
             .await
@@ -2332,6 +2343,10 @@ impl AgentSpawner {
         launch: ResolvedChildLaunch,
         extras: SpawnExtras,
         child_cancel: tokio_util::sync::CancellationToken,
+        // #863 F2 — the child's durable lifecycle origin. Threaded in because
+        // this is where the child `AgentEngine` is built, and loop ownership is
+        // a property of HOW a child was launched, which the engine cannot see.
+        origin: ChildOrigin,
     ) -> SubAgentResult {
         let requested_budget = launch
             .overrides
@@ -2369,6 +2384,19 @@ impl AgentSpawner {
             return SubAgentResult::error(&launch.request.name, &error);
         }
         engine.set_egress_policy(self.egress_policy.clone());
+        // #863 F2 — an Anvil child is a builder fork of a CLIENT-side climb, so
+        // every turn it takes is mid-loop material. Declare the loop ownership
+        // here, at the one seam that knows the child's `ChildOrigin`: the engine
+        // cannot infer it, because origin is a property of how it was launched.
+        //
+        // This is the ONLY production site that sets it, and it covers both
+        // driver-seat routings (in-session and standalone-CLI) because both
+        // reach the wire through this same durable-launch path.
+        if origin == wcore_types::spawner::ChildOrigin::Anvil {
+            engine.set_flux_loop_intent(wcore_types::llm::FluxLoopIntent::ClientOwned(
+                wcore_types::llm::ANVIL_LOOP_OWNER.to_string(),
+            ));
+        }
         // ===================================================================
         // F21-02-03 — LAYER 2 of the child tool authority. DO NOT DELETE AS
         // "duplicate" of the intersection in `build_tool_registry`.
@@ -3840,6 +3868,28 @@ mod crucible_provider_resolution_tests {
         assert!(
             cfg.max_tokens_explicit,
             "a spawned child's per-spawn cap must read as explicit (never omitted on the wire)"
+        );
+    }
+
+    /// #862 (scope guard) — the fork output-budget floor lives in the Spawn
+    /// TOOL, never here. `child_config` is shared by callers that pass a
+    /// DELIBERATELY narrow cap (Crucible proposers, `wcore-skills`,
+    /// `wcore-tools/delegate`) to bound spend; flooring here would silently
+    /// widen every one of them. If someone moves the #862 fix into
+    /// `child_config`, this test fails.
+    #[test]
+    fn child_config_preserves_a_deliberately_narrow_cap() {
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let base = Config {
+            max_tokens: 64_000,
+            ..Config::default()
+        };
+        let spawner = AgentSpawner::new(parent, base);
+        // `sub()` asks for 16 — a deliberate, spend-bounding narrowing.
+        let cfg = spawner.child_config(&sub("p", None));
+        assert_eq!(
+            cfg.max_tokens, 16,
+            "child_config must pass a deliberate per-spawn cap through untouched"
         );
     }
 

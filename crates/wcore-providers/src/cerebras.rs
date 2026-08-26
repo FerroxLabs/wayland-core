@@ -133,6 +133,8 @@ mod tests {
             DebugConfig::default(),
         );
         let req = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "llama-3.3-70b".into(),
             system: String::new(),
             messages: vec![],

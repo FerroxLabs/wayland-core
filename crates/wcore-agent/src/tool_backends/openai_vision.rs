@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use wcore_egress::EgressClient as Client;
 
 use super::build_ssrf_safe_tool_client;
-use super::shared::reported_cost;
+use super::shared::{http_error_detail, reported_cost};
 use base64::Engine as _;
 use wcore_tools::media_cost::{MediaAccounting, MediaCostRecord, MediaOutcome, MediaUnits};
 use wcore_tools::vision_tools::{VisionBackend, VisionOutcome};
@@ -165,7 +165,7 @@ impl VisionBackend for OpenAiVisionBackend {
                     "{} vision returned HTTP {}: {}",
                     self.backend_id,
                     status.as_u16(),
-                    txt.chars().take(400).collect::<String>()
+                    http_error_detail("vision", status.as_u16(), &txt)
                 ),
             };
         }
@@ -341,6 +341,47 @@ mod tests {
             PriceSource::ProviderHeader {
                 header: "x-flux-cost-usd".to_string()
             }
+        );
+    }
+
+    /// #938. A FluxRouter 402 on the vision (chat-completions) endpoint is the
+    /// same entitlement signal the image path maps to `PremiumLocked`, and must
+    /// read the same way rather than as a wall of provider JSON.
+    #[tokio::test]
+    async fn flux_402_on_vision_yields_the_typed_entitlement_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(402).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "vision is available on paid plans only",
+                    "code": "premium_locked"
+                }
+            })))
+            .mount(&server)
+            .await;
+        let backend = OpenAiVisionBackend::with_endpoint(
+            "flux-test-key".to_string(),
+            format!("{}/v1/chat/completions", server.uri()),
+            "flux-auto".to_string(),
+            "flux-router",
+        );
+        let msg = match backend
+            .analyze("image/png", b"\x89PNG\r\n", "describe")
+            .await
+        {
+            VisionOutcome::Err { message } => message,
+            other => panic!("a 402 must not succeed: {other:?}"),
+        };
+        assert!(msg.contains("requires a paid Flux plan"), "got: {msg}");
+        assert!(
+            !msg.contains("\"code\""),
+            "the provider's raw JSON envelope must not reach the user, got: {msg}"
+        );
+        assert!(
+            msg.contains("402"),
+            "video_analyze classifies InsufficientCredits by string-matching the \
+             status, so it must survive: {msg}"
         );
     }
 }

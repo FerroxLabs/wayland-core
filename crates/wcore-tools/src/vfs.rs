@@ -1415,16 +1415,20 @@ impl InMemoryFile {
 pub struct SandboxedFs<F: VirtualFs> {
     inner: F,
     root: PathBuf,
-    /// Standing READ grants ("always allow this folder"), shared live with the
+    /// Standing path grants ("always allow this folder"), shared live with the
     /// session's `WorkspacePolicy` rather than copied — a grant must take
     /// effect on the very next call, not on the next session.
     ///
-    /// READ ONLY, and only on the pure-read operations. `write`,
-    /// `remove_file`, `observe_file` and `compare_exchange_file` keep the
-    /// root-only check: a granted folder is somewhere the agent may LOOK, and
-    /// widening a read into a write is exactly the escalation this feature is
-    /// supposed to make unnecessary.
-    read_grants: Arc<RwLock<Vec<crate::workspace_policy::SessionReadGrant>>>,
+    /// EVERY grant confers read, on the pure-read operations. Only a grant
+    /// carrying `write` widens the mutating four (`write`, `remove_file`,
+    /// `observe_file`, `compare_exchange_file`), and it is minted under
+    /// strictly more refusals than a read grant — see
+    /// `WorkspacePolicy::check_write_grantable` (#1104). The asymmetry is
+    /// enforced HERE by asking two different questions
+    /// ([`contain_read`](Self::contain_read) vs
+    /// [`contain_write`](Self::contain_write)), not by trusting the caller to
+    /// pass the right list.
+    path_grants: Arc<RwLock<Vec<crate::workspace_policy::SessionPathGrant>>>,
 }
 
 impl<F: VirtualFs> SandboxedFs<F> {
@@ -1439,24 +1443,24 @@ impl<F: VirtualFs> SandboxedFs<F> {
         Self {
             inner,
             root,
-            read_grants: Arc::new(RwLock::new(Vec::new())),
+            path_grants: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
-    /// Share the session's standing read grants with this jail.
+    /// Share the session's standing path grants with this jail.
     ///
     /// Takes the `Arc` from
-    /// `WorkspacePolicy::session_read_grant_handle` — the same allocation, so
+    /// `WorkspacePolicy::session_path_grant_handle` — the same allocation, so
     /// a grant approved mid-session is visible here immediately. Without this
     /// the user approves "always allow this folder" and `Read` keeps refusing,
     /// because the OS sandbox and the in-process file tools would be reading
     /// two different answers to the same question.
     #[must_use]
-    pub fn with_read_grants(
+    pub fn with_path_grants(
         mut self,
-        grants: Arc<RwLock<Vec<crate::workspace_policy::SessionReadGrant>>>,
+        grants: Arc<RwLock<Vec<crate::workspace_policy::SessionPathGrant>>>,
     ) -> Self {
-        self.read_grants = grants;
+        self.path_grants = grants;
         self
     }
 
@@ -1497,7 +1501,21 @@ impl<F: VirtualFs> SandboxedFs<F> {
             }
         };
 
-        if !canon_prefix.starts_with(&self.root) {
+        // Step 2 above resolves symlinks, and step 3 argues that the
+        // not-yet-existing suffix is safe because "no symlink can escape
+        // through a not-yet-created node". A DANGLING symlink is the node that
+        // argument does not cover: it EXISTS, `canonicalize` refuses it only
+        // because its target does not, so it lands in `suffix` and is never
+        // re-examined. `landing_prefix` follows exactly that one node and
+        // reports where the operation would really act.
+        let Some(landing) = landing_prefix(&canon_prefix, &suffix).await else {
+            return Err(VfsError::OutsideSandbox {
+                path: normalized,
+                root: self.root.clone(),
+            });
+        };
+
+        if !landing.starts_with(&self.root) {
             return Err(VfsError::OutsideSandbox {
                 path: normalized,
                 root: self.root.clone(),
@@ -1517,14 +1535,30 @@ impl<F: VirtualFs> SandboxedFs<F> {
     }
 
     /// Containment for the pure-READ operations: inside the sandbox root, OR
-    /// inside a folder the user explicitly granted.
+    /// inside any folder the user explicitly granted.
+    async fn contain_read(&self, path: &Path) -> Result<PathBuf, VfsError> {
+        self.contain_granted(path, false).await
+    }
+
+    /// Containment for the MUTATING operations: inside the sandbox root, or
+    /// inside a folder granted with WRITE.
     ///
+    /// #1104. Before this, all four mutating operations used the bare
+    /// [`contain`](Self::contain), because write outside the workspace was not
+    /// grantable at all. They now ask the same question `contain_read` asks
+    /// with the access raised, so a plain read grant still refuses every one of
+    /// them — the DoD's "a read-only grant on the same folder still refuses the
+    /// write" is this one boolean, and it is checked in exactly one place.
+    async fn contain_write(&self, path: &Path) -> Result<PathBuf, VfsError> {
+        self.contain_granted(path, true).await
+    }
+
     /// Falls through to [`contain`](Self::contain) first so the ordinary
     /// in-workspace path is byte-for-byte unchanged, and so a session with no
     /// grants behaves exactly as it did before this existed. The grant check
     /// runs on the CANONICALIZED path for the same reason `contain` does:
     /// otherwise `<granted>/link -> /etc/shadow` would pass.
-    async fn contain_read(&self, path: &Path) -> Result<PathBuf, VfsError> {
+    async fn contain_granted(&self, path: &Path, write: bool) -> Result<PathBuf, VfsError> {
         let refusal = match self.contain(path).await {
             Ok(contained) => return Ok(contained),
             Err(refusal) => refusal,
@@ -1542,20 +1576,21 @@ impl<F: VirtualFs> SandboxedFs<F> {
         // a long-running turn must lose access the moment the deadline passes,
         // not at whatever later point something happens to rebuild a sandbox.
         let now = std::time::SystemTime::now();
-        let grants: Vec<PathBuf> = self
-            .read_grants
-            .read()
-            .iter()
-            .filter(|grant| grant.expires_at.is_none_or(|deadline| now < deadline))
-            .map(|grant| grant.root.clone())
-            .collect();
+        let grants = self.live_grant_roots(now, write);
         if grants.is_empty() {
             return Err(refusal);
         }
         let Some((canon_prefix, suffix)) = canonicalize_existing_prefix(attempted).await else {
             return Err(refusal);
         };
-        if !grants.iter().any(|root| canon_prefix.starts_with(root)) {
+        // Same dangling-boundary resolution the jail check applies. A grant
+        // that could be stepped out of by a spelling the jail refuses would be
+        // a hole opened BY the grant, which is the worst outcome available
+        // here.
+        let Some(landing) = landing_prefix(&canon_prefix, &suffix).await else {
+            return Err(refusal);
+        };
+        if !grants.iter().any(|root| landing.starts_with(root)) {
             return Err(refusal);
         }
         // A grant widens WHERE we may look, never WHAT. The secret rules are
@@ -1580,19 +1615,54 @@ impl<F: VirtualFs> SandboxedFs<F> {
         }
     }
 
+    /// The roots of every live grant conferring at least `write`.
+    ///
+    /// Expiry is evaluated HERE, at use time, not when the grant was made: a
+    /// long-running turn must lose access the moment the deadline passes, not
+    /// at whatever later point something happens to rebuild a sandbox.
+    fn live_grant_roots(&self, now: std::time::SystemTime, write: bool) -> Vec<PathBuf> {
+        self.path_grants
+            .read()
+            .iter()
+            .filter(|grant| {
+                grant.expires_at.is_none_or(|deadline| now < deadline) && (!write || grant.write)
+            })
+            .map(|grant| grant.root.clone())
+            .collect()
+    }
+
+    /// Bind an observed object to the authority that vouches for it.
+    ///
+    /// The authority is what `compare_exchange_file` compares before applying a
+    /// mutation, so it must name the boundary the object actually sits behind.
+    /// #1104: an object inside a granted WRITE root is bound to THAT root's
+    /// identity, not the jail's. Binding it to the jail root would claim the
+    /// workspace vouches for a file that is not in it, and two different
+    /// granted roots would then be indistinguishable — a mutation prepared
+    /// against one could be applied to the other.
+    ///
+    /// A path reachable through no live write grant is refused, exactly as
+    /// before: this is the mutating path's containment check, and it must not
+    /// be widened by a plain READ grant.
     fn bind_identity(
         &self,
         mut object: FileObjectIdentity,
     ) -> Result<FileObjectIdentity, VfsError> {
-        if !object.path.starts_with(&self.root) {
-            return Err(VfsError::OutsideSandbox {
-                path: object.path,
-                root: self.root.clone(),
-            });
-        }
+        let authority_root = if object.path.starts_with(&self.root) {
+            self.root.clone()
+        } else {
+            let now = std::time::SystemTime::now();
+            self.live_grant_roots(now, true)
+                .into_iter()
+                .find(|granted| object.path.starts_with(granted))
+                .ok_or_else(|| VfsError::OutsideSandbox {
+                    path: object.path.clone(),
+                    root: self.root.clone(),
+                })?
+        };
         object.authority = format!(
             "sandbox:{}|{}",
-            sandbox_root_identity(&self.root)?,
+            sandbox_root_identity(&authority_root)?,
             object.authority
         );
         Ok(object)
@@ -1653,6 +1723,70 @@ async fn canonicalize_existing_prefix(path: &Path) -> Option<(PathBuf, PathBuf)>
     }
 }
 
+/// How many dangling-symlink hops [`landing_prefix`] will follow.
+///
+/// A chain longer than this is not a path anybody meant, and refusing is the
+/// only safe answer: "could not resolve" must never be treated as "resolves
+/// inside". `SYMLOOP_MAX` is 8 on Linux and 32 on macOS; this is the tighter
+/// of the two on purpose, because this is a boundary check and not a resolver.
+const MAX_DANGLING_HOPS: usize = 8;
+
+/// The canonical directory an operation on `canon_prefix + suffix` will really
+/// act in.
+///
+/// Returns `canon_prefix` unchanged in the ordinary case — the first
+/// not-yet-existing component genuinely does not exist, and the containment
+/// reasoning in [`SandboxedFs::contain`] holds as written. It differs only when
+/// that component is a DANGLING symlink, in which case the operation is
+/// redirected wherever the link points and the caller must judge THAT.
+///
+/// Only the FIRST suffix component can be such a node: everything deeper has a
+/// non-existent parent and therefore cannot itself exist.
+///
+/// `None` means the chain could not be resolved inside the hop budget. The
+/// caller refuses on `None`.
+///
+/// MEASURED before this existed: `RealFs::write` goes through
+/// `wcore_config::atomic_write`, which writes a tempfile and RENAMES over the
+/// destination, so it replaces the dangling link's own dentry instead of
+/// following it — no bytes escaped. That containment is a property of one
+/// backend's write strategy, not of the boundary, and `observe_file` and any
+/// future `VirtualFs` implementor do not share it. The check belongs at the
+/// boundary.
+async fn landing_prefix(canon_prefix: &Path, suffix: &Path) -> Option<PathBuf> {
+    let Some(first) = suffix.components().next() else {
+        return Some(canon_prefix.to_path_buf());
+    };
+    let mut node = canon_prefix.join(first.as_os_str());
+    for _ in 0..MAX_DANGLING_HOPS {
+        match tokio::fs::symlink_metadata(&node).await {
+            // Not a link (or gone): whatever prefix contains it is the landing
+            // point, and it is judged by the longest ancestor that does exist.
+            Ok(metadata) if !metadata.is_symlink() => {
+                return canonicalize_existing_prefix(&node)
+                    .await
+                    .map(|(prefix, _)| prefix);
+            }
+            Ok(_) => {}
+            Err(_) => {
+                return canonicalize_existing_prefix(&node)
+                    .await
+                    .map(|(prefix, _)| prefix);
+            }
+        }
+        let target = tokio::fs::read_link(&node).await.ok()?;
+        node = if target.is_absolute() {
+            target
+        } else {
+            // A relative link is relative to the directory HOLDING it, not to
+            // the process cwd — resolving it against anything else is how a
+            // link that stays inside gets misread as one that leaves.
+            lex_normalize(&target, node.parent().unwrap_or(Path::new("/")))
+        };
+    }
+    None
+}
+
 fn lex_normalize(path: &Path, base: &Path) -> PathBuf {
     let candidate = if path.is_absolute() {
         path.to_path_buf()
@@ -1695,7 +1829,7 @@ impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
         self.inner.read_pinned(&p).await
     }
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError> {
-        let p = self.contain(path).await?;
+        let p = self.contain_write(path).await?;
         self.inner.write(&p, contents).await
     }
     async fn exists(&self, path: &Path) -> Result<bool, VfsError> {
@@ -1707,7 +1841,7 @@ impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
         self.inner.list(&p).await
     }
     async fn remove_file(&self, path: &Path) -> Result<(), VfsError> {
-        let p = self.contain(path).await?;
+        let p = self.contain_write(path).await?;
         self.inner.remove_file(&p).await
     }
     async fn metadata(&self, path: &Path) -> Result<VfsMetadata, VfsError> {
@@ -1715,7 +1849,7 @@ impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
         self.inner.metadata(&p).await
     }
     async fn observe_file(&self, path: &Path) -> Result<IdentifiedFileObservation, VfsError> {
-        let p = self.contain(path).await?;
+        let p = self.contain_write(path).await?;
         let mut observed = self.inner.observe_file(&p).await?;
         observed.object = self.bind_identity(observed.object)?;
         Ok(observed)
@@ -1725,7 +1859,7 @@ impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
         path: &Path,
         mutation: &IntendedFileMutation,
     ) -> Result<FileMutationOutcome, VfsError> {
-        let p = self.contain(path).await?;
+        let p = self.contain_write(path).await?;
         let inner_observed = self.inner.observe_file(&p).await?;
         let wrapped_observed = IdentifiedFileObservation {
             observation: inner_observed.observation,

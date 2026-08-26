@@ -89,6 +89,11 @@ pub enum ResolveError {
     /// council can skip rather than fail on.
     #[error("provider '{0}' has no usable api key")]
     Keyless(String),
+    /// #685 — the provider is `enabled = false` in config. Like [`Self::Keyless`]
+    /// the council skips it rather than failing the whole round, but the reason
+    /// reported to the user is the true one.
+    #[error("provider '{0}' is disabled (`enabled = false`)")]
+    Disabled(String),
     /// The provider could be identified and keyed, but construction failed.
     ///
     /// `create_provider` is infallible at the type level today, so this is not
@@ -104,6 +109,7 @@ impl From<CouncilProviderError> for ResolveError {
         match e {
             CouncilProviderError::Unknown(id) => ResolveError::Unknown(id),
             CouncilProviderError::Keyless(id) => ResolveError::Keyless(id),
+            CouncilProviderError::Disabled(id) => ResolveError::Disabled(id),
         }
     }
 }

@@ -28,6 +28,8 @@ use wcore_types::tool::ToolDef;
 
 fn minimal_request() -> LlmRequest {
     LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "gemini-2.5-pro".to_string(),
         system: String::new(),
         messages: vec![Message::new(

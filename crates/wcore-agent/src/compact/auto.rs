@@ -229,6 +229,8 @@ pub async fn autocompact(
 
     let summary_text = loop {
         let request = LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: compact_model.to_string(),
             system: COMPACT_SYSTEM_PROMPT.to_string(),
             messages: conv_messages.clone(),

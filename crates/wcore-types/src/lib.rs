@@ -17,6 +17,7 @@ pub mod model_aliases;
 // and because AGENTS.md requires platform differences to sit in exactly one
 // function rather than being re-derived per crate.
 pub mod process_liveness;
+pub mod reasoning_filter;
 pub mod skill_types;
 pub mod spawner;
 pub mod tool;

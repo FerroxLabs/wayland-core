@@ -520,3 +520,34 @@ threads-required = 4
 filter = 'binary(path_boundary_tui_pty) + binary(goal_control_tui_pty) + binary(smoke_p0) + binary(config_unknown_keys_visible) + binary(p2_open_admission_entry_points) + binary(f21_02_01_child_tool_authority) + binary(f21_02_child_budget_live)'
 threads-required = 4
 retries = 0
+
+# ── pipeline_test: deterministic now, so do not let a retry hide a relapse ───
+#
+# `[profile.ci] retries = 2` is why FerroxLabs/wayland#1101 survived: a flaky
+# test that passes on a retry reports the RUN as SUCCESS, so CI could not tell
+# the flake from a real barrier regression in `pipeline(over, stages)` — the one
+# thing this binary exists to catch.
+#
+# MEASURED on hetzner-dsm (96 cores), same test binary within each arm:
+#   * origin/main, `no_barrier_fast_item_finishes_all_stages_before_slow_
+#     finishes_stage_one` alone, sequential, n=60: 0 failures.
+#   * origin/main, full binary, 64 concurrent processes, n=256: 156 failures
+#     (60.9 %) — the flake is competing tokio runtimes ACROSS processes, which
+#     is exactly what nextest's process-per-test model produces.
+#   * After the causal StageGate fix, the SAME arm: 0 of 256 at 64 concurrent
+#     and 0 of 512 at 128 concurrent, and no OTHER test in this binary failed
+#     across all 768 of those runs. That is what licenses scoping this to the
+#     binary rather than to the one test.
+#
+# So the ordering these tests assert is now enforced by construction, not by
+# racing a sleep, and a failure here is signal. `retries = 0` makes that signal
+# reach the run conclusion instead of a buried `TRY n FAIL` line. Same reasoning
+# and same scope discipline as the PTY block above: every other test keeps
+# `retries = 2`.
+#
+# Note the fixed test detects a reintroduced barrier by a 30s gate expiry, well
+# inside this profile's 90s slow-timeout, so a regression reports as an ordinary
+# assertion failure rather than a harness kill.
+[[profile.ci.overrides]]
+filter = 'binary(=pipeline_test)'
+retries = 0

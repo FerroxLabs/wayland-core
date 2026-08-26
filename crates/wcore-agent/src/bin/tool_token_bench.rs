@@ -219,6 +219,8 @@ fn scripted_provider_with_size(result_chars: usize) -> ScriptedProvider {
 /// in the markdown.
 async fn drain_scripted_usage(provider: &ScriptedProvider) -> Usage {
     let req = LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "scripted".into(),
         system: String::new(),
         messages: vec![],

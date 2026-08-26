@@ -27,9 +27,14 @@ use crate::workspace_policy::{WorkspacePolicy, WorkspaceTrust, canon_for_scope};
 /// Verified against each tool's own `input_schema()`; the
 /// `path_arg_table_matches_each_tools_schema` test fails if either side drifts.
 ///
-/// WRITE tools are deliberately absent. Write authority outside the workspace
-/// is not grantable (`PathGrantError::WriteNotGrantable`), so a boundary card
-/// for `Write`/`Edit` could only ever offer a button that refuses itself.
+/// WRITE tools are deliberately absent, and stay absent after #1104 made write
+/// grantable. A write grant is minted from a folder the OPERATOR chose in a
+/// picker (`grant_path`), never inferred from a path the MODEL named: the
+/// pre-flight card offers a suggested root derived from the tool call, and
+/// offering "always allow writes here" for a directory the model picked is a
+/// prompt-injection lever, not a convenience. The read cards are safe for the
+/// same reason inverted — the worst case there is showing the model a file the
+/// user then approves seeing.
 pub const READ_PATH_ARGS: &[(&str, &str)] =
     &[("Read", "file_path"), ("Grep", "path"), ("Glob", "path")];
 

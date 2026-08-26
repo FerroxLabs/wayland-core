@@ -168,7 +168,7 @@ impl FluxFetchClient {
             // Reuse T1's 402 mapper: web_fetch's not-entitled body is
             // `{"error":"upgrade_required","message":"..."}` → UpgradeRequired.
             if status.as_u16() == 402
-                && let Some(err) = crate::openai::parse_flux_402(&body_text)
+                && let Some(err) = crate::openai::parse_flux_402("web fetch", &body_text)
             {
                 return Err(err);
             }
@@ -273,7 +273,7 @@ mod tests {
         // Contract §4.6: web_fetch not-entitled → 402 upgrade_required, code is
         // the top-level `error` STRING with a sibling `message`.
         let body = r#"{"error":"upgrade_required","message":"web_fetch is a paid capability; upgrade or clear a charge"}"#;
-        let err = crate::openai::parse_flux_402(body).expect("recognised 402");
+        let err = crate::openai::parse_flux_402("web fetch", body).expect("recognised 402");
         match err {
             ProviderError::UpgradeRequired { message } => {
                 assert!(message.contains("paid capability"));
@@ -289,7 +289,7 @@ mod tests {
         // ProviderError::Api{400, <body>}).
         let body = r#"{"error":"blocked target: 169.254.169.254"}"#;
         assert!(
-            crate::openai::parse_flux_402(body).is_none(),
+            crate::openai::parse_flux_402("web fetch", body).is_none(),
             "a 400 SSRF body must not be parsed as a 402 entitlement error"
         );
     }
@@ -299,7 +299,7 @@ mod tests {
         // Contract §4.6: social hosts → `400 {"error":"social_blocked"}`.
         let body = r#"{"error":"social_blocked"}"#;
         assert!(
-            crate::openai::parse_flux_402(body).is_none(),
+            crate::openai::parse_flux_402("web fetch", body).is_none(),
             "a 400 social_blocked body must not be parsed as a 402"
         );
     }

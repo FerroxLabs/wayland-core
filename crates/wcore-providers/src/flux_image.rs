@@ -264,7 +264,7 @@ impl FluxImageClient {
             // recognised there. `premium_locked` is mapped to
             // `PremiumLocked { capability: "image generation", .. }`.
             if status.as_u16() == 402
-                && let Some(err) = crate::openai::parse_flux_402(&body_text)
+                && let Some(err) = crate::openai::parse_flux_402("image generation", &body_text)
             {
                 return Err(err);
             }
@@ -438,7 +438,7 @@ mod tests {
         // Contract §3.6: image not-entitled → 402 premium_locked. T1's
         // parse_flux_402 maps this to PremiumLocked{capability:"image generation"}.
         let body = r#"{"error":{"message":"image generation requires a paid plan","code":"premium_locked"}}"#;
-        let err = crate::openai::parse_flux_402(body).expect("recognised 402");
+        let err = crate::openai::parse_flux_402("image generation", body).expect("recognised 402");
         match err {
             ProviderError::PremiumLocked {
                 capability,

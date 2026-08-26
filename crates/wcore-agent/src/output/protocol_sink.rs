@@ -8,6 +8,7 @@ use wcore_protocol::events::{
 };
 use wcore_protocol::execution_policy::ExecutionPolicySnapshot;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
+use wcore_types::reasoning_filter::ReasoningFilter;
 
 use super::OutputSink;
 
@@ -233,12 +234,15 @@ impl PluginCapabilitySet {
     /// Confirmed 3-of-3 by cross-audit panel; see
     /// `.planning/FALSE-ADVERTISING-SUMMARY.md`.
     ///
-    /// Each narrowing is logged at WARN with the probe's reason and remedy. A
-    /// recorded panel dissent held that silently dropping a capability replaces
-    /// an actionable runtime error with an un-debuggable missing feature; the
-    /// log is how that objection is honoured without keeping the false claim.
-    pub async fn narrowed_to_live(self) -> Self {
+    /// Every narrowing is RETURNED beside the narrowed set, so the caller —
+    /// which owns the session's `OutputSink` — announces it on a channel the
+    /// user actually reads. A recorded panel dissent held that silently
+    /// dropping a capability replaces an actionable runtime error with an
+    /// un-debuggable missing feature; that objection is honoured by the
+    /// announcement, not by the log. See [`CapabilityNarrowing`].
+    pub async fn narrowed_to_live(self) -> (Self, Vec<CapabilityNarrowing>) {
         let mut out = self;
+        let mut narrowed = Vec::new();
 
         if out.browser_suite {
             let probe = wcore_browser::liveness::probe(
@@ -246,12 +250,11 @@ impl PluginCapabilitySet {
             )
             .await;
             if let Some(u) = probe.unavailable() {
-                tracing::warn!(
-                    capability = "browser_suite",
-                    reason = %u.reason,
-                    remedy = %u.remedy,
-                    "not advertising browser_suite: the plugin is loaded but no backend can start"
-                );
+                narrowed.push(CapabilityNarrowing {
+                    capability: "browser_suite",
+                    reason: u.reason.clone(),
+                    remedy: u.remedy.clone(),
+                });
                 out.browser_suite = false;
             }
         }
@@ -259,17 +262,63 @@ impl PluginCapabilitySet {
         if out.computer_use {
             let probe = wcore_cua::liveness::probe();
             if let Some(u) = probe.unavailable() {
-                tracing::warn!(
-                    capability = "computer_use",
-                    reason = %u.reason,
-                    remedy = %u.remedy,
-                    "not advertising computer_use: the plugin is loaded but no backend can start"
-                );
+                narrowed.push(CapabilityNarrowing {
+                    capability: "computer_use",
+                    reason: u.reason.clone(),
+                    remedy: u.remedy.clone(),
+                });
                 out.computer_use = false;
             }
         }
 
-        out
+        (out, narrowed)
+    }
+}
+
+/// One capability [`PluginCapabilitySet::narrowed_to_live`] dropped, carrying
+/// the probe's own reason and remedy.
+///
+/// #1130 — the narrowing used to exist ONLY as a `tracing::warn!`. With
+/// `RUST_LOG` unset, which is the default for every ordinary user, stderr takes
+/// ERROR only (`wcore-cli`'s `main.rs` builds the writer as
+/// `stderr.with_max_level(Level::ERROR)`) and everything below it goes to the
+/// rotating log file; under the TUI nothing may reach stdio at all. So the one
+/// diagnostic that explained why a capability disappeared was invisible to the
+/// person it was written for, and the feature simply looked broken.
+///
+/// A log-level bump cannot fix that — the user is not reading logs. The fact is
+/// therefore RETURNED rather than logged, which makes announcing it the
+/// caller's obligation: bootstrap owns the session's `OutputSink` and puts the
+/// line on the same channel the retry notices use. Same shape as
+/// `bootstrap::local_shell_notice` and `config::ambient_credential_notice`,
+/// and for the same reason.
+///
+/// Returning a value rather than taking a sink is deliberate: the type makes it
+/// impossible to narrow a capability without being handed the words for it, so
+/// a future second call site cannot silently drop one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityNarrowing {
+    /// The wire flag that was cleared: `browser_suite` or `computer_use`.
+    pub capability: &'static str,
+    /// The probe's own account of why no backend can start.
+    pub reason: String,
+    /// The probe's own account of what would make it start.
+    pub remedy: String,
+}
+
+impl CapabilityNarrowing {
+    /// The operator-facing line. Pure, so the exact words are under test rather
+    /// than reachable only on a host with no display and no browser.
+    ///
+    /// It states AVAILABILITY, not advertising: the flag is read by the JSON
+    /// stream host, but the fact underneath — no backend on this host can start
+    /// — is equally true for a CLI or TUI user, whose tool call would die at
+    /// first use instead. One sentence is therefore correct on every surface.
+    pub fn notice(&self) -> String {
+        format!(
+            "notice: the '{}' capability is not available in this session: {}. To enable it: {}",
+            self.capability, self.reason, self.remedy
+        )
     }
 }
 
@@ -331,6 +380,24 @@ pub struct ProtocolSink {
     /// diagnostic and has no ordering claim, so it waits for the handshake
     /// and is replayed immediately after it, in order.
     pre_ready_info: Arc<parking_lot::Mutex<Option<Vec<ProtocolEvent>>>>,
+    /// #1129 - inline-reasoning splitter for the JSON-stream wire.
+    ///
+    /// Open-weights models (DeepSeek-R1 / Qwen-QwQ class, reached through
+    /// Flux or Ollama) emit their private reasoning INSIDE the ordinary text
+    /// stream, wrapped in `<think>`/`<thinking>`/`<reasoning>`. The CLI TUI
+    /// has always stripped those host-side; the protocol path did not, so a
+    /// Desktop host rendered the literal tag body inside the assistant
+    /// bubble.
+    ///
+    /// The filter runs HERE rather than in the engine because the TUI's own
+    /// sink must keep receiving raw text: the TUI does not delete reasoning,
+    /// it captures it and renders a collapsed `Thought:` block, and stripping
+    /// upstream of every sink would take that block away from the local user.
+    ///
+    /// Stateful across chunks by design - a tag may straddle a chunk
+    /// boundary (`<thi` | `nk>`). Reset on `stream_start`, drained on
+    /// `stream_end`.
+    reasoning: Arc<parking_lot::Mutex<ReasoningFilter>>,
 }
 
 impl ProtocolSink {
@@ -358,6 +425,7 @@ impl ProtocolSink {
             current_msg_id: Arc::new(RwLock::new(String::new())),
             session_id: Arc::new(RwLock::new(None)),
             pre_ready_info: Arc::new(parking_lot::Mutex::new(None)),
+            reasoning: Arc::new(parking_lot::Mutex::new(ReasoningFilter::new())),
         }
     }
 
@@ -382,6 +450,25 @@ impl ProtocolSink {
         let held = self.pre_ready_info.lock().take();
         for event in held.into_iter().flatten() {
             let _ = self.writer.emit(&event);
+        }
+    }
+
+    /// #1129 - drain whatever inline reasoning the filter is holding and put
+    /// it on the wire as `thinking`.
+    ///
+    /// Called after every text chunk (so reasoning streams incrementally,
+    /// not as one end-of-turn blob) and once more at `stream_end`, which is
+    /// what recovers an UNCLOSED `<think>` - the filter deliberately eats to
+    /// end of stream rather than leak a runaway tail, and without this flush
+    /// that tail would be silently deleted instead of shown.
+    fn flush_reasoning(&self, msg_id: &str) {
+        let captured = self.reasoning.lock().take_captured_delta();
+        if !captured.is_empty() {
+            let _ = self.writer.emit(&ProtocolEvent::Thinking {
+                text: captured,
+                msg_id: msg_id.to_string(),
+                subject: None,
+            });
         }
     }
 
@@ -739,8 +826,23 @@ impl OutputSink for ProtocolSink {
     }
 
     fn emit_text_delta(&self, text: &str, msg_id: &str) {
+        // #1129: split inline reasoning out of the visible stream. `visible`
+        // is what the host renders as the answer; the reasoning the filter
+        // withheld rides the typed `thinking` event instead of being
+        // deleted, so a host can render it collapsed exactly as the TUI does.
+        let visible = self.reasoning.lock().process(text);
+        self.flush_reasoning(msg_id);
+        // A chunk the filter consumed WHOLE (pure reasoning, or the first
+        // half of a tag straddling the boundary) must not become an empty
+        // `text_delta`: a host that counts deltas to decide "the model
+        // answered" would read a reasoning-only turn as an answer. An
+        // already-empty input still passes through unchanged - that is a
+        // producer's frame, not the filter's doing.
+        if visible.is_empty() && !text.is_empty() {
+            return;
+        }
         let _ = self.writer.emit(&ProtocolEvent::TextDelta {
-            text: text.to_string(),
+            text: visible,
             msg_id: msg_id.to_string(),
         });
     }
@@ -790,6 +892,9 @@ impl OutputSink for ProtocolSink {
     }
 
     fn emit_stream_start(&self, msg_id: &str) {
+        // #1129: a runaway unclosed `<think>` from a cancelled turn must not
+        // suppress the next turn's visible output.
+        self.reasoning.lock().reset();
         let _ = self.writer.emit(&ProtocolEvent::StreamStart {
             msg_id: msg_id.to_string(),
         });
@@ -805,6 +910,9 @@ impl OutputSink for ProtocolSink {
         cache_read_tokens: u64,
         finish_reason: FinishReason,
     ) {
+        // #1129: an unclosed reasoning block reaches the host instead of
+        // vanishing with the turn.
+        self.flush_reasoning(msg_id);
         let _ = self.writer.emit(&ProtocolEvent::StreamEnd {
             msg_id: msg_id.to_string(),
             finish_reason,
@@ -842,6 +950,9 @@ impl OutputSink for ProtocolSink {
         agent_run_id: Option<&str>,
         usage_delta: Option<&wcore_types::message::TokenUsage>,
     ) {
+        // #1129: same unclosed-block flush as the plain `emit_stream_end`.
+        // Both overrides are live producer paths, so the flush is on both.
+        self.flush_reasoning(msg_id);
         let _ = self.writer.emit(&ProtocolEvent::StreamEnd {
             msg_id: msg_id.to_string(),
             finish_reason,

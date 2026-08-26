@@ -29,6 +29,29 @@ most once a day, never blocking a launch) and prints a warning with the exact
 pinned command when the cached engine is behind. Opt out with
 `WAYLAND_CORE_SKIP_UPDATE_CHECK=1`.
 
+## error while loading shared libraries (Linux)
+
+```
+wayland-core: error while loading shared libraries: libseccomp.so.2: cannot
+open shared object file: No such file or directory
+```
+
+The binary never started -- this is the dynamic loader, not wayland-core. The
+Linux artifact is glibc-linked and needs `libseccomp.so.2` beyond the C
+runtime:
+
+```bash
+apt-get install -y libseccomp2   # Debian/Ubuntu
+dnf install -y libseccomp        # RHEL/Fedora
+```
+
+The npm launcher detects this case and prints the missing library with the
+install command for your distribution.
+
+If the named library is `libc.so.6` with a version complaint, or the loader
+reports the file as "not found" on Alpine, the host is below the glibc 2.34
+floor or is musl-based; neither is supported. Build from source instead.
+
 ## API Key Not Configured
 
 ```

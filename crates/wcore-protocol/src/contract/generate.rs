@@ -38,8 +38,57 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // `render_artifact_v1` (#1098): a new event. No field on an existing event
 // changed shape, so `major` holds at 1 — the vocabulary a host can validate
 // got strictly wider, which is what a minor bump is for.
-pub const CONTRACT_MINOR: u64 = 16;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/16";
+// 17 -> 18: `path_write_grants_v1` (#1104). No wire type or field changed
+// shape — `ApprovalScope::AlwaysPath::write` and `PathGrantAccess::Write` were
+// already published and already refused — so `major` holds at 1. What changed
+// is that the engine can now say YES to them, and a pinned host has no way to
+// learn that from the shapes alone. Without the bump a host would have to
+// discover write support by sending a grant and reading the refusal text,
+// which is exactly the button-that-lies this feature exists to prevent.
+// 16 -> 17: `grant_workspace_capability`, `grant_path` and `revoke_path` are
+// declared (#314). Three new command wire types; no field on an existing
+// command or event changed shape, so `major` holds at 1 and the command union
+// a host can emit got strictly wider. The wire-shape gate refuses this
+// regeneration without the bump - three `added=` entries under a standing
+// 1.16 - which is that gate deciding the version question it exists to force.
+// 17 -> 18: TWO capabilities land in the same release; one bump carries both.
+//
+// `inline_reasoning_split_v1` (#1129). No wire SHAPE moved - this is the first
+// bump here that the wire-shape gate does NOT force, and the entry says so
+// plainly rather than implying a refusal that never happened. What moved is the
+// MEANING of two already-published types: `text_delta` no longer carries inline
+// `<think>`/`<thinking>`/`<reasoning>` bodies from open-weights models, and
+// `thinking` now carries them. A host pinned to 1.17 has no way to learn that
+// from the shapes, and rendering is exactly what it changes - the reasoning was
+// previously indistinguishable from the answer.
+//
+// `path_write_grants_v1` (#1104). Every shipped Core accepts `write: true` and
+// every one before this refused it, so a host CANNOT feature-detect by sending
+// one - it would have to parse refusal prose. The version and the capability
+// are the only honest signals.
+//
+// 18 -> 19: `turn_abandon_v1` (#326, Desktop-side FerroxLabs/wayland#1116). `resume_turn`
+// gains a fourth `action`. The command union does not widen and no field
+// changes shape, so `major` holds at 1; what widens is one closed enum, which a
+// pinned host validates against and would otherwise reject before the frame
+// ever reached the wire. Desktop reported exactly that: it cannot offer "give
+// up on this stuck turn" because its own outbound validation refuses the value.
+// A host cannot feature-detect this by sending one and reading the refusal —
+// the refusal happens inside the host, against the pinned corpus.
+//
+// `contract.minor` plus the named capabilities are the only signals a pinned
+// host reads, so the version moves once and all three capabilities name
+// themselves.
+//
+// ON THE GAP BETWEEN 16 AND 19. The last TAGGED contract is 1.16 — v0.13.5,
+// v0.13.6 and `main` all publish it. 17 and 18 were assembled on this branch
+// and never reached a tag, so no host has ever pinned them. The entries above
+// are kept as the decision log they are, rather than renumbered to close the
+// gap: each records why a specific widening needed a signal, and rewriting them
+// to look consecutive would destroy that reasoning to tidy a sequence no host
+// reads. A pinned host moves 1.16 -> 1.19 and finds every capability named.
+pub const CONTRACT_MINOR: u64 = 19;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/19";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -86,11 +135,17 @@ cannot be fooled by the producer-side `PRODUCER_EVENT_TYPES` constant.
 `generated_artifacts()` now refuses to build a corpus whose `EVENT_SPECS` and
 `PRODUCER_EVENT_TYPES` disagree, so this hole cannot reopen silently.
 
-STILL OPEN, same class, command direction: `grant_workspace_capability` is in
-`PRODUCER_COMMAND_TYPES` and absent from `manifest.json`'s `commands`. The blast
-radius is different — commands travel host to Core, so an undeclared command
-does not hard error a host — and the generator parity check deliberately covers
-events only. It is not closed.
+CLOSED, same class, command direction (#314): `grant_workspace_capability`,
+`grant_path` and `revoke_path` were in `PRODUCER_COMMAND_TYPES` and absent from
+`manifest.json`'s `commands`. The blast radius was different — commands travel
+host to Core, so an undeclared command does not hard error a host — but a host
+that derives its emitter or its conformance check from the published union
+cannot send a command that union does not contain, and that failure reads as
+"folder grants do not persist" rather than as a contract gap. All three now
+carry a `WireSpec`, a fixture generated from the real deserializer, and a branch
+in `host-command.schema.json`, and `generated_artifacts()` refuses to build a
+corpus whose `COMMAND_SPECS` and `PRODUCER_COMMAND_TYPES` disagree — the parity
+gate the event direction already had, which previously covered events only.
 
 Malformed command fixtures and the current unknown-type behavior are proved by
 `desktop_contract_adversarial.rs`. Browser, CUA, and plugin event fixtures are
@@ -285,10 +340,17 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
             json!({"minimum": 0, "maximum": 65535, "type": "integer"})
         }
         ("resume_turn", "action") => {
-            json!({"enum": ["continue", "reconcile", "cancel"], "type": "string"})
+            json!({"enum": ["continue", "reconcile", "cancel", "abandon"], "type": "string"})
         }
         ("resolve_interrupted_approval", "decision") => {
             json!({"enum": ["approve", "deny"], "type": "string"})
+        }
+        // CLOSED on the wire (`PathGrantAccess`), so closed in the published
+        // schema too. Inference would read `"read"` from the fixture and
+        // publish `{"type": "string"}` - a contract that calls a frame valid
+        // which the deserializer rejects outright.
+        ("grant_path", "access") => {
+            json!({"enum": ["read", "write"], "type": "string"})
         }
         ("session_recovery_snapshot" | "turn_recovery_lifecycle", "lifecycle") => {
             recovery_lifecycle_schema()
@@ -1104,31 +1166,39 @@ fn schema_branch(spec: &WireSpec, fixture: &Value) -> Value {
     branch
 }
 
+/// Build the published schema and, beside it, the per-wire-type shape branches
+/// keyed by fixture path.
+///
+/// The branches are the version-independent half of the schema: the document
+/// title carries `vMAJOR.MINOR`, the branches carry only structure. That split
+/// is what lets `wire_shape_refusal` ask "did the shape move?" without the
+/// question being confounded by a version bump that moved the title.
 fn schema_for(
     specs: &[WireSpec],
     fixtures: &BTreeMap<String, Value>,
     legacy_child: Option<&Value>,
     title: &str,
-) -> Value {
+) -> (Value, BTreeMap<String, Value>) {
     let mut one_of = Vec::with_capacity(specs.len() + 1);
+    let mut shapes = BTreeMap::new();
     for spec in specs {
         let fixture = fixtures
             .get(spec.path)
             .unwrap_or_else(|| panic!("missing canonical fixture {}", spec.path));
+        let branch = schema_branch(spec, fixture);
+        shapes.insert(spec.path.to_string(), branch.clone());
+        one_of.push(branch);
         if spec.wire_type == "sub_agent_event" {
-            one_of.push(schema_branch(spec, fixture));
             let legacy = legacy_child.expect("legacy sub-agent fixture must be present");
-            let mut legacy_branch = schema_branch(
-                &WireSpec {
-                    wire_type: "sub_agent_event",
-                    path: "compat/events/sub_agent_event.legacy.json",
-                    required: &["type", "parent_call_id", "agent_name", "inner"],
-                    criticality: spec.criticality,
-                    correlation: spec.correlation,
-                    capability: spec.capability,
-                },
-                legacy,
-            );
+            let legacy_spec = WireSpec {
+                wire_type: "sub_agent_event",
+                path: "compat/events/sub_agent_event.legacy.json",
+                required: &["type", "parent_call_id", "agent_name", "inner"],
+                criticality: spec.criticality,
+                correlation: spec.correlation,
+                capability: spec.capability,
+            };
+            let mut legacy_branch = schema_branch(&legacy_spec, legacy);
             legacy_branch["not"] = json!({
                 "anyOf": [
                     {"required": ["run_id"]},
@@ -1140,16 +1210,18 @@ fn schema_for(
             });
             legacy_branch["title"] =
                 json!("Legacy non-authoritative sub-agent compatibility event");
+            shapes.insert(legacy_spec.path.to_string(), legacy_branch.clone());
             one_of.push(legacy_branch);
-        } else {
-            one_of.push(schema_branch(spec, fixture));
         }
     }
-    json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "oneOf": one_of,
-        "title": title
-    })
+    (
+        json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "oneOf": one_of,
+            "title": title
+        }),
+        shapes,
+    )
 }
 
 fn producer_complete_schema(command_schema: &Value, event_schema: &Value) -> Value {
@@ -1275,6 +1347,173 @@ fn schemas_digest(artifacts: &BTreeMap<String, Vec<u8>>) -> String {
     }))
 }
 
+/// One digest per published wire type, over the canonical bytes of its schema
+/// branch.
+///
+/// Value-independent (a branch records types, enums and nesting, never fixture
+/// values) and version-independent (a branch carries no title), so this moves
+/// when, and only when, the shape a host validates against moves.
+fn wire_shape_digests(
+    shapes: impl IntoIterator<Item = (String, Value)>,
+) -> ContractResult<BTreeMap<String, String>> {
+    let mut digests = BTreeMap::new();
+    for (path, branch) in shapes {
+        let bytes = canonical_json(&branch)?;
+        let digest = digest_named_bytes([(path.as_str(), bytes.as_slice())]);
+        digests.insert(path, digest);
+    }
+    Ok(digests)
+}
+
+/// The wire shape surface the checked-in corpus published, and the contract
+/// version it published it under.
+struct PublishedWireShapes {
+    major: u64,
+    minor: u64,
+    shapes: BTreeMap<String, String>,
+}
+
+/// Read the checked-in manifest's published wire shapes.
+///
+/// `None` means there is no baseline to compare against: the corpus is absent,
+/// truncated, or predates `wire_shapes`. That is not a state a regeneration may
+/// silently pass through - see `WireShapeBaseline`.
+fn published_wire_shapes() -> ContractResult<Option<PublishedWireShapes>> {
+    let Ok(bytes) = fs::read(contract_root().join("manifest.json")) else {
+        return Ok(None);
+    };
+    let manifest: Value = serde_json::from_slice(&bytes)?;
+    let (Some(published), Some(major), Some(minor)) = (
+        manifest.get("wire_shapes").and_then(Value::as_object),
+        manifest.pointer("/contract/major").and_then(Value::as_u64),
+        manifest.pointer("/contract/minor").and_then(Value::as_u64),
+    ) else {
+        return Ok(None);
+    };
+    let shapes = published
+        .iter()
+        .filter_map(|(path, digest)| Some((path.clone(), digest.as_str()?.to_string())))
+        .collect();
+    Ok(Some(PublishedWireShapes {
+        major,
+        minor,
+        shapes,
+    }))
+}
+
+/// Whether a corpus that publishes no wire shapes may be regenerated at all.
+///
+/// A missing baseline is the one state in which the gate cannot do its job, so
+/// it is an error rather than a skip: the commit that introduces `wire_shapes`
+/// is exactly the commit a wire change is most likely to ride along in
+/// unnoticed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WireShapeBaseline {
+    /// The published corpus must carry a baseline. Everything except an
+    /// operator typing the bootstrap flag uses this, `check_contract`
+    /// included - CI has no legitimate bootstrap.
+    Required,
+    /// Permit a MISSING baseline, and nothing else. Where a baseline exists it
+    /// is compared exactly as under `Required`, so the escape can create a
+    /// contract root but can never bless a change to a shape already published.
+    Bootstrap,
+}
+
+/// The whole gate decision, with the disk read hoisted out so every branch is
+/// reachable from a test.
+fn wire_shape_verdict(
+    published: Option<&PublishedWireShapes>,
+    current: &BTreeMap<String, String>,
+    major: u64,
+    minor: u64,
+    baseline: WireShapeBaseline,
+) -> Option<String> {
+    match (published, baseline) {
+        (Some(published), _) => wire_shape_refusal(published, current, major, minor),
+        (None, WireShapeBaseline::Bootstrap) => None,
+        (None, WireShapeBaseline::Required) => Some(
+            "The checked-in Desktop contract corpus publishes no wire shapes, so this \
+             regeneration has nothing to compare against and could bless a changed wire shape \
+             under an unchanged contract version. That is legal only while a contract root is \
+             being created: if that is what this is, run `wcore-contract generate \
+             --bootstrap-wire-shapes` once and commit the manifest it writes, after which every \
+             regeneration is gated. Otherwise contracts/desktop/v1 is truncated or hand-edited - \
+             restore manifest.json from git rather than bypassing this."
+                .to_string(),
+        ),
+    }
+}
+
+/// Refuse a regeneration that would move a published wire shape while the
+/// contract version stands still.
+///
+/// `contract.major`/`contract.minor` is the only compatibility signal a pinned
+/// Desktop build reads, and regeneration does not move it. Without this gate a
+/// renamed correlation key - `tool_request.call_id`, say - regenerates straight
+/// back to green under an unchanged `1.16`, and the host that pinned `1.16`
+/// then accepts frames it cannot correlate: every tool call renders as an
+/// orphan, with no version error anywhere to explain it.
+///
+/// The baseline is the checked-in corpus, not a hand-maintained constant, so
+/// the only way past the gate is the version decision itself.
+fn wire_shape_refusal(
+    published: &PublishedWireShapes,
+    current: &BTreeMap<String, String>,
+    major: u64,
+    minor: u64,
+) -> Option<String> {
+    let altered = published
+        .shapes
+        .iter()
+        .filter(|(path, digest)| current.get(path.as_str()).is_some_and(|now| now != *digest))
+        .map(|(path, _)| path.as_str())
+        .collect::<Vec<_>>();
+    let removed = published
+        .shapes
+        .keys()
+        .filter(|path| !current.contains_key(*path))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let added = current
+        .keys()
+        .filter(|path| !published.shapes.contains_key(*path))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if altered.is_empty() && removed.is_empty() && added.is_empty() {
+        return None;
+    }
+    if (major, minor) > (published.major, published.minor) {
+        return None;
+    }
+    let (was_major, was_minor) = (published.major, published.minor);
+    // The justification has to match the finding. On an added-only refusal
+    // nothing a pinned host already correlates or renders has moved, and
+    // telling the author otherwise points them at CONTRACT_MAJOR for a change
+    // that is additive - #314 walked into exactly that sentence.
+    let consequence = if altered.is_empty() && removed.is_empty() {
+        format!(
+            "a host pinned to {was_major}.{was_minor} has no way to learn the added wire \
+             types exist: the version has to move for the addition to be discoverable"
+        )
+    } else {
+        format!(
+            "a host pinned to {was_major}.{was_minor} would accept an engine whose frames it \
+             can no longer correlate or render"
+        )
+    };
+    Some(format!(
+        "Desktop contract wire shape changed while the contract version stayed at \
+         {was_major}.{was_minor}: altered={altered:?}, removed={removed:?}, added={added:?}. \
+         Regenerating cannot bless this. `contract.major`/`contract.minor` in manifest.json is \
+         the only compatibility signal a pinned Desktop build reads and regeneration does not \
+         move it, so {consequence}. Decide the version in \
+         crates/wcore-protocol/src/contract/generate.rs first, then regenerate: bump \
+         CONTRACT_MINOR for a new wire type or a new optional field on an existing one, bump \
+         CONTRACT_MAJOR for a field renamed, removed, retyped or newly required, and move \
+         GENERATOR_VERSION with it."
+    ))
+}
+
 fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
     BTreeMap::from([
         (
@@ -1293,6 +1532,30 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         ),
         (
             "durable_child_model_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        // #1129. Core splits inline reasoning out of the visible stream on the
+        // JSON-stream path: `text_delta` carries answer text only, and the
+        // `<think>`/`<thinking>`/`<reasoning>` bodies that open-weights models
+        // inline in that same stream ride `thinking` instead. `Available`, not
+        // `ShapeOnly`: both event types already existed and already round-trip
+        // - what this declares is that the producer now populates them this
+        // way, which is the part a host renders off.
+        (
+            "inline_reasoning_split_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        // #326. `resume_turn` accepts a fourth action, `abandon`, which ends a
+        // stuck turn permanently and tolerates the three disagreements
+        // `cancel` refuses: a stale cursor, a session with nothing interrupted,
+        // and a turn id the engine does not hold. `Available`, not `ShapeOnly`:
+        // the enum value is published AND the dispatcher answers it, in the
+        // same change. Declared because a pinned host validates its own
+        // outbound frames against this corpus, so before the value is
+        // published the host refuses it internally and the verb is
+        // unreachable — which is the state FerroxLabs/wayland#1116 reports.
+        (
+            "turn_abandon_v1".into(),
             ContractCapabilityStatus::Available,
         ),
         // F22-C1. Promoted ShapeOnly -> Available in the SAME change that
@@ -1328,6 +1591,33 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         // nothing about who raises the prompt; that is
         // `path_boundary_prompt_v1` below.
         ("path_grants_v1".into(), ContractCapabilityStatus::Available),
+        // The feature-detect for the WRITE half of a path grant (#1104):
+        // `always_path.write: true` on a `tool_approve`, and
+        // `grant_path.access: "write"`.
+        //
+        // Separate from `path_grants_v1` for the same reason
+        // `path_boundary_prompt_v1` is: they are separate promises and a host
+        // must be able to hold one without the other. Every shipped Core
+        // accepts both frames — the field and the enum variant were on the wire
+        // from the start — and every Core before this one REFUSED the write and
+        // granted nothing. So a host cannot feature-detect write support by
+        // sending it: the frame is valid either way and the only difference is
+        // an `info` line. A host that renders a "grant write access" button
+        // without checking this ships a button that silently does nothing on
+        // three quarters of the installed base.
+        //
+        // Available, not ShapeOnly: an approved write grant is honoured end to
+        // end by the same Core that declares this — `writable_roots()` for the
+        // OS sandbox manifest and `SandboxedFs`'s mutating operations for the
+        // in-process file tools. It does NOT promise that any given folder will
+        // be accepted: the write grant applies strictly more refusals than the
+        // read grant (an unconfined sandbox backend, an auto-run location, a
+        // folder holding an executable or a secret), and a host must still
+        // render the refusal it gets back.
+        (
+            "path_write_grants_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
         // The feature-detect for `tool_request.tool.escalation` (#1099): Core
         // itself raises the approval when a read names a path outside every
         // reachable root, instead of letting the call fail with an
@@ -1554,8 +1844,43 @@ fn assert_producer_event_parity() -> ContractResult<()> {
     .into())
 }
 
+/// The command-direction mirror of [`assert_producer_event_parity`].
+///
+/// An undeclared command does not hard error a host the way an undeclared
+/// event does - commands travel host to Core - so this gate was deliberately
+/// left off the command direction. #314 is what that cost: three commands the
+/// engine has dispatched since 0.13.6 were absent from the published union, so
+/// a host that derives its emitter, its codegen or its conformance check from
+/// `manifest.json` could not send them, and the resulting silence reads as the
+/// FEATURE being broken rather than the contract being incomplete.
+fn assert_producer_command_parity() -> ContractResult<()> {
+    let declared = COMMAND_SPECS
+        .iter()
+        .map(|spec| spec.wire_type)
+        .collect::<BTreeSet<_>>();
+    let produced = PRODUCER_COMMAND_TYPES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if declared == produced {
+        return Ok(());
+    }
+    let undeclared = produced.difference(&declared).copied().collect::<Vec<_>>();
+    let phantom = declared.difference(&produced).copied().collect::<Vec<_>>();
+    Err(format!(
+        "Desktop contract corpus does not match the producer command inventory. \
+         Accepted by Core but absent from COMMAND_SPECS (a host that derives its \
+         emitter from the published union cannot send these): {undeclared:?}. \
+         Declared in COMMAND_SPECS but never accepted: {phantom:?}. Add a WireSpec \
+         plus a real fixture in contract/spec.rs, or remove the variant from \
+         PRODUCER_COMMAND_TYPES."
+    )
+    .into())
+}
+
 pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
     assert_producer_event_parity()?;
+    assert_producer_command_parity()?;
     let mut artifacts = BTreeMap::new();
 
     for (path, value) in command_fixture_values() {
@@ -1921,18 +2246,19 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         format!("Desktop-consumed HostCommand v{CONTRACT_MAJOR}.{CONTRACT_MINOR}");
     let event_schema_title =
         format!("Desktop-consumed CoreEvent v{CONTRACT_MAJOR}.{CONTRACT_MINOR}");
-    let command_schema = schema_for(
+    let (command_schema, command_shapes) = schema_for(
         COMMAND_SPECS,
         &command_schema_fixtures,
         None,
         &command_schema_title,
     );
-    let event_schema = schema_for(
+    let (event_schema, event_shapes) = schema_for(
         EVENT_SPECS,
         &event_schema_fixtures,
         legacy_child,
         &event_schema_title,
     );
+    let wire_shapes = wire_shape_digests(command_shapes.into_iter().chain(event_shapes))?;
     artifacts.insert(
         "schema/host-command.schema.json".into(),
         canonical_json(&command_schema)?,
@@ -2017,16 +2343,54 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         },
         "schema_digest": schema_digest,
         "source_inputs": SOURCE_INPUTS,
-        "source_inputs_digest": source_inputs_digest
+        "source_inputs_digest": source_inputs_digest,
+        "wire_shapes": wire_shapes
     });
     artifacts.insert("manifest.json".into(), canonical_json(&manifest)?);
 
     Ok(artifacts)
 }
 
-pub fn write_contract() -> ContractResult<()> {
+/// Reject a regeneration that would move a published wire shape without a
+/// contract version decision.
+///
+/// Deliberately a separate step over the finished artifacts rather than a
+/// check inside `generated_artifacts`: the two callers that can actually
+/// publish a blessed break - `write_contract` (the `generate` remedy) and
+/// `check_contract` (what CI runs) - are gated, while the tests and tooling
+/// that only inspect the regenerated bytes keep reporting their own findings
+/// instead of all reporting this one.
+pub fn enforce_wire_shape_version(
+    artifacts: &BTreeMap<String, Vec<u8>>,
+    baseline: WireShapeBaseline,
+) -> ContractResult<()> {
+    let published = published_wire_shapes()?;
+    let manifest_bytes = artifacts
+        .get("manifest.json")
+        .ok_or_else(|| std::io::Error::other("regenerated corpus is missing manifest.json"))?;
+    let manifest: Value = serde_json::from_slice(manifest_bytes)?;
+    let current = manifest["wire_shapes"]
+        .as_object()
+        .ok_or_else(|| std::io::Error::other("regenerated manifest is missing wire_shapes"))?
+        .iter()
+        .filter_map(|(path, digest)| Some((path.clone(), digest.as_str()?.to_string())))
+        .collect::<BTreeMap<_, _>>();
+    match wire_shape_verdict(
+        published.as_ref(),
+        &current,
+        CONTRACT_MAJOR,
+        CONTRACT_MINOR,
+        baseline,
+    ) {
+        Some(refusal) => Err(std::io::Error::other(refusal).into()),
+        None => Ok(()),
+    }
+}
+
+pub fn write_contract(baseline: WireShapeBaseline) -> ContractResult<()> {
     let root = contract_root();
     let artifacts = generated_artifacts()?;
+    enforce_wire_shape_version(&artifacts, baseline)?;
     let expected = artifacts.keys().cloned().collect::<BTreeSet<_>>();
 
     if root.exists() {
@@ -2088,6 +2452,253 @@ pub(crate) fn all_relative_files(root: &Path) -> ContractResult<BTreeSet<String>
 mod tests {
     use super::*;
     use crate::contract::{HostContractObserver, HostObservation, HostObservationError};
+
+    fn shape_map(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(path, digest)| ((*path).to_string(), (*digest).to_string()))
+            .collect()
+    }
+
+    fn published_at(major: u64, minor: u64, entries: &[(&str, &str)]) -> PublishedWireShapes {
+        PublishedWireShapes {
+            major,
+            minor,
+            shapes: shape_map(entries),
+        }
+    }
+
+    const BASELINE: &[(&str, &str)] = &[
+        ("events/ready.json", "sha256:bbb"),
+        ("events/tool_request.json", "sha256:aaa"),
+    ];
+
+    #[test]
+    fn an_unmoved_wire_shape_regenerates_under_the_standing_version() {
+        let published = published_at(1, 16, BASELINE);
+        assert_eq!(
+            wire_shape_refusal(&published, &shape_map(BASELINE), 1, 16),
+            None
+        );
+    }
+
+    #[test]
+    fn a_moved_wire_shape_is_refused_while_the_version_stands_still() {
+        let published = published_at(1, 16, BASELINE);
+        let current = shape_map(&[
+            ("events/ready.json", "sha256:bbb"),
+            ("events/tool_request.json", "sha256:ccc"),
+        ]);
+        let refusal = wire_shape_refusal(&published, &current, 1, 16)
+            .expect("a standing version must refuse a moved wire shape");
+        assert!(
+            refusal.contains("events/tool_request.json"),
+            "the refusal must name the type that moved: {refusal}"
+        );
+        assert!(
+            !refusal.contains("events/ready.json"),
+            "the refusal must not name a type that held still: {refusal}"
+        );
+        assert!(
+            refusal.contains("CONTRACT_MAJOR") && refusal.contains("CONTRACT_MINOR"),
+            "the refusal must name the version decision it wants: {refusal}"
+        );
+    }
+
+    #[test]
+    fn a_moved_wire_shape_regenerates_once_the_version_moves_forward() {
+        let published = published_at(1, 16, BASELINE);
+        let current = shape_map(&[
+            ("events/ready.json", "sha256:bbb"),
+            ("events/tool_request.json", "sha256:ccc"),
+        ]);
+        assert_eq!(wire_shape_refusal(&published, &current, 1, 17), None);
+        assert_eq!(wire_shape_refusal(&published, &current, 2, 0), None);
+        // Backwards is not a decision, it is the same silent bless with a
+        // smaller number, so it stays refused.
+        assert!(wire_shape_refusal(&published, &current, 1, 15).is_some());
+    }
+
+    #[test]
+    fn adding_or_dropping_a_wire_type_is_also_a_version_decision() {
+        let published = published_at(1, 16, BASELINE);
+        let added = shape_map(&[
+            ("events/ready.json", "sha256:bbb"),
+            ("events/render_artifact.json", "sha256:ddd"),
+            ("events/tool_request.json", "sha256:aaa"),
+        ]);
+        let refusal = wire_shape_refusal(&published, &added, 1, 16)
+            .expect("a new wire type must not regenerate under a standing version");
+        assert!(
+            refusal.contains("events/render_artifact.json"),
+            "the refusal must name the added type: {refusal}"
+        );
+        assert_eq!(wire_shape_refusal(&published, &added, 1, 17), None);
+
+        let dropped = shape_map(&[("events/ready.json", "sha256:bbb")]);
+        let refusal = wire_shape_refusal(&published, &dropped, 1, 16)
+            .expect("a dropped wire type must not regenerate under a standing version");
+        assert!(
+            refusal.contains("events/tool_request.json"),
+            "the refusal must name the dropped type: {refusal}"
+        );
+    }
+
+    /// The two justification clauses, named once so the pair of tests below
+    /// cannot quietly drift back into agreeing with each other.
+    const CORRELATION_CLAUSE: &str = "can no longer correlate or render";
+    const DISCOVERY_CLAUSE: &str = "no way to learn the added wire types exist";
+
+    #[test]
+    fn an_added_only_refusal_does_not_claim_broken_correlation() {
+        let published = published_at(1, 16, BASELINE);
+        let mut added = shape_map(BASELINE);
+        added.insert("commands/set_effort.json".into(), "sha256:ddd".into());
+        let refusal = wire_shape_refusal(&published, &added, 1, 16)
+            .expect("a new wire type must not regenerate under a standing version");
+        assert!(
+            refusal.contains(DISCOVERY_CLAUSE),
+            "an added-only refusal must justify itself by discoverability: {refusal}"
+        );
+        assert!(
+            !refusal.contains(CORRELATION_CLAUSE),
+            "nothing a pinned host correlates or renders moves when a type is added: {refusal}"
+        );
+        assert!(
+            refusal.contains("CONTRACT_MINOR") && refusal.contains("CONTRACT_MAJOR"),
+            "the rule sentence stays on both branches: {refusal}"
+        );
+    }
+
+    #[test]
+    fn an_altered_or_removed_refusal_keeps_the_correlation_justification() {
+        let published = published_at(1, 16, BASELINE);
+        let moved = shape_map(&[
+            ("events/ready.json", "sha256:bbb"),
+            ("events/tool_request.json", "sha256:ccc"),
+        ]);
+        let dropped = shape_map(&[("events/ready.json", "sha256:bbb")]);
+        // Mixed: an addition alongside a moved shape still breaks correlation,
+        // so the branch turns on altered/removed and never on added.
+        let mixed = shape_map(&[
+            ("commands/set_effort.json", "sha256:ddd"),
+            ("events/ready.json", "sha256:bbb"),
+            ("events/tool_request.json", "sha256:ccc"),
+        ]);
+        for (label, current) in [("altered", moved), ("removed", dropped), ("mixed", mixed)] {
+            let refusal = wire_shape_refusal(&published, &current, 1, 16)
+                .unwrap_or_else(|| panic!("{label} must refuse under a standing version"));
+            assert!(
+                refusal.contains(CORRELATION_CLAUSE),
+                "{label} must keep the correlation justification: {refusal}"
+            );
+            assert!(
+                !refusal.contains(DISCOVERY_CLAUSE),
+                "{label} is not a discoverability problem: {refusal}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_corpus_publishing_no_wire_shapes_is_refused_unless_bootstrapping() {
+        let current = shape_map(BASELINE);
+        let refusal = wire_shape_verdict(None, &current, 1, 16, WireShapeBaseline::Required)
+            .expect("a missing baseline must not be a silent skip");
+        assert!(
+            refusal.contains("--bootstrap-wire-shapes"),
+            "the refusal must name the one explicit escape: {refusal}"
+        );
+        assert_eq!(
+            wire_shape_verdict(None, &current, 1, 16, WireShapeBaseline::Bootstrap),
+            None
+        );
+    }
+
+    #[test]
+    fn bootstrapping_still_compares_a_baseline_that_does_exist() {
+        let published = published_at(1, 16, BASELINE);
+        let moved = shape_map(&[
+            ("events/ready.json", "sha256:bbb"),
+            ("events/tool_request.json", "sha256:ccc"),
+        ]);
+        assert!(
+            wire_shape_verdict(
+                Some(&published),
+                &moved,
+                1,
+                16,
+                WireShapeBaseline::Bootstrap
+            )
+            .is_some(),
+            "the bootstrap escape must not double as a blanket bypass"
+        );
+        assert_eq!(
+            wire_shape_verdict(
+                Some(&published),
+                &shape_map(BASELINE),
+                1,
+                16,
+                WireShapeBaseline::Bootstrap
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_gate_refuses_a_moved_shape_against_the_real_published_baseline() {
+        let mut artifacts = generated_artifacts().unwrap();
+        enforce_wire_shape_version(&artifacts, WireShapeBaseline::Required)
+            .expect("the checked-in corpus must agree with its own generator");
+
+        let mut manifest: Value = serde_json::from_slice(&artifacts["manifest.json"]).unwrap();
+        manifest["wire_shapes"]["events/tool_request.json"] =
+            json!(format!("sha256:{}", "e".repeat(64)));
+        artifacts.insert("manifest.json".into(), canonical_json(&manifest).unwrap());
+
+        let refusal = enforce_wire_shape_version(&artifacts, WireShapeBaseline::Required)
+            .expect_err("a moved correlation anchor must not pass under a standing version")
+            .to_string();
+        // The bootstrap escape permits a MISSING baseline and nothing else, so
+        // it must not get this change past the gate either.
+        assert!(
+            enforce_wire_shape_version(&artifacts, WireShapeBaseline::Bootstrap).is_err(),
+            "--bootstrap-wire-shapes must not bless a change to an already published shape"
+        );
+        assert!(
+            refusal.contains("events/tool_request.json"),
+            "the refusal must name the moved type: {refusal}"
+        );
+        assert!(
+            refusal.contains("CONTRACT_MAJOR"),
+            "the refusal must name the version decision: {refusal}"
+        );
+    }
+
+    #[test]
+    fn every_generated_wire_type_publishes_exactly_one_shape_digest() {
+        let artifacts = generated_artifacts().unwrap();
+        let manifest: Value =
+            serde_json::from_slice(artifacts.get("manifest.json").unwrap()).unwrap();
+        let shapes = manifest["wire_shapes"].as_object().unwrap();
+        let mut expected = COMMAND_SPECS
+            .iter()
+            .chain(EVENT_SPECS)
+            .map(|spec| spec.path)
+            .collect::<BTreeSet<_>>();
+        expected.insert("compat/events/sub_agent_event.legacy.json");
+        assert_eq!(
+            shapes.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            expected
+        );
+        for (path, digest) in shapes {
+            assert!(
+                digest
+                    .as_str()
+                    .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71),
+                "{path} must publish a prefixed SHA-256 wire shape digest"
+            );
+        }
+    }
 
     #[test]
     fn generated_negotiation_fixtures_replay_without_digest_recursion() {

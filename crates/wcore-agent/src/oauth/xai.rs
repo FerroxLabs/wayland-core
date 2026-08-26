@@ -60,6 +60,41 @@ const XAI_SCOPES: &str = "openid profile email offline_access grok-cli:access ap
 /// never starts on a token that lapses mid-flight.
 const REFRESH_LEAD_SECS: u64 = 120;
 
+/// Floor on the remaining access-token life the rate-limited (C3) concession
+/// will hand back to the provider. Twin of
+/// `super::chatgpt::RATE_LIMITED_REUSE_FLOOR_SECS` -- RE-DERIVED here rather
+/// than copied, because the xAI dispatch path is not the ChatGPT one.
+///
+/// The bearer is resolved once per request, inside `OpenAIProvider::stream`
+/// (which `XaiProvider` wraps), and the floor is the ceiling on the gap
+/// between that resolve and the backend RECEIVING the request. Same ceiling,
+/// and so the same 60 s:
+///
+/// * both paths share `builder_send_with_retry` and the 30 s `connect_timeout`
+///   of `wcore_providers::http_client`;
+/// * under the engine's `scope_max_retries(0)` that is ONE physical send --
+///   about 30 s -- and the same clamp suppresses the two EXTRA dispatches the
+///   shared OpenAI path can otherwise make on an ALREADY-RESOLVED bearer: the
+///   #389 tools-unsupported retry and the region-locked auth failover, both
+///   gated on `retries_disabled()`;
+/// * unscoped, the ring's 30 s broken-connection window plus a final connect
+///   is about 60 s.
+///
+/// The region-failover leg cannot extend the ceiling at defaults in any case:
+/// `ProviderCompat::xai_defaults` leaves `auth_fallback_base_url` unset, so
+/// that arm's guard is never satisfied for xAI.
+///
+/// The roughly six-hour xAI token lifetime does NOT move the number: the floor
+/// is a property of the dispatch ceiling, not of the token. It only makes the
+/// concession RARER here -- a session crosses the 120 s lead window once every
+/// six hours -- so the floor bites less often than on ChatGPT, not harder.
+/// The cost argument transfers intact: `get()` runs per request, so a token
+/// inside the lead window is re-attempted within seconds of entering it, and
+/// the sub-floor band is reached only after a full minute of sustained 429 --
+/// by which time the session is dying regardless, and a named error beats a
+/// silent gamble on an upstream rejection the engine cannot attribute.
+const RATE_LIMITED_REUSE_FLOOR_SECS: u64 = 60;
+
 /// Per network call ceiling for the refresh round-trip.
 /// The refresh POST's wall-clock cap. Re-exported from `refresh_lock` rather
 /// than duplicated: the cross-process lock's wait ceiling and staleness are
@@ -195,12 +230,14 @@ impl XaiTokenManager {
         exp.saturating_sub(REFRESH_LEAD_SECS) > Self::now_secs()
     }
 
-    /// Past actual expiry (no lead window). Used by the 429 path.
-    fn token_is_hard_expired(t: &OAuthTokens) -> bool {
-        let Some(exp) = t.expires_at_unix_secs else {
-            return true;
-        };
-        exp <= Self::now_secs()
+    /// Remaining access-token life in seconds, or `None` when the stored bundle
+    /// carries no expiry at all. The 429 path must decide not merely "is it
+    /// dead" but "has it enough life left to be worth handing out" -- see
+    /// [`RATE_LIMITED_REUSE_FLOOR_SECS`]. An unknown expiry cannot prove
+    /// still-valid, so it reads as no usable life.
+    fn token_remaining_secs(t: &OAuthTokens) -> Option<u64> {
+        let exp = t.expires_at_unix_secs?;
+        Some(exp.saturating_sub(Self::now_secs()))
     }
 
     /// Pick the token that expires later (None expiry sorts earliest).
@@ -344,15 +381,33 @@ impl XaiTokenManager {
         let refreshed = match refreshed {
             Ok(t) => t,
             Err(RefreshError::Transport(msg)) if msg == RATE_LIMIT_SENTINEL => {
-                if Self::token_is_hard_expired(&current) {
-                    return Err(
+                // C3: rate limited. Keep the current token -- but only while it
+                // has enough life left to survive a dispatch, not merely while
+                // it is technically unexpired. The bare "not hard-expired" test
+                // this replaces would hand out a token with one second left;
+                // see [`RATE_LIMITED_REUSE_FLOOR_SECS`] for why 60 s and what
+                // the floor costs.
+                return match Self::token_remaining_secs(&current) {
+                    Some(remaining) if remaining >= RATE_LIMITED_REUSE_FLOOR_SECS => {
+                        *self.cached.lock().await = Some(current.clone());
+                        Ok(current)
+                    }
+                    // Dead, or expiry unknown: unchanged from before the floor.
+                    Some(0) | None => Err(
                         "Grok refresh is rate limited (429) and the access token has expired — \
                          try again shortly."
                             .to_string(),
-                    );
-                }
-                *self.cached.lock().await = Some(current.clone());
-                return Ok(current);
+                    ),
+                    // Alive but too thin to dispatch. Name the rate limit and
+                    // the margin rather than letting the turn fail upstream
+                    // with a status the engine cannot attribute.
+                    Some(remaining) => Err(format!(
+                        "Grok refresh is rate limited (429) and the access token has only \
+                         {remaining}s left — under the {RATE_LIMITED_REUSE_FLOOR_SECS}s a \
+                         request dispatch can need, so reusing it would fail upstream \
+                         instead of here. Try again shortly."
+                    )),
+                };
             }
             Err(e) => return Err(format!("refresh failed: {e}")),
         };
@@ -478,6 +533,149 @@ mod tests {
         let mgr = XaiTokenManager::new(storage);
         assert_eq!(mgr.get().await.unwrap(), "at-fresh");
         unsafe { std::env::remove_var("GROK_HOME") };
+    }
+
+    /// A flow whose refresh POST points at a local mock token server. The
+    /// in-crate tests reach the private `flow` field directly.
+    fn xai_flow_with_token_url(token_url: &str) -> OAuthFlow {
+        OAuthFlow::new(
+            xai_client_id(),
+            None,
+            XAI_AUTH_URL,
+            token_url,
+            XAI_SCOPES.split(' ').map(str::to_string).collect(),
+        )
+    }
+
+    /// A manager over a hermetic in-memory secure tier whose refresh round-trip
+    /// hits `token_url`. Tests must never reach the host keyring: it is a
+    /// machine-global singleton.
+    fn manager_with_token_url(root: std::path::PathBuf, token_url: &str) -> XaiTokenManager {
+        let storage = OAuthStorage::at_root(
+            root,
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .expect("storage");
+        let mut mgr = XaiTokenManager::new(storage);
+        mgr.flow = Arc::new(xai_flow_with_token_url(token_url));
+        mgr
+    }
+
+    /// Mount a token endpoint that always answers 429.
+    async fn rate_limited_token_server() -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("Too Many Requests"))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// MEASURES THE WORST CASE ON THE RATE-LIMITED PATH, and pins the floor
+    /// that now bounds it. Twin of the ChatGPT arm.
+    ///
+    /// Before the floor, the C3 concession's predicate here was a bare
+    /// `exp <= now` -- no lead at all -- so the worst-case remaining
+    /// access-token life at bearer hand-off was ONE SECOND, against a 120 s
+    /// lead window. [`RATE_LIMITED_REUSE_FLOOR_SECS`] bounds it at the
+    /// resolve-to-receipt ceiling. Both sides are asserted, so the arm cannot
+    /// pass on a predicate that simply answers one way.
+    #[test]
+    fn the_rate_limited_path_floors_reuse_at_the_dispatch_ceiling() {
+        assert_eq!(
+            RATE_LIMITED_REUSE_FLOOR_SECS, 60,
+            "the floor is derived from the resolve-to-receipt ceiling, shared with chatgpt"
+        );
+        let now = XaiTokenManager::now_secs();
+        assert_eq!(
+            XaiTokenManager::token_remaining_secs(&token("a", Some("r"), Some(now))),
+            Some(0),
+            "an expired token has no remaining life"
+        );
+        assert_eq!(
+            XaiTokenManager::token_remaining_secs(&token("a", Some("r"), None)),
+            None,
+            "an unknown expiry cannot prove remaining life"
+        );
+        let thin = XaiTokenManager::token_remaining_secs(&token("a", Some("r"), Some(now + 2)))
+            .expect("known expiry");
+        assert!(
+            thin < RATE_LIMITED_REUSE_FLOOR_SECS,
+            "2s of life is below the floor, was {thin}"
+        );
+        let ample = XaiTokenManager::token_remaining_secs(&token("a", Some("r"), Some(now + 119)))
+            .expect("known expiry");
+        assert!(
+            ample >= RATE_LIMITED_REUSE_FLOOR_SECS,
+            "119s of life is above the floor, was {ample}"
+        );
+    }
+
+    /// RED ARM for the floor, end to end through `get()`: a 429 on refresh with
+    /// only ~2 s of token life left must FAIL, and must name the rate limit
+    /// rather than letting the turn die upstream with a status the engine
+    /// cannot attribute. Before the floor this handed the bearer out.
+    ///
+    /// `GROK_HOME` is isolated because `load_active` takes the FRESHER of the
+    /// engine store and `~/.grok/auth.json`; a real Grok login on the host
+    /// would otherwise supply the token under test.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_rate_limited_refresh_refuses_a_token_below_the_dispatch_floor() {
+        unsafe { std::env::set_var("GROK_HOME", "/nonexistent-grok-home-for-test") };
+        let server = rate_limited_token_server().await;
+        let tmp = TempDir::new().unwrap();
+        let mgr = manager_with_token_url(
+            tmp.path().join("oauth"),
+            &format!("{}/oauth2/token", server.uri()),
+        );
+        let now = XaiTokenManager::now_secs();
+        mgr.storage
+            .store(PROVIDER, &token("at-thin", Some("rt"), Some(now + 2)))
+            .unwrap();
+
+        let err = mgr
+            .get()
+            .await
+            .expect_err("a token below the dispatch floor must not be handed out");
+        unsafe { std::env::remove_var("GROK_HOME") };
+        assert!(err.contains("rate limited"), "err={err}");
+        assert!(
+            err.contains("left"),
+            "the refusal must name the remaining margin: err={err}"
+        );
+    }
+
+    /// COSTS THE FLOOR. The concession exists so a rate-limited refresh does
+    /// not kill a live Grok session, and the floor must not swallow it: a token
+    /// still holding 119 s -- anywhere in the lead window above the floor -- is
+    /// handed out on a 429 exactly as before. With the arm above this brackets
+    /// what the floor gives up: only the sub-60 s band, which a session reaches
+    /// only after a full minute of sustained 429.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_rate_limited_refresh_still_saves_a_session_above_the_floor() {
+        unsafe { std::env::set_var("GROK_HOME", "/nonexistent-grok-home-for-test") };
+        let server = rate_limited_token_server().await;
+        let tmp = TempDir::new().unwrap();
+        let mgr = manager_with_token_url(
+            tmp.path().join("oauth"),
+            &format!("{}/oauth2/token", server.uri()),
+        );
+        let now = XaiTokenManager::now_secs();
+        mgr.storage
+            .store(PROVIDER, &token("at-ample", Some("rt"), Some(now + 119)))
+            .unwrap();
+
+        let access = mgr.get().await;
+        unsafe { std::env::remove_var("GROK_HOME") };
+        assert_eq!(
+            access.expect("above the floor, the concession holds"),
+            "at-ample"
+        );
     }
 
     #[test]

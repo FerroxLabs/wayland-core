@@ -1323,6 +1323,28 @@ fn b1_scope() -> super::policy::SandboxScope {
     super::policy::SandboxScope::new(&manifest, Some(Path::new("/w/repo")))
 }
 
+/// A file that really is on disk, in a directory outside every root the scopes
+/// in this section grant.
+///
+/// The positive controls below used to name `/w/other/secret.txt` and
+/// `/Users/me/.gitconfig` — paths nothing was ever at on any test host. That
+/// asserted nothing once wayland#1103 made the advisory require the path to
+/// exist, and it was never a faithful model of the case it claimed to cover: a
+/// denial is a file you cannot reach, not a file that is not there.
+///
+/// Spelled with `/` separators because `is_path_token` requires an interior
+/// forward slash, which is the only separator a POSIX tool emits and one of the
+/// two a Windows tool emits. The `TempDir` guard is returned with it: the whole
+/// point of the control is that the file EXISTS while it is graded, so the
+/// caller has to hold the directory open.
+fn a_real_ungranted_file(name: &str) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let file = dir.path().join(name);
+    std::fs::write(&file, b"x").expect("the control file must exist to be denied");
+    let spelled = file.display().to_string().replace('\\', "/");
+    (dir, spelled)
+}
+
 // ── wayland#1078: a masked (policy-denied) read succeeds silently ────────────
 // The bwrap backend binds /dev/null over a denied file, so `cat .env` exits 0
 // with empty output. Containment is right; the SILENCE is the defect, because
@@ -1508,17 +1530,25 @@ fn sandbox_denial_names_the_policy_denied_path_and_a_remedy() {
 
 #[test]
 fn sandbox_denial_attributes_an_ungranted_path_to_the_sandbox_not_the_machine() {
+    // `$HOME/.gitconfig` is the path B1 is really about; it has to be a real
+    // file here, because after wayland#1103 a path that is not there is not a
+    // denial — it is a typo, and gets no advisory at all.
+    let (_guard, gitconfig) = a_real_ungranted_file(".gitconfig");
     let result = super::policy::annotate_sandbox_denial(
         &b1_scope(),
         ToolResult {
-            content: "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
-                      fatal: unable to access '/Users/me/.gitconfig': Operation not permitted\n"
-                .to_string(),
+            content: format!(
+                "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+                 fatal: unable to access '{gitconfig}': Operation not permitted\n"
+            ),
             is_error: true,
         },
     );
+    // Graded against the ADVISORY half only: the command output legitimately
+    // quotes the path itself, so asserting on the whole body would pass even
+    // if nothing were appended at all.
     assert!(
-        result.content.contains("/Users/me/.gitconfig"),
+        advisory_of(&result.content).contains(".gitconfig"),
         "the ungranted path must be named; got:\n{}",
         result.content
     );
@@ -1734,13 +1764,15 @@ fn sandbox_denial_does_not_report_an_always_granted_system_path_as_denied() {
         ..Default::default()
     };
     let scope = super::policy::SandboxScope::new(&manifest, Some(Path::new("/w/repo")));
+    let (_guard, secret) = a_real_ungranted_file("secret.txt");
     let result = super::policy::annotate_sandbox_denial(
         &scope,
         ToolResult {
-            content: "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
-                      LoadLibrary failed for C:/Windows/System32/kernel32.dll\n\
-                      open /w/other/secret.txt: Operation not permitted\n"
-                .to_string(),
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
+                 LoadLibrary failed for C:/Windows/System32/kernel32.dll\n\
+                 open {secret}: Operation not permitted\n"
+            ),
             is_error: true,
         },
     );
@@ -1753,7 +1785,7 @@ fn sandbox_denial_does_not_report_an_always_granted_system_path_as_denied() {
     // Positive control: a path that really is outside every granted root is
     // still named, so this cannot be passed by silencing the advisory.
     assert!(
-        advisory.contains("/w/other/secret.txt"),
+        advisory.contains("secret.txt"),
         "a genuinely ungranted path must still be reported; got:\n{}",
         result.content
     );
@@ -1789,13 +1821,15 @@ fn sandbox_denial_does_not_fabricate_a_denial_for_a_relative_system_path() {
     // POSIX host `canonicalize` fails and the literal join is graded instead.
     // Either way the answer must be silence.
     let scope = super::policy::SandboxScope::new(&manifest, Some(Path::new(r"C:\Windows")));
+    let (_guard, secret) = a_real_ungranted_file("secret.txt");
     let result = super::policy::annotate_sandbox_denial(
         &scope,
         ToolResult {
-            content: "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
-                      LoadLibrary failed for System32/kernel32.dll\n\
-                      open /w/other/secret.txt: Operation not permitted\n"
-                .to_string(),
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
+                 LoadLibrary failed for System32/kernel32.dll\n\
+                 open {secret}: Operation not permitted\n"
+            ),
             is_error: true,
         },
     );
@@ -1838,13 +1872,15 @@ fn sandbox_denial_does_not_fabricate_a_denial_for_a_symlink_into_a_system_root()
         ..Default::default()
     };
     let scope = super::policy::SandboxScope::new(&manifest, Some(&granted));
+    let (_guard, secret) = a_real_ungranted_file("secret.txt");
     let result = super::policy::annotate_sandbox_denial(
         &scope,
         ToolResult {
-            content: "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
-                      ld: cannot open vendor/bin: Operation not permitted\n\
-                      open /w/other/secret.txt: Operation not permitted\n"
-                .to_string(),
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
+                 ld: cannot open vendor/bin: Operation not permitted\n\
+                 open {secret}: Operation not permitted\n"
+            ),
             is_error: true,
         },
     );
@@ -2754,5 +2790,196 @@ async fn invalid_utf8_in_non_ctx_streaming_output_is_flagged() {
         result.content.contains(LOSSY_MARKER),
         "the non-ctx streaming path hands the model U+FFFD unflagged; got: {}",
         result.content
+    );
+}
+
+// ── wayland#1103: a path that is merely MISSING is not a sandbox denial ──────
+//
+// The advisory opens by ruling out the two causes it is most often mistaken
+// for — "not a broken machine and not a missing tool" — and it was being
+// appended to `No such file or directory`. A typo in a path therefore produced
+// a message that explicitly denied the true cause and then offered
+// `--trust-workspace` or `--dangerously-skip-permissions-and-sandbox` as the
+// remedy: a mistyped filename steering the reader into turning the sandbox off.
+//
+// The two cases are only separable OUTSIDE the child. Under bwrap an ungranted
+// path is simply absent from the child's mount namespace, so a genuine denial
+// and a genuine typo produce the SAME `No such file or directory`; under
+// seatbelt the denial is `Operation not permitted` but the typo still is not.
+// This annotation runs in the PARENT, which is not sandboxed, so it can ask
+// the filesystem which of the two happened instead of assuming.
+#[cfg(unix)]
+#[test]
+fn a_merely_missing_path_is_not_blamed_on_the_sandbox() {
+    let ws = tempfile::tempdir().unwrap();
+    let granted = std::fs::canonicalize(ws.path()).unwrap();
+    // A REAL directory outside every granted root: the accusation graded here
+    // cannot then be excused as "nothing about this path resolved anyway".
+    let outside = tempfile::tempdir().unwrap();
+    let outside = std::fs::canonicalize(outside.path()).unwrap();
+    let missing = outside.join("todo-that-never-existed.md");
+    assert!(
+        std::fs::symlink_metadata(&missing).is_err(),
+        "test precondition: the file must not exist"
+    );
+
+    let manifest = wcore_sandbox::manifest::SandboxManifest {
+        fs_read_allow: vec![granted.clone()],
+        fs_write_allow: vec![granted.clone()],
+        ..Default::default()
+    };
+    let scope = super::policy::SandboxScope::new(&manifest, Some(&granted));
+
+    let result = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\ncat: {}: No such file or directory\n",
+                missing.display()
+            ),
+            is_error: true,
+        },
+    );
+    assert!(
+        !result.content.contains("out of reach of this command"),
+        "the shell already gave the correct answer — the sandbox must not be \
+         blamed for a file that does not exist; got:\n{}",
+        result.content
+    );
+    assert!(
+        !result
+            .content
+            .contains("--dangerously-skip-permissions-and-sandbox"),
+        "a typo in a path must never steer the reader toward disabling the \
+         sandbox; got:\n{}",
+        result.content
+    );
+
+    // POSITIVE CONTROL, same scope and same shape: a file that really IS there
+    // and really is outside every granted root must still be reported. Without
+    // this row the test above could be passed by muting the advisory.
+    let present = outside.join("secret.txt");
+    std::fs::write(&present, b"x").unwrap();
+    let real = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\ncat: {}: Operation not permitted\n",
+                present.display()
+            ),
+            is_error: true,
+        },
+    );
+    assert!(
+        real.content.contains("outside every root"),
+        "positive control: a REAL file outside every granted root is still a \
+         denial and must still be named; got:\n{}",
+        real.content
+    );
+}
+
+/// wayland#1103, second half: the BANNER may only assert a cause it actually
+/// established.
+///
+/// Suppressing the merely-absent path removed the common trigger for the false
+/// claim, but the banner itself was still unconditional — so on the rarer shape
+/// the advisory deliberately keeps (the stat failed for a reason that is NOT
+/// `NotFound`, so absence was never established) the reader still got "not a
+/// broken machine and not a missing tool" about a path nobody had checked.
+/// Same falsehood, rarer trigger.
+///
+/// The indeterminate shape is reached here with a path whose parent COMPONENT
+/// is a regular file: `symlink_metadata` fails with `NotADirectory` on unix,
+/// which is not `NotFound`, so `Presence::Unverifiable` is the honest answer.
+/// (Windows collapses this shape to `NotFound`, hence the unix gate — the
+/// polarity itself is pinned in `policy.rs`'s own test on every host.)
+#[cfg(unix)]
+#[test]
+fn an_unverifiable_path_gets_a_conditional_banner_not_an_assertion() {
+    const ASSERTION: &str = "not a broken machine and not a missing tool";
+
+    let ws = tempfile::tempdir().unwrap();
+    let granted = std::fs::canonicalize(ws.path()).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside = std::fs::canonicalize(outside.path()).unwrap();
+
+    let regular_file = outside.join("notes.md");
+    std::fs::write(&regular_file, b"x").unwrap();
+    let through_a_file = regular_file.join("child.txt");
+    let kind = std::fs::symlink_metadata(&through_a_file)
+        .expect_err("a regular file cannot be a directory component")
+        .kind();
+    assert_ne!(
+        kind,
+        std::io::ErrorKind::NotFound,
+        "anti-vacuity: this test only grades the indeterminate arm if the \
+         stat fails as something OTHER than NotFound; it stats as {kind:?}"
+    );
+
+    let manifest = wcore_sandbox::manifest::SandboxManifest {
+        fs_read_allow: vec![granted.clone()],
+        fs_write_allow: vec![granted.clone()],
+        ..Default::default()
+    };
+    let scope = super::policy::SandboxScope::new(&manifest, Some(&granted));
+
+    let unverified = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\ncat: {}: Not a directory\n",
+                through_a_file.display()
+            ),
+            is_error: true,
+        },
+    );
+    // It must still SPEAK — suppressing an unestablished case would be the
+    // inversion this whole area exists to avoid.
+    assert!(
+        unverified.content.contains("out of reach of this command"),
+        "an unverifiable path must still be reported, never silenced; got:\n{}",
+        unverified.content
+    );
+    assert!(
+        !unverified.content.contains(ASSERTION),
+        "the banner must not assert a cause for a path whose existence was \
+         never established; got:\n{}",
+        unverified.content
+    );
+    assert!(
+        unverified.content.contains("POSSIBLE — not an established"),
+        "the conditional banner must say so in its own words; got:\n{}",
+        unverified.content
+    );
+    let advisory = advisory_of(&unverified.content);
+    assert!(
+        advisory.contains("UNKNOWN"),
+        "the path itself must carry the caveat, so a mixed list stays \
+         readable; got advisory:\n{advisory}"
+    );
+
+    // POSITIVE CONTROL, same scope: a path whose existence IS established gets
+    // the assertive banner and no caveat. Without this row the test could be
+    // passed by making every advisory conditional, which would throw away the
+    // claim in the case where it is true and useful.
+    let established = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\ncat: {}: Operation not permitted\n",
+                regular_file.display()
+            ),
+            is_error: true,
+        },
+    );
+    assert!(
+        established.content.contains(ASSERTION),
+        "a confirmed denial must keep asserting its cause; got:\n{}",
+        established.content
+    );
+    assert!(
+        !established.content.contains("UNKNOWN"),
+        "and must not be diluted with a caveat that does not apply; got:\n{}",
+        established.content
     );
 }

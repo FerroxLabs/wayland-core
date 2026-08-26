@@ -5,6 +5,17 @@
 //! authority that decides which caller may dial.  It intentionally does not
 //! implement reconfiguration: a ready server keeps its current connection
 //! until an explicit remove completes and releases the name for a new generation.
+//!
+//! wayland#605 gap 1 — reservations are keyed by NAME, never by registered tool
+//! provenance, so a server exposing only resources or prompts (zero tools) is
+//! detected on re-add exactly like a tool-exposing one. Boot connections are
+//! adopted by name through `McpLifecycleCatalog::seed_ready` for the same
+//! reason. `AgentEngine::mcp_server_connected` still carries a #135-era comment
+//! calling itself the idempotency probe: it is only a backstop for a live
+//! registration with no catalog generation, and every add path reserves here
+//! BEFORE it dials. The end-to-end property is locked by
+//! `wcore-cli/tests/mcp_resource_only_readd_e2e.rs`, whose stdio arm counts
+//! real child processes.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};

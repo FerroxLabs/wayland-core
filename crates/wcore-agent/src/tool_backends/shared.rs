@@ -42,6 +42,32 @@ pub fn cost_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Reporte
     None
 }
 
+/// The user-facing detail for a non-2xx from an OpenAI-wire media endpoint.
+///
+/// FluxRouter folds its paid-only gating into a 402 on **every** media surface,
+/// not just images. #938: the image path ran that body through
+/// [`wcore_providers::openai::parse_flux_402`] and told the user which plan they
+/// needed, while transcription, vision and speech pasted the provider's JSON
+/// envelope into the message — same provider, same status, two different
+/// products.
+///
+/// `capability` names the surface the user was locked out of and is what the
+/// typed message renders. An unrecognised body — any non-Flux provider, or a
+/// 402 Flux did not send — keeps the truncated raw body it always had, so no
+/// diagnostic detail is lost.
+///
+/// Callers keep their own `returned HTTP {status}` prefix: `video_analyze`
+/// classifies `InsufficientCredits` by string-matching the status out of the
+/// backend's message, so the status must survive this rewrite.
+pub fn http_error_detail(capability: &str, status: u16, body: &str) -> String {
+    if status == 402
+        && let Some(err) = wcore_providers::openai::parse_flux_402(capability, body)
+    {
+        return err.to_string();
+    }
+    body.chars().take(400).collect()
+}
+
 /// Read a provider-reported cost out of a parsed JSON response body.
 ///
 /// Used for the chat-wire shapes (vision), where FluxRouter reports the figure
@@ -187,6 +213,48 @@ pub fn urlencode(s: &str) -> String {
     out
 }
 
+/// Map raw search rows into the `{title,url,snippet}` shape, dropping any row
+/// that carries no usable information.
+///
+/// gh#452 — a row needs a non-empty title and an `http(s)` url to be worth
+/// showing. Callers MUST treat an empty return as `WebOutcome::Err`, never as
+/// an empty success: `ChainedWebBackend` takes any `Ok` as final, so an
+/// `Ok{web:[]}` silently disables the DuckDuckGo floor and the user is shown a
+/// successful search with nothing in it and no error explaining why.
+///
+/// `snippet_key` names the per-provider field holding the result text
+/// (`content` for Tavily, `description` for Brave).
+pub fn map_validated_rows(
+    raw_results: &[serde_json::Value],
+    snippet_key: &str,
+) -> Vec<serde_json::Value> {
+    let mut results = Vec::new();
+    for r in raw_results {
+        let title = r
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let url = r
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if title.is_empty() || !(url.starts_with("http://") || url.starts_with("https://")) {
+            continue;
+        }
+        let snippet = r
+            .get(snippet_key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        results.push(serde_json::json!({ "title": title, "url": url, "snippet": snippet }));
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +395,50 @@ mod tests {
             openai_wire_media_base(&cfg).as_deref(),
             Some("https://api.fluxrouter.ai/v1")
         );
+    }
+
+    /// #938, BOTH DIRECTIONS. A recognised FluxRouter 402 becomes the typed
+    /// entitlement message and names the surface the caller asked for; anything
+    /// else keeps the raw body verbatim.
+    #[test]
+    fn flux_402_becomes_the_typed_message_and_everything_else_stays_raw() {
+        let flux = r#"{"error":{"message":"paid plans only","code":"premium_locked"}}"#;
+
+        let stt = http_error_detail("speech-to-text", 402, flux);
+        assert_eq!(
+            stt,
+            "speech-to-text requires a paid Flux plan: paid plans only"
+        );
+        // The capability is the CALLER's, not a constant: the image path and
+        // the speech path must not describe each other's lock.
+        let img = http_error_detail("image generation", 402, flux);
+        assert_eq!(
+            img,
+            "image generation requires a paid Flux plan: paid plans only"
+        );
+        assert_ne!(stt, img);
+
+        // Same body, a status Flux does not gate on -> untouched.
+        assert_eq!(http_error_detail("speech-to-text", 500, flux), flux);
+        // A 402 from a provider that is not Flux -> untouched.
+        let other = "quota exhausted, top up your balance";
+        assert_eq!(http_error_detail("speech-to-text", 402, other), other);
+        // A 402 carrying no JSON at all -> untouched.
+        assert_eq!(
+            http_error_detail("vision", 402, "gateway said no"),
+            "gateway said no"
+        );
+    }
+
+    /// The 400-char truncation the raw path has always applied must survive:
+    /// this helper replaced four `chars().take(400)` call sites and a
+    /// regression here would put an unbounded provider body in front of the
+    /// user.
+    #[test]
+    fn an_unrecognised_body_is_still_truncated_at_400_chars() {
+        let long = "x".repeat(5_000);
+        assert_eq!(http_error_detail("vision", 402, &long).chars().count(), 400);
+        // LIVENESS CONTROL: a short body is not padded or mangled.
+        assert_eq!(http_error_detail("vision", 402, "xx"), "xx");
     }
 }

@@ -10,6 +10,8 @@ use wcore_types::message::{ContentBlock, Message, Role};
 
 fn req_with_messages(messages: Vec<Message>) -> LlmRequest {
     LlmRequest {
+        flux_loop_intent: None,
+        flux_turn_nonce: None,
         model: "claude-haiku".into(),
         system: "sys".into(),
         messages,

@@ -228,7 +228,17 @@ fn the_shipped_manifest_and_ready_fixture_advertise_render_artifact_v1() {
         json!(1),
         "an additive event must not move the major"
     );
-    assert_eq!(ready["contract"]["minor"], json!(16));
+    // `>=`, not `== 16`: 1.16 is the minor `render_artifact_v1` first shipped
+    // in, and the assertion that matters is that a later additive bump cannot
+    // un-ship it. Pinning the exact minor made this test fail on #314 — an
+    // unrelated additive command bump — which teaches the next author to edit a
+    // number rather than to check a promise.
+    assert!(
+        ready["contract"]["minor"]
+            .as_u64()
+            .is_some_and(|minor| minor >= 16),
+        "render_artifact_v1 shipped in 1.16 and no later minor may withdraw it"
+    );
 }
 
 /// The three outcomes a corpus-only host classifies a frame into. Mirrors

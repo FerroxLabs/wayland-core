@@ -18,19 +18,40 @@
 #
 # WHY NOT AN EVEN OLDER BASE
 # --------------------------
-# The floor is squeezed from BOTH sides and the second side is easy to miss.
-# The binary carries `NEEDED libssl.so.3` (openssl-sys + native-tls are in the
-# dependency graph). A base old enough to give glibc 2.28 — rockylinux:8,
-# almalinux:8, manylinux_2_28 — ships OpenSSL 1.1, so it would emit a binary
-# needing `libssl.so.1.1`, which does NOT exist on Ubuntu 22.04, Debian 12 or
-# RHEL 9. That trades a glibc break for an OpenSSL break on precisely the
-# distros this is meant to reach, and is a net regression.
+# The floor used to be squeezed from BOTH sides, and the second side was
+# OpenSSL: a base old enough to give glibc 2.28 (rockylinux:8, almalinux:8,
+# manylinux_2_28) ships OpenSSL 1.1, so it emitted a binary needing
+# `libssl.so.1.1`, which does NOT exist on Ubuntu 22.04, Debian 12 or RHEL 9.
 #
-#   almalinux:9   glibc 2.34 + libssl.so.3   <- lowest glibc that still has OpenSSL 3
-#   ubuntu:22.04  glibc 2.35 + libssl.so.3   <- lowest OpenSSL-3 base with arm64 multiarch
+#   almalinux:9   glibc 2.34
+#   ubuntu:22.04  glibc 2.35   <- lowest base with arm64 multiarch
 #
-# Going below 2.34 requires vendoring OpenSSL, which forfeits distro security
-# updates for TLS. That is a product decision, not a build-container choice.
+# THAT SQUEEZE IS GONE: NOTHING HERE LINKS OPENSSL AT ALL. The old note
+# attributed libssl to `reqwest -> openssl-sys`, which was wrong -- reqwest is
+# declared `default-features = false, features = ["rustls-tls"]` and has never
+# linked OpenSSL here. OpenSSL had exactly ONE entry point into this workspace:
+# `imap` 2.x's default `tls` feature, i.e. native-tls, used by the IMAP inbound
+# leg of the email channel.
+#
+# #1128 closed that by VENDORING OpenSSL into the artifact. This branch closes
+# it by REMOVING the dependency: `wcore-channel-email` takes `imap` with
+# `default-features = false` and drives both TLS legs on the rustls stack the
+# rest of the workspace (reqwest, lettre SMTP) already used.
+# `cargo tree -i openssl-sys --target all -e all` now prints nothing.
+#
+# Removing it beats vendoring on three counts: no `make`/perl requirement in
+# every image that builds this workspace (the CI image has neither, and the
+# vendored build reddened `CI (linux-containerized)`), no OpenSSL CVE ownership
+# -- an advisory would have needed a wayland-core release instead of the user's
+# `apt upgrade` -- and one TLS implementation in the product instead of two.
+#
+# libdbus (keyring -> dbus-secret-service) IS still vendored, on its own merits:
+# `libdbus-sys/vendored` is a `cc` build of the bundled C source, so it needs
+# only the C compiler every image already has, and it is what keeps
+# `libdbus-1.so.3` out of DT_NEEDED without dropping the Linux keyring backend.
+#
+# The glibc floor is UNCHANGED at 2.34. Lowering it is a separate decision with
+# its own evidence, and this lane did not make it.
 set -euo pipefail
 
 IMAGE="${1:?usage: build-linux-release.sh <image> <target-triple>}"
@@ -64,9 +85,13 @@ docker run --rm \
   -e CARGO_HTTP_TIMEOUT=600 \
   "${IMAGE}" bash -euo pipefail -c '
 # ---- system dependencies ------------------------------------------------
-# Same set the native runner used to install: libdbus-1-dev (keyring ->
-# libdbus-sys), libssl-dev (reqwest -> openssl-sys), libseccomp-dev
-# (wcore-sandbox), libasound2-dev (cpal -> alsa-sys, voice feature).
+# libseccomp-dev (wcore-sandbox) and libasound2-dev (cpal -> alsa-sys, voice
+# feature) only. libssl-dev and libdbus-1-dev were dropped in #1128 and stay
+# dropped: nothing in the workspace links OpenSSL any more (the `imap`
+# native-tls edge is gone, see the header), and `libdbus-sys` builds the bundled
+# C source with `cc`. Their ABSENCE is the proof: if either edge comes back the
+# build fails HERE rather than shipping an artifact that cannot start on a slim
+# image.
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then
@@ -100,10 +125,10 @@ EOF
   if [ "$TARGET" = "aarch64-unknown-linux-gnu" ]; then
     apt-get install -y -qq --no-install-recommends \
       gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-      libdbus-1-dev:arm64 libseccomp-dev:arm64 libasound2-dev:arm64 libssl-dev:arm64
+      libseccomp-dev:arm64 libasound2-dev:arm64
   else
     apt-get install -y -qq --no-install-recommends \
-      libdbus-1-dev libseccomp-dev libasound2-dev libssl-dev
+      libseccomp-dev libasound2-dev
   fi
 elif command -v dnf >/dev/null 2>&1; then
   dnf -y -q install dnf-plugins-core >/dev/null 2>&1 || true
@@ -113,7 +138,7 @@ elif command -v dnf >/dev/null 2>&1; then
   # `curl` is deliberately NOT requested: el9 ships curl-minimal, which already
   # provides /usr/bin/curl, and naming `curl` is a hard dnf conflict.
   dnf -y -q install gcc gcc-c++ make pkgconfig cmake perl \
-    dbus-devel libseccomp-devel alsa-lib-devel openssl-devel git file binutils
+    libseccomp-devel alsa-lib-devel git file binutils
 else
   echo "unsupported base image: no apt-get and no dnf" >&2
   exit 1

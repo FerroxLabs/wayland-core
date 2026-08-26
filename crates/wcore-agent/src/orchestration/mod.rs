@@ -844,6 +844,21 @@ enum ConfirmedCall {
     Denied(ContentBlock),
 }
 
+/// The way forward every approval denial that reaches the model must name.
+///
+/// #946: the old text reported the outcome and stopped there, so a headless
+/// run dead-ended with nothing to act on — not one occurrence of
+/// `--auto-approve` anywhere in the tree reached a user or the model. Narrowest
+/// grant first (this one tool, in config), with the run-wide bypass last so the
+/// message never leads with the flag that turns the gate off entirely.
+fn approval_remedy(tool_name: &str) -> String {
+    format!(
+        "To allow it without prompting, add \"{tool_name}\" to `[tools] \
+         allow_list` in your wayland-core config; to skip every confirmation \
+         for the whole run, start wayland-core with `--auto-approve`."
+    )
+}
+
 fn confirm_call(
     registry: &ToolRegistry,
     confirmer: &Arc<Mutex<ToolConfirmer>>,
@@ -881,10 +896,14 @@ fn confirm_call(
         ConfirmResult::Denied => Ok(ConfirmedCall::Denied(ContentBlock::ToolResult {
             tool_use_id: id.clone(),
             // Not "denied by user": `ToolConfirmer` also denies when there
-            // is no interactive terminal to ask, and on EOF at the prompt.
-            // The message must not assert a human decision that never
-            // happened — it reports the outcome, approval was not granted.
-            content: "Tool execution denied: approval was not granted".to_string(),
+            // is no interactive terminal to ask, when nobody answers within
+            // the budget, and on EOF at the prompt. The message must not
+            // assert a human decision that never happened — it reports the
+            // outcome and then names what the operator can actually do.
+            content: format!(
+                "Tool execution denied: approval was not granted for {name}.\n{}",
+                approval_remedy(name)
+            ),
             is_error: true,
         })),
         ConfirmResult::Quit => Err(ExecutionControl::Quit),
@@ -1073,6 +1092,46 @@ impl Drop for ProtocolToolSink {
     }
 }
 
+/// Narrow a declared effect contract to the evidence this call actually
+/// produced.
+///
+/// A tool's `effect_contract` sees only the input. `Write` and `Edit` declare
+/// a filesystem-transactional effect, but they produce no receipt when the
+/// target cannot be identified before the write — a symlink, a hard link, a
+/// preimage past the checkpoint bound, a backend with no identity primitive.
+/// The durable reducer refuses to START a filesystem-transactional execution
+/// with no receipt, and it is right to: recovery would have a reconciler name
+/// and nothing to reconcile against. So the record keeps the narrowed
+/// contract, which is exactly the opaque recovery those calls had before this
+/// seam existed.
+fn narrow_contract_to_evidence(
+    contract: wcore_types::tool::ToolEffectContract,
+    effect_receipt: Option<&serde_json::Value>,
+) -> wcore_types::tool::ToolEffectContract {
+    if effect_receipt.is_none() && matches!(contract.kind, ToolEffectKind::FilesystemTransactional)
+    {
+        return wcore_types::tool::ToolEffectContract::default();
+    }
+    contract
+}
+
+/// Whether a recovered retry may proceed against the contract its durable
+/// record holds.
+///
+/// The record holds the NARROWED contract, so an opaque record is compatible
+/// with a fresh filesystem-transactional declaration that is still willing to
+/// narrow to it — the attempt is then forced back onto the opaque path below.
+/// Nothing else about the contract may change across a retry.
+fn retry_contract_is_compatible(
+    durable: &wcore_types::tool::ToolEffectContract,
+    declared: &wcore_types::tool::ToolEffectContract,
+) -> bool {
+    durable == declared
+        || (matches!(durable.kind, ToolEffectKind::Opaque)
+            && durable.reconciler.is_none()
+            && matches!(declared.kind, ToolEffectKind::FilesystemTransactional))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_tool_effect(
     effect_scope: Option<&TurnEffectScope>,
@@ -1085,6 +1144,7 @@ fn prepare_tool_effect(
     effect_receipt: Option<serde_json::Value>,
     pre_hook_phase_id: Option<&str>,
 ) -> Result<Option<PreparedToolLease>, String> {
+    let contract = narrow_contract_to_evidence(contract, effect_receipt.as_ref());
     effect_scope
         .map(|scope| {
             let prepared = match (effect_receipt, pre_hook_phase_id) {
@@ -1797,7 +1857,7 @@ async fn execute_single_with_streaming(
             let max_size = tool.max_result_size();
             let effect_contract = tool.effect_contract(&effective_input);
             if let Some(retry) = recovered_retry
-                && retry.effect_contract != &effect_contract
+                && !retry_contract_is_compatible(retry.effect_contract, &effect_contract)
             {
                 return (
                     journal_authority_failure(
@@ -2108,42 +2168,41 @@ async fn execute_single_with_streaming(
                 },
                 None => None,
             };
-            if let Err(error) =
-                store_prepared_effect_checkpoint(effect_scope, prepared_runtime.as_ref()).await
+            // A recovered retry inherits its durable record's contract and
+            // receipt verbatim. If that record carries none, this attempt must
+            // run the opaque path too, whatever this process managed to
+            // prepare — otherwise the physical dispatch and the durable
+            // description of it would disagree.
+            let (prepared_runtime, durable_receipt) =
+                if recovered_retry.is_some_and(|retry| retry.effect_receipt.is_none()) {
+                    (None, None)
+                } else {
+                    (prepared_runtime, durable_receipt)
+                };
+            // A receipt whose preimage cannot be checkpointed is a receipt
+            // recovery would decline anyway, so this call falls back to the
+            // opaque path rather than being refused. The session's checkpoint
+            // quota is finite; refusing here would mean an agent that had
+            // spent it could no longer write a file at all, which is a far
+            // worse outcome than an interrupted write going back to being an
+            // operator's question.
+            let (prepared_runtime, durable_receipt) = match store_prepared_effect_checkpoint(
+                effect_scope,
+                prepared_runtime.as_ref(),
+            )
+            .await
             {
-                let reason = crate::output_redaction::redact_tool_output(&error);
-                if let Err(journal_error) = record_tool_attempt_not_started(
-                    effect_scope,
-                    id,
-                    ordinal,
-                    name,
-                    input,
-                    &effective_input,
-                    effect_contract.clone(),
-                    ToolNotStartedReason::DispatchFailed {
-                        error: reason.clone(),
-                    },
-                    pre_hook_phase_id.as_deref(),
-                    recovered_retry,
-                ) {
-                    return (
-                        journal_authority_failure(id, journal_error),
-                        None,
-                        pre_outcome,
-                        false,
+                Ok(()) => (prepared_runtime, durable_receipt),
+                Err(error) => {
+                    eprintln!(
+                        "[effect-checkpoint] tool={} call_id={} degraded to opaque recovery: {}",
+                        name,
+                        id,
+                        crate::output_redaction::redact_tool_output(&error)
                     );
+                    (None, None)
                 }
-                return (
-                    ContentBlock::ToolResult {
-                        tool_use_id: id.clone(),
-                        content: reason,
-                        is_error: true,
-                    },
-                    None,
-                    pre_outcome,
-                    false,
-                );
-            }
+            };
             #[cfg(test)]
             inject_dispatcher_crash(DispatcherCrashCut::BeforePrepared);
             let prepared_effect = match recovered_retry {
@@ -3359,8 +3418,13 @@ async fn execute_tool_calls_with_approval_budget_effects_inner(
                     });
                     let denied = ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
+                        // #946: the reason alone is a dead end when no host
+                        // ever answered (TTL reap, host EOF), so the remedy
+                        // rides along here too — same helper, so the two
+                        // denial surfaces cannot drift apart.
                         content: crate::output_redaction::redact_tool_output(&format!(
-                            "Tool denied: {reason}"
+                            "Tool denied: {reason}\n{}",
+                            approval_remedy(name)
                         )),
                         is_error: true,
                     };

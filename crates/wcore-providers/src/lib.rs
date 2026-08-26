@@ -19,6 +19,7 @@ pub mod fingerprint;
 pub mod fireworks;
 pub mod flux_fetch;
 pub mod flux_image;
+pub mod flux_loop;
 pub mod flux_router;
 pub mod gemini;
 pub mod groq;
@@ -184,7 +185,14 @@ pub enum ProviderError {
     /// attempted. This is deliberately distinct from `Connection`, whose
     /// outcome may be ambiguous and therefore remains conservatively billed.
     #[error("Provider request was not attempted: {reason}")]
-    NotAttempted { reason: String },
+    NotAttempted {
+        reason: String,
+        /// Machine-readable class of the fault that led here, when the caller
+        /// proved one — #1127. `None` when nothing upstream was ever
+        /// classified. Read by `retry::provider_failure_code`, which is what
+        /// the engine prices retries with and what the host is told.
+        failure_code: Option<String>,
+    },
     /// FluxRouter 402 — a paid-only capability was requested on a key that is
     /// not entitled to it (free or paid-but-uncleared). This is a FEATURE lock,
     /// not an account state: the user must be on a paid plan with a cleared
@@ -851,7 +859,8 @@ mod billing_classification_tests {
         assert!(!ProviderError::Parse("bad frame".into()).produced_no_billable_output());
         assert!(
             !ProviderError::NotAttempted {
-                reason: "egress refused".into()
+                reason: "egress refused".into(),
+                failure_code: None
             }
             .produced_no_billable_output(),
             "a request that never left is released by `was_not_attempted`; \

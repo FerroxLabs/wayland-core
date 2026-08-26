@@ -61,9 +61,18 @@
 //! the turn never ended. Both cases assert on that same closing turn, which is
 //! why both are exposed.
 //!
-//! Do NOT restore `retries` to hide this, and do not widen either attribute to a
-//! bare `#[ignore]`: the Linux and Windows legs still run both cases, and they
-//! are the legs that make this quarantine bounded rather than a deletion.
+//! Do NOT restore `retries` to hide this.
+//!
+//! QUARANTINE LIFTED, deliberately, in the 0.13.7 integration. #1126 is
+//! root-caused and fixed in the same branch: `TranscriptSig` was keyed on the
+//! tail turn only, so a stream-end appended to an EARLIER turn produced an
+//! identical signature and the cache never repainted. With the attributes in
+//! place these two cases do not execute on macOS at all, so the macOS leg
+//! would report no signal on the one platform the defect ever appeared on.
+//! They are live again so that leg IS the confirmation run. A Linux pass
+//! proves nothing here: the live tail wins the race by about one frame, so
+//! Linux is green with or without the fix. If macOS goes red, restore both
+//! attributes and reopen #1126 - do not restore `retries`.
 //!
 #![cfg(unix)]
 
@@ -185,10 +194,6 @@ fn provider_traffic(rt: &tokio::runtime::Runtime, server: &wiremock::MockServer)
 /// precisely not in this workspace), and `a` sent a bare `Always`, which the
 /// boundary check overrides, so the tool never ran and no tool_result was ever
 /// POSTed.
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "FerroxLabs/wayland#1126: the macOS wedge — see the module doc for why this case is quarantined too"
-)]
 #[test]
 fn a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds() {
     let home = TempDir::new().expect("tempdir");
@@ -302,10 +307,6 @@ fn a_on_the_boundary_card_grants_the_folder_and_the_read_succeeds() {
 /// left running everywhere else — do not widen it to a bare `#[ignore]`, and do
 /// not restore the retries. Delete this attribute only with a macOS run that
 /// shows it passing.
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "FerroxLabs/wayland#1126: 30s timeout on the macOS leg only"
-)]
 #[test]
 fn approving_once_leaves_the_read_refused_by_the_sandbox() {
     let home = TempDir::new().expect("tempdir");

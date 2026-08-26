@@ -516,6 +516,8 @@ mod tests {
 
     fn req_three_messages_with_system() -> LlmRequest {
         LlmRequest {
+            flux_loop_intent: None,
+            flux_turn_nonce: None,
             model: "command-r-plus-08-2024".into(),
             system: "you are helpful".into(),
             messages: vec![

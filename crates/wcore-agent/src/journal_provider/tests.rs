@@ -452,6 +452,7 @@ async fn event_conversion_failure_terminalizes_and_surfaces_authority() {
         &fixture,
         LifecyclePurpose::Conversation,
         ProviderScript::Events(vec![LlmEvent::ProviderMeta {
+            loop_engaged: None,
             routed_model: Some("model".into()),
             model_window: Some(10),
             context_pressure: Some(f32::NAN),

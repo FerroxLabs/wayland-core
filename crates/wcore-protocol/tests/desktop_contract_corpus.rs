@@ -212,9 +212,132 @@ fn checked_corpus_matches_real_serializers_byte_for_byte() {
     }
 }
 
+// #314 - the single enumeration of the host command surface.
+//
+// The macro expands to BOTH the name list the publication assertions iterate
+// and a wildcard-free `match` over `ProtocolCommand`. Adding a variant to the
+// enum stops this file compiling, and the only edit that makes it compile again
+// names the variant here - which puts it in `EVERY_PROTOCOL_COMMAND`, which
+// makes the assertions below demand its fixture and its published schema
+// branch. The list and the match cannot drift apart because they are one
+// invocation, so a command cannot ship implemented-but-unpublished again
+// without deleting a test.
+macro_rules! protocol_command_surface {
+    ($($variant:pat => $wire:literal,)+) => {
+        const EVERY_PROTOCOL_COMMAND: &[&str] = &[$($wire),+];
+
+        fn wire_type_of(command: &ProtocolCommand) -> &'static str {
+            match command {
+                $($variant => $wire,)+
+            }
+        }
+    };
+}
+
+protocol_command_surface! {
+    ProtocolCommand::Message { .. } => "message",
+    ProtocolCommand::Stop => "stop",
+    ProtocolCommand::ToolApprove { .. } => "tool_approve",
+    ProtocolCommand::ToolDeny { .. } => "tool_deny",
+    ProtocolCommand::InitHistory { .. } => "init_history",
+    ProtocolCommand::SetMode { .. } => "set_mode",
+    ProtocolCommand::SetConfig { .. } => "set_config",
+    ProtocolCommand::ContinueWithBudget(_) => "continue_with_budget",
+    ProtocolCommand::SessionResync(_) => "session_resync",
+    ProtocolCommand::ResumeTurn(_) => "resume_turn",
+    ProtocolCommand::ResolveInterruptedApproval(_) => "resolve_interrupted_approval",
+    ProtocolCommand::ResolveUnknownToolEffect(_) => "resolve_unknown_tool_effect",
+    ProtocolCommand::GetRuntimeDiagnostics(_) => "get_runtime_diagnostics",
+    ProtocolCommand::GoalOpen(_) => "goal_open",
+    ProtocolCommand::GoalDeclareTask(_) => "goal_declare_task",
+    ProtocolCommand::GoalAdvance(_) => "goal_advance",
+    ProtocolCommand::GoalCancel(_) => "goal_cancel",
+    ProtocolCommand::GoalResync(_) => "goal_resync",
+    ProtocolCommand::AddMcpServer { .. } => "add_mcp_server",
+    ProtocolCommand::RemoveMcpServer(_) => "remove_mcp_server",
+    ProtocolCommand::GrantWorkspaceCapability { .. } => "grant_workspace_capability",
+    ProtocolCommand::GrantPath { .. } => "grant_path",
+    ProtocolCommand::RevokePath { .. } => "revoke_path",
+    ProtocolCommand::ApprovalResume { .. } => "approval_resume",
+    ProtocolCommand::HostSendMessageResult { .. } => "host_send_message_result",
+    ProtocolCommand::Ping => "ping",
+}
+
+/// Every command the engine accepts must be findable in what the corpus
+/// publishes: a `WireSpec`, a branch in `host-command.schema.json`, and a
+/// fixture on disk. #314 shipped three that had none of the three.
 #[test]
-fn inventory_is_exactly_twenty_three_commands_and_sixty_one_events() {
-    assert_eq!(COMMAND_SPECS.len(), 23);
+fn every_protocol_command_variant_is_published_with_a_fixture_and_a_schema_branch() {
+    let declared = COMMAND_SPECS
+        .iter()
+        .map(|spec| spec.wire_type)
+        .collect::<BTreeSet<_>>();
+    let schema = generated_json("schema/host-command.schema.json");
+    let published = schema["oneOf"]
+        .as_array()
+        .expect("host-command schema must contain oneOf")
+        .iter()
+        .filter_map(|branch| branch.pointer("/properties/type/const")?.as_str())
+        .collect::<BTreeSet<_>>();
+
+    for wire_type in EVERY_PROTOCOL_COMMAND {
+        assert!(
+            declared.contains(wire_type),
+            "{wire_type} is accepted by ProtocolCommand but has no WireSpec"
+        );
+        assert!(
+            published.contains(wire_type),
+            "{wire_type} has no branch in host-command.schema.json"
+        );
+        let fixture = root().join(format!("commands/{wire_type}.json"));
+        assert!(
+            fixture.is_file(),
+            "{wire_type} has no published fixture at {}",
+            fixture.display()
+        );
+    }
+
+    assert_eq!(
+        declared,
+        EVERY_PROTOCOL_COMMAND
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        "COMMAND_SPECS and the ProtocolCommand enum must name the same surface"
+    );
+}
+
+/// The other direction: no published fixture may name a `type` that decodes to
+/// a different variant, and every variant must have exactly one fixture.
+#[test]
+fn every_command_fixture_round_trips_to_the_variant_it_names() {
+    let mut seen = BTreeSet::new();
+    for entry in fs::read_dir(root().join("commands")).unwrap() {
+        let path = entry.unwrap().path();
+        let bytes = fs::read(&path).unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let command: ProtocolCommand = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            wire_type_of(&command),
+            value["type"].as_str().unwrap(),
+            "{} decodes to a different variant than its `type` names",
+            path.display()
+        );
+        seen.insert(wire_type_of(&command));
+    }
+    assert_eq!(
+        seen,
+        EVERY_PROTOCOL_COMMAND
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        "every ProtocolCommand variant must have exactly one published fixture"
+    );
+}
+
+#[test]
+fn inventory_is_exactly_twenty_six_commands_and_sixty_one_events() {
+    assert_eq!(COMMAND_SPECS.len(), 26);
     assert_eq!(EVENT_SPECS.len(), 61);
     assert_eq!(
         COMMAND_SPECS
@@ -222,7 +345,7 @@ fn inventory_is_exactly_twenty_three_commands_and_sixty_one_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        23
+        26
     );
     assert_eq!(
         EVENT_SPECS
@@ -315,9 +438,9 @@ fn manifest_pins_generator_and_all_three_digests() {
     }
     assert_eq!(manifest["contract"]["major"], CONTRACT_MAJOR);
     assert_eq!(manifest["contract"]["minor"], CONTRACT_MINOR);
-    assert_eq!(manifest["commands"].as_array().unwrap().len(), 23);
+    assert_eq!(manifest["commands"].as_array().unwrap().len(), 26);
     assert_eq!(manifest["events"].as_array().unwrap().len(), 61);
-    assert_eq!(manifest["counts"]["commands"], 23);
+    assert_eq!(manifest["counts"]["commands"], 26);
     assert_eq!(manifest["counts"]["events"], 61);
     assert_eq!(manifest["counts"]["child_types"], 3);
     assert_eq!(
@@ -375,6 +498,47 @@ fn manifest_pins_generator_and_all_three_digests() {
         .find(|event| event["type"] == "sub_agent_event")
         .expect("child terminal evidence must be in EVENT_SPECS");
     assert_eq!(child_event["criticality"], "safety");
+}
+
+#[test]
+fn manifest_publishes_a_wire_shape_for_every_command_and_event() {
+    // The published wire shapes are what `generate` diffs the next regeneration
+    // against, so a corpus that stops publishing them silently restores the
+    // blind blessing this guard exists to stop.
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(root().join("manifest.json")).unwrap()).unwrap();
+    let shapes = manifest["wire_shapes"]
+        .as_object()
+        .expect("manifest must publish one wire shape digest per wire type");
+    for entry in manifest["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(manifest["events"].as_array().unwrap())
+    {
+        let path = entry["path"].as_str().unwrap();
+        assert!(
+            shapes
+                .get(path)
+                .and_then(Value::as_str)
+                .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71),
+            "{path} must publish a prefixed SHA-256 wire shape digest"
+        );
+    }
+    assert!(
+        shapes.contains_key("compat/events/sub_agent_event.legacy.json"),
+        "the legacy sub-agent compatibility branch is a validated shape too"
+    );
+    assert_eq!(
+        shapes.len(),
+        26 + 61 + 1,
+        "26 commands, 61 events, and the legacy sub-agent compatibility branch"
+    );
+    // The correlation anchors every later tool frame is matched against. A
+    // rename here is the exact break regeneration used to bless.
+    for anchor in ["events/tool_request.json", "commands/tool_approve.json"] {
+        assert!(shapes.contains_key(anchor));
+    }
 }
 
 #[test]
