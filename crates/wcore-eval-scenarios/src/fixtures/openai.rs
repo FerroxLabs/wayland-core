@@ -86,6 +86,20 @@ pub enum OpenAiStep {
     /// Core must surface the dead-end and must NOT commit the empty turn to
     /// the conversation.
     EmptyResponse,
+    /// A COMPLETE 200 stream (text delta, terminal frame, `[DONE]`) whose
+    /// terminal frame carries a `finish_reason` the OpenAI mapper does not
+    /// recognise — `content_filter`, a vendor extension, anything.
+    ///
+    /// The mapper sends every unmapped signal to `StopReason::EndTurn` +
+    /// `FinishReason::Error` on purpose (`openai.rs`: "keep agent loop alive
+    /// with EndTurn; FinishReason::Error already flags the protocol-level
+    /// signal"), so the engine returns `Ok` for it. That is the only wire shape
+    /// that reaches the CLI as "the run completed, the TURN did not", and it is
+    /// what the #946 exit-code rows were measured on.
+    TextWithFinishReason {
+        text: String,
+        finish_reason: String,
+    },
 }
 
 impl OpenAiStep {
@@ -109,6 +123,17 @@ impl OpenAiStep {
     /// A 200 response that streams to `[DONE]` without a single content event.
     pub fn empty_response() -> Self {
         Self::EmptyResponse
+    }
+
+    /// Script a complete stream that ends on an arbitrary `finish_reason`.
+    pub fn text_with_finish_reason(
+        text: impl Into<String>,
+        finish_reason: impl Into<String>,
+    ) -> Self {
+        Self::TextWithFinishReason {
+            text: text.into(),
+            finish_reason: finish_reason.into(),
+        }
     }
 
     pub fn rate_limited(retry_after_ms: u64) -> Self {
@@ -171,6 +196,7 @@ impl OpenAiStep {
             | Self::ToolCall { .. }
             | Self::TruncatedToolCall { .. }
             | Self::EmptyResponse
+            | Self::TextWithFinishReason { .. }
             | Self::TextThenStall { .. } => None,
         }
     }
@@ -260,7 +286,8 @@ impl OpenAiFixtureScript {
             match step {
                 OpenAiStep::Text { text }
                 | OpenAiStep::Truncated { text }
-                | OpenAiStep::DuplicateText { text } => {
+                | OpenAiStep::DuplicateText { text }
+                | OpenAiStep::TextWithFinishReason { text, .. } => {
                     if text.len() > MAX_TEXT_BYTES {
                         return Err(OpenAiFixtureError::InvalidScript(format!(
                             "response text exceeds {MAX_TEXT_BYTES} bytes"
@@ -637,6 +664,10 @@ async fn handle_chat_completion(
             stalling_sse_response(text_delta_frame(&text), delay_ms)
         }
         OpenAiStep::EmptyResponse => sse_response(empty_sse()),
+        OpenAiStep::TextWithFinishReason {
+            text,
+            finish_reason,
+        } => sse_response(text_sse_finishing_on(&text, &finish_reason)),
         OpenAiStep::StallBeforeHeaders { delay_ms } => {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             sse_response(complete_text_sse("released", false, 7))
@@ -799,6 +830,29 @@ fn complete_text_sse(text: &str, duplicate: bool, prompt_tokens: u64) -> String 
     });
     let repeated = if duplicate { delta.as_str() } else { "" };
     format!("{delta}{repeated}data: {finish}\n\ndata: {usage}\n\ndata: [DONE]\n\n")
+}
+
+/// A complete stream whose terminal frame carries `finish_reason`.
+///
+/// Identical to [`complete_text_sse`] except that the finish signal is the
+/// caller's, so a fixture can reproduce a provider that ends a turn on a
+/// signal the mapper does not recognise.
+fn text_sse_finishing_on(text: &str, finish_reason: &str) -> String {
+    let delta = text_delta_frame(text);
+    let finish = json!({
+        "id": "fixture-completion",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "fixture-chat-v1",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 3,
+            "total_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 0}
+        }
+    });
+    format!("{delta}data: {finish}\n\ndata: [DONE]\n\n")
 }
 
 /// A 200 stream that carries no content at all: the role chunk, a `stop`

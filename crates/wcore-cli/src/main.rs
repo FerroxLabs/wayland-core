@@ -2418,9 +2418,23 @@ async fn run() -> anyhow::Result<ExitCode> {
         && let Some((driver, goal_id)) = wcore_cli::goal_cmd::GoalAttachArgs::default().resolve()?
     {
         use wcore_agent::goal::{DirectOutcome, StrategyTermination};
+        // #946: this arm ended `return Ok(ExitCode::SUCCESS)`, so the exit-code
+        // contract did not exist for a Goal-attached headless run AT ALL — a
+        // turn-cap stop, a provider error and a run that answered nothing all
+        // reported 0. The code is decided inside the closure (that is where the
+        // run result lives) and read out after `run_direct` returns. Atomic
+        // rather than a `Cell` because the closure's future must stay `Send`.
+        let goal_exit_code =
+            std::sync::Arc::new(std::sync::atomic::AtomicU8::new(wcore_cli::exit_code::OK));
+        let exit_sink = std::sync::Arc::clone(&goal_exit_code);
         let cursor = driver
             .run_direct(&goal_id, |owner| async {
-                match engine.run(&prompt, "").await {
+                // Bound to a `let` so the `&mut engine` borrow held by the
+                // future ends here; the arms below need `&engine` for the
+                // human latch.
+                let run_outcome = engine.run(&prompt, "").await;
+                let awaiting_human = engine.awaiting_human();
+                match run_outcome {
                     Ok(run_result) => {
                         output.emit_stream_end(
                             "",
@@ -2430,6 +2444,16 @@ async fn run() -> anyhow::Result<ExitCode> {
                             run_result.usage.cache_creation_tokens,
                             run_result.usage.cache_read_tokens,
                             run_result.finish_reason,
+                        );
+                        exit_sink.store(
+                            wcore_cli::exit_code::for_run_outcome(
+                                run_result.stop_reason,
+                                run_result.finish_reason,
+                                &run_result.text,
+                                run_result.ended_on_unrecovered_tool_failure,
+                                awaiting_human,
+                            ),
+                            std::sync::atomic::Ordering::SeqCst,
                         );
                         // A completed Direct run is UNCHECKED — Direct has no
                         // verification owner — so the adapter maps it to
@@ -2447,6 +2471,10 @@ async fn run() -> anyhow::Result<ExitCode> {
                     }
                     Err(error) => {
                         output.emit_error(&format!("{error:#}"), false);
+                        exit_sink.store(
+                            wcore_cli::exit_code::FAILURE,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
                         StrategyTermination::from_direct(owner, DirectOutcome::Failed(&error))
                     }
                 }
@@ -2459,7 +2487,9 @@ async fn run() -> anyhow::Result<ExitCode> {
         for mgr in &result.mcp_managers {
             mgr.shutdown().await;
         }
-        return Ok(ExitCode::SUCCESS);
+        return Ok(ExitCode::from(
+            goal_exit_code.load(std::sync::atomic::Ordering::SeqCst),
+        ));
     }
 
     let exit_code = if prompt.is_empty() {
@@ -2497,8 +2527,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                 // completed `engine.run`, so a run stopped by the turn cap and
                 // one that gave up on a failing tool both reported 0. The
                 // contract lives in `wcore_cli::exit_code`.
+                // #946: `stop_reason` alone is blind to a turn that ended in a
+                // provider error and to a run that answered with nothing at
+                // all, so both used to exit 0. Both are now inputs.
                 ExitCode::from(wcore_cli::exit_code::for_run_outcome(
                     run_result.stop_reason,
+                    run_result.finish_reason,
+                    &run_result.text,
                     run_result.ended_on_unrecovered_tool_failure,
                     awaiting_human,
                 ))

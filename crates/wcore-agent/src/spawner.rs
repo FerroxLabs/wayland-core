@@ -2720,6 +2720,13 @@ impl AgentSpawner {
 
 #[async_trait]
 impl Spawner for AgentSpawner {
+    /// #862 — expose the parent session's cap through the trait so BOTH
+    /// delegation surfaces can floor at it. The Spawn tool reads the inherent
+    /// method directly; Delegate only ever sees `dyn Spawner`.
+    fn base_max_tokens(&self) -> u32 {
+        self.base_config.max_tokens
+    }
+
     async fn spawn_fork(
         &self,
         sub_config: SubAgentConfig,
