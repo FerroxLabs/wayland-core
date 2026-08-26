@@ -2318,6 +2318,45 @@ async fn phase_align_to_the_timer_tick() {
 /// well inside the growth cap even with all five callers running concurrently.
 const CALIBRATED_WALK: Duration = Duration::from_millis(25);
 
+/// How many times the two timeout tests may re-race before they assert.
+///
+/// Their message assertion needs the manifest build to STILL BE RUNNING when
+/// the deadline fires. That is a RACE, not a property, and the calibrated walk
+/// does not establish it: `workspace_whose_walk_costs_at_least` samples the
+/// walk under whatever load the host carries at that moment, so on a busy box
+/// every sample is inflated, the tree stops growing early, and a later idle
+/// moment finishes the real walk INSIDE a timeout derived from those inflated
+/// samples. Windows widens the gap — a timeout below the system tick does not
+/// fire until the next one (~15.6 ms by default), so the walk has to outlast
+/// the TICK rather than merely the requested timeout.
+///
+/// Measured on the self-hosted Windows runner while a second lane was building
+/// on the same box: a 25 ms floor yielded a 3 ms timeout, the build finished
+/// inside it, and the test failed on `got: Command timed out after 3ms` — the
+/// CHILD-timeout message, which grades nothing about #1111. The existing
+/// min-of-three-samples floor cannot catch this: it rejects ONE stalled sample,
+/// and sustained load inflates all three.
+///
+/// So the premise is ESTABLISHED rather than predicted — grow the tree and
+/// re-race until the call actually reports the manifest. Growing the TREE
+/// rather than raising the timing target is deliberate: the target is capped by
+/// what `workspace_whose_walk_costs_at_least` can reach inside 240k entries,
+/// and its own note records that 250 ms already needed 630k, so a ladder of
+/// larger targets would panic in tree growth instead of grading anything.
+const RACE_ATTEMPTS: usize = 3;
+
+/// Add ~10k entries to `root` under a uniquely named subtree, making the real
+/// secret-deny walk more expensive. See [`RACE_ATTEMPTS`].
+fn grow_workspace(root: &std::path::Path, tag: usize) {
+    for d in 0..100 {
+        let dir = root.join(format!("x{tag}")).join(format!("d{d}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in 0..100 {
+            std::fs::write(dir.join(format!("f{f}.txt")), b"x").unwrap();
+        }
+    }
+}
+
 /// How many timer samples each bracket of `timer_allowance` takes.
 ///
 /// The allowance is a maximum, so more samples can only make it a tighter
@@ -2464,56 +2503,72 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
     warm_bash_tool_process_init().await;
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
-    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
-    let ctx = canned_ctx(policy, CannedBackend::enforcing());
+    for attempt in 0..RACE_ATTEMPTS {
+        let last_attempt = attempt + 1 == RACE_ATTEMPTS;
+        let (policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
-    // #1111 grades "the user's `timeout` BOUNDS the walk", which is a relation
-    // between the two — so the bound is derived from the walk just measured
-    // rather than pinned. A literal that is small against today's walk becomes
-    // large against a faster one, and this assertion would then pass for the
-    // wrong reason (or, as with the 250 ms target this replaced, never get the
-    // chance to run at all).
-    let timeout_ms = (walk / 10).as_millis().max(1) as u64;
+        let ctx = canned_ctx(policy, CannedBackend::enforcing());
 
-    // The host's timer cost is BRACKETED around the call under test and the
-    // larger bracket is used. On Windows the timer resolution is a system-wide
-    // setting any process can raise or drop, so a correction measured only
-    // afterwards can belong to a different regime than the one the call paid
-    // for — which is exactly the shape of the CI failure, a 6.5033 ms
-    // correction against a 15.8632 ms call. Measuring on both sides means a
-    // regime has to appear and vanish inside the bracket to escape it. These
-    // samples touch nothing but the timer, so the before-bracket cannot warm
-    // or perturb the call it is correcting.
-    let allowance_before = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
+        // #1111 grades "the user's `timeout` BOUNDS the walk", which is a
+        // relation between the two — so the bound is derived from the walk just
+        // measured rather than pinned. A literal that is small against today's
+        // walk becomes large against a faster one, and this assertion would
+        // then pass for the wrong reason (or, as with the 250 ms target this
+        // replaced, never get the chance to run at all).
+        let timeout_ms = (walk / 10).as_millis().max(1) as u64;
 
-    phase_align_to_the_timer_tick().await;
-    let started = std::time::Instant::now();
-    let result = BashTool
-        .execute_with_ctx(json!({"command": "echo hi", "timeout": timeout_ms}), &ctx)
-        .await;
-    let elapsed = started.elapsed();
-    let allowance_after = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
-    let allowance = allowance_before.max(allowance_after);
-    let bounded = elapsed.saturating_sub(allowance);
+        // The host's timer cost is BRACKETED around the call under test and the
+        // larger bracket is used. On Windows the timer resolution is a
+        // system-wide setting any process can raise or drop, so a correction
+        // measured only afterwards can belong to a different regime than the
+        // one the call paid for. Measuring on both sides means a regime has to
+        // appear and vanish inside the bracket to escape it. These samples
+        // touch nothing but the timer, so the before-bracket cannot warm or
+        // perturb the call it is correcting.
+        let allowance_before = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
 
-    assert!(
-        bounded * 3 < walk,
-        "a {timeout_ms}ms timeout returned after {elapsed:?} ({bounded:?} above \
-         this host's {allowance:?} allowance for one timer wait) against a walk \
-         measured at {walk:?} — the manifest build is outside the timeout scope"
-    );
-    // #1111 acceptance 3: "a manifest build that exceeds the timeout produces a
-    // user-visible message NAMING THE CAUSE". `contains("timed out")` alone is
-    // satisfied by the byte-identical string the CHILD-timeout path returns, so
-    // it does not grade that criterion — the caller has to be told the
-    // workspace scan ate the budget and that no child ever ran.
-    assert!(
-        result.content.contains("timed out") && result.content.contains("manifest"),
-        "the caller must be told WHY it stopped, and that it was the manifest \
-         build rather than the command itself; got: {}",
-        result.content
-    );
+        phase_align_to_the_timer_tick().await;
+        let started = std::time::Instant::now();
+        let result = BashTool
+            .execute_with_ctx(json!({"command": "echo hi", "timeout": timeout_ms}), &ctx)
+            .await;
+        let elapsed = started.elapsed();
+        let allowance_after = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
+        let allowance = allowance_before.max(allowance_after);
+        let bounded = elapsed.saturating_sub(allowance);
+
+        // Graded on EVERY attempt and never retried: this is the half a product
+        // regression breaks, and re-racing past a failure here would hide
+        // exactly the defect #1111 exists to catch.
+        assert!(
+            bounded * 3 < walk,
+            "a {timeout_ms}ms timeout returned after {elapsed:?} ({bounded:?} above \
+             this host's {allowance:?} allowance for one timer wait) against a walk \
+             measured at {walk:?} — the manifest build is outside the timeout scope"
+        );
+
+        // #1111 acceptance 3: "a manifest build that exceeds the timeout
+        // produces a user-visible message NAMING THE CAUSE".
+        // `contains("timed out")` alone is satisfied by the byte-identical
+        // string the CHILD-timeout path returns, so it does not grade that
+        // criterion — the caller has to be told the workspace scan ate the
+        // budget and that no child ever ran.
+        if result.content.contains("manifest") || last_attempt {
+            assert!(
+                result.content.contains("timed out") && result.content.contains("manifest"),
+                "the caller must be told WHY it stopped, and that it was the manifest \
+                 build rather than the command itself; got: {} (attempt {attempt}, a \
+                 {timeout_ms}ms timeout against a walk measured at {walk:?})",
+                result.content
+            );
+            return;
+        }
+
+        // The build beat the deadline this time — see `RACE_ATTEMPTS`. Make the
+        // real walk more expensive and race again.
+        grow_workspace(&root, attempt);
+    }
 }
 
 /// #1111, call site `bash.rs:744` (`execute_streaming_with_ctx`): same defect,
@@ -2554,62 +2609,77 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
     warm_bash_tool_process_init().await;
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
-    let (policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
-    let ctx = canned_ctx(policy, CannedBackend::enforcing());
+    for attempt in 0..RACE_ATTEMPTS {
+        let last_attempt = attempt + 1 == RACE_ATTEMPTS;
+        let (policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
-    // #1111 grades "the user's `timeout` BOUNDS the walk", which is a relation
-    // between the two — so the bound is derived from the walk just measured
-    // rather than pinned. A literal that is small against today's walk becomes
-    // large against a faster one, and this assertion would then pass for the
-    // wrong reason (or, as with the 250 ms target this replaced, never get the
-    // chance to run at all).
-    let timeout_ms = (walk / 10).as_millis().max(1) as u64;
+        let ctx = canned_ctx(policy, CannedBackend::enforcing());
 
-    let sink = crate::NullToolOutputSink;
-    // The host's timer cost is BRACKETED around the call under test and the
-    // larger bracket is used. On Windows the timer resolution is a system-wide
-    // setting any process can raise or drop, so a correction measured only
-    // afterwards can belong to a different regime than the one the call paid
-    // for — which is exactly the shape of the CI failure, a 6.5033 ms
-    // correction against a 15.8632 ms call. Measuring on both sides means a
-    // regime has to appear and vanish inside the bracket to escape it. These
-    // samples touch nothing but the timer, so the before-bracket cannot warm
-    // or perturb the call it is correcting.
-    let allowance_before = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
+        // #1111 grades "the user's `timeout` BOUNDS the walk", which is a
+        // relation between the two — so the bound is derived from the walk just
+        // measured rather than pinned. A literal that is small against today's
+        // walk becomes large against a faster one, and this assertion would
+        // then pass for the wrong reason (or, as with the 250 ms target this
+        // replaced, never get the chance to run at all).
+        let timeout_ms = (walk / 10).as_millis().max(1) as u64;
 
-    phase_align_to_the_timer_tick().await;
-    let started = std::time::Instant::now();
-    let result = BashTool
-        .execute_streaming_with_ctx(
-            json!({"command": "echo hi", "timeout": timeout_ms}),
-            &ctx,
-            &sink,
-        )
-        .await;
-    let elapsed = started.elapsed();
-    let allowance_after = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
-    let allowance = allowance_before.max(allowance_after);
-    let bounded = elapsed.saturating_sub(allowance);
+        // The host's timer cost is BRACKETED around the call under test and the
+        // larger bracket is used. On Windows the timer resolution is a
+        // system-wide setting any process can raise or drop, so a correction
+        // measured only afterwards can belong to a different regime than the
+        // one the call paid for. Measuring on both sides means a regime has to
+        // appear and vanish inside the bracket to escape it. These samples
+        // touch nothing but the timer, so the before-bracket cannot warm or
+        // perturb the call it is correcting.
+        let allowance_before = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
 
-    assert!(
-        bounded * 3 < walk,
-        "a {timeout_ms}ms streaming timeout returned after {elapsed:?} \
-         ({bounded:?} above this host's {allowance:?} allowance for one timer \
-         wait) against a walk measured at {walk:?} — the manifest build is \
-         outside the timeout scope"
-    );
-    // #1111 acceptance 3: "a manifest build that exceeds the timeout produces a
-    // user-visible message NAMING THE CAUSE". `contains("timed out")` alone is
-    // satisfied by the byte-identical string the CHILD-timeout path returns, so
-    // it does not grade that criterion — the caller has to be told the
-    // workspace scan ate the budget and that no child ever ran.
-    assert!(
-        result.content.contains("timed out") && result.content.contains("manifest"),
-        "the caller must be told WHY it stopped, and that it was the manifest \
-         build rather than the command itself; got: {}",
-        result.content
-    );
+        phase_align_to_the_timer_tick().await;
+        let started = std::time::Instant::now();
+        let sink = crate::NullToolOutputSink;
+        let result = BashTool
+            .execute_streaming_with_ctx(
+                json!({"command": "echo hi", "timeout": timeout_ms}),
+                &ctx,
+                &sink,
+            )
+            .await;
+        let elapsed = started.elapsed();
+        let allowance_after = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
+        let allowance = allowance_before.max(allowance_after);
+        let bounded = elapsed.saturating_sub(allowance);
+
+        // Graded on EVERY attempt and never retried: this is the half a product
+        // regression breaks, and re-racing past a failure here would hide
+        // exactly the defect #1111 exists to catch.
+        assert!(
+            bounded * 3 < walk,
+            "a {timeout_ms}ms streaming timeout returned after {elapsed:?} ({bounded:?} above \
+             this host's {allowance:?} allowance for one timer wait) against a walk \
+             measured at {walk:?} — the manifest build is outside the timeout scope"
+        );
+
+        // #1111 acceptance 3: "a manifest build that exceeds the timeout
+        // produces a user-visible message NAMING THE CAUSE".
+        // `contains("timed out")` alone is satisfied by the byte-identical
+        // string the CHILD-timeout path returns, so it does not grade that
+        // criterion — the caller has to be told the workspace scan ate the
+        // budget and that no child ever ran.
+        if result.content.contains("manifest") || last_attempt {
+            assert!(
+                result.content.contains("timed out") && result.content.contains("manifest"),
+                "the caller must be told WHY it stopped, and that it was the manifest \
+                 build rather than the command itself; got: {} (attempt {attempt}, a \
+                 {timeout_ms}ms timeout against a walk measured at {walk:?})",
+                result.content
+            );
+            return;
+        }
+
+        // The build beat the deadline this time — see `RACE_ATTEMPTS`. Make the
+        // real walk more expensive and race again.
+        grow_workspace(&root, attempt);
+    }
 }
 
 /// NEGATIVE CONTROL for the four tests above — and it must stay GREEN on the
