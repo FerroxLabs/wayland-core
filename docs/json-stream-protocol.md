@@ -658,13 +658,16 @@ Clients should update their UI controls (e.g., enable/disable thinking toggle, p
 
 ### 1.13 `mcp_ready`
 
-Emitted after a dynamically injected MCP server has connected and its tools are registered.
+Emitted when an MCP server's tools are available under `name` — after a boot-time
+or dynamic connect, and also when an `add_mcp_server` names a server that is
+already connected.
 
 ```json
 {
   "type": "mcp_ready",
   "name": "my-tools",
-  "tools": ["tool_a", "tool_b"]
+  "tools": ["tool_a", "tool_b"],
+  "outcome": "connected"
 }
 ```
 
@@ -672,6 +675,22 @@ Emitted after a dynamically injected MCP server has connected and its tools are 
 |-------|------|-------------|
 | `name` | string | Server name (as provided in `add_mcp_server`) |
 | `tools` | string[] | List of tool names registered from this server |
+| `outcome` | string | Optional. `connected` or `already_connected` — see below |
+
+`outcome` (capability `mcp_ready_outcome_v1`, contract 1.20) tells a host why the
+frame exists:
+
+- `connected` — a transport was dialed and its tools registered by this event.
+- `already_connected` — the server was already connected. **Nothing was dialed**,
+  no tool was re-registered, the lifecycle generation is unchanged, and `tools`
+  restates the set the host already holds. A host must not render this as a
+  reconnect, and must not restart anything it had bound to the previous
+  generation.
+
+The field is omitted by producers that predate the capability. **Absence means
+"unknown", not `connected`** — before this capability a skip and a connect were
+byte-identical, so treating a missing `outcome` as a connect reports every skip
+as a reconnect. Feature-detect on `mcp_ready_outcome_v1` in `ready.contract.capabilities`.
 
 ### 1.14 `pong`
 

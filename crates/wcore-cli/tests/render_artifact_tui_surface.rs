@@ -19,10 +19,10 @@ use tokio_util::sync::CancellationToken;
 
 use wcore_agent::output::OutputSink;
 use wcore_agent::render_sink::ProtocolRenderSink;
-use wcore_cli::tui::app::App;
 use wcore_cli::tui::ChannelSink;
-use wcore_cli::tui::apply_event;
 use wcore_cli::tui::TurnElement;
+use wcore_cli::tui::app::App;
+use wcore_cli::tui::apply_event;
 use wcore_protocol::events::{ProtocolEvent, RenderMime};
 use wcore_tools::Tool;
 use wcore_tools::context::ToolContext;
@@ -100,9 +100,7 @@ async fn a_rendered_artifact_reaches_the_tui_transcript() {
         .iter()
         .find(|event| matches!(event, ProtocolEvent::RenderArtifact { .. }))
         .cloned()
-        .unwrap_or_else(|| {
-            panic!("ChannelSink must forward the artifact; got {events:?}")
-        });
+        .unwrap_or_else(|| panic!("ChannelSink must forward the artifact; got {events:?}"));
     match &frame {
         ProtocolEvent::RenderArtifact {
             title,
@@ -162,7 +160,11 @@ fn the_channel_sink_applies_the_content_cap() {
 /// be READ, and markdown-rendering `text/plain` eats its `#` and `*`.
 #[test]
 fn plain_text_is_fenced_rather_than_markdown_rendered() {
-    let rendered = transcript_for(RenderMime::Plain, "# not a heading\n* not a bullet\n", false);
+    let rendered = transcript_for(
+        RenderMime::Plain,
+        "# not a heading\n* not a bullet\n",
+        false,
+    );
     assert!(
         rendered.contains("# not a heading"),
         "plain text must survive verbatim: {rendered:?}"

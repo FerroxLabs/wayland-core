@@ -2016,6 +2016,12 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             ProtocolEvent::McpReady {
                 name: "desktop-tools".into(),
                 tools: vec!["search".into(), "fetch".into()],
+                // #605 — the fixture PUBLISHES the annotation. Leaving it out
+                // would have kept the schema unchanged and let the widening
+                // ride `additionalProperties: true` unannounced, which is the
+                // smuggled-widening failure `session_persistence_v2` exists to
+                // prevent.
+                outcome: Some(crate::events::McpReadyOutcome::Connected),
             },
         ),
         (

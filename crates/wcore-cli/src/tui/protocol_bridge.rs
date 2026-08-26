@@ -854,7 +854,12 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 ..prev.clone()
             });
         }
-        ProtocolEvent::McpReady { name, tools } => {
+        // #605: `outcome` is deliberately unread here. The TUI's own skip
+        // path never emits `McpReady` at all (it returns from the `Existing`
+        // arm with an `Info`), so every frame this bridge sees is a connect,
+        // and branching on the annotation would add a status string no TUI
+        // code path can produce.
+        ProtocolEvent::McpReady { name, tools, .. } => {
             // v0.9.1 W1-B: MCP readiness is a status concern, not a
             // transcript event. Record it on `app.mcp_status` so
             // `/doctor` and the right-rail Activity panel can surface it
@@ -1409,11 +1414,7 @@ fn render_artifact_body(
             body.push_str(content);
         }
         RenderMime::Plain | RenderMime::Html => {
-            let longest_run = content
-                .split(|c| c != '`')
-                .map(str::len)
-                .max()
-                .unwrap_or(0);
+            let longest_run = content.split(|c| c != '`').map(str::len).max().unwrap_or(0);
             let fence = "`".repeat(longest_run.saturating_add(1).max(3));
             let language = if matches!(mime, RenderMime::Html) {
                 "html"
@@ -1431,9 +1432,7 @@ fn render_artifact_body(
         }
     }
     if truncated {
-        body.push_str(
-            "\n\n_Truncated \u{2014} the artifact was larger than the render cap._",
-        );
+        body.push_str("\n\n_Truncated \u{2014} the artifact was larger than the render cap._");
     }
     body
 }
@@ -4062,6 +4061,7 @@ mod tests {
             ProtocolEvent::McpReady {
                 name: "github".into(),
                 tools: vec!["search".into(), "fetch".into()],
+                outcome: Some(wcore_protocol::events::McpReadyOutcome::Connected),
             },
         );
         assert_eq!(
@@ -4127,6 +4127,7 @@ mod tests {
             ProtocolEvent::McpReady {
                 name: "github".into(),
                 tools: vec!["search".into(), "fetch".into()],
+                outcome: Some(wcore_protocol::events::McpReadyOutcome::Connected),
             },
         );
         assert_eq!(

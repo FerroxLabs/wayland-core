@@ -3092,6 +3092,11 @@ impl TuiEngine {
         let _ = tx.send(ProtocolEvent::McpReady {
             name: name.clone(),
             tools: tool_names,
+            // #605: reached only after `connect_and_register_mcp` dialed and
+            // published this generation. The TUI's own skip path returns much
+            // earlier, from the `Existing` arm, and emits `Info` rather than
+            // `McpReady` — so no frame from here is ever a restatement.
+            outcome: Some(wcore_protocol::events::McpReadyOutcome::Connected),
         });
         let _ = tx.send(ProtocolEvent::Info {
             msg_id: String::new(),

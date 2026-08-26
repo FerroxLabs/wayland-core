@@ -972,9 +972,23 @@ pub enum ProtocolEvent {
     ConfigChanged {
         capabilities: Capabilities,
     },
+    /// An MCP server's tool set is available under `name`.
+    ///
+    /// FerroxLabs/wayland#605: `outcome` says WHY this frame exists. Without
+    /// it, `add_mcp_server` for a name already held at `Ready` produced a frame
+    /// byte-identical to the one a real connect produces — the host learned
+    /// "these tools are available" but could not tell that nothing was dialed,
+    /// nothing changed, and its own "reconnecting…" spinner should never have
+    /// been shown.
+    ///
+    /// `None` means an older producer that predates the annotation, NOT a
+    /// third outcome — the `mcp_ready_outcome_v1` contract capability is how a
+    /// host tells those apart. Every emit site in this producer states a value.
     McpReady {
         name: String,
         tools: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<McpReadyOutcome>,
     },
     /// An MCP server failed (or timed out) at connect. The companion to
     /// [`McpReady`]: it carries the preserved failure cause so a host /
@@ -1681,6 +1695,32 @@ pub enum GoalControlRefusalReason {
     JournalUnavailable,
     /// The journal rejected the append.
     JournalError,
+}
+
+/// Why a [`ProtocolEvent::McpReady`] was emitted (FerroxLabs/wayland#605).
+///
+/// CLOSED, on the same terms as `ready.session_persistence`: a future value
+/// must not be able to arrive as free text and be accepted by a host that has
+/// never heard of it. Widening this is a contract event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpReadyOutcome {
+    /// A transport was dialed and its tools registered by THIS event. The
+    /// server was not connected a moment ago.
+    Connected,
+    /// The server was already connected and nothing was dialed. The event
+    /// restates the tool set the host already has; the lifecycle generation is
+    /// unchanged. A host must not treat this as a reconnect.
+    AlreadyConnected,
+}
+
+impl McpReadyOutcome {
+    /// Every declared token, in wire order. The contract generator reads this
+    /// so the published schema stays a projection of the enum rather than a
+    /// hand-kept copy of it.
+    pub fn all() -> &'static [&'static str] {
+        &["connected", "already_connected"]
+    }
 }
 
 /// Result of a session-scoped runtime MCP removal request.
@@ -2662,6 +2702,7 @@ mod tests {
         let event = ProtocolEvent::McpReady {
             name: "team-tools".to_string(),
             tools: vec!["team_send_message".into(), "team_task_create".into()],
+            outcome: Some(McpReadyOutcome::Connected),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "mcp_ready");
@@ -2669,6 +2710,67 @@ mod tests {
         assert_eq!(json["tools"][0], "team_send_message");
         assert_eq!(json["tools"][1], "team_task_create");
         assert_eq!(json["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(json["outcome"], "connected");
+    }
+
+    /// #605 — the whole point: the two frames must not be equal. A test that
+    /// only checked one spelling would pass on a producer that emitted the same
+    /// value twice.
+    #[test]
+    fn an_mcp_ready_skip_is_distinguishable_from_a_connect() {
+        let connected = serde_json::to_value(ProtocolEvent::McpReady {
+            name: "team-tools".into(),
+            tools: vec!["a".into()],
+            outcome: Some(McpReadyOutcome::Connected),
+        })
+        .unwrap();
+        let skipped = serde_json::to_value(ProtocolEvent::McpReady {
+            name: "team-tools".into(),
+            tools: vec!["a".into()],
+            outcome: Some(McpReadyOutcome::AlreadyConnected),
+        })
+        .unwrap();
+        assert_eq!(skipped["outcome"], "already_connected");
+        assert_ne!(connected, skipped);
+    }
+
+    /// The back-compat half. `None` must put NOTHING on the wire, so a host
+    /// pinned to the pre-#605 shape sees the frame it has always seen rather
+    /// than an `"outcome": null` its validator may not accept.
+    #[test]
+    fn an_unannotated_mcp_ready_omits_the_key_entirely() {
+        let json = serde_json::to_value(ProtocolEvent::McpReady {
+            name: "team-tools".into(),
+            tools: vec!["a".into()],
+            outcome: None,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "mcp_ready", "name": "team-tools", "tools": ["a"]})
+        );
+    }
+
+    /// `McpReadyOutcome::all()` is the published vocabulary and is hand-written,
+    /// so it can drift from the `rename_all` serde emits. Pin the two together;
+    /// a schema that names a token the producer never emits is worse than no
+    /// schema.
+    #[test]
+    fn the_published_outcome_vocabulary_matches_what_serde_emits() {
+        let emitted: Vec<String> = [
+            McpReadyOutcome::Connected,
+            McpReadyOutcome::AlreadyConnected,
+        ]
+        .into_iter()
+        .map(|outcome| {
+            serde_json::to_value(outcome)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+        assert_eq!(emitted, McpReadyOutcome::all());
     }
 
     #[test]

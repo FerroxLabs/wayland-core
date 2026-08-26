@@ -87,8 +87,19 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // gap: each records why a specific widening needed a signal, and rewriting them
 // to look consecutive would destroy that reasoning to tidy a sequence no host
 // reads. A pinned host moves 1.16 -> 1.19 and finds every capability named.
-pub const CONTRACT_MINOR: u64 = 19;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/19";
+// 19 -> 20: `mcp_ready_outcome_v1` (FerroxLabs/wayland#605). `mcp_ready` gains
+// an optional `outcome`. No existing field changed shape and nothing became
+// required, so `major` holds at 1 — this is the "new optional field on an
+// existing event" case the wire-shape gate names, and the gate forces the bump
+// (`altered=["events/mcp_ready.json"]` under a standing 1.19).
+//
+// The version is what a pinned host reads to know the field is TRUSTWORTHY.
+// Absence cannot carry that: on every Core before this one `outcome` is absent
+// from a skip and a connect alike, so a host that treated "no outcome" as
+// "connected" would call every skip a reconnect — the exact misreading #605
+// reports, now with a schema that looks like it settled the question.
+pub const CONTRACT_MINOR: u64 = 20;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/20";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -310,6 +321,14 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
         // would fail its own published schema instead of silently costing a
         // host its connection.
         ("render_artifact", "critical") => json!({"const": false, "type": "boolean"}),
+        // CLOSED, for the same reason `ready.session_persistence` is: a future
+        // outcome must not arrive as free text and be accepted by a host that
+        // has never heard of it and cannot render it. Generated from the enum
+        // so the schema cannot drift from the type that produces the frames.
+        ("mcp_ready", "outcome") => json!({
+            "enum": crate::events::McpReadyOutcome::all(),
+            "type": "string"
+        }),
         ("render_artifact", "title") => json!({
             "maxLength": crate::events::RENDER_ARTIFACT_TITLE_LIMIT_BYTES,
             "type": "string"
@@ -1652,6 +1671,23 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         // renders it — that is the host's half of #1098.
         (
             "render_artifact_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        // #605 — the feature-detect for `mcp_ready.outcome`.
+        //
+        // Declared => EVERY `mcp_ready` this producer emits carries `outcome`,
+        // and `already_connected` means the transport was not touched: no
+        // dial, no re-registration, the same lifecycle generation, the same
+        // tool set the host already holds.
+        // Undeclared => the field never appears, and a host cannot tell a
+        // restatement from a reconnect at all — which is the state #605
+        // reports and why absence is not a usable signal on its own.
+        //
+        // Available, not ShapeOnly: the value is not decorative. It is read off
+        // the lifecycle reservation that decided whether to dial, at the site
+        // that decided it.
+        (
+            "mcp_ready_outcome_v1".into(),
             ContractCapabilityStatus::Available,
         ),
         ("plugin_events".into(), ContractCapabilityStatus::ShapeOnly),

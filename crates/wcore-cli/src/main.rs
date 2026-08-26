@@ -3339,7 +3339,13 @@ fn mcp_ready_events_for(
         .into_iter()
         .map(|name| {
             let tools = per_server.remove(&name).unwrap_or_default();
-            ProtocolEvent::McpReady { name, tools }
+            // #605: boot-time inventory. Every server in the manager here was
+            // dialed by THIS process during startup, so this is a connect.
+            ProtocolEvent::McpReady {
+                name,
+                tools,
+                outcome: Some(wcore_protocol::events::McpReadyOutcome::Connected),
+            }
         })
         .collect()
 }
@@ -5451,8 +5457,21 @@ async fn run_json_stream_mode(
                         }
                         match snapshot.state {
                             McpLifecycleState::Ready => {
+                                // #605 THE skip. The reservation came back
+                                // `Existing` at `Ready`: nothing is dialed, no
+                                // tool is re-registered, and the lifecycle
+                                // generation is kept. This frame restates the
+                                // tool set the host already has, and before the
+                                // annotation it was byte-identical to the one a
+                                // real connect emits.
                                 let tools = registered_mcp_tool_names(&engine.tools(), &name);
-                                let _ = writer.emit(&ProtocolEvent::McpReady { name, tools });
+                                let _ = writer.emit(&ProtocolEvent::McpReady {
+                                    name,
+                                    tools,
+                                    outcome: Some(
+                                        wcore_protocol::events::McpReadyOutcome::AlreadyConnected,
+                                    ),
+                                });
                             }
                             McpLifecycleState::Connecting => {
                                 eprintln!(
@@ -5572,6 +5591,9 @@ async fn run_json_stream_mode(
                         let _ = writer.emit(&ProtocolEvent::McpReady {
                             name,
                             tools: tool_names,
+                            // #605: `connect_one` returned Ok on this call —
+                            // a transport really was dialed here.
+                            outcome: Some(wcore_protocol::events::McpReadyOutcome::Connected),
                         });
                     }
                     Err(e) => {
@@ -8726,8 +8748,19 @@ mod tests {
 
         // Helper sorts servers by name, so order is deterministic: fs, search.
         match &events[0] {
-            ProtocolEvent::McpReady { name, tools } => {
+            ProtocolEvent::McpReady {
+                name,
+                tools,
+                outcome,
+            } => {
                 assert_eq!(name, "fs");
+                // #605: boot-time inventory is a real connect, not a
+                // restatement — a host must not be told to re-render the
+                // server as "reconnected" at startup.
+                assert_eq!(
+                    *outcome,
+                    Some(wcore_protocol::events::McpReadyOutcome::Connected)
+                );
                 let mut sorted = tools.clone();
                 sorted.sort();
                 assert_eq!(sorted, vec!["read_file".to_string(), "write_file".into()]);
@@ -8735,9 +8768,17 @@ mod tests {
             other => panic!("expected McpReady, got {other:?}"),
         }
         match &events[1] {
-            ProtocolEvent::McpReady { name, tools } => {
+            ProtocolEvent::McpReady {
+                name,
+                tools,
+                outcome,
+            } => {
                 assert_eq!(name, "search");
                 assert_eq!(tools, &vec!["grep".to_string()]);
+                assert_eq!(
+                    *outcome,
+                    Some(wcore_protocol::events::McpReadyOutcome::Connected)
+                );
             }
             other => panic!("expected McpReady, got {other:?}"),
         }
@@ -8771,9 +8812,17 @@ mod tests {
         let events = mcp_ready_events_for(&mgr, &registry);
         assert_eq!(events.len(), 1, "tool-less servers must still emit");
         match &events[0] {
-            ProtocolEvent::McpReady { name, tools } => {
+            ProtocolEvent::McpReady {
+                name,
+                tools,
+                outcome,
+            } => {
                 assert_eq!(name, "introspect");
                 assert!(tools.is_empty());
+                assert_eq!(
+                    *outcome,
+                    Some(wcore_protocol::events::McpReadyOutcome::Connected)
+                );
             }
             other => panic!("expected McpReady, got {other:?}"),
         }
@@ -9142,9 +9191,17 @@ mod tests {
         let events = mcp_ready_events_for(&manager, &registry);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ProtocolEvent::McpReady { name, tools } => {
+            ProtocolEvent::McpReady {
+                name,
+                tools,
+                outcome,
+            } => {
                 assert_eq!(name, "collision");
                 assert_eq!(tools, &["mcp__collision__ToolSearch".to_string()]);
+                assert_eq!(
+                    *outcome,
+                    Some(wcore_protocol::events::McpReadyOutcome::Connected)
+                );
             }
             other => panic!("expected McpReady, got {other:?}"),
         }

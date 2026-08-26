@@ -391,9 +391,13 @@ fn golden_config_changed_v0_1_21() {
 
 #[test]
 fn golden_mcp_ready_v0_1_21() {
+    // #605 added an optional `outcome`. `None` here is the point of this
+    // golden: the v0.1.21 wire must still be producible byte-for-byte, so an
+    // unannotated frame carries no extra key at all.
     let event = ProtocolEvent::McpReady {
         name: "memory-server".into(),
         tools: vec!["memory_store".into(), "memory_search".into()],
+        outcome: None,
     };
     assert_eq!(
         serialize(&event),
