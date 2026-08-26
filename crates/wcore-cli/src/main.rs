@@ -9188,7 +9188,16 @@ mod tests {
                     rust_sources(&path, out);
                 } else if path.extension().is_some_and(|ext| ext == "rs") {
                     let text = std::fs::read_to_string(&path).expect("readable source");
-                    out.push((path, text));
+                    // Cut the test modules off. THIS test quotes the waiver
+                    // string three times, so a gate that searched whole files
+                    // would report main.rs as a waiver site whether or not the
+                    // production line still existed — it would be matching its
+                    // own text and could never fail in the deleted direction.
+                    let production = match text.find("\n#[cfg(test)]\n") {
+                        Some(at) => text[..at].to_string(),
+                        None => text,
+                    };
+                    out.push((path, production));
                 }
             }
         }
