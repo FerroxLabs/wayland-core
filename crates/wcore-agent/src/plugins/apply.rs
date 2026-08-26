@@ -309,6 +309,17 @@ fn deliver_user_models(
 
 /// Reify each `CapturedPluginTool` and register it into `tool_registry`.
 ///
+/// Namespace claims (`PluginTool::namespace_claim`) are dropped first, before
+/// the collision check. They are pure name reservations for the plugin-side
+/// `NamespaceLedger`; nothing executes under them, and their real tool arrives
+/// through a separate host-side path (`deliver_browser_tools` /
+/// `deliver_cua_tools`). Because `PluginToolAdapter::name()` echoes the BARE
+/// name, keeping them would (a) make `wayland-browser` and `wayland-cua` — both
+/// of which claim `"execute"` — collide with each other on every startup, and
+/// (b) leave the survivor in the registry, where `Engine::to_tool_defs()`
+/// advertises it to the model as a callable tool whose only possible result is
+/// `is_error: true`.
+///
 /// Collision rule (§5.1, Task 1.7): if a tool with the same name is already
 /// registered, log a warning and skip the plugin tool. Called *after* the
 /// builtin block, so builtins always win.
@@ -317,6 +328,15 @@ fn deliver_tools(
     tool_registry: &mut wcore_tools::registry::ToolRegistry,
 ) {
     for captured in tools {
+        if captured.tool.namespace_claim {
+            tracing::debug!(
+                plugin = %captured.plugin,
+                fq_name = %captured.fq_name,
+                "plugin tool is a namespace claim — not registered (the real \
+                 tool is reified host-side)"
+            );
+            continue;
+        }
         let reified = ReifiedTool::from_captured(captured);
         let name = reified.tool.name().to_string();
         if tool_registry.get(&name).is_some() {

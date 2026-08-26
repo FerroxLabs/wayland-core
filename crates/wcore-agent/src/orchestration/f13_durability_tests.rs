@@ -1507,6 +1507,7 @@ async fn actual_plugin_adapter_error_is_ambiguous_and_terminal() {
         category: ToolCategory::Info,
         is_deferred: false,
         max_result_size: 1_000,
+        namespace_claim: false,
         execute: Arc::new(|_inv| {
             Box::pin(async {
                 ToolResult {

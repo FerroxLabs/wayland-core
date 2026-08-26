@@ -85,7 +85,7 @@ impl Plugin for WaylandBrowser {
         // (wayland-browser cannot construct it directly — audit F2). The
         // `PluginTool` carries honest metadata; its closure is never the
         // live execution path.
-        registry.register_tool(wcore_plugin_api::tool::PluginTool::host_delegated(
+        registry.register_tool(wcore_plugin_api::tool::PluginTool::namespace_claim(
             "execute",
             "Browser tool — reified host-side from the BrowserToolSpec.",
             wcore_protocol::events::ToolCategory::Exec,
