@@ -203,17 +203,72 @@ fn windows_path_is_under(path: &str, prefix: &str) -> bool {
 
 /// True when `path` sits under a prefix the platform grants unconditionally,
 /// in either spelling.
+/// Does one path component match a carve-out component, allowing for Windows'
+/// 8.3 SHORT form?
+///
+/// Windows quotes a child's own output back with short components — the CI
+/// runners produce
+/// `C:\WINDOWS\SERVIC~1\NETWOR~1\AppData\Local\Temp\...` for what
+/// `canonicalize` renders as `...\ServiceProfiles\NetworkService\...`. A
+/// carve-out compared component-wise against the long spelling can never match
+/// the short one, and the path then falls through to the `C:\Windows` grant,
+/// which needs only two components and matches the short spelling fine.
+///
+/// The generated form is the first six characters, uppercased, then `~` and a
+/// disambiguating index.
+///
+/// THE ASYMMETRY IS DELIBERATE, and this is why the relaxation lives here and
+/// NOT in [`windows_path_is_under`] itself. Over-matching a CARVE-OUT withholds
+/// an always-granted classification, so the worst case is an advisory shown for
+/// a path that did not need one — noise. Over-matching a GRANT suppresses the
+/// advisory, which is the failure this whole carve-out exists to prevent. Only
+/// the harmless direction gets the loose comparison.
+fn windows_component_matches_short_form(got: &str, want: &str) -> bool {
+    if got.eq_ignore_ascii_case(want) {
+        return true;
+    }
+    let Some((stem, index)) = got.split_once('~') else {
+        return false;
+    };
+    if stem.len() != 6 || index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    // A component short enough to survive intact is never abbreviated, so a
+    // `~` form cannot stand for it.
+    want.len() > 8 && want.is_char_boundary(6) && want[..6].eq_ignore_ascii_case(stem)
+}
+
+/// [`windows_path_is_under`], but each component may also be an 8.3 short form.
+fn windows_path_is_under_short_aware(path: &str, prefix: &str) -> bool {
+    fn components(s: &str) -> impl Iterator<Item = &str> {
+        s.strip_prefix(r"\\?\")
+            .unwrap_or(s)
+            .split(['\\', '/'])
+            .filter(|c| !c.is_empty())
+    }
+    let mut actual = components(path);
+    components(prefix).all(|want| {
+        actual
+            .next()
+            .is_some_and(|got| windows_component_matches_short_form(got, want))
+    })
+}
+
+/// Does this spelling of a path name one of the [`ALWAYS_GRANTED_EXCEPTIONS`]?
+fn is_grant_exception(path: &str) -> bool {
+    ALWAYS_GRANTED_EXCEPTIONS
+        .iter()
+        .any(|(syntax, prefix)| match syntax {
+            PathSyntax::Posix => posix_path_is_under(path, prefix),
+            PathSyntax::Windows => windows_path_is_under_short_aware(path, prefix),
+        })
+}
+
 fn is_always_granted(path: &str) -> bool {
     // The carve-out is consulted FIRST and short-circuits: a path under one of
     // these is the user's own working directory even though it is also under a
     // granted system root, and the grant must not swallow it.
-    if ALWAYS_GRANTED_EXCEPTIONS
-        .iter()
-        .any(|(syntax, prefix)| match syntax {
-            PathSyntax::Posix => posix_path_is_under(path, prefix),
-            PathSyntax::Windows => windows_path_is_under(path, prefix),
-        })
-    {
+    if is_grant_exception(path) {
         return false;
     }
     ALWAYS_GRANTED_PREFIXES
@@ -1298,6 +1353,46 @@ mod tests {
                 "{path} must still be always-granted"
             );
         }
+    }
+
+    #[test]
+    fn an_8_3_short_spelling_cannot_re_grant_a_carved_out_path() {
+        // What the Windows runners ACTUALLY emit. The child quotes the path
+        // back in 8.3 short form, and `SERVIC~1` cannot match the long-form
+        // carve-out component — while `C:\Windows` needs only two components
+        // and matches the short spelling fine. Before the carve-out learned the
+        // short form, this path was classified as an always-granted system path
+        // and the user lost the advisory entirely.
+        for path in [
+            "C:/WINDOWS/SERVIC~1/NETWOR~1/AppData/Local/Temp/.tmpQNhdeF/.gitconfig",
+            r"C:\WINDOWS\SERVIC~1\NETWOR~1\AppData\Local\Temp\t\secret.txt",
+            r"\\?\C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Temp\t",
+        ] {
+            assert!(
+                !is_always_granted(path),
+                "{path} is a service account's own working directory in ANY spelling"
+            );
+        }
+
+        // Anti-vacuity, and the reason the short-form relaxation is confined to
+        // the carve-out: a genuine system path must STILL be always-granted,
+        // including when Windows shortens ITS components.
+        assert!(is_always_granted(r"C:\Windows\System32\kernel32.dll"));
+
+        // The short-form relaxation is confined to the carve-out, so a system
+        // path spelled 8.3 is NOT recognised as granted. That is pre-existing
+        // and deliberately left alone here: an unrecognised grant only shows an
+        // advisory that was not needed, while an over-matched grant SUPPRESSES
+        // one — the failure this carve-out exists to prevent. Asserted so the
+        // asymmetry is a recorded decision rather than an accident, and so
+        // whoever closes that separate gap is told to update this row.
+        assert!(!is_always_granted("C:/PROGRA~1/Git/cmd/git.exe"));
+        assert!(!is_always_granted(r"C:\WINDOW~1\System32\kernel32.dll"));
+
+        // A `~` component that is NOT an 8.3 form of the carve-out must not be
+        // read as one, or the relaxation would swallow unrelated directories.
+        assert!(is_always_granted(r"C:\Windows\SERVIC~1x\y"));
+        assert!(is_always_granted(r"C:\Windows\ABCDEF~1\y"));
     }
 
     #[test]
