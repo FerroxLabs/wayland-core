@@ -50,7 +50,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -240,6 +240,28 @@ async fn start_routed_mock() -> MockServer {
 }
 
 /// A live `acp serve` process plus the address it actually bound.
+/// How long [`AcpServer::post`] may spend reading one prompt response.
+///
+/// A DELIBERATE CAP, set BELOW nextest's kill rather than above the operation
+/// it reads. Two measured facts put it there:
+///
+///   * A prompt turn contains at least one tool dispatch, and
+///     `tool_dispatch_timeout` (crates/wcore-agent/src/orchestration/mod.rs)
+///     allows a `ToolCategory::Exec` dispatch 600s. A turn is that plus model
+///     latency, so NO read budget can be proved to cover one. This can only be
+///     a cap that says so when it binds — which is what `post` now does.
+///   * nextest hard-kills this binary at 180s under `--profile ci`
+///     (`[profile.ci] slow-timeout = { period = "90s", terminate-after = 2 }`)
+///     and at 60s under the default profile. The previous 180s budget was
+///     therefore UNREACHABLE under ci: the prompt read starts seconds into the
+///     test, so nextest always won the race and the budget never fired.
+///     Raising it to 600s to "match" the Exec ceiling would deepen that — a
+///     number that cannot be reached certifies nothing.
+///
+/// 150s leaves ~30s of headroom under the ci kill, so the diagnostic in `post`
+/// is reachable on the profile CI actually runs.
+const PROMPT_READ_BUDGET: Duration = Duration::from_secs(150);
+
 struct AcpServer {
     child: std::process::Child,
     addr: String,
@@ -274,10 +296,37 @@ impl AcpServer {
             .expect("write the request");
         stream.flush().expect("flush the request");
         let mut raw = Vec::new();
-        // A read timeout ends the read; an SSE body that has finished is closed
-        // by the server, so the common case returns on EOF rather than timing
-        // out. Either way the accumulated bytes are the response.
-        let _ = stream.read_to_end(&mut raw);
+        let started = Instant::now();
+        // NEVER `let _ =` here. `read_to_end` returns `Ok` only on a clean
+        // EOF, which IS the normal path: the server closes a finished response
+        // (`Connection: close`). Any error means `raw` holds a PREFIX, and a
+        // prefix returned as a plain `String` is indistinguishable from a
+        // whole response — the session-create call then dies inside
+        // `json_body` blaming the server for invalid JSON, and the prompt call
+        // fails an assertion blaming the product for a frame the harness
+        // simply never read. Both misattribute a harness timeout to the code
+        // under test, which is worse than a red test.
+        if let Err(err) = stream.read_to_end(&mut raw) {
+            // Read-timeout expiry is `WouldBlock` on Unix and `TimedOut` on
+            // Windows (`TcpStream::set_read_timeout`); CI runs both.
+            let timed_out = matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            );
+            panic!(
+                "POST {path} was not read to completion after {:?} (budget \
+                 {read_for:?}, timed out: {timed_out}, io error: {err}). The {} \
+                 bytes received are a PREFIX of the response, not the response. \
+                 A single `ToolCategory::Exec` dispatch is allowed 600s \
+                 (wcore_agent tool_dispatch_timeout), so a legitimately slow \
+                 turn can outlast this budget: raise the budget at the call \
+                 site and this binary's nextest slow-timeout TOGETHER, rather \
+                 than reading the partial body as a result. Partial body: {:?}",
+                started.elapsed(),
+                raw.len(),
+                String::from_utf8_lossy(&raw),
+            );
+        }
         String::from_utf8_lossy(&raw).into_owned()
     }
 }
@@ -370,7 +419,7 @@ fn drive_one_turn(server: &AcpServer, agent: Option<&str>) -> String {
     server.post(
         &format!("/v1/sessions/{session_id}/prompt"),
         &json!({ "text": "delegate the probe write" }),
-        Duration::from_secs(180),
+        PROMPT_READ_BUDGET,
     )
 }
 
