@@ -12,6 +12,7 @@ use crate::Tool;
 use crate::context::ToolContext;
 use crate::file_cache::{FileStateCache, file_mtime_ms};
 use crate::path_validation::validate_user_path;
+use crate::tool_output_limits::ToolOutputLimits;
 
 /// Stub returned when a file has not changed since the model last read it.
 /// Saves tokens by avoiding re-sending identical content.
@@ -97,6 +98,20 @@ fn build_symbol_result(text: &str, path: &Path, symbol: &str) -> ToolResult {
 
 pub struct ReadTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
+    /// Output-shape caps applied to the numbered result this tool returns
+    /// (FerroxLabs/wayland#947).
+    ///
+    /// `tool_output_limits` documents `max_lines` as the "read_file
+    /// pagination + truncation cap" and `max_line_length` as the file-ops
+    /// per-line cap, but `Read` never consulted either. The only bound on its
+    /// result was therefore the blunt head/tail byte cut
+    /// `orchestration::truncate_result` applies at `max_result_size()`
+    /// downstream, which slices mid-line, drops the middle of the file, and
+    /// destroys the line numbering this tool exists to provide.
+    ///
+    /// Held as a field, mirroring `JsonlTool` — the one tool that already
+    /// honours these knobs — so the two file-ops tools share one idiom.
+    limits: ToolOutputLimits,
 }
 
 impl ReadTool {
@@ -104,7 +119,10 @@ impl ReadTool {
     ///
     /// Pass `None` to disable caching (all reads return full content).
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
-        Self { file_cache }
+        Self {
+            file_cache,
+            limits: ToolOutputLimits::default(),
+        }
     }
 }
 
@@ -241,16 +259,43 @@ impl Tool for ReadTool {
         let effective_offset = offset.unwrap_or(0);
         let effective_limit = limit.unwrap_or(lines.len());
 
-        let end = (effective_offset + effective_limit).min(lines.len());
-        let slice = &lines[effective_offset.min(lines.len())..end];
+        let start = effective_offset.min(lines.len());
+        let requested_end = (effective_offset + effective_limit).min(lines.len());
+        // `max_lines` caps the window the caller asked for. It is applied AFTER
+        // offset/limit, so an explicit narrower `limit` still wins, and
+        // `offset` stays the paging escape hatch the notice below points at.
+        let end = requested_end.min(start.saturating_add(self.limits.max_lines));
+        let slice = &lines[start..end];
 
-        let numbered: Vec<String> = slice
+        // Clamp each line BEFORE numbering. `clamped` is reused as the diff's
+        // "current" side further down: building that from the raw `slice`
+        // instead would make every clamped line read as an edit against an
+        // equally-clamped base.
+        let clamped: Vec<String> = slice.iter().map(|l| self.limits.clamp_line(l)).collect();
+
+        let numbered: Vec<String> = clamped
             .iter()
             .enumerate()
             .map(|(i, line)| format!("{:>6}\t{}", effective_offset + i + 1, line))
             .collect();
 
         let result_content = numbered.join("\n");
+
+        // Disclose the line cap. Silent truncation is the failure mode that
+        // matters here: the model cannot tell a 2000-line file from the first
+        // 2000 lines of a 200000-line one, so it reasons about a tail it never
+        // saw. Marker shape matches `JsonlTool::finish`, the existing
+        // convention for this cap, plus the offset needed to continue.
+        let cap_notice = if end < requested_end {
+            format!(
+                "\n... [truncated: showing {} of {} lines — re-read with offset={} to continue]",
+                end - start,
+                requested_end - start,
+                end
+            )
+        } else {
+            String::new()
+        };
 
         // Update cache after successful read.
         if let Some(cache_arc) = &self.file_cache
@@ -271,7 +316,7 @@ impl Tool for ReadTool {
         }
 
         ToolResult {
-            content: result_content,
+            content: format!("{result_content}{cap_notice}"),
             is_error: false,
         }
     }
@@ -432,16 +477,43 @@ impl Tool for ReadTool {
         let effective_offset = offset.unwrap_or(0);
         let effective_limit = limit.unwrap_or(lines.len());
 
-        let end = (effective_offset + effective_limit).min(lines.len());
-        let slice = &lines[effective_offset.min(lines.len())..end];
+        let start = effective_offset.min(lines.len());
+        let requested_end = (effective_offset + effective_limit).min(lines.len());
+        // `max_lines` caps the window the caller asked for. It is applied AFTER
+        // offset/limit, so an explicit narrower `limit` still wins, and
+        // `offset` stays the paging escape hatch the notice below points at.
+        let end = requested_end.min(start.saturating_add(self.limits.max_lines));
+        let slice = &lines[start..end];
 
-        let numbered: Vec<String> = slice
+        // Clamp each line BEFORE numbering. `clamped` is reused as the diff's
+        // "current" side further down: building that from the raw `slice`
+        // instead would make every clamped line read as an edit against an
+        // equally-clamped base.
+        let clamped: Vec<String> = slice.iter().map(|l| self.limits.clamp_line(l)).collect();
+
+        let numbered: Vec<String> = clamped
             .iter()
             .enumerate()
             .map(|(i, line)| format!("{:>6}\t{}", effective_offset + i + 1, line))
             .collect();
 
         let result_content = numbered.join("\n");
+
+        // Disclose the line cap. Silent truncation is the failure mode that
+        // matters here: the model cannot tell a 2000-line file from the first
+        // 2000 lines of a 200000-line one, so it reasons about a tail it never
+        // saw. Marker shape matches `JsonlTool::finish`, the existing
+        // convention for this cap, plus the offset needed to continue.
+        let cap_notice = if end < requested_end {
+            format!(
+                "\n... [truncated: showing {} of {} lines — re-read with offset={} to continue]",
+                end - start,
+                requested_end - start,
+                end
+            )
+        } else {
+            String::new()
+        };
 
         // Token-burn fix: if the exact numbered lines we would return are already
         // present verbatim in a still-current cached Read of this file, the model
@@ -468,7 +540,7 @@ impl Tool for ReadTool {
         let mut response_content = result_content.clone();
         if let Some(base_numbered) = &diff_base {
             let base_raw = crate::read_diff::strip_line_numbers(base_numbered);
-            let cur_raw: Vec<String> = slice.iter().map(|s| s.to_string()).collect();
+            let cur_raw: Vec<String> = clamped.clone();
             if base_raw != cur_raw
                 && let Some(diff_body) = crate::read_diff::build_read_diff(
                     &base_raw,
@@ -502,7 +574,7 @@ impl Tool for ReadTool {
         }
 
         ToolResult {
-            content: response_content,
+            content: format!("{response_content}{cap_notice}"),
             is_error: false,
         }
     }

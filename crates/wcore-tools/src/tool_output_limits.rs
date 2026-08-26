@@ -114,6 +114,26 @@ impl ToolOutputLimits {
             ),
         }
     }
+
+    /// Cap one line to `max_line_length`, appending an ellipsis marker when
+    /// the line was longer than the cap.
+    ///
+    /// Lives here rather than on a single tool because `max_line_length` is
+    /// this type's own semantics and both file-ops tools that honour it
+    /// (`JsonlTool`, `ReadTool`) need exactly this behaviour. The cap is a
+    /// BYTE cap snapped back to the nearest char boundary, so a line of
+    /// multi-byte text is never split mid-codepoint.
+    pub fn clamp_line(&self, line: &str) -> String {
+        let max = self.max_line_length;
+        if line.len() <= max {
+            return line.to_string();
+        }
+        let mut end = max;
+        while end > 0 && !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}... [truncated]", &line[..end])
+    }
 }
 
 /// Coerce a JSON value to a positive `usize`, falling back to `default` on
