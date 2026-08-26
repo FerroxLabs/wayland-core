@@ -54,8 +54,10 @@ pub struct PluginTool {
     /// `CuaToolSpec` reification).
     ///
     /// Deliberately DISTINCT from `host_delegated`: a host-delegated tool
-    /// still executes (IJFW's `ijfw_run` runs through the IJFW MCP
-    /// server's tool proxy); a namespace claim never does. The host
+    /// still executes somewhere; a namespace claim never does. IJFW's
+    /// `ijfw_run` / `ijfw_update_apply` are claims, NOT host-delegated —
+    /// the tools the MCP proxy serves are separate registrations that
+    /// happen to share the name. The host
     /// (`wcore-agent`'s `deliver_tools`) drops marked entries before
     /// they reach the tool registry, so the claim can neither trip the
     /// bare-name collision check against the real host-reified tool nor
@@ -76,16 +78,20 @@ impl PluginTool {
     /// Construct a `PluginTool` whose behavior is delivered by the host
     /// (or an MCP server) rather than an in-process closure.
     ///
-    /// IJFW's `ijfw_run` / `ijfw_update_apply` execute via the IJFW MCP
-    /// server's tool proxy, not an in-process body. The `PluginTool`
-    /// carries honest metadata and a closure that returns an error if it
-    /// is ever invoked directly — the delegated path supersedes it before
-    /// that can happen.
+    /// For a tool whose body really is delivered elsewhere but which the
+    /// host should still keep in the registry under this name. The
+    /// `PluginTool` carries honest metadata and a closure that returns an
+    /// error if it is ever invoked directly — the delegated path
+    /// supersedes it before that can happen.
     ///
     /// This is NOT the constructor for a pure name reservation: a
-    /// host-delegated tool still runs somewhere. Use
-    /// [`PluginTool::namespace_claim`] when nothing will ever execute
-    /// under this name.
+    /// host-delegated tool still runs somewhere, and the host keeps it.
+    /// Use [`PluginTool::namespace_claim`] when nothing will ever execute
+    /// under this name — including the case where the real implementation
+    /// reaches the registry as its OWN separate registration, which is
+    /// what IJFW does through the MCP proxy. Keeping a claim here lets it
+    /// shadow that registration: the registry dedupes on the bare name and
+    /// `get()` returns the first match.
     pub fn host_delegated(
         name: impl Into<String>,
         description: impl Into<String>,
