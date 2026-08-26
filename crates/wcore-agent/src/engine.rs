@@ -28039,25 +28039,35 @@ mod audit_2026_05_22_tests {
     ///
     /// The tempdir is returned because dropping it deletes the session the
     /// journal is writing to.
-    fn journaled_engine_with_a_wedged_key_store() -> (
+    ///
+    /// The mock server is the fixture's physical-attempt endpoint: a journaled
+    /// turn only completes when the provider's PHYSICAL attempt is durably
+    /// accepted, which needs a real 2xx. Returned so it outlives the turn, as
+    /// is the tempdir the journal writes into.
+    async fn journaled_engine_with_a_wedged_key_store() -> (
         super::AgentEngine,
         crate::test_utils::TestSinkHandle,
         tempfile::TempDir,
+        MockServer,
     ) {
+        let server = physical_attempt_server().await;
         let dir = tempfile::tempdir().unwrap();
         let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
         let active = manager
-            .create_for_run("anthropic", "m-1", "/tmp", Some("wedgedwedged"))
+            .create_for_run("anthropic", "m-1", "/tmp", Some("deadbeefdead"))
             .unwrap();
-        let (mut engine, events) = engine_and_events(Arc::new(ScriptedProvider::new(vec![vec![
-            LlmEvent::TextDelta("answered".into()),
-            done_endturn(),
-        ]])));
+        let (mut engine, events) = engine_and_events(Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("answered".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        ));
         engine.session_manager = Some(manager);
         engine.current_session = Some(active.session);
         engine.session_journal = Some(active.journal);
         engine.use_wedged_recovery_key_store();
-        (engine, events, dir)
+        (engine, events, dir, server)
     }
 
     fn replay_protection_notices(handle: &crate::test_utils::TestSinkHandle) -> Vec<String> {
@@ -28084,7 +28094,7 @@ mod audit_2026_05_22_tests {
     /// this test's own deadline could not fire.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_wedged_key_store_still_lets_the_turn_reach_the_provider_and_says_so() {
-        let (mut engine, events, _dir) = journaled_engine_with_a_wedged_key_store();
+        let (mut engine, events, _dir, _server) = journaled_engine_with_a_wedged_key_store().await;
 
         let started = std::time::Instant::now();
         let result = engine.run("say something", "m-1").await;
@@ -28127,7 +28137,7 @@ mod audit_2026_05_22_tests {
     /// was set to forbid.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn require_durability_refuses_a_turn_whose_key_store_timed_out() {
-        let (mut engine, events, _dir) = journaled_engine_with_a_wedged_key_store();
+        let (mut engine, events, _dir, _server) = journaled_engine_with_a_wedged_key_store().await;
         engine.config.session.require_durability = true;
 
         let result = engine.run("say something", "m-1").await;
