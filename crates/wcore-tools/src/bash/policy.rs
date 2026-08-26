@@ -126,6 +126,32 @@ const ALWAYS_GRANTED_PREFIXES: &[(PathSyntax, &str)] = &[
     (PathSyntax::Posix, "/nix"),
 ];
 
+/// Paths that sit UNDER an always-granted prefix but are NOT system paths.
+///
+/// Windows keeps every service account's profile, and SYSTEM's own scratch
+/// space, beneath `C:\Windows`:
+///
+/// ```text
+/// C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Temp
+/// C:\Windows\ServiceProfiles\LocalService\AppData\Local\Temp
+/// C:\Windows\Temp                                        (SYSTEM)
+/// ```
+///
+/// Those are ordinary user-writable working directories. When Wayland runs as
+/// a Windows service — which is how our own CI runners execute — `TEMP` is one
+/// of them, so `env::temp_dir()` and everything built on it lands there. Read
+/// as "system", [`classify`] returns `None` for such a path, and the user gets
+/// no banner, no path line and no remedy for a file that was genuinely theirs.
+///
+/// Checked BEFORE the grant list and component-wise like everything else here,
+/// so `C:\Windows\Temperature` and `C:\Windows\ServiceProfilesFoo` keep the
+/// meaning they had: a prefix that compared strings instead of components
+/// would silently widen this carve-out into them.
+const ALWAYS_GRANTED_EXCEPTIONS: &[(PathSyntax, &str)] = &[
+    (PathSyntax::Windows, r"C:\Windows\Temp"),
+    (PathSyntax::Windows, r"C:\Windows\ServiceProfiles"),
+];
+
 /// True when `path` names `prefix`, or something under it, in POSIX syntax.
 fn posix_path_is_under(path: &str, prefix: &str) -> bool {
     // Only an ABSOLUTE path can be under an absolute system prefix: a relative
@@ -178,6 +204,18 @@ fn windows_path_is_under(path: &str, prefix: &str) -> bool {
 /// True when `path` sits under a prefix the platform grants unconditionally,
 /// in either spelling.
 fn is_always_granted(path: &str) -> bool {
+    // The carve-out is consulted FIRST and short-circuits: a path under one of
+    // these is the user's own working directory even though it is also under a
+    // granted system root, and the grant must not swallow it.
+    if ALWAYS_GRANTED_EXCEPTIONS
+        .iter()
+        .any(|(syntax, prefix)| match syntax {
+            PathSyntax::Posix => posix_path_is_under(path, prefix),
+            PathSyntax::Windows => windows_path_is_under(path, prefix),
+        })
+    {
+        return false;
+    }
     ALWAYS_GRANTED_PREFIXES
         .iter()
         .any(|(syntax, prefix)| match syntax {
@@ -1226,6 +1264,40 @@ mod tests {
             );
         }
         assert!(is_always_granted("/usr/bin/foo"));
+    }
+
+    #[test]
+    fn a_service_accounts_own_working_directory_is_not_a_system_path() {
+        // `C:\Windows` is a system root, but Windows keeps every SERVICE
+        // account's profile — and SYSTEM's own temp — underneath it. Those are
+        // ordinary user-writable working directories: when Wayland runs as a
+        // Windows service its `env::temp_dir()` IS one of them. Matching them
+        // as "system" makes `classify` return `None`, so the user gets no
+        // banner, no path and no remedy for a file that was genuinely theirs.
+        for path in [
+            r"C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Temp\t\secret.txt",
+            "C:/WINDOWS/ServiceProfiles/LocalService/AppData/Local/Temp/t/.gitconfig",
+            r"\\?\C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Temp\t",
+            r"C:\Windows\Temp\build\out.log",
+            "C:/Windows/Temp/t",
+        ] {
+            assert!(
+                !is_always_granted(path),
+                "{path} is a service account's own working directory, not a system path"
+            );
+        }
+        // Anti-vacuity: the carve-out must NARROW the rule, not disable it, and
+        // it must respect component boundaries exactly like the rule it narrows.
+        for path in [
+            r"C:\Windows\System32\kernel32.dll",
+            r"C:\Windows\ServiceProfilesFoo\x",
+            r"C:\Windows\Temperature\x",
+        ] {
+            assert!(
+                is_always_granted(path),
+                "{path} must still be always-granted"
+            );
+        }
     }
 
     #[test]
