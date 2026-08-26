@@ -2343,6 +2343,17 @@ const CALIBRATED_WALK: Duration = Duration::from_millis(25);
 /// what `workspace_whose_walk_costs_at_least` can reach inside 240k entries,
 /// and its own note records that 250 ms already needed 630k, so a ladder of
 /// larger targets would panic in tree growth instead of grading anything.
+///
+/// #319: re-racing is NOT ENOUGH ON ITS OWN, and that is measured too. Nightly
+/// soak run 32935226310 on hosted `windows-2025` exhausted all three attempts
+/// and then asserted the graded message anyway, failing on `got: Command timed
+/// out after 3ms` — the CHILD-timeout message, which grades nothing. A retry
+/// budget cannot decide whether the premise holds; only a measurement can. So
+/// the outcome of each attempt is now DECIDED by
+/// [`grade_manifest_attribution`], which compares the walk this tree still
+/// costs against this host's measured latency for the deadline to fire, and
+/// these attempts only bound how many times the tree may be grown while trying
+/// to make that comparison decisive.
 const RACE_ATTEMPTS: usize = 3;
 
 /// Add ~10k entries to `root` under a uniquely named subtree, making the real
@@ -2371,6 +2382,123 @@ fn grow_workspace(root: &std::path::Path, tag: usize) {
 /// tree-growth batch count moving between reps rather than anything this
 /// costs.
 const TIMER_ALLOWANCE_SAMPLES: usize = 4;
+
+/// The SMALLEST of `samples` fresh-policy secret-deny walks over `root`.
+///
+/// The same instrument `workspace_whose_walk_costs_at_least` calibrates with,
+/// and it carries the same known-positive control: a walk that stopped finding
+/// the planted `.env` reports as a broken instrument rather than as a fast
+/// walk. A FRESH policy per sample because the exec path is memoised — re-asking
+/// one policy would report ~0 for every sample after the first.
+///
+/// The smallest sample is the one least contaminated by whatever else the host
+/// is doing, so it is a LOWER bound on what a walk running right now costs.
+/// Every caller here wants that direction: calibration must not size a tree off
+/// a stalled sample, and [`grade_manifest_attribution`] must not call a premise
+/// established off one.
+fn walk_floor(root: &std::path::Path, samples: usize) -> Duration {
+    let mut floor = Duration::MAX;
+    for _ in 0..samples.max(1) {
+        let started = std::time::Instant::now();
+        let deny = crate::workspace_policy::WorkspacePolicy::contained(root)
+            .secret_deny_paths_for_backend(true);
+        floor = floor.min(started.elapsed());
+        assert!(
+            deny.iter().any(|p| p.ends_with(".env")),
+            "instrument control: the contained walk must find the planted .env; got {deny:?}"
+        );
+    }
+    floor
+}
+
+/// #1111 acceptance 3 — "a manifest build that exceeds the timeout produces a
+/// user-visible message NAMING THE CAUSE" — graded against ONE race attempt.
+///
+/// Returns `true` when the test is finished (the criterion was graded, or the
+/// premise it needs could not be established and the test skipped) and `false`
+/// when the caller should grow the tree and race again.
+///
+/// The premise this criterion needs — the manifest build STILL RUNNING when the
+/// deadline fires — is a race, not a property. #319: the v0.13.8 shape asserted
+/// the graded message on the last attempt regardless, so a run that never
+/// established the premise produced a red that graded nothing. A retry budget
+/// cannot tell the two apart. A measurement can, and there are three outcomes:
+///
+/// * The message NAMES the manifest. The build demonstrably outlived the
+///   deadline, so the criterion is IN SCOPE and is graded.
+/// * The message does NOT name the manifest, and the walk this tree still costs
+///   is decisively MORE than this host's latency for the deadline to fire. The
+///   build cannot have finished first, so the product owed the caller the
+///   attribution and withheld it. That is a regression and it FAILS.
+/// * The message does NOT name the manifest, and the walk is not decisively
+///   more than the fire latency. The build may well have won the race, so this
+///   attempt establishes nothing in either direction: grow the tree and race
+///   again, and on the last attempt SKIP LOUDLY rather than assert a criterion
+///   this run never put in scope.
+///
+/// This cannot decay into a test that can never fail. `floor` is the smallest
+/// of three fresh-policy walks (a lower bound on what the build paid) and
+/// `allowance` is the largest of eight phase-aligned timer samples (an upper
+/// bound on when the deadline fires), so `floor > allowance` is already
+/// conservative on both sides and the extra quarter is only margin for the two
+/// being measured moments apart. On this Linux box the floor is ~25 ms against
+/// a ~3 ms allowance — an 8x margin, decisive on every attempt — and on the
+/// Windows host ~25-30 ms against the ~15.6 ms system tick, which still clears
+/// it. The regression arm is proven by mutation, not argued: breaking the
+/// attribution arm in `bash.rs` turns both tests RED here.
+fn grade_manifest_attribution(
+    test: &str,
+    content: &str,
+    root: &std::path::Path,
+    allowance: Duration,
+    context: &str,
+    last_attempt: bool,
+) -> bool {
+    // `contains("timed out")` alone is satisfied by the byte-identical string
+    // the CHILD-timeout path returns, so it does not grade the criterion — the
+    // caller has to be told the workspace scan ate the budget and that no child
+    // ever ran.
+    if content.contains("manifest") {
+        assert!(
+            content.contains("timed out"),
+            "the caller must be told WHY it stopped, and that it was the manifest \
+             build rather than the command itself; got: {content} ({context})"
+        );
+        return true;
+    }
+
+    let floor = walk_floor(root, 3);
+    // `floor > allowance * 1.25`, in integer arithmetic so there is no float
+    // rounding between the two measured quantities.
+    if floor * 4 > allowance * 5 {
+        panic!(
+            "the manifest build was still walking when the deadline fired — the walk \
+             this tree costs floors at {floor:?}, decisively above this host's \
+             {allowance:?} allowance for the timeout to fire — so the caller must be \
+             told the sandbox manifest build ate the budget and that the command never \
+             ran; got: {content} ({context})"
+        );
+    }
+
+    if last_attempt {
+        // No `assert` here on purpose. The premise was never established, so
+        // whatever message came back grades nothing about #1111 acceptance 3,
+        // and asserting on it would be a red that reports a busy host as a
+        // product defect — which is exactly what #319 is. The LATENCY half of
+        // this test was graded on every attempt regardless and is untouched by
+        // this path.
+        eprintln!(
+            "SKIP (#319) {test}: the manifest-naming premise could not be established \
+             after {RACE_ATTEMPTS} attempts — the walk floors at {floor:?} against a \
+             {allowance:?} timer-fire allowance, so the manifest build cannot be shown \
+             to have outlived the deadline and the message it produced grades nothing. \
+             Got: {content} ({context})"
+        );
+        return true;
+    }
+
+    false
+}
 
 /// Grow `root` until its secret-deny walk costs at least `target`, and return
 /// the policy plus the MEASURED warm cost of that walk.
@@ -2439,17 +2567,7 @@ fn workspace_whose_walk_costs_at_least(
             // `walk / 3` budget the latency assertions get, and it shrinks the
             // `walk / 10` timeout they ask for, so the timeout stays a real cut
             // of a real walk.
-            let mut floor = walk;
-            for _ in 0..2 {
-                let started = std::time::Instant::now();
-                let deny = crate::workspace_policy::WorkspacePolicy::contained(root)
-                    .secret_deny_paths_for_backend(true);
-                floor = floor.min(started.elapsed());
-                assert!(
-                    deny.iter().any(|p| p.ends_with(".env")),
-                    "instrument control: the contained walk must find the planted .env; got {deny:?}"
-                );
-            }
+            let floor = walk.min(walk_floor(root, 2));
             if floor >= target {
                 return (policy, floor);
             }
@@ -2549,24 +2667,24 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
         );
 
         // #1111 acceptance 3: "a manifest build that exceeds the timeout
-        // produces a user-visible message NAMING THE CAUSE".
-        // `contains("timed out")` alone is satisfied by the byte-identical
-        // string the CHILD-timeout path returns, so it does not grade that
-        // criterion — the caller has to be told the workspace scan ate the
-        // budget and that no child ever ran.
-        if result.content.contains("manifest") || last_attempt {
-            assert!(
-                result.content.contains("timed out") && result.content.contains("manifest"),
-                "the caller must be told WHY it stopped, and that it was the manifest \
-                 build rather than the command itself; got: {} (attempt {attempt}, a \
-                 {timeout_ms}ms timeout against a walk measured at {walk:?})",
-                result.content
-            );
+        // produces a user-visible message NAMING THE CAUSE". Whether this run
+        // is even in a position to grade that is DECIDED BY MEASUREMENT rather
+        // than by exhausting the retry budget — see `grade_manifest_attribution`.
+        if grade_manifest_attribution(
+            "the_bash_timeout_bounds_the_secret_deny_walk",
+            &result.content,
+            &root,
+            allowance,
+            &format!(
+                "attempt {attempt}, a {timeout_ms}ms timeout against a walk measured at {walk:?}"
+            ),
+            last_attempt,
+        ) {
             return;
         }
 
-        // The build beat the deadline this time — see `RACE_ATTEMPTS`. Make the
-        // real walk more expensive and race again.
+        // The build may have beaten the deadline this time — see
+        // `RACE_ATTEMPTS`. Make the real walk more expensive and race again.
         grow_workspace(&root, attempt);
     }
 }
@@ -2660,24 +2778,24 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
         );
 
         // #1111 acceptance 3: "a manifest build that exceeds the timeout
-        // produces a user-visible message NAMING THE CAUSE".
-        // `contains("timed out")` alone is satisfied by the byte-identical
-        // string the CHILD-timeout path returns, so it does not grade that
-        // criterion — the caller has to be told the workspace scan ate the
-        // budget and that no child ever ran.
-        if result.content.contains("manifest") || last_attempt {
-            assert!(
-                result.content.contains("timed out") && result.content.contains("manifest"),
-                "the caller must be told WHY it stopped, and that it was the manifest \
-                 build rather than the command itself; got: {} (attempt {attempt}, a \
-                 {timeout_ms}ms timeout against a walk measured at {walk:?})",
-                result.content
-            );
+        // produces a user-visible message NAMING THE CAUSE". Whether this run
+        // is even in a position to grade that is DECIDED BY MEASUREMENT rather
+        // than by exhausting the retry budget — see `grade_manifest_attribution`.
+        if grade_manifest_attribution(
+            "the_streaming_bash_timeout_bounds_the_secret_deny_walk",
+            &result.content,
+            &root,
+            allowance,
+            &format!(
+                "attempt {attempt}, a {timeout_ms}ms timeout against a walk measured at {walk:?}"
+            ),
+            last_attempt,
+        ) {
             return;
         }
 
-        // The build beat the deadline this time — see `RACE_ATTEMPTS`. Make the
-        // real walk more expensive and race again.
+        // The build may have beaten the deadline this time — see
+        // `RACE_ATTEMPTS`. Make the real walk more expensive and race again.
         grow_workspace(&root, attempt);
     }
 }
