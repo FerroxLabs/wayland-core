@@ -252,6 +252,32 @@ struct DenyCache {
 /// stops paying for itself and starts costing memory instead.
 const DENY_CACHE_MAX_DIRS: usize = 100_000;
 
+/// #1145 - how far a directory mtime must lag the instant a walk started before
+/// that walk's answer may be trusted, on a filesystem that stamps SUB-SECOND
+/// modification times.
+///
+/// `stamped_at` is a `SystemTime::now()` and is therefore fine-grained, but a
+/// directory mtime is stamped by the kernel from a COARSE clock: measured on
+/// this project's Linux build host, ext4 and tmpfs both report exactly one
+/// jiffy of granularity (1.000010 ms at `CONFIG_HZ=1000`), and 2000 of 2000
+/// post-walk writes produced an mtime STRICTLY LESS than a `stamped_at` taken
+/// moments before. A bare `now >= stamped_at` test can therefore essentially
+/// never fire, which is what left the same-tick write in #1145 invisible.
+///
+/// A change made within one tick of the walk cannot be witnessed by an mtime at
+/// all, so the only sound answer is to distrust the memo for that long. 20 ms is
+/// 20x the granularity measured here and 2x the coarsest jiffy any supported
+/// Linux kernel uses (10 ms at `CONFIG_HZ=100`); APFS and NTFS stamp finer
+/// still. It costs one extra walk per `Bash` execution that starts within 20 ms
+/// of the workspace changing.
+const SUBSECOND_MTIME_GRANULARITY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// #1145 - the same slack for a filesystem that stamps WHOLE SECONDS: HFS+,
+/// FAT/exFAT (two-second resolution), and older NFS servers. 20 ms would be
+/// meaningless there - the tick such a filesystem can hide a write inside is a
+/// thousand times longer.
+const WHOLE_SECOND_MTIME_GRANULARITY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// #667/#1118 — THE shell-principal predicate, in one place.
 ///
 /// True when the ONLY principal that can drive a shell built from this decision
@@ -1332,10 +1358,35 @@ impl WorkspacePolicy {
                 return None;
             }
             let now = std::fs::symlink_metadata(dir).ok()?.modified().ok()?;
-            // `>= stamped_at` is the timestamp-granularity guard: a write that
-            // landed in the same clock tick as the walk leaves an mtime the
-            // equality test above cannot distinguish from the one recorded.
-            if now != *seen || now >= cache.stamped_at {
+            // The timestamp-granularity guard (#1145): a write that landed in
+            // the same COARSE filesystem tick as the walk leaves an mtime the
+            // equality test above cannot distinguish from the one recorded, so
+            // an mtime is evidence of quiescence only once it is further behind
+            // the walk's own start instant than one tick can account for.
+            // Comparing against `stamped_at` alone is not enough - `stamped_at`
+            // is fine-grained, so a same-tick mtime is strictly LESS than it and
+            // the old `now >= stamped_at` test never fired.
+            // Take the granularity from the stamp actually in hand rather than
+            // assuming the build host's: a filesystem that resolves only whole
+            // seconds reports a zero nanosecond part for every mtime it stamps.
+            // A sub-second stamp that happens to land exactly on a second
+            // boundary is misread here, and falls in the conservative
+            // direction - a walk that was not strictly needed, never a hit that
+            // was not earned.
+            let granularity = if now
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |since_epoch| since_epoch.subsec_nanos())
+                == 0
+            {
+                WHOLE_SECOND_MTIME_GRANULARITY
+            } else {
+                SUBSECOND_MTIME_GRANULARITY
+            };
+            let settled = cache
+                .stamped_at
+                .duration_since(now)
+                .is_ok_and(|behind| behind > granularity);
+            if now != *seen || !settled {
                 return None;
             }
         }
