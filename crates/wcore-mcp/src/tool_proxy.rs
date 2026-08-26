@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use super::config::McpServerConfig;
 use super::manager::{McpManager, McpToolEffectIdentity};
+use super::protocol::McpToolAnnotations;
 use wcore_protocol::events::ToolCategory;
 use wcore_tools::Tool;
 use wcore_tools::context::{ToolContext, ToolEffectContext};
@@ -26,6 +27,10 @@ pub struct McpToolProxy {
     manager: Arc<McpManager>,
     /// Whether this tool's schema should be deferred (sent as name-only stub).
     deferred: bool,
+    /// What the server declared about this tool in `tools/list`. Default —
+    /// nothing declared — is what every server that publishes no annotations
+    /// gets, and it is the opaque recovery MCP tools have always had.
+    annotations: McpToolAnnotations,
 }
 
 impl McpToolProxy {
@@ -46,7 +51,19 @@ impl McpToolProxy {
             input_schema,
             manager,
             deferred,
+            annotations: McpToolAnnotations::default(),
         }
+    }
+
+    /// Bind what the server declared about this tool in `tools/list`.
+    ///
+    /// Separate from [`Self::new`] because a proxy built without it must keep
+    /// the opaque contract: an absent declaration is not a declaration of
+    /// nothing-happens.
+    #[must_use]
+    pub fn with_annotations(mut self, annotations: Option<McpToolAnnotations>) -> Self {
+        self.annotations = annotations.unwrap_or_default();
+        self
     }
 
     async fn execute_with_optional_effect(
@@ -115,8 +132,35 @@ impl Tool for McpToolProxy {
         self.deferred
     }
 
+    /// Opaque unless the server declared this tool read-only.
+    ///
+    /// `readOnlyHint: true` is the server stating that its own tool does not
+    /// modify its environment. That declaration is the only authority that
+    /// exists about a remote effect surface — see [`McpToolAnnotations`] for
+    /// why acting on it is sound in this product — and it is what turns an
+    /// interrupted call from a question for a human into a receipt.
+    ///
+    /// Two things are deliberately NOT done here.
+    ///
+    /// A server that sends `readOnlyHint: true` alongside
+    /// `destructiveHint: true` has contradicted itself; this refuses instead
+    /// of picking the convenient half.
+    ///
+    /// `idempotentHint` is not mapped to repeat-safe. The spec's idempotent
+    /// tool may mutate — it only promises the SECOND identical call adds
+    /// nothing — and the receipt a repeat-safe reconciler writes says the
+    /// effect never landed. Recording that for a mutating call would be a
+    /// false claim, so an idempotent-but-mutating MCP tool keeps its operator
+    /// question. Closing that case needs a resolution the journal does not
+    /// have: "safe to re-issue under the same key".
     fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
-        // MCP servers expose arbitrary external effects with no host reconciler.
+        if self.annotations.read_only_hint == Some(true)
+            && self.annotations.destructive_hint != Some(true)
+        {
+            return wcore_types::tool::repeat_safe_contract(
+                wcore_types::tool::READ_ONLY_MCP_RECONCILER,
+            );
+        }
         ToolEffectContract::default()
     }
 
@@ -269,7 +313,8 @@ pub fn register_mcp_tools(
             tool_def.input_schema.clone(),
             Arc::clone(manager),
             deferred,
-        );
+        )
+        .with_annotations(tool_def.annotations.clone());
 
         registry.register(Box::new(proxy));
     }
@@ -336,7 +381,8 @@ pub fn register_single_server_tools(
             tool_def.input_schema.clone(),
             Arc::clone(manager),
             deferred,
-        );
+        )
+        .with_annotations(tool_def.annotations.clone());
 
         registry.register(Box::new(proxy));
     }
@@ -463,6 +509,60 @@ mod tests {
             manager,
             deferred,
         )
+    }
+
+    /// The proxy's contract is decided by what the SERVER declared, and by
+    /// nothing else. The row that matters most is the last one: a server
+    /// claiming both read-only and destructive has contradicted itself, and a
+    /// receipt written on a contradiction would be worse than the question it
+    /// replaced.
+    #[test]
+    fn only_a_read_only_declaration_certifies_an_mcp_tool() {
+        use crate::protocol::McpToolAnnotations;
+
+        let opaque = |proxy: &McpToolProxy| {
+            let contract = proxy.effect_contract(&json!({}));
+            assert_eq!(contract.kind, wcore_types::tool::ToolEffectKind::Opaque);
+            assert!(contract.reconciler.is_none());
+        };
+
+        opaque(&make_proxy(false));
+        opaque(&make_proxy(false).with_annotations(None));
+        opaque(&make_proxy(false).with_annotations(Some(McpToolAnnotations::default())));
+        opaque(
+            &make_proxy(false).with_annotations(Some(McpToolAnnotations {
+                read_only_hint: Some(false),
+                ..McpToolAnnotations::default()
+            })),
+        );
+        opaque(
+            &make_proxy(false).with_annotations(Some(McpToolAnnotations {
+                idempotent_hint: Some(true),
+                ..McpToolAnnotations::default()
+            })),
+        );
+        opaque(
+            &make_proxy(false).with_annotations(Some(McpToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(true),
+                ..McpToolAnnotations::default()
+            })),
+        );
+
+        let certified = make_proxy(false)
+            .with_annotations(Some(McpToolAnnotations {
+                read_only_hint: Some(true),
+                ..McpToolAnnotations::default()
+            }))
+            .effect_contract(&json!({}));
+        assert_eq!(
+            certified.kind,
+            wcore_types::tool::ToolEffectKind::RepeatSafe
+        );
+        assert_eq!(
+            certified.reconciler.as_deref(),
+            Some(wcore_types::tool::READ_ONLY_MCP_RECONCILER)
+        );
     }
 
     #[test]
@@ -830,6 +930,7 @@ mod tests {
                 false,
                 Box::new(StubTransport),
                 vec![McpToolDef {
+                    annotations: None,
                     name: "read".into(),
                     description: None,
                     input_schema: json!({}),
@@ -840,6 +941,7 @@ mod tests {
                 false,
                 Box::new(StubTransport),
                 vec![McpToolDef {
+                    annotations: None,
                     name: "read".into(),
                     description: None,
                     input_schema: json!({}),
@@ -906,6 +1008,7 @@ mod tests {
             false,
             Box::new(StubTransport),
             vec![McpToolDef {
+                annotations: None,
                 name: "late_dynamic".into(),
                 description: Some("late dynamic MCP fixture".into()),
                 input_schema: json!({"type": "object"}),

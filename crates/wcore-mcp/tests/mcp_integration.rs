@@ -168,6 +168,7 @@ fn server_responses(tools: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
 
 fn make_tool_def(name: &str, description: &str) -> McpToolDef {
     McpToolDef {
+        annotations: None,
         name: name.to_string(),
         description: Some(description.to_string()),
         input_schema: json!({"type": "object"}),

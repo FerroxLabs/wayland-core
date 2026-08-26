@@ -9727,7 +9727,7 @@ impl AgentEngine {
         // only then is the account written, naming exactly what is genuinely
         // still in doubt.
         self.admit_interrupted_tool_starts(&turn_id).await?;
-        self.reconcile_authoritative_filesystem_effects("resume_after_interruption")
+        self.reconcile_authoritative_tool_effects("resume_after_interruption")
             .await?;
         // Read the account of what was in flight BEFORE terminalizing the
         // rest. Afterwards the journal records only that an outcome is
@@ -10393,7 +10393,7 @@ impl AgentEngine {
             }
         }
 
-        self.reconcile_authoritative_filesystem_effects("engine_startup")
+        self.reconcile_authoritative_tool_effects("engine_startup")
             .await?;
 
         let unresolved = self.tool_effects_requiring_reconciliation()?;
@@ -10415,7 +10415,85 @@ impl AgentEngine {
         Ok(())
     }
 
-    /// Run the one authoritative reconciler Core registers — the filesystem
+    /// Run every reconciler Core registers over the tool effects that still
+    /// require reconciliation.
+    ///
+    /// Dispatch is by the NAME the tool declared, never by the kind alone.
+    /// `ToolEffectContract::reconciler` documents `None` as "no automatic
+    /// reconciler is available", and a name this process does not recognise is
+    /// the same thing: nothing is resolved and the effect stays in front of an
+    /// operator. That is what stops a tool — a plugin, an MCP proxy, a future
+    /// built-in — from minting recovery authority for itself by pairing a
+    /// repeat-safe kind with a reconciler identifier of its own invention.
+    async fn reconcile_authoritative_tool_effects(
+        &self,
+        recovery: &'static str,
+    ) -> Result<(), AgentError> {
+        self.reconcile_repeat_safe_effects(recovery)?;
+        self.reconcile_authoritative_filesystem_effects(recovery)
+            .await
+    }
+
+    /// Settle every interrupted effect whose tool declared a REGISTERED
+    /// repeat-safe reconciler.
+    ///
+    /// Nothing about the world is consulted, because there is nothing to
+    /// consult: the certified class is "this invocation could not have changed
+    /// anything". The receipt is therefore `NotStarted`, which is the exact
+    /// disposition `wayland-core session cancel` has always written for this
+    /// class — the two surfaces must not disagree about the same effect.
+    ///
+    /// The engine used to run only the filesystem receipt here, so a crash
+    /// during a plain `Read` left an unresolved effect that blocked the
+    /// session from ever resuming, while the CLI would have cleared the same
+    /// effect without asking anyone. A correct reconciler nothing calls is not
+    /// a reconciler.
+    fn reconcile_repeat_safe_effects(&self, recovery: &'static str) -> Result<(), AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let certified = state
+            .tools
+            .iter()
+            .filter_map(|(tool_execution_id, tool)| {
+                let reconciler = tool.effect_contract.reconciler.as_deref()?;
+                if !matches!(
+                    tool.effect_contract.kind,
+                    wcore_types::tool::ToolEffectKind::RepeatSafe
+                ) || !wcore_types::tool::repeat_safe_reconciler_is_registered(reconciler)
+                    || !matches!(tool.effect, ToolEffectState::Unknown { .. })
+                {
+                    return None;
+                }
+                Some((tool_execution_id.clone(), reconciler.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        for (tool_execution_id, reconciler) in certified {
+            self.resolve_unknown_tool_effect(
+                tool_execution_id,
+                ToolResolution::NotStarted {
+                    reason: ToolNotStartedReason::Cancelled {
+                        reason: format!(
+                            "no external effect is possible for this invocation ({reconciler})"
+                        ),
+                    },
+                },
+                ToolResolutionSource::Reconciler {
+                    reconciler: reconciler.clone(),
+                },
+                serde_json::json!({
+                    "recovery": recovery,
+                    "certified_by": reconciler,
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Run the one authoritative filesystem reconciler Core registers — the
     /// compare-exchange receipt — over every tool effect that still requires
     /// reconciliation.
     ///

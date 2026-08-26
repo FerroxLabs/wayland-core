@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
 use wcore_types::file_state::{FileState, Provenance};
-use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolEffectKind, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::Tool;
 use crate::context::ToolContext;
@@ -522,10 +522,7 @@ impl Tool for ReadTool {
     /// path — an *ambiguous* effect, which is nonterminal and killed the
     /// session (live UAT defect D1).
     fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
-        ToolEffectContract {
-            kind: ToolEffectKind::RepeatSafe,
-            reconciler: None,
-        }
+        wcore_types::tool::repeat_safe_contract(wcore_types::tool::READ_ONLY_FILESYSTEM_RECONCILER)
     }
 
     /// Read cannot mutate anything for any input it accepts: it opens a path

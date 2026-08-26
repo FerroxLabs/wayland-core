@@ -95,6 +95,7 @@ impl McpTransport for GrowingTransport {
 
 fn tool_def(name: &str) -> McpToolDef {
     McpToolDef {
+        annotations: None,
         name: name.to_string(),
         description: Some(name.to_string()),
         input_schema: json!({}),

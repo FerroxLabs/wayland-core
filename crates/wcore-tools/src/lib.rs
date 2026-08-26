@@ -612,20 +612,31 @@ pub trait Tool: Send + Sync {
     /// That is why each of these stays opaque, permanently, unless the world
     /// underneath it changes:
     ///
-    /// * `Bash` and `Script` — a shell command mutates arbitrary host state.
-    /// * `WebFetch` and the web search/extract/crawl tools — a remote service's
-    ///   state and rate limits are not re-readable.
+    /// * `Script`, and any `Bash` command outside the read-only classifier —
+    ///   a shell command mutates arbitrary host state.
+    /// * The web tool's `extract` and `crawl` — a crawl creates a remote job.
     /// * `send_message` — external delivery cannot be proven or deduplicated
     ///   after an interruption.
     /// * `Spawn`, `Delegate`, workflow stages and the Anvil forge — an
     ///   aggregate of nested effects has no aggregate reconciler.
-    /// * MCP proxies, plugin closures and browser actions — untrusted or
-    ///   remote effect surfaces the host cannot photograph.
+    /// * MCP proxies with no `readOnlyHint`, plugin closures and browser
+    ///   actions — remote effect surfaces the host cannot photograph.
     ///
-    /// The reachable exceptions are exactly two, and both earn it:
+    /// The reachable exceptions all earn it, and each names the reconciler
+    /// that certifies it — recovery acts on the NAME, so an unregistered one
+    /// resolves nothing (see
+    /// [`wcore_types::tool::repeat_safe_reconciler_is_registered`]):
     ///
     /// * `Read`, `Grep`, `Glob` are [`wcore_types::tool::ToolEffectKind::RepeatSafe`] because
     ///   they mutate nothing.
+    /// * A `Bash` call whose command a static classifier proves cannot mutate
+    ///   anything is repeat-safe for that invocation only; every other command
+    ///   through the same tool stays opaque.
+    /// * `WebFetch` and the web tool's `search` operation are repeat-safe
+    ///   because the request they build cannot ask for a state change. The
+    ///   web tool's `extract` and `crawl` are not.
+    /// * An MCP tool its own server declared `readOnlyHint: true` for is
+    ///   repeat-safe on that declaration.
     /// * `Write` and `Edit` are [`wcore_types::tool::ToolEffectKind::FilesystemTransactional`]
     ///   because [`effects::prepare_filesystem_effect`] can bind all three
     ///   pieces of evidence before the write. Note what that does NOT claim:

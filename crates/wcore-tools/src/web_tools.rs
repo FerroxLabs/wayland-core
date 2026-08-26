@@ -769,9 +769,25 @@ impl Tool for WebTool {
         ToolCategory::Info
     }
 
-    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
-        // External search, extraction, and crawl backends expose no replay reconciler.
-        ToolEffectContract::default()
+    /// Only `search` is classified, and only because the operation IS a query.
+    ///
+    /// `extract` and `crawl` stay opaque. No backend in this tree implements
+    /// either one — every `WebBackend` impl returns an error for both — so
+    /// there is no evidence about what a future one would do, and a crawl at a
+    /// real provider creates a server-side job with its own lifecycle and
+    /// billing. That is a state change, and guessing it away would be strictly
+    /// worse than the operator question it replaced.
+    fn effect_contract(&self, input: &Value) -> ToolEffectContract {
+        match input
+            .get("operation")
+            .and_then(Value::as_str)
+            .and_then(WebOperation::parse_str)
+        {
+            Some(WebOperation::Search) => wcore_types::tool::repeat_safe_contract(
+                wcore_types::tool::READ_ONLY_NETWORK_RECONCILER,
+            ),
+            _ => ToolEffectContract::default(),
+        }
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
@@ -818,11 +834,28 @@ mod tests {
     use super::*;
     use wcore_types::tool::ToolEffectKind;
 
+    /// Search is a query and is certified as one; the two operations that
+    /// could create a remote resource keep the recovery they had.
     #[test]
-    fn effect_contract_remains_opaque() {
+    fn only_search_is_certified_repeat_safe() {
         let contract = WebTool::default().effect_contract(&json!({ "operation": "search" }));
-        assert_eq!(contract.kind, ToolEffectKind::Opaque);
-        assert!(contract.reconciler.is_none());
+        assert_eq!(contract.kind, ToolEffectKind::RepeatSafe);
+        assert_eq!(
+            contract.reconciler.as_deref(),
+            Some(wcore_types::tool::READ_ONLY_NETWORK_RECONCILER)
+        );
+
+        for operation in ["extract", "crawl", "not-an-operation"] {
+            let contract = WebTool::default().effect_contract(&json!({ "operation": operation }));
+            assert_eq!(
+                contract.kind,
+                ToolEffectKind::Opaque,
+                "`{operation}` may create a remote resource and is not classified"
+            );
+            assert!(contract.reconciler.is_none());
+        }
+        let missing = WebTool::default().effect_contract(&json!({}));
+        assert_eq!(missing.kind, ToolEffectKind::Opaque);
     }
 
     fn parse(result: &ToolResult) -> Value {

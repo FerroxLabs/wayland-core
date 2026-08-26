@@ -444,9 +444,10 @@ pub enum DeterminedBy {
     /// for this class — the flag was decoration over a decision the journal
     /// had already made.
     ProviderAttemptState,
-    /// The tool itself declared [`ToolEffectKind::RepeatSafe`]: by its own
-    /// contract the invocation cannot have created an external effect, so
-    /// there is no landed effect for anyone to have an opinion about.
+    /// The tool declared [`ToolEffectKind::RepeatSafe`] AND named a
+    /// reconciler this build registers: by a contract the product recognises,
+    /// the invocation cannot have created an external effect, so there is no
+    /// landed effect for anyone to have an opinion about.
     RepeatSafeContract,
 }
 
@@ -496,11 +497,12 @@ fn unanswerable_reason(item: &ReconcileItem) -> String {
 /// Can the product settle this item from the journal alone?
 ///
 /// `None` means it genuinely cannot, and the honest response is to say so and
-/// ask — never to pick a default. The one class that reaches `None` in
-/// practice is a tool whose effect contract is `Opaque` (`Bash`, `Write`,
-/// `Edit`): the journal records that the tool STARTED and nothing after it,
-/// there is no receipt to compare, and repeating it is not safe. No amount of
-/// reading the journal turns that into knowledge.
+/// ask — never to pick a default. The class that reaches `None` in practice is
+/// a tool whose effect contract is `Opaque` (`Write`, `Edit`, and every `Bash`
+/// command outside the read-only classifier): the journal records that the
+/// tool STARTED and nothing after it, there is no receipt to compare, and
+/// repeating it is not safe. No amount of reading the journal turns that into
+/// knowledge.
 pub fn determined_disposition(
     state: &ReducedSessionState,
     item: &ReconcileItem,
@@ -512,8 +514,17 @@ pub fn determined_disposition(
         ReconcileKind::ProviderAttempt => Some(DeterminedBy::ProviderAttemptState),
         ReconcileKind::ToolExecution => {
             let tool = state.tools.get(&item.tool_execution_id)?;
-            (tool.effect_contract.kind == ToolEffectKind::RepeatSafe)
-                .then_some(DeterminedBy::RepeatSafeContract)
+            // The NAME is load-bearing, not the kind. `reconciler: None` is
+            // documented on the field as "no automatic reconciler is
+            // available", and an unregistered name says the same thing — so a
+            // tool cannot obtain a receipt written on the operator's behalf by
+            // declaring a repeat-safe kind and inventing an identifier. This
+            // is the same gate the engine's own recovery applies, and the two
+            // must not disagree about the same effect.
+            let reconciler = tool.effect_contract.reconciler.as_deref()?;
+            (tool.effect_contract.kind == ToolEffectKind::RepeatSafe
+                && wcore_types::tool::repeat_safe_reconciler_is_registered(reconciler))
+            .then_some(DeterminedBy::RepeatSafeContract)
         }
         _ => None,
     }

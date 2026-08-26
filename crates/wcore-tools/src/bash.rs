@@ -16,6 +16,7 @@ use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 use crate::context::ToolContext;
 
 mod policy;
+mod read_only;
 use crate::{Tool, ToolOutputSink};
 pub use policy::check_denylist;
 use policy::{SandboxScope, annotate_masked_read, annotate_network_block, annotate_sandbox_denial};
@@ -472,9 +473,25 @@ impl Tool for BashTool {
         false
     }
 
-    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
-        // Shell commands can mutate arbitrary host state with no general reconciler.
-        ToolEffectContract::default()
+    /// Opaque unless [`read_only::is_provably_read_only`] proves otherwise.
+    ///
+    /// A shell command can mutate arbitrary host state and nothing can
+    /// photograph the result afterwards, so opaque remains the answer for
+    /// anything this classifier does not model — which is most of what a
+    /// shell can express. The exception is narrow and static: one simple
+    /// command, no shell metacharacters at all, and a program with neither a
+    /// write mode nor a route to a user-configured helper. Such a call cannot
+    /// have changed anything, so an interruption leaves nothing for an
+    /// operator to have an opinion about.
+    fn effect_contract(&self, input: &Value) -> ToolEffectContract {
+        match input.get("command").and_then(Value::as_str) {
+            Some(command) if read_only::is_provably_read_only(command) => {
+                wcore_types::tool::repeat_safe_contract(
+                    wcore_types::tool::READ_ONLY_SHELL_RECONCILER,
+                )
+            }
+            _ => ToolEffectContract::default(),
+        }
     }
 
     async fn execute(&self, input: Value) -> ToolResult {

@@ -305,9 +305,23 @@ impl Tool for WebFetchTool {
         ToolCategory::Mcp
     }
 
+    /// `WebFetch` issues one HTTP GET and never a request body.
+    ///
+    /// That is a property of the request this process builds, not a hope about
+    /// the origin: [`FetchRequest`] carries no method and no body for a
+    /// backend to vary, and the only production backend
+    /// (`HttpFetchBackend::fetch_inner`) calls `client.get(...)`. GET is the
+    /// method HTTP defines as safe — the request does not ask the origin to
+    /// change state — so an interrupted fetch left nothing behind for an
+    /// operator to have an opinion about.
+    ///
+    /// What this does NOT claim: an origin is free to violate its own method
+    /// contract, and a fetch does consume a remote rate limit. Neither moves
+    /// the class. `Read` and `Grep` consume host I/O and are repeat-safe for
+    /// exactly the same reason — what is certified is that no state change was
+    /// REQUESTED, and the alternative on offer is asking a human about a GET.
     fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
-        // Remote fetches can affect external rate limits and lack a durable reconciler.
-        ToolEffectContract::default()
+        wcore_types::tool::repeat_safe_contract(wcore_types::tool::READ_ONLY_NETWORK_RECONCILER)
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
@@ -381,13 +395,24 @@ mod tests {
     use super::*;
     use wcore_types::tool::ToolEffectKind;
 
+    /// A GET is repeat-safe, and it must say WHICH reconciler certifies it —
+    /// recovery acts on the name, not on the kind.
     #[test]
-    fn effect_contract_remains_opaque() {
+    fn a_fetch_is_certified_repeat_safe_by_the_network_reconciler() {
         let contract = WebFetchTool::default().effect_contract(&json!({
             "url": "https://example.com"
         }));
-        assert_eq!(contract.kind, ToolEffectKind::Opaque);
-        assert!(contract.reconciler.is_none());
+        assert_eq!(contract.kind, ToolEffectKind::RepeatSafe);
+        assert_eq!(
+            contract.reconciler.as_deref(),
+            Some(wcore_types::tool::READ_ONLY_NETWORK_RECONCILER)
+        );
+        assert!(
+            wcore_types::tool::repeat_safe_reconciler_is_registered(
+                contract.reconciler.as_deref().expect("a named reconciler")
+            ),
+            "a name recovery does not recognise resolves nothing"
+        );
     }
 
     #[tokio::test]

@@ -1897,6 +1897,7 @@ mod tests {
                 false,
                 Box::new(MockTransport::new(vec![])),
                 vec![McpToolDef {
+                    annotations: None,
                     name: "live_tool".into(),
                     description: None,
                     input_schema: json!({}),
@@ -1907,6 +1908,7 @@ mod tests {
                 false,
                 Box::new(DeadTransport),
                 vec![McpToolDef {
+                    annotations: None,
                     name: "dead_tool".into(),
                     description: None,
                     input_schema: json!({}),

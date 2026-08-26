@@ -392,10 +392,10 @@ fn a_repeat_safe_tool_is_settled_by_cancel_alone_in_one_command() {
     let (sessions, id, tool_execution_id) = crashed_mid_tool_session_with(
         home.path(),
         "Grep",
-        wcore_types::tool::ToolEffectContract {
-            kind: wcore_types::tool::ToolEffectKind::RepeatSafe,
-            reconciler: None,
-        },
+        // Exactly what the real `Grep` declares: the repeat-safe kind AND the
+        // registered reconciler that certifies it. The kind alone buys
+        // nothing — see `determined_disposition`.
+        wcore_types::tool::repeat_safe_contract(wcore_types::tool::READ_ONLY_FILESYSTEM_RECONCILER),
     );
     let dir = sessions.to_str().unwrap();
 

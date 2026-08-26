@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use wcore_config::shell::shell_command_argv;
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolEffectKind, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::Tool;
 use crate::context::ToolContext;
@@ -112,10 +112,7 @@ impl Tool for GrepTool {
     /// authoritative rather than an ambiguous external effect. See the note on
     /// `ReadTool::effect_contract` (live UAT D1).
     fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
-        ToolEffectContract {
-            kind: ToolEffectKind::RepeatSafe,
-            reconciler: None,
-        }
+        wcore_types::tool::repeat_safe_contract(wcore_types::tool::READ_ONLY_FILESYSTEM_RECONCILER)
     }
 
     /// Grep's own search subprocess is fixed and argv-invoked — no input it

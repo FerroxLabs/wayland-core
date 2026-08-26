@@ -3,11 +3,29 @@ use super::*;
 use serde_json::json;
 use wcore_types::tool::ToolEffectKind;
 
+/// The shell classification is per-INVOCATION, which is the whole point: the
+/// tool is opaque, a provably read-only command through it is not.
 #[test]
-fn effect_contract_remains_opaque() {
-    let contract = BashTool.effect_contract(&json!({ "command": "true" }));
-    assert_eq!(contract.kind, ToolEffectKind::Opaque);
-    assert!(contract.reconciler.is_none());
+fn a_provably_read_only_command_is_certified_and_everything_else_stays_opaque() {
+    let certified = BashTool.effect_contract(&json!({ "command": "ls -la" }));
+    assert_eq!(certified.kind, ToolEffectKind::RepeatSafe);
+    assert_eq!(
+        certified.reconciler.as_deref(),
+        Some(wcore_types::tool::READ_ONLY_SHELL_RECONCILER)
+    );
+
+    for command in ["rm -rf /", "cat a > b", "git status", "ls; rm -rf /"] {
+        let contract = BashTool.effect_contract(&json!({ "command": command }));
+        assert_eq!(
+            contract.kind,
+            ToolEffectKind::Opaque,
+            "`{command}` must keep the opaque recovery it had"
+        );
+        assert!(contract.reconciler.is_none());
+    }
+
+    let missing = BashTool.effect_contract(&json!({}));
+    assert_eq!(missing.kind, ToolEffectKind::Opaque);
 }
 
 #[tokio::test]

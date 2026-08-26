@@ -84,6 +84,7 @@ impl McpTransport for ScriptedTransport {
 
 fn tool(name: &str) -> McpToolDef {
     McpToolDef {
+        annotations: None,
         name: name.to_string(),
         description: Some(format!("{name} tool")),
         input_schema: serde_json::json!({ "type": "object" }),

@@ -199,11 +199,8 @@ async fn an_interrupted_read_only_shell_command_settles_without_an_operator() {
         json!({ "command": "ls -la src" }),
     )
     .await;
-    assert_settles_without_an_operator(
-        &mut state,
-        wcore_types::tool::READ_ONLY_SHELL_RECONCILER,
-    )
-    .await;
+    assert_settles_without_an_operator(&mut state, wcore_types::tool::READ_ONLY_SHELL_RECONCILER)
+        .await;
 }
 
 #[tokio::test]
@@ -239,11 +236,8 @@ async fn an_interrupted_web_fetch_settles_without_an_operator() {
         json!({ "url": "https://example.com" }),
     )
     .await;
-    assert_settles_without_an_operator(
-        &mut state,
-        wcore_types::tool::READ_ONLY_NETWORK_RECONCILER,
-    )
-    .await;
+    assert_settles_without_an_operator(&mut state, wcore_types::tool::READ_ONLY_NETWORK_RECONCILER)
+        .await;
 }
 
 #[tokio::test]
@@ -253,11 +247,8 @@ async fn an_interrupted_web_search_settles_without_an_operator() {
         json!({ "operation": "search", "query": "rust" }),
     )
     .await;
-    assert_settles_without_an_operator(
-        &mut state,
-        wcore_types::tool::READ_ONLY_NETWORK_RECONCILER,
-    )
-    .await;
+    assert_settles_without_an_operator(&mut state, wcore_types::tool::READ_ONLY_NETWORK_RECONCILER)
+        .await;
 }
 
 /// A crawl creates a job at the backend. That is a state change and it is not

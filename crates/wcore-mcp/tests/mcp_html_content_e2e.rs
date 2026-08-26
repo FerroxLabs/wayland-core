@@ -81,6 +81,7 @@ async fn mcp_tool_html_content_flows_back_through_call_tool() {
 
     // Build an McpManager with one pre-wired server that exposes `fetch_page`.
     let tool_def = McpToolDef {
+        annotations: None,
         name: "fetch_page".to_string(),
         description: Some("Fetch a URL via the browser tool and return rendered text".to_string()),
         input_schema: json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
