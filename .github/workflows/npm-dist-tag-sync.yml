@@ -55,9 +55,27 @@ jobs:
           echo "after:  $(npm view @ferroxlabs/wayland-core dist-tags --json)"
           # Read it back. `dist-tag add` exiting 0 is not evidence the registry
           # agrees, and this job exists precisely because a tag was wrong.
-          ACTUAL="$(npm view "@ferroxlabs/wayland-core" "dist-tags.${DIST_TAG}")"
+          #
+          # POLLED, not instant. npm's packument is CDN-cached and eventually
+          # consistent: run 32933189046 logged `+next: ...@0.13.7` (the add
+          # succeeded) and then read the OLD value back milliseconds later, so a
+          # single immediate read reported failure for a tag that had in fact
+          # moved. A guard that cries wolf is as useless as one that never fires,
+          # so this waits for convergence — but still FAILS if it never comes,
+          # which is the case it exists for.
+          ACTUAL=""
+          for attempt in $(seq 1 12); do
+            # `--prefer-online` bypasses the local metadata cache; without it a
+            # warm cache can echo our own stale read straight back at us.
+            ACTUAL="$(npm view --prefer-online "@ferroxlabs/wayland-core" "dist-tags.${DIST_TAG}" 2>/dev/null || true)"
+            if [ "${ACTUAL}" = "${VERSION}" ]; then
+              echo "${DIST_TAG} -> ${VERSION} confirmed by read-back (attempt ${attempt})"
+              break
+            fi
+            echo "read-back attempt ${attempt}: ${DIST_TAG} is '${ACTUAL:-<empty>}', waiting for the registry to converge"
+            sleep 10
+          done
           if [ "${ACTUAL}" != "${VERSION}" ]; then
-            echo "::error::${DIST_TAG} reads back as ${ACTUAL}, expected ${VERSION}."
+            echo "::error::${DIST_TAG} still reads back as '${ACTUAL:-<empty>}' after 12 attempts over ~2 minutes, expected ${VERSION}."
             exit 1
           fi
-          echo "${DIST_TAG} -> ${VERSION} confirmed by read-back"
