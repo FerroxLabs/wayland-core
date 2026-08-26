@@ -2009,7 +2009,13 @@ fn path_is_in_credential_store(path: &Path) -> bool {
 /// reach it via [`WorkspacePolicy::is_secret_path`]; `grep_policy` (SR-05) uses
 /// it directly, because Grep has no policy instance and must not grow a second,
 /// divergent copy of this list.
-pub(crate) fn is_secret_path_static(path: &Path) -> bool {
+///
+/// `pub` rather than crate-private because `wcore-cli`'s `@`-attach guard
+/// (`tui::commands::at_ref_guard::is_secret_path`) unions its own file-name
+/// rules with this one. It used to keep a private copy, and the two lists had
+/// drifted apart in BOTH directions — the divergence is the defect the union
+/// closes, and a second copy is what re-opens it.
+pub fn is_secret_path_static(path: &Path) -> bool {
     // ASCII case is folded on EVERY rule, on EVERY platform — not just on the
     // extension, which is how this was written and how `.ENV` escaped while
     // `server.KEY` did not.
