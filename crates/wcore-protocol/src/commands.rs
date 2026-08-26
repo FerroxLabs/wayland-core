@@ -6,8 +6,8 @@ use thiserror::Error;
 use wcore_types::goal::GoalStrategy;
 
 use crate::diagnostics::GetRuntimeDiagnosticsCommand;
-use crate::quiescence::QuiesceScope;
 use crate::events::{OperatorToolEffectResolution, RecoveryCursor};
+use crate::quiescence::QuiesceScope;
 
 pub const OPERATOR_RESOLUTION_RECOVERY_VERSION: u16 = 1;
 pub const RECOVERED_APPROVAL_VERSION: u16 = 1;

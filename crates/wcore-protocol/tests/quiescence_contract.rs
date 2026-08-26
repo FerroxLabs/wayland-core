@@ -42,8 +42,8 @@ fn read_value(relative: &str) -> Value {
 /// the dispatcher does.
 fn verdict(relative: &str) -> Option<QuiesceRefusalReason> {
     let value = read_value(relative);
-    let version = u16::try_from(value["quiescence_version"].as_u64().unwrap_or(u64::MAX))
-        .unwrap_or(u16::MAX);
+    let version =
+        u16::try_from(value["quiescence_version"].as_u64().unwrap_or(u64::MAX)).unwrap_or(u16::MAX);
     let request_id = value["request_id"].as_str().unwrap_or_default();
     let lease_id = value["lease_id"].as_str().unwrap_or_default();
     let session_id = value["session_id"].as_str().unwrap_or_default();
@@ -116,9 +116,12 @@ fn the_happy_command_fixtures_decode_through_the_real_command_type() {
 #[test]
 fn the_granted_fixture_covers_the_default_home_and_a_named_profile() {
     let value = read_value("events/quiesce_lease_granted.json");
-    let coverage: QuiesceCoverage = serde_json::from_value(value["coverage"].clone())
-        .expect("coverage must decode");
-    assert!(coverage.complete, "a grant always reports complete coverage");
+    let coverage: QuiesceCoverage =
+        serde_json::from_value(value["coverage"].clone()).expect("coverage must decode");
+    assert!(
+        coverage.complete,
+        "a grant always reports complete coverage"
+    );
     assert_eq!(coverage.roots.len(), 2);
     let kinds: Vec<&str> = coverage
         .roots

@@ -445,7 +445,10 @@ fn observe_root(root: &Path, strict: bool) -> Result<RootObservation, io::Error>
                 Ok(meta) => meta,
                 Err(error) if strict => return Err(error),
                 Err(error) => {
-                    entries.push(format!("{label}\u{0}unreadable-meta\u{0}{:?}", error.kind()));
+                    entries.push(format!(
+                        "{label}\u{0}unreadable-meta\u{0}{:?}",
+                        error.kind()
+                    ));
                     continue;
                 }
             };
@@ -468,7 +471,10 @@ fn observe_root(root: &Path, strict: bool) -> Result<RootObservation, io::Error>
                     }
                     Err(error) if strict => return Err(error),
                     Err(error) => {
-                        entries.push(format!("{label}\u{0}unreadable-file\u{0}{:?}", error.kind()));
+                        entries.push(format!(
+                            "{label}\u{0}unreadable-file\u{0}{:?}",
+                            error.kind()
+                        ));
                     }
                 }
             } else {

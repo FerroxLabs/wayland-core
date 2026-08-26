@@ -32,13 +32,13 @@ use crate::events::{
     WorkflowChildTerminalState, WorkflowNodeState, WorkflowTerminalState,
 };
 use crate::execution_policy::{ExecutionPolicyChangeReason, ExecutionPolicySequence};
-use crate::quiescence::{
-    QUIESCENCE_PROTOCOL_VERSION, QuiesceCoverage, QuiesceHeldLease, QuiesceProfileIdentity,
-    QuiesceRefusalReason, QuiesceReleaseVerdict, QuiesceRoot,
-};
 use crate::goal::{
     GOAL_PROTOCOL_VERSION, GoalAuthorityWire, GoalLifecycleWire, GoalLoopOwnerWire, GoalProjection,
     GoalTaskWire, GoalTaskWireStatus, GoalTransitionKind,
+};
+use crate::quiescence::{
+    QUIESCENCE_PROTOCOL_VERSION, QuiesceCoverage, QuiesceHeldLease, QuiesceProfileIdentity,
+    QuiesceRefusalReason, QuiesceReleaseVerdict, QuiesceRoot,
 };
 use wcore_types::execution_policy::{
     ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, PolicySource,

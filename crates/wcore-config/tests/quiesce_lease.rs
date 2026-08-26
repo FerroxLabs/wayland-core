@@ -326,10 +326,7 @@ fn an_out_of_range_ttl_is_refused() {
         let mut req = request("lease-1", all_scope());
         req.ttl_ms = ttl;
         assert!(
-            matches!(
-                quiesce::acquire(&req),
-                Err(QuiesceError::InvalidRequest(_))
-            ),
+            matches!(quiesce::acquire(&req), Err(QuiesceError::InvalidRequest(_))),
             "ttl {ttl} must be refused"
         );
     }
@@ -384,7 +381,11 @@ fn a_same_length_rewrite_is_detected() {
     let mut rewritten = original.clone();
     let last = rewritten.len() - 2;
     rewritten[last] = if rewritten[last] == b'x' { b'y' } else { b'x' };
-    assert_eq!(rewritten.len(), original.len(), "the rewrite must be same-length");
+    assert_eq!(
+        rewritten.len(),
+        original.len(),
+        "the rewrite must be same-length"
+    );
     assert_ne!(rewritten, original, "the rewrite must change content");
     fs::write(&target, &rewritten).expect("rewrite");
     let receipt = quiesce::release("lease-1", &grant.record.epoch).expect("release");
@@ -432,7 +433,10 @@ fn a_repeated_acquire_returns_the_same_grant() {
     let second = quiesce::acquire(&request("lease-1", all_scope())).expect("second");
     assert!(second.idempotent_replay);
     assert_eq!(second.record.epoch, first.record.epoch);
-    assert_eq!(second.record.acquired_unix_ms, first.record.acquired_unix_ms);
+    assert_eq!(
+        second.record.acquired_unix_ms,
+        first.record.acquired_unix_ms
+    );
     assert_eq!(second.record.expires_unix_ms, first.record.expires_unix_ms);
     let receipt = quiesce::release("lease-1", &first.record.epoch).expect("release");
     assert_eq!(receipt.verdict, ReleaseVerdict::Mutated);
@@ -546,7 +550,11 @@ fn reap(mut child: Child) {
 #[serial]
 fn a_killed_holder_leaves_a_reclaimable_lease() {
     let world = World::new(&["work"]);
-    let marker = world.profiles.parent().expect("tmp root").join("held.marker");
+    let marker = world
+        .profiles
+        .parent()
+        .expect("tmp root")
+        .join("held.marker");
 
     let mut child = Command::new(std::env::current_exe().expect("test binary"))
         .args(["crash_arm_lease_holder", "--exact", "--nocapture"])
@@ -619,11 +627,9 @@ fn dropping_a_handle_releases_only_its_own_lease() {
     // The asymmetric case: a handle for a lease the control plane no longer
     // records must not remove someone else's record.
     let mine = quiesce::acquire(&request("lease-1", all_scope())).expect("mine");
-    let stale_handle = quiesce::LeaseHandle::adopt(&quiesce::acquire(&request(
-        "lease-1",
-        all_scope(),
-    ))
-    .expect("replay"));
+    let stale_handle = quiesce::LeaseHandle::adopt(
+        &quiesce::acquire(&request("lease-1", all_scope())).expect("replay"),
+    );
     drop(stale_handle);
     // Same id, so that one legitimately released. Now prove the negative with a
     // handle whose id differs from the record on disk.

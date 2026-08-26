@@ -91,11 +91,7 @@ fn acquire(command: &QuiesceAcquireCommand) -> Vec<ProtocolEvent> {
             // be reclaimed BEFORE this one could be granted, so it precedes the
             // grant it made possible.
             if let Some(expired) = grant.reclaimed {
-                events.push(expiry(
-                    &expired,
-                    &command.session_id,
-                    &command.request_id,
-                ));
+                events.push(expiry(&expired, &command.session_id, &command.request_id));
             }
             events.push(ProtocolEvent::QuiesceLeaseGranted {
                 quiescence_version: QUIESCENCE_PROTOCOL_VERSION,
@@ -221,12 +217,10 @@ fn to_reason(error: &QuiesceError) -> QuiesceRefusalReason {
 /// there is no mechanism error to quote.
 fn boundary_detail(reason: QuiesceRefusalReason) -> String {
     match reason {
-        QuiesceRefusalReason::UnsupportedVersion => format!(
-            "quiescence_version must be {QUIESCENCE_PROTOCOL_VERSION}"
-        ),
-        QuiesceRefusalReason::PartialCoverage => {
-            "the request covers no profile state".to_string()
+        QuiesceRefusalReason::UnsupportedVersion => {
+            format!("quiescence_version must be {QUIESCENCE_PROTOCOL_VERSION}")
         }
+        QuiesceRefusalReason::PartialCoverage => "the request covers no profile state".to_string(),
         _ => "the frame could not be honoured as written".to_string(),
     }
 }
@@ -333,7 +327,8 @@ mod tests {
     /// have and must still refuse.
     #[test]
     fn an_unsupported_version_is_refused_without_touching_the_control_plane() {
-        let events = handle_quiesce_control(&acquire_command(QUIESCENCE_PROTOCOL_VERSION + 1, 60_000));
+        let events =
+            handle_quiesce_control(&acquire_command(QUIESCENCE_PROTOCOL_VERSION + 1, 60_000));
         assert_eq!(events.len(), 1);
         match &events[0] {
             ProtocolEvent::QuiesceRefused { reason, .. } => {
