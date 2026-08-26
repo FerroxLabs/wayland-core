@@ -24,6 +24,11 @@ use wcore_tools::web_tools::{CrawlRequest, ExtractRequest, WebBackend, WebOutcom
 /// being ignored was advised to set a Brave key, because the only backend
 /// anyone could see was the fallback.
 ///
+/// The consumer is `wcore-cli`'s `tui::tool_formatters::web::WebFormatter`,
+/// which renders it on the tool card. Adding the field without a renderer left
+/// the user-visible symptom of gh#1068 exactly as it was: the note reached the
+/// model inside the tool JSON and nobody else.
+///
 /// Additive only. `payload` is splice-merged into the final result object, so
 /// a new key cannot disturb the `web` / `results` shapes callers match on. A
 /// non-object payload is passed through untouched rather than coerced.
@@ -42,11 +47,25 @@ fn note_degraded(outcome: WebOutcome, primary: &str, fallback: &str, reason: &st
             }
             WebOutcome::Ok { payload }
         }
-        // Both failed. The fallback's own message is the one worth surfacing,
-        // but it is misleading on its own, so carry the primary's with it.
-        WebOutcome::Err { message } => WebOutcome::Err {
-            message: format!("{message} (primary '{primary}' also failed: {reason})"),
-        },
+        // Both failed - the dead end. This message is the ONLY thing the user
+        // sees, so it has to carry all three: what was tried, what happened to
+        // each, and the one next step. The fallback's own message is the one
+        // worth leading with, but it is misleading on its own (it names
+        // DuckDuckGo for a failure that began with the user's configured
+        // backend), so the primary's reason travels with it. The remedy is
+        // appended only if the inner message did not already carry it -
+        // repeating it twice in one error reads as noise and gets skipped.
+        WebOutcome::Err { message } => {
+            let mut out = format!(
+                "web search failed on every backend. Fallback '{fallback}': {message} \
+                         (primary '{primary}' also failed: {reason})"
+            );
+            if !out.contains(crate::tool_backends::shared::WEB_SEARCH_KEY_REMEDY) {
+                out.push(' ');
+                out.push_str(crate::tool_backends::shared::WEB_SEARCH_KEY_REMEDY);
+            }
+            WebOutcome::Err { message: out }
+        }
     }
 }
 
