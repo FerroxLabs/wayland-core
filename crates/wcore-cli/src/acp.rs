@@ -242,6 +242,158 @@ pub async fn run(args: AcpArgs) -> anyhow::Result<()> {
 /// Keychain account name for the ACP server API key. (F-017)
 const ACP_SERVER_KEY_ACCOUNT: &str = "acp-server-key";
 
+/// Where `serve` found (or put) this process's ACP server API key.
+///
+/// Carried as a value rather than reported inline so the decision and the
+/// operator-facing report cannot drift: there is exactly one `describe()` and
+/// it is derived from the same value the key came out of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServerKeyStore {
+    /// Injected by the caller through `WAYLAND_ACP_SERVER_KEY` — the profile
+    /// supervisor's path. Nothing is read or written on disk.
+    Environment,
+    /// The OS keychain (`wayland-core.acp` / `acp-server-key`).
+    Keychain { minted: bool },
+    /// The profile's `credentials.toml`, `0600`, beside its `config.toml`.
+    File { path: PathBuf, minted: bool },
+    /// No store on this host accepted the key. It lives in this process only.
+    Ephemeral,
+}
+
+impl ServerKeyStore {
+    /// Whether this run MINTED the key (as opposed to reading back an existing
+    /// one). Only a freshly minted key is printed to stderr — reprinting a
+    /// persisted key on every boot would scatter it through logs.
+    fn is_new(&self) -> bool {
+        match self {
+            Self::Environment => false,
+            Self::Keychain { minted } | Self::File { minted, .. } => *minted,
+            Self::Ephemeral => true,
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::Environment => {
+                "environment (WAYLAND_ACP_SERVER_KEY); nothing was read or written on disk"
+                    .to_string()
+            }
+            Self::Keychain { minted: false } => "OS keychain (existing entry)".to_string(),
+            Self::Keychain { minted: true } => "OS keychain (new entry)".to_string(),
+            Self::File { path, minted } => format!(
+                "file {} ({} entry, mode 0600, NOT encrypted at rest — no OS keychain was \
+                 available). Set WAYLAND_ACP_SERVER_KEY to keep the key off disk entirely.",
+                path.display(),
+                if *minted { "new" } else { "existing" }
+            ),
+            Self::Ephemeral => "EPHEMERAL, in this process only — no OS keychain and no \
+                 writable credentials file on this host. The key changes on every restart; \
+                 set WAYLAND_ACP_SERVER_KEY to pin one."
+                .to_string(),
+        }
+    }
+}
+
+/// The credentials-store slot holding the ACP server key.
+///
+/// Namespaced under `acp.` so it can never collide with the `providers.*` /
+/// `oauth.*` slots that share the same file.
+fn server_key_file_slot(account: &str) -> String {
+    format!("acp.{account}")
+}
+
+/// 32 random bytes, hex-encoded → 64 chars. Uses uuid's RNG (already in the
+/// workspace) for portability.
+fn mint_server_key() -> String {
+    let mut buf = [0u8; 32];
+    let id = uuid::Uuid::new_v4();
+    let id2 = uuid::Uuid::new_v4();
+    buf[..16].copy_from_slice(id.as_bytes());
+    buf[16..].copy_from_slice(id2.as_bytes());
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Resolve this process's ACP server key, minting and persisting one on first
+/// run. NEVER fails: a host with no credential store at all still gets a
+/// server, it just gets an ephemeral key and is told so.
+///
+/// Order, and why:
+///
+/// 1. `env_key` — the supervisor injected it; it is authoritative and touches
+///    no store.
+/// 2. The OS keychain, but ONLY when this is not an isolated profile home.
+///    The keychain service name is a process-global constant, so an isolated
+///    profile reading or writing it would share ONE server key with every
+///    other profile on the host — the same C4/D1 rule
+///    `wcore_config::credentials::build_ladder` already applies to provider
+///    credentials, applied here for the same reason.
+/// 3. The profile's own `credentials.toml`, written `0600` by
+///    `PlaintextCredentialsStore` (it enforces the mode on every save) at the
+///    path `credentials_storage_path()` resolves — which honours
+///    `WAYLAND_HOME`, so an isolated profile's key lands in that profile's
+///    home and nowhere else.
+/// 4. Ephemeral. A server the operator can still reach beats a server that
+///    refused to start.
+///
+/// Takes its environment as ARGUMENTS rather than reading it, so the arms can
+/// be tested without mutating process-global state or touching the host's real
+/// keychain.
+fn load_or_create_server_key(
+    account: &str,
+    env_key: Option<String>,
+    isolated_home: bool,
+    file_path: PathBuf,
+) -> (String, ServerKeyStore) {
+    use wcore_config::credentials::{CredentialsStore, PlaintextCredentialsStore};
+
+    if let Some(key) = env_key.filter(|k| !k.is_empty()) {
+        return (key, ServerKeyStore::Environment);
+    }
+
+    if !isolated_home
+        && let Ok(key) =
+            wcore_config::keychain::get_secret(wcore_acp::auth::KEYCHAIN_SERVICE, account)
+        && !key.is_empty()
+    {
+        return (key, ServerKeyStore::Keychain { minted: false });
+    }
+
+    let file = PlaintextCredentialsStore::new(file_path.clone());
+    let slot = server_key_file_slot(account);
+    if let Ok(Some(key)) = file.get(&slot)
+        && !key.is_empty()
+    {
+        return (
+            key,
+            ServerKeyStore::File {
+                path: file_path,
+                minted: false,
+            },
+        );
+    }
+
+    let key = mint_server_key();
+    if !isolated_home && store_api_key(account, &key).is_ok() {
+        return (key, ServerKeyStore::Keychain { minted: true });
+    }
+    match file.put(&slot, &key) {
+        Ok(()) => (
+            key,
+            ServerKeyStore::File {
+                path: file_path,
+                minted: true,
+            },
+        ),
+        Err(error) => {
+            eprintln!(
+                "wayland-core acp: could not persist the server API key to {} ({error})",
+                file_path.display()
+            );
+            (key, ServerKeyStore::Ephemeral)
+        }
+    }
+}
+
 async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
     // Bind the isolated profile FIRST — before the bind address is parsed, before
     // the server's API key is loaded-or-GENERATED into the keychain, before the
@@ -290,44 +442,40 @@ async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("invalid bind address {:?}: {e}", args.bind))?;
 
     // F-017: generate or load a one-time API key for this server instance.
-    // We try to load an existing key from the keychain first; if absent
-    // (first run), we generate a new one, persist it, and print it to stderr
-    // exactly once. The key is 32 random bytes, hex-encoded → 64 chars.
     // persona-profiles PR-7: when the profile SUPERVISOR spawns this process as
     // a per-profile CHILD, it injects a pre-generated server key via
     // WAYLAND_ACP_SERVER_KEY so the parent's AcpClient can authenticate to us
     // (X-API-Key) WITHOUT scraping our stderr for a keychain-generated key. The
     // env var is readable only by this child process (and root); children bind
-    // localhost ephemeral ports. Takes precedence over the keychain path below.
-    let api_key = match std::env::var("WAYLAND_ACP_SERVER_KEY") {
-        Ok(k) if !k.is_empty() => k,
-        _ => match wcore_config::keychain::get_secret(
-            wcore_acp::auth::KEYCHAIN_SERVICE,
-            ACP_SERVER_KEY_ACCOUNT,
-        ) {
-            Ok(k) if !k.is_empty() => k,
-            _ => {
-                // First run: generate a fresh key.
-                let random_bytes: [u8; 32] = {
-                    let mut buf = [0u8; 32];
-                    // Use uuid's rng (already in the workspace) for portability.
-                    let id = uuid::Uuid::new_v4();
-                    let id2 = uuid::Uuid::new_v4();
-                    buf[..16].copy_from_slice(id.as_bytes());
-                    buf[16..].copy_from_slice(id2.as_bytes());
-                    buf
-                };
-                let key: String = random_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                store_api_key(ACP_SERVER_KEY_ACCOUNT, &key)
-                    .map_err(|e| anyhow::anyhow!("keychain store failed: {e}"))?;
-                eprintln!(
-                    "wayland-core acp: generated API key (first run) — \
-                 pass as X-API-Key header:\n  {key}"
-                );
-                key
-            }
-        },
-    };
+    // localhost ephemeral ports. Takes precedence over every store below.
+    //
+    // FerroxLabs/wayland#305: this used to `?` out of `serve` with "keychain
+    // store failed" whenever the OS keychain could not be written — which on a
+    // headless WSL / container / CI host is ALWAYS, and on first run, before
+    // any key exists to pass through the env var. That made `acp serve`
+    // unreachable on exactly the hosts it is most useful on. It now descends
+    // to the 0600 credentials file this profile already uses for provider
+    // keys, and only if THAT is impossible to an ephemeral in-process key.
+    let (api_key, key_store) = load_or_create_server_key(
+        ACP_SERVER_KEY_ACCOUNT,
+        std::env::var("WAYLAND_ACP_SERVER_KEY").ok(),
+        std::env::var_os("WAYLAND_HOME").is_some(),
+        wcore_config::config::credentials_storage_path(),
+    );
+    // Say which store, ALWAYS, and before anything else uses the key. A
+    // fallback the operator cannot see is a silent downgrade: they would have
+    // no way to tell a keychain-protected key from a cleartext file from a key
+    // that will not survive a restart.
+    eprintln!(
+        "wayland-core acp: server API key store: {}",
+        key_store.describe()
+    );
+    if key_store.is_new() {
+        eprintln!(
+            "wayland-core acp: generated API key (first run) — \
+             pass as X-API-Key header:\n  {api_key}"
+        );
+    }
 
     // Resolve a runtime Config for the engine. Provider/model/api-key flags
     // override; everything else falls back to the config-file + env cascade.
@@ -812,5 +960,130 @@ mod tests {
         request(delete_args).await.unwrap();
         let listed_after = client.list_sessions().await.unwrap();
         assert!(listed_after.sessions.is_empty());
+    }
+
+    // ── #305: the server key must never be a reason not to boot ─────────
+
+    /// `credentials.toml` for a home directory, the way
+    /// `credentials_storage_path()` composes it.
+    fn creds_in(home: &std::path::Path) -> PathBuf {
+        home.join("credentials.toml")
+    }
+
+    /// An injected key is authoritative and touches no store at all — the
+    /// profile-supervisor path. `isolated_home = false` here on purpose: even
+    /// with the keychain arm ENABLED the env var must short-circuit before it,
+    /// so this also proves the host's real keychain is never consulted.
+    #[test]
+    fn injected_key_wins_and_touches_no_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = creds_in(tmp.path());
+        let (key, store) = load_or_create_server_key(
+            "acp-server-key",
+            Some("injected-key".to_string()),
+            false,
+            path.clone(),
+        );
+        assert_eq!(key, "injected-key");
+        assert_eq!(store, ServerKeyStore::Environment);
+        assert!(
+            !path.exists(),
+            "an injected key must not create a credentials file"
+        );
+    }
+
+    /// An empty `WAYLAND_ACP_SERVER_KEY` is not a key. It must fall through
+    /// rather than authenticate every caller against the empty string.
+    #[test]
+    fn empty_injected_key_falls_through() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (key, store) = load_or_create_server_key(
+            "acp-server-key",
+            Some(String::new()),
+            true,
+            creds_in(tmp.path()),
+        );
+        assert_ne!(key, "");
+        assert!(matches!(store, ServerKeyStore::File { minted: true, .. }));
+    }
+
+    /// THE #305 FIX. With no injected key and no keychain in play, the first
+    /// run must MINT, PERSIST at 0600, and report the file it used — not exit.
+    /// The second call must read the SAME key back, which is what makes the
+    /// fallback a store rather than a per-boot accident.
+    #[test]
+    fn headless_first_run_persists_to_the_profile_file_at_0600() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = creds_in(tmp.path());
+
+        let (first, store) = load_or_create_server_key("acp-server-key", None, true, path.clone());
+        assert_eq!(
+            store,
+            ServerKeyStore::File {
+                path: path.clone(),
+                minted: true
+            }
+        );
+        assert_eq!(first.len(), 64, "32 random bytes, hex-encoded");
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(store.is_new(), "a minted key must be printed once");
+        assert!(
+            store.describe().contains(&path.display().to_string()),
+            "the report must name the store it chose: {}",
+            store.describe()
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the fallback store must be owner-only");
+        }
+
+        let (second, store) = load_or_create_server_key("acp-server-key", None, true, path.clone());
+        assert_eq!(second, first, "the persisted key must be read back");
+        assert_eq!(
+            store,
+            ServerKeyStore::File {
+                path,
+                minted: false
+            }
+        );
+        assert!(!store.is_new(), "a reread key must not be reprinted");
+    }
+
+    /// The store slot is namespaced, so the server key cannot collide with a
+    /// provider credential living in the same file.
+    #[test]
+    fn server_key_slot_is_namespaced_under_acp() {
+        assert_eq!(server_key_file_slot("acp-server-key"), "acp.acp-server-key");
+    }
+
+    /// Last rung: when even the file cannot be written the process must still
+    /// come up with a usable key rather than refuse to serve. The parent of
+    /// the credentials path is a regular FILE here, so `create_dir_all` fails
+    /// for a reason no permission fix-up in the test can paper over.
+    #[test]
+    fn unwritable_store_yields_an_ephemeral_key_instead_of_refusing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("not-a-dir");
+        std::fs::write(&blocker, b"i am a file").unwrap();
+        let path = blocker.join("credentials.toml");
+
+        let (first, store) = load_or_create_server_key("acp-server-key", None, true, path.clone());
+        assert_eq!(store, ServerKeyStore::Ephemeral);
+        assert_eq!(first.len(), 64);
+        assert!(store.is_new());
+        assert!(
+            store.describe().contains("EPHEMERAL"),
+            "the operator must be told the key will not survive a restart: {}",
+            store.describe()
+        );
+
+        // CONTROL for the assertion above: an ephemeral key really is not
+        // persisted, so a second call mints a different one. If this were
+        // equal, "ephemeral" would be a mislabelled durable store.
+        let (second, _) = load_or_create_server_key("acp-server-key", None, true, path);
+        assert_ne!(first, second);
     }
 }

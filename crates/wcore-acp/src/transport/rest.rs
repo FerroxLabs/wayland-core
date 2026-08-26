@@ -15,14 +15,23 @@
 //!   GET    /v1/tools                 list_tools
 //!   GET    /v1/agents                list_agents  (persona-profiles roster)
 //!   GET    /v1/initialize            initialize   (capability handshake, R2)
-//!   GET    /v1/health                liveness
+//!   GET    /v1/health                liveness (unauthenticated by default)
 //!   GET    /openapi.json             the OpenAPI document (unauthenticated)
 //!   GET    /doc                      embedded spec viewer, HTML (unauthenticated)
 //!
 //! Auth + CORS mirror [`super::http`] exactly (F-017): optional `X-API-Key`
-//! verifier installed by `wcore-cli`; `/openapi.json` + `/doc` are a public
-//! carve-out (spec discovery is not sensitive), every `/v1/*` route is gated
-//! when a verifier is present.
+//! verifier installed by `wcore-cli`; `/openapi.json`, `/doc` and `/v1/health`
+//! are the public carve-out, every other `/v1/*` route is gated when a
+//! verifier is present.
+//!
+//! `/v1/health` is in that carve-out because a liveness probe has to answer
+//! BEFORE a credential exists — a headless host (FerroxLabs/wayland#305) has
+//! no way to obtain the server key until the process it is probing has already
+//! started and printed it, so gating liveness on that key makes the probe
+//! unusable exactly when it is needed. The carve-out is an explicit flag
+//! ([`RestTransport::with_health_auth_required`]) rather than an implicit
+//! property of the route, so an operator who wants liveness gated can say so
+//! and nobody has to infer the posture from route order.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -162,6 +171,10 @@ impl<H: HttpHandler> RestExt for H {}
 pub struct RestTransport<H: HttpHandler> {
     handler: Arc<H>,
     verifier: Option<Arc<dyn Verifier>>,
+    /// Whether `GET /v1/health` sits INSIDE the auth middleware. Default
+    /// `false`: liveness answers without a credential. See
+    /// [`Self::with_health_auth_required`].
+    health_auth_required: bool,
 }
 
 impl<H: HttpHandler> RestTransport<H> {
@@ -169,6 +182,7 @@ impl<H: HttpHandler> RestTransport<H> {
         Self {
             handler,
             verifier: None,
+            health_auth_required: false,
         }
     }
 
@@ -179,12 +193,34 @@ impl<H: HttpHandler> RestTransport<H> {
         self
     }
 
-    /// Build the REST `Router`. `/openapi.json` and `/doc` are served
-    /// UNAUTHENTICATED (spec discovery is not sensitive); all `/v1/*` routes
-    /// go through the auth middleware when a verifier is present.
+    /// Move `GET /v1/health` back INSIDE the auth middleware.
+    ///
+    /// The default (`false`) serves liveness unauthenticated, which is what
+    /// makes a health probe usable on a host where no server key has been
+    /// configured yet. An operator who does not want an unauthenticated
+    /// liveness surface on their bind address flips this to `true` and the
+    /// route rejoins the gated set with no other change in behaviour.
+    ///
+    /// This is deliberately a FLAG and not a second router: the two postures
+    /// differ only in which side of the middleware one route is registered on,
+    /// so there is exactly one place to read the answer from.
+    #[must_use]
+    pub fn with_health_auth_required(mut self, required: bool) -> Self {
+        self.health_auth_required = required;
+        self
+    }
+
+    /// Build the REST `Router`. `/openapi.json`, `/doc` and — unless
+    /// [`Self::with_health_auth_required`] says otherwise — `/v1/health` are
+    /// served UNAUTHENTICATED; every other `/v1/*` route goes through the auth
+    /// middleware when a verifier is present.
+    ///
+    /// The health route is registered on exactly ONE side of the middleware,
+    /// chosen by the flag, so the two postures cannot both be live and no
+    /// route can end up outside the gate by accident.
     pub fn router(&self) -> Router {
         // Authenticated API surface.
-        let api = Router::new()
+        let mut api = Router::new()
             .route(
                 "/v1/sessions",
                 post(create_session::<H>).get(list_sessions::<H>),
@@ -203,9 +239,11 @@ impl<H: HttpHandler> RestTransport<H> {
             // Both default-safe (empty roster / advertised capability only) and
             // gated by the same auth middleware as the rest of `/v1/*`.
             .route("/v1/agents", get(list_agents::<H>))
-            .route("/v1/initialize", get(initialize::<H>))
-            .route("/v1/health", get(health))
-            .with_state(self.handler.clone());
+            .route("/v1/initialize", get(initialize::<H>));
+        if self.health_auth_required {
+            api = api.route("/v1/health", get(health));
+        }
+        let api = api.with_state(self.handler.clone());
 
         let api = if let Some(v) = self.verifier.clone() {
             let h = self.handler.clone();
@@ -218,11 +256,14 @@ impl<H: HttpHandler> RestTransport<H> {
             api
         };
 
-        // Spec routes are stateless + unauthenticated; merge them in.
-        Router::new()
+        // Public routes are stateless + unauthenticated; merge them in.
+        let mut public = Router::new()
             .route("/openapi.json", get(openapi_json))
-            .route("/doc", get(doc_ui))
-            .merge(api)
+            .route("/doc", get(doc_ui));
+        if !self.health_auth_required {
+            public = public.route("/v1/health", get(health));
+        }
+        public.merge(api)
     }
 }
 
@@ -1105,6 +1146,155 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── #305: liveness is reachable before a credential exists ─────────
+
+    /// The health carve-out and its CONTROL, in one test.
+    ///
+    /// `/v1/health` must answer 200 with NO credential — that is the fix for
+    /// FerroxLabs/wayland#305, where a headless operator could not probe a
+    /// server whose key they did not yet have. The second assertion is what
+    /// stops that fix from being "turn the auth off": the very same router,
+    /// in the very same posture, must still refuse `/v1/sessions` with 401.
+    /// A carve-out that widened to the whole surface would pass the first
+    /// assertion and fail the second.
+    #[tokio::test]
+    async fn health_answers_unauthenticated_while_other_routes_still_401() {
+        let app = RestTransport::new(Arc::new(MockHandler {
+            fail_get_not_found: false,
+        }))
+        .with_verifier(Arc::new(DenyVerifier))
+        .router();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v1/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "liveness must answer without a credential"
+        );
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["status"], "ok");
+
+        // CONTROL: the gate is still shut for everything else.
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v1/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "the health carve-out must not open any other route"
+        );
+    }
+
+    /// Enumerate the OpenAPI document and assert EVERY documented `/v1`
+    /// operation except `GET /v1/health` is refused without a credential.
+    ///
+    /// Driven off `ApiDoc::openapi()` rather than a hand-written list so a
+    /// route added to the surface without being placed behind the middleware
+    /// fails here instead of shipping. The `carved_out` counter is the
+    /// positive control: if the enumeration ever silently walked zero paths
+    /// (a renamed document key, an empty `paths` map) the loop below would
+    /// vacuously pass, so the test also asserts it saw the one route it
+    /// expects to be public and a plausible number of gated ones.
+    #[tokio::test]
+    async fn only_health_is_carved_out_of_the_v1_gate() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let paths = doc["paths"].as_object().expect("paths object");
+
+        let mut gated = 0usize;
+        let mut carved_out = Vec::new();
+        for (template, item) in paths {
+            if !template.starts_with("/v1") {
+                continue;
+            }
+            let uri = template
+                .replace("{id}", "sess-1")
+                .replace("{call_id}", "c1");
+            let verbs = item.as_object().expect("path item object");
+            for verb in verbs.keys() {
+                // A fresh router per request: `oneshot` consumes it.
+                let app = RestTransport::new(Arc::new(MockHandler {
+                    fail_get_not_found: false,
+                }))
+                .with_verifier(Arc::new(DenyVerifier))
+                .router();
+                let resp = app
+                    .oneshot(
+                        HttpRequest::builder()
+                            .method(verb.to_uppercase().as_str())
+                            .uri(&uri)
+                            .header("content-type", "application/json")
+                            .body(Body::from("{}"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                if uri == "/v1/health" {
+                    assert_eq!(
+                        resp.status(),
+                        StatusCode::OK,
+                        "{verb} {uri} is the documented carve-out"
+                    );
+                    carved_out.push(format!("{verb} {uri}"));
+                } else {
+                    assert_eq!(
+                        resp.status(),
+                        StatusCode::UNAUTHORIZED,
+                        "{verb} {uri} reached the handler without a credential"
+                    );
+                    gated += 1;
+                }
+            }
+        }
+        assert_eq!(
+            carved_out,
+            vec!["get /v1/health".to_string()],
+            "exactly one operation may be public"
+        );
+        assert!(
+            gated >= 8,
+            "the enumeration walked only {gated} gated operations; the OpenAPI \
+             document is not being read"
+        );
+    }
+
+    /// The flag is real in both directions: an operator who wants liveness
+    /// gated gets a 401 on the same route the default serves publicly.
+    #[tokio::test]
+    async fn health_rejoins_the_gate_when_the_operator_requires_it() {
+        let app = RestTransport::new(Arc::new(MockHandler {
+            fail_get_not_found: false,
+        }))
+        .with_verifier(Arc::new(DenyVerifier))
+        .with_health_auth_required(true)
+        .router();
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v1/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     // ── T-C9 (shared error→status table) ───────────────────────────────
