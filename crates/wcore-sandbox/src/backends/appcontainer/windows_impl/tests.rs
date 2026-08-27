@@ -861,6 +861,25 @@ fn session_selection_reaches_ready_without_running_the_appcontainer_probe() {
     // was deterministically red; under the default runner it passed on luck
     // (#1100). Take the isolation lock and establish the precondition by
     // construction instead.
+    // This test has TWO process-global preconditions, not one, and both used to
+    // be inherited from the scheduler. `WAYLAND_SANDBOX` (asserted below) is
+    // the second: four tests in this SAME lib test binary — `fail_closed_tests`
+    // and `config_toggle_tests` in crates/wcore-sandbox/src/lib.rs — set
+    // `WAYLAND_SANDBOX=none` and `WAYLAND_ALLOW_NO_SANDBOX=1` under
+    // `SANDBOX_TEST_LOCK`, which this test did not take.
+    //
+    // MEASURED on Windows 11 26200 before this lock, 300 runs of those four
+    // tests plus this one at `--test-threads=16`: 106 red. 34 on the
+    // precondition assert below, and 72 later at `required_for_session`, which
+    // observed the bypass pair mid-test and returned `UnsafeBypassSource`. So
+    // the guard has to be held for the whole body, not just across the read.
+    //
+    // Lock order is `SANDBOX_TEST_LOCK` then `probe_isolation()` and nothing
+    // takes them the other way round: the lib.rs tests take only the former,
+    // the AppContainer tests take only the latter.
+    let _env_isolation = crate::SANDBOX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _isolation = probe_isolation()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
