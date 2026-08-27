@@ -157,7 +157,7 @@ async fn dangerous_expiry_cancels_production_streaming_bash_process_tree() {
     let shell_pid_file = workspace.path().join("shell.pid");
     let child_pid_file = workspace.path().join("child.pid");
     let script = format!(
-        "echo streaming-proof; echo $$ > '{}'; sleep 30 & echo $! > '{}'; wait",
+        "echo streaming-proof; echo $$ > '{}'; sleep 600 & echo $! > '{}'; wait",
         shell_pid_file.display(),
         child_pid_file.display()
     );
