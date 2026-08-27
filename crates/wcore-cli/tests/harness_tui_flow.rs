@@ -336,6 +336,33 @@ fn tui_renders_the_chrome_and_every_tab_on_boot() {
     seed_config(home.path());
     let h = boot_to_workspace(home.path());
 
+    // `boot_to_workspace` waits for the top chrome ONLY (`WAYLAND` +
+    // `Workspace`). The status-bar assertion at the bottom of this test reads
+    // a DIFFERENT region that is painted on a later frame, so a boot screen
+    // carrying the wordmark and all six tabs with an EMPTY status bar
+    // satisfies that wait and then fails here. (Observed on a loaded host:
+    // header and every tab painted, status bar blank.) Every anchor this test
+    // asserts on must be waited for before the screen is snapshotted --
+    // otherwise the wait is under-specified relative to the assertions.
+    h.wait_for(
+        |s| {
+            [
+                "WAYLAND",
+                "Workspace",
+                "Sub-Agents",
+                "Plan",
+                "Config",
+                "Diagnostics",
+                "Workflows",
+                "claude-sonnet-4-20250514",
+            ]
+            .iter()
+            .all(|anchor| s.contains(anchor))
+        },
+        Duration::from_secs(60),
+        "TUI to render the chrome, every tab and the status-bar model",
+    );
+
     let screen = h.screen_text();
     // The hybrid-branded wordmark sits at the top-left of every surface.
     assert!(
