@@ -87,8 +87,8 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // gap: each records why a specific widening needed a signal, and rewriting them
 // to look consecutive would destroy that reasoning to tidy a sequence no host
 // reads. A pinned host moves 1.16 -> 1.19 and finds every capability named.
-pub const CONTRACT_MINOR: u64 = 19;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/19";
+pub const CONTRACT_MINOR: u64 = 20;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/20";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases

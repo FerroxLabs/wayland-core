@@ -394,6 +394,7 @@ fn golden_mcp_ready_v0_1_21() {
     let event = ProtocolEvent::McpReady {
         name: "memory-server".into(),
         tools: vec!["memory_store".into(), "memory_search".into()],
+        already_connected: false,
     };
     assert_eq!(
         serialize(&event),

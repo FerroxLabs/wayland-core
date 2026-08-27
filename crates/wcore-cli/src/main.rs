@@ -3339,7 +3339,11 @@ fn mcp_ready_events_for(
         .into_iter()
         .map(|name| {
             let tools = per_server.remove(&name).unwrap_or_default();
-            ProtocolEvent::McpReady { name, tools }
+            ProtocolEvent::McpReady {
+                name,
+                tools,
+                already_connected: false,
+            }
         })
         .collect()
 }
@@ -5452,7 +5456,13 @@ async fn run_json_stream_mode(
                         match snapshot.state {
                             McpLifecycleState::Ready => {
                                 let tools = registered_mcp_tool_names(&engine.tools(), &name);
-                                let _ = writer.emit(&ProtocolEvent::McpReady { name, tools });
+                                // wayland#605: annotate the skip so a host can
+                                // tell this apart from a real reconnect.
+                                let _ = writer.emit(&ProtocolEvent::McpReady {
+                                    name,
+                                    tools,
+                                    already_connected: true,
+                                });
                             }
                             McpLifecycleState::Connecting => {
                                 eprintln!(
@@ -5572,6 +5582,7 @@ async fn run_json_stream_mode(
                         let _ = writer.emit(&ProtocolEvent::McpReady {
                             name,
                             tools: tool_names,
+                            already_connected: false,
                         });
                     }
                     Err(e) => {
@@ -8726,7 +8737,7 @@ mod tests {
 
         // Helper sorts servers by name, so order is deterministic: fs, search.
         match &events[0] {
-            ProtocolEvent::McpReady { name, tools } => {
+            ProtocolEvent::McpReady { name, tools, .. } => {
                 assert_eq!(name, "fs");
                 let mut sorted = tools.clone();
                 sorted.sort();
@@ -8735,7 +8746,7 @@ mod tests {
             other => panic!("expected McpReady, got {other:?}"),
         }
         match &events[1] {
-            ProtocolEvent::McpReady { name, tools } => {
+            ProtocolEvent::McpReady { name, tools, .. } => {
                 assert_eq!(name, "search");
                 assert_eq!(tools, &vec!["grep".to_string()]);
             }
@@ -8771,7 +8782,7 @@ mod tests {
         let events = mcp_ready_events_for(&mgr, &registry);
         assert_eq!(events.len(), 1, "tool-less servers must still emit");
         match &events[0] {
-            ProtocolEvent::McpReady { name, tools } => {
+            ProtocolEvent::McpReady { name, tools, .. } => {
                 assert_eq!(name, "introspect");
                 assert!(tools.is_empty());
             }
@@ -9142,7 +9153,7 @@ mod tests {
         let events = mcp_ready_events_for(&manager, &registry);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            ProtocolEvent::McpReady { name, tools } => {
+            ProtocolEvent::McpReady { name, tools, .. } => {
                 assert_eq!(name, "collision");
                 assert_eq!(tools, &["mcp__collision__ToolSearch".to_string()]);
             }

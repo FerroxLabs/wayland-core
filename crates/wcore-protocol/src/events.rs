@@ -975,6 +975,14 @@ pub enum ProtocolEvent {
     McpReady {
         name: String,
         tools: Vec<String>,
+        /// wayland#605: `true` when this event is the receipt for an
+        /// `add_mcp_server` that was SKIPPED because the named server was
+        /// already connected, rather than the receipt for a real connect.
+        /// Without it the two are byte-identical and a json-stream host
+        /// cannot tell a no-op re-add from a reconnect. Forward-additive and
+        /// default-false, so a real connect stays byte-identical on the wire.
+        #[serde(default, skip_serializing_if = "is_false")]
+        already_connected: bool,
     },
     /// An MCP server failed (or timed out) at connect. The companion to
     /// [`McpReady`]: it carries the preserved failure cause so a host /
@@ -2662,6 +2670,7 @@ mod tests {
         let event = ProtocolEvent::McpReady {
             name: "team-tools".to_string(),
             tools: vec!["team_send_message".into(), "team_task_create".into()],
+            already_connected: false,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "mcp_ready");
@@ -2669,6 +2678,25 @@ mod tests {
         assert_eq!(json["tools"][0], "team_send_message");
         assert_eq!(json["tools"][1], "team_task_create");
         assert_eq!(json["tools"].as_array().unwrap().len(), 2);
+        // wayland#605: a real connect must stay byte-identical to the
+        // pre-#605 wire shape, so the annotation is absent when false.
+        assert!(
+            json.get("already_connected").is_none(),
+            "a real connect must not serialize already_connected: {json}"
+        );
+    }
+
+    /// wayland#605: a skipped `add_mcp_server` for an already-connected
+    /// server must be distinguishable on the wire from a real reconnect.
+    #[test]
+    fn mcp_ready_annotates_an_already_connected_skip() {
+        let event = ProtocolEvent::McpReady {
+            name: "team-tools".to_string(),
+            tools: vec!["team_send_message".into()],
+            already_connected: true,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["already_connected"], serde_json::json!(true));
     }
 
     #[test]
