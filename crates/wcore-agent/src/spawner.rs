@@ -4294,6 +4294,10 @@ mod production_durable_spawn_tests {
         started: parking_lot::Mutex<Option<oneshot::Sender<()>>>,
         release: Arc<Notify>,
         wait_for_release: bool,
+        /// #893 — loop-ownership provenance of the last request seen, so a
+        /// test can assert what actually reached the wire rather than only
+        /// what the durable record says about the child.
+        seen_loop_intent: parking_lot::Mutex<Option<wcore_types::llm::FluxLoopIntent>>,
     }
 
     impl ControlledProvider {
@@ -4303,6 +4307,7 @@ mod production_durable_spawn_tests {
                 started: parking_lot::Mutex::new(None),
                 release: Arc::new(Notify::new()),
                 wait_for_release: false,
+                seen_loop_intent: parking_lot::Mutex::new(None),
             })
         }
 
@@ -4312,6 +4317,7 @@ mod production_durable_spawn_tests {
                 started: parking_lot::Mutex::new(Some(started)),
                 release: Arc::new(Notify::new()),
                 wait_for_release: true,
+                seen_loop_intent: parking_lot::Mutex::new(None),
             })
         }
     }
@@ -4320,9 +4326,10 @@ mod production_durable_spawn_tests {
     impl LlmProvider for ControlledProvider {
         async fn stream(
             &self,
-            _request: &LlmRequest,
+            request: &LlmRequest,
         ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.seen_loop_intent.lock() = request.flux_loop_intent.clone();
             if let Some(started) = self.started.lock().take() {
                 let _ = started.send(());
             }
@@ -5046,6 +5053,60 @@ mod production_durable_spawn_tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// #893 — `spawn_one_with_origin` is the ONLY production site that
+    /// declares Anvil loop ownership, and nothing asserted it: deleting the
+    /// `ChildOrigin::Anvil` block left every existing test green. Assert what
+    /// reaches the WIRE, not just what the durable record says.
+    #[tokio::test]
+    async fn anvil_origin_child_declares_loop_ownership_on_the_wire() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, _journal, _token) = canonical_binding(dir.path(), "f8930001", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = bound_spawner(provider_dyn, authority.clone(), dir.path());
+
+        let result = spawner
+            .spawn_one_with_origin(child("anvil-builder"), ChildOrigin::Anvil)
+            .await;
+
+        assert!(!result.is_error, "{}", result.text);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            provider.seen_loop_intent.lock().clone(),
+            Some(wcore_types::llm::FluxLoopIntent::ClientOwned(
+                wcore_types::llm::ANVIL_LOOP_OWNER.to_string()
+            )),
+            "an Anvil builder fork is mid-loop material of a client-side climb"
+        );
+    }
+
+    /// Control for the test above: an ordinary fork must NOT claim loop
+    /// ownership, or every sub-agent turn would bypass the router cache and
+    /// suppress its elevation. Proves the assertion tracks the origin, not
+    /// merely the fact that some intent is always set.
+    #[tokio::test]
+    async fn non_anvil_origin_child_declares_no_loop_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, _journal, _token) = canonical_binding(dir.path(), "f8930002", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = bound_spawner(provider_dyn, authority.clone(), dir.path());
+
+        let result = spawner
+            .spawn_one_with_origin(child("workflow-child"), ChildOrigin::Workflow)
+            .await;
+
+        assert!(!result.is_error, "{}", result.text);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            provider.seen_loop_intent.lock().clone(),
+            None,
+            "only an Anvil fork owns a client-side loop"
+        );
     }
 
     #[tokio::test]
