@@ -28,12 +28,30 @@ pub mod mute_server {
     /// test run.
     pub const PID_FILE_ENV: &str = "WCORE_MCP_MUTE_SERVER_PIDFILE";
 
+    /// Hard lifetime cap on a mute server.
+    ///
+    /// The `sleep 3600` this fixture replaced self-terminated after an hour;
+    /// an unbounded `loop { sleep }` does not, so every run that fails or is
+    /// interrupted before the reaper fires leaks a process that outlives the
+    /// machine's patience (measured: a mute server still alive after nextest
+    /// had exited and reported the failure).
+    ///
+    /// Sized against the longest window any caller holds one open — a 30s
+    /// spawn budget plus a 30s dial deadline plus a 10s reap budget — with
+    /// room to spare, so it cannot expire mid-test and hand a reaper test a
+    /// free pass. Deliberately NOT reactive: exiting on stdin EOF or on the
+    /// pid file disappearing would make the process die for reasons that have
+    /// nothing to do with the reaper under test, which is exactly the vacuity
+    /// these tests exist to avoid.
+    const MAX_LIFETIME: Duration = Duration::from_secs(300);
+
     /// Call this as the FIRST statement of a `#[test]` that exists only to be
     /// re-executed by [`launch_parts`].
     ///
     /// Returns immediately during an ordinary test run. When
     /// [`PID_FILE_ENV`] is set it writes this process's pid there and then
-    /// never returns — the caller is the mute server.
+    /// never returns — the caller is the mute server, which stays silent until
+    /// it is reaped or [`MAX_LIFETIME`] elapses.
     pub fn serve_if_requested() {
         let Ok(pid_file) = std::env::var(PID_FILE_ENV) else {
             return;
@@ -43,9 +61,11 @@ pub mod mute_server {
         if std::fs::write(&temporary, std::process::id().to_string()).is_ok() {
             let _ = std::fs::rename(&temporary, &pid_file);
         }
-        loop {
-            std::thread::sleep(Duration::from_secs(3600));
-        }
+        std::thread::sleep(MAX_LIFETIME);
+        // Reached only by a leaked server: every test that uses this fixture
+        // kills it long before the cap. Exiting non-zero so a run that somehow
+        // depended on this process is not quietly told everything was fine.
+        std::process::exit(2);
     }
 
     /// The `command`, `args` and `env` for an MCP stdio server config that

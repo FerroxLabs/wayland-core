@@ -966,6 +966,11 @@ impl McpTransport for StdioTransport {
         // Mark dead first so concurrent `request()` calls fast-fail.
         self.alive.store(false, Ordering::SeqCst);
 
+        // A cleanup failure worth telling the caller about, held back until the
+        // background tasks below have been joined — abandoning them to report
+        // the child would trade one leak for another.
+        let mut deferred_error: Option<McpError> = None;
+
         // Drop stdin to signal EOF, then SIGKILL and reap. `kill().await`
         // (tokio) sends SIGKILL and awaits process exit, so the OS process
         // is reaped; the EOF additionally unblocks a parked reader.
@@ -991,8 +996,18 @@ impl McpTransport for StdioTransport {
                 // already dead, so this returns in microseconds in every
                 // observed case — but an unbounded await on a process the OS
                 // is slow to reap would put a second full connect deadline on
-                // a path whose whole job is to give up. Elapsing here is not a
-                // cleanup failure: the tree is already terminated above.
+                // a path whose whole job is to give up.
+                //
+                // Elapsing here is not a containment failure — the tree was
+                // terminated above — but it IS an abandoned direct child, and
+                // that has to reach the operator. It used to be a `warn!`
+                // only: with `RUST_LOG` unset nothing below ERROR reaches
+                // stderr, so the abandonment went to the log file and the user
+                // saw a clean `close()`. Reporting it as an error puts it on
+                // the same disclosure path as `CLOSE_TIMEOUT`, which
+                // `manager.rs` folds into `InitFailed` / `ConnectTimedOut`.
+                // The level of the log line is not the fix and must not be
+                // "corrected" back into one.
                 match timeout(CHILD_REAP_TIMEOUT, child.wait()).await {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
@@ -1000,9 +1015,12 @@ impl McpTransport for StdioTransport {
                             "failed to reap MCP child: {error}"
                         )));
                     }
-                    Err(_) => warn!(
-                        "[mcp] stdio child did not reap within {CHILD_REAP_TIMEOUT:?} — abandoning it"
-                    ),
+                    Err(_) => {
+                        deferred_error = Some(McpError::Transport(format!(
+                            "MCP stdio child did not reap within {CHILD_REAP_TIMEOUT:?} and was \
+                             abandoned; its process tree was terminated first"
+                        )));
+                    }
                 }
             }
             #[cfg(unix)]
@@ -1032,7 +1050,10 @@ impl McpTransport for StdioTransport {
         if let Some(handle) = self.stderr_task.lock().await.take() {
             handle.abort();
         }
-        Ok(())
+        match deferred_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 

@@ -9,10 +9,30 @@
 //! reader that can never observe EOF from the transport's.
 //!
 //! Unix has had a reaper for this since Rank 24 (`process_group(0)` plus
-//! `killpg`), so on Unix these tests are a regression guard on a mechanism
-//! that already works. On Windows there was none — the code carried comments
-//! claiming a Job Object that did not exist — and these tests are the ones
-//! that go from red to green.
+//! `killpg`). On Windows there was none — the code carried comments claiming a
+//! Job Object that did not exist — and these tests are the ones that go from
+//! red to green.
+//!
+//! # Their power is NOT uniform across Unix — the macOS arm is vacuous
+//!
+//! "Unix" is two different measurements here, because the grandchild these
+//! tests assert on only exists on one of them. The launch path is
+//! `mcp_stdio_command_builder` -> `sh -c "<program> <args>"`, and the inner
+//! command is a single simple command:
+//!
+//! * **macOS**: `/bin/sh` EXEC-REPLACES itself with the inner command, so the
+//!   "grandchild" IS the direct child (measured on Darwin 25.3.0:
+//!   `/bin/sh -c "/bin/sleep 4"` reported pid 96378, and pid 96378 was
+//!   `/bin/sleep`). `child.start_kill()` alone reaps it, so BOTH tests below
+//!   pass with the process-group reaper removed entirely. On macOS they are a
+//!   smoke test of the fixture, not a guard on the reaper.
+//! * **Linux**: `dash` FORKS (measured: `/bin/sh -c "/bin/sleep 4"` reported
+//!   pid 1737448 as `sh`, with a separate `sleep` at pid 1737450, ppid
+//!   1737448). The grandchild is real, and so is what these tests grade.
+//!
+//! So the real coverage is Linux and Windows. Do not read a green macOS run as
+//! evidence the reaper works, and do not "simplify" the launch path on the
+//! strength of one.
 //!
 //! Deliberately asserts against the OS, not against a transport field: the
 //! claim is "no process survived", and only the OS can answer that.
@@ -104,29 +124,41 @@ async fn drop_reaps_the_grandchild_server_too() {
     );
 }
 
-/// The spawn contract the two tests above depend on: a transport that failed
-/// to take ownership of its tree must not be handed back as if it had.
+/// A transport for a program that does not exist must not stay LIVE.
+///
+/// Renamed from `a_command_that_cannot_start_is_an_error_not_a_silent_orphan`,
+/// which claimed to grade "a transport that failed to take ownership of its
+/// tree". It never did: a nonexistent program is reported by the shell shim,
+/// which starts fine, so `attach` is reached and SUCCEEDS and no ownership
+/// failure ever occurs. That path is graded where it lives, by the `attach`
+/// unit tests in `wcore_types::job_object` — the `Err` return here has no
+/// bearing on it.
+///
+/// It was also vacuous: the whole body sat inside `if let Ok(transport)`, so
+/// an `Err` passed the test having asserted nothing. The spawn result is
+/// asserted directly now. If a platform ever starts refusing the spawn
+/// outright, this fails loudly and gets re-graded rather than going quiet.
 #[tokio::test]
-async fn a_command_that_cannot_start_is_an_error_not_a_silent_orphan() {
+async fn a_nonexistent_program_never_yields_a_live_transport() {
     let missing = if cfg!(windows) {
         "wcore-mcp-no-such-program.exe"
     } else {
         "wcore-mcp-no-such-program"
     };
-    let result = StdioTransport::spawn(missing, &[], &HashMap::new()).await;
 
     // The shell wrapper reports "command not found" on its own stderr and
-    // exits, so the spawn itself succeeds and the failure surfaces as a dead
-    // transport rather than a spawn error. Either shape is acceptable; a
-    // LIVE transport for a program that does not exist is not.
-    if let Ok(transport) = result {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while transport.is_alive() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(
-            !transport.is_alive(),
-            "a transport for a nonexistent program reported itself alive"
-        );
+    // exits, so the spawn itself succeeds on every platform this runs on and
+    // the failure surfaces as a transport that goes dead.
+    let transport = StdioTransport::spawn(missing, &[], &HashMap::new())
+        .await
+        .expect("the shell shim starts even when the program it names does not");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while transport.is_alive() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert!(
+        !transport.is_alive(),
+        "a transport for a nonexistent program reported itself alive"
+    );
 }

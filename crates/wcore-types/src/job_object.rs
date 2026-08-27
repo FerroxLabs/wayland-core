@@ -33,11 +33,40 @@
 //! 2. call [`WindowsJobObject::attach`] with the new PID immediately after.
 //!
 //! `attach` resumes the child's threads only once the kernel has accepted the
-//! assignment. A caller that skips step 1 hands `attach` a process that is
-//! already running: the assignment still succeeds, but `attach` then fails
-//! with `NotFound` from the resume pass (there is no suspended thread to
-//! resume), which is deliberate — a silently-lost race is exactly the bug this
-//! type exists to remove.
+//! assignment, and it verifies the SUSPEND COUNT rather than merely the
+//! absence of an error. `ResumeThread` returns the thread's PREVIOUS suspend
+//! count and succeeds on a thread that was never suspended, so "no error" is
+//! not evidence that step 1 happened. The counts and what each means here:
+//!
+//! | previous | meaning | verdict |
+//! |----------|---------|---------|
+//! | `u32::MAX` | the call failed; `GetLastError` is meaningful | error |
+//! | `0` | the thread was NOT suspended and nothing changed | error — step 1 was skipped, and the child may already have spawned a descendant outside the job |
+//! | `1` | count is now 0 and the thread is runnable | the only success |
+//! | `n > 1` | count is now `n - 1`; the thread is STILL frozen | error — something else (debugger, EDR) suspended it too, and resuming once would hand back a job whose only process never runs |
+//!
+//! The honest limit of that check: it reads the suspend count at one instant.
+//! It cannot distinguish "never suspended" from "was created suspended and
+//! something already resumed it" — both report `0`. It is a detector for the
+//! skipped-`create_suspended` bug, not a proof that no descendant escaped.
+//!
+//! # De-duplication state (do not overclaim this)
+//!
+//! Moving this type into `wcore-types` removed the `wcore-mcp` copy. It did
+//! NOT leave the workspace with one implementation:
+//! `crates/wcore-eval-scenarios/src/process_tree.rs` still carries a third,
+//! independent `mod windows` (`WindowsJob(HANDLE)`, `CreateJobObjectW`,
+//! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, `CREATE_SUSPENDED`,
+//! `resume_only_thread`, its own `unsafe impl Send` and `Drop`, and its own
+//! `Win32_System_Diagnostics_ToolHelp` dependency). Folding it in is a
+//! deliberate separate change — it also owns `IsProcessInJob` /
+//! `QueryInformationJobObject` membership assertions this type does not have.
+//!
+//! Nor are there only two consumers. `attach` has two DIRECT callers
+//! (`wcore-mcp`'s stdio transport and `wcore-sandbox`'s `ProcessTreeGuard`),
+//! but `ProcessTreeGuard::new` is itself called from seven production sites:
+//! `wcore-sandbox`'s `sandbox_exec`, `no_sandbox` (twice), `bwrap` and
+//! `process_capture` backends, plus `wcore-browser`'s `supervisor` (twice).
 
 #![cfg(windows)]
 
@@ -49,11 +78,15 @@ pub struct WindowsJobObject(HANDLE);
 
 // SAFETY: a Job Object handle is a process-wide kernel reference and this
 // wrapper has unique ownership, so moving it across threads cannot duplicate a
-// close or invalidate the handle. `TerminateJobObject` is itself thread-safe
-// and idempotent, which is what makes `&self` sharing (`Sync`) sound: the only
-// operation reachable through a shared reference is that terminate.
+// close or invalidate the handle.
+//
+// Deliberately NOT `unsafe impl Sync`. Both consumers store this behind a
+// `std::sync::Mutex`, and `Mutex<T>: Sync` needs only `T: Send`, so a `Sync`
+// impl buys nothing — it only leaves a hand-audited invariant standing for
+// whoever adds the next `&self` method. If a future caller genuinely needs to
+// share a `&WindowsJobObject` across threads, add the impl back together with
+// the concrete reason and re-audit every `&self` method at that point.
 unsafe impl Send for WindowsJobObject {}
-unsafe impl Sync for WindowsJobObject {}
 
 impl WindowsJobObject {
     /// Mark `command` `CREATE_SUSPENDED` so the child cannot create an
@@ -70,8 +103,20 @@ impl WindowsJobObject {
     /// Create a kill-on-close job, assign the (suspended) process `pid` to it,
     /// then resume the process.
     ///
-    /// On error the process is left suspended and unowned; the caller is
-    /// responsible for killing it rather than leaking a frozen child.
+    /// Errors split at the assignment, and the caller's obligation differs:
+    ///
+    /// * Failing BEFORE `AssignProcessToJobObject` succeeds (job creation,
+    ///   limit configuration, `OpenProcess`, the assignment itself) leaves the
+    ///   process suspended and unowned. The caller must kill it rather than
+    ///   leak a frozen child.
+    /// * Failing in the resume pass AFTER the assignment landed does not: the
+    ///   process is already in the job, so dropping the job on the way out
+    ///   fires `TerminateJobObject` and takes the tree with it. The caller's
+    ///   kill is then a harmless no-op on an already-dead pid.
+    ///
+    /// Callers therefore kill unconditionally on `Err` — that is correct for
+    /// both shapes — but must not read this as "the child is always still
+    /// alive to be killed".
     pub fn attach(pid: u32) -> std::io::Result<Self> {
         use std::mem;
         use std::ptr;
@@ -135,65 +180,128 @@ impl WindowsJobObject {
         }
     }
 
-    fn resume_process_threads(pid: u32) -> std::io::Result<()> {
+    /// Every thread of `pid`, from a system-wide thread snapshot.
+    ///
+    /// The snapshot is the only route to a thread id from a pid.
+    /// `std::os::windows::process::ChildExt::main_thread_handle` would make
+    /// this O(1) and let the `Win32_System_Diagnostics_ToolHelp` dependency go
+    /// away, but it is unstable (feature
+    /// `windows_process_extensions_main_thread_handle`, rust-lang/rust#96723 —
+    /// verified rejected by the pinned stable toolchain), it lives on
+    /// `std::process::Child` while every spawn site here uses
+    /// `tokio::process::Command` (whose `Child` exposes `raw_handle()`, the
+    /// PROCESS handle, and never the primary thread's), and both callers of
+    /// [`WindowsJobObject::attach`] hand it a bare pid rather than a `Child`.
+    fn process_thread_ids(pid: u32) -> std::io::Result<Vec<u32>> {
         use std::mem;
-        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, ERROR_NO_MORE_FILES, GetLastError, INVALID_HANDLE_VALUE, SetLastError,
+        };
         use windows_sys::Win32::System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
         };
+
+        // SAFETY: the snapshot handle is closed on every path below.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let result = (|| {
+            // SAFETY: `entry` is a plain POD struct with its `dwSize` set, as
+            // `Thread32First`/`Thread32Next` require.
+            let mut entry: THREADENTRY32 = unsafe { mem::zeroed() };
+            entry.dwSize = mem::size_of::<THREADENTRY32>() as u32;
+            // SAFETY: snapshot and entry are valid.
+            if unsafe { Thread32First(snapshot, &raw mut entry) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            let mut ids = Vec::new();
+            loop {
+                if entry.th32OwnerProcessID == pid {
+                    ids.push(entry.th32ThreadID);
+                }
+                // SAFETY: clear stale state so end-of-snapshot is
+                // distinguishable from a real enumeration failure. Without
+                // this an aborted walk reads back as "this process has no
+                // threads", which the caller would report as the wrong bug.
+                unsafe { SetLastError(0) };
+                // SAFETY: snapshot and entry are valid.
+                if unsafe { Thread32Next(snapshot, &raw mut entry) } == 0 {
+                    // SAFETY: reads the calling thread's last-error slot.
+                    let error = unsafe { GetLastError() };
+                    if error != ERROR_NO_MORE_FILES {
+                        return Err(std::io::Error::from_raw_os_error(error as i32));
+                    }
+                    break;
+                }
+            }
+            Ok(ids)
+        })();
+        // SAFETY: snapshot was returned by CreateToolhelp32Snapshot.
+        unsafe { CloseHandle(snapshot) };
+        result
+    }
+
+    /// Resume `pid`'s threads, refusing anything that is not exactly one
+    /// pending suspension per thread.
+    ///
+    /// See the module docs for the suspend-count table. The rule applied here
+    /// is "every thread of `pid` must report a previous suspend count of
+    /// exactly 1, and there must be at least one". A `CREATE_SUSPENDED` child
+    /// has exactly one thread by construction — its primary thread has not run,
+    /// so it cannot have created another — so for a caller that honoured the
+    /// contract the per-thread rule and a one-thread rule are the same rule.
+    /// For a caller that did not, the per-thread rule is the stricter of the
+    /// two, and it is deliberately strict: a thread this pass does not leave
+    /// runnable is a job whose only process never starts, and a thread that
+    /// was already runnable is a process that may have escaped a descendant
+    /// before the assignment landed. Both are hard errors, not warnings.
+    fn resume_process_threads(pid: u32) -> std::io::Result<()> {
+        use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
             OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
         };
 
-        unsafe {
-            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-            if snapshot == INVALID_HANDLE_VALUE {
-                return Err(std::io::Error::from_raw_os_error(GetLastError() as i32));
-            }
-
-            let result = (|| {
-                let mut entry: THREADENTRY32 = mem::zeroed();
-                entry.dwSize = mem::size_of::<THREADENTRY32>() as u32;
-                if Thread32First(snapshot, &mut entry) == 0 {
-                    return Err(std::io::Error::from_raw_os_error(GetLastError() as i32));
-                }
-
-                let mut resumed = false;
-                loop {
-                    if entry.th32OwnerProcessID == pid {
-                        let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
-                        if thread.is_null() {
-                            return Err(std::io::Error::from_raw_os_error(GetLastError() as i32));
-                        }
-                        let resume_result = ResumeThread(thread);
-                        let resume_error = if resume_result == u32::MAX {
-                            Some(std::io::Error::from_raw_os_error(GetLastError() as i32))
-                        } else {
-                            None
-                        };
-                        CloseHandle(thread);
-                        if let Some(error) = resume_error {
-                            return Err(error);
-                        }
-                        resumed = true;
-                    }
-                    if Thread32Next(snapshot, &mut entry) == 0 {
-                        break;
-                    }
-                }
-
-                if resumed {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "suspended child thread was not found",
-                    ))
-                }
-            })();
-            CloseHandle(snapshot);
-            result
+        let thread_ids = Self::process_thread_ids(pid)?;
+        if thread_ids.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "suspended child thread was not found",
+            ));
         }
+
+        for thread_id in thread_ids {
+            // SAFETY: the suspended process cannot exit before it is resumed,
+            // and OpenThread returns a separately owned handle.
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
+            if thread.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: `thread` was opened with THREAD_SUSPEND_RESUME.
+            let previous = unsafe { ResumeThread(thread) };
+            // Captured BEFORE `CloseHandle`, which overwrites the last-error
+            // slot on its own success path.
+            let resume_error = if previous == u32::MAX {
+                Some(std::io::Error::last_os_error())
+            } else {
+                None
+            };
+            // SAFETY: `thread` was returned by OpenThread and is not used after.
+            unsafe { CloseHandle(thread) };
+            if let Some(error) = resume_error {
+                return Err(error);
+            }
+            if previous != 1 {
+                return Err(std::io::Error::other(format!(
+                    "thread {thread_id} of child pid {pid} had suspend count {previous}, \
+                     expected exactly 1 — the child was not created suspended, or something \
+                     else suspended it as well, so this job cannot be trusted to own the tree"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -209,5 +317,151 @@ impl Drop for WindowsJobObject {
             TerminateJobObject(self.0, 1);
             CloseHandle(self.0);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests. Windows-only by construction: the whole module is `#![cfg(windows)]`.
+// They drive real processes, because the claim under test is about what the
+// Windows kernel does, and only the kernel can answer that.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::WindowsJobObject;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// Long enough to survive a loaded runner, short enough that a frozen
+    /// child fails rather than hangs.
+    const RUN_BUDGET: Duration = Duration::from_secs(30);
+
+    /// A child that runs for roughly `pings - 1` seconds once it is allowed
+    /// to, and forever if it is not.
+    ///
+    /// `ping` ships in System32 on every Windows SKU, so this fixture does not
+    /// smuggle in a "Git for Windows is installed" requirement the way `sleep`
+    /// would.
+    fn child_command(pings: u32) -> Command {
+        let mut command = Command::new("cmd.exe");
+        command
+            .args(["/C", &format!("ping -n {pings} 127.0.0.1 >nul")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    /// The contract holds: a `CREATE_SUSPENDED` child is owned AND resumed.
+    ///
+    /// The child's own exit is the positive control. Nothing here kills it —
+    /// `ping -n 2` terminates only if the resume pass genuinely made the
+    /// thread runnable, so an `attach` that owned the child and left it frozen
+    /// fails here instead of passing quietly.
+    #[test]
+    fn attaching_to_a_create_suspended_child_owns_it_and_lets_it_run() {
+        let mut command = child_command(2);
+        WindowsJobObject::create_suspended(&mut command);
+        let mut child = command.spawn().expect("spawn a suspended child");
+        let pid = child.id();
+
+        let job = WindowsJobObject::attach(pid).expect("attach must own a CREATE_SUSPENDED child");
+
+        let deadline = Instant::now() + RUN_BUDGET;
+        loop {
+            if child.try_wait().expect("poll the child").is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "attach reported success but pid {pid} never ran to completion — it \
+                 was assigned to the job and left suspended"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(job);
+    }
+
+    /// F1 red arm. A process that was never suspended must be REFUSED.
+    ///
+    /// `ResumeThread` succeeds on a running thread and returns the previous
+    /// suspend count 0, so an implementation whose only failure test is
+    /// `== u32::MAX` takes the success branch and hands back a job for a
+    /// process that has been free to spawn descendants outside it since it
+    /// started. That is the silently-lost race this type exists to remove, and
+    /// before the suspend-count check this test failed with `attach` returning
+    /// `Ok`.
+    #[test]
+    fn attaching_to_a_process_that_was_never_suspended_is_an_error() {
+        let mut child = child_command(61).spawn().expect("spawn a running child");
+        let pid = child.id();
+
+        let result = WindowsJobObject::attach(pid);
+        let refused = result.is_err();
+        // Dropping an `Ok` job terminates its tree, so this covers the accepted
+        // case; the kill below covers the refused one. Either way the fixture
+        // must not outlive the test.
+        drop(result);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            refused,
+            "attach accepted pid {pid}, which was never created suspended — the \
+             assignment cannot have preceded anything the process already spawned"
+        );
+    }
+
+    /// The second half of the same defect: resuming ONCE is not the same as
+    /// making the thread runnable.
+    ///
+    /// A debugger or EDR that also suspends the child leaves the count at 2.
+    /// The old code resumed to 1, saw no error, and reported success for a job
+    /// whose only process is permanently frozen — a wedged MCP server that
+    /// looks like a healthy spawn.
+    #[test]
+    fn attaching_to_a_doubly_suspended_child_is_an_error() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenThread, SuspendThread, THREAD_SUSPEND_RESUME,
+        };
+
+        let mut command = child_command(61);
+        WindowsJobObject::create_suspended(&mut command);
+        let mut child = command.spawn().expect("spawn a suspended child");
+        let pid = child.id();
+
+        let thread_ids = WindowsJobObject::process_thread_ids(pid).expect("enumerate threads");
+        assert_eq!(
+            thread_ids.len(),
+            1,
+            "a CREATE_SUSPENDED child must have exactly one thread; the rest of \
+             this test is meaningless if it does not"
+        );
+        for thread_id in &thread_ids {
+            // SAFETY: the child is suspended and cannot exit; the handle is
+            // closed immediately after the single call that uses it.
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, *thread_id) };
+            assert!(!thread.is_null(), "open the suspended child's thread");
+            // SAFETY: `thread` was opened with THREAD_SUSPEND_RESUME.
+            let previous = unsafe { SuspendThread(thread) };
+            // SAFETY: `thread` was returned by OpenThread and is not used after.
+            unsafe { CloseHandle(thread) };
+            assert_eq!(
+                previous, 1,
+                "the child must already be suspended exactly once"
+            );
+        }
+
+        let result = WindowsJobObject::attach(pid);
+        let refused = result.is_err();
+        drop(result);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            refused,
+            "attach accepted a child suspended twice: one ResumeThread leaves it \
+             frozen, so this job owns a process that will never run"
+        );
     }
 }

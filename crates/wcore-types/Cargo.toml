@@ -26,6 +26,12 @@ libc.workspace = true
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_System_Threading",
+  # `CreateJobObjectW` takes a `SECURITY_ATTRIBUTES`, so windows-sys gates it on
+  # `Win32_Security` as well as on `Win32_System_JobObjects`. Without this the
+  # crate only builds because a sibling crate happens to enable it — measured:
+  # `cargo test -p wcore-types --lib` on Windows failed with "no
+  # `CreateJobObjectW` in Win32::System::JobObjects" until it was declared here.
+  "Win32_Security",
   # `job_object`: CreateJobObjectW / AssignProcessToJobObject, and the thread
   # snapshot used to resume a CREATE_SUSPENDED child once it is in the job.
   "Win32_System_JobObjects",
@@ -39,8 +45,12 @@ windows-sys = { version = "0.59", features = [
 [target.'cfg(unix)'.dev-dependencies]
 libc.workspace = true
 
+# Kept a mirror of the `[dependencies]` list above so the two cannot drift.
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_System_Threading",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Diagnostics_ToolHelp",
 ] }
