@@ -3234,6 +3234,26 @@ mod spawn_task_set_tests {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     }
 
+    /// Anti-hang budget for the shared-cap proof below.
+    ///
+    /// core#337: this was two separate wall-clock bounds, 2s to fill the pool
+    /// and 15s to drain it. Neither states a product requirement -- nothing
+    /// anywhere claims 100 child engines pass through a 20-slot pool in any
+    /// particular time -- but under load both behaved like latency assertions.
+    /// Measured on hetzner-dsm (96 cores) against this exact test: 5.5s alone
+    /// at ambient load 41, 12.3-13.1s at 64-way parallelism, and 17.2-22.8s at
+    /// 96-way, where 9 of 96 runs blew the 15s bound at
+    /// `Elapsed(())` while every one of them was on its way to the correct
+    /// answer.
+    ///
+    /// What this test proves is entirely in the equalities: the pool never
+    /// exceeds `MAX_CONCURRENT_WORKERS` while children are queued, every
+    /// queued child eventually runs exactly once, and the pool drains to zero.
+    /// None of those is a statement about how fast. This budget exists only so
+    /// that a genuine deadlock in the shared semaphore fails the suite instead
+    /// of wedging it, so it is deliberately ~5x the worst time ever measured.
+    const SPAWN_CAP_ANTI_HANG: Duration = Duration::from_secs(120);
+
     #[tokio::test]
     async fn parallel_spawn_caps_active_child_engines_across_shared_calls() {
         const CHILDREN_PER_CALL: usize = 50;
@@ -3266,7 +3286,7 @@ mod spawn_task_set_tests {
         let run = tokio::spawn(async move {
             tokio::join!(spawner.spawn_parallel(first), cloned.spawn_parallel(second))
         });
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(SPAWN_CAP_ANTI_HANG, async {
             while provider.active.load(Ordering::SeqCst) < wcore_swarm::MAX_CONCURRENT_WORKERS {
                 tokio::task::yield_now().await;
             }
@@ -3286,7 +3306,7 @@ mod spawn_task_set_tests {
         );
 
         provider.release.add_permits(TOTAL_CHILDREN);
-        let (first_results, second_results) = tokio::time::timeout(Duration::from_secs(15), run)
+        let (first_results, second_results) = tokio::time::timeout(SPAWN_CAP_ANTI_HANG, run)
             .await
             .expect("all queued children must run after permits are released")
             .expect("parallel spawn task must not panic");
