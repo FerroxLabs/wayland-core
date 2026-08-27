@@ -8,26 +8,51 @@
 //!    `core.sshCommand` / `filter.*.clean` key in `.git/config`, is arbitrary
 //!    code that runs as the operator on their NEXT git command. The file tools
 //!    already refuse this (`wcore_tools::workspace_policy::is_repo_control_path`);
-//!    `Bash` did not, and that asymmetry is what this module closes.
+//!    `Bash` did not, and that asymmetry is what this module closes. The
+//!    control child is matched at ANY depth below `.git`, because a submodule's
+//!    hooks live at `.git/modules/<name>/hooks` and run exactly the same way.
 //!
-//! 2. **The agent's own authority state** — `permissions.toml` (the durable
-//!    learned-grant store), the global `config.toml` (which carries
-//!    `security.enabled` and `tools.auto_approve`), `workspace-trust.json`, the
-//!    credential stores and `oauth/`. A command that appends to the grant store
-//!    has disabled the guard it is running under, permanently and for every
-//!    future session.
+//! 2. **The agent's own authority directories, whole** — `profile_home()`,
+//!    `wayland_config_dir()`, and always the default `~/.wayland`, together
+//!    with everything at or under them.
+//!
+//! Rule 2 protects the DIRECTORIES, not a list of files inside them, because a
+//! list of files inside them was measured and did not hold:
+//!
+//! * `rm -rf ~/.wayland && mv <evil> ~/.wayland` replaces the durable
+//!   grant store — standing auto-approval in every future session, which is the
+//!   exact catastrophe this module exists to stop — without ever naming
+//!   `permissions.toml`.
+//! * `cp /tmp/x ~/.wayland/perm*.toml` reaches the same file through a glob.
+//! * `cd ~/.wayland && echo x >> config.toml` reaches `security.enabled` and
+//!   `tools.auto_approve` through a name too common to protect bare
+//!   (`.cargo/config.toml` is ordinary work).
+//! * `cp -r ~/.wayland /tmp/backup` exfiltrates `oauth/`, `.env` and the
+//!   credential stores wholesale.
+//! * Those directories also hold `plugins/`, `trusted-keys/`, `skills/` and
+//!   `agents/` — execution and trust surfaces a per-file list never listed.
+//!
+//! **The cost, stated plainly.** `Bash` can no longer read or write ANYTHING
+//! under those three directories, log files included. That is the price of a
+//! rule with no exception list, and an exception list is precisely where the
+//! next bypass would live. Nothing else on the machine is affected: the
+//! directories are the agent's own state, not the user's work.
 //!
 //! **This module reads no switch.** No config field, no CLI flag, no
 //! enable/disable environment variable. The single `env::var` it performs is
 //! `WAYLAND_HOME`, which only ADDS to the protected set — the default
 //! `~/.wayland` store stays protected regardless of what that variable says, so
 //! an environment variable cannot move the floor off the operator's real store.
+//! A base that is a filesystem root is dropped, so that variable cannot turn
+//! the floor into a denial of service either.
 //!
 //! **Deliberately not wider.** An ancestor of a protected path is NOT matched:
 //! the shortest ancestor token of `.git/hooks` is `.`, and refusing that would
 //! cost `git add .`, which a floor may not do. `.git` alone is likewise not
 //! matched — `git commit`, `git add` and every other porcelain verb are
-//! ordinary session work.
+//! ordinary session work. `~` is not matched either, so `rm -rf ~` still
+//! destroys the store; that is a denial, not an escalation, and refusing `~`
+//! would cost every ordinary command that names the home directory.
 //!
 //! It lives in `wcore-config` rather than `wcore-tools` because there are TWO
 //! shell surfaces — `wcore_tools::bash::BashTool` and
@@ -38,7 +63,9 @@
 //!
 //! This is a floor, not a boundary: it matches path-shaped tokens in the
 //! command text, and a determined attacker has unbounded indirection
-//! (`eval $(base64 -d ...)`, a variable holding the path, a helper script). It
+//! (`eval $(base64 -d ...)`, a variable holding the path, a helper script), or
+//! a rule expressed without a path at all (`git config core.hooksPath /tmp/x`
+//! reaches the same execution surface by naming a git KEY, not a file). It
 //! exists so that the cheapest and most likely form of the catastrophe — a
 //! model or a prompt injection writing the obvious path — has something
 //! underneath it that no flag can lift.
@@ -48,25 +75,15 @@ use std::path::{Component, Path, PathBuf};
 /// Basenames of the agent's authority state that are protected wherever they
 /// appear, not only under a resolved Wayland directory.
 ///
-/// A command that `cd`s into the profile home first leaves only the bare name
-/// in the token stream, so the resolved-path check alone would miss it. These
-/// names carry no ordinary meaning in a source tree, which is what makes the
-/// bare-name rule affordable — unlike `config.toml`, which is Cargo's own
-/// (`.cargo/config.toml`) and is therefore protected by resolved path only.
+/// A command that reaches the profile home by a spelling this module cannot
+/// resolve (an unknown variable, a symlink) still leaves the bare name in the
+/// token stream. These names carry no ordinary meaning in a source tree, which
+/// is what makes the bare-name rule affordable — unlike `config.toml`, which is
+/// Cargo's own (`.cargo/config.toml`) and is therefore protected by resolved
+/// path only.
 const AUTHORITY_BASENAMES: &[&str] = &[
     "permissions.toml",
     "workspace-trust.json",
-    "credentials.toml",
-    "credentials.enc",
-    "credentials.kdf.json",
-];
-
-/// Entries protected only INSIDE a resolved Wayland config/profile directory.
-const AUTHORITY_DIR_ENTRIES: &[&str] = &[
-    "permissions.toml",
-    "workspace-trust.json",
-    "config.toml",
-    "oauth",
     "credentials.toml",
     "credentials.enc",
     "credentials.kdf.json",
@@ -78,15 +95,20 @@ const REPO_CONTROL_COMPONENTS: &[&str] = &[".wayland-core", ".wayland-core.toml"
 /// The `.git` children that are execute-on-next-command surfaces.
 const GIT_CONTROL_CHILDREN: &[&str] = &["hooks", "config"];
 
+/// Shell glob metacharacters. A token carrying one of these is not the path it
+/// looks like — the shell expands it before the command sees it.
+const GLOB_CHARS: [char; 3] = ['*', '?', '['];
+
 const REPO_CONTROL_REFUSAL: &str = "Refused by the command floor: this command references the repository control surface \
      (.git/hooks, .git/config, .wayland-core). Writing there is arbitrary code execution as \
      you on your next git command, so it is refused below approval and --force alike. \
      Ordinary git work (add, commit, status, push) is unaffected.";
 
 const AUTHORITY_REFUSAL: &str = "Refused by the command floor: this command references the agent's own authority state \
-     (permissions.toml, config.toml, workspace-trust.json, or a credential store). A command \
-     that rewrites the grant store revokes the guard it is running under, so it is refused \
-     below approval and --force alike. Ask the user to edit that file directly.";
+     (the Wayland profile/config directories — the grant store, workspace trust, credentials, \
+     oauth, plugins and skills — or one of their files by name). A command that rewrites or \
+     replaces that state revokes the guard it is running under, so it is refused below \
+     approval and --force alike. Ask the user to edit those files directly.";
 
 /// Returns `Some(reason)` when `command` must be refused before any shell is
 /// spawned. `None` means the floor has no opinion — every other guard still
@@ -127,12 +149,16 @@ fn token_refusal(token: &str, cwd: Option<&Path>, protected: &[PathBuf]) -> Opti
         if REPO_CONTROL_COMPONENTS.contains(&part.as_str()) {
             return Some(REPO_CONTROL_REFUSAL);
         }
-        // `.git` alone is NOT a match — only `.git` followed by a child that
-        // is an execute-on-next-command surface.
+        // `.git` alone is NOT a match — only `.git` followed by a child that is
+        // an execute-on-next-command surface. That child is looked for at any
+        // depth, not just the next component: a submodule's hooks live at
+        // `.git/modules/<name>/hooks`. `parts` is lexically normalized first,
+        // so `.git/x/../hooks` is seen as `.git/hooks` (refused) while
+        // `.git/../hooks` is seen as plain `hooks` (allowed).
         if part == ".git"
-            && parts
-                .get(i + 1)
-                .is_some_and(|next| GIT_CONTROL_CHILDREN.contains(&next.as_str()))
+            && parts[i + 1..]
+                .iter()
+                .any(|child| GIT_CONTROL_CHILDREN.contains(&child.as_str()))
         {
             return Some(REPO_CONTROL_REFUSAL);
         }
@@ -145,39 +171,59 @@ fn token_refusal(token: &str, cwd: Option<&Path>, protected: &[PathBuf]) -> Opti
         return Some(AUTHORITY_REFUSAL);
     }
 
-    // Rule 2b — anything at or under a resolved authority path.
+    // Rule 2b — anything at or under an authority DIRECTORY, and any glob whose
+    // literal prefix could expand onto one.
     let resolved = resolve(token, cwd)?;
-    if protected
-        .iter()
-        .any(|p| resolved == *p || resolved.starts_with(p))
-    {
+    if protected.iter().any(|p| resolved.starts_with(p)) || glob_could_reach(&resolved, protected) {
         return Some(AUTHORITY_REFUSAL);
     }
     None
 }
 
-/// Every directory the authority state can live in: the active profile home,
-/// the resolved config dir, and — always — the default `~/.wayland`, so that
-/// pointing `WAYLAND_HOME` elsewhere cannot move the floor off the operator's
-/// real store.
+/// The authority DIRECTORIES themselves: the active profile home, the resolved
+/// config dir, and — always — the default `~/.wayland`, so that pointing
+/// `WAYLAND_HOME` elsewhere cannot move the floor off the operator's real
+/// store.
+///
+/// A base with no parent (a filesystem root, or empty) is dropped. Widening the
+/// protected set is the only thing `WAYLAND_HOME` may do; turning every command
+/// on the machine into a refusal is not widening, it is breaking.
 fn protected_roots() -> Vec<PathBuf> {
-    let mut bases = vec![
-        crate::config::profile_home(),
-        crate::config::wayland_config_dir(),
-    ];
-    if let Some(home) = dirs::home_dir() {
-        bases.push(home.join(".wayland"));
-    }
-
-    let mut out = Vec::new();
-    for base in bases {
-        for entry in AUTHORITY_DIR_ENTRIES {
-            out.push(base.join(entry));
-        }
-    }
+    let mut out: Vec<PathBuf> = [
+        Some(crate::config::profile_home()),
+        Some(crate::config::wayland_config_dir()),
+        dirs::home_dir().map(|h| h.join(".wayland")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|p| p.parent().is_some())
+    .collect();
     out.sort();
     out.dedup();
     out
+}
+
+/// A token containing a glob metacharacter is not the path it looks like. It is
+/// refused when its literal prefix could expand onto a protected directory:
+/// `~/.way*` is `~/.wayland` to the shell, and `cp -r /tmp/evil ~/.way*` would
+/// otherwise walk straight past rule 2b.
+///
+/// The prefix has to end MID-component. A glob that starts a fresh component
+/// (`~/*`, `src/*.rs`, `ls *`) names no directory in particular, and refusing on
+/// it would cost ordinary work for no gain — a glob that expands onto a
+/// protected FILE still carries its basename, which rule 2a already has.
+fn glob_could_reach(resolved: &Path, protected: &[PathBuf]) -> bool {
+    let text = resolved.to_string_lossy();
+    let Some(cut) = text.find(GLOB_CHARS) else {
+        return false;
+    };
+    let prefix = &text[..cut];
+    if prefix.is_empty() || prefix.ends_with('/') || prefix.ends_with('\\') {
+        return false;
+    }
+    protected
+        .iter()
+        .any(|p| p.to_string_lossy().starts_with(prefix))
 }
 
 /// Expand a leading `~`, `$HOME`/`${HOME}` or `$WAYLAND_HOME`/`${WAYLAND_HOME}`
@@ -237,14 +283,22 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// Split a token on both separators and drop empty / `.` segments, so
-/// `./.git//hooks/pre-commit` yields `[".git", "hooks", "pre-commit"]`.
+/// Split a token on both separators, drop empty / `.` segments, and resolve
+/// `..` lexically, so `./.git//hooks/pre-commit` and `.git/x/../hooks/pre-commit`
+/// both yield `[".git", "hooks", "pre-commit"]` while `.git/../hooks` yields
+/// `["hooks"]`.
 fn components(token: &str) -> Vec<String> {
-    token
-        .split(['/', '\\'])
-        .filter(|s| !s.is_empty() && *s != ".")
-        .map(str::to_owned)
-        .collect()
+    let mut out: Vec<String> = Vec::new();
+    for part in token.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            other => out.push(other.to_owned()),
+        }
+    }
+    out
 }
 
 /// Split a command into path-shaped words. Everything the shell treats as a
@@ -307,6 +361,32 @@ mod tests {
     }
 
     #[test]
+    fn a_git_control_child_is_matched_at_any_depth() {
+        // A submodule's hooks are at `.git/modules/<name>/hooks` and run the
+        // same way, so the child cannot be looked for at i+1 only.
+        for command in [
+            "echo id > .git/modules/sub/hooks/pre-commit",
+            "echo x >> .git/modules/sub/config",
+            // Lexical `..` inside the token must not dodge it either.
+            "echo id > .git/objects/../hooks/pre-commit",
+        ] {
+            assert!(
+                floor_refusal(command, Some(Path::new("/work"))).is_some(),
+                "must be refused: {command}"
+            );
+        }
+        // ...and the same normalization must not INVENT a match: these two
+        // name `hooks` in the working tree, not under `.git`.
+        for command in ["cat .git/../hooks/pre-commit", "cat hooks/pre-commit"] {
+            assert_eq!(
+                floor_refusal(command, Some(Path::new("/work"))),
+                None,
+                "must NOT be refused: {command}"
+            );
+        }
+    }
+
+    #[test]
     fn ordinary_work_is_not_refused() {
         // The wrong-refusal arm. The shortest ancestor token of `.git/hooks`
         // is `.`, and an ancestor rule would cost every one of these.
@@ -316,6 +396,7 @@ mod tests {
             "git status",
             "cargo build",
             "git push origin main",
+            "git config user.name x",
             "ls -la .git",
             "cat Cargo.toml",
             "cat .cargo/config.toml",
@@ -346,6 +427,55 @@ mod tests {
     }
 
     #[test]
+    fn the_authority_directory_itself_is_protected() {
+        // Every one of these reaches the grant store, the credential stores or
+        // an execution surface WITHOUT naming a protected file. Protecting a
+        // list of entries inside the directory left all of them open.
+        for command in [
+            // Replace the directory around the store — standing auto-approval
+            // in every future session, in one line, no indirection.
+            "rm -rf ~/.wayland && mv /tmp/evil ~/.wayland",
+            "ln -sfn /tmp/evil ~/.wayland",
+            // Reach the file through a glob.
+            "cp /tmp/x ~/.wayland/perm*.toml",
+            // Reach the directory through a glob.
+            "cp -r /tmp/evil ~/.way*",
+            // Reach `security.enabled` / `tools.auto_approve` through a name
+            // too common to protect bare.
+            "cd ~/.wayland && echo 'tools.auto_approve = true' >> config.toml",
+            // Exfiltrate oauth/, .env and the credential stores wholesale.
+            "cp -r ~/.wayland /tmp/backup",
+            "tar czf /tmp/x.tgz ~/.wayland",
+            // Execution and trust surfaces no per-file list ever listed.
+            "cp /tmp/evil.so ~/.wayland/plugins/evil.so",
+            "cp /tmp/k ~/.wayland/trusted-keys/k.pub",
+        ] {
+            assert!(
+                floor_refusal(command, Some(Path::new("/work"))).is_some(),
+                "must be refused: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_glob_that_names_no_directory_is_not_refused() {
+        // Known-positive control in the same test: the glob rule IS live here.
+        assert!(
+            floor_refusal("cp -r /tmp/evil ~/.way*", Some(Path::new("/work"))).is_some(),
+            "control: a mid-component glob onto the profile home must be refused"
+        );
+        // A glob that starts a fresh component names no directory in
+        // particular, and refusing on it would cost ordinary work.
+        for command in ["ls *", "cat src/*.rs", "ls ~/*", "wc -l crates/*/src/*.rs"] {
+            assert_eq!(
+                floor_refusal(command, Some(Path::new("/work"))),
+                None,
+                "must NOT be refused: {command}"
+            );
+        }
+    }
+
+    #[test]
     fn the_resolved_config_dir_is_protected_without_the_bare_name_rule() {
         // `config.toml` is Cargo's own basename, so it is protected by
         // RESOLVED PATH only. This is the arm that grades rule 2b on its own:
@@ -360,6 +490,31 @@ mod tests {
             .join("oauth")
             .join("token.json");
         assert!(floor_refusal(&format!("cat {}", oauth.display()), None).is_some());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_root_wayland_home_cannot_brick_every_command() {
+        // `WAYLAND_HOME` may only ADD to the protected set. Pointed at a
+        // filesystem root it would otherwise refuse every command on the
+        // machine, so a base with no parent is dropped.
+        let prior = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: test-only env mutation, serialized against the crate's other
+        // env-driven tests.
+        unsafe { std::env::set_var("WAYLAND_HOME", "/") };
+        let ordinary = floor_refusal("cat /work/src/main.rs", Some(Path::new("/work")));
+        let store = floor_refusal("echo x >> ~/.wayland/permissions.toml", None);
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+        assert_eq!(ordinary, None, "a root base must not refuse ordinary work");
+        assert!(
+            store.is_some(),
+            "the default ~/.wayland store stays protected regardless"
+        );
     }
 
     #[test]

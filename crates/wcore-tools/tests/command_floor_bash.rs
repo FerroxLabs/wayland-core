@@ -295,6 +295,8 @@ async fn the_floor_costs_no_ordinary_work() {
     for cmd in [
         "git add .",
         "git status",
+        "git config --get user.name",
+        "ls *",
         "git commit -m x",
         "cargo --version",
         "ls -la .git",
@@ -311,6 +313,145 @@ async fn the_floor_costs_no_ordinary_work() {
             !result.content.contains("command floor"),
             "the floor refused ordinary work {cmd:?}: {}",
             result.content
+        );
+    }
+
+    close_escape_hatches(prior_home);
+}
+
+/// The measured defect #3, and the one a per-file protected list did not stop:
+/// the store is reached WITHOUT ever naming `permissions.toml`.
+///
+/// Every command here was proven to land end-to-end through
+/// `execute_with_ctx` — `is_error=false`, "Exit code: 0", the grant store on
+/// disk replaced — against the first form of this floor. A directory rename is
+/// not "unbounded indirection": it is one line, no `eval`, no variable, no
+/// obfuscation, and it grants the agent standing auto-approval in every future
+/// session.
+///
+/// Paths are spelled ABSOLUTELY against the temporary `HOME`, never as `~`.
+/// If the floor is removed to grade this test's red arm these commands really
+/// do run, and `rm -rf ~/.wayland` in a child that did not inherit the test's
+/// `HOME` would delete the operator's real store.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_grant_store_survives_a_directory_swap() {
+    let home = tempfile::tempdir().unwrap();
+    let decoy = tempfile::tempdir().unwrap();
+    let prior_home = std::env::var_os("HOME");
+    open_every_escape_hatch(home.path(), decoy.path());
+
+    let wayland = home.path().join(".wayland");
+    let store = wayland.join("permissions.toml");
+    std::fs::create_dir_all(&wayland).unwrap();
+    std::fs::write(&store, SENTINEL).unwrap();
+
+    let work = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(work.path()).unwrap();
+    // A ready-made replacement store, and a file to copy over the real one.
+    let evil = root.join("evil");
+    std::fs::create_dir_all(&evil).unwrap();
+    std::fs::write(evil.join("permissions.toml"), "tools.auto_approve = true\n").unwrap();
+    let src = root.join("src.txt");
+    std::fs::write(&src, "PWNED\n").unwrap();
+    let backup = root.join("backup");
+
+    let ctx =
+        ToolContext::test_default().with_workspace(Arc::new(WorkspacePolicy::trusted_local(&root)));
+
+    for (name, entry) in entries() {
+        assert_entry_point_is_live(name, entry, &ctx).await;
+
+        for cmd in [
+            // Reach the file through a glob.
+            format!("cp {} {}/perm*.toml", src.display(), wayland.display()),
+            // Replace the directory around the file.
+            format!(
+                "rm -rf {} && mv {} {}",
+                wayland.display(),
+                evil.display(),
+                wayland.display()
+            ),
+            // Reach the directory through a glob.
+            format!("cp -r {} {}/.way*", evil.display(), home.path().display()),
+            // Point the directory at attacker-controlled content.
+            format!("ln -sfn {} {}", evil.display(), wayland.display()),
+            // `security.enabled` / `tools.auto_approve` through a basename too
+            // common to protect bare, with the resolved path hidden by a `cd`.
+            format!(
+                "cd {} && echo 'tools.auto_approve = true' >> config.toml",
+                wayland.display()
+            ),
+            // Exfiltrate oauth/, .env and the credential stores wholesale.
+            format!("cp -r {} {}", wayland.display(), backup.display()),
+        ] {
+            let (result, chunks) = run(entry, &cmd, &ctx).await;
+            assert_refused(&result, &chunks, AUTHORITY_PREFIX, name);
+        }
+
+        // Assert the WORLD, not the receipt.
+        assert_eq!(
+            std::fs::read_to_string(&store).unwrap(),
+            SENTINEL,
+            "{name}: the grant store was replaced"
+        );
+        assert!(
+            !wayland.join("config.toml").exists(),
+            "{name}: tools.auto_approve was written to the profile config"
+        );
+        assert!(!backup.exists(), "{name}: the profile home was exfiltrated");
+        let entries_left: Vec<_> = std::fs::read_dir(&wayland)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries_left.len(),
+            1,
+            "{name}: something was planted in the profile home: {entries_left:?}"
+        );
+    }
+
+    close_escape_hatches(prior_home);
+}
+
+/// The submodule shape of the hooks surface: `.git/modules/<name>/hooks` runs
+/// exactly like `.git/hooks`, and a check that looks only one component past
+/// `.git` never sees it.
+#[tokio::test]
+#[serial_test::serial]
+async fn submodule_git_hooks_survive_the_bash_entry_points() {
+    let home = tempfile::tempdir().unwrap();
+    let decoy = tempfile::tempdir().unwrap();
+    let prior_home = std::env::var_os("HOME");
+    open_every_escape_hatch(home.path(), decoy.path());
+
+    let work = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(work.path()).unwrap();
+    let hooks = root.join(".git").join("modules").join("sub").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    let ctx =
+        ToolContext::test_default().with_workspace(Arc::new(WorkspacePolicy::trusted_local(&root)));
+
+    for (name, entry) in entries() {
+        assert_entry_point_is_live(name, entry, &ctx).await;
+        for cmd in [
+            format!("printf '#!/bin/sh\\nid\\n' > {}", hook.display()),
+            format!(
+                "echo x >> {}",
+                root.join(".git")
+                    .join("modules")
+                    .join("sub")
+                    .join("config")
+                    .display()
+            ),
+        ] {
+            let (result, chunks) = run(entry, &cmd, &ctx).await;
+            assert_refused(&result, &chunks, REPO_CONTROL_PREFIX, name);
+        }
+        assert!(
+            !hook.exists(),
+            "{name}: a submodule pre-commit hook was authored on disk"
         );
     }
 
