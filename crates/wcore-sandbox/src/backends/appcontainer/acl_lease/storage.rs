@@ -1,4 +1,5 @@
 use super::*;
+use crate::backends::appcontainer::acl_lock_policy as policy;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::windows::ffi::OsStringExt;
@@ -46,6 +47,69 @@ pub(super) fn lease_directory() -> Result<PathBuf> {
 /// real profile.
 pub(super) fn lock_holder_directory() -> Result<PathBuf> {
     directory_under(lease_root()?, &LOCK_HOLDER_DIRECTORY_COMPONENTS)
+}
+
+/// The holder sidecar as [`MutationLock`] owns it: where it goes, and the three
+/// things that are done to it.
+///
+/// A TYPE and not a `PathBuf`, because wave 1 of `#945` shipped
+/// `MutationLock::acquire` publishing into `lease_directory()` — swept by
+/// `recover_dead_leases_locked` two lines later — and that single call failed
+/// EVERY sandboxed command on Windows under
+/// `WAYLAND_SANDBOX=appcontainer|strict`. Guarding the two PATHNAMES did not
+/// guard that: the acquire site still held a bare `PathBuf` and a one-token
+/// edit put the wrong one in it with no test signal.
+///
+/// Two things close that here, and both are needed:
+///
+/// 1. **The acquire site has no `PathBuf` to swap.** `MutationLock` holds this
+///    type, whose field is private to this module, so handing it
+///    `lease_directory().ok()` is a compile error rather than a regression.
+/// 2. **The one surviving place to choose wrong is [`Self::resolve`]**, and
+///    that function is EXECUTED, against a real lease root, by
+///    `the_published_holder_survives_the_sweep_that_follows_every_acquisition`.
+///
+/// Every operation is best effort by construction: the sidecar is diagnostics,
+/// and a lock whose holder could not be reported is still held. An unresolvable
+/// directory costs the holder's NAME, never the lock.
+pub(super) struct HolderSidecar {
+    directory: Option<PathBuf>,
+}
+
+impl HolderSidecar {
+    /// Resolve where this process publishes itself as the lock's holder.
+    ///
+    /// Deliberately NOT [`lease_directory`]: see [`HolderSidecar`] and
+    /// [`LOCK_HOLDER_DIRECTORY_COMPONENTS`]. This is the whole of the choice,
+    /// which is why it is one line in a named function rather than an
+    /// expression inside `MutationLock::acquire` where nothing could reach it.
+    pub(super) fn resolve() -> Self {
+        Self {
+            directory: lock_holder_directory().ok(),
+        }
+    }
+
+    /// Where the sidecar is published, for tests and diagnostics only.
+    pub(super) fn directory(&self) -> Option<&Path> {
+        self.directory.as_deref()
+    }
+
+    pub(super) fn publish(&self, pid: u32, exe: &str) {
+        if let Some(directory) = self.directory() {
+            policy::publish_holder(directory, pid, exe);
+        }
+    }
+
+    /// Read the current holder, treating this process as no holder at all.
+    pub(super) fn sample(&self, self_pid: u32) -> Option<policy::LockHolder> {
+        policy::read_holder(self.directory()?, self_pid)
+    }
+
+    pub(super) fn clear(&self) {
+        if let Some(directory) = self.directory() {
+            policy::clear_holder(directory);
+        }
+    }
 }
 
 /// Production lease root: the user's real `%LOCALAPPDATA%`.

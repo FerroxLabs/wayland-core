@@ -552,6 +552,155 @@ fn the_lock_holder_sidecar_is_published_outside_the_swept_lease_directory() {
     );
 }
 
+/// Environment carrying the helper's report path, and the marker that turns
+/// [`holder_sidecar_sweep_helper_entry`] from a no-op into the child process.
+const HOLDER_SWEEP_REPORT_ENV: &str = "WCORE_HOLDER_SWEEP_REPORT";
+
+/// The production setup sequence, EXECUTED — not two pathnames compared.
+///
+/// `start_with_apply` is, verbatim and in this order:
+///
+/// ```ignore
+/// let _lock = MutationLock::acquire()?;              // resolves + publishes the sidecar
+/// unsafe { recover_dead_leases_locked(&lease_dir)? };
+/// ```
+///
+/// Wave 1 of `#945` broke exactly that composition — the sidecar landed in the
+/// directory the next line sweeps — and neither of the pathname guards below
+/// could see it, because a guard on two resolvers never runs the wiring that
+/// chooses between them. This runs it: the real [`HolderSidecar::resolve`], the
+/// real publish, and the real `recover_dead_leases_locked` over the real
+/// [`lease_directory`], all rooted at ONE lease root.
+///
+/// It runs in a CHILD PROCESS, and that is not decoration. `lease_root` is a
+/// per-process `OnceLock`, so the only way to give the two production resolvers
+/// a root of their own — instead of the process-wide one every other test in
+/// this binary is concurrently writing into (`#1095`) — is to hand it to a new
+/// process through [`TEST_LEASE_ROOT_ENV`], which is what that variable exists
+/// for.
+///
+/// The child does NOT take the `Global\` mutex. Creating a `Global\` object
+/// needs `SeCreateGlobalPrivilege` outside session 0, so a non-elevated
+/// developer running `cargo test` would see this fail for a reason that has
+/// nothing to do with the invariant. What the mutex would add is serialization;
+/// what is under test is the directory the sidecar is published into, and the
+/// child owns its lease root outright.
+#[test]
+fn the_published_holder_survives_the_sweep_that_follows_every_acquisition() {
+    let root = tempfile::tempdir().unwrap();
+    let report = root.path().join("report.txt");
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("holder_sidecar_sweep_helper_entry")
+        .arg("--nocapture")
+        .env(TEST_LEASE_ROOT_ENV, root.path())
+        .env(HOLDER_SWEEP_REPORT_ENV, &report)
+        .status()
+        .unwrap();
+    let report = fs::read_to_string(&report).unwrap_or_default();
+    assert!(
+        status.success(),
+        "the production acquire-then-sweep sequence failed; child reported: {report}"
+    );
+    // A child that returned early, or that skipped a step, must not read as a
+    // pass: every marker below is written only after the step it names ran.
+    for marker in [
+        "resolved=",
+        "published=1",
+        "sweep-is-armed=1",
+        "swept-clean=1",
+    ] {
+        assert!(
+            report.contains(marker),
+            "the child never reached {marker:?}; it reported: {report}"
+        );
+    }
+
+    // Independently of anything the child asserted: find the sidecar on disk
+    // and check WHERE it is. This is the assertion a child that lied cannot
+    // satisfy, and it is made against the same two production layouts the child
+    // resolved, derived here from the same root.
+    let lease_dir = private_lease_directory(root.path()).unwrap();
+    let holder_dir = private_lock_holder_directory(root.path()).unwrap();
+    // And bind the two: the directory PRODUCTION chose in the child is the one
+    // checked below. Without this the structural checks would be made against
+    // paths this test computed, and a resolver that wandered off to a third
+    // directory entirely would satisfy both of them.
+    assert!(
+        report.contains(&format!("resolved={}\n", holder_dir.display())),
+        "the child resolved a directory other than {}; it reported: {report}",
+        holder_dir.display()
+    );
+    assert!(
+        holder_dir.join(policy::HOLDER_FILE).is_file(),
+        "no sidecar was published under {}, so this test proved nothing",
+        holder_dir.display()
+    );
+    assert!(
+        !lease_dir.join(policy::HOLDER_FILE).exists(),
+        "the sidecar landed in the swept lease directory {}",
+        lease_dir.display()
+    );
+}
+
+/// Child half of [`the_published_holder_survives_the_sweep_that_follows_every_acquisition`].
+///
+/// Inert unless [`HOLDER_SWEEP_REPORT_ENV`] is set, exactly like
+/// `mutation_lock_helper_entry`, so an ordinary run of this binary skips it.
+#[test]
+fn holder_sidecar_sweep_helper_entry() {
+    let Some(report) = std::env::var_os(HOLDER_SWEEP_REPORT_ENV) else {
+        return;
+    };
+    let report = PathBuf::from(report);
+    let mut log = String::new();
+    let mut note = |line: String| {
+        log.push_str(&line);
+        log.push('\n');
+        fs::write(&report, &log).unwrap();
+    };
+
+    // The production choice, made by production code, under this child's root.
+    let sidecar = HolderSidecar::resolve();
+    let directory = sidecar
+        .directory()
+        .expect("the holder directory must resolve under a private lease root")
+        .to_path_buf();
+    note(format!("resolved={}", directory.display()));
+
+    sidecar.publish(std::process::id(), r"C:\wayland.exe");
+    // Positive control: everything below is vacuous unless publishing actually
+    // wrote a sidecar somewhere.
+    assert!(
+        sidecar.sample(0).is_some(),
+        "publish wrote nothing, so this child cannot see where it went"
+    );
+    note("published=1".to_string());
+
+    let lease_dir = lease_directory().unwrap();
+
+    // Control FIRST, and it is the one that makes the pass below mean
+    // something: prove that the sweep in THIS process, over THIS lease
+    // directory, still rejects an entry it does not recognise. Without it a
+    // sweep that had quietly stopped enforcing anything would read as success.
+    let intruder = lease_dir.join("wave3-control.txt");
+    fs::write(&intruder, b"not a lease").unwrap();
+    let rejected = unsafe { recover_dead_leases_locked(&lease_dir) }
+        .expect_err("the sweep must still reject an unknown entry")
+        .to_string();
+    assert!(
+        rejected.contains("unknown entry in AppContainer ACL lease directory"),
+        "the sweep rejected the control for the wrong reason: {rejected}"
+    );
+    fs::remove_file(&intruder).unwrap();
+    note("sweep-is-armed=1".to_string());
+
+    // The production consequence. With the published sidecar still on disk, the
+    // line that runs immediately after `MutationLock::acquire` must recover.
+    unsafe { recover_dead_leases_locked(&lease_dir) }
+        .expect("the sweep that follows every acquisition must survive the holder sidecar");
+    note("swept-clean=1".to_string());
+}
+
 /// The same invariant on the PRODUCTION resolvers, not just the test ones.
 ///
 /// The test above pins the behaviour of a private root; this pins the two

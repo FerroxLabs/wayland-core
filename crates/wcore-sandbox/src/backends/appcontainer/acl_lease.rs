@@ -17,14 +17,14 @@ mod tests;
 
 use self::mutation_lock::MutationLock;
 use self::sha256::sha256_hex;
+use self::storage::{
+    HolderSidecar, lease_directory, lease_is_zero_length, quarantine_lease, read_validated_lease,
+    recover_rewrite_temps, remove_validated_lease, rewrite_synced_lease, write_new_synced_lease,
+};
 #[cfg(test)]
 use self::storage::{
-    TEST_LEASE_ROOT_ENV, private_lease_directory, private_lock_holder_directory, test_lease_root,
-};
-use self::storage::{
-    lease_directory, lease_is_zero_length, lock_holder_directory, quarantine_lease,
-    read_validated_lease, recover_rewrite_temps, remove_validated_lease, rewrite_synced_lease,
-    write_new_synced_lease,
+    TEST_LEASE_ROOT_ENV, lock_holder_directory, private_lease_directory,
+    private_lock_holder_directory, test_lease_root,
 };
 
 use crate::error::{Result, SandboxError};

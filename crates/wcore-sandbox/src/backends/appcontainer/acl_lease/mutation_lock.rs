@@ -63,10 +63,9 @@ pub(super) struct MutationLock {
     handle: OwnedHandle,
     /// Where this process published itself as the lock's holder, so a
     /// contender's timeout can name it. A SIBLING of the lease directory, never
-    /// inside it — see [`LOCK_HOLDER_DIRECTORY_COMPONENTS`]. `None` when that
-    /// directory could not be resolved, which costs the holder's NAME and never
-    /// the lock.
-    holder_directory: Option<PathBuf>,
+    /// inside it — see [`HolderSidecar`], which is a type precisely so this
+    /// field cannot be handed the lease directory by mistake.
+    holder: HolderSidecar,
 }
 
 impl MutationLock {
@@ -130,13 +129,13 @@ impl MutationLock {
 
         let timeout =
             policy::timeout_from(std::env::var(policy::ACL_LOCK_TIMEOUT_ENV).ok().as_deref());
-        // Resolved BEFORE the wait because every expired slice samples it, and
-        // best-effort throughout: a diagnostic that cannot be resolved costs
-        // the holder's NAME, never the lock. It is deliberately NOT
-        // `lease_directory()` — that directory is swept by
-        // `recover_dead_leases_locked` two lines after this call returns, and
-        // it rejects every entry it does not recognise.
-        let holder_directory = lock_holder_directory().ok();
+        // Resolved BEFORE the wait because every expired slice samples it.
+        // `HolderSidecar` owns the directory choice, and owns it as a type this
+        // site cannot substitute: `recover_dead_leases_locked` sweeps the lease
+        // directory two lines after this call returns and rejects every entry
+        // it does not recognise, so publishing there fails every sandboxed
+        // command instead of only a contended one.
+        let holder = HolderSidecar::resolve();
         let self_pid = std::process::id();
         let outcome = policy::wait_with_retry(
             timeout,
@@ -145,11 +144,7 @@ impl MutationLock {
                 WAIT_TIMEOUT => policy::WaitVerdict::Timeout,
                 _ => policy::WaitVerdict::Failed,
             },
-            || {
-                holder_directory
-                    .as_deref()
-                    .and_then(|directory| policy::read_holder(directory, self_pid))
-            },
+            || holder.sample(self_pid),
         );
         match outcome.verdict {
             policy::WaitVerdict::Acquired => {}
@@ -162,19 +157,13 @@ impl MutationLock {
                 return Err(exec_error(policy::timeout_message(&outcome)));
             }
         }
-        if let Some(directory) = holder_directory.as_deref() {
-            policy::publish_holder(
-                directory,
-                self_pid,
-                &std::env::current_exe()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default(),
-            );
-        }
-        Ok(Self {
-            handle,
-            holder_directory,
-        })
+        holder.publish(
+            self_pid,
+            &std::env::current_exe()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        );
+        Ok(Self { handle, holder })
     }
 }
 
@@ -288,9 +277,7 @@ fn mutex_name(token_user: &CurrentUserSid) -> String {
 
 impl Drop for MutationLock {
     fn drop(&mut self) {
-        if let Some(directory) = self.holder_directory.as_deref() {
-            policy::clear_holder(directory);
-        }
+        self.holder.clear();
         if unsafe { ReleaseMutex(self.handle.0) } == 0 {
             tracing::error!(
                 target: "wcore_sandbox",
