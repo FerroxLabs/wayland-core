@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolEffectKind, ToolResult};
 
 use crate::Tool;
 
@@ -197,6 +197,15 @@ pub fn parse_target(target: &str) -> Result<ParsedTarget, String> {
 /// adapter in `wcore_agent::channel_send_transport` does.
 pub const THROTTLED_ERROR_PREFIX: &str = "rate limit: ";
 
+/// Stable identifier for the reconciliation this tool declares when — and only
+/// when — the destination itself enforces the idempotency key the send carries.
+///
+/// It names ONE recovery rule: an interrupted execution may be re-dispatched
+/// verbatim under the SAME durable key, because the far end collapses the
+/// replay into the delivery it already has. It is not a claim that the outcome
+/// is known, and it says nothing about any other destination.
+pub const OUTBOUND_KEY_RECONCILER: &str = "wcore.channel.outbound_key.v1";
+
 /// Key set on the error payload of a throttled send. Machine-readable so the
 /// neutrality decision never depends on re-matching prose.
 pub const THROTTLED_ERROR_KEY: &str = "throttled";
@@ -244,6 +253,29 @@ pub trait MessageTransport: Send + Sync {
     ) -> SendOutcome {
         let _ = idempotency_key;
         self.send(target, message).await
+    }
+
+    /// Whether a key handed to [`send_keyed`](Self::send_keyed) will actually
+    /// ride THIS body to THIS target and be honoured by the destination.
+    ///
+    /// This is the oracle behind [`SendMessageTool::effect_contract`]: it is
+    /// what turns an opaque send into a `ProviderIdempotent` one, and a
+    /// `ProviderIdempotent` declaration is what licenses recovery to
+    /// re-dispatch an interrupted execution instead of asking a human. A
+    /// transport that answers `true` while the far end does not deduplicate
+    /// turns one interrupted delivery into two.
+    ///
+    /// Both halves of the question matter and neither is a property of the
+    /// transport alone: an adapter that transmits a key may still drop it on a
+    /// body it has to split into several platform messages, and a split body is
+    /// N deliveries carrying no key at all.
+    ///
+    /// Sync because `Tool::effect_contract` is sync. Defaulted to `false` — a
+    /// transport that says nothing claims nothing, which keeps every existing
+    /// destination opaque and fail-closed.
+    fn honours_idempotency_key(&self, target: &ParsedTarget, message: &str) -> bool {
+        let _ = (target, message);
+        false
     }
 }
 
@@ -430,8 +462,39 @@ impl Tool for SendMessageTool {
         ToolCategory::Exec
     }
 
-    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
-        // External delivery cannot be proven or deduplicated after interruption.
+    /// The recovery contract for THIS send, read off the bound transport.
+    ///
+    /// `Opaque` — the default, and still the answer for almost every
+    /// destination — means an interrupted send cannot be proven or replayed,
+    /// so recovery must fail closed and ask a human. That was once hardcoded
+    /// here, with a comment asserting it of every platform; it is false for a
+    /// destination that enforces the caller's key, and asserting it there threw
+    /// away the one recovery the F13 contract exists to permit.
+    ///
+    /// `ProviderIdempotent` is claimed ONLY when the transport says a key rides
+    /// this exact body to this exact target and the far end honours it. It is a
+    /// narrower claim than "this platform deduplicates": an over-cap body goes
+    /// as several keyless messages even to a destination that would have
+    /// deduplicated a single one, so the body is part of the question.
+    fn effect_contract(&self, input: &Value) -> ToolEffectContract {
+        let (Some(target), Some(message)) = (
+            input.get("target").and_then(Value::as_str),
+            input.get("message").and_then(Value::as_str),
+        ) else {
+            return ToolEffectContract::default();
+        };
+        // A call this tool would reject anyway makes no external effect, but it
+        // must not claim a recovery contract on the strength of a target it
+        // could not even parse.
+        let Ok(parsed) = parse_target(target) else {
+            return ToolEffectContract::default();
+        };
+        if self.transport.honours_idempotency_key(&parsed, message) {
+            return ToolEffectContract {
+                kind: ToolEffectKind::ProviderIdempotent,
+                reconciler: Some(OUTBOUND_KEY_RECONCILER.to_string()),
+            };
+        }
         ToolEffectContract::default()
     }
 
@@ -557,14 +620,118 @@ mod tests {
         assert_eq!(transport.seen.lock().clone(), vec![None, None]);
     }
 
+    /// A transport that declares the destination enforces the key, for exactly
+    /// the target/body pairs named. Everything else answers `false`, which is
+    /// what every real non-Matrix adapter answers.
+    struct SelectiveIdempotentTransport {
+        honoured: Vec<(&'static str, &'static str)>,
+    }
+
+    #[async_trait]
+    impl MessageTransport for SelectiveIdempotentTransport {
+        async fn send(&self, _target: &ParsedTarget, _message: &str) -> SendOutcome {
+            SendOutcome::Ok { message_id: None }
+        }
+
+        fn honours_idempotency_key(&self, target: &ParsedTarget, message: &str) -> bool {
+            self.honoured
+                .iter()
+                .any(|(platform, body)| *platform == target.platform.as_str() && *body == message)
+        }
+    }
+
+    fn contract_for(tool: &SendMessageTool, target: &str, message: &str) -> ToolEffectContract {
+        tool.effect_contract(&json!({ "target": target, "message": message }))
+    }
+
+    /// The production construction site for [`ToolEffectKind::ProviderIdempotent`].
+    ///
+    /// This variant had NO production construction site at all: it existed in
+    /// the type, in one test, and in a match arm that OR'd it with `Opaque`, so
+    /// nothing a user could do produced one and nothing downstream could tell
+    /// it from opaque. If this assertion ever goes back to `Opaque` the variant
+    /// is dead again and the keyed re-dispatch in `resume_recovered_tool_round`
+    /// becomes unreachable.
     #[test]
-    fn effect_contract_remains_opaque() {
-        let contract = SendMessageTool::default().effect_contract(&json!({
-            "target": "slack:C012ABCDE",
-            "message": "hello"
+    fn a_destination_that_enforces_the_key_declares_provider_idempotent() {
+        let tool = SendMessageTool::new(Arc::new(SelectiveIdempotentTransport {
+            honoured: vec![("matrix", "hello")],
         }));
+
+        let contract = contract_for(&tool, "matrix:!room:server.org", "hello");
+
+        assert_eq!(contract.kind, ToolEffectKind::ProviderIdempotent);
+        // The LITERAL, not the constant. Recovery selects a reconciler by this
+        // exact string (`recovery::engine_redispatchable_under_durable_key`),
+        // so an assertion written against the constant would move with a rename
+        // and let a tool declare a reconciler nothing selects.
+        assert_eq!(
+            contract.reconciler.as_deref(),
+            Some("wcore.channel.outbound_key.v1"),
+            "the declaration is worthless without the reconciler that interprets it"
+        );
+        assert_eq!(OUTBOUND_KEY_RECONCILER, "wcore.channel.outbound_key.v1");
+    }
+
+    /// The arms that keep the one above honest.
+    ///
+    /// The claim is per-send, not per-tool: the SAME tool must answer `Opaque`
+    /// for a destination that does not enforce the key, and for a body the
+    /// transport will not carry the key on. Without this a blanket
+    /// `ProviderIdempotent` — which is what "declare it and move on" produces —
+    /// would pass the positive arm while licensing recovery to duplicate a
+    /// Slack message.
+    #[test]
+    fn a_destination_that_does_not_enforce_the_key_stays_opaque() {
+        let tool = SendMessageTool::new(Arc::new(SelectiveIdempotentTransport {
+            honoured: vec![("matrix", "hello")],
+        }));
+
+        for (target, message, why) in [
+            (
+                "slack:C012ABCDE",
+                "hello",
+                "a destination that does not deduplicate",
+            ),
+            (
+                "matrix:!room:server.org",
+                "a body the transport will not key",
+                "the right platform but a body the key does not ride",
+            ),
+        ] {
+            let contract = contract_for(&tool, target, message);
+            assert_eq!(contract.kind, ToolEffectKind::Opaque, "{why}");
+            assert!(contract.reconciler.is_none(), "{why}");
+        }
+    }
+
+    /// The boot default. Nothing is wired, so nothing is claimed.
+    #[test]
+    fn a_tool_with_no_transport_bound_claims_no_contract() {
+        let contract = contract_for(
+            &SendMessageTool::default(),
+            "matrix:!room:server.org",
+            "hello",
+        );
         assert_eq!(contract.kind, ToolEffectKind::Opaque);
         assert!(contract.reconciler.is_none());
+    }
+
+    /// A malformed call must not reach the oracle at all. `parse_target` is the
+    /// gate: a target this tool would refuse cannot be the basis of a claim
+    /// about what the far end does with a key.
+    #[test]
+    fn an_unparseable_target_claims_no_contract() {
+        let tool = SendMessageTool::new(Arc::new(SelectiveIdempotentTransport {
+            honoured: vec![("matrix", "hello")],
+        }));
+        for input in [
+            json!({ "target": "aol:foo", "message": "hello" }),
+            json!({ "target": "matrix:!room:server.org" }),
+            json!({}),
+        ] {
+            assert_eq!(tool.effect_contract(&input).kind, ToolEffectKind::Opaque);
+        }
     }
 
     fn must_send(t: &SendMessageTool, target: &str, msg: &str) -> ToolResult {

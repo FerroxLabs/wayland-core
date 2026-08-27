@@ -1177,6 +1177,32 @@ fn latest_valid_recovery_checkpoint(
     })
 }
 
+/// An interrupted tool effect the ENGINE can settle by itself, with no human.
+///
+/// A tool that durably declared `{ProviderIdempotent,
+/// wcore.channel.outbound_key.v1}` recorded, at dispatch, that its destination
+/// enforces the idempotency key the call carried.
+/// `AgentEngine::resume_recovered_tool_round` re-dispatches such an execution
+/// on the resumed tool round under that SAME key, and the far end collapses the
+/// replay — so routing the session to `ReconciliationRequired` would park it on
+/// an operator question whose answer the product already has, for the one
+/// effect class F13 exists to recover automatically.
+///
+/// It is a claim about the RECOVERY ROUTE, never about the outcome: the engine
+/// still does not know whether the interrupted send landed, and it does not
+/// need to. Nor is the claim sufficient on its own — the resumed round re-asks
+/// the LIVE tool whether the declaration still holds and refuses to re-dispatch
+/// if it does not, so a channel reconfigured out from under a recorded contract
+/// falls back to the operator instead of duplicating.
+pub(crate) fn engine_redispatchable_under_durable_key(
+    tool: &crate::session_journal::ToolState,
+) -> bool {
+    tool.effect_contract.kind == wcore_types::tool::ToolEffectKind::ProviderIdempotent
+        && tool.effect_contract.reconciler.as_deref()
+            == Some(wcore_tools::send_message::OUTBOUND_KEY_RECONCILER)
+        && !tool.idempotency_key.is_empty()
+}
+
 impl RecoveryPlan {
     pub fn from_journal(journal: &SessionJournal) -> Result<Self, JournalError> {
         let authority = journal.committed_authority()?;
@@ -1280,7 +1306,9 @@ impl RecoveryPlan {
                     .tools
                     .iter()
                     .filter(|(_, tool)| {
-                        tool.turn_id == turn_id && tool.effect.requires_reconciliation()
+                        tool.turn_id == turn_id
+                            && tool.effect.requires_reconciliation()
+                            && !engine_redispatchable_under_durable_key(tool)
                     })
                     .map(|(tool_execution_id, _)| tool_execution_id.clone())
                     .collect::<Vec<_>>();

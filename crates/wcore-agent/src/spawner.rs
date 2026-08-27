@@ -2556,14 +2556,32 @@ impl AgentSpawner {
         }
         config.max_turns = Some(sub_config.max_turns);
         config.max_tokens = sub_config.max_tokens;
-        // #112 — a per-spawn cap is ALWAYS deliberate: it must bind on the
-        // wire and never be omitted. Without this, (a) a desktop-default
-        // session on an omit-safe provider (flux/openrouter/gemini) would
-        // omit the child's sized cap and let Spawn/council children emit the
-        // served model's full ceiling, busting the sub-agent/CouncilSpend
-        // worst-case math; and (b) a child pinned to a different provider
-        // would decide omission from the PARENT's omitted-cap signal.
-        config.max_tokens_explicit = true;
+        // #112 — a DELIBERATE per-spawn cap must bind on the wire and never
+        // be omitted. Without that, (a) a desktop-default session on an
+        // omit-safe provider (flux/openrouter/gemini) would omit the child's
+        // sized cap and let Spawn/council children emit the served model's
+        // full ceiling, busting the sub-agent/CouncilSpend worst-case math;
+        // and (b) a child pinned to a different provider would decide omission
+        // from the PARENT's omitted-cap signal.
+        //
+        // #862 — but "deliberate" is not "always". The Spawn tool has no
+        // per-task `max_tokens` at all: `parse_tasks` seeds every task with one
+        // constant and `floor_task_caps_at_parent` then raises it to the
+        // session's own cap, so a Spawn child's budget IS the parent's, never a
+        // per-spawn value. Marking that explicit made a fork SERIALIZE a wire
+        // cap that the identical no-fork session OMITS, so the fork got the
+        // conservative unknown-model floor while the no-fork run got the served
+        // model's natural ceiling — the exact fork / no-fork asymmetry #862
+        // measured. A cap that merely inherits the session's budget therefore
+        // inherits the session's wire posture too. Spend stays bounded: such a
+        // child may emit no more than the session that spawned it, an explicit
+        // `--max-tokens` still binds everywhere, and a budget-governed session
+        // forces the sized cap back on regardless (`Engine::run`).
+        let deliberately_narrower = sub_config.max_tokens < self.base_config.max_tokens;
+        let pinned_to_another_provider = sub_config.provider.is_some();
+        config.max_tokens_explicit = deliberately_narrower
+            || pinned_to_another_provider
+            || self.base_config.max_tokens_explicit;
         // Crucible #3 — honor a per-spawn temperature override. `None` leaves the
         // base config's temperature in place (top-level base is `None`, so the
         // child engine omits the field unless this sets it).
@@ -3940,6 +3958,49 @@ mod crucible_provider_resolution_tests {
         assert!(
             cfg.max_tokens_explicit,
             "a spawned child's per-spawn cap must read as explicit (never omitted on the wire)"
+        );
+    }
+
+    /// #862 — a child whose cap merely INHERITS the session's own budget (the
+    /// Spawn surface, post-floor: `parse_tasks` has no per-task cap and
+    /// `floor_task_caps_at_parent` raises every task to the parent's) is not a
+    /// deliberate per-spawn value, so it must adopt the session's WIRE posture
+    /// instead of forcing the cap onto the wire. Otherwise a fork serializes a
+    /// max-tokens field that the identical no-fork session omits, and gets the
+    /// conservative unknown-model floor where the no-fork run gets the served
+    /// model's natural ceiling — the asymmetry #862 measured (forks 3/8 vs
+    /// no-fork 20/20).
+    #[test]
+    fn child_config_inheriting_the_session_cap_adopts_its_wire_posture() {
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let base = Config {
+            compat: wcore_config::compat::ProviderCompat::flux_router_defaults(),
+            max_tokens: 64_000,
+            max_tokens_explicit: false,
+            ..Config::default()
+        };
+        let spawner = AgentSpawner::new(parent, base);
+        // Post-floor Spawn shape: the child's cap IS the session's cap.
+        let mut c = sub("p", None);
+        c.max_tokens = 64_000;
+        let cfg = spawner.child_config(&c);
+        assert!(
+            !cfg.max_tokens_explicit,
+            "a child that only inherits the session's budget must inherit its \
+             omitted-cap posture too, or the fork/no-fork wire shapes diverge"
+        );
+        // And an explicitly-sized session still binds its children.
+        let parent2: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let sized = Config {
+            compat: wcore_config::compat::ProviderCompat::flux_router_defaults(),
+            max_tokens: 64_000,
+            max_tokens_explicit: true,
+            ..Config::default()
+        };
+        let cfg2 = AgentSpawner::new(parent2, sized).child_config(&c);
+        assert!(
+            cfg2.max_tokens_explicit,
+            "an operator-sized session cap must keep binding on its children"
         );
     }
 
