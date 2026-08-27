@@ -642,27 +642,27 @@ jobs:
         shell: bash
         run: bash scripts/regression-gate-1100.sh
 
-      # 2026-07-27: MOVED to after the test step. It used to run before it, so a
-      # contract digest drift failed the job at that step and macOS and
-      # self-hosted Windows never reached the tests at all — three separate
-      # lanes reported "CI is red on two of three platforms" when what was
-      # actually lost was test VISIBILITY on those platforms.
+      # gh#1055 ask 2 — the Desktop contract corpus check USED TO RUN HERE, once
+      # per native matrix entry. It has MOVED to `ci-linux`, and nothing was
+      # weakened in the move: it is still a hard failure, still runs after the
+      # tests, and is still deliberately NOT fixed by regenerating on a red (a
+      # 4-way cross-audit went 3-0 against re-stamping digests on a working
+      # branch — an agent who regenerates whenever CI goes red destroys the only
+      # guard that would catch a genuine wire change).
       #
-      # Deliberately still a hard failure, and deliberately NOT fixed by
-      # regenerating: a 4-way cross-audit went 3-0 against re-stamping the
-      # digests on a working branch, on the grounds that an agent who
-      # regenerates whenever CI goes red destroys the only guard that would
-      # catch a genuine wire change. The drift here is bookkeeping only —
-      # measured field-by-field, exactly `fixture_digest` and
-      # `source_inputs_digest` moved while `schema_digest` did NOT, so the wire
-      # shape is unchanged — but the coordinated Core+Desktop re-pin is still
-      # owed and the red is the honest signal that it is owed. See
-      # .planning/SEAM-REQUESTS/CONTRACT-DIGEST-RESTAMP.md.
+      # What changed is the BLAST RADIUS. The check regenerates in memory and
+      # byte-compares against contracts/desktop/v1; it has no platform
+      # component. Running it on every leg turned one fact — a `SOURCE_INPUTS`
+      # file's hash moved — into `CI (Array)`, `CI (linux-containerized)` and
+      # `CI (macos-latest)` red simultaneously, which is the most alarming shape
+      # a CI board can show and is why two unrelated PRs lost a night to it.
+      # Windows keeps its coverage through `just test-ci` (the corpus drift test
+      # itself), because path-separator normalization in the generator is the one
+      # genuinely platform-sensitive part; macOS is the redundant leg.
       #
-      # Ordering only. The command, its strictness and its exit status are
-      # untouched: the job still fails on drift, it just reports the tests first.
-      - name: Check Desktop protocol contract corpus drift
-        run: vx cargo run -p wcore-protocol --bin wcore-contract -- check
+      # crates/wcore-protocol/tests/contract_gate_topology.rs asserts this step
+      # sits in exactly one job and that the job is `ci-linux`, so re-adding it
+      # here fails a test instead of quietly restoring the old board.
 
       # V1 C2 — release-binary smoke. Catches the v0.2.0 BLOCKER #1 class
       # of regression where `inventory::submit!` items get dead-code-stripped
@@ -1080,6 +1080,16 @@ jobs:
     name: CI (linux-containerized)
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # A job-level `permissions:` block REPLACES the workflow-level one at the
+    # top of this file wholesale (GHA semantics) — the same rule that cost the
+    # `report` job "multiple weeks of red" when `contents: read` was dropped by
+    # omission — so contents+checks are restated here rather than inherited.
+    # The addition is `pull-requests: read`, which the Desktop contract corpus
+    # pre-flight hint below needs to read the PR changed-file list (gh#1055).
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: read
     env:
       CI_IMAGE: wayland-core-ci:rust-1.95-slim-bookworm
       # Linux runners ship with ~14GB free; the host cleanup step
@@ -1459,6 +1469,67 @@ jobs:
           RUN cargo install --locked cargo-audit
           EOF
 
+      # gh#1055 ask 3 — ADVISORY, never gating. A PR that edits a `SOURCE_INPUTS`
+      # file without touching crates/wcore-protocol/contracts/desktop/v1/ is a
+      # near-certain corpus drift, and that is knowable from the changed-file
+      # list before a single test runs. Emitting it as a `::notice` turns the
+      # eventual red from "this PR broke something fundamental" into something
+      # the author was already told to expect, with the SAFE procedure attached
+      # (`wcore-contract diff` first, regenerate only once the key-diff shows
+      # nothing but source_inputs_digest and fixture_digest moved).
+      #
+      # PLACEMENT IS THE POINT, AND IT WAS WRONG ONCE. This step first landed
+      # as step 11 of ~15 in this job — after fmt, after clippy, after the whole
+      # nextest workspace suite, the swarm suite and the voice suite. That is
+      # POST-flight: a hint whose entire value is "the corpus check you are
+      # about to see fail is a hash rebase, not a protocol break" is worth
+      # nothing once the failing minutes have already been spent, and worth
+      # less than nothing when an earlier gating step reds out and the job
+      # never reaches it at all. It now runs at the earliest point it CAN —
+      # immediately after the CI image exists, because it invokes the real
+      # binary rather than a hardcoded path list — and before every step that
+      # touches $DOCKER_RUN. Both bounds are held by
+      # `the_preflight_hint_runs_before_every_step_it_is_meant_to_pre_empt` in
+      # crates/wcore-protocol/tests/contract_gate_topology.rs.
+      #
+      # `pull-requests: read` in this job's `permissions:` block is load-bearing.
+      # This step reads the PR's changed-file list over the REST API; the
+      # workflow-level block (top of this file) grants contents+checks only, and
+      # GHA sets every scope a `permissions:` block omits to `none`. Without the
+      # grant `gh api` 403s — and since the step is `continue-on-error`, that
+      # 403 is SILENT: no notice, no red, the feature simply never happens. Held
+      # by `the_job_carrying_the_preflight_hint_can_actually_read_the_pull_request`.
+      #
+      # The path list comes from the binary that actually hashes it
+      # (`wcore-contract source-inputs` feeds the same constant), so this step
+      # can never re-hardcode a list and go stale. `docker run -i` rather than
+      # $DOCKER_RUN because the changed-file list arrives on stdin.
+      #
+      # Non-gating twice over: `continue-on-error: true`, AND the binary's
+      # `preflight` arm is infallible by construction — it decodes whatever
+      # arrives lossily and reports an unreadable list on stderr instead of
+      # returning it (graded by `preflight_survives_a_non_utf8_changed_file_list`
+      # and `preflight_survives_a_changed_file_list_that_cannot_be_read`). The
+      # one thing deliberately NOT silent is losing the file list itself: `gh`
+      # failing emits a ::warning, so a future permissions regression is visible
+      # rather than merely absent.
+      - name: Desktop contract corpus pre-flight hint (advisory)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          list="$RUNNER_TEMP/desktop-contract-changed-files.txt"
+          if ! gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --jq '.[].filename' > "$list"; then
+            echo "::warning title=Desktop contract corpus::could not read this PR changed-file list (gh api failed - check this job permissions block); the corpus pre-flight hint was not evaluated"
+            exit 0
+          fi
+          docker run --rm -i -v "${{ github.workspace }}:/work" -w /work "$CI_IMAGE" \
+            cargo run -q -p wcore-protocol --bin wcore-contract -- preflight < "$list"
+
       - name: Pre-build tool_token_bench
         run: $DOCKER_RUN "$CI_IMAGE" cargo build -p wcore-agent --bin tool_token_bench --features test-utils
 
@@ -1734,6 +1805,19 @@ jobs:
             echo "::error title=Shared-process lib suite::Executed $total tests, expected at least $MIN. A suite that exits 0 having run nothing is not a suite -- a crate lost its lib target, a module got cfg'd out, or the invocation stopped collecting. Move the floor in this step together with whatever moved."
             exit 1
           fi
+      # gh#1055 ask 2 — MOVED here from the `ci` matrix job, where it ran once
+      # per native platform for a fact that has no platform component. See the
+      # note at its old site for the full reasoning; the command, its strictness
+      # and its exit status are unchanged, and it still runs after the tests so a
+      # drift never costs this leg its test visibility.
+      #
+      # It carries NO `if:` and NO `continue-on-error:`, and must not grow one:
+      # this is the only remaining standalone corpus gate, so either would delete
+      # the coverage silently rather than loudly. `the_corpus_drift_step_is_a_gate
+      # _and_carries_nothing_that_could_silence_it` fails if either ever appears,
+      # on the step or on this job.
+      - name: Check Desktop protocol contract corpus drift
+        run: $DOCKER_RUN "$CI_IMAGE" cargo run -p wcore-protocol --bin wcore-contract -- check
 
       # WCORE_SMOKE_REQUIRE_PREBUILT=1 (passed into the container): a missing
       # release artifact is a hard failure here, never a silent skip (#190).

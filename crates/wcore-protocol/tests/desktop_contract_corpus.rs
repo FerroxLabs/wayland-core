@@ -9,7 +9,7 @@ use wcore_protocol::child::{
 use wcore_protocol::commands::ProtocolCommand;
 use wcore_protocol::contract::{
     COMMAND_SPECS, CONTRACT_MAJOR, CONTRACT_MINOR, CONTRACT_ROOT, ContractCriticality, EVENT_SPECS,
-    GENERATOR_VERSION, canonical_json, check_contract, generated_artifacts,
+    GENERATOR_VERSION, canonical_json, generated_artifacts,
 };
 use wcore_protocol::events::{BudgetGrantOutcome, BudgetGrantRefusalReason, BudgetGrantResult};
 
@@ -198,9 +198,30 @@ fn decode_budget_grant_result(event: &Value) -> serde_json::Result<BudgetGrantRe
     serde_json::from_value(result)
 }
 
+// gh#1055 ask 2 - the ONE test in this binary that compares the checked-in
+// corpus against a fresh generation, and therefore the only one a source-hash
+// rebase can redden. Editing any SOURCE_INPUTS file moves
+// source_inputs_digest, fixture_digest follows, and this fails - on every
+// matrix leg at once, which reads as "this PR broke something fundamental"
+// when it means "a source file's hash changed".
+//
+// macOS is dropped because it is the redundant leg, not because the check is
+// weak: the comparison is pure byte equality over in-memory generation, and
+// the one genuinely platform-sensitive line in the generator is the path
+// separator normalization in `all_relative_files`, which only Windows
+// exercises. Linux (containerized) and Windows both keep this test. The
+// exclusion is scoped to this single function on purpose - every other
+// assertion in this file still runs on macOS, so the binary never becomes
+// vacuous there.
+//
+// crates/wcore-protocol/tests/contract_gate_topology.rs asserts this attribute
+// is still here, because deleting it would silently restore the old blast
+// radius rather than failing.
 #[test]
+#[cfg(not(target_os = "macos"))]
 fn checked_corpus_matches_real_serializers_byte_for_byte() {
-    check_contract().expect("checked-in Desktop contract corpus must match the generator");
+    wcore_protocol::contract::check_contract()
+        .expect("checked-in Desktop contract corpus must match the generator");
 
     let artifacts = generated_artifacts().unwrap();
     for (relative, expected) in artifacts {
