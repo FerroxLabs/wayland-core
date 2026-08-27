@@ -530,6 +530,74 @@ context window.
 
 ---
 
+## Automatic failover (`[provider_chain]`)
+
+Provider selection is explicit — but a *selected* provider that starts failing
+can hand the turn to a configured fallback instead of ending the run. This is
+off by default and, until now, was documented nowhere: #946 B-02 recorded it as
+discoverable only by reading Rust source or the TUI Advanced pane.
+
+```toml
+[provider_chain]
+enabled = true                 # default false — no wrapping, no fallbacks
+failure_threshold = 3          # failures inside the window before the breaker opens
+recovery_timeout_secs = 30     # cooldown before an open breaker probes again
+fallback_models = [            # tried IN ORDER when the primary is broken
+  "anthropic:claude-haiku-4-5",
+  "openai:gpt-5",
+]
+```
+
+`enabled = false` (the default) means no circuit breaker and no fallbacks: the
+primary's error is the turn's error.
+
+### How an entry is read
+
+Each `fallback_models` entry takes the same shape as `[default] model`: either a
+bare model id, or `<provider>:<model>`.
+
+The prefix is treated as a provider **only** when it names a built-in provider
+(`anthropic`, `openai`, `bedrock`, `vertex`, `gemini`, `openai-chatgpt`,
+`minimax`) or a `[providers.<id>]` block you defined. Anything else is read as
+part of a model id on the **primary's own provider** — which is what makes a
+model id that legitimately contains a colon (a Bedrock `…-v2:0`, an Ollama
+`qwen:7b`) work. The cost of that rule is real and worth knowing: a typo'd or
+plugin-supplied provider prefix does not error, it silently becomes a
+same-provider model, so an outage that takes the primary down takes the
+"fallback" with it. If a fallback is meant to be a different provider, give that
+provider a `[providers.<id>]` block (or use its built-in slug) and confirm the
+failover notice names it.
+
+### Which candidates are allowed to serve
+
+A fallback is checked against the request and the routing policy *before* any
+call is made to it. It is skipped when it cannot support the request's tools,
+images or structured output, when its context window is unknown or too small for
+the assembled prompt, or when the policy below refuses it.
+
+```toml
+[provider_policy]              # GLOBAL config only — a project block is ignored
+allowed_providers = []         # non-empty = allow-list
+denied_providers  = []
+allowed_regions   = []         # non-empty = the candidate must declare one of these
+organization      = "acme"     # candidate must belong to this org
+require_fresh_pricing = false  # refuse a candidate whose pricing evidence is stale
+require_priced        = false  # refuse a candidate with no published price
+```
+
+`[provider_policy]` is read from the **global** config only. A project-level
+block is ignored (and says so on stderr), so workspace content cannot widen the
+set of providers your credentials may reach.
+
+### What you see when it fires
+
+When a fallback serves the turn, the run prints a notice naming the failed
+provider, the fault class that broke it, and who answered instead — on the TUI
+and in headless runs, not only over the JSON stream protocol. When the whole
+roster is walked with nothing dispatched, the message names each candidate and
+the reason it was refused (cooldown, an unknown context window, a policy denial,
+…) rather than a blanket "no candidate passed routing policy".
+
 ## Sign in with ChatGPT
 
 Authenticate with your **ChatGPT subscription** instead of an OpenAI API key and
