@@ -340,11 +340,70 @@ not restrict who can then use it within that session.
 
 ## Startup Flow
 
-1. Connect to all configured MCP servers
-2. Perform MCP protocol handshake (`initialize`) for each server
-3. Discover available tools (`tools/list`)
-4. Register tools in the tool registry — the agent uses them like built-in tools
-5. Gracefully close all connections on exit
+1. Run the OSV malware check on every stdio server whose command is a package
+   runner (see below)
+2. Connect to all configured MCP servers
+3. Perform MCP protocol handshake (`initialize`) for each server
+4. Discover available tools (`tools/list`)
+5. Register tools in the tool registry — the agent uses them like built-in tools
+6. Gracefully close all connections on exit
+
+## Malware check on package-runner launches
+
+An `[mcp_servers]` entry with `command = "npx"`, `"uvx"` or `"pipx"` fetches a
+package from a public registry and executes it with your ambient authority.
+Before that process is created, Core queries the [OSV](https://osv.dev) API for
+**malware** advisories (`MAL-*`) on every package the invocation will install —
+the positional, whatever `--package` / `--from` / `--spec` names, and every
+`--with` extra. Ordinary CVEs never block; only confirmed malware does.
+
+Three outcomes:
+
+| Outcome | What happens |
+|---|---|
+| Clean | The server launches. Nothing is printed. |
+| Known malware | The launch is **refused** before the process exists, naming the advisory IDs. |
+| The command is a package runner but its argv names no package | The launch is **refused**. Name the package explicitly (`npx --package <pkg>`, `uvx --from <pkg>`, `pipx run --spec <pkg>`). |
+
+If OSV cannot be reached — you are offline, the API is down, the response is
+unparseable — the check **cannot run**, and by default the server launches
+anyway with a notice on stderr:
+
+```
+[mcp] WARNING: the OSV malware check did NOT run for some-pkg (osv backend
+network error: …). 'npx' is being launched UNCHECKED. Set
+WAYLAND_MCP_MALWARE_GATE=strict to refuse these launches instead.
+```
+
+Refusing every MCP server whenever OSV is down is a worse default than
+launching one whose package went unchecked — but that is a judgement call, so
+it is yours to override:
+
+```bash
+export WAYLAND_MCP_MALWARE_GATE=strict   # refuse any launch whose check could not run
+```
+
+Any other value (or none) keeps the permissive default, so a typo cannot wedge
+every MCP server on the machine.
+
+### What the check does NOT cover
+
+It is a malware-feed lookup on the **configured command**, not an execution
+boundary. It does not see:
+
+- **Indirect execution.** `command = "sh"` with `args = ["-c", "npx evil"]` is
+  not a recognised package runner, so it launches unchecked. The same goes for
+  `env`, `node -e`, and any wrapper script. Configure the runner directly if you
+  want it checked.
+- **Package runners it does not recognise:** `bunx`, `pnpm dlx`, `yarn dlx`,
+  `npm exec`, `uv tool run`, `deno run npm:…`.
+- **Anything the server does after it starts.** A cleared package may fetch and
+  run whatever it likes.
+- **Transitive dependencies**, and malware OSV has not yet published an
+  advisory for.
+
+Treat it as one layer that catches known-bad names cheaply, not as a reason to
+run an MCP server you would not otherwise trust.
 
 ## Plugin Lifecycle Hooks → Context
 
