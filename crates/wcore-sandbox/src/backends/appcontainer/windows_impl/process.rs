@@ -101,6 +101,21 @@ pub(super) fn probe_cache() -> &'static Mutex<ProbeCache> {
 /// under `--test-threads=1`, and only misses it by luck under the default
 /// parallel runner (FerroxLabs/wayland#1100). Every such test takes this lock
 /// as its first statement, so the reset-then-read window cannot be interleaved.
+///
+/// EVIDENCE STATUS, so it is not re-derived. The reset in
+/// `session_selection_reaches_ready_without_running_the_appcontainer_probe`
+/// has a deterministic red arm (revert it and
+/// `cargo test -p wcore-sandbox --lib -- --test-threads=1` fails on Windows;
+/// that is what `scripts/regression-gate-1100.sh` runs in CI). The locks in the
+/// cache-WARMING siblings do not. Stripping the lock from the one non-ignored
+/// warmer and racing it against the protected test, 300 runs at
+/// `--test-threads=16` on Windows 11 26200, produced 0 failures — the warmer's
+/// write is behind a real `spawn_blocking` probe that takes milliseconds while
+/// the read it would corrupt completes in microseconds, so libtest starting
+/// both at once does not reach the window. They are kept because a
+/// process-global write racing a process-global read is a real hazard and the
+/// lock is free, NOT because a measurement demanded them. Do not cite them as
+/// proven.
 #[cfg(test)]
 pub(super) fn probe_isolation() -> &'static Mutex<()> {
     static ISOLATION: OnceLock<Mutex<()>> = OnceLock::new();
