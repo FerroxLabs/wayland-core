@@ -145,9 +145,12 @@ impl GuardedFile {
         &self.resolved
     }
 
-    /// Read the opened handle's contents as UTF-8. Reads the object whose
-    /// identity [`open`](Self::open) proved, never a re-resolution of the
-    /// original path.
+    /// Read the opened handle's contents as UTF-8.
+    ///
+    /// Reads the object whose identity [`open`](Self::open) proved. Not the
+    /// original path, and not [`resolved`](Self::resolved) either: naming a
+    /// path again is a second resolution, and a second resolution is the
+    /// window this type exists to close.
     pub fn read_to_string(&mut self) -> io::Result<String> {
         let file = self.handle.as_file_mut();
         file.seek(SeekFrom::Start(0))?;
@@ -264,6 +267,32 @@ impl GitIgnore {
             }
         }
         ignored
+    }
+
+    /// True if `rel` is ignored, or if any ancestor DIRECTORY of it is.
+    ///
+    /// [`is_ignored`](Self::is_ignored) asks about one path against one set
+    /// of rules, and a directory-only rule (`build/`) answers "no" when
+    /// asked about `build/artifact.txt` as a file. That answer is only right
+    /// because the walk normally refuses `build` before it can ever reach
+    /// anything inside it. Name a path that skips the descent — `@build/x`
+    /// directly, or a symlink whose target lives under an ignored directory
+    /// — and the pruning never happens, so the question has to be asked in
+    /// full here.
+    ///
+    /// A match on the leaf OR on any ancestor directory excludes. That
+    /// disjunction is what gives git's rule that a leaf pattern cannot
+    /// re-include a file whose parent directory is excluded — the ancestor
+    /// hit stands whatever the leaf's own rules say.
+    pub fn is_ignored_with_ancestors(&self, rel: &str, is_dir: bool) -> bool {
+        let rel = rel.trim_start_matches('/');
+        let segments: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+        for depth in 1..segments.len() {
+            if self.is_ignored(&segments[..depth].join("/"), true) {
+                return true;
+            }
+        }
+        self.is_ignored(rel, is_dir)
     }
 
     /// The number of parsed rules — used by tests to assert comment/blank
@@ -395,6 +424,19 @@ mod tests {
         let gi = GitIgnore::parse("# a comment\n\n  \n*.tmp\n");
         assert!(gi.is_ignored("x.tmp", false));
         assert_eq!(gi.rule_count(), 1);
+    }
+
+    #[test]
+    fn gitignore_ancestor_directory_rules_cover_their_contents() {
+        let gi = GitIgnore::parse("build/\n");
+        // The bare matcher cannot answer this — `build/` is directory-only.
+        assert!(!gi.is_ignored("build/artifact.txt", false));
+        assert!(gi.is_ignored_with_ancestors("build/artifact.txt", false));
+        assert!(gi.is_ignored_with_ancestors("build/deep/nested.txt", false));
+        assert!(!gi.is_ignored_with_ancestors("src/main.rs", false));
+        // An excluded parent cannot be re-included by a leaf negation.
+        let neg = GitIgnore::parse("build/\n!build/keep.txt\n");
+        assert!(neg.is_ignored_with_ancestors("build/keep.txt", false));
     }
 
     #[test]

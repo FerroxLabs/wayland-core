@@ -205,6 +205,11 @@ fn resolve_file(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
         io::ErrorKind::NotFound | io::ErrorKind::InvalidInput => {
             AtRefError::NotFound(display(path))
         }
+        // Windows refuses to open a directory as a file outright, where
+        // Unix opens it and fails the `is_file` check inside. Both spell a
+        // directory named without a trailing `/` the same way the
+        // pre-change `!full.is_file()` did.
+        _ if full.is_dir() => AtRefError::NotFound(display(path)),
         _ => AtRefError::Io {
             path: display(path),
             message: e.to_string(),
@@ -219,7 +224,7 @@ fn resolve_file(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     // root, so a `..` component or a root spelled through a symlink can no
     // longer land the path outside the matcher's reach (core#335).
     if let Some(rel) = rel_to_canonical_root(opened.resolved(), root)
-        && GitIgnore::load(root).is_ignored(&rel, false)
+        && GitIgnore::load(root).is_ignored_with_ancestors(&rel, false)
     {
         return Err(AtRefError::GitIgnored(display(path)));
     }
@@ -248,30 +253,32 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     if !full.is_dir() {
         return Err(AtRefError::NotFound(display(path)));
     }
-    // The walk runs entirely in resolved coordinates: the root the payload
-    // paths are relative to, and the tree the walk descends, are both the
-    // symlink-free spellings. That is what makes `rel_to_root` a real
-    // containment test rather than a string comparison (core#335).
-    let canon_root = fs::canonicalize(root).map_err(|e| AtRefError::Io {
-        path: display(root),
-        message: e.to_string(),
-    })?;
-    let start = fs::canonicalize(&full).map_err(|e| AtRefError::Io {
-        path: display(path),
-        message: e.to_string(),
-    })?;
+    // The two trees an automatic descent is allowed to stay inside: the
+    // workspace, and whatever tree the user named. Both canonical, because
+    // containment is a question about objects, not about spelling.
+    let bounds = WalkBounds {
+        workspace: fs::canonicalize(root).map_err(|e| AtRefError::Io {
+            path: display(root),
+            message: e.to_string(),
+        })?,
+        named: fs::canonicalize(&full).map_err(|e| AtRefError::Io {
+            path: display(path),
+            message: e.to_string(),
+        })?,
+    };
 
     let ignore = GitIgnore::load(root);
     let mut files = Vec::new();
     let mut warnings = Vec::new();
     let mut skipped = 0usize;
     let mut truncated = false;
-    let mut visited: HashSet<PathBuf> = HashSet::new();
-    visited.insert(start.clone());
+    // Seeded with the tree being walked so a link back to it terminates.
+    let mut visited: HashSet<PathBuf> = HashSet::from([bounds.named.clone()]);
 
     walk_dir(
-        &start,
-        &canon_root,
+        &full,
+        root,
+        &bounds,
         &ignore,
         &mut files,
         &mut skipped,
@@ -314,16 +321,40 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     })
 }
 
+/// The trees an automatic descent may stay inside. Both canonical.
+///
+/// Two, not one, because the user's own `@dir` target is not a descent — a
+/// deliberately named directory is as legitimate as a deliberately named
+/// absolute file path, and refusing it would remove a real capability. What
+/// must not happen is the walk *finding* a link and following it out of
+/// both trees on its own.
+struct WalkBounds {
+    /// The workspace root — the tree whose `.gitignore` is in force.
+    workspace: PathBuf,
+    /// The tree the `@dir` reference actually named.
+    named: PathBuf,
+}
+
+impl WalkBounds {
+    /// True if `resolved` lies inside either tree.
+    fn contains(&self, resolved: &Path) -> bool {
+        resolved.starts_with(&self.workspace) || resolved.starts_with(&self.named)
+    }
+}
+
 /// Depth-first directory walk for `@dir`, applying both guardrails.
 ///
-/// `dir` and `root` are both already canonical. `visited` holds the
-/// canonical directories already descended, which is what makes a
-/// self-referential symlink terminate — a name-keyed check cannot see that
-/// `a/link` and `a` are the same directory.
+/// `dir` and `root` are the caller's spelling, so payload paths keep the
+/// names the user typed. Containment and cycle detection are the two
+/// questions that spelling cannot answer, and both are asked of the
+/// canonical target instead: `bounds` for "did this link leave the tree?"
+/// and `visited` for "have we already been in this directory?" — a
+/// name-keyed check cannot see that `a/b/link` and `a` are one directory.
 #[allow(clippy::too_many_arguments)]
 fn walk_dir(
     dir: &Path,
     root: &Path,
+    bounds: &WalkBounds,
     ignore: &GitIgnore,
     out: &mut Vec<ResolvedFile>,
     skipped: &mut usize,
@@ -364,7 +395,7 @@ fn walk_dir(
                 continue;
             }
         };
-        if ignore.is_ignored(&rel, is_dir) {
+        if ignore.is_ignored_with_ancestors(&rel, is_dir) {
             *skipped += 1;
             continue;
         }
@@ -381,25 +412,31 @@ fn walk_dir(
             {
                 continue;
             }
-            // A directory link whose target leaves the workspace would pull
-            // an arbitrary out-of-tree slice into an `@dir` of *this*
-            // workspace, under this workspace's gitignore — which does not
-            // govern it. Skipping is counted, not silent, and removes no
-            // way to attach anything: `@<path>` still resolves a path
-            // outside the root when the user names it deliberately.
-            let Some(resolved_rel) = rel_to_root(&resolved, root) else {
-                *skipped += 1;
-                continue;
-            };
-            if ignore.is_ignored(&resolved_rel, true) {
+            // A link the walk *found* that leaves both trees would pull an
+            // arbitrary out-of-tree slice into an `@dir` of this workspace,
+            // under a `.gitignore` that does not govern it. Counted, not
+            // silent — and it removes no way to attach anything, because
+            // naming the target directly still resolves it.
+            if !bounds.contains(&resolved) {
                 *skipped += 1;
                 continue;
             }
-            // Identity, not name, is what makes a cycle detectable.
-            if !visited.insert(resolved.clone()) {
+            if rel_to_root(&resolved, root)
+                .is_some_and(|r| ignore.is_ignored_with_ancestors(&r, true))
+            {
+                *skipped += 1;
                 continue;
             }
-            walk_dir(&resolved, root, ignore, out, skipped, truncated, visited)?;
+            // Identity, not name, is what makes a cycle detectable. Every
+            // descended directory is recorded, plain ones included, so a
+            // link back to any ancestor terminates and not just one to the
+            // tree's own root.
+            if !visited.insert(resolved) {
+                continue;
+            }
+            walk_dir(
+                &path, root, bounds, ignore, out, skipped, truncated, visited,
+            )?;
         } else {
             // One open; both remaining gates judge its proven identity.
             // Read text files only — a binary file is skipped silently
@@ -415,8 +452,8 @@ fn walk_dir(
                 *skipped += 1;
                 continue;
             }
-            if rel_to_root(opened.resolved(), root)
-                .is_some_and(|r| ignore.is_ignored(&r, false))
+            if rel_to_root(opened.resolved(), &bounds.workspace)
+                .is_some_and(|r| ignore.is_ignored_with_ancestors(&r, false))
             {
                 *skipped += 1;
                 continue;
@@ -865,10 +902,7 @@ mod tests {
         match resolve(&at, root) {
             Err(AtRefError::GitIgnored(_)) => {}
             Err(other) => panic!("expected GitIgnored, got {other:?}"),
-            Ok(p) => panic!(
-                "`..` skipped the gitignore guard: {:?}",
-                p.files[0].content
-            ),
+            Ok(p) => panic!("`..` skipped the gitignore guard: {:?}", p.files[0].content),
         }
     }
 
@@ -920,7 +954,10 @@ mod tests {
         // …and the `@dir` walk must not pick it up either.
         let payload = resolve(&AtRef::parse("@./").unwrap(), root).expect("resolve dir");
         assert!(
-            !payload.files.iter().any(|f| f.content.contains("fake-token")),
+            !payload
+                .files
+                .iter()
+                .any(|f| f.content.contains("fake-token")),
             "@dir walk inlined the reported credential store"
         );
     }
@@ -967,6 +1004,155 @@ mod tests {
         let at = AtRef::parse(&format!("@{}", target.display())).expect("parse");
         let payload = resolve(&at, root).expect("an out-of-tree absolute path still attaches");
         assert_eq!(payload.files[0].content, "outside body");
+    }
+
+    /// The read must come from the handle whose identity was proven, not
+    /// from resolving a path a second time. Replacing the OBJECT at the
+    /// resolved path after the open makes the difference observable without
+    /// having to schedule a race: the proven handle still holds the inode it
+    /// checked, a re-resolution would pick up the replacement.
+    #[cfg(unix)]
+    #[test]
+    fn a_guarded_file_reads_the_object_it_proved_not_the_path_again() {
+        use super::super::at_ref_guard::GuardedFile;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let target = tmp.path().join("target.txt");
+        fs::write(&target, "original").expect("write target");
+        let link = tmp.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let mut opened = GuardedFile::open(&link).expect("open");
+        assert_eq!(opened.resolved(), fs::canonicalize(&target).unwrap());
+
+        // A new inode under the same name — what a swap looks like.
+        fs::remove_file(&target).expect("unlink");
+        fs::write(&target, "swapped").expect("rewrite target");
+
+        assert_eq!(
+            opened.read_to_string().expect("read"),
+            "original",
+            "the read re-resolved the path instead of using the proven handle"
+        );
+    }
+
+    /// A directory spelled without a trailing `/` is a miss, not an I/O
+    /// error — the answer the pre-change `!full.is_file()` gate gave.
+    #[test]
+    fn a_directory_named_as_a_file_is_not_found() {
+        let tmp = TempDir::new().expect("tempdir");
+        fs::create_dir(tmp.path().join("src")).expect("mkdir src");
+
+        let err = resolve(&AtRef::parse("@./src").unwrap(), tmp.path())
+            .expect_err("a directory is not a file");
+        assert!(matches!(err, AtRefError::NotFound(_)), "got {err:?}");
+    }
+
+    /// A link cannot re-include a git-ignored file by wearing a name no
+    /// rule matches. Both spellings are put to the matcher; either hit
+    /// excludes.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_cannot_re_include_a_gitignored_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join(".gitignore"), "build/\n").expect("write gitignore");
+        fs::create_dir(root.join("build")).expect("mkdir build");
+        fs::write(root.join("build/artifact.txt"), "ignored artifact").expect("write artifact");
+        std::os::unix::fs::symlink(root.join("build/artifact.txt"), root.join("notes.txt"))
+            .expect("symlink");
+
+        let payload = resolve(&AtRef::parse("@./").unwrap(), root).expect("resolve dir");
+        assert!(
+            !payload
+                .files
+                .iter()
+                .any(|f| f.content.contains("ignored artifact")),
+            "a symlink re-included a git-ignored file: {:?}",
+            payload
+                .files
+                .iter()
+                .map(|f| f.path.display().to_string())
+                .collect::<Vec<_>>()
+        );
+
+        // …and the same through `@file`.
+        let err = resolve(&AtRef::parse("@notes.txt").unwrap(), root)
+            .expect_err("a link to a git-ignored file is refused");
+        assert!(matches!(err, AtRefError::GitIgnored(_)), "got {err:?}");
+    }
+
+    /// The escape must be REPORTED, not just absent from the payload. The
+    /// pre-existing `rel_to_root(&path, root)` at the top of the loop drops
+    /// out-of-tree entries silently; only the bounds check counts them, so
+    /// the user is told something was held back.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_symlink_that_leaves_both_trees_is_counted_as_skipped() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let outside = TempDir::new().expect("outside");
+        fs::write(outside.path().join("private.txt"), "outside-the-workspace")
+            .expect("write outside");
+        fs::write(root.join("ok.txt"), "safe").expect("write ok");
+        std::os::unix::fs::symlink(outside.path(), root.join("vendor")).expect("symlink dir");
+
+        let payload = resolve(&AtRef::parse("@./").unwrap(), root).expect("resolve dir");
+        assert!(
+            payload
+                .warnings
+                .iter()
+                .any(|w| matches!(w, AtWarning::SkippedFiles { count: 1 })),
+            "the escaping link must be reported, got {:?}",
+            payload.warnings
+        );
+    }
+
+    /// The other half of that boundary: naming an out-of-tree directory
+    /// DELIBERATELY still works. `@vendor/` is the user's own choice, and
+    /// refusing it would be the silent capability loss the bounds check
+    /// exists to avoid.
+    #[cfg(unix)]
+    #[test]
+    fn naming_an_out_of_tree_directory_deliberately_still_resolves() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let outside = TempDir::new().expect("outside");
+        fs::write(outside.path().join("shared.txt"), "shared body").expect("write shared");
+        fs::create_dir(outside.path().join("nested")).expect("mkdir nested");
+        fs::write(outside.path().join("nested/deep.txt"), "deep body").expect("write deep");
+        std::os::unix::fs::symlink(outside.path(), root.join("vendor")).expect("symlink dir");
+
+        let payload = resolve(&AtRef::parse("@vendor/").unwrap(), root).expect("resolve dir");
+        let bodies: Vec<_> = payload.files.iter().map(|f| f.content.as_str()).collect();
+        assert!(bodies.contains(&"shared body"), "{bodies:?}");
+        // …including its sub-directories: the named tree is one of the two
+        // bounds, so the descent does not stop at its first level.
+        assert!(bodies.contains(&"deep body"), "{bodies:?}");
+    }
+
+    /// A cycle back to an INTERIOR directory. The workspace root is not
+    /// involved, so nothing but the visited set can stop it.
+    #[cfg(unix)]
+    #[test]
+    fn an_interior_directory_cycle_terminates_the_walk() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("a/b")).expect("mkdir a/b");
+        fs::write(root.join("a/b/leaf.txt"), "leaf").expect("write leaf");
+        std::os::unix::fs::symlink(root.join("a"), root.join("a/b/up")).expect("symlink cycle");
+
+        let payload = resolve(&AtRef::parse("@./").unwrap(), root).expect("resolve dir");
+        assert!(
+            payload.files.len() <= 2,
+            "interior cycle multiplied the walk to {} entries: {:?}",
+            payload.files.len(),
+            payload
+                .files
+                .iter()
+                .map(|f| f.path.display().to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     /// A self-referential directory symlink must not multiply the

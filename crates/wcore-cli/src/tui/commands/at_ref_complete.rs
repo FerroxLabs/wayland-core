@@ -278,8 +278,11 @@ mod tests {
         // test isolates the identity fix from the `.git-credentials`
         // addition that ships alongside it.
         let cred = outside.path().join(".netrc");
-        fs::write(&cred, "machine example.invalid login fake-user password fake-token\n")
-            .expect("write fake credential");
+        fs::write(
+            &cred,
+            "machine example.invalid login fake-user password fake-token\n",
+        )
+        .expect("write fake credential");
         std::os::unix::fs::symlink(&cred, root.join("notes.txt")).expect("symlink");
 
         let offered: Vec<String> = complete("@notes", root)
@@ -300,8 +303,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
         fs::write(root.join("real.rs"), "fn main() {}").expect("write real");
-        std::os::unix::fs::symlink(root.join("real.rs"), root.join("linked.rs"))
-            .expect("symlink");
+        std::os::unix::fs::symlink(root.join("real.rs"), root.join("linked.rs")).expect("symlink");
 
         let offered: Vec<String> = complete("@linked", root)
             .into_iter()
