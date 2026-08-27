@@ -385,3 +385,33 @@ async fn an_opaque_contract_naming_a_registered_reconciler_settles_nothing() {
     .await;
     assert_still_needs_an_operator(&mut state).await;
 }
+
+/// The shape EVERY journal written before this branch holds for `Read`,
+/// `Grep` and `Glob`: the repeat-safe kind with no reconciler named at all.
+///
+/// This is not the same case as the invented name above. That one is a tool
+/// reaching for authority it was never given; this one is an honest receipt
+/// written by a build that predates the registry, and it is what an upgrade
+/// finds in a session that crashed mid-`Read`. The answer must still be
+/// "ask": `reconciler: None` is documented on the field as "no automatic
+/// reconciler is available", and it is also the shape a plugin gets for free
+/// by declaring the bare kind — so honouring it would hand back exactly the
+/// authority the named registry exists to withhold.
+///
+/// What that costs is worth stating rather than discovering: such a session
+/// becomes an operator question after the upgrade instead of settling
+/// silently. That is the fail-safe direction, and the only one available
+/// without reopening the hole.
+#[tokio::test]
+async fn a_repeat_safe_contract_naming_no_reconciler_at_all_settles_nothing() {
+    let mut state = interrupt(
+        "Grep",
+        json!({ "pattern": "needle", "path": "src" }),
+        ToolEffectContract {
+            kind: ToolEffectKind::RepeatSafe,
+            reconciler: None,
+        },
+    )
+    .await;
+    assert_still_needs_an_operator(&mut state).await;
+}

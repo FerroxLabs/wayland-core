@@ -517,3 +517,72 @@ fn a_repeat_safe_kind_with_a_reconciler_this_build_does_not_know_is_still_asked_
             .contains("interrupted=1")
     );
 }
+
+/// The same gate at the CLI surface, for the contract every pre-#889 journal
+/// actually contains: the repeat-safe kind with NO reconciler named.
+///
+/// `session cancel` used to settle this shape without asking, because the kind
+/// alone was the whole test. It must not any more — `reconciler: None` is
+/// documented as "no automatic reconciler is available", and it is the shape
+/// any tool obtains for free by declaring the bare kind. The test above pins
+/// an INVENTED name; this one pins the absent name, and the two are different
+/// code paths into the same refusal.
+#[test]
+fn a_repeat_safe_kind_naming_no_reconciler_at_all_is_still_asked_about() {
+    assert!(
+        wcore_types::tool::repeat_safe_reconciler_is_registered(
+            wcore_types::tool::READ_ONLY_FILESYSTEM_RECONCILER
+        ),
+        "positive control: the name the settled arm uses IS registered"
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    let (sessions, id, tool_execution_id) = crashed_mid_tool_session_with(
+        home.path(),
+        "Grep",
+        wcore_types::tool::ToolEffectContract {
+            kind: wcore_types::tool::ToolEffectKind::RepeatSafe,
+            reconciler: None,
+        },
+    );
+    let dir = sessions.to_str().unwrap();
+
+    let cancelled = run(&["session", "--dir", dir, "cancel", &id], home.path());
+    assert_eq!(
+        code(&cancelled),
+        5,
+        "an unnamed reconciler must leave the item outstanding; stdout: {} stderr: {}",
+        stdout(&cancelled),
+        String::from_utf8_lossy(&cancelled.stderr)
+    );
+    assert!(
+        !stdout(&cancelled).contains("cancel_auto_resolved"),
+        "nothing may be resolved on the operator s behalf here; got:\n{}",
+        stdout(&cancelled)
+    );
+
+    let guessed = run(
+        &[
+            "session",
+            "--dir",
+            dir,
+            "reconcile",
+            &id,
+            "--resolve",
+            &tool_execution_id,
+        ],
+        home.path(),
+    );
+    assert_eq!(
+        code(&guessed),
+        4,
+        "an unnamed reconciler is not an answer; stdout: {} stderr: {}",
+        stdout(&guessed),
+        String::from_utf8_lossy(&guessed.stderr)
+    );
+
+    assert!(
+        stdout(&run(&["session", "--dir", dir, "show", &id], home.path()))
+            .contains("interrupted=1")
+    );
+}
