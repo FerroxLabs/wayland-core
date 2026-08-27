@@ -2216,6 +2216,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             ProtocolEvent::McpReady {
                 name: "desktop-tools".into(),
                 tools: vec!["search".into(), "fetch".into()],
+                already_connected: true,
             },
         ),
         (

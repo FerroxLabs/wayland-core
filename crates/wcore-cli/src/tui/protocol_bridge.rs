@@ -854,7 +854,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 ..prev.clone()
             });
         }
-        ProtocolEvent::McpReady { name, tools } => {
+        ProtocolEvent::McpReady { name, tools, .. } => {
             // v0.9.1 W1-B: MCP readiness is a status concern, not a
             // transcript event. Record it on `app.mcp_status` so
             // `/doctor` and the right-rail Activity panel can surface it
@@ -4024,6 +4024,7 @@ mod tests {
             ProtocolEvent::McpReady {
                 name: "github".into(),
                 tools: vec!["search".into(), "fetch".into()],
+                already_connected: false,
             },
         );
         assert_eq!(
@@ -4089,6 +4090,7 @@ mod tests {
             ProtocolEvent::McpReady {
                 name: "github".into(),
                 tools: vec!["search".into(), "fetch".into()],
+                already_connected: false,
             },
         );
         assert_eq!(

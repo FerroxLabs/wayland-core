@@ -668,10 +668,30 @@ Emitted after a dynamically injected MCP server has connected and its tools are 
 }
 ```
 
+An `add_mcp_server` naming a server that is **already connected** is skipped --
+no second connection, no second stdio child -- and the skip is acknowledged with
+an `mcp_ready` carrying the existing server's tools. That receipt would otherwise
+be byte-identical to the one above, so it is annotated:
+
+```json
+{
+  "type": "mcp_ready",
+  "name": "my-tools",
+  "tools": ["tool_a", "tool_b"],
+  "already_connected": true
+}
+```
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Server name (as provided in `add_mcp_server`) |
 | `tools` | string[] | List of tool names registered from this server |
+| `already_connected` | boolean | Optional; omitted when false. `true` means this receipt acknowledges a **skipped** re-add of an already-connected server, not a new connection. Absent means a real connect -- but see the feature-detect note below |
+
+Feature-detect `mcp_ready_skip_annotation_v1` in the contract capabilities before
+reading anything into the field's absence: a Core that predates the annotation
+omits it on *every* `mcp_ready`, skips included, so on such a producer "absent"
+carries no information at all.
 
 ### 1.14 `pong`
 

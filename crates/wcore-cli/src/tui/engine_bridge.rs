@@ -3120,6 +3120,7 @@ impl TuiEngine {
         let _ = tx.send(ProtocolEvent::McpReady {
             name: name.clone(),
             tools: tool_names,
+            already_connected: false,
         });
         let _ = tx.send(ProtocolEvent::Info {
             msg_id: String::new(),

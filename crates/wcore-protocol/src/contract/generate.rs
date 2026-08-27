@@ -1750,6 +1750,32 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
             "runtime_mcp_lifecycle_v1".into(),
             ContractCapabilityStatus::Available,
         ),
+        // wayland#605 -- the feature-detect for `mcp_ready.already_connected`:
+        // an `add_mcp_server` that names an already-connected server is skipped
+        // and acknowledged with `already_connected: true`, so a host can tell a
+        // no-op re-add from a real reconnect.
+        //
+        // Separate from `runtime_mcp_lifecycle_v1` rather than folded into it,
+        // for the reason `session_persistence_v2` is separate from v1: a host
+        // that feature-detected on the lifecycle capability minted its handling
+        // when every `mcp_ready` was a connect, and widening that capability's
+        // meaning in place gives such a host no way to ask which producer it is
+        // talking to.
+        //
+        // The flag is omitted when false, so its ABSENCE is exactly what a host
+        // cannot read without this: on a Core that predates the annotation it is
+        // absent on skips too. Declared => absent means a real connect.
+        // Undeclared => absent means nothing in particular, and a host must keep
+        // treating a duplicate `mcp_ready` as ambiguous.
+        //
+        // Available, not ShapeOnly: the producer sets it on the skip path in the
+        // same change that publishes the field -- `crates/wcore-cli/src/main.rs`
+        // on the `McpLifecycleState::Ready` arm -- and every real-connect site
+        // sets it false.
+        (
+            "mcp_ready_skip_annotation_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
         (
             "workflow_lifecycle_v1".into(),
             ContractCapabilityStatus::Available,
@@ -2915,5 +2941,92 @@ mod tests {
             fixtures_digest(&artifacts).unwrap(),
             expected.fixture_digest
         );
+    }
+
+    /// wayland#605. `mcp_ready.already_connected` is omitted when false, so a
+    /// host cannot feature-detect it by watching the wire: on a producer that
+    /// predates it the field is absent on every frame, and on this one it is
+    /// absent on every real connect. The named capability is the only thing
+    /// that separates those two worlds, so publishing the field without
+    /// declaring it ships an annotation no pinned host may trust.
+    ///
+    /// The coupling is asserted in that direction on purpose: the fixture
+    /// premise is checked first, so if the field ever leaves the wire this
+    /// test says so instead of demanding a capability for a promise the
+    /// producer no longer keeps.
+    #[test]
+    fn the_mcp_ready_skip_annotation_is_named_in_the_manifest() {
+        let artifacts = generated_artifacts().unwrap();
+        let fixture: Value =
+            serde_json::from_slice(artifacts.get("events/mcp_ready.json").unwrap()).unwrap();
+        assert!(
+            fixture.get("already_connected").is_some(),
+            "the mcp_ready fixture no longer publishes `already_connected`; the capability \
+             assertion below would be declaring a promise this producer does not keep: {fixture}"
+        );
+
+        let manifest: Value =
+            serde_json::from_slice(artifacts.get("manifest.json").unwrap()).unwrap();
+        assert_eq!(
+            manifest["capabilities"]["mcp_ready_skip_annotation_v1"],
+            Value::String("available".into()),
+            "`mcp_ready` publishes `already_connected` but the manifest does not name a \
+             capability for it, so a pinned host has no way to learn that an ABSENT flag now \
+             means a real connect rather than an older Core"
+        );
+    }
+
+    /// The comment block directly above [`CONTRACT_MINOR`] is this contract's
+    /// decision log, and `contract_capabilities`' own doctrine is that the
+    /// version moves once and every capability names itself. Nothing enforced
+    /// that: wayland#605's first pass moved the constant 19 -> 20 with no entry
+    /// and no capability, and the corpus check plus 378 protocol tests all
+    /// passed. This is that enforcement.
+    #[test]
+    fn the_decision_log_explains_the_contract_minor_it_sits_above() {
+        let log = decision_log_above_contract_minor(include_str!("generate.rs"));
+        assert!(
+            log.contains(&format!("-> {CONTRACT_MINOR}")),
+            "CONTRACT_MINOR is {CONTRACT_MINOR} but the decision log above it never explains a \
+             move to {CONTRACT_MINOR}: a pinned host is asked to re-pin with no recorded reason. \
+             Log tail:\n{}",
+            log.lines().rev().take(12).collect::<Vec<_>>().join("\n")
+        );
+        // Negative control in the same run: the log must not already claim a
+        // version this producer has not shipped, which also proves the
+        // assertion above can fail rather than matching anything.
+        let unshipped = CONTRACT_MINOR + 1;
+        assert!(
+            !log.contains(&format!("-> {unshipped}")),
+            "the decision log records a move to {unshipped} while CONTRACT_MINOR is still \
+             {CONTRACT_MINOR}"
+        );
+    }
+
+    /// The trailing run of `//` lines immediately above the `CONTRACT_MINOR`
+    /// declaration. Panics rather than returning empty if the declaration is
+    /// not found exactly once, so a rename reddens instead of passing on an
+    /// empty string.
+    fn decision_log_above_contract_minor(src: &str) -> String {
+        // Assembled at runtime so this test's own source text cannot be
+        // mistaken for the declaration it is looking for.
+        let marker = format!("pub const {}: u64 =", "CONTRACT_MINOR");
+        assert_eq!(
+            src.matches(marker.as_str()).count(),
+            1,
+            "expected exactly one `{marker}` in generate.rs"
+        );
+        let head = &src[..src.find(marker.as_str()).unwrap()];
+        let mut lines: Vec<&str> = head
+            .lines()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("//"))
+            .collect();
+        lines.reverse();
+        assert!(
+            !lines.is_empty(),
+            "there is no comment block above CONTRACT_MINOR at all"
+        );
+        lines.join("\n")
     }
 }

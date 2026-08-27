@@ -5232,11 +5232,16 @@ impl AgentEngine {
     /// duplicate child process). Deferred tools are registered eagerly as
     /// name-only stubs, so a just-added deferred server is detected too.
     ///
-    /// LIMITATION: keys on tool provenance only. A server that exposes ONLY
-    /// resources or prompts (zero tools) leaves no tool defs, so it is not
-    /// detected and a re-add still reconnects. That is the SAME behavior as
-    /// before this fix (no regression) — closing it needs a live
-    /// connected-server registry keyed by name, tracked as a follow-up.
+    /// NOT THE IDEMPOTENCY GATE (wayland#605). It once was, and the
+    /// tool-provenance limitation this comment used to describe — a
+    /// resource-only server leaves no tool defs, so a re-add reconnects — was
+    /// real while it was. It is no longer reachable: `/mcp add` now gates on
+    /// `McpLifecycleCatalog::reserve`, keyed by NAME with no `.await` before
+    /// it, on both surfaces (`crates/wcore-cli/src/tui/engine_bridge.rs` and
+    /// `crates/wcore-cli/src/main.rs`). This probe is consulted only AFTER that
+    /// reservation, as a backstop for a live registration that predates the
+    /// catalog and therefore has no catalog generation of its own. Reading it
+    /// as the gate is what misgraded wayland#605 twice.
     pub fn mcp_server_connected(&self, name: &str) -> bool {
         Self::mcp_server_has_tools(&self.tools().to_tool_defs(), name)
     }
