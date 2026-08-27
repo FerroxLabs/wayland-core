@@ -2457,3 +2457,179 @@ mod cost_rate_provenance_tests {
         );
     }
 }
+
+// --- #559 Layer E1: prompt_cache_expected must not inherit ---
+
+#[cfg(test)]
+mod prompt_cache_expected_pinning_tests {
+    use super::*;
+    use crate::config::{ProviderType, compat_defaults_for};
+
+    /// Every `ProviderType`, so the table below is read off the REAL preset
+    /// constructors (via `compat_defaults_for`) rather than a hand-built
+    /// `ProviderCompat`. A hand-built struct literal cannot observe
+    /// struct-update inheritance — which is exactly how `prompt_cache_expected`
+    /// leaked from `openai_defaults()` into every openai-compat preset and from
+    /// `anthropic_defaults()` into Vertex and MiniMax.
+    const ALL_PROVIDER_TYPES: [ProviderType; 23] = [
+        ProviderType::Anthropic,
+        ProviderType::OpenAI,
+        ProviderType::Bedrock,
+        ProviderType::Vertex,
+        ProviderType::Gemini,
+        ProviderType::AzureOpenAI,
+        ProviderType::Together,
+        ProviderType::Fireworks,
+        ProviderType::Nvidia,
+        ProviderType::Perplexity,
+        ProviderType::Cerebras,
+        ProviderType::OpenRouter,
+        ProviderType::FluxRouter,
+        ProviderType::Deepseek,
+        ProviderType::Xai,
+        ProviderType::Groq,
+        ProviderType::Moonshot,
+        ProviderType::Qwen,
+        ProviderType::Mistral,
+        ProviderType::Cohere,
+        ProviderType::OpenAIChatGpt,
+        ProviderType::MiniMax,
+        ProviderType::Sakana,
+    ];
+
+    /// The ONLY presets allowed to answer `true`.
+    ///
+    /// `prompt_cache_expected` is an accusation: `true` makes the engine tell
+    /// the user their provider is failing to serve prompt cache and re-billing
+    /// them. It may only be `true` where the preset carries an in-line
+    /// justification for the claim — today Anthropic and Bedrock (explicit
+    /// `cache_control` + priced cache reads), native OpenAI (automatic caching
+    /// reported as `prompt_tokens_details.cached_tokens`) and FluxRouter
+    /// (measured live, see `flux_router_defaults`).
+    ///
+    /// This `match` is exhaustive on purpose: a new `ProviderType` will not
+    /// compile until someone classifies it, and the default classification for
+    /// anything unmeasured is `false` — "unknown, never accuse".
+    fn justified_to_expect_a_prompt_cache(provider: ProviderType) -> bool {
+        match provider {
+            ProviderType::Anthropic
+            | ProviderType::Bedrock
+            | ProviderType::OpenAI
+            | ProviderType::FluxRouter => true,
+            ProviderType::Vertex
+            | ProviderType::Gemini
+            | ProviderType::AzureOpenAI
+            | ProviderType::Together
+            | ProviderType::Fireworks
+            | ProviderType::Nvidia
+            | ProviderType::Perplexity
+            | ProviderType::Cerebras
+            | ProviderType::OpenRouter
+            | ProviderType::Deepseek
+            | ProviderType::Xai
+            | ProviderType::Groq
+            | ProviderType::Moonshot
+            | ProviderType::Qwen
+            | ProviderType::Mistral
+            | ProviderType::Cohere
+            | ProviderType::OpenAIChatGpt
+            | ProviderType::MiniMax
+            | ProviderType::Sakana => false,
+        }
+    }
+
+    #[test]
+    fn only_justified_presets_expect_a_served_prompt_cache() {
+        assert_eq!(
+            ALL_PROVIDER_TYPES.len(),
+            23,
+            "ALL_PROVIDER_TYPES is stale — append the new ProviderType variant \
+             (the match in justified_to_expect_a_prompt_cache already forced you \
+             to classify it)"
+        );
+
+        let mut wrong: Vec<String> = Vec::new();
+        println!("provider                 resolved  justified");
+        for provider in ALL_PROVIDER_TYPES {
+            let resolved = compat_defaults_for(provider).prompt_cache_expected();
+            let justified = justified_to_expect_a_prompt_cache(provider);
+            let name = format!("{provider:?}");
+            println!("{name:<24} {resolved:<9} {justified}");
+            if resolved != justified {
+                wrong.push(format!(
+                    "{provider:?}: resolved={resolved} justified={justified}"
+                ));
+            }
+        }
+        // Known-negative controls, in the same run: neither is reachable via
+        // `ProviderType`, and neither may ever be accused.
+        let ollama = ProviderCompat::ollama_defaults().prompt_cache_expected();
+        let bare = ProviderCompat::default().prompt_cache_expected();
+        println!("{:<24} {:<9} {}", "ollama_defaults()", ollama, false);
+        println!("{:<24} {:<9} {}", "ProviderCompat::default()", bare, false);
+        assert!(!ollama, "control: ollama must never expect a prompt cache");
+        assert!(
+            !bare,
+            "control: a bare ProviderCompat must never expect one"
+        );
+
+        assert!(
+            wrong.is_empty(),
+            "prompt_cache_expected leaked into presets with no justification for \
+             the claim (struct-update inheritance from openai_defaults() / \
+             anthropic_defaults()). Each of these would tell the user their \
+             provider is silently re-billing an uncached prompt, with zero \
+             evidence for that route:\n  {}",
+            wrong.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn openai_compat_provider_does_not_inherit_the_openai_cache_claim() {
+        // The direct unit of the leak: the shared Tier-2 constructor. Native
+        // OpenAI keeps the claim; a Tier-2 provider that merely speaks the
+        // OpenAI wire does not inherit it.
+        assert_eq!(
+            ProviderCompat::openai_defaults().prompt_cache_expected,
+            Some(true)
+        );
+        assert_eq!(
+            ProviderCompat::openai_compat_provider("groq").prompt_cache_expected,
+            None,
+            "openai_compat_provider() must clear the claim, not inherit it"
+        );
+        assert!(!ProviderCompat::openai_compat_provider("groq").prompt_cache_expected());
+    }
+
+    #[test]
+    fn anthropic_shaped_presets_do_not_inherit_the_anthropic_cache_claim() {
+        assert_eq!(
+            ProviderCompat::anthropic_defaults().prompt_cache_expected,
+            Some(true)
+        );
+        assert_eq!(
+            ProviderCompat::vertex_defaults().prompt_cache_expected,
+            None
+        );
+        assert_eq!(
+            ProviderCompat::minimax_defaults().prompt_cache_expected,
+            None
+        );
+        assert!(!ProviderCompat::vertex_defaults().prompt_cache_expected());
+        assert!(!ProviderCompat::minimax_defaults().prompt_cache_expected());
+    }
+
+    #[test]
+    fn a_user_can_still_opt_a_tier2_provider_in() {
+        // Clearing the preset must not remove the user's ability to declare the
+        // capability for their own endpoint.
+        let merged = ProviderCompat::merge(
+            ProviderCompat::groq_defaults(),
+            ProviderCompat {
+                prompt_cache_expected: Some(true),
+                ..ProviderCompat::default()
+            },
+        );
+        assert!(merged.prompt_cache_expected());
+    }
+}
