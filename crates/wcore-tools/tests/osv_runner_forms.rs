@@ -232,6 +232,49 @@ async fn form_pipx_non_fetching_subcommand_is_not_applicable() {
     );
 }
 
+/// core#340 — a NOT-covered form, pinned so it cannot be re-described as
+/// coverage.
+///
+/// `pipx inject <venv> <pkg>` fetches `<pkg>` from PyPI and runs its install
+/// hooks, and the gate does not check it. The gap is deliberate: `inject`'s
+/// first positional is a venv NAME, so the parser that reads `run`/`install`
+/// would query the venv and report a confident CLEAN on a package nobody
+/// looked at — a wrong answer, which this module holds to be worse than no
+/// answer.
+///
+/// The assertion that matters is the SECOND one: nothing was queried. A test
+/// that only checked the outcome would still pass if some future edit started
+/// querying the venv name.
+#[tokio::test]
+async fn form_pipx_inject_is_a_documented_gap() {
+    let (outcome, calls) = queries("pipx", &["inject", "my-venv", "evil-pkg"]).await;
+    assert_eq!(
+        outcome,
+        MalwareCheckOutcome::NotApplicable,
+        "`pipx inject` is a documented coverage GAP, not a check"
+    );
+    assert!(
+        calls.is_empty(),
+        "nothing may be queried for an argv whose package operand this parser \
+         cannot place — querying the venv name would report CLEAN on a package \
+         nobody looked at, got {calls:?}"
+    );
+}
+
+/// KNOWN-POSITIVE CONTROL for the gap above: the SAME package name, in the
+/// SAME `pipx` command, under a subcommand the parser CAN place, IS queried.
+/// Without this, the arm above passes just as well on a `pipx` arm that was
+/// broken outright.
+#[tokio::test]
+async fn form_pipx_install_control_queries_the_same_package() {
+    let (_, calls) = queries("pipx", &["install", "evil-pkg"]).await;
+    assert_queried(
+        &calls,
+        &[("evil-pkg", Ecosystem::PyPI)],
+        "pipx install evil-pkg",
+    );
+}
+
 /// `pipx run` with no package is a runner whose argv names nothing readable.
 #[tokio::test]
 async fn form_pipx_run_with_no_package_is_unidentified() {

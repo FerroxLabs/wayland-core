@@ -340,13 +340,13 @@ not restrict who can then use it within that session.
 
 ## Startup Flow
 
-1. Run the OSV malware check on every stdio server whose command is a package
-   runner (see below)
-2. Connect to all configured MCP servers
-3. Perform MCP protocol handshake (`initialize`) for each server
-4. Discover available tools (`tools/list`)
-5. Register tools in the tool registry — the agent uses them like built-in tools
-6. Gracefully close all connections on exit
+1. Connect to all configured MCP servers. For a stdio server whose command is
+   a package runner, the OSV malware check (see below) runs immediately before
+   that server's process is created — per server, not as a separate pass
+2. Perform MCP protocol handshake (`initialize`) for each server
+3. Discover available tools (`tools/list`)
+4. Register tools in the tool registry — the agent uses them like built-in tools
+5. Gracefully close all connections on exit
 
 ## Malware check on package-runner launches
 
@@ -397,6 +397,12 @@ boundary. It does not see:
   want it checked.
 - **Package runners it does not recognise:** `bunx`, `pnpm dlx`, `yarn dlx`,
   `npm exec`, `uv tool run`, `deno run npm:…`.
+- **`pipx` subcommands other than `run` and `install`.** `pipx inject`,
+  `pipx upgrade`, `pipx reinstall` and `pipx runpip` all fetch from PyPI and
+  run the package's install hooks, and they launch unchecked — their package
+  operand sits behind a positional the parser cannot place (`inject`'s first
+  positional is a venv name), and guessing it would report a confident CLEAN on
+  a package nobody looked at. Use `pipx run` or `pipx install` to get a check.
 - **Anything the server does after it starts.** A cleared package may fetch and
   run whatever it likes.
 - **Transitive dependencies**, and malware OSV has not yet published an

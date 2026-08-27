@@ -15,9 +15,9 @@
 //! against a malware feed, **not an execution boundary**. Specifically:
 //!
 //! * **Recognised runners:** `npx`, `uvx`, `pipx` (each also matched through a
-//!   path and a Windows `.cmd`/`.exe` launcher extension). For `pipx` only the
-//!   fetching subcommands (`run`, `install`) are checked; `pipx list` and
-//!   friends fetch nothing, so there is nothing to check.
+//!   path and a Windows `.cmd`/`.exe` launcher extension). For `pipx`, only
+//!   `pipx run` and `pipx install` are checked — see the NOT-covered list for
+//!   the other subcommands.
 //! * **Every package the argv fetches**, not just the one it runs: the
 //!   positional, whatever `--package` / `--from` / `--spec` names, and every
 //!   `--with` / `--with-editable` extra. A `--with` extra is installed and
@@ -35,6 +35,16 @@
 //!     for a runner token was considered and rejected — it is stepped over in
 //!     one character (`n''px`), so it would buy no security while creating
 //!     exactly the overstated guarantee this section exists to prevent.
+//!   * **`pipx` subcommands other than `run` / `install`.** `pipx inject
+//!     <venv> <pkg>`, `pipx upgrade <pkg>`, `pipx reinstall <pkg>` and
+//!     `pipx runpip <venv> install <pkg>` all FETCH from PyPI and run the
+//!     package's install hooks. They are `NotApplicable` here — deliberately,
+//!     because their package operand sits behind a positional this parser
+//!     cannot place (`inject`'s first positional is a venv NAME, not a
+//!     package), and answering with the venv name would be a WRONG answer,
+//!     which this module treats as worse than no answer. Pinned by
+//!     `tests/osv_runner_forms.rs::form_pipx_inject_is_a_documented_gap` so
+//!     the gap cannot quietly be re-described as coverage.
 //!   * Anything the launched program does AFTER it starts. A cleared package
 //!     may fetch and execute whatever it likes.
 //!   * Transitive dependencies. Only the named packages are queried.
@@ -240,13 +250,24 @@ fn runner_base(command: &str) -> String {
 /// Leading subcommands that mean "this invocation fetches from a registry".
 ///
 /// An empty table means the runner fetches unconditionally (`npx pkg`,
-/// `uvx pkg`). `pipx` is a package MANAGER, not a bare runner: `pipx run pkg`
-/// and `pipx install pkg` fetch, `pipx list` does not — and a
-/// subcommand-unaware scan reads the literal token `run` as the package name.
-/// `run` is a real PyPI project, so OSV answers CLEAN and the package actually
-/// being fetched is never queried. That is a WRONG answer, which is worse than
-/// no answer: it is the same failure the `value_taking_flags` table exists to
-/// prevent, one level up.
+/// `uvx pkg`). `pipx` is a package MANAGER, not a bare runner, so the
+/// subcommand decides: a subcommand-unaware scan reads the literal token `run`
+/// as the package name, and `run` is a real PyPI project, so OSV answers CLEAN
+/// and the package actually being fetched is never queried. That is a WRONG
+/// answer, which is worse than no answer — the same failure the
+/// `value_taking_flags` table exists to prevent, one level up.
+///
+/// Listed here are exactly the subcommands whose package operand this parser
+/// can place: `run` and `install` both take it as the first positional.
+///
+/// Everything else — `list` and `environment`, which fetch nothing, but ALSO
+/// `inject`, `upgrade`, `reinstall` and `runpip`, which DO — falls through to
+/// `NotApplicable`. That is a real gap, and it is deliberate rather than
+/// overlooked: `pipx inject <venv> <pkg>` puts a venv NAME in the position
+/// this parser reads, so adding it to the table would query the venv name and
+/// report a confident CLEAN on a package nobody looked at. The module docs
+/// carry the gap in the NOT-covered list; widening the table is not the fix,
+/// per-subcommand operand positions would be.
 fn fetching_subcommands(runner: &str) -> &'static [&'static str] {
     match runner {
         "pipx" => &["run", "install"],
