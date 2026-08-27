@@ -9457,6 +9457,133 @@ impl AgentEngine {
                         )),
                         is_error: true,
                     },
+                    // The one effect class the engine can recover by itself.
+                    //
+                    // Everything below this arm is the fail-closed default: an
+                    // effect that durably STARTED and was never observed is a
+                    // question only a human can answer, and the session stops
+                    // until one does. That is right for a shell command or a
+                    // Slack message — nothing at the far end can tell a replay
+                    // from a new request.
+                    //
+                    // It is NOT right for a destination that enforces the
+                    // caller's idempotency key. There a re-dispatch of THIS
+                    // execution under the key already recorded for it converges
+                    // on exactly one external effect whether or not the first
+                    // attempt landed, so the honest recovery is to re-issue it,
+                    // not to ask. That is the issue's \"recover exactly once
+                    // where the effect is idempotent\" line, and it is the only
+                    // thing that makes `ToolEffectKind::ProviderIdempotent`
+                    // behave differently from `Opaque` anywhere in the product.
+                    //
+                    // Both the durable declaration AND the live tool must still
+                    // agree. The contract in the journal is a PAST fact about a
+                    // channel that may since have been reconfigured, and acting
+                    // on a stale one would replay a keyless send into a second
+                    // delivery — exactly the duplicate this arm exists to
+                    // prevent. Disagreement falls through to the operator.
+                    (ToolEffectState::Running | ToolEffectState::Unknown { .. }, None)
+                        if crate::recovery::engine_redispatchable_under_durable_key(tool)
+                            && self.live_contract_still_redispatchable(tool, tool_call) =>
+                    {
+                        let reconciler =
+                            tool.effect_contract.reconciler.clone().unwrap_or_default();
+                        if matches!(
+                            approval_resolution,
+                            Some(
+                                ApprovalResolution::Decided {
+                                    decision: ApprovalDecision::Deny,
+                                } | ApprovalResolution::Cancelled
+                                    | ApprovalResolution::TimedOut
+                            )
+                        ) {
+                            return Err(AgentError::SessionAuthority(format!(
+                                "recovered tool call {id} was retryable after a durable non-approval"
+                            )));
+                        }
+                        // A still-RUNNING execution has no receipt at all yet.
+                        // `Unknown` is the admission of ignorance the crash
+                        // left implicit, and the only state a resolution may be
+                        // written over.
+                        if matches!(tool.effect, ToolEffectState::Running) {
+                            journal
+                                .append(SessionEvent::ToolExecutionUnknown {
+                                    tool_execution_id: tool_execution_id.to_owned(),
+                                    reason: ToolUnknownReason::Interrupted,
+                                    evidence: serde_json::json!({
+                                        "recovery": "resume_recovered_tool_round",
+                                        "prior_state": "running",
+                                    }),
+                                })
+                                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                        }
+                        journal
+                            .append(SessionEvent::ToolExecutionResolved {
+                                tool_execution_id: tool_execution_id.to_owned(),
+                                resolution: ToolResolution::NotStarted {
+                                    reason: ToolNotStartedReason::RedispatchableUnderDurableKey {
+                                        reconciler: reconciler.clone(),
+                                    },
+                                },
+                                source: ToolResolutionSource::Reconciler {
+                                    reconciler: reconciler.clone(),
+                                },
+                                evidence: serde_json::json!({
+                                    "recovery": "resume_recovered_tool_round",
+                                    "redispatched_under_durable_key": true,
+                                }),
+                            })
+                            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                        terminalize_recoverable_prepared_post_hook(&journal, tool_execution_id)?;
+                        let recovered_approval_call_id = matches!(
+                            approval_resolution,
+                            Some(ApprovalResolution::Decided {
+                                decision: ApprovalDecision::AllowOnce
+                                    | ApprovalDecision::AllowSession,
+                            })
+                        )
+                        .then_some(id.as_str());
+                        let pre_hook_consumption = recovered_pre_hook_consumption(&state, tool)?;
+                        // `retry_not_started_tool` reuses the prior execution's
+                        // exact idempotency key. That reuse IS the recovery:
+                        // a fresh key would be a second, unrecognisable request.
+                        let outcome =
+                            crate::orchestration::execute_recovered_retry_tool_call_with_effects(
+                                &self.tools,
+                                tool_call,
+                                &approval_manager,
+                                &writer,
+                                msg_id,
+                                &self.allow_list,
+                                self.hooks.as_mut(),
+                                self.compaction_level,
+                                self.toon_enabled,
+                                Some(&tool_budget),
+                                &self.cancel_token,
+                                file_write_notifier.as_ref(),
+                                &effect_scope,
+                                ordinal,
+                                recovered_approval_call_id,
+                                id,
+                                tool_execution_id,
+                                &tool.tool,
+                                tool.ordinal,
+                                &tool.effect_contract,
+                                tool.effect_receipt.as_ref(),
+                                &tool.requested_input_digest,
+                                &tool.effective_input_digest,
+                                tool.pre_hook_phase_id.as_deref(),
+                                pre_hook_consumption,
+                            )
+                            .await
+                            .map_err(|ExecutionControl::Quit| AgentError::UserAborted)?;
+                        self.apply_context_modifiers(&outcome.modifiers);
+                        for hook_outcome in outcome.hook_outcomes {
+                            self.apply_turn_end_outcome(hook_outcome);
+                        }
+                        results.extend(outcome.results);
+                        continue;
+                    }
                     (ToolEffectState::Running | ToolEffectState::Unknown { .. }, _) => {
                         return Err(AgentError::SessionAuthority(format!(
                             "recovered tool effect {tool_execution_id} requires reconciliation"
@@ -10521,6 +10648,37 @@ impl AgentEngine {
             )?;
         }
         Ok(())
+    }
+
+    /// Does the LIVE tool still declare the recorded re-dispatch contract?
+    ///
+    /// The journal's `effect_contract` was computed at dispatch, possibly in a
+    /// previous process, against a channel table that may since have been
+    /// reloaded. It is evidence about the past. Re-dispatching a send on the
+    /// strength of it alone would put a keyless message on the wire for a
+    /// second time the moment an operator swapped a Matrix channel for one that
+    /// does not deduplicate — the precise duplicate the contract exists to
+    /// prevent.
+    ///
+    /// So the declaration is asked twice, of two different authorities, and
+    /// only agreement licenses the replay. `false` — including a tool that is
+    /// no longer registered, or a call whose input cannot be read back — routes
+    /// the effect to the operator, which is where every opaque effect goes and
+    /// is never worse than the status quo.
+    fn live_contract_still_redispatchable(
+        &self,
+        tool: &crate::session_journal::ToolState,
+        tool_call: &ContentBlock,
+    ) -> bool {
+        let ContentBlock::ToolUse { input, .. } = tool_call else {
+            return false;
+        };
+        let Some(live) = self.tools.get(&tool.tool) else {
+            return false;
+        };
+        let contract = live.effect_contract(input);
+        contract.kind == wcore_types::tool::ToolEffectKind::ProviderIdempotent
+            && contract.reconciler == tool.effect_contract.reconciler
     }
 
     /// Return durable tool executions that must be reconciled before the
@@ -31987,6 +32145,406 @@ mod audit_2026_05_22_tests {
                 ..
             }]) if tool_use_id == call_id
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // F13 / #889 — `ProviderIdempotent` must not be a synonym for `Opaque`.
+    //
+    // The variant existed in the type, in one unit test, and in a match arm
+    // that OR'd it with `Opaque`. Nothing a user could do constructed one, and
+    // nothing downstream behaved differently when one existed, so the issue's
+    // Proof line "recover exactly once where the effect is idempotent" was
+    // untestable in production. These three arms are the whole claim: the
+    // contract is CONSTRUCTED by a real tool from a real destination fact, it
+    // CHANGES what recovery does, and it is refused the moment either of the
+    // two authorities that must agree stops agreeing.
+    // -----------------------------------------------------------------
+
+    /// Every delivery the fixture transport saw, as `(body, idempotency_key)`.
+    type ObservedSends = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+    /// A Matrix-shaped transport: it records every delivery and the key that
+    /// rode with it, and it answers the recovery oracle however the arm asks.
+    struct OutboundKeyTransport {
+        honours: bool,
+        sends: ObservedSends,
+    }
+
+    #[async_trait]
+    impl wcore_tools::send_message::MessageTransport for OutboundKeyTransport {
+        async fn send(
+            &self,
+            _target: &wcore_tools::send_message::ParsedTarget,
+            message: &str,
+        ) -> wcore_tools::send_message::SendOutcome {
+            self.sends.lock().unwrap().push((message.to_string(), None));
+            wcore_tools::send_message::SendOutcome::Ok {
+                message_id: Some("unkeyed".into()),
+            }
+        }
+
+        async fn send_keyed(
+            &self,
+            _target: &wcore_tools::send_message::ParsedTarget,
+            message: &str,
+            idempotency_key: Option<&str>,
+        ) -> wcore_tools::send_message::SendOutcome {
+            self.sends
+                .lock()
+                .unwrap()
+                .push((message.to_string(), idempotency_key.map(str::to_owned)));
+            wcore_tools::send_message::SendOutcome::Ok {
+                message_id: Some("keyed".into()),
+            }
+        }
+
+        fn honours_idempotency_key(
+            &self,
+            _target: &wcore_tools::send_message::ParsedTarget,
+            _message: &str,
+        ) -> bool {
+            self.honours
+        }
+    }
+
+    fn outbound_key_registry(honours: bool, sends: &ObservedSends) -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(wcore_tools::send_message::SendMessageTool::new(
+            Arc::new(OutboundKeyTransport {
+                honours,
+                sends: Arc::clone(sends),
+            }),
+        )));
+        registry
+    }
+
+    fn outbound_send_input() -> serde_json::Value {
+        json!({ "target": "matrix:!room:server.org", "message": "the one delivery" })
+    }
+
+    /// Everything the three arms share: a session whose only tool call is a
+    /// `send_message` that durably STARTED and was then interrupted with its
+    /// outcome unobserved — the exact state a `kill -9` between the start
+    /// boundary and the terminal append leaves behind.
+    ///
+    /// `contract` is what gets written into the journal, so an arm can seed a
+    /// declaration the live tool no longer makes.
+    struct InterruptedSend {
+        _dir: tempfile::TempDir,
+        manager: crate::session::SessionManager,
+        config: wcore_config::config::Config,
+        turn_id: &'static str,
+        run_id: String,
+        tool_execution_id: String,
+        idempotency_key: String,
+        cursor: wcore_protocol::events::RecoveryCursor,
+        recovery_key: [u8; 32],
+    }
+
+    async fn interrupt_a_started_send(
+        run_id: &str,
+        contract: wcore_types::tool::ToolEffectContract,
+    ) -> InterruptedSend {
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x59; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some(run_id))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        config.tools.allow_list = vec!["send_message".into()];
+        config.tools.verify_edits = false;
+        let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config.clone(),
+            outbound_key_registry(true, &sends),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.set_approval_manager(Arc::new(wcore_protocol::ToolApprovalManager::new()));
+        engine.set_protocol_writer(Arc::new(NullEmitter));
+        engine.use_recovery_test_key(&recovery_key);
+        let turn_id = "turn-outbound-key";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "tell the room".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+        engine.messages.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "tell the room".into(),
+            }],
+        ));
+        engine.messages.push(Message::now(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "call-send".into(),
+                name: "send_message".into(),
+                input: outbound_send_input(),
+                extra: None,
+            }],
+        ));
+        engine
+            .commit_tool_round_recovery_checkpoint(
+                turn_id,
+                0,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let scope = crate::journal_effects::JournalEffectCoordinator::new(
+            engine.session_journal.as_ref().unwrap().clone(),
+        )
+        .for_turn(turn_id);
+        let lease = scope
+            .prepare_tool_with_contract(
+                "call-send",
+                0,
+                "send_message",
+                outbound_send_input(),
+                outbound_send_input(),
+                contract,
+            )
+            .unwrap();
+        let running = lease.start().unwrap();
+        let tool_execution_id = running.id().to_string();
+        let idempotency_key = running.idempotency_key().to_string();
+        // The crash: the started lease is dropped with no terminal append.
+        drop(running);
+        let cursor = engine.recovery_plan().unwrap().cursor();
+        drop(scope);
+        drop(engine);
+        assert!(
+            sends.lock().unwrap().is_empty(),
+            "the fixture must not itself deliver anything"
+        );
+
+        InterruptedSend {
+            _dir: dir,
+            manager,
+            config,
+            turn_id,
+            run_id: run_id.to_string(),
+            tool_execution_id,
+            idempotency_key,
+            cursor,
+            recovery_key,
+        }
+    }
+
+    fn resume_engine_for(
+        state: &InterruptedSend,
+        honours: bool,
+        sends: &ObservedSends,
+        physical_url: Option<String>,
+    ) -> super::AgentEngine {
+        let reopened = state.manager.load_for_run(&state.run_id).unwrap();
+        let mut provider = ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("the room was told once".into()),
+            done_endturn(),
+        ]]);
+        if let Some(url) = physical_url {
+            provider = provider.with_physical_url(url);
+        }
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            Arc::new(provider),
+            state.config.clone(),
+            outbound_key_registry(honours, sends),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        resumed.set_approval_manager(Arc::new(wcore_protocol::ToolApprovalManager::new()));
+        resumed.set_protocol_writer(Arc::new(NullEmitter));
+        resumed.use_recovery_test_key(&state.recovery_key);
+        resumed
+    }
+
+    /// The whole point of the variant.
+    ///
+    /// A destination that enforces the caller's key makes ONE recovery honest
+    /// that is dishonest everywhere else: re-issue the interrupted call under
+    /// the key it already carried. This asserts the recovery actually happens,
+    /// that it carries the ORIGINAL key (a fresh one would be a second,
+    /// unrecognisable request and would duplicate at the far end), and that no
+    /// human was asked.
+    #[tokio::test]
+    async fn an_interrupted_keyed_send_is_redispatched_under_its_original_key() {
+        let tool_contract =
+            wcore_tools::send_message::SendMessageTool::new(Arc::new(OutboundKeyTransport {
+                honours: true,
+                sends: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }))
+            .effect_contract(&outbound_send_input());
+        assert_eq!(
+            tool_contract.kind,
+            wcore_types::tool::ToolEffectKind::ProviderIdempotent,
+            "the fixture must seed the contract the PRODUCTION tool computes, not a hand-written one; if this is Opaque the variant has no construction site"
+        );
+
+        let state = interrupt_a_started_send("f88900d10001", tool_contract).await;
+        let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        // The recovered turn dispatches to the provider once the tool round
+        // completes, and that dispatch demands a durable physical-attempt id.
+        let server = physical_attempt_server().await;
+        let mut resumed = resume_engine_for(&state, true, &sends, Some(server.uri()));
+
+        assert!(
+            !matches!(
+                resumed.recovery_plan().unwrap().disposition,
+                crate::recovery::RecoveryDisposition::ReconciliationRequired { .. }
+            ),
+            "an effect the engine can settle under its own key must not park the session on an operator question"
+        );
+
+        resumed
+            .resume_interrupted_turn(state.turn_id, &state.cursor, "resume-keyed-send")
+            .await
+            .expect("the keyed re-dispatch must complete the turn");
+
+        let journal = resumed.session_journal.as_ref().unwrap().state().unwrap();
+        let interrupted = &journal.tools[&state.tool_execution_id];
+        assert!(
+            matches!(
+                interrupted.effect,
+                crate::session_journal::ToolEffectState::NotStarted
+            ),
+            "got {:?}",
+            interrupted.effect
+        );
+        assert_eq!(
+            interrupted.not_started_reason,
+            Some(
+                crate::session_journal::ToolNotStartedReason::RedispatchableUnderDurableKey {
+                    reconciler: wcore_tools::send_message::OUTBOUND_KEY_RECONCILER.to_string(),
+                }
+            ),
+            "the receipt must say it was terminalized FOR RE-DISPATCH, not that the send never happened"
+        );
+        assert_eq!(
+            interrupted.resolution_source,
+            Some(crate::session_journal::ToolResolutionSource::Reconciler {
+                reconciler: "wcore.channel.outbound_key.v1".to_string(),
+            }),
+            "the answer must be attributed, by its literal name, to the reconciler that vouched for it - mutate that name anywhere in the chain and this arm must go red rather than follow it"
+        );
+
+        let retry = journal
+            .tools
+            .values()
+            .find(|tool| tool.retry_of.as_deref() == Some(state.tool_execution_id.as_str()))
+            .expect("the interrupted send must have exactly one linked re-dispatch");
+        assert_eq!(
+            retry.idempotency_key, state.idempotency_key,
+            "the re-dispatch must reuse the ORIGINAL durable key; a fresh key is a second request the destination cannot recognise"
+        );
+
+        assert_eq!(
+            sends.lock().unwrap().clone(),
+            vec![(
+                "the one delivery".to_string(),
+                Some(state.idempotency_key.clone())
+            )],
+            "recovery must put exactly one keyed delivery on the wire"
+        );
+    }
+
+    /// The arm that makes the first one mean something.
+    ///
+    /// Identical interruption, identical tool, identical everything except that
+    /// the destination does not enforce the key — which is the answer for Slack,
+    /// SMS, WhatsApp, Discord and every over-cap body. Re-dispatching here would
+    /// deliver the message a second time, so the effect must stay opaque, park
+    /// on the operator, and put NOTHING on the wire.
+    #[tokio::test]
+    async fn an_interrupted_unkeyed_send_stays_opaque_and_reaches_the_operator() {
+        let tool_contract =
+            wcore_tools::send_message::SendMessageTool::new(Arc::new(OutboundKeyTransport {
+                honours: false,
+                sends: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }))
+            .effect_contract(&outbound_send_input());
+        assert_eq!(
+            tool_contract.kind,
+            wcore_types::tool::ToolEffectKind::Opaque,
+            "a destination that does not deduplicate must not be declared idempotent"
+        );
+
+        let state = interrupt_a_started_send("f88900d20001", tool_contract).await;
+        let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut resumed = resume_engine_for(&state, false, &sends, None);
+
+        assert!(
+            matches!(
+                resumed.recovery_plan().unwrap().disposition,
+                crate::recovery::RecoveryDisposition::ReconciliationRequired { .. }
+            ),
+            "an opaque interrupted effect must still reach a human"
+        );
+        let refusal = resumed
+            .resume_interrupted_turn(state.turn_id, &state.cursor, "resume-opaque-send")
+            .await
+            .expect_err("an unreconciled opaque effect must refuse to resume");
+        assert!(
+            refusal.to_string().to_lowercase().contains("reconcil"),
+            "expected a reconciliation refusal, got: {refusal}"
+        );
+        assert!(
+            sends.lock().unwrap().is_empty(),
+            "an opaque interrupted send must never be replayed: {:?}",
+            sends.lock().unwrap()
+        );
+    }
+
+    /// The drift arm — the one a reconciler that lies would fail.
+    ///
+    /// The journal records a `ProviderIdempotent` contract from a dispatch that
+    /// happened in a previous process, and the channel has since been swapped
+    /// for one that does not deduplicate. The durable declaration alone would
+    /// license the replay and put a second message in front of a person. Both
+    /// authorities have to agree, so the engine must refuse and fall back to the
+    /// operator.
+    #[tokio::test]
+    async fn a_recorded_contract_the_live_tool_no_longer_makes_is_refused() {
+        let recorded = wcore_types::tool::ToolEffectContract {
+            kind: wcore_types::tool::ToolEffectKind::ProviderIdempotent,
+            reconciler: Some(wcore_tools::send_message::OUTBOUND_KEY_RECONCILER.to_string()),
+        };
+        let state = interrupt_a_started_send("f88900d30001", recorded).await;
+        let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        // The live transport no longer honours the key.
+        let mut resumed = resume_engine_for(&state, false, &sends, None);
+        assert!(
+            !matches!(
+                resumed.recovery_plan().unwrap().disposition,
+                crate::recovery::RecoveryDisposition::ReconciliationRequired { .. }
+            ),
+            "the DURABLE declaration alone routes this past the operator gate — which \
+             is exactly why the live re-check below has to be the thing that stops it"
+        );
+
+        let refusal = resumed
+            .resume_interrupted_turn(state.turn_id, &state.cursor, "resume-drifted-send")
+            .await
+            .expect_err("a contract the live tool no longer makes must not license a replay");
+        assert!(
+            refusal.to_string().to_lowercase().contains("reconcil"),
+            "expected a reconciliation refusal, got: {refusal}"
+        );
+        assert!(
+            sends.lock().unwrap().is_empty(),
+            "a stale declaration must never put a second delivery on the wire: {:?}",
+            sends.lock().unwrap()
+        );
     }
 
     #[tokio::test]

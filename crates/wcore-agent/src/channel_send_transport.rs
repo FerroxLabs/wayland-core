@@ -58,7 +58,7 @@ use tokio::sync::RwLock;
 use wcore_channels::outgoing::OutgoingMessage;
 use wcore_channels::{
     AutoReplyRateLimiter, ChannelManager, DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP,
-    DEFAULT_MAX_AUTO_REPLIES,
+    DEFAULT_MAX_AUTO_REPLIES, OutboundIdempotencySnapshot,
 };
 use wcore_tools::send_message::{
     MessageTransport, ParsedTarget, SendOutcome, THROTTLED_ERROR_PREFIX,
@@ -72,6 +72,19 @@ pub struct ChannelManagerTransport {
     /// critical section is a bounded map op and the guard is dropped before
     /// any `.await`, so it never crosses a suspension point.
     rate_limiter: StdMutex<AutoReplyRateLimiter>,
+    /// The outbound-idempotency oracle, frozen so the SYNC
+    /// [`MessageTransport::honours_idempotency_key`] can read it.
+    ///
+    /// `Tool::effect_contract` runs on the dispatch path and cannot await the
+    /// manager's per-channel mutex, so the answer has to be in hand before it
+    /// is asked. Refreshed by [`Self::refresh_capabilities`] at wiring time and
+    /// again on every delivery, which is the only moment the answer can matter
+    /// next.
+    ///
+    /// Empty until the first refresh, and an empty snapshot answers `false`
+    /// everywhere: a transport that has not yet looked declares nothing, which
+    /// leaves the send opaque and recovery fail-closed.
+    capabilities: std::sync::RwLock<OutboundIdempotencySnapshot>,
 }
 
 impl ChannelManagerTransport {
@@ -85,7 +98,25 @@ impl ChannelManagerTransport {
                 DEFAULT_AUTO_REPLY_WINDOW,
                 DEFAULT_CONVERSATION_CAP,
             )),
+            capabilities: std::sync::RwLock::new(OutboundIdempotencySnapshot::default()),
         }
+    }
+
+    /// Re-read which registered channels transmit an idempotency key their
+    /// destination honours, and how long a message each will carry unsplit.
+    ///
+    /// Must be called after wiring and after any channel reload. Everything
+    /// this snapshot licenses is a REPLAY, so a stale `true` is the dangerous
+    /// direction: it would let recovery re-dispatch a send to a destination
+    /// that no longer deduplicates. The delivery path refreshes it on every
+    /// send so the window is one delivery wide, and `resume_recovered_tool_round`
+    /// re-asks this transport before it acts on anything the journal recorded.
+    pub async fn refresh_capabilities(&self) {
+        let snapshot = self.mgr.read().await.outbound_idempotency_snapshot().await;
+        *self
+            .capabilities
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = snapshot;
     }
 }
 
@@ -166,6 +197,28 @@ impl MessageTransport for ChannelManagerTransport {
     ) -> SendOutcome {
         self.deliver(target, message, idempotency_key).await
     }
+
+    /// Answer the recovery question for this exact send, from the snapshot.
+    ///
+    /// Resolution runs through the SAME [`resolve_channel_name`] the delivery
+    /// uses, so the channel this answers about is the channel the send would
+    /// reach — a parallel guess from the platform token would eventually answer
+    /// about a different adapter than the one that gets the message. The
+    /// per-body half runs through the manager's own chunk split, so it cannot
+    /// disagree with `send_to_keyed` about where the key stops riding.
+    fn honours_idempotency_key(&self, target: &ParsedTarget, message: &str) -> bool {
+        let capabilities = self
+            .capabilities
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let platform_token = target.platform.as_str();
+        let channel_name = resolve_channel_name(
+            &capabilities.names(),
+            &capabilities.names_for_platform(platform_token),
+            platform_token,
+        );
+        capabilities.honours_key_for(&channel_name, message)
+    }
 }
 
 impl ChannelManagerTransport {
@@ -183,6 +236,9 @@ impl ChannelManagerTransport {
             reply_to: target.thread_id.clone(),
             attachments: Vec::new(),
         };
+        // Re-read the oracle before every send, so the contract the NEXT
+        // dispatch declares is at most one delivery stale.
+        self.refresh_capabilities().await;
         let guard = self.mgr.read().await;
         // A channel's instance name is chosen by the operator and need not
         // resemble the platform token at all ("mail" for platform "email").

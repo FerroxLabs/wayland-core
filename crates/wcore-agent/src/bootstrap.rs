@@ -4084,6 +4084,12 @@ impl AgentBootstrap {
                         std::sync::Arc::clone(&lifted),
                     ),
                 );
+                // Read the outbound-idempotency oracle once here, so the FIRST
+                // send already knows whether its destination enforces the key.
+                // `Tool::effect_contract` is sync and cannot ask the manager
+                // itself; without this prime, the first send of every session
+                // would declare itself opaque and forfeit the keyed recovery.
+                transport.refresh_capabilities().await;
                 reg.replace_by_name(Box::new(wcore_tools::send_message::SendMessageTool::new(
                     transport,
                 )));
