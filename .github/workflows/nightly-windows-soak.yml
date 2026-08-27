@@ -117,6 +117,27 @@ jobs:
       issues: write
 
     steps:
+      # Which Windows executor served this job (gh#1146). Fails closed: a job
+      # that cannot name the box that served it reports nothing rather than
+      # reporting anonymously. Why, and what enforces it:
+      # `scripts/check-windows-attribution.py`.
+      - name: Record which Windows executor served this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_NAME:-}" ]; then
+            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
+            exit 1
+          fi
+          echo "runner_name=${RUNNER_NAME}"
+          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
+          {
+            echo "### Windows executor"
+            echo "- runner_name: \`${RUNNER_NAME}\`"
+            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
+            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # NOTE: when this workflow lands on main, the SHA-pinning sweep
       # described in security audit F7 should hit it in the same change
       # that pins every other workflow's actions.
@@ -326,6 +347,27 @@ jobs:
       contents: read
 
     steps:
+      # Which Windows executor served this job (gh#1146). Fails closed: a job
+      # that cannot name the box that served it reports nothing rather than
+      # reporting anonymously. Why, and what enforces it:
+      # `scripts/check-windows-attribution.py`.
+      - name: Record which Windows executor served this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_NAME:-}" ]; then
+            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
+            exit 1
+          fi
+          echo "runner_name=${RUNNER_NAME}"
+          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
+          {
+            echo "### Windows executor"
+            echo "- runner_name: \`${RUNNER_NAME}\`"
+            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
+            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v4
 
       - name: Show the tree under test
@@ -450,6 +492,27 @@ jobs:
       contents: read
 
     steps:
+      # Which Windows executor served this job (gh#1146). Fails closed: a job
+      # that cannot name the box that served it reports nothing rather than
+      # reporting anonymously. Why, and what enforces it:
+      # `scripts/check-windows-attribution.py`.
+      - name: Record which Windows executor served this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_NAME:-}" ]; then
+            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
+            exit 1
+          fi
+          echo "runner_name=${RUNNER_NAME}"
+          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
+          {
+            echo "### Windows executor"
+            echo "- runner_name: \`${RUNNER_NAME}\`"
+            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
+            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # In candidate mode, pin the checkout to the AUTHORIZED CANDIDATE SHA so
       # this job's ACL evidence binds to the same tree the six-target proof
       # certifies. In non-candidate mode f20_expected_sha is the empty string,
@@ -553,6 +616,27 @@ jobs:
       contents: read
 
     steps:
+      # Which Windows executor served this job (gh#1146). Fails closed: a job
+      # that cannot name the box that served it reports nothing rather than
+      # reporting anonymously. Why, and what enforces it:
+      # `scripts/check-windows-attribution.py`.
+      - name: Record which Windows executor served this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_NAME:-}" ]; then
+            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
+            exit 1
+          fi
+          echo "runner_name=${RUNNER_NAME}"
+          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
+          {
+            echo "### Windows executor"
+            echo "- runner_name: \`${RUNNER_NAME}\`"
+            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
+            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # Check out the AUTHORIZED CANDIDATE, not the dispatch ref. GitHub always
       # reads the workflow DEFINITION from the ref passed to workflow_dispatch,
       # and that ref must therefore be a branch/tag that already carries this

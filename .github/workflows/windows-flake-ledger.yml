@@ -44,6 +44,19 @@ on:
         type: string
         required: false
         default: "isolated,batch,loaded"
+      tests:
+        # gh#1146. The harness's built-in target table was a ceiling: the three
+        # tests #1146 measured failing on all three tries were not in it and
+        # there was no way to add them, so the red arm the issue asks for
+        # (same tree, same box, N runs, retries off) could not be run at all.
+        # Empty keeps the built-in list. Example, the #1146 set:
+        #   wcore-cli::mcp_assistant_scoping_e2e::matching_assistant_dials_scoped_deferred_server,
+        #   wcore-tools::wcore-tools::bash::tests::the_bash_timeout_bounds_the_secret_deny_walk,
+        #   wcore-tools::wcore-tools::bash::tests::the_streaming_bash_timeout_bounds_the_secret_deny_walk
+        description: "PKG::BINARY::TEST triples, comma separated (empty = default set)"
+        type: string
+        required: false
+        default: ""
   push:
     branches:
       - lane/win-hidden-fails
@@ -78,6 +91,27 @@ jobs:
     timeout-minutes: 300
 
     steps:
+      # Which Windows executor served this job (gh#1146). Fails closed: a job
+      # that cannot name the box that served it reports nothing rather than
+      # reporting anonymously. Why, and what enforces it:
+      # `scripts/check-windows-attribution.py`.
+      - name: Record which Windows executor served this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_NAME:-}" ]; then
+            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
+            exit 1
+          fi
+          echo "runner_name=${RUNNER_NAME}"
+          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
+          {
+            echo "### Windows executor"
+            echo "- runner_name: \`${RUNNER_NAME}\`"
+            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
+            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v4
 
       # The self-hosted checkout dir is owned by BUILTIN\Administrators while
@@ -141,8 +175,17 @@ jobs:
       # blows its own wall-clock budget.
       - name: Warm the test binaries
         shell: bash
+        env:
+          LEDGER_TESTS: ${{ github.event.inputs.tests || '' }}
         run: |
           set -euo pipefail
+          # With a custom target set the two hardcoded filters warm the wrong
+          # binaries, and the harness's own presence check would then pay for
+          # the build. Listing the whole workspace warms whatever was asked for.
+          if [ -n "${LEDGER_TESTS}" ]; then
+            cargo nextest list --profile ci > /dev/null
+            exit 0
+          fi
           cargo nextest list --profile ci \
             -E 'package(wcore-swarm) and (binary(dispatch_smoke) or binary(worker_runtime_limits))' \
             > /dev/null
@@ -155,11 +198,17 @@ jobs:
         env:
           LEDGER_RUNS: ${{ github.event.inputs.runs || '10' }}
           LEDGER_CONDITIONS: ${{ github.event.inputs.conditions || 'isolated,batch,loaded' }}
+          LEDGER_TESTS: ${{ github.event.inputs.tests || '' }}
         run: |
           set -euo pipefail
           py=python3
           command -v python3 >/dev/null 2>&1 || py=python
+          extra=()
+          if [ -n "${LEDGER_TESTS}" ]; then
+            extra=(--tests "$LEDGER_TESTS")
+          fi
           "$py" scripts/flake-ledger.py \
+            "${extra[@]}" \
             --runs "$LEDGER_RUNS" \
             --conditions "$LEDGER_CONDITIONS" \
             --profile ci \
@@ -201,6 +250,27 @@ jobs:
     timeout-minutes: 240
 
     steps:
+      # Which Windows executor served this job (gh#1146). Fails closed: a job
+      # that cannot name the box that served it reports nothing rather than
+      # reporting anonymously. Why, and what enforces it:
+      # `scripts/check-windows-attribution.py`.
+      - name: Record which Windows executor served this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_NAME:-}" ]; then
+            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
+            exit 1
+          fi
+          echo "runner_name=${RUNNER_NAME}"
+          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
+          {
+            echo "### Windows executor"
+            echo "- runner_name: \`${RUNNER_NAME}\`"
+            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
+            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v4
 
       - name: Setup Rust toolchain
@@ -213,8 +283,17 @@ jobs:
 
       - name: Warm the test binaries
         shell: bash
+        env:
+          LEDGER_TESTS: ${{ github.event.inputs.tests || '' }}
         run: |
           set -euo pipefail
+          # With a custom target set the two hardcoded filters warm the wrong
+          # binaries, and the harness's own presence check would then pay for
+          # the build. Listing the whole workspace warms whatever was asked for.
+          if [ -n "${LEDGER_TESTS}" ]; then
+            cargo nextest list --profile ci > /dev/null
+            exit 0
+          fi
           cargo nextest list --profile ci \
             -E 'package(wcore-swarm) and (binary(dispatch_smoke) or binary(worker_runtime_limits))' \
             > /dev/null
@@ -227,9 +306,15 @@ jobs:
         env:
           LEDGER_RUNS: ${{ github.event.inputs.runs || '10' }}
           LEDGER_CONDITIONS: ${{ github.event.inputs.conditions || 'isolated,batch,loaded' }}
+          LEDGER_TESTS: ${{ github.event.inputs.tests || '' }}
         run: |
           set -euo pipefail
+          extra=()
+          if [ -n "${LEDGER_TESTS}" ]; then
+            extra=(--tests "$LEDGER_TESTS")
+          fi
           python scripts/flake-ledger.py \
+            "${extra[@]}" \
             --runs "$LEDGER_RUNS" \
             --conditions "$LEDGER_CONDITIONS" \
             --profile ci \
