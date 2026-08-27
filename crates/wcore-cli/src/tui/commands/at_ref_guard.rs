@@ -688,4 +688,34 @@ mod tests {
             "two distinct objects must not share an identity"
         );
     }
+
+    /// The read must come from the handle pinned during resolution, not
+    /// from the path. Re-pointing the link after the guard and before the
+    /// read is the deterministic form of the race that
+    /// canonicalize-then-reopen loses: a path-based read returns the NEW
+    /// target's bytes under the OLD target's canonical name, which is
+    /// precisely "guard one object, read another".
+    #[cfg(unix)]
+    #[test]
+    fn resolve_target_reads_the_handle_it_pinned_not_the_path() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = fs::canonicalize(tmp.path()).expect("canonical root");
+        fs::write(root.join("first.txt"), "first body").expect("write first");
+        fs::write(root.join("second.txt"), "second body").expect("write second");
+        let link = root.join("link.txt");
+        std::os::unix::fs::symlink(root.join("first.txt"), &link).expect("symlink");
+
+        let target = resolve_target(&link).expect("resolve");
+        assert_eq!(target.canonical(), root.join("first.txt"));
+
+        // Re-point the link between the guard and the read.
+        fs::remove_file(&link).expect("unlink");
+        std::os::unix::fs::symlink(root.join("second.txt"), &link).expect("relink");
+
+        assert_eq!(
+            target.read_to_string().expect("read"),
+            "first body",
+            "the read followed the path instead of the handle it guarded"
+        );
+    }
 }
