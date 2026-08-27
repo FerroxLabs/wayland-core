@@ -17338,6 +17338,34 @@ impl AgentEngine {
                         )),
                     );
                 }
+                Err(auto::CompactError::LoopCollision(detail)) => {
+                    // #863 F2 — fault the SAME way the ordinary turn path does
+                    // (`AgentError::ApiError`, above in the turn loop), and for
+                    // a sharper reason: an ordinary turn that swallows a
+                    // doubled-ladder answer loses one reply, whereas an
+                    // ACCEPTED compaction summary destroys the whole
+                    // conversation history irreversibly. Restore the carved-out
+                    // live turn first so the history this refusal protects is
+                    // handed back exactly as it was.
+                    if let Some(turn) = live_user_turn {
+                        self.messages.push(turn);
+                    }
+                    self.flux_loop_collisions = self.flux_loop_collisions.saturating_add(1);
+                    tracing::error!("{detail}");
+                    self.record_cache_ledger_compaction(
+                        crate::cache_ledger::CompactionKind::AutoFailed,
+                        if smart_drove {
+                            crate::cache_ledger::CompactionTrigger::SmartForce
+                        } else {
+                            crate::cache_ledger::CompactionTrigger::Watermark
+                        },
+                        self.compact_state.last_real_input_tokens,
+                        0,
+                        0,
+                        Some(detail.clone()),
+                    );
+                    return Err(AgentError::ApiError(detail));
+                }
                 Err(error)
                     if crate::journal_provider::is_journal_authority_error(&error.to_string()) =>
                 {
@@ -23268,6 +23296,208 @@ mod compact_tests {
             request.flux_turn_nonce.is_none(),
             "an ordinary session must not add per-turn cache variance"
         );
+    }
+
+    /// A provider that answers a compaction with a well-formed `<summary>`,
+    /// preceded by the Flux signal-back echo under test. This is the shape a
+    /// real Flux stream has: `ProviderMeta` is emitted at stream start, from
+    /// the response headers, BEFORE any text.
+    struct LadderEchoProvider {
+        loop_engaged: Option<String>,
+    }
+    #[async_trait::async_trait]
+    impl LlmProvider for LadderEchoProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let loop_engaged = self.loop_engaged.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(LlmEvent::ProviderMeta {
+                        routed_model: Some("flux/routed".into()),
+                        model_window: Some(200_000),
+                        context_pressure: Some(0.9),
+                        tokens_counted: Some(180_000),
+                        loop_engaged,
+                    })
+                    .await;
+                let _ = tx
+                    .send(LlmEvent::TextDelta(format!(
+                        "<summary>{CONTAMINATED_SUMMARY}</summary>"
+                    )))
+                    .await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: super::StopReason::EndTurn,
+                        finish_reason: FinishReason::Stop,
+                        usage: wcore_types::message::TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    /// The summary text every `LadderEchoProvider` returns. Named so the
+    /// refusal arm can assert this exact string never reached the history.
+    const CONTAMINATED_SUMMARY: &str = "doubled-ladder summary text";
+
+    /// Every text block currently in the engine's history, concatenated.
+    fn history_text(engine: &super::AgentEngine) -> String {
+        engine
+            .messages
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// True when autocompact actually replaced the conversation: the boundary
+    /// marker and the returned summary are in, and the summarized turns are
+    /// gone. "old reply" is the probe rather than "old turn one" because the
+    /// B7 pin deliberately re-attaches the user's ORIGINAL instruction
+    /// verbatim after a successful fold, so the first user turn surviving is
+    /// evidence of compaction, not of its absence.
+    fn history_was_replaced(engine: &super::AgentEngine) -> bool {
+        let text = history_text(engine);
+        text.contains(crate::compact::auto::BOUNDARY_PREFIX)
+            && text.contains(CONTAMINATED_SUMMARY)
+            && !text.contains("old reply")
+    }
+
+    /// #863 F2, the RUNTIME half — on the one path where accepting
+    /// contaminated material is IRREVERSIBLE.
+    ///
+    /// The session declares `loop_owner=anvil` (wave 2's fix); the router
+    /// replies `x-flux-loop-engaged: elevation`, i.e. it ran its own ladder
+    /// anyway. Both ladders climbed the same task, so the summary is
+    /// contaminated mid-loop material. The ordinary turn path has always
+    /// faulted on this (`AgentError::ApiError`); the compaction path dropped
+    /// the event via a bare `_ => {}` in `collect_stream_text` and accepted
+    /// the summary — which REPLACES the entire conversation history.
+    ///
+    /// Fails without the fix: `run_compaction` returns `Ok(())` and the
+    /// history becomes the contaminated summary.
+    #[tokio::test]
+    async fn owned_compaction_refuses_a_doubled_ladder_summary() {
+        let (config, state, messages) = compaction_fixture();
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(LadderEchoProvider {
+            loop_engaged: Some("elevation".into()),
+        });
+        engine.set_flux_loop_intent(wcore_types::llm::FluxLoopIntent::ClientOwned(
+            wcore_types::llm::ANVIL_LOOP_OWNER.to_string(),
+        ));
+
+        let outcome = engine.run_compaction().await;
+
+        let detail = match outcome {
+            Err(super::AgentError::ApiError(detail)) => detail,
+            other => panic!(
+                "a doubled ladder must fault the compaction turn the way an \
+                 ordinary turn faults; got {other:?}"
+            ),
+        };
+        assert!(
+            detail.contains("loop-ownership collision") && detail.contains("elevation"),
+            "the refusal must carry the shared collision wording; got {detail}"
+        );
+
+        // THE POINT: the conversation must survive intact.
+        let text = history_text(&engine);
+        assert!(
+            !text.contains(CONTAMINATED_SUMMARY),
+            "contaminated mid-loop material must never enter the history; got {text}"
+        );
+        assert!(
+            !text.contains(crate::compact::auto::BOUNDARY_PREFIX),
+            "a refused compaction must not leave a boundary marker; got {text}"
+        );
+        assert!(
+            text.contains("old turn one")
+                && text.contains("old reply")
+                && text.contains("keep climbing"),
+            "every pre-compaction turn must be handed back verbatim, including \
+             the carved-out live user turn; got {text}"
+        );
+        assert_eq!(
+            engine.messages.len(),
+            3,
+            "the history must be the exact three fixture turns, no more"
+        );
+        assert_eq!(
+            engine.flux_loop_collisions, 1,
+            "the collision must be counted the way the ordinary turn path counts it"
+        );
+    }
+
+    /// POSITIVE CONTROL for the test above, and the reason its negative
+    /// assertions are not vacuous: the SAME harness, the same owned session,
+    /// the same provider — only the echo changes to `cascade` — must still
+    /// destroy the history. F1 explicitly permits Cascade's single-tier
+    /// climb-on-failure, so it is not a collision.
+    ///
+    /// Without this arm, a fix that simply broke compaction (or a fixture that
+    /// never reached the destructive path at all) would pass the refusal test.
+    #[tokio::test]
+    async fn owned_compaction_accepts_a_cascade_ladder() {
+        let (config, state, messages) = compaction_fixture();
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(LadderEchoProvider {
+            loop_engaged: Some("cascade".into()),
+        });
+        engine.set_flux_loop_intent(wcore_types::llm::FluxLoopIntent::ClientOwned(
+            wcore_types::llm::ANVIL_LOOP_OWNER.to_string(),
+        ));
+
+        engine
+            .run_compaction()
+            .await
+            .expect("cascade is not a collision — compaction must still run");
+
+        assert!(
+            history_was_replaced(&engine),
+            "the control must actually reach the destructive path, otherwise the \
+             refusal test proves nothing; history = {}",
+            history_text(&engine)
+        );
+        assert_eq!(
+            engine.flux_loop_collisions, 0,
+            "a cascade echo must not be counted as a collision"
+        );
+    }
+
+    /// The over-refusal guard: a session that owns NO loop must ignore the
+    /// echo entirely. `collides` requires a declared owner, so an elevation
+    /// echo on unowned traffic is the router doing its ordinary job. A guard
+    /// that faulted here would break compaction for every non-Anvil session
+    /// on a Flux endpoint.
+    #[tokio::test]
+    async fn unowned_compaction_ignores_an_elevation_echo() {
+        let (config, state, messages) = compaction_fixture();
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(LadderEchoProvider {
+            loop_engaged: Some("elevation".into()),
+        });
+        // No `set_flux_loop_intent` — this session owns no loop.
+
+        engine
+            .run_compaction()
+            .await
+            .expect("an unowned session has no ladder to collide with");
+
+        assert!(
+            history_was_replaced(&engine),
+            "an unowned session's compaction must still run; history = {}",
+            history_text(&engine)
+        );
+        assert_eq!(engine.flux_loop_collisions, 0);
     }
 
     struct SummaryProvider;

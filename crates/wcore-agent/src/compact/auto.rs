@@ -7,7 +7,7 @@
 
 use tokio::sync::mpsc;
 use wcore_config::compact::CompactConfig;
-use wcore_providers::{LlmProvider, ProviderError};
+use wcore_providers::{LlmProvider, ProviderError, flux_loop};
 use wcore_types::compact::{CompactMetadata, CompactTrigger};
 use wcore_types::llm::{FluxLoopIntent, LlmEvent, LlmRequest, ThinkingConfig};
 use wcore_types::message::{ContentBlock, Message, Role, TokenUsage};
@@ -74,6 +74,12 @@ pub enum CompactError {
     StreamError(String),
     #[error("Circuit breaker tripped after {failures} consecutive failures")]
     CircuitBroken { failures: u32 },
+    /// #863 F2 — the router ran its OWN server-side Elevation ladder on a turn
+    /// this session declared it owns. Both ladders climbed the same task, so
+    /// the summary that came back is contaminated mid-loop material. Carries
+    /// the shared `flux_loop::collision_message` text verbatim.
+    #[error("{0}")]
+    LoopCollision(String),
 }
 
 // ── Trigger check ───────────────────────────────────────────────────────────
@@ -273,13 +279,17 @@ pub async fn autocompact(
         };
 
         match provider.stream(&request).await {
-            Ok(rx) => match collect_stream_text(rx).await {
-                Ok((text, _usage)) => break text,
-                Err(e) => {
-                    state.record_failure();
-                    return Err(e);
+            Ok(rx) => {
+                match collect_stream_text(rx, provenance.intent.as_ref().and_then(|i| i.owner()))
+                    .await
+                {
+                    Ok((text, _usage)) => break text,
+                    Err(e) => {
+                        state.record_failure();
+                        return Err(e);
+                    }
                 }
-            },
+            }
             Err(ProviderError::PromptTooLong(_)) if ptl_attempts < MAX_PTL_RETRIES => {
                 ptl_attempts += 1;
                 // Remove the summary prompt (last msg), truncate, re-add prompt
@@ -365,8 +375,22 @@ pub async fn autocompact(
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Collect all text from a streaming LLM response.
+///
+/// `loop_owner` is the owner this compaction turn DECLARED (`None` when the
+/// session owns no loop, which is the ordinary case).
+///
+/// #863 F2 — the RUNTIME half of the anti-collision handshake, which until now
+/// existed only on the ordinary turn path (`engine.rs`, the `ProviderMeta` arm
+/// of the turn loop, which returns `AgentError::ApiError`). Declaring
+/// `loop_owner` asks the router not to elevate; `x-flux-loop-engaged:
+/// elevation` is it saying it did anyway. Both ladders then climbed the same
+/// task and the text that came back is contaminated mid-loop material. On an
+/// ordinary turn accepting it costs one answer; on a COMPACTION it replaces
+/// the entire conversation history and nothing can restore it — so this is the
+/// one path where dropping the signal is irreversible, and it must fault.
 async fn collect_stream_text(
     mut rx: mpsc::Receiver<LlmEvent>,
+    loop_owner: Option<&str>,
 ) -> Result<(String, TokenUsage), CompactError> {
     let mut text = String::new();
 
@@ -375,6 +399,24 @@ async fn collect_stream_text(
             LlmEvent::TextDelta(delta) => text.push_str(&delta),
             LlmEvent::Done { usage, .. } => return Ok((text, usage)),
             LlmEvent::Error(e) => return Err(CompactError::StreamError(e)),
+            LlmEvent::ProviderMeta { loop_engaged, .. } => {
+                // Same predicate and same wording as the ordinary turn path, so
+                // the two cannot drift apart. Deliberately narrow: `cascade` is
+                // not a collision (F1 permits Cascade's single-tier
+                // climb-on-failure) and a missing header is not one either — a
+                // non-Flux endpoint never sends one, and every Anthropic
+                // compaction in the workspace would fault if silence counted.
+                if let Some(owner) = loop_owner
+                    && flux_loop::collides(Some(owner), loop_engaged.as_deref())
+                {
+                    let engaged = loop_engaged
+                        .as_deref()
+                        .unwrap_or(flux_loop::LOOP_ENGAGED_ELEVATION);
+                    return Err(CompactError::LoopCollision(flux_loop::collision_message(
+                        owner, engaged,
+                    )));
+                }
+            }
             // Ignore thinking deltas and tool calls (shouldn't happen in compact)
             _ => {}
         }
