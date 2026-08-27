@@ -40,6 +40,7 @@ fn commit_writes_self_contained_native_plugin() {
         strict: true,
         declared_version: None,
         description: None,
+        unsupported: Vec::new(),
     };
     let draft = ClaudeCodeAdapter.lower("acme", &entry, root).unwrap();
 
@@ -103,6 +104,7 @@ fn reinstall_replaces_existing_directory() {
         strict: true,
         declared_version: None,
         description: None,
+        unsupported: Vec::new(),
     };
     let store = tempdir().unwrap();
     let meta = CommitMeta {
