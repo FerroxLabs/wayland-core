@@ -273,6 +273,13 @@ impl PtyHarness {
 
     /// Resize the PTY. The TUI sees this as a `crossterm::event::Resize`
     /// and reflows.
+    ///
+    /// The vt100 parser is resized too. It is the instrument, and an
+    /// instrument that does not track the subject reports fiction: left at
+    /// its spawn width it renders an 80-column app onto a 120-column grid,
+    /// so `screen_text()` returns the new paint PLUS whatever the old,
+    /// wider frame left in columns 80..120. Any assertion could then be
+    /// satisfied by residue from before the resize.
     fn resize(&mut self, cols: u16, rows: u16) {
         self.master
             .resize(PtySize {
@@ -282,6 +289,10 @@ impl PtyHarness {
                 pixel_height: 0,
             })
             .expect("resize PTY");
+        self.parser
+            .lock()
+            .expect("parser lock")
+            .set_size(rows, cols);
     }
 
     /// Block until the child exits or `timeout` elapses. Returns the
@@ -466,28 +477,46 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
     // Shrink well below RAIL_RESPONSIVE_MIN_WIDTH = 100. 80 cols is the
     // canonical "narrow terminal" size. A render-primitive panic on tight
     // rows would crash the child here.
+    //
+    // The anchor for "the app has reflowed" is the DISAPPEARANCE of the
+    // full `Workspace` tab label. At 80 columns the tab bar truncates it
+    // (`Workspa…`), so the untruncated string cannot be on a settled
+    // narrow screen — its absence is positive proof the resize was
+    // processed, and it costs nothing to a change in the ellipsis width.
+    //
+    // This replaces waiting for `Workspace` to still be PRESENT, which
+    // core#336 showed could only ever be satisfied by the stale
+    // pre-resize frame: measured, the reflow lands in ~31ms, one poll
+    // interval, and every "pass" was a poll that beat it. The 5s budget
+    // was never the problem — the anchor was unreachable.
     h.resize(80, 40);
     h.wait_for(
-        |s| s.contains("WAYLAND") && s.contains("Workspace"),
-        Duration::from_secs(5),
-        "chrome to stay painted after shrinking to 80 cols",
+        |s| s.contains("WAYLAND") && !s.contains("Workspace"),
+        Duration::from_secs(10),
+        "the surface to reflow to 80 cols (tab labels truncate)",
     );
 
-    // Sanity: the screen is still coherent — the surface didn't panic and
-    // the tabs are still painted.
+    // The narrow screen itself is coherent: the wordmark is painted, the
+    // tab strip is still there (truncated, hence the prefix), and the tabs
+    // that DO fit at 80 columns are intact. A render-primitive panic or a
+    // corrupted surface loses these.
     let screen = h.screen_text();
-    assert!(
-        screen.contains("Workspace"),
-        "Workspace tab vanished after resize — surface state corrupt.\n{screen}"
-    );
+    for anchor in ["WAYLAND", "Workspa", "Plan", "Config"] {
+        assert!(
+            screen.contains(anchor),
+            "`{anchor}` missing from the 80-col surface — chrome corrupt after \
+             shrinking.\n{screen}"
+        );
+    }
 
     // Restoring width must keep the chrome coherent — the symmetric half of
     // the contract. A resize handler that corrupted state on the way down
-    // and never recovered would fail here.
+    // and never recovered would fail here. The full label coming BACK is
+    // the proof the widen was processed too.
     h.resize(120, 40);
     h.wait_for(
         |s| s.contains("WAYLAND") && s.contains("Workspace"),
-        Duration::from_secs(5),
+        Duration::from_secs(10),
         "chrome to stay coherent after resizing back to 120 cols",
     );
 
