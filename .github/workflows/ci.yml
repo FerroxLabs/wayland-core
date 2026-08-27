@@ -751,8 +751,21 @@ jobs:
     # self-hosted boxes ever die, Windows work QUEUES rather than passing
     # vacuously — visible as a pending required check, never a false green —
     # and this leg is one `[ci-windows]` commit tag away from covering it.
+    #
+    # 2026-08-27: the commit-tag route above reads `github.event.head_commit`
+    # and `github.event.commits`, which exist ONLY on a `push` event. `push:`
+    # here covers `main` and `lane/**` and nothing else, so on an integration
+    # branch — the exact case where self-hosted Windows being down actually
+    # matters — a `[ci-windows]` tag is silently inert: the push fires only
+    # the `pull_request` event, both fields are null, and this job reports
+    # `skipped`. Measured, not assumed (run 33027398596).
+    #
+    # A LABEL is the pull_request-side equivalent: it is available on the
+    # event, it is opt-in exactly like the tag, and it can be applied to a PR
+    # that is already open without rewriting a commit.
     if: >-
       contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
+      || contains(github.event.pull_request.labels.*.name, 'ci-windows')
     # Bounded on purpose. The matrix job is unbounded (GHA default 6h), which is
     # tolerable on a box whose target/ is warm; a cold hosted compile that wedges
     # would otherwise burn six hours of hosted minutes per run. Sized from the
