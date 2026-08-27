@@ -221,6 +221,30 @@ pub trait MessageTransport: Send + Sync {
     /// describing success (with optional platform-assigned message
     /// id) or failure (with a human-readable reason).
     async fn send(&self, target: &ParsedTarget, message: &str) -> SendOutcome;
+
+    /// Deliver `message` carrying the durable idempotency key orchestration
+    /// minted for this tool execution, so a re-dispatch of the SAME execution
+    /// produces ONE message at a destination that honours the key.
+    ///
+    /// The key is the only thing that can tell a destination "this is the
+    /// delivery you already have". It is stable across exactly the paths that
+    /// legitimately re-run one call — an in-turn retry and the crash-resume
+    /// re-dispatch both carry the prior execution's key forward — so a send
+    /// that drops it turns an interrupted delivery into two messages at the
+    /// far end, which is the duplicate the F13 contract exists to prevent.
+    ///
+    /// Defaulted to the unkeyed [`send`](Self::send) so a transport whose
+    /// destination has no idempotency surface keeps working unchanged and
+    /// visibly does not claim one.
+    async fn send_keyed(
+        &self,
+        target: &ParsedTarget,
+        message: &str,
+        idempotency_key: Option<&str>,
+    ) -> SendOutcome {
+        let _ = idempotency_key;
+        self.send(target, message).await
+    }
 }
 
 /// Default transport returned when the host wires nothing — every
@@ -284,6 +308,75 @@ impl Default for SendMessageTool {
 impl SendMessageTool {
     pub fn new(transport: Arc<dyn MessageTransport>) -> Self {
         Self { transport }
+    }
+
+    /// The one send path. `idempotency_key` is the durable key orchestration
+    /// minted for this tool execution, or `None` when the tool was dispatched
+    /// with no durable effect identity (a host with no session journal, or a
+    /// direct `execute` call).
+    async fn dispatch(&self, input: Value, idempotency_key: Option<&str>) -> ToolResult {
+        let target_str = match input.get("target").and_then(Value::as_str) {
+            Some(s) if !s.trim().is_empty() => s,
+            _ => {
+                return ToolResult {
+                    content: "Missing required parameter: 'target'".to_string(),
+                    is_error: true,
+                };
+            }
+        };
+        let message = match input.get("message").and_then(Value::as_str) {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                return ToolResult {
+                    content: "Missing required parameter: 'message'".to_string(),
+                    is_error: true,
+                };
+            }
+        };
+
+        let parsed = match parse_target(target_str) {
+            Ok(p) => p,
+            Err(e) => {
+                return ToolResult {
+                    content: e,
+                    is_error: true,
+                };
+            }
+        };
+
+        match self
+            .transport
+            .send_keyed(&parsed, message, idempotency_key)
+            .await
+        {
+            SendOutcome::Ok { message_id } => {
+                let payload = json!({
+                    "success": true,
+                    "platform": parsed.platform.as_str(),
+                    "chat_id": parsed.chat_id,
+                    "thread_id": parsed.thread_id,
+                    "message_id": message_id,
+                });
+                ToolResult {
+                    content: payload.to_string(),
+                    is_error: false,
+                }
+            }
+            SendOutcome::Err { message: err } => {
+                // A throttle is still an ERROR to the model — that is the only
+                // surface that ends a runaway send loop — but it is tagged so
+                // the human-unreachable latch and the breaker can tell it
+                // apart from a route that is actually down (wayland#585).
+                let mut payload = json!({ "error": err });
+                if err.starts_with(THROTTLED_ERROR_PREFIX) {
+                    payload[THROTTLED_ERROR_KEY] = json!(true);
+                }
+                ToolResult {
+                    content: payload.to_string(),
+                    is_error: true,
+                }
+            }
+        }
     }
 }
 
@@ -361,64 +454,24 @@ impl Tool for SendMessageTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let target_str = match input.get("target").and_then(Value::as_str) {
-            Some(s) if !s.trim().is_empty() => s,
-            _ => {
-                return ToolResult {
-                    content: "Missing required parameter: 'target'".to_string(),
-                    is_error: true,
-                };
-            }
-        };
-        let message = match input.get("message").and_then(Value::as_str) {
-            Some(s) if !s.is_empty() => s,
-            _ => {
-                return ToolResult {
-                    content: "Missing required parameter: 'message'".to_string(),
-                    is_error: true,
-                };
-            }
-        };
+        self.dispatch(input, None).await
+    }
 
-        let parsed = match parse_target(target_str) {
-            Ok(p) => p,
-            Err(e) => {
-                return ToolResult {
-                    content: e,
-                    is_error: true,
-                };
-            }
-        };
-
-        match self.transport.send(&parsed, message).await {
-            SendOutcome::Ok { message_id } => {
-                let payload = json!({
-                    "success": true,
-                    "platform": parsed.platform.as_str(),
-                    "chat_id": parsed.chat_id,
-                    "thread_id": parsed.thread_id,
-                    "message_id": message_id,
-                });
-                ToolResult {
-                    content: payload.to_string(),
-                    is_error: false,
-                }
-            }
-            SendOutcome::Err { message: err } => {
-                // A throttle is still an ERROR to the model — that is the only
-                // surface that ends a runaway send loop — but it is tagged so
-                // the human-unreachable latch and the breaker can tell it
-                // apart from a route that is actually down (wayland#585).
-                let mut payload = json!({ "error": err });
-                if err.starts_with(THROTTLED_ERROR_PREFIX) {
-                    payload[THROTTLED_ERROR_KEY] = json!(true);
-                }
-                ToolResult {
-                    content: payload.to_string(),
-                    is_error: true,
-                }
-            }
-        }
+    /// Carry the durable effect identity onto the wire.
+    ///
+    /// Orchestration mints one idempotency key per tool execution and hands it
+    /// here; without this override the trait default drops straight to
+    /// [`Tool::execute`], the key never reaches the transport, and a resume
+    /// that re-dispatches this exact execution delivers the message a second
+    /// time at a destination that would have recognised the replay.
+    async fn execute_with_effect_ctx(
+        &self,
+        input: Value,
+        _ctx: &crate::context::ToolContext,
+        effect: Option<&crate::context::ToolEffectContext>,
+    ) -> ToolResult {
+        self.dispatch(input, effect.map(|e| e.idempotency_key.as_str()))
+            .await
     }
 }
 
@@ -426,6 +479,83 @@ impl Tool for SendMessageTool {
 mod tests {
     use super::*;
     use wcore_types::tool::ToolEffectKind;
+
+    /// Records exactly which send entry point ran, and with what key.
+    #[derive(Default)]
+    struct KeyRecordingTransport {
+        seen: parking_lot::Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl MessageTransport for KeyRecordingTransport {
+        async fn send(&self, _target: &ParsedTarget, _message: &str) -> SendOutcome {
+            self.seen.lock().push(None);
+            SendOutcome::Ok {
+                message_id: Some("unkeyed".to_string()),
+            }
+        }
+
+        async fn send_keyed(
+            &self,
+            _target: &ParsedTarget,
+            _message: &str,
+            idempotency_key: Option<&str>,
+        ) -> SendOutcome {
+            self.seen.lock().push(idempotency_key.map(str::to_owned));
+            SendOutcome::Ok {
+                message_id: Some("keyed".to_string()),
+            }
+        }
+    }
+
+    fn send_input() -> Value {
+        json!({ "target": "matrix:!room:server.org", "message": "hello" })
+    }
+
+    /// The durable identity orchestration minted for this execution has to
+    /// reach the wire, because it is the ONLY thing a destination can use to
+    /// recognise the replay when a resume re-dispatches this exact call. Before
+    /// this override existed the trait default dropped to `execute`, the key
+    /// stopped inside the process, and the interrupted send arrived twice.
+    #[test]
+    fn durable_idempotency_key_reaches_the_transport() {
+        let transport = Arc::new(KeyRecordingTransport::default());
+        let tool = SendMessageTool::new(transport.clone());
+        let ctx = crate::context::ToolContext::test_default();
+        let effect = crate::context::ToolEffectContext {
+            tool_execution_id: "tool-execution-1".to_string(),
+            idempotency_key: "idem-key-1".to_string(),
+        };
+
+        let out = futures::executor::block_on(tool.execute_with_effect_ctx(
+            send_input(),
+            &ctx,
+            Some(&effect),
+        ));
+
+        assert!(!out.is_error, "send should have succeeded: {}", out.content);
+        assert_eq!(
+            transport.seen.lock().clone(),
+            vec![Some("idem-key-1".to_string())],
+            "the transport must see the journal's key, not None"
+        );
+    }
+
+    /// The arm that keeps the first honest. A dispatch with NO durable
+    /// identity must not invent one: a key the journal never recorded would
+    /// make a destination deduplicate against a token nothing can reproduce,
+    /// which suppresses a legitimate later send instead of a replay.
+    #[test]
+    fn a_dispatch_without_a_durable_identity_carries_no_key() {
+        let transport = Arc::new(KeyRecordingTransport::default());
+        let tool = SendMessageTool::new(transport.clone());
+        let ctx = crate::context::ToolContext::test_default();
+
+        futures::executor::block_on(tool.execute_with_effect_ctx(send_input(), &ctx, None));
+        futures::executor::block_on(tool.execute(send_input()));
+
+        assert_eq!(transport.seen.lock().clone(), vec![None, None]);
+    }
 
     #[test]
     fn effect_contract_remains_opaque() {

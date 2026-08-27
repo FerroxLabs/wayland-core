@@ -145,6 +145,36 @@ fn resolve_channel_name(
 #[async_trait]
 impl MessageTransport for ChannelManagerTransport {
     async fn send(&self, target: &ParsedTarget, message: &str) -> SendOutcome {
+        self.deliver(target, message, None).await
+    }
+
+    /// Put the tool execution's durable idempotency key on the wire.
+    ///
+    /// [`ChannelManager::send_to_keyed`] is the only send that transmits it,
+    /// and only an adapter declaring
+    /// [`Channel::supports_outbound_idempotency`] actually forwards it to the
+    /// platform — so this is a pass-through for every destination that has no
+    /// idempotency surface, and the replay-suppressing send for the ones that
+    /// do (Matrix, within its single-message cap). Without this override the
+    /// trait default falls back to the unkeyed [`MessageTransport::send`] and
+    /// the key the journal minted never leaves the process.
+    async fn send_keyed(
+        &self,
+        target: &ParsedTarget,
+        message: &str,
+        idempotency_key: Option<&str>,
+    ) -> SendOutcome {
+        self.deliver(target, message, idempotency_key).await
+    }
+}
+
+impl ChannelManagerTransport {
+    async fn deliver(
+        &self,
+        target: &ParsedTarget,
+        message: &str,
+        idempotency_key: Option<&str>,
+    ) -> SendOutcome {
         let platform_token = target.platform.as_str();
         let conversation_id = target.chat_id.clone().unwrap_or_default();
         let outgoing = OutgoingMessage {
@@ -200,7 +230,14 @@ impl MessageTransport for ChannelManagerTransport {
             };
         }
 
-        match guard.send_to(&channel_name, outgoing).await {
+        // `send_to` IS `send_to_keyed(.., None)`, so the unkeyed path through
+        // here is byte-identical to what it always was; a `Some` key is the
+        // only change in behaviour, and only at an adapter that declares it
+        // transmits one.
+        match guard
+            .send_to_keyed(&channel_name, outgoing, idempotency_key)
+            .await
+        {
             Ok(receipt) => SendOutcome::Ok {
                 message_id: Some(receipt.id),
             },
@@ -223,6 +260,131 @@ mod tests {
             chat_id: Some(chat_id.to_string()),
             thread_id: None,
         }
+    }
+
+    /// A Matrix-shaped adapter: it declares that it transmits an idempotency
+    /// key, and records which send arm the manager actually took.
+    struct KeyRecordingChannel {
+        keys: Arc<StdMutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl wcore_channels::Channel for KeyRecordingChannel {
+        fn name(&self) -> &str {
+            "matrix"
+        }
+
+        fn platform(&self) -> &str {
+            "matrix"
+        }
+
+        async fn start(&mut self) -> Result<(), wcore_channels::ChannelError> {
+            Ok(())
+        }
+
+        async fn stop(&mut self) -> Result<(), wcore_channels::ChannelError> {
+            Ok(())
+        }
+
+        async fn poll_events(
+            &mut self,
+        ) -> Result<Vec<wcore_channels::ChannelEvent>, wcore_channels::ChannelError> {
+            Ok(Vec::new())
+        }
+
+        async fn send_message(
+            &mut self,
+            msg: wcore_channels::OutgoingMessage,
+        ) -> Result<wcore_channels::MessageReceipt, wcore_channels::ChannelError> {
+            self.keys.lock().unwrap().push(None);
+            Ok(wcore_channels::MessageReceipt {
+                id: "unkeyed".to_string(),
+                conversation_id: msg.conversation_id,
+                ts_secs: 0,
+            })
+        }
+
+        async fn send_message_idempotent(
+            &mut self,
+            msg: wcore_channels::OutgoingMessage,
+            key: &str,
+        ) -> Result<wcore_channels::MessageReceipt, wcore_channels::ChannelError> {
+            self.keys.lock().unwrap().push(Some(key.to_string()));
+            Ok(wcore_channels::MessageReceipt {
+                id: "keyed".to_string(),
+                conversation_id: msg.conversation_id,
+                ts_secs: 0,
+            })
+        }
+
+        fn supports_outbound_idempotency(&self) -> bool {
+            true
+        }
+
+        fn config_schema(&self) -> &str {
+            r#"{"name": "string", "platform": "matrix"}"#
+        }
+    }
+
+    async fn keyed_channel_transport()
+    -> (ChannelManagerTransport, Arc<StdMutex<Vec<Option<String>>>>) {
+        let keys = Arc::new(StdMutex::new(Vec::new()));
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(KeyRecordingChannel { keys: keys.clone() }))
+            .await;
+        mgr.start_all().await.expect("start channels");
+        (
+            ChannelManagerTransport::new(Arc::new(RwLock::new(mgr))),
+            keys,
+        )
+    }
+
+    /// The last hop. `SendMessageTool` hands the journal's key to the
+    /// transport; this is where it either goes on the wire or is dropped.
+    ///
+    /// `ChannelManager::send_to` is `send_to_keyed(.., None)`, so a transport
+    /// that calls `send_to` throws the key away silently — the send still
+    /// succeeds and the destination has no way to recognise the replay. That
+    /// was the state of this adapter, and it is the measured shape of the
+    /// duplicate the F13 contract exists to prevent.
+    #[tokio::test]
+    async fn a_keyed_send_transmits_the_key_to_the_adapter() {
+        let (transport, keys) = keyed_channel_transport().await;
+
+        let outcome = transport
+            .send_keyed(
+                &target(MessagingPlatform::Matrix, "!room:server.org"),
+                "hello",
+                Some("idem-key-1"),
+            )
+            .await;
+
+        match outcome {
+            SendOutcome::Ok { message_id } => assert_eq!(message_id.as_deref(), Some("keyed")),
+            SendOutcome::Err { message } => panic!("expected Ok, got Err: {message}"),
+        }
+        assert_eq!(
+            keys.lock().unwrap().clone(),
+            vec![Some("idem-key-1".to_string())],
+            "the adapter must receive the key the journal minted"
+        );
+    }
+
+    /// The negative arm: an unkeyed send must stay unkeyed. Without it the
+    /// test above would pass against an adapter handed any key at all, and a
+    /// fabricated key deduplicates real messages rather than replays.
+    #[tokio::test]
+    async fn an_unkeyed_send_stays_unkeyed() {
+        let (transport, keys) = keyed_channel_transport().await;
+
+        transport
+            .send(
+                &target(MessagingPlatform::Matrix, "!room:server.org"),
+                "hello",
+            )
+            .await;
+
+        assert_eq!(keys.lock().unwrap().clone(), vec![None]);
     }
 
     /// The legacy name-only arms, exercised with NO platform metadata so the
