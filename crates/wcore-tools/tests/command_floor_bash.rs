@@ -613,7 +613,12 @@ async fn a_cd_does_not_move_the_floor_off_the_authority_directories() {
         // did work. Writing this as `!link.exists() && make(...)` would have
         // short-circuited the whole leg away on every platform where `ln`
         // succeeds, which is all of them except the one this was written for.
-        let have_link = link.exists() || symlink_dir_or_skip(&decoy_parent, &link).is_some();
+        // `is_symlink`, not `exists`: the leg below asserts that reaching the
+        // config dir THROUGH A LINK is refused, so it is only meaningful when
+        // what is there is actually a link. A platform whose `ln` leaves an
+        // ordinary directory behind would otherwise be graded on a path that
+        // reaches nothing protected, and fail for the wrong reason.
+        let have_link = link.is_symlink() || symlink_dir_or_skip(&decoy_parent, &link).is_some();
         if have_link {
             let (result, chunks) = run(
                 entry,
