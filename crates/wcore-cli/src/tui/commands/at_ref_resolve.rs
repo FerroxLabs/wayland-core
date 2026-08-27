@@ -243,6 +243,16 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     if !full.is_dir() {
         return Err(AtRefError::NotFound(display(path)));
     }
+    // The walk ROOT has to be inside the workspace, and `full` is still
+    // only a name: `@link/`, where `link` is a symlink to a directory
+    // outside the root, satisfies `is_dir` and then hands `walk_dir` an
+    // out-of-tree tree whose every entry strips back to `link/…` — in-root
+    // -looking paths for files the workspace does not contain.
+    let croot = canonical_root(root);
+    match fs::canonicalize(&full) {
+        Ok(canonical) if canonical.starts_with(&croot) => {}
+        _ => return Err(AtRefError::NotFound(display(path))),
+    }
 
     let ignore = GitIgnore::load(root);
     let mut files = Vec::new();
@@ -321,7 +331,28 @@ fn walk_dir(
             *truncated = true;
             return Ok(());
         }
-        let is_dir = path.is_dir();
+        // `symlink_metadata`, NOT `Path::is_dir`, which follows symlinks:
+        // a symlink to a directory took the recurse branch below — the one
+        // branch with no identity guard on it — while `rel_to_root` kept
+        // answering `link/…` for every entry underneath. The walk left the
+        // workspace and every path it reported still looked in-root.
+        //
+        // A symlink therefore reports `is_dir == false` here and falls to
+        // the file branch, where `resolve_target` judges the object it
+        // opens and refuses anything that is not a regular file. That
+        // refuses a symlink to a DIRECTORY, deliberately: following one
+        // would need a containment test *and* cycle bookkeeping, because
+        // `root/loop -> root` is inside the root and the `DIR_MAX_FILES`
+        // budget cannot stop a cycle — each lap re-pushes the same files
+        // under a longer prefix. A symlink to a FILE is still followed,
+        // which is the capability repositories actually use, and the skip
+        // is reported in the payload's `SkippedFiles` count rather than
+        // being silent.
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            *skipped += 1;
+            continue;
+        };
+        let is_dir = meta.is_dir();
         let rel = match rel_to_root(&path, root) {
             Some(r) => r,
             None => continue,

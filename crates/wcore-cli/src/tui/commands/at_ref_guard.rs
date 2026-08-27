@@ -156,6 +156,40 @@ impl ResolvedTarget {
     }
 }
 
+/// Open `path` for reading in a way that cannot block on the open itself.
+///
+/// `File::open` on a FIFO with no writer — or on a blocking character
+/// device such as a serial tty — waits inside the syscall, indefinitely.
+/// The type check that refuses those objects runs on the handle, so it is
+/// never reached: `@<fifo>` typed into the composer wedged the TUI on a
+/// path where `Path::is_file()` would have answered instantly.
+///
+/// Unix answers that with `O_NONBLOCK`, which makes the open return for
+/// every file type and is a no-op for the regular files this function is
+/// actually after — POSIX gives `O_NONBLOCK` no effect on reads from a
+/// regular file, so the later `read_to_string` is unchanged. Windows has
+/// no equivalent flag and no equivalent exposure through a workspace path
+/// (a named pipe there is a `\\.\pipe\…` name, not a directory entry),
+/// so it keeps the plain open.
+///
+/// Every open in this module goes through here — that is what keeps the
+/// "check the handle, not the name" ordering from costing a hang.
+#[cfg(unix)]
+fn open_without_blocking(path: &Path) -> io::Result<File> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_without_blocking(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
 /// Resolve `path` to the single object a guarded read will consume.
 ///
 /// Refuses anything that is not a regular file, and refuses a target whose
@@ -179,6 +213,11 @@ impl ResolvedTarget {
 /// steps 1 and 2 the identities differ and the resolution is refused,
 /// rather than guarding one file and quietly reading another.
 ///
+/// The open in step 1 is deliberately non-blocking (see
+/// [`open_without_blocking`]): the type check below judges the handle, and
+/// a check that runs AFTER the open is worth nothing if the open itself
+/// can sleep forever.
+///
 /// Note what is deliberately NOT done here: symlinks are not refused.
 /// Repositories legitimately symlink real files, and a guard that blocks
 /// the mechanism instead of the target removes a capability people rely
@@ -193,13 +232,13 @@ impl ResolvedTarget {
 /// denylist, which is a larger change than this one; it is written down
 /// here so the boundary is visible rather than assumed away.
 pub(super) fn resolve_target(path: &Path) -> io::Result<ResolvedTarget> {
-    let file = File::open(path)?;
+    let file = open_without_blocking(path)?;
     if !file.metadata()?.is_file() {
-        // A directory, a FIFO, a device. `File::open` on a directory
-        // succeeds on Unix and fails on Windows, so the refusal has to
-        // come from the handle's own metadata to read the same on both —
-        // and refusing a FIFO here is what stops a read blocking forever
-        // on a named pipe planted in a walked tree.
+        // A directory, a FIFO, a device. The refusal comes from the
+        // handle's own metadata rather than from a `Path::is_file` stat:
+        // opening on a directory succeeds on Unix and fails on Windows, so
+        // only the handle reads the same on both, and only the handle
+        // describes the object the read will actually consume.
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "an @-reference target must be a regular file",
@@ -207,7 +246,9 @@ pub(super) fn resolve_target(path: &Path) -> io::Result<ResolvedTarget> {
     }
     let handle = Handle::from_file(file)?;
     let canonical = fs::canonicalize(path)?;
-    if handle != Handle::from_path(&canonical)? {
+    // Non-blocking here too: the canonical name is a second traversal, and
+    // it can land on a FIFO the first one did not.
+    if handle != Handle::from_file(open_without_blocking(&canonical)?)? {
         return Err(io::Error::other(
             "the @-reference target changed identity while it was being resolved",
         ));

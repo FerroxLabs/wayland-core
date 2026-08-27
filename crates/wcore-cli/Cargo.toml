@@ -289,6 +289,14 @@ workspace-hack.workspace = true
 # workspace lockfile — this promotion adds ZERO packages to `Cargo.lock`.
 rand.workspace = true
 
+# core#339: `at_ref_guard::open_without_blocking` needs `O_NONBLOCK` so the
+# @-reference type check can run on the OPEN HANDLE without the open itself
+# blocking on a FIFO or a serial tty. `libc` was already a dev-dependency of
+# this crate and is pinned in the workspace lockfile — this adds ZERO packages
+# to `Cargo.lock`.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 # W-1 fix: OpenProcess + GetExitCodeProcess for process_is_alive() on Windows.
 # windows-sys is already a workspace dependency (see wcore-sandbox/Cargo.toml).
 # We need Win32_Foundation (BOOL, HANDLE) + Win32_System_Threading

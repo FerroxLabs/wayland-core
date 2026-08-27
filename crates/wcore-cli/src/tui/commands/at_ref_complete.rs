@@ -129,15 +129,22 @@ fn complete_paths(body: &str, root: &Path) -> Vec<Completion> {
         {
             continue;
         }
-        // Judge the gitignore at the target's real location too, so the
-        // popup and the resolver cannot disagree about the same candidate.
-        // A target outside the root has no gitignore jurisdiction, and falls
-        // back to the path as typed.
-        let rel_for_ignore = canonical
-            .as_deref()
-            .and_then(|c| rel_to_root(c, &croot))
-            .unwrap_or_else(|| rel.clone());
-        if ignore.is_ignored(&rel_for_ignore, is_dir) {
+        // Gitignore, judged on BOTH names — ADDITIVELY. A candidate has the
+        // relative path it is typed as and the one its target canonicalizes
+        // to, and either being ignored is a reason not to offer it.
+        //
+        // Substituting the canonical verdict for the lexical one instead
+        // *un-ignores* every lexically-ignored link: the popup offers the
+        // row, the user presses Tab, and `resolve_file`'s own lexical check
+        // refuses it as GitIgnored — the popup/resolver disagreement this
+        // pass exists to remove. A target outside the root has no gitignore
+        // jurisdiction and simply adds no second verdict.
+        if ignore.is_ignored(&rel, is_dir) {
+            continue;
+        }
+        if let Some(canonical_rel) = canonical.as_deref().and_then(|c| rel_to_root(c, &croot))
+            && ignore.is_ignored(&canonical_rel, is_dir)
+        {
             continue;
         }
 
@@ -372,16 +379,15 @@ mod tests {
     fn completion_honors_both_the_typed_and_the_canonical_gitignore_name() {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
-        fs::write(root.join(".gitignore"), "notes.txt\nbuild/\n").expect("write gitignore");
+        fs::write(root.join(".gitignore"), "notes.txt\nartifact.txt\n").expect("write gitignore");
         fs::create_dir(root.join("real")).expect("mkdir real");
-        fs::create_dir(root.join("build")).expect("mkdir build");
         fs::write(root.join("real/out.txt"), "kept body").expect("write out");
-        fs::write(root.join("build/out.txt"), "ignored body").expect("write build out");
+        fs::write(root.join("artifact.txt"), "ignored body").expect("write artifact");
         // Ignored by the name it is TYPED as; its target is not ignored.
         std::os::unix::fs::symlink(root.join("real/out.txt"), root.join("notes.txt"))
             .expect("symlink notes");
         // Ignored by the name it CANONICALIZES to; its own name is not.
-        std::os::unix::fs::symlink(root.join("build/out.txt"), root.join("notable.txt"))
+        std::os::unix::fs::symlink(root.join("artifact.txt"), root.join("notable.txt"))
             .expect("symlink notable");
         fs::write(root.join("noted.txt"), "ordinary").expect("write control");
 
