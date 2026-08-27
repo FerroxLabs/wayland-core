@@ -1175,6 +1175,21 @@ jobs:
           python3 scripts/check-no-vacuous-cargo-test.py --self-test
           python3 scripts/check-no-vacuous-cargo-test.py
 
+      # ── model-limits freshness checker: SELF-TEST ONLY ────────────────
+      # The LIVE scan runs at release time (release.yml `prepare-release`),
+      # not here: it needs models.dev, and a third-party catalogue in the
+      # main test path buys flakiness for no benefit.
+      #
+      # What runs here is the checker's own self-test — offline, ~0.1s, and
+      # it asserts the gate can still reach ALL FOUR verdicts: PASS on a
+      # table that matches, FAIL on a missing/over-claimed/stale arm, REPORT
+      # on a brand-new family, and a SKIPPED banner that never reads as a
+      # pass. Without this, a checker that had quietly stopped matching would
+      # sail through every release green, which is the same "green-looking
+      # absence of signal" the step above was moved twice to avoid.
+      - name: Model-limits freshness checker self-test
+        run: python3 scripts/check-model-limits-freshness.py --self-test
+
       # ── pre-publish personal-identifier gate ──────────────────────────
       # Placed here for the same reasons as the step above, which paid for
       # them twice: AFTER checkout (it needs the working tree) and EARLY (a
@@ -1918,84 +1933,42 @@ jobs:
         if: always()
         run: df -h / "$RUNNER_TEMP" 2>/dev/null || df -h /
 
-  # ── W10: Chromium live e2e (debt-register A.1) ───────────────────────
-  # Closes A.1 — chromiumoxide live tests don't run in CI because runners
-  # don't ship Chromium pre-installed. This job installs `chromium-browser`
-  # via apt and runs the feature-gated `browser-live-tests` suite under
-  # `wcore-browser`.
-  #
-  # SEPARATE from `ci:` on purpose: a Chromium install hiccup or a flaky
-  # live spawn MUST NOT break the main lane. `continue-on-error: true`
-  # is intentional for the first ship (matches the Z0 pattern Sean OK'd
-  # for genuinely flaky live-network steps). Once we see >N consecutive
-  # green runs we can flip it to gating.
-  #
-  # ubuntu-latest only — the apt path is well-defined; macOS/Windows
-  # Chromium installs are slower + flakier and deferred to a future wave.
-  browser-live:
-    name: Browser live e2e (chromium)
-    runs-on: ${{ matrix.os }}
-    continue-on-error: true
-    # gh#1072 — THE job this issue was filed for. It hung twice in one day
-    # during the v0.13.1 release train (runs 32088384785 at ~4h06m and
-    # 32043535383 at ~3h13m), both times producing no output at all, both
-    # times cancelled by hand. In the second case this context had ALREADY
-    # gone green for the same commit, and branch protection scores the LATEST
-    # check-run per context, so the hung retry masked a passing result.
-    #
-    # `continue-on-error: true` does NOT save us here: it stops a FAILURE from
-    # failing the run, but a job that never finishes never reports at all, so
-    # the context simply stays in progress and holds the merge.
-    #
-    # Healthy runtime is 5 min flat across every sampled run. 30 is 6x that —
-    # deliberately loose enough never to fire on a slow-but-working run, and
-    # tight enough that a wedge costs half an hour instead of a working day.
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-
+  all-features-check:
+    name: All-features check (Linux)
+    runs-on: ubuntu-latest
+    # Measured cold on a comparable Linux box at ~7 min for the full union
+    # (1.1 GB target dir, `check` only). 45 leaves ample headroom for a cold
+    # registry without letting a wedge sit for GitHub's 6-hour default.
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v6
 
-      - name: Free disk space (drop unused preinstalled toolchains)
-        run: |
-          set -e
-          echo "=== BEFORE ==="; df -h /
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/share/miniconda
-          sudo rm -rf /home/linuxbrew
-          echo "=== AFTER ==="; df -h /
-
-      - name: Install Chromium + mold linker
+      # Derived from the `-sys` crates the feature union actually compiles,
+      # not guessed: alsa-sys (`voice` / `piper_tts`), libdbus-sys,
+      # libseccomp-sys, and — the two no other job in this repo needs —
+      # leptonica-sys and tesseract-sys, pulled in by `wcore-cua/redact-ocr`
+      # via `leptess`, which also drags `clang-sys`/bindgen and therefore
+      # libclang. Without libtesseract-dev + libleptonica-dev this job CANNOT
+      # pass on a stock runner, which is the failure mode that gets a new gate
+      # switched off in its first week.
+      - name: Install system deps for the feature union
         run: |
           sudo apt-get update
-          sudo apt-get install -y chromium-browser mold libdbus-1-dev libseccomp-dev libasound2-dev pkg-config
+          sudo apt-get install -y \
+            pkg-config mold \
+            libasound2-dev libdbus-1-dev libseccomp-dev \
+            libtesseract-dev libleptonica-dev libclang-dev clang
 
-      - name: Setup vx (installs Rust + just from vx.toml)
+      - name: Setup vx (installs Rust from vx.toml)
         uses: loonghao/vx@v0.9.17
         with:
           setup: 'true'
           cache: 'true'
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
-
-      - name: Run live browser e2e
-        env:
-          # Tell the test where chromium lives — apt drops it at this path.
-          # The fallback discovery in the test also checks /usr/bin/chromium-browser
-          # but being explicit makes CI failures easier to triage.
-          WCORE_CHROMIUM_PATH: /usr/bin/chromium-browser
-        run: vx cargo nextest run -p wcore-browser --features browser-live-tests --test chromium_live_test
+      - name: Check the feature union (compile only, nothing is run)
+        run: vx cargo check --workspace --all-targets --all-features --locked
 
   # ── Annotate PR / commit with test results ────────────────────────────
   report:
