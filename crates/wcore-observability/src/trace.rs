@@ -733,6 +733,20 @@ mod tests {
     }
 
     // ---- T2-A0: result_snippet ----
+    //
+    // Capture is gated by the process-global `WAYLAND_TRACE_RESULT_SNIPPETS`
+    // (see `result_snippets_enabled`), and the W9 tests below WRITE it under
+    // `#[serial(env)]`. Every test here that calls `with_result_snippet` and
+    // expects a snippet back is therefore a READER of that global and must
+    // join the SAME key — an unkeyed `#[serial]`, or none at all, is not
+    // serialized against `#[serial(env)]`.
+    //
+    // Measured on `origin/main` @ 7066118a with these three unannotated:
+    // `cargo test -p wcore-observability --lib` failed 17 of 50 reps
+    // (`snippet present` — a sibling had the gate switched off), while
+    // `cargo nextest run -p wcore-observability --lib --retries 0` passed
+    // 10 of 10 on the same commit. nextest gives every test its own process,
+    // which is why CI never saw it (wayland#1134).
 
     #[test]
     fn result_snippet_none_by_default() {
@@ -741,6 +755,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn with_result_snippet_short_value_preserved() {
         let raw: String = "x".repeat(100);
         let t = ToolCallTrace::new("c1".into(), "Read".into(), json!({})).with_result_snippet(&raw);
@@ -749,6 +764,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn with_result_snippet_truncates_at_512_bytes() {
         let raw: String = "a".repeat(1000);
         let t = ToolCallTrace::new("c1".into(), "Read".into(), json!({})).with_result_snippet(&raw);
@@ -758,6 +774,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn with_result_snippet_truncates_at_utf8_boundary() {
         // "日本語" is 9 bytes (3 chars × 3 bytes). 200 repeats == 1800 bytes,
         // and 512 / 3 = 170 r 2 — so the naive byte-512 cut would land
