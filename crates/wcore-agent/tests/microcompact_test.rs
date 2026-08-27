@@ -482,3 +482,156 @@ fn a6_zero_fraction_restores_unconditional_time_trigger() {
     };
     assert!(should_microcompact(&msgs, &config, low_pressure()));
 }
+
+// ── #559: a team leader's results are unlisted names, so an allow-list of six
+// built-in tool names left microcompact with nothing it could touch ─────────
+
+/// The tool names a team leader's loop actually produces. Not one of them is
+/// in `default_compactable_tools()`, and MCP/plugin names cannot be added to
+/// that list at build time because they are not knowable then.
+const LEADER_TOOLS: [&str; 6] = [
+    "Delegate",
+    "WebFetch",
+    "web",
+    "mcp__linear__issues",
+    "RepoMap",
+    "pdf_extract",
+];
+
+/// Twelve 50 KB results (600 KB total) from unlisted tools — the leader shape
+/// from the ticket. Twelve is `micro_keep_recent * 2` plus two, so the count
+/// trigger has room to fire once the results are eligible at all.
+fn leader_history() -> Vec<Message> {
+    let body = "x".repeat(50_000);
+    let mut msgs = Vec::new();
+    for i in 0..12 {
+        let id = format!("t{i}");
+        let name = LEADER_TOOLS[i % LEADER_TOOLS.len()];
+        msgs.push(assistant(vec![tool_use(&id, name)]));
+        msgs.push(user(vec![tool_result(&id, &body)]));
+    }
+    msgs
+}
+
+/// TRIGGER ARM, graded independently of the clear arm. On untouched HEAD this
+/// is `false`: 600 KB of stale delegated transcripts at 90% of the autocompact
+/// threshold, and the pass declines to run.
+#[test]
+fn issue_559_trigger_fires_for_large_results_from_unlisted_tools() {
+    let msgs = leader_history();
+    let config = CompactConfig::default();
+    let pressure = ContextPressure {
+        real_input_tokens: 150_000,
+        autocompact_threshold: THRESHOLD,
+    };
+    assert!(
+        should_microcompact(&msgs, &config, pressure),
+        "count trigger must see large unlisted-tool results as compactable"
+    );
+    // Positive control on the pressure conjunct: the same history below the
+    // gate must NOT fire, or this test would pass against a trigger that had
+    // simply been made unconditional.
+    assert!(!should_microcompact(&msgs, &config, low_pressure()));
+}
+
+/// CLEAR ARM, graded independently of the trigger arm. `microcompact` never
+/// consults pressure, so this reddens on its own if the threshold is dropped
+/// from `collect_compactable_locations` alone.
+#[test]
+fn issue_559_clear_pass_clears_large_results_from_unlisted_tools() {
+    let mut msgs = leader_history();
+    let config = CompactConfig::default();
+
+    let result = microcompact(&mut msgs, &config);
+
+    // 12 eligible, keep the 5 most recent → 7 cleared.
+    assert_eq!(result.cleared_count, 7);
+    for i in 0..7 {
+        assert_eq!(
+            get_tool_result_content(&msgs[i * 2 + 1], 0),
+            CLEARED_TOOL_RESULT,
+            "result {i} should have been cleared"
+        );
+    }
+    // The protected tail survives at full size.
+    for i in 7..12 {
+        assert_eq!(get_tool_result_content(&msgs[i * 2 + 1], 0).len(), 50_000);
+    }
+}
+
+/// The licence-to-erase guard. Small results from the SAME unlisted names —
+/// a todo list, an answered question — carry live state and must be
+/// byte-identical after the pass, at any pressure.
+#[test]
+fn issue_559_small_results_from_unlisted_tools_are_untouched() {
+    let small = [
+        (
+            "s0",
+            "TodoWrite",
+            "1. ship #559  2. re-measure a leader session",
+        ),
+        ("s1", "AskUserQuestion", "user chose: option B"),
+        ("s2", "Delegate", "teammate acknowledged"),
+    ];
+    let mut msgs = Vec::new();
+    for (id, name, body) in &small {
+        msgs.push(assistant(vec![tool_use(id, name)]));
+        msgs.push(user(vec![tool_result(id, body)]));
+    }
+    // Pad with large results so the pass definitely runs and has work to do.
+    let big = "x".repeat(50_000);
+    for i in 0..12 {
+        let id = format!("b{i}");
+        msgs.push(assistant(vec![tool_use(&id, "Delegate")]));
+        msgs.push(user(vec![tool_result(&id, &big)]));
+    }
+
+    let config = CompactConfig::default();
+    let result = microcompact(&mut msgs, &config);
+    assert!(result.cleared_count > 0, "the pass must actually have run");
+
+    for (i, (_, _, body)) in small.iter().enumerate() {
+        assert_eq!(
+            get_tool_result_content(&msgs[i * 2 + 1], 0),
+            *body,
+            "small unlisted-tool result must survive byte-identical"
+        );
+    }
+}
+
+/// An ORPHANED result — its `ToolUse` already folded away by an earlier
+/// compaction — can no longer be named, so the name-only predicate exempted
+/// it forever however large it grew.
+#[test]
+fn issue_559_large_orphaned_result_is_eligible() {
+    let big = "x".repeat(50_000);
+    // No ToolUse blocks at all: nothing can be named.
+    let mut msgs: Vec<Message> = (0..12)
+        .map(|i| user(vec![tool_result(&format!("orphan{i}"), &big)]))
+        .collect();
+
+    let config = CompactConfig::default();
+    let pressure = ContextPressure {
+        real_input_tokens: 150_000,
+        autocompact_threshold: THRESHOLD,
+    };
+    assert!(should_microcompact(&msgs, &config, pressure));
+    let result = microcompact(&mut msgs, &config);
+    assert_eq!(result.cleared_count, 7);
+}
+
+/// `0` is the documented escape hatch back to the old name-only behaviour.
+#[test]
+fn issue_559_zero_threshold_restores_name_only_behaviour() {
+    let mut msgs = leader_history();
+    let config = CompactConfig {
+        micro_large_result_bytes: 0,
+        ..Default::default()
+    };
+    let pressure = ContextPressure {
+        real_input_tokens: 150_000,
+        autocompact_threshold: THRESHOLD,
+    };
+    assert!(!should_microcompact(&msgs, &config, pressure));
+    assert_eq!(microcompact(&mut msgs, &config).cleared_count, 0);
+}

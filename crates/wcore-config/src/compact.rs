@@ -96,6 +96,29 @@ pub struct CompactConfig {
     #[serde(default = "default_compactable_tools")]
     pub compactable_tools: Vec<String>,
 
+    /// Microcompact: byte size above which a tool result is eligible for
+    /// clearing REGARDLESS of which tool produced it.
+    ///
+    /// `compactable_tools` is an allow-list of six built-in names, so an agent
+    /// whose loop is delegation, web fetch, RepoMap or MCP calls has zero
+    /// compactable results: the count trigger never fires and the clear pass
+    /// has nothing it may touch, at any size and any pressure below hard
+    /// overflow (issue #559 — a team leader re-billing 600 KB of stale
+    /// delegated transcripts on every sub-call). The list cannot be extended
+    /// to cover it either: MCP and plugin tool names are not knowable at build
+    /// time.
+    ///
+    /// Size is the right property for the residue. A body this large, already
+    /// past the `micro_keep_recent` protected tail and under at least
+    /// `micro_pressure_fraction` of real pressure, is stale working data
+    /// whatever produced it. Small results from unlisted tools (a todo list,
+    /// an answered question) carry state and stay untouched, so this is not a
+    /// licence to erase everything.
+    ///
+    /// `0` restores the old name-only behaviour.
+    #[serde(default = "default_micro_large_result_bytes")]
+    pub micro_large_result_bytes: usize,
+
     /// Whether the compaction system is enabled.
     /// When false, microcompact and autocompact are skipped
     /// (emergency truncation still applies).
@@ -285,6 +308,7 @@ impl Default for CompactConfig {
             micro_gap_seconds: default_micro_gap_seconds(),
             micro_pressure_fraction: default_micro_pressure_fraction(),
             compactable_tools: default_compactable_tools(),
+            micro_large_result_bytes: default_micro_large_result_bytes(),
             enabled: default_true(),
             cache_diagnostics: false,
             compaction: wcore_compact::CompactionLevel::default(),
@@ -333,6 +357,10 @@ fn default_compactable_tools() -> Vec<String> {
         "Write".into(),
         "Edit".into(),
     ]
+}
+/// ~5k tokens at the usual 4 bytes/token estimate.
+fn default_micro_large_result_bytes() -> usize {
+    20_000
 }
 fn default_true() -> bool {
     true

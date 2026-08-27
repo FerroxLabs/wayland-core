@@ -139,7 +139,12 @@ fn count_trigger(messages: &[Message], config: &CompactConfig) -> bool {
         .map(String::as_str)
         .collect();
 
-    let count = count_compactable_results(messages, &tool_names, &compactable_set);
+    let count = count_compactable_results(
+        messages,
+        &tool_names,
+        &compactable_set,
+        config.micro_large_result_bytes,
+    );
     count > config.micro_keep_recent * 2
 }
 
@@ -166,7 +171,12 @@ pub fn microcompact(messages: &mut [Message], config: &CompactConfig) -> Microco
 
     // Collect (message_index, block_index) of all compactable, non-cleared
     // tool results, in conversation order.
-    let targets = collect_compactable_locations(messages, &tool_names, &compactable_set);
+    let targets = collect_compactable_locations(
+        messages,
+        &tool_names,
+        &compactable_set,
+        config.micro_large_result_bytes,
+    );
 
     let keep = config.micro_keep_recent.max(1);
     if targets.len() <= keep {
@@ -550,11 +560,12 @@ fn count_compactable_results(
     messages: &[Message],
     tool_names: &HashMap<String, String>,
     compactable_set: &HashSet<&str>,
+    large_result_bytes: usize,
 ) -> usize {
     messages
         .iter()
         .flat_map(|m| &m.content)
-        .filter(|b| is_compactable_and_live(b, tool_names, compactable_set))
+        .filter(|b| is_compactable_and_live(b, tool_names, compactable_set, large_result_bytes))
         .count()
 }
 
@@ -564,11 +575,12 @@ fn collect_compactable_locations(
     messages: &[Message],
     tool_names: &HashMap<String, String>,
     compactable_set: &HashSet<&str>,
+    large_result_bytes: usize,
 ) -> Vec<(usize, usize)> {
     let mut locations = Vec::new();
     for (mi, msg) in messages.iter().enumerate() {
         for (bi, block) in msg.content.iter().enumerate() {
-            if is_compactable_and_live(block, tool_names, compactable_set) {
+            if is_compactable_and_live(block, tool_names, compactable_set, large_result_bytes) {
                 locations.push((mi, bi));
             }
         }
@@ -578,12 +590,19 @@ fn collect_compactable_locations(
 
 /// A tool result is "compactable and live" when:
 /// 1. It is a `ToolResult` variant.
-/// 2. Its corresponding tool name is in the compactable set.
-/// 3. Its content has not already been cleared.
+/// 2. Its content has not already been cleared.
+/// 3. Its corresponding tool name is in the compactable set, OR its body is
+///    larger than `large_result_bytes` (when that is non-zero).
+///
+/// The size arm is what makes the pass reach delegation / web / MCP results,
+/// whose names cannot be enumerated at build time, and an ORPHANED result
+/// whose `ToolUse` an earlier compaction already folded away — which the name
+/// map can no longer name, so it would otherwise be exempt forever.
 fn is_compactable_and_live(
     block: &ContentBlock,
     tool_names: &HashMap<String, String>,
     compactable_set: &HashSet<&str>,
+    large_result_bytes: usize,
 ) -> bool {
     if let ContentBlock::ToolResult {
         tool_use_id,
@@ -593,6 +612,9 @@ fn is_compactable_and_live(
     {
         if content == CLEARED_TOOL_RESULT || content.starts_with(SUPERSEDED_TOOL_RESULT_PREFIX) {
             return false;
+        }
+        if large_result_bytes > 0 && content.len() > large_result_bytes {
+            return true;
         }
         if let Some(name) = tool_names.get(tool_use_id) {
             return compactable_set.contains(name.as_str());
@@ -678,13 +700,16 @@ mod tests {
 
     // ── is_compactable_and_live ─────────────────────────────────────────
 
+    /// Stands in for `CompactConfig::default().micro_large_result_bytes`.
+    const LARGE: usize = 20_000;
+
     #[test]
     fn live_compactable_result_returns_true() {
         let tool_names: HashMap<String, String> =
             [("t1".into(), "Read".into())].into_iter().collect();
         let set: HashSet<&str> = ["Read"].into_iter().collect();
         let block = tool_result_block("t1", "file content here");
-        assert!(is_compactable_and_live(&block, &tool_names, &set));
+        assert!(is_compactable_and_live(&block, &tool_names, &set, LARGE));
     }
 
     #[test]
@@ -693,7 +718,7 @@ mod tests {
             [("t1".into(), "Read".into())].into_iter().collect();
         let set: HashSet<&str> = ["Read"].into_iter().collect();
         let block = tool_result_block("t1", CLEARED_TOOL_RESULT);
-        assert!(!is_compactable_and_live(&block, &tool_names, &set));
+        assert!(!is_compactable_and_live(&block, &tool_names, &set, LARGE));
     }
 
     #[test]
@@ -702,7 +727,7 @@ mod tests {
             [("t1".into(), "Skill".into())].into_iter().collect();
         let set: HashSet<&str> = ["Read", "Bash"].into_iter().collect();
         let block = tool_result_block("t1", "result");
-        assert!(!is_compactable_and_live(&block, &tool_names, &set));
+        assert!(!is_compactable_and_live(&block, &tool_names, &set, LARGE));
     }
 
     #[test]
@@ -710,7 +735,7 @@ mod tests {
         let tool_names = HashMap::new();
         let set: HashSet<&str> = ["Read"].into_iter().collect();
         let block = text_block("hello");
-        assert!(!is_compactable_and_live(&block, &tool_names, &set));
+        assert!(!is_compactable_and_live(&block, &tool_names, &set, LARGE));
     }
 
     #[test]
@@ -718,7 +743,54 @@ mod tests {
         let tool_names = HashMap::new(); // no ToolUse registered
         let set: HashSet<&str> = ["Read"].into_iter().collect();
         let block = tool_result_block("orphan", "data");
-        assert!(!is_compactable_and_live(&block, &tool_names, &set));
+        assert!(!is_compactable_and_live(&block, &tool_names, &set, LARGE));
+    }
+
+    #[test]
+    fn large_result_from_unlisted_tool_returns_true() {
+        let tool_names: HashMap<String, String> =
+            [("t1".into(), "Delegate".into())].into_iter().collect();
+        let set: HashSet<&str> = ["Read", "Bash"].into_iter().collect();
+        let block = tool_result_block("t1", &"x".repeat(LARGE + 1));
+        assert!(is_compactable_and_live(&block, &tool_names, &set, LARGE));
+    }
+
+    #[test]
+    fn large_orphaned_result_returns_true() {
+        let tool_names = HashMap::new(); // ToolUse already folded away
+        let set: HashSet<&str> = ["Read"].into_iter().collect();
+        let block = tool_result_block("orphan", &"x".repeat(LARGE + 1));
+        assert!(is_compactable_and_live(&block, &tool_names, &set, LARGE));
+    }
+
+    #[test]
+    fn large_result_ignored_when_threshold_is_zero() {
+        let tool_names: HashMap<String, String> =
+            [("t1".into(), "Delegate".into())].into_iter().collect();
+        let set: HashSet<&str> = ["Read"].into_iter().collect();
+        let block = tool_result_block("t1", &"x".repeat(LARGE + 1));
+        assert!(!is_compactable_and_live(&block, &tool_names, &set, 0));
+    }
+
+    #[test]
+    fn large_but_already_cleared_result_returns_false() {
+        let tool_names: HashMap<String, String> =
+            [("t1".into(), "Delegate".into())].into_iter().collect();
+        let set: HashSet<&str> = ["Read"].into_iter().collect();
+        // The already-cleared early-out must win over the size arm, or a
+        // superseded-read stub would be re-counted on every later pass.
+        let cleared = tool_result_block("t1", CLEARED_TOOL_RESULT);
+        assert!(!is_compactable_and_live(&cleared, &tool_names, &set, 1));
+        let superseded = tool_result_block(
+            "t1",
+            &format!("{SUPERSEDED_TOOL_RESULT_PREFIX} {}", "x".repeat(LARGE)),
+        );
+        assert!(!is_compactable_and_live(
+            &superseded,
+            &tool_names,
+            &set,
+            LARGE
+        ));
     }
 
     // ── time_trigger ────────────────────────────────────────────────────

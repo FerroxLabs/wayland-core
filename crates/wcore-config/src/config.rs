@@ -6323,6 +6323,7 @@ allow_list = ["Read", "Grep", "Glob"]
 # micro_keep_recent = 5          # keep N most recent tool results
 # micro_gap_seconds = 3600       # gap threshold for time-based microcompact
 # compactable_tools = ["Read", "Bash", "Grep", "Glob", "Write", "Edit"]
+# micro_large_result_bytes = 20000 # clear any result over this size, whatever tool made it (0 = name-only)
 # enabled = true
 
 # File state cache (dedup repeated reads, staleness detection)
