@@ -134,6 +134,23 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ matrix.provider == 'anthropic' && secrets.ANTHROPIC_API_KEY || '' }}
           OPENAI_API_KEY:    ${{ matrix.provider == 'openai'    && secrets.OPENAI_API_KEY    || '' }}
+          # Endpoint and model overrides. Repository VARIABLES, not secrets --
+          # a base URL and a model id are not secret, and keeping them visible
+          # means anyone reading a green check can see WHAT it dialled. Unset
+          # variables expand to '' and every consumer falls back to the vendor
+          # default, so the no-variable behaviour is unchanged.
+          #
+          # These exist because a green here means "the endpoint we dialled
+          # works", which is only "the vendor works" when the endpoint IS the
+          # vendor. If E2E_*_BASE_URL points at a router, this suite is
+          # proving our wire format against that router's normalisation and
+          # can no longer catch vendor drift. That is a deliberate trade to
+          # keep a REQUIRED check honest-and-running rather than permanently
+          # red; it is not equivalent coverage.
+          E2E_OPENAI_BASE_URL:    ${{ vars.E2E_OPENAI_BASE_URL }}
+          E2E_ANTHROPIC_BASE_URL: ${{ vars.E2E_ANTHROPIC_BASE_URL }}
+          E2E_ANTHROPIC_HAIKU:    ${{ vars.E2E_ANTHROPIC_HAIKU }}
+          E2E_OPENAI_GPT4O_MINI:  ${{ vars.E2E_OPENAI_GPT4O_MINI }}
         run: |
           vx cargo nextest run \
             -p wcore-agent \

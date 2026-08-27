@@ -17,6 +17,27 @@ use wcore_providers::create_provider;
 use wcore_tools::read::ReadTool;
 use wcore_tools::registry::ToolRegistry;
 
+/// The provider endpoint these live tests dial.
+///
+/// Env-overridable for the same reason the MODEL ids already are
+/// (`wcore_types::model_aliases::from_env_or`): a value baked into the test
+/// source cannot be pointed at a staging endpoint, a proxy, or a router, so
+/// the suite can only ever run in exactly one configuration. Defaults to the
+/// vendor endpoint, so an unset variable behaves exactly as before.
+///
+/// NOTE ON WHAT A GREEN MEANS: pointed at a router rather than the vendor,
+/// this suite proves our wire format works against THAT router's
+/// normalisation, not against the vendor's live API. The whole value of a
+/// live-provider test is catching vendor drift, and a router can mask
+/// precisely that. Read the check accordingly — it is the endpoint under
+/// test, not necessarily the vendor.
+fn e2e_base_url(var: &str, default: &str) -> String {
+    std::env::var(var)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
 /// Skip the test if ANTHROPIC_API_KEY is not set.
 fn anthropic_api_key() -> Option<String> {
     std::env::var("ANTHROPIC_API_KEY")
@@ -29,7 +50,7 @@ fn anthropic_config(api_key: &str) -> Config {
         provider: ProviderType::Anthropic,
         provider_label: "anthropic".to_string(),
         api_key: api_key.to_string(),
-        base_url: "https://api.anthropic.com".to_string(),
+        base_url: e2e_base_url("E2E_ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
         model: crate::common::models::anthropic_haiku(), // cheapest for e2e
         max_tokens: 256,
         max_turns: Some(3),
