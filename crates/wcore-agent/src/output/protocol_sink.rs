@@ -1263,6 +1263,12 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    fn emit_route_info(&self, route: &wcore_protocol::events::RouteInfo) {
+        let _ = self.writer.emit(&ProtocolEvent::RouteInfo {
+            route: route.clone(),
+        });
+    }
+
     fn emit_midflight_monitor_decision(
         &self,
         directive: wcore_protocol::events::MonitorDirective,

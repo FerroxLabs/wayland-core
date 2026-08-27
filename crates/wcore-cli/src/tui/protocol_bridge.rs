@@ -1106,6 +1106,9 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::ProviderAttempt { .. }
         | ProtocolEvent::ProviderRetry { .. }
         | ProtocolEvent::ProviderFailure { .. }
+        // #372 route diagnostics are host-facing evidence; the TUI already
+        // shows its own route in the status line and has no separate view.
+        | ProtocolEvent::RouteInfo { .. }
         // Failover receipts are authoritative host/protocol evidence. The TUI
         // has no receipt view yet, so accepting one must not mutate local state.
         | ProtocolEvent::ProviderFailoverReceipt { .. }

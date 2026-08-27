@@ -80,6 +80,16 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // host reads, so the version moves once and all three capabilities name
 // themselves.
 //
+// 19 -> 20: `route_info_v1` (#372). A new always-on event carrying the route a
+// turn dispatched against — provider, model, the scrubbed endpoint, and a
+// derived local-vs-cloud flag. The reporter ran the same task against a local
+// Ollama server and a cloud OpenRouter gateway; both are driven as
+// `provider = "openai"`, so every route-bearing field already published read
+// identically for the two runs and the endpoint was absent from the protocol
+// entirely. A host cannot feature-detect a new event type by sending anything —
+// it either sees the frame or it does not — so the version is the only way a
+// pinned host learns the route is now answerable.
+//
 // ON THE GAP BETWEEN 16 AND 19. The last TAGGED contract is 1.16 — v0.13.5,
 // v0.13.6 and `main` all publish it. 17 and 18 were assembled on this branch
 // and never reached a tag, so no host has ever pinned them. The entries above
@@ -87,8 +97,8 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // gap: each records why a specific widening needed a signal, and rewriting them
 // to look consecutive would destroy that reasoning to tidy a sequence no host
 // reads. A pinned host moves 1.16 -> 1.19 and finds every capability named.
-pub const CONTRACT_MINOR: u64 = 19;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/19";
+pub const CONTRACT_MINOR: u64 = 20;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/20";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases

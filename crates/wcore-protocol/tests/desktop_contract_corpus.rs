@@ -336,9 +336,9 @@ fn every_command_fixture_round_trips_to_the_variant_it_names() {
 }
 
 #[test]
-fn inventory_is_exactly_twenty_six_commands_and_sixty_one_events() {
+fn inventory_is_exactly_twenty_six_commands_and_sixty_two_events() {
     assert_eq!(COMMAND_SPECS.len(), 26);
-    assert_eq!(EVENT_SPECS.len(), 61);
+    assert_eq!(EVENT_SPECS.len(), 62);
     assert_eq!(
         COMMAND_SPECS
             .iter()
@@ -353,7 +353,7 @@ fn inventory_is_exactly_twenty_six_commands_and_sixty_one_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        61
+        62
     );
 }
 
@@ -439,9 +439,9 @@ fn manifest_pins_generator_and_all_three_digests() {
     assert_eq!(manifest["contract"]["major"], CONTRACT_MAJOR);
     assert_eq!(manifest["contract"]["minor"], CONTRACT_MINOR);
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 26);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 61);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 62);
     assert_eq!(manifest["counts"]["commands"], 26);
-    assert_eq!(manifest["counts"]["events"], 61);
+    assert_eq!(manifest["counts"]["events"], 62);
     assert_eq!(manifest["counts"]["child_types"], 3);
     assert_eq!(
         manifest["child_types"],
@@ -531,8 +531,8 @@ fn manifest_publishes_a_wire_shape_for_every_command_and_event() {
     );
     assert_eq!(
         shapes.len(),
-        26 + 61 + 1,
-        "26 commands, 61 events, and the legacy sub-agent compatibility branch"
+        26 + 62 + 1,
+        "26 commands, 62 events, and the legacy sub-agent compatibility branch"
     );
     // The correlation anchors every later tool frame is matched against. A
     // rename here is the exact break regeneration used to bless.

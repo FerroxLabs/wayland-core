@@ -257,6 +257,13 @@ pub trait OutputSink: Send + Sync {
     /// retry decision.
     fn emit_provider_failure(&self, _failure: &str) {}
 
+    /// #372: emit the route this turn dispatched against — provider, model,
+    /// the scrubbed endpoint and a derived local-vs-cloud flag. Default no-op
+    /// for non-protocol sinks; the JSON-stream sink emits it always-on so a
+    /// host can tell a local model server from a cloud one, which the provider
+    /// name alone cannot express.
+    fn emit_route_info(&self, _route: &wcore_protocol::events::RouteInfo) {}
+
     /// F10: emit a typed monitor control-flow decision. Default no-op for
     /// non-protocol sinks; JSON and test sinks preserve the stable reason.
     fn emit_midflight_monitor_decision(

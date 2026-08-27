@@ -7850,6 +7850,23 @@ impl AgentEngine {
     ///
     /// Real #255 kernel API: `ContextWindow::resolve(used_tokens, provider,
     /// model, config_window) -> Self`, then `percent(&self) -> Option<u32>`.
+    /// #372: publish the route this turn actually dispatched against.
+    ///
+    /// A local Ollama endpoint and a cloud OpenAI-compatible endpoint are both
+    /// driven as `provider = "openai"`, so provider and model alone cannot tell
+    /// a host which of the two a step ran on. `RouteInfo::from_endpoint` owns
+    /// the redaction — a `base_url` can carry an API key in userinfo or in a
+    /// query string, so it is never published raw.
+    fn emit_route_info(&self, turn: usize, effective_model: &str) {
+        self.output
+            .emit_route_info(&wcore_protocol::events::RouteInfo::from_endpoint(
+                turn,
+                self.compat.provider_type(),
+                effective_model,
+                Some(self.config.base_url.as_str()),
+            ));
+    }
+
     fn active_window_percent_now(&self, effective_model: &str, used_tokens: u64) -> Option<u32> {
         use wcore_config::context_window::ContextWindow;
         ContextWindow::resolve(
@@ -14851,6 +14868,7 @@ impl AgentEngine {
                     // #279(b)+(c): correlate this turn's trace to the run.
                     agent_run_id: self.current_agent_run_id.clone().unwrap_or_default(),
                 };
+                self.emit_route_info(turn, &effective_model);
                 if let Ok(trace_json) = serde_json::to_value(&trace) {
                     self.output.emit_trace(&self.current_msg_id, &trace_json);
                 }
@@ -15616,6 +15634,7 @@ impl AgentEngine {
                 // #279(b)+(c): correlate this turn's trace to the run.
                 agent_run_id: self.current_agent_run_id.clone().unwrap_or_default(),
             };
+            self.emit_route_info(turn, &effective_model);
             if let Ok(trace_json) = serde_json::to_value(&trace) {
                 self.output.emit_trace(&self.current_msg_id, &trace_json);
             }

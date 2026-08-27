@@ -27,7 +27,7 @@ use crate::events::{
     OperatorResolutionEvidence, OperatorResolutionEvidenceSource, OperatorToolEffectOutcome,
     OperatorToolEffectResolution, OutputType, ProtocolEvent, RecoveryBudgetSnapshot,
     RecoveryCursor, RecoveryLifecycle, RecoveryReconcileReason, RecoveryReplayItem,
-    RecoveryReplayKind, RecoveryTurnSnapshot, RecoveryUnavailableReason, RenderMime,
+    RecoveryReplayKind, RecoveryTurnSnapshot, RecoveryUnavailableReason, RenderMime, RouteInfo,
     SessionPersistence, ToolCategory, ToolInfo, ToolStatus, TurnCost, Usage,
     WorkflowChildTerminalState, WorkflowNodeState, WorkflowTerminalState,
 };
@@ -785,6 +785,16 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "session",
         "available"
     ),
+    // #372 route diagnostics. Observational: a host reads it to label a step
+    // local or cloud and to show the endpoint. `base_url` arrives scrubbed.
+    wire!(
+        "route_info",
+        "events/route_info.json",
+        ["route"],
+        Observational,
+        "session",
+        "available"
+    ),
     // Structured monitor control flow. Safety: this is how a host tells a
     // deliberate stop/replan apart from a generic engine error, and mis-reading
     // it means telling the user the run crashed when Core chose to stop.
@@ -1116,6 +1126,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "provider_attempt",
     "provider_retry",
     "provider_failure",
+    "route_info",
     "mid_flight_monitor_decision",
     "approval_required",
     "suspend",
@@ -2119,6 +2130,19 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             "events/provider_failure.json".into(),
             ProtocolEvent::ProviderFailure {
                 failure: "stream_truncated".into(),
+            },
+        ),
+        // #372: the fixture deliberately uses a local endpoint, which is the
+        // route the reporter could not identify from the wire.
+        (
+            "events/route_info.json".into(),
+            ProtocolEvent::RouteInfo {
+                route: RouteInfo::from_endpoint(
+                    0,
+                    "openai",
+                    "qwen3:8b",
+                    Some("http://127.0.0.1:11434/v1"),
+                ),
             },
         ),
         (

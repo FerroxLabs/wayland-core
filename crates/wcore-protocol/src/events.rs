@@ -1204,6 +1204,16 @@ pub enum ProtocolEvent {
     ProviderFailure {
         failure: String,
     },
+    /// #372 per-turn route diagnostics. A local Ollama endpoint and a cloud
+    /// OpenAI-compatible endpoint both report `provider = "openai"`, so the
+    /// provider name alone cannot answer "did this step run locally or in the
+    /// cloud?" — the question the reporter of #372 could not answer from the
+    /// wire. This additive event carries the resolved endpoint and a derived
+    /// locality flag beside the model, once per turn. Unknown hosts drop it
+    /// under the W0 decoder contract.
+    RouteInfo {
+        route: RouteInfo,
+    },
     /// F10 always-on structured monitor decision. Hosts use this additive
     /// event to distinguish a deliberate stop/replan from a generic engine
     /// error or informational string.
@@ -1697,6 +1707,140 @@ pub enum McpRemovalOutcome {
     CapacityExceeded,
     CleanupUnverified,
     RegistryBusy,
+}
+
+/// #372 route diagnostics for one turn, carried by
+/// [`ProtocolEvent::RouteInfo`].
+///
+/// # Why the endpoint has to be on the wire
+///
+/// `provider` is the structured provider id (`"openai"`, `"anthropic"`, ...).
+/// It is not a route: a local Ollama server and a cloud OpenAI-compatible
+/// gateway are both driven as `openai`, and the only thing that tells them
+/// apart is the base URL they resolved to. Without it a host cannot say which
+/// of the two a step ran against, which is exactly what #372 asked for.
+///
+/// # `base_url` is scrubbed, and that is load-bearing
+///
+/// A base URL is a credential carrier: it can hold a key in userinfo
+/// (`https://user:secret@host/v1`) or in a query string
+/// (`https://host/v1?api_key=...`). [`RouteInfo::from_endpoint`] is the only
+/// way this struct is built inside Core, and it removes both before the value
+/// can reach the wire. Do not populate `base_url` from a raw configured URL by
+/// hand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteInfo {
+    /// Zero-based turn index this route was dispatched for.
+    pub turn: usize,
+    /// Structured provider id, same vocabulary as [`TurnCost::provider`].
+    pub provider: String,
+    /// The model actually dispatched this turn (post tier-swap).
+    pub model: String,
+    /// Resolved endpoint with userinfo, query and fragment removed. `None`
+    /// when the provider resolved no explicit endpoint (SDK-default routing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// True when `base_url` resolves to a loopback, link-local or private
+    /// host — i.e. the step ran against a machine-local or LAN model server
+    /// rather than a cloud endpoint. False when there is no endpoint.
+    pub local: bool,
+}
+
+impl RouteInfo {
+    /// Build a wire-safe route row from a resolved endpoint.
+    ///
+    /// This is the enforcement point for #372's redaction requirement: the
+    /// endpoint is scrubbed here and nowhere else, so no call site can emit a
+    /// credential-bearing base URL by forgetting to.
+    pub fn from_endpoint(
+        turn: usize,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        base_url: Option<&str>,
+    ) -> Self {
+        let raw = base_url.map(str::trim).filter(|url| !url.is_empty());
+        Self {
+            turn,
+            provider: provider.into(),
+            model: model.into(),
+            base_url: raw.map(scrub_base_url),
+            local: raw.is_some_and(is_local_endpoint),
+        }
+    }
+}
+
+/// Split a URL into `(scheme_with_separator, authority, path)`, dropping the
+/// query and the fragment. Deliberately hand-rolled: this crate carries no URL
+/// parser, and the shapes a provider `base_url` can take are narrow.
+fn split_endpoint(raw: &str) -> (&str, &str, &str) {
+    let (scheme, rest) = match raw.find("://") {
+        Some(idx) => raw.split_at(idx + 3),
+        None => ("", raw),
+    };
+    let rest = rest
+        .split_once(['?', '#'])
+        .map_or(rest, |(before, _)| before);
+    let (authority, path) = match rest.find('/') {
+        Some(idx) => rest.split_at(idx),
+        None => (rest, ""),
+    };
+    (scheme, authority, path)
+}
+
+/// Remove userinfo, query string and fragment from an endpoint so it can be
+/// published. Both positions can carry an API key.
+fn scrub_base_url(raw: &str) -> String {
+    let (scheme, authority, path) = split_endpoint(raw);
+    // `rsplit_once` so a password containing `@` cannot smuggle the rest back.
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_userinfo, host)| host);
+    format!("{scheme}{host}{path}")
+}
+
+/// The bare host of an endpoint: userinfo, port and IPv6 brackets removed.
+fn host_of(raw: &str) -> String {
+    let (_, authority, _) = split_endpoint(raw);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_userinfo, host)| host);
+    let host = if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6 literal, e.g. `[::1]:11434`.
+        rest.split_once(']').map_or(rest, |(ip, _port)| ip)
+    } else if host.matches(':').count() > 1 {
+        // Bare IPv6 literal — a port cannot be expressed without brackets, so
+        // the last colon is part of the address, not a port separator.
+        host
+    } else {
+        host.split_once(':').map_or(host, |(host, _port)| host)
+    };
+    host.trim().to_ascii_lowercase()
+}
+
+/// Whether an endpoint points at a loopback, link-local or private-range host.
+///
+/// The address checks run ONLY against a parsed IP literal. A prefix match on
+/// the raw string would call `https://127.0.0.1.evil.example.com/v1` local —
+/// a registrable public name that anyone can point anywhere — and this flag is
+/// exactly what a user would trust to decide their prompt never left the box.
+fn is_local_endpoint(raw: &str) -> bool {
+    let host = host_of(raw);
+    if let Ok(addr) = host.parse::<std::net::Ipv4Addr>() {
+        return addr.is_loopback()
+            || addr.is_private()
+            || addr.is_link_local()
+            || addr.is_unspecified();
+    }
+    if let Ok(addr) = host.parse::<std::net::Ipv6Addr>() {
+        let head = addr.segments()[0];
+        // fc00::/7 unique-local, fe80::/10 link-local. Both stdlib predicates
+        // are still unstable, so the prefixes are checked directly.
+        return addr.is_loopback()
+            || addr.is_unspecified()
+            || head & 0xfe00 == 0xfc00
+            || head & 0xffc0 == 0xfe80;
+    }
+    host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local")
 }
 
 /// W6 F7 per-turn cost row carried by [`ProtocolEvent::SessionCost`].
@@ -2967,5 +3111,78 @@ mod tests {
         }))
         .unwrap();
         assert!(!row.priced);
+    }
+
+    /// #372 REDACTION. A provider `base_url` is a credential carrier — a key
+    /// can sit in userinfo or in a query string. Both positions must be gone
+    /// from the serialized event, because this event exists to be shown to a
+    /// user and forwarded to a host log.
+    #[test]
+    fn route_info_never_serializes_a_credential_bearing_base_url() {
+        let cases = [
+            "https://user:s3cr3t@gateway.example.com/v1",
+            "https://gateway.example.com/v1?api_key=s3cr3t",
+            "https://gateway.example.com/v1#s3cr3t",
+            "https://user:s3cr3t@gateway.example.com/v1?api_key=s3cr3t",
+            // A password containing `@` must not smuggle the rest back in.
+            "https://user:p@ss3cr3t@gateway.example.com/v1",
+        ];
+        for raw in cases {
+            let event = ProtocolEvent::RouteInfo {
+                route: RouteInfo::from_endpoint(0, "openai", "gpt-5", Some(raw)),
+            };
+            let wire = serde_json::to_string(&event).expect("serialize");
+            assert!(
+                !wire.contains("s3cr3t"),
+                "credential survived onto the wire for {raw}: {wire}"
+            );
+            assert!(
+                wire.contains("gateway.example.com/v1"),
+                "scrubbing must keep the diagnostic host+path for {raw}: {wire}"
+            );
+        }
+    }
+
+    /// The whole point of the event: `provider` is `openai` for BOTH a local
+    /// Ollama server and a cloud gateway, so `local` is the only field that
+    /// answers the question #372 asked.
+    #[test]
+    fn route_info_locality_separates_local_from_cloud_on_one_provider_id() {
+        let local = [
+            "http://127.0.0.1:11434/v1",
+            "http://localhost:11434",
+            "http://LOCALHOST:8080/v1",
+            "http://192.168.1.50:11434/v1",
+            "http://10.0.0.7:11434",
+            "http://172.20.0.4:11434",
+            "http://[::1]:11434/v1",
+            "http://ollama.local:11434",
+        ];
+        let cloud = [
+            "https://api.openai.com/v1",
+            "https://openrouter.ai/api/v1",
+            // 172.32 is OUTSIDE the private 172.16.0.0/12 block.
+            "http://172.32.0.4:11434",
+            "https://127.0.0.1.evil.example.com/v1",
+        ];
+        for raw in local {
+            let route = RouteInfo::from_endpoint(0, "openai", "qwen3:8b", Some(raw));
+            assert!(route.local, "{raw} must be reported as a local route");
+        }
+        for raw in cloud {
+            let route = RouteInfo::from_endpoint(0, "openai", "gpt-5", Some(raw));
+            assert!(!route.local, "{raw} must NOT be reported as a local route");
+        }
+    }
+
+    /// No resolved endpoint must not be published as "local" — absence of an
+    /// endpoint is not evidence of a loopback one.
+    #[test]
+    fn route_info_without_an_endpoint_is_absent_not_local() {
+        for raw in [None, Some(""), Some("   ")] {
+            let route = RouteInfo::from_endpoint(3, "anthropic", "claude", raw);
+            assert_eq!(route.base_url, None, "{raw:?}");
+            assert!(!route.local, "{raw:?}");
+        }
     }
 }
