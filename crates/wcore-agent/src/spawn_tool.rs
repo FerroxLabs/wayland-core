@@ -828,6 +828,7 @@ mod spawn_output_budget_tests {
     use async_trait::async_trait;
     use serde_json::json;
     use tokio::sync::mpsc;
+    use wcore_config::compat::ProviderCompat;
     use wcore_config::config::{Config, SessionConfig};
     use wcore_providers::{LlmProvider, ProviderError};
     use wcore_tools::Tool;
@@ -844,6 +845,37 @@ mod spawn_output_budget_tests {
     /// a literal on purpose: this test asserts the FORK can reach that ceiling,
     /// so it must fail if either side drifts.
     const UNKNOWN_REASONING_CAP: u32 = 32_768;
+
+    /// Records the shape of every request a child engine actually puts on the
+    /// wire: the sized cap AND whether that cap is serialized at all
+    /// (`omit_max_tokens`). Both halves matter — #862 was measured as a fork
+    /// sending a cap the identical no-fork session omitted.
+    struct RecordingProvider(Arc<Mutex<Vec<(u32, bool)>>>);
+
+    #[async_trait]
+    impl LlmProvider for RecordingProvider {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((request.max_tokens, request.omit_max_tokens));
+            let (tx, rx) = mpsc::channel(2);
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta("ok".to_string())).await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
 
     fn task(max_tokens: u32) -> SubAgentConfig {
         SubAgentConfig {
@@ -901,30 +933,6 @@ mod spawn_output_budget_tests {
         /// `UNKNOWN_REASONING_CAP` above: drift on either side must fail.
         const UNKNOWN_CAP: u32 = 8_192;
 
-        struct RecordingProvider(Arc<Mutex<Vec<u32>>>);
-
-        #[async_trait]
-        impl LlmProvider for RecordingProvider {
-            async fn stream(
-                &self,
-                request: &LlmRequest,
-            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-                self.0.lock().unwrap().push(request.max_tokens);
-                let (tx, rx) = mpsc::channel(2);
-                tokio::spawn(async move {
-                    let _ = tx.send(LlmEvent::TextDelta("ok".to_string())).await;
-                    let _ = tx
-                        .send(LlmEvent::Done {
-                            stop_reason: StopReason::EndTurn,
-                            finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
-                            usage: TokenUsage::default(),
-                        })
-                        .await;
-                });
-                Ok(rx)
-            }
-        }
-
         let dir = tempfile::tempdir().unwrap();
         let recorded = Arc::new(Mutex::new(Vec::new()));
         // The incident's shape: a router alias unknown to the limits registry,
@@ -956,14 +964,70 @@ mod spawn_output_budget_tests {
         let caps = recorded.lock().unwrap();
         assert_eq!(caps.len(), 1, "expected exactly one child request");
         assert!(
-            caps[0] > DEFAULT_SUB_AGENT_MAX_TOKENS,
+            caps[0].0 > DEFAULT_SUB_AGENT_MAX_TOKENS,
             "the child reached the wire on the raw sub-agent default ({}) — \
              the parent-cap floor is not reaching the dispatch path",
-            caps[0]
+            caps[0].0
         );
         assert_eq!(
-            caps[0], UNKNOWN_CAP,
+            caps[0].0, UNKNOWN_CAP,
             "a floored child must size to the unknown-model ceiling, not below it"
+        );
+    }
+
+    /// Assertion 4 — close the remaining half of #862. The floor fixes the
+    /// child's INTERNAL budget, but the incident was measured on the WIRE:
+    /// `flux-auto` forks failed 3/8 while the identical no-fork session passed
+    /// 20/20. On an omit-safe router preset with an unsized session cap, a
+    /// no-fork turn omits the wire `max_tokens` field entirely and gets the
+    /// served model's natural ceiling; the fork used to serialize the
+    /// conservative unknown-model floor (8192) because `child_config` marked
+    /// EVERY child's cap explicit (#112). The Spawn surface has no per-task cap
+    /// to be deliberate about, so the child must now inherit the session's wire
+    /// posture and the two request shapes must match.
+    #[tokio::test]
+    async fn spawn_child_inherits_the_sessions_omitted_wire_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        // The incident's shape, now including the omit-safe compat preset and
+        // the UNSIZED session cap the desktop default ships with.
+        let config = Config {
+            model: "flux-auto".into(),
+            provider_label: "flux-router".into(),
+            compat: ProviderCompat::flux_router_defaults(),
+            max_tokens: 64_000,
+            max_tokens_explicit: false,
+            session: SessionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        assert!(
+            config.compat.omit_max_tokens_when_unsized(),
+            "control: this preset must be the omit-safe one, or the test proves nothing"
+        );
+        let spawner = Arc::new(
+            AgentSpawner::new(Arc::new(RecordingProvider(Arc::clone(&recorded))), config)
+                .with_parent_workspace(dir.path())
+                .unwrap(),
+        );
+        bind_test_durable_session(&spawner, dir.path(), "f1860023");
+
+        let out = SpawnTool::new(spawner)
+            .execute(json!({
+                "tasks": [{ "name": "audit", "prompt": "inspect the workspace" }]
+            }))
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+
+        let caps = recorded.lock().unwrap();
+        assert_eq!(caps.len(), 1, "expected exactly one child request");
+        assert!(
+            caps[0].1,
+            "the fork serialized max_tokens={} while the identical no-fork \
+             session omits the field — #862's fork/no-fork asymmetry is back",
+            caps[0].0
         );
     }
 }
