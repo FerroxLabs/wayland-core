@@ -9,12 +9,26 @@ use tokio::process::Command;
 
 use super::{ExecutableReadinessError, ResolvedExecutable, resolve_mcp_stdio_executable};
 
-/// Environment variables inherited by an MCP stdio child.
+/// Environment variables inherited by an engine-spawned child process.
 ///
 /// Provider credentials, vault passphrases, and other ambient secrets are
 /// deliberately absent. A server that needs an additional variable must name
 /// it explicitly in its own configuration.
-const FORWARDED_ENVIRONMENT_VARIABLES: &[&str] = &[
+///
+/// This is the single allowlist for every `env_clear()`-ing child spawn in the
+/// workspace: the MCP stdio transport reads it through
+/// [`McpStdioLaunchContext`], and `wcore_plugin_subprocess::runner` re-exports
+/// it as `FORWARDED_ENV_VARS`. The two used to be hand-copied lists kept in
+/// step by a doc comment; they can no longer drift (#928).
+///
+/// The Windows entries are mandatory, not cosmetic. Without `SYSTEMROOT` /
+/// `WINDIR` the child cannot initialise at all (CreateProcess returns
+/// `ERROR_ENVVAR_NOT_FOUND` / 0xcb, observed v0.8.6 round 17), and without
+/// `APPDATA` / `LOCALAPPDATA` / `USERPROFILE` a Node server launched through
+/// the Windows `npx` shim cannot resolve a writable npm prefix or cache.
+/// `forwards_the_mandatory_windows_child_variables` guards them on every
+/// platform — deleting an entry fails that test on Linux and macOS too.
+pub const FORWARDED_ENVIRONMENT_VARIABLES: &[&str] = &[
     "PATH",
     "HOME",
     "USER",
@@ -288,6 +302,22 @@ fn windows_environment_keys_match(left: &str, right: &str) -> bool {
     windows_environment_key(left) == windows_environment_key(right)
 }
 
+/// Entries of [`FORWARDED_ENVIRONMENT_VARIABLES`] a Windows child cannot
+/// start without. Exposed for the guarding tests in this crate and in
+/// `wcore-plugin-subprocess`, which spawns through the same list (#928).
+#[doc(hidden)]
+pub const MANDATORY_WINDOWS_CHILD_VARIABLES: &[&str] = &[
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +354,29 @@ mod tests {
             context.environment_value("WAYLAND_PROFILE_HOME"),
             Some(OsStr::new("/profile/home"))
         );
+    }
+
+    /// #928 guard. The Windows entries of the shared allowlist are
+    /// load-bearing — a child spawned without `SYSTEMROOT`/`WINDIR` cannot
+    /// initialise (CreateProcess 0xcb), and one without
+    /// `APPDATA`/`LOCALAPPDATA`/`USERPROFILE` cannot resolve a writable npm
+    /// prefix or cache when it is a Node server behind the Windows `npx`
+    /// shim. Nothing named any of them before, so deleting one broke real
+    /// Windows users silently. This runs on every platform: `capture_for`
+    /// takes `windows_environment` as a parameter and the closure supplies
+    /// the ambient values, so no Windows host is needed.
+    #[test]
+    fn forwards_the_mandatory_windows_child_variables() {
+        let context = context_for(HashMap::new(), true).expect("context should be captured");
+
+        for key in MANDATORY_WINDOWS_CHILD_VARIABLES {
+            let expected = OsString::from(format!("ambient-{key}"));
+            assert_eq!(
+                context.environment_value(key),
+                Some(expected.as_os_str()),
+                "{key} must reach the child — the Windows spawn fails without it"
+            );
+        }
     }
 
     #[test]

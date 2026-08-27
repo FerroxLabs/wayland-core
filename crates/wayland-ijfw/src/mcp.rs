@@ -1,6 +1,7 @@
 //! G.7 — register the IJFW MCP server.
 //!
-//! Spawns `@ijfw/memory-server` via stdio. The MCP server itself
+//! Spawns the `ijfw-memory` bin from `@ijfw/memory-server` via stdio.
+//! The MCP server itself
 //! exposes the canonical memory tools, whose names carry the `ijfw_`
 //! prefix at runtime (e.g. `ijfw_memory_store`, `ijfw_memory_search`,
 //! `ijfw_memory_recall`, `ijfw_memory_prelude`, `ijfw_run`,
@@ -23,6 +24,21 @@ use wcore_plugin_api::{PluginContext, PluginResult};
 /// scopes every tool the server advertises with this name.
 pub const SERVER_NAME: &str = "ijfw-memory";
 
+/// npm package that ships the IJFW memory MCP server.
+pub const MEMORY_SERVER_PACKAGE: &str = "@ijfw/memory-server";
+
+/// Executable inside [`MEMORY_SERVER_PACKAGE`] that speaks MCP over stdio.
+///
+/// **#928.** `npx <pkg>` only resolves an executable when the package ships a
+/// bin whose name equals the package's *unscoped* name. `@ijfw/memory-server`
+/// ships `ijfw-memory`, `ijfw` and `ijfw-dispatch-plan` — there is no
+/// `memory-server` bin — so the bare `npx -y @ijfw/memory-server` this used to
+/// spawn exits 1 with `npm error could not determine executable to run` on
+/// every platform (measured against 1.6.5 on Linux and on Windows 11 26200).
+/// The bin has to be named explicitly and the package passed with
+/// `--package=`; that form completes an MCP `initialize` handshake.
+pub const MEMORY_SERVER_BIN: &str = "ijfw-memory";
+
 /// Build the default IJFW MCP server spec. Operators override the
 /// transport (npx vs locally-installed binary) via plugin config.
 pub fn default_server_spec() -> McpServerSpec {
@@ -30,7 +46,11 @@ pub fn default_server_spec() -> McpServerSpec {
         name: SERVER_NAME.to_string(),
         transport: McpTransport::Stdio {
             command: "npx".to_string(),
-            args: vec!["-y".to_string(), "@ijfw/memory-server".to_string()],
+            args: vec![
+                "-y".to_string(),
+                format!("--package={MEMORY_SERVER_PACKAGE}"),
+                MEMORY_SERVER_BIN.to_string(),
+            ],
         },
         env: HashMap::new(),
     }
@@ -146,15 +166,40 @@ fn probe_reachability(spec: &wcore_plugin_api::mcp_server_spec::McpServerSpec) -
     }
 
     // Stage 2: verify the server is actually reachable.
+    //
+    // #928: this is logged at ERROR, not INFO. `npx` being absent (stage 1) is
+    // an ordinary state for a user with no Node install, but *`npx` present and
+    // the memory server still not starting* means a feature the user can see in
+    // the UI has been silently switched off. The CLI subscriber caps the stderr
+    // writer at `Level::ERROR` (wcore-cli/src/main.rs), so with `RUST_LOG`
+    // unset an `info!` here reached the log file and nothing else — the user
+    // clicked Memory, got an error, and core had already decided not to say
+    // why.
     if !mcp_server_is_reachable(spec) {
-        tracing::info!(
-            "ijfw-memory: MCP server did not start cleanly — skipping registration. \
-             Run `npx @ijfw/memory-server --help` manually to diagnose."
-        );
+        notify_server_unreachable();
         return false;
     }
 
     true
+}
+
+/// Emit the user-visible notice that the memory server was skipped.
+///
+/// Split out of [`probe_reachability`] so the LEVEL is directly testable:
+/// `wcore-cli` builds its stderr writer as
+/// `stderr.with_max_level(tracing::Level::ERROR)`, so anything below ERROR
+/// reaches the log file and never the person who just clicked Memory. A
+/// downgrade back to `info!`/`warn!` would re-open #928 while still "logging
+/// the failure", which is why `notice_for_unreachable_server_is_user_visible`
+/// asserts on the recorded level rather than on the message text.
+fn notify_server_unreachable() {
+    tracing::error!(
+        "ijfw-memory: MCP server did not start cleanly — memory tools are \
+         disabled for this session. Run `npx -y --package={} {} --help` \
+         manually to diagnose.",
+        MEMORY_SERVER_PACKAGE,
+        MEMORY_SERVER_BIN
+    );
 }
 
 /// Returns `true` if the MCP server is reachable / will start.
@@ -162,12 +207,12 @@ fn probe_reachability(spec: &wcore_plugin_api::mcp_server_spec::McpServerSpec) -
 /// For `Stdio { command: "node", args: [script, …] }`: checks the script
 /// file exists on disk (fast, no process spawn).
 ///
-/// For all other stdio commands (e.g. `npx @ijfw/memory-server`): spawns
-/// the server with a `--help` flag and waits up to 2 seconds. If the
-/// process exits with code 0 or the `--help` flag causes it to exit
-/// non-zero but the process at least *starts* (spawn succeeds), we treat
-/// the server as reachable. If the spawn fails (binary not found / exits
-/// immediately with error) we skip.
+/// For all other stdio commands (e.g. `npx -y --package=@ijfw/memory-server
+/// ijfw-memory`): spawns the server with a `--help` flag and waits up to 2
+/// seconds. It is reachable if the child exits *cleanly* (`--help` handled) or
+/// is still running at the deadline (a real server that ignored `--help`). A
+/// non-zero exit means the command line did not resolve to a working
+/// executable and the server is NOT reachable — see #928.
 fn mcp_server_is_reachable(spec: &wcore_plugin_api::mcp_server_spec::McpServerSpec) -> bool {
     use wcore_plugin_api::mcp_server_spec::McpTransport;
     match &spec.transport {
@@ -201,7 +246,8 @@ fn mcp_server_is_reachable(spec: &wcore_plugin_api::mcp_server_spec::McpServerSp
             probe_args.push("--help");
 
             // PATHEXT-aware (issue #6): on Windows this becomes
-            // `cmd /C npx -y @ijfw/memory-server --help` so the `npx.cmd`
+            // `cmd /C npx -y --package=@ijfw/memory-server ijfw-memory
+            // --help` so the `npx.cmd`
             // shim resolves; on Unix it spawns `npx …` directly.
             let mut cmd = shim_aware_command(command);
             cmd.args(&probe_args)
@@ -219,12 +265,22 @@ fn mcp_server_is_reachable(spec: &wcore_plugin_api::mcp_server_spec::McpServerSp
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
                     loop {
                         match child.try_wait() {
-                            Ok(Some(_)) => {
-                                // Process exited — it started, which is
-                                // enough to confirm the binary is present
-                                // and executable. `--help` may exit 1,
-                                // but that's fine.
-                                return true;
+                            Ok(Some(status)) => {
+                                // #928: a successful *spawn* proves nothing
+                                // here. On Windows the child is `cmd /C`, and
+                                // through `npx` the child is the npm shim, so
+                                // spawning succeeds for a command that cannot
+                                // possibly work — this arm used to return
+                                // `true` for any exit code and so could never
+                                // reject anything. `npx -y @ijfw/memory-server
+                                // --help` exits 1 with "could not determine
+                                // executable to run"; the probe called that
+                                // reachable, the server was registered, and
+                                // every call then failed ("Retry isn't
+                                // responding"). A clean exit is the only
+                                // evidence that the command line resolved to
+                                // a real executable.
+                                return status.success();
                             }
                             Ok(None) if std::time::Instant::now() < deadline => {
                                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -263,10 +319,194 @@ mod tests {
         match parsed.transport {
             McpTransport::Stdio { command, args } => {
                 assert_eq!(command, "npx");
-                assert!(args.iter().any(|a| a == "@ijfw/memory-server"));
+                assert!(args.iter().any(|a| a.contains(MEMORY_SERVER_PACKAGE)));
             }
             _ => panic!("expected stdio transport for default IJFW MCP server"),
         }
+    }
+
+    /// #928 — the invocation must NAME the executable.
+    ///
+    /// `npx <positional>` treats the trailing positional as a *bin* name and
+    /// only falls back to "install this package and guess its bin" when the
+    /// package's unscoped name happens to equal one of its bins.
+    /// `@ijfw/memory-server` ships `ijfw-memory` / `ijfw` /
+    /// `ijfw-dispatch-plan`, so the old `npx -y @ijfw/memory-server` exited 1
+    /// with `could not determine executable to run` on every platform and the
+    /// memory server could never start.
+    ///
+    /// This asserts the *mechanism*, not the literal string: the package must
+    /// travel as a `--package=` option (never as the executable positional),
+    /// and the executable positional must be a bare bin name — no `@`, no `/`.
+    /// Reverting to `npx -y @ijfw/memory-server` fails both halves.
+    #[test]
+    fn default_spec_names_an_executable_rather_than_the_package() {
+        let McpTransport::Stdio { command, args } = default_server_spec().transport else {
+            panic!("expected stdio transport");
+        };
+        assert_eq!(command, "npx");
+
+        let positionals: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+        assert_eq!(
+            positionals.len(),
+            1,
+            "npx takes exactly one executable positional, got {positionals:?}"
+        );
+        let exe = positionals[0];
+        assert!(
+            !exe.contains('@') && !exe.contains('/'),
+            "the npx executable positional must be a bin name, not a package \
+             specifier — got {exe:?}; `npx -y @ijfw/memory-server` exits 1 with \
+             \"could not determine executable to run\" (#928)"
+        );
+        assert!(
+            args.iter()
+                .any(|a| a == &format!("--package={MEMORY_SERVER_PACKAGE}")),
+            "the package must be supplied with --package= so npx installs it \
+             while still running the named bin; args were {args:?}"
+        );
+        assert_eq!(exe, MEMORY_SERVER_BIN);
+    }
+
+    /// A command whose exit code is non-zero is NOT reachable.
+    ///
+    /// #928 root cause: this arm used to `return true` for *any* exit code,
+    /// on the theory that "the process started" proves the binary is real.
+    /// It does not. Through `npx` the child is the npm shim and on Windows the
+    /// child is `cmd /C`, so the spawn succeeds for a command line that cannot
+    /// work — the probe could never reject anything, the broken memory server
+    /// was registered anyway, and every call failed afterwards.
+    ///
+    /// This spawns a REAL process (no fake, no shape assertion): on Unix
+    /// `false --help` exits 1; on Windows `cmd /C <absent> --help` exits 1
+    /// while `cmd` itself spawns fine, which is precisely the shape that
+    /// defeated the old code.
+    #[test]
+    fn reachability_rejects_a_command_that_exits_non_zero() {
+        let command = if cfg!(windows) {
+            "wayland-ijfw-definitely-absent-binary-xyz"
+        } else {
+            "false"
+        };
+        let spec = McpServerSpec {
+            name: "probe-test".to_string(),
+            transport: McpTransport::Stdio {
+                command: command.to_string(),
+                args: vec![],
+            },
+            env: HashMap::new(),
+        };
+        assert!(
+            !mcp_server_is_reachable(&spec),
+            "a child that exits non-zero must not be reported reachable"
+        );
+    }
+
+    /// Control for the test above: the strict exit check must not reject a
+    /// command that genuinely works, or the probe becomes a gate that can
+    /// never PASS — equally useless. `true --help` / `cmd /C rem --help` both
+    /// exit 0 and ignore the trailing flag.
+    #[test]
+    fn reachability_accepts_a_command_that_exits_cleanly() {
+        let command = if cfg!(windows) { "rem" } else { "true" };
+        let spec = McpServerSpec {
+            name: "probe-test".to_string(),
+            transport: McpTransport::Stdio {
+                command: command.to_string(),
+                args: vec![],
+            },
+            env: HashMap::new(),
+        };
+        assert!(
+            mcp_server_is_reachable(&spec),
+            "a child that exits 0 must still be reported reachable"
+        );
+    }
+
+    /// #928 — the skip must reach the user, not just the log file.
+    ///
+    /// `wcore-cli` caps its stderr writer at `Level::ERROR`, so the original
+    /// `tracing::info!` meant a user with `RUST_LOG` unset was told nothing at
+    /// all when memory was switched off. Asserting on the recorded LEVEL is
+    /// the point: a regression to `info!`/`warn!` still "logs the failure" and
+    /// still leaves the user staring at a dead Memory button.
+    #[test]
+    fn notice_for_unreachable_server_is_user_visible() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<tracing::Level>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.lock().unwrap().push(*event.metadata().level());
+            }
+        }
+
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::registry::Registry::default().with(captured.clone());
+        tracing::subscriber::with_default(subscriber, notify_server_unreachable);
+
+        let levels = captured.0.lock().unwrap().clone();
+        assert_eq!(
+            levels.len(),
+            1,
+            "expected exactly one event, got {levels:?}"
+        );
+        assert_eq!(
+            levels[0],
+            tracing::Level::ERROR,
+            "the unreachable-server notice must be ERROR: wcore-cli's stderr \
+             writer is capped at ERROR, so anything quieter never reaches the \
+             user (#928)"
+        );
+    }
+
+    /// Live proof against the real npm registry. `#[ignore]`d and env-gated so
+    /// it stays out of the default lane, per this repo's live-test convention.
+    ///
+    /// Asserts BOTH directions against the same probe: the shipped spec is
+    /// reachable, and the pre-#928 invocation is not. Without the second half
+    /// a green here would not distinguish the fix from the bug.
+    ///
+    /// `WAYLAND_IJFW_LIVE_NPX=1 cargo test -p wayland-ijfw -- --ignored`
+    #[test]
+    #[ignore = "needs network + npx; gated on WAYLAND_IJFW_LIVE_NPX=1"]
+    fn live_npx_invocation_starts_the_memory_server() {
+        assert_eq!(
+            std::env::var("WAYLAND_IJFW_LIVE_NPX").ok().as_deref(),
+            Some("1"),
+            "declared intent to run this live case but WAYLAND_IJFW_LIVE_NPX is \
+             not 1 — refusing to report a pass that measured nothing"
+        );
+        assert!(
+            command_available("npx", "--version"),
+            "live case requires npx on PATH"
+        );
+
+        let broken = McpServerSpec {
+            name: SERVER_NAME.to_string(),
+            transport: McpTransport::Stdio {
+                command: "npx".to_string(),
+                args: vec!["-y".to_string(), MEMORY_SERVER_PACKAGE.to_string()],
+            },
+            env: HashMap::new(),
+        };
+        assert!(
+            !mcp_server_is_reachable(&broken),
+            "the pre-#928 invocation `npx -y {MEMORY_SERVER_PACKAGE}` must be \
+             rejected — it exits 1 with \"could not determine executable to run\""
+        );
+
+        assert!(
+            mcp_server_is_reachable(&default_server_spec()),
+            "the shipped invocation must be reachable against the live registry"
+        );
     }
 
     // Issue #6: the probe must route through `cmd /C` on Windows so the
