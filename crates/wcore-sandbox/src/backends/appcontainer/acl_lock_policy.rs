@@ -35,12 +35,23 @@ const MAX_TIMEOUT_SECS: u64 = 300;
 /// gives the whole of setup a 15 s `PROBE_WALL_CLOCK`, so a 3 x 15 s wait here
 /// could never finish before that fired.
 ///
-/// The point of splitting at all is that a real Win32 failure (as opposed to a
-/// contended timeout) stops the wait immediately instead of burning the rest of
-/// the budget, and each expiry is a place to observe who is holding the lock.
-/// There is deliberately NO sleep between attempts: the wait itself is the
-/// backoff, and stepping out of the kernel mutex queue to sleep would only
-/// lengthen the contention this exists to survive.
+/// SPLITTING BUYS EXACTLY ONE THING: a place to look. `WaitForSingleObject`
+/// blocks with the sidecar unreadable, so the only moment this process can see
+/// WHO is holding the lock is between two waits. Three slices give three
+/// samples, and the difference between "one process held it for the whole
+/// budget" and "it changed hands three times" is the difference between the
+/// two answers to the ticket's own question — the lock is held too long, or the
+/// budget is too tight. Without the sampling the split would be inert: the same
+/// handle, the same total wall clock, the same outcome. It is NOT a fail-fast
+/// mechanism, and must not be described as one — `WaitForSingleObject` returns
+/// `WAIT_FAILED` immediately whatever timeout it was handed, so a broken handle
+/// was always fast.
+///
+/// The cost is honest and bounded: each re-wait forfeits this waiter's place in
+/// the kernel mutex queue, so under contention a waiter can lose its slot to a
+/// process that arrived after it — at most `ACL_LOCK_ATTEMPTS - 1` times, never
+/// for longer than the budget it was given. There is deliberately NO sleep
+/// between attempts on top of that: the wait itself is the backoff.
 pub(crate) const ACL_LOCK_ATTEMPTS: u32 = 3;
 
 /// A slice is never zero, or the wait degenerates into a non-blocking poll.
@@ -48,7 +59,19 @@ const MIN_SLICE: Duration = Duration::from_millis(1);
 
 /// Sidecar naming the process that currently holds the lock. A Win32 mutex
 /// cannot report its owner, so the holder publishes itself.
-const HOLDER_FILE: &str = "acl-lock-holder.txt";
+///
+/// The DIRECTORY this is written into is chosen by the caller and is not a free
+/// choice: it must never be the AppContainer lease directory.
+/// `recover_dead_leases_locked` runs two lines after `MutationLock::acquire`
+/// and hard-errors on every entry there it does not recognise, so a sidecar
+/// published in the lease directory fails EVERY sandboxed command instead of
+/// only a contended one. Allow-listing a second name in that sweep is the wrong
+/// repair for the reason `windows_impl::shared_verdict::record_path` already
+/// records: an older Core build that meets the new file wedges, and two Core
+/// builds sharing one Windows machine is the exact configuration this lock
+/// exists for. `acl_lease::storage::lock_holder_directory` is the sibling
+/// directory that satisfies this, and it is the only production caller.
+pub(crate) const HOLDER_FILE: &str = "holder.txt";
 
 /// Resolve the acquisition budget from the raw environment value.
 ///
@@ -85,11 +108,25 @@ pub(crate) enum WaitVerdict {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the expired slices saw, folded into the shape of the contention.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Contention {
+    /// The most recent holder that had published itself when a slice expired.
+    pub(crate) holder: Option<LockHolder>,
+    /// How many DISTINCT processes were seen holding it across the expiries.
+    ///
+    /// A sample can be `None` — there is a window between one holder's `Drop`
+    /// and the next holder's publish in which no sidecar exists — so this
+    /// counts observed pids and never infers a change from an absence.
+    pub(crate) distinct_holders: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WaitOutcome {
     pub(crate) verdict: WaitVerdict,
     pub(crate) attempts: u32,
     pub(crate) waited: Duration,
+    pub(crate) contention: Contention,
 }
 
 /// Split the budget into equal slices.
@@ -98,15 +135,22 @@ fn attempt_slices(total: Duration) -> [Duration; ACL_LOCK_ATTEMPTS as usize] {
     [slice; ACL_LOCK_ATTEMPTS as usize]
 }
 
-/// Run the bounded wait, taking the wait as a parameter so the policy is
-/// provable: a test cannot conjure a genuinely contended machine-wide mutex,
-/// but it can assert that a timeout is retried and a Win32 failure is not.
+/// Run the bounded wait, taking the wait AND the observation as parameters so
+/// the policy is provable: a test cannot conjure a genuinely contended
+/// machine-wide mutex, but it can assert that a timeout is retried, that a
+/// Win32 failure is not, and that every expiry samples the holder.
+///
+/// `observe` is called only when a slice EXPIRES. An acquisition needs no
+/// diagnostic, and a wait that failed outright has nothing to attribute.
 pub(crate) fn wait_with_retry(
     total: Duration,
     mut wait: impl FnMut(Duration) -> WaitVerdict,
+    mut observe: impl FnMut() -> Option<LockHolder>,
 ) -> WaitOutcome {
     let slices = attempt_slices(total);
     let mut waited = Duration::ZERO;
+    let mut seen: Vec<u32> = Vec::new();
+    let mut holder = None;
     for (index, slice) in slices.iter().copied().enumerate() {
         let verdict = wait(slice);
         waited += slice;
@@ -116,13 +160,27 @@ pub(crate) fn wait_with_retry(
                 verdict,
                 attempts,
                 waited,
+                contention: Contention {
+                    holder,
+                    distinct_holders: seen.len(),
+                },
             };
+        }
+        if let Some(observed) = observe() {
+            if !seen.contains(&observed.pid) {
+                seen.push(observed.pid);
+            }
+            holder = Some(observed);
         }
     }
     WaitOutcome {
         verdict: WaitVerdict::Timeout,
         attempts: ACL_LOCK_ATTEMPTS,
         waited,
+        contention: Contention {
+            holder,
+            distinct_holders: seen.len(),
+        },
     }
 }
 
@@ -176,8 +234,8 @@ pub(crate) fn read_holder(lease_directory: &Path, self_pid: u32) -> Option<LockH
 ///
 /// The leading clause is unchanged on purpose: it is the string the teardown
 /// annotation test asserts, and the string in the field report.
-pub(crate) fn timeout_message(holder: Option<&LockHolder>, outcome: &WaitOutcome) -> String {
-    let contender = match holder {
+pub(crate) fn timeout_message(outcome: &WaitOutcome) -> String {
+    let contender = match outcome.contention.holder.as_ref() {
         Some(LockHolder { pid, exe }) if exe.is_empty() => {
             format!("another Wayland Core process (pid {pid}) on this machine holds it")
         }
@@ -186,10 +244,19 @@ pub(crate) fn timeout_message(holder: Option<&LockHolder>, outcome: &WaitOutcome
         }
         None => "another process on this machine holds it (holder unknown)".to_string(),
     };
+    // Which of the ticket's two candidate causes this actually was. One holder
+    // across every sample means the hold is too long and a bigger budget only
+    // buys patience; several means the queue is moving and patience is exactly
+    // what is missing.
+    let shape = match outcome.contention.distinct_holders {
+        0 => String::new(),
+        1 => ", and it never changed hands".to_string(),
+        seen => format!(", and {seen} different processes held it while waiting"),
+    };
     format!(
         "timed out acquiring AppContainer ACL mutation lock: {contender}; waited {:.1}s across {} \
-         attempts. Wait for it to finish, raise {ACL_LOCK_TIMEOUT_ENV}, or unset WAYLAND_SANDBOX \
-         to use the default relaxed Windows backend.",
+         attempts{shape}. Wait for it to finish, raise {ACL_LOCK_TIMEOUT_ENV}, or unset \
+         WAYLAND_SANDBOX to use the default relaxed Windows backend.",
         outcome.waited.as_secs_f32(),
         outcome.attempts
     )
@@ -235,7 +302,7 @@ mod tests {
         // never finish inside it.
         for secs in [1, 5, 15, 300] {
             let total = Duration::from_secs(secs);
-            let outcome = wait_with_retry(total, |_| WaitVerdict::Timeout);
+            let outcome = wait_with_retry(total, |_| WaitVerdict::Timeout, || None);
             assert!(
                 outcome.waited <= total,
                 "{secs}s budget waited {:?}",
@@ -247,10 +314,14 @@ mod tests {
     #[test]
     fn a_contended_wait_is_retried_to_the_attempt_limit() {
         let mut slices = Vec::new();
-        let outcome = wait_with_retry(Duration::from_secs(15), |slice| {
-            slices.push(slice);
-            WaitVerdict::Timeout
-        });
+        let outcome = wait_with_retry(
+            Duration::from_secs(15),
+            |slice| {
+                slices.push(slice);
+                WaitVerdict::Timeout
+            },
+            || None,
+        );
         assert_eq!(outcome.verdict, WaitVerdict::Timeout);
         assert_eq!(outcome.attempts, ACL_LOCK_ATTEMPTS);
         assert_eq!(slices.len(), ACL_LOCK_ATTEMPTS as usize);
@@ -259,14 +330,18 @@ mod tests {
     #[test]
     fn a_lock_that_frees_up_mid_wait_is_acquired_without_further_attempts() {
         let mut calls = 0;
-        let outcome = wait_with_retry(Duration::from_secs(15), |_| {
-            calls += 1;
-            if calls == 2 {
-                WaitVerdict::Acquired
-            } else {
-                WaitVerdict::Timeout
-            }
-        });
+        let outcome = wait_with_retry(
+            Duration::from_secs(15),
+            |_| {
+                calls += 1;
+                if calls == 2 {
+                    WaitVerdict::Acquired
+                } else {
+                    WaitVerdict::Timeout
+                }
+            },
+            || None,
+        );
         assert_eq!(outcome.verdict, WaitVerdict::Acquired);
         assert_eq!(outcome.attempts, 2);
         assert_eq!(calls, 2, "acquisition must stop the loop");
@@ -277,10 +352,14 @@ mod tests {
         // The interesting case is the one a healthy host cannot conjure: a
         // broken handle must fail fast, not burn the operator's whole budget.
         let mut calls = 0;
-        let outcome = wait_with_retry(Duration::from_secs(300), |_| {
-            calls += 1;
-            WaitVerdict::Failed
-        });
+        let outcome = wait_with_retry(
+            Duration::from_secs(300),
+            |_| {
+                calls += 1;
+                WaitVerdict::Failed
+            },
+            || None,
+        );
         assert_eq!(outcome.verdict, WaitVerdict::Failed);
         assert_eq!(calls, 1, "a real wait failure must not be retried");
     }
@@ -294,12 +373,16 @@ mod tests {
 
     #[test]
     fn the_timeout_message_names_the_contending_process_and_a_remedy() {
-        let outcome = wait_with_retry(Duration::from_secs(15), |_| WaitVerdict::Timeout);
         let holder = LockHolder {
             pid: 4242,
             exe: r"C:\Program Files\WaylandCore\wayland.exe".to_string(),
         };
-        let message = timeout_message(Some(&holder), &outcome);
+        let outcome = wait_with_retry(
+            Duration::from_secs(15),
+            |_| WaitVerdict::Timeout,
+            || Some(holder.clone()),
+        );
+        let message = timeout_message(&outcome);
         assert!(
             message.starts_with("timed out acquiring AppContainer ACL mutation lock"),
             "the teardown annotation asserts this leading clause: {message:?}"
@@ -324,13 +407,145 @@ mod tests {
 
     #[test]
     fn an_unpublished_holder_still_yields_a_remedy_rather_than_a_dead_end() {
-        let outcome = wait_with_retry(Duration::from_secs(15), |_| WaitVerdict::Timeout);
-        let message = timeout_message(None, &outcome);
+        let outcome = wait_with_retry(Duration::from_secs(15), |_| WaitVerdict::Timeout, || None);
+        let message = timeout_message(&outcome);
         assert!(
             message.contains("holder unknown"),
             "an absent sidecar must read as unknown, not as no contention: {message:?}"
         );
         assert!(message.contains(ACL_LOCK_TIMEOUT_ENV), "{message:?}");
+    }
+
+    #[test]
+    fn only_an_expired_slice_samples_the_holder() {
+        // The sampling is the ONLY thing splitting the budget buys, and it must
+        // cost nothing when there is nothing to attribute: an acquisition needs
+        // no diagnostic, and a failed wait has no holder to blame.
+        let mut observations = 0;
+        let acquired = wait_with_retry(
+            Duration::from_secs(15),
+            |_| WaitVerdict::Acquired,
+            || {
+                observations += 1;
+                None
+            },
+        );
+        assert_eq!(acquired.verdict, WaitVerdict::Acquired);
+        assert_eq!(
+            observations, 0,
+            "an uncontended acquisition must not sample"
+        );
+
+        let mut observations = 0;
+        let failed = wait_with_retry(
+            Duration::from_secs(15),
+            |_| WaitVerdict::Failed,
+            || {
+                observations += 1;
+                None
+            },
+        );
+        assert_eq!(failed.verdict, WaitVerdict::Failed);
+        assert_eq!(observations, 0, "a broken handle has no holder to name");
+
+        let mut observations = 0;
+        let timed_out = wait_with_retry(
+            Duration::from_secs(15),
+            |_| WaitVerdict::Timeout,
+            || {
+                observations += 1;
+                None
+            },
+        );
+        assert_eq!(timed_out.verdict, WaitVerdict::Timeout);
+        assert_eq!(
+            observations, ACL_LOCK_ATTEMPTS as usize,
+            "every expiry is a sample, or the split is inert"
+        );
+    }
+
+    #[test]
+    fn a_lock_that_never_changed_hands_reads_differently_from_one_that_did() {
+        // This is the ticket's own question 1 — is the budget too tight, or is
+        // the hold too long — answered from what the waiter actually saw.
+        let held_throughout = wait_with_retry(
+            Duration::from_secs(15),
+            |_| WaitVerdict::Timeout,
+            || {
+                Some(LockHolder {
+                    pid: 7,
+                    exe: "one.exe".to_string(),
+                })
+            },
+        );
+        assert_eq!(held_throughout.contention.distinct_holders, 1);
+        let message = timeout_message(&held_throughout);
+        assert!(
+            message.contains("never changed hands"),
+            "one holder across every sample means the HOLD is the problem: {message:?}"
+        );
+
+        let mut pid = 0;
+        let changed_hands = wait_with_retry(
+            Duration::from_secs(15),
+            |_| WaitVerdict::Timeout,
+            || {
+                pid += 1;
+                Some(LockHolder {
+                    pid,
+                    exe: format!("holder-{pid}.exe"),
+                })
+            },
+        );
+        assert_eq!(
+            changed_hands.contention.distinct_holders, ACL_LOCK_ATTEMPTS as usize,
+            "three distinct pids were observed"
+        );
+        let message = timeout_message(&changed_hands);
+        assert!(
+            message.contains("3 different processes held it"),
+            "a moving queue means the BUDGET is the problem: {message:?}"
+        );
+        assert!(
+            message.contains("pid 3"),
+            "the message must name the most recent holder, not the first: {message:?}"
+        );
+    }
+
+    #[test]
+    fn a_gap_between_two_holders_is_never_counted_as_a_change() {
+        // There is a real window between one holder's `Drop` and the next
+        // holder's publish in which no sidecar exists. Counting that absence as
+        // a hand-over would report a moving queue on a lock one process is
+        // sitting on.
+        let mut call = 0;
+        let outcome = wait_with_retry(
+            Duration::from_secs(15),
+            |_| WaitVerdict::Timeout,
+            || {
+                call += 1;
+                (call != 2).then(|| LockHolder {
+                    pid: 11,
+                    exe: "one.exe".to_string(),
+                })
+            },
+        );
+        assert_eq!(outcome.contention.distinct_holders, 1);
+        assert_eq!(outcome.contention.holder.unwrap().pid, 11);
+    }
+
+    #[test]
+    fn publishing_leaves_exactly_one_named_file_behind() {
+        // The Windows guard that the sidecar never lands in the swept lease
+        // directory checks for HOLDER_FILE by name. That check is only sound if
+        // publishing writes that file and nothing else.
+        let dir = tempfile::tempdir().unwrap();
+        publish_holder(dir.path(), 4242, r"C:\wayland.exe");
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![HOLDER_FILE.to_string()]);
     }
 
     #[test]

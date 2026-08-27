@@ -1,4 +1,5 @@
 use super::*;
+use crate::backends::appcontainer::acl_lock_policy as policy;
 
 fn lease_paths() -> BTreeSet<PathBuf> {
     let Ok(directory) = lease_directory() else {
@@ -495,6 +496,83 @@ fn quarantine_directory_does_not_become_a_second_wedge() {
     for stale in quarantined_for(&path) {
         fs::remove_file(stale).unwrap();
     }
+}
+
+/// The lock's holder sidecar must be published OUTSIDE the swept directory.
+///
+/// `start_with_apply` runs these two statements back to back:
+///
+/// ```ignore
+/// let _lock = MutationLock::acquire()?;          // publishes the holder sidecar
+/// unsafe { recover_dead_leases_locked(&lease_dir)? };
+/// ```
+///
+/// and the sweep hard-errors on every entry in the lease directory it does not
+/// recognise. A sidecar published in there therefore fails EVERY sandboxed
+/// command under `WAYLAND_SANDBOX=appcontainer|strict`, with an error naming a
+/// stray file rather than the lock — turning an intermittent contention timeout
+/// into an unconditional failure of the whole backend. Exactly the wedge class
+/// `quarantine_directory_does_not_become_a_second_wedge` guards, arriving
+/// through the lock instead of through recovery.
+///
+/// Allow-listing a second name in the sweep is deliberately NOT the repair;
+/// `shared_verdict::record_path` records why (an older Core build that meets
+/// the new file wedges instead), so the sidecar gets a sibling directory.
+#[test]
+fn the_lock_holder_sidecar_is_published_outside_the_swept_lease_directory() {
+    let _lock = reclamation_sink_lock();
+    let (local, lease_dir) = private_lease_root();
+    let holder_dir = private_lock_holder_directory(local.path()).unwrap();
+
+    policy::publish_holder(&holder_dir, std::process::id(), r"C:\wayland.exe");
+    // Positive control: every assertion below is vacuous unless publishing
+    // actually wrote a sidecar somewhere.
+    assert!(
+        policy::read_holder(&holder_dir, 0).is_some(),
+        "publish_holder wrote nothing, so this test cannot see where it went"
+    );
+
+    // The CONSEQUENCE first, so a regression reports the production failure
+    // rather than the structural reason for it.
+    unsafe { recover_dead_leases_locked(&lease_dir) }
+        .expect("the sweep that follows every acquisition must still recover");
+
+    // Then the reason. The sweep above can only stay green while this holds,
+    // and stating it separately keeps the guard honest if the sweep ever grows
+    // a tolerance the production wedge did not have.
+    assert!(
+        !lease_dir.join(policy::HOLDER_FILE).exists(),
+        "the sidecar landed in the directory the sweep rejects unknown entries in"
+    );
+    assert!(
+        !holder_dir.starts_with(&lease_dir),
+        "the holder directory is inside the swept lease directory: {} under {}",
+        holder_dir.display(),
+        lease_dir.display()
+    );
+}
+
+/// The same invariant on the PRODUCTION resolvers, not just the test ones.
+///
+/// The test above pins the behaviour of a private root; this pins the two
+/// pathnames the product itself computes, so moving one of them without the
+/// other cannot pass by only touching test plumbing.
+#[test]
+fn the_production_holder_directory_is_a_sibling_of_the_lease_directory() {
+    let lease = lease_directory().unwrap();
+    let holder = lock_holder_directory().unwrap();
+    assert!(
+        !holder.starts_with(&lease),
+        "{} is inside {}",
+        holder.display(),
+        lease.display()
+    );
+    assert_ne!(holder, lease);
+    assert_eq!(
+        holder.parent().and_then(Path::parent),
+        lease.parent().and_then(Path::parent),
+        "the holder directory must be a SIBLING of the lease directory, sharing its root"
+    );
 }
 
 /// Reclaim one unreconcilable lease and return the report the product emitted.

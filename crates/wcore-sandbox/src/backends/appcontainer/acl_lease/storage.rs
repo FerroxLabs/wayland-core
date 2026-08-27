@@ -34,7 +34,18 @@ struct TrustedRoot {
 }
 
 pub(super) fn lease_directory() -> Result<PathBuf> {
-    lease_directory_from(lease_root()?)
+    directory_under(lease_root()?, &LEASE_DIRECTORY_COMPONENTS)
+}
+
+/// Where [`MutationLock`] publishes the sidecar naming its holder.
+///
+/// A sibling of the lease directory, and that placement is the whole point:
+/// see [`LOCK_HOLDER_DIRECTORY_COMPONENTS`] for what putting it INSIDE the
+/// lease directory costs. The two roots share [`lease_root`], so the same test
+/// chokepoint covers both and no test can publish a sidecar into a developer's
+/// real profile.
+pub(super) fn lock_holder_directory() -> Result<PathBuf> {
+    directory_under(lease_root()?, &LOCK_HOLDER_DIRECTORY_COMPONENTS)
 }
 
 /// Production lease root: the user's real `%LOCALAPPDATA%`.
@@ -150,11 +161,27 @@ pub(super) fn test_lease_root() -> Result<PathBuf> {
 /// they get a directory of their own instead of a lock.
 #[cfg(test)]
 pub(super) fn private_lease_directory(local: &Path) -> Result<PathBuf> {
-    // This is the SECOND door into `lease_directory_from`, so it carries the
-    // same lock as the first: whatever a test passes here, it must not be the
-    // user's real lease root. See [`lease_root`] for what a test lease written
-    // there costs — it disabled the Windows sandbox on a real developer box
-    // until a human deleted the file.
+    private_directory(local, &LEASE_DIRECTORY_COMPONENTS)
+}
+
+/// The holder-sidecar directory belonging to ONE test's private root.
+///
+/// Exists so a test can assert the sidecar's placement against the lease
+/// directory derived from the SAME root. Comparing a private lease directory
+/// against the process-wide holder directory would compare two unrelated trees
+/// and pass no matter where the sidecar goes.
+#[cfg(test)]
+pub(super) fn private_lock_holder_directory(local: &Path) -> Result<PathBuf> {
+    private_directory(local, &LOCK_HOLDER_DIRECTORY_COMPONENTS)
+}
+
+#[cfg(test)]
+fn private_directory(local: &Path, components: &[&str]) -> Result<PathBuf> {
+    // This is the SECOND door into `directory_under`, so it carries the same
+    // lock as the first: whatever a test passes here, it must not be the user's
+    // real lease root. See [`lease_root`] for what a test lease written there
+    // costs — it disabled the Windows sandbox on a real developer box until a
+    // human deleted the file.
     if std::env::var_os("LOCALAPPDATA")
         .is_some_and(|real| same_windows_path(local, Path::new(&real)))
     {
@@ -162,15 +189,15 @@ pub(super) fn private_lease_directory(local: &Path) -> Result<PathBuf> {
             "a private test lease directory must never be rooted at the real LOCALAPPDATA".into(),
         ));
     }
-    lease_directory_from(local.to_path_buf())
+    directory_under(local.to_path_buf(), components)
 }
 
-fn lease_directory_from(local: PathBuf) -> Result<PathBuf> {
+fn directory_under(local: PathBuf, components: &[&str]) -> Result<PathBuf> {
     let local_root = open_directory_nofollow(&local, "LOCALAPPDATA")?;
     validate_local_canonical_path(&local_root.final_path)?;
 
     let mut root = local_root;
-    for component in LEASE_DIRECTORY_COMPONENTS {
+    for component in components {
         root = create_or_open_child_directory(&root, component)?;
     }
     Ok(root.path)
@@ -1002,7 +1029,7 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "create junction: {output:?}");
 
-        let result = lease_directory_from(local);
+        let result = directory_under(local, &LEASE_DIRECTORY_COMPONENTS);
         assert!(result.is_err());
         assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
         fs::remove_dir(&junction).unwrap();

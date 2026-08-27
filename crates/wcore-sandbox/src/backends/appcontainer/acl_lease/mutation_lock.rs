@@ -62,8 +62,10 @@ const LOCAL_SYSTEM_RID: u32 = 18;
 pub(super) struct MutationLock {
     handle: OwnedHandle,
     /// Where this process published itself as the lock's holder, so a
-    /// contender's timeout can name it. `None` when the lease directory could
-    /// not be resolved — that costs the holder's NAME, never the lock.
+    /// contender's timeout can name it. A SIBLING of the lease directory, never
+    /// inside it — see [`LOCK_HOLDER_DIRECTORY_COMPONENTS`]. `None` when that
+    /// directory could not be resolved, which costs the holder's NAME and never
+    /// the lock.
     holder_directory: Option<PathBuf>,
 }
 
@@ -128,16 +130,27 @@ impl MutationLock {
 
         let timeout =
             policy::timeout_from(std::env::var(policy::ACL_LOCK_TIMEOUT_ENV).ok().as_deref());
-        let outcome = policy::wait_with_retry(timeout, |slice| {
-            match unsafe { WaitForSingleObject(handle.0, slice.as_millis() as u32) } {
+        // Resolved BEFORE the wait because every expired slice samples it, and
+        // best-effort throughout: a diagnostic that cannot be resolved costs
+        // the holder's NAME, never the lock. It is deliberately NOT
+        // `lease_directory()` — that directory is swept by
+        // `recover_dead_leases_locked` two lines after this call returns, and
+        // it rejects every entry it does not recognise.
+        let holder_directory = lock_holder_directory().ok();
+        let self_pid = std::process::id();
+        let outcome = policy::wait_with_retry(
+            timeout,
+            |slice| match unsafe { WaitForSingleObject(handle.0, slice.as_millis() as u32) } {
                 WAIT_OBJECT_0 | WAIT_ABANDONED => policy::WaitVerdict::Acquired,
                 WAIT_TIMEOUT => policy::WaitVerdict::Timeout,
                 _ => policy::WaitVerdict::Failed,
-            }
-        });
-        // Resolved after the wait so a contended acquisition pays nothing for
-        // it, and best-effort so a diagnostic can never fail an acquisition.
-        let holder_directory = lease_directory().ok();
+            },
+            || {
+                holder_directory
+                    .as_deref()
+                    .and_then(|directory| policy::read_holder(directory, self_pid))
+            },
+        );
         match outcome.verdict {
             policy::WaitVerdict::Acquired => {}
             policy::WaitVerdict::Failed => {
@@ -146,19 +159,13 @@ impl MutationLock {
                 ));
             }
             policy::WaitVerdict::Timeout => {
-                let holder = holder_directory
-                    .as_deref()
-                    .and_then(|directory| policy::read_holder(directory, std::process::id()));
-                return Err(exec_error(policy::timeout_message(
-                    holder.as_ref(),
-                    &outcome,
-                )));
+                return Err(exec_error(policy::timeout_message(&outcome)));
             }
         }
         if let Some(directory) = holder_directory.as_deref() {
             policy::publish_holder(
                 directory,
-                std::process::id(),
+                self_pid,
                 &std::env::current_exe()
                     .map(|path| path.display().to_string())
                     .unwrap_or_default(),
@@ -513,6 +520,16 @@ mod tests {
         assert!(
             message.contains(policy::ACL_LOCK_TIMEOUT_ENV),
             "the timeout must offer a remedy: {message:?}"
+        );
+        // The sampling, against a real cross-process holder rather than a
+        // closure. One helper holds the mutex for the whole budget, so every
+        // expired slice must have read the SAME pid out of the sidecar — which
+        // is only observable at all because the budget is split. If this reads
+        // "different processes" the samples are not landing where the holder
+        // publishes; if the clause is absent, no slice sampled anything.
+        assert!(
+            message.contains("never changed hands"),
+            "one holder across every sample must be reported as such: {message:?}"
         );
     }
 }
