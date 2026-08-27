@@ -8,8 +8,9 @@
 //! `at_refs.rs` (W3-B) so parsing, completion, and resolution each import
 //! only the guard surface they need.
 
-use std::fs;
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Secret denylist
@@ -109,6 +110,184 @@ fn is_secret_file_name(path: &Path) -> bool {
         return true;
     }
     false
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Target identity
+// ─────────────────────────────────────────────────────────────────────────
+
+/// An `@`-reference target resolved to exactly ONE filesystem object.
+///
+/// Every rule in this module judges a NAME — [`is_secret_path`] matches
+/// file names and separator-anchored path fragments, [`GitIgnore`] matches
+/// a relative path — while every read follows symlinks. A name is not an
+/// identity, so the two disagreed: `@notes.txt`, where `notes.txt` is a
+/// symlink to `~/.git-credentials`, satisfied every guard and then inlined
+/// the credential store into the outgoing prompt (core#339).
+///
+/// This type is the join. It carries the handle a read must consume and
+/// the canonical name the guards must judge, built so those two are
+/// provably the same object.
+#[derive(Debug)]
+pub(super) struct ResolvedTarget {
+    file: File,
+    canonical: PathBuf,
+}
+
+impl ResolvedTarget {
+    /// The fully-resolved name of the object — no symlinks, no `..`, no
+    /// route. Apply the guards to THIS, never to the name the user typed.
+    pub(super) fn canonical(&self) -> &Path {
+        &self.canonical
+    }
+
+    /// Read the object's contents as UTF-8, from the handle opened during
+    /// resolution.
+    ///
+    /// Takes `self` by value deliberately: once a caller has read the
+    /// target it no longer holds anything it could re-resolve, so "guard
+    /// one object, then read a path" is not expressible at this surface.
+    pub(super) fn read_to_string(mut self) -> io::Result<String> {
+        let mut buf = String::new();
+        self.file.read_to_string(&mut buf)?;
+        Ok(buf)
+    }
+}
+
+/// Resolve `path` to the single object a guarded read will consume.
+///
+/// Refuses anything that is not a regular file, and refuses a target whose
+/// identity moved while it was being resolved.
+///
+/// ## Why this is not canonicalize-then-open
+///
+/// Canonicalizing and then re-opening the canonical path leaves the very
+/// race the guard exists to close: the check and the read become two
+/// separate traversals, and whoever re-points the link — or renames a
+/// secret over the canonical name — between them wins. Instead:
+///
+/// 1. open `path` once. This follows the link and pins a handle to one
+///    object, and that handle is what the caller will read.
+/// 2. canonicalize `path` to obtain a NAME with no symlinks left in it —
+///    something the name-based guards can actually judge.
+/// 3. open that name and require both handles to report the same
+///    filesystem identity.
+///
+/// Step 3 is what binds the name to the bytes. If the link moved between
+/// steps 1 and 2 the identities differ and the resolution is refused,
+/// rather than guarding one file and quietly reading another.
+///
+/// Note what is deliberately NOT done here: symlinks are not refused.
+/// Repositories legitimately symlink real files, and a guard that blocks
+/// the mechanism instead of the target removes a capability people rely
+/// on — which is how guards end up switched off.
+///
+/// ## What this does not close
+///
+/// A HARD link. `ln ~/.git-credentials notes.txt` gives the secret a
+/// second name that is itself already canonical, and no name-based rule
+/// can tell the two apart because there is nothing for `canonicalize` to
+/// unwind. Closing that needs an identity denylist rather than a path
+/// denylist, which is a larger change than this one; it is written down
+/// here so the boundary is visible rather than assumed away.
+pub(super) fn resolve_target(path: &Path) -> io::Result<ResolvedTarget> {
+    let file = File::open(path)?;
+    if !file.metadata()?.is_file() {
+        // A directory, a FIFO, a device. `File::open` on a directory
+        // succeeds on Unix and fails on Windows, so the refusal has to
+        // come from the handle's own metadata to read the same on both —
+        // and refusing a FIFO here is what stops a read blocking forever
+        // on a named pipe planted in a walked tree.
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "an @-reference target must be a regular file",
+        ));
+    }
+    let canonical = fs::canonicalize(path)?;
+    let probe = File::open(&canonical)?;
+    if file_identity(&file)? != file_identity(&probe)? {
+        return Err(io::Error::other(
+            "the @-reference target changed identity while it was being resolved",
+        ));
+    }
+    Ok(ResolvedTarget { file, canonical })
+}
+
+/// A filesystem object's identity, read from an OPEN HANDLE.
+///
+/// Handle-derived on both platforms rather than path-derived: Windows
+/// reports the volume/index pair only for metadata obtained from a handle,
+/// and a path-derived answer would be one more traversal — one more chance
+/// for the object to change underneath the comparison this exists to make.
+#[cfg(unix)]
+fn file_identity(file: &File) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata()?;
+    Ok((meta.dev(), meta.ino()))
+}
+
+#[cfg(windows)]
+fn file_identity(file: &File) -> io::Result<(u64, u64)> {
+    use std::os::windows::fs::MetadataExt;
+    let meta = file.metadata()?;
+    match (meta.volume_serial_number(), meta.file_index()) {
+        (Some(volume), Some(index)) => Ok((u64::from(volume), index)),
+        // Fail closed. With no identity to compare there is no proof that
+        // the name being guarded and the handle being read are the same
+        // object, which is the only thing this function exists to supply.
+        _ => Err(io::Error::other(
+            "the filesystem reported no identity for the @-reference target",
+        )),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Workspace-root helpers
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The canonical form of a workspace root.
+///
+/// [`rel_to_root`] strips one path against another, so both sides have to
+/// be in the same form or the strip fails, `rel_to_root` answers `None`,
+/// and the caller skips the `.gitignore` verdict entirely (core#335).
+/// A canonical target path therefore needs a canonical root — including on
+/// macOS, where a temp dir is reached as `/var/…` but canonicalizes to
+/// `/private/var/…`, and every gitignore check would otherwise be silently
+/// skipped there while Linux CI stayed green.
+///
+/// Falls back to the root as given when it cannot be canonicalized (a root
+/// that does not exist), which keeps the previous behaviour for that case
+/// rather than failing a resolution the user can still complete.
+pub(super) fn canonical_root(root: &Path) -> PathBuf {
+    fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
+
+/// The path of `full` relative to `root`, as a `/`-joined string, if
+/// `full` is inside `root`. Returns `None` for a path that escapes the
+/// root (a `..` traversal or an unrelated absolute path) — such a path is
+/// outside the gitignore's jurisdiction and is treated conservatively by
+/// the caller.
+pub(super) fn rel_to_root(full: &Path, root: &Path) -> Option<String> {
+    let stripped = full.strip_prefix(root).ok()?;
+    // Reject any residual `..` — a relative path that climbs out of root.
+    if stripped
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return None;
+    }
+    let joined: Vec<String> = stripped
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => s.to_str().map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.join("/"))
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -429,5 +608,84 @@ mod tests {
         assert!(gi.is_ignored("a/b/generated/x.rs", false));
         assert!(gi.is_ignored("generated/x.rs", false));
         assert!(!gi.is_ignored("generated/x.txt", false));
+    }
+
+    // ── target identity ──────────────────────────────────────────────────
+
+    /// The identity primitive itself, on every platform: a path routed
+    /// through `..` resolves to one canonical name, and the bytes come from
+    /// that same object.
+    #[test]
+    fn resolve_target_reports_the_canonical_name_and_reads_that_object() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = fs::canonicalize(tmp.path()).expect("canonical root");
+        fs::create_dir(root.join("sub")).expect("mkdir sub");
+        fs::write(root.join("sub").join("a.txt"), "body").expect("write");
+
+        let routed = root.join("sub").join("..").join("sub").join("a.txt");
+        let target = resolve_target(&routed).expect("resolve");
+        assert_eq!(target.canonical(), root.join("sub").join("a.txt"));
+        assert_eq!(target.read_to_string().expect("read"), "body");
+    }
+
+    /// A directory is not a readable target. `File::open` on a directory
+    /// succeeds on Unix and fails on Windows, so the refusal has to come
+    /// from the handle's own metadata to be the same on both.
+    #[test]
+    fn resolve_target_refuses_a_directory() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        assert!(resolve_target(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn resolve_target_refuses_a_missing_path() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let err = resolve_target(&tmp.path().join("nope.txt")).expect_err("missing");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// A dangling symlink has no target to guard, so it must refuse rather
+    /// than fall back to judging the link's own name.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_target_refuses_a_dangling_symlink() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::os::unix::fs::symlink(tmp.path().join("gone"), tmp.path().join("link.txt"))
+            .expect("symlink");
+        assert!(resolve_target(&tmp.path().join("link.txt")).is_err());
+    }
+
+    /// `canonical_root` must not turn a root that cannot be canonicalized
+    /// into an empty or absolute-root path — the gitignore jurisdiction
+    /// check depends on it still naming the caller's root.
+    #[test]
+    fn canonical_root_falls_back_to_the_given_root() {
+        let missing = Path::new("relative/does/not/exist");
+        assert_eq!(canonical_root(missing), missing.to_path_buf());
+    }
+
+    /// The comparator the whole identity guard rests on. If it agreed with
+    /// itself across different objects the guard would be vacuous; if it
+    /// disagreed with itself across the same object `resolve_target` would
+    /// refuse every ordinary read.
+    #[test]
+    fn file_identity_agrees_with_itself_and_separates_two_objects() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        fs::write(tmp.path().join("a.txt"), "a").expect("write a");
+        fs::write(tmp.path().join("b.txt"), "b").expect("write b");
+        let first = File::open(tmp.path().join("a.txt")).expect("open a");
+        let again = File::open(tmp.path().join("a.txt")).expect("reopen a");
+        let other = File::open(tmp.path().join("b.txt")).expect("open b");
+
+        assert_eq!(
+            file_identity(&first).expect("identity"),
+            file_identity(&again).expect("identity"),
+            "two handles on one object must agree"
+        );
+        assert_ne!(
+            file_identity(&first).expect("identity"),
+            file_identity(&other).expect("identity"),
+            "two distinct objects must not share an identity"
+        );
     }
 }

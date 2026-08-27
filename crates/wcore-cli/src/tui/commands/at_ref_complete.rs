@@ -11,7 +11,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::at_ref_guard::{GitIgnore, is_secret_path};
+use super::at_ref_guard::{GitIgnore, canonical_root, is_secret_path, rel_to_root};
 
 /// Max completion candidates returned for one partial token. The popup in
 /// the mockup shows a short list; more than this is noise.
@@ -88,6 +88,7 @@ fn complete_paths(body: &str, root: &Path) -> Vec<Completion> {
     };
 
     let ignore = GitIgnore::load(root);
+    let croot = canonical_root(root);
     let mut out = Vec::new();
 
     for entry in entries.flatten() {
@@ -102,6 +103,7 @@ fn complete_paths(body: &str, root: &Path) -> Vec<Completion> {
             continue;
         }
         let path = entry.path();
+        // Lexical pass, on the name as listed.
         if is_secret_path(&path) {
             continue;
         }
@@ -111,7 +113,31 @@ fn complete_paths(body: &str, root: &Path) -> Vec<Completion> {
         } else {
             format!("{dir_part}/{name}")
         };
-        if ignore.is_ignored(&rel, is_dir) {
+        // Identity pass — the third production call site of the guard.
+        // Offering a row is the first half of attaching it: the user presses
+        // Tab and `resolve_file` inlines whatever the name points at, so the
+        // popup has to judge the same object that read will (core#339).
+        //
+        // `canonicalize` rather than `resolve_target` because nothing is read
+        // here, so there is no handle to bind a name to; the authoritative,
+        // race-free guard is the one at resolution. A candidate whose target
+        // will not resolve keeps its lexical verdict — a broken link leaks
+        // nothing and still deserves to be listed.
+        let canonical = fs::canonicalize(&path).ok();
+        if let Some(canonical) = &canonical
+            && is_secret_path(canonical)
+        {
+            continue;
+        }
+        // Judge the gitignore at the target's real location too, so the
+        // popup and the resolver cannot disagree about the same candidate.
+        // A target outside the root has no gitignore jurisdiction, and falls
+        // back to the path as typed.
+        let rel_for_ignore = canonical
+            .as_deref()
+            .and_then(|c| rel_to_root(c, &croot))
+            .unwrap_or_else(|| rel.clone());
+        if ignore.is_ignored(&rel_for_ignore, is_dir) {
             continue;
         }
 

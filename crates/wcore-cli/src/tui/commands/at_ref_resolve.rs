@@ -10,9 +10,9 @@
 
 use std::fmt;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-use super::at_ref_guard::{GitIgnore, is_secret_path};
+use super::at_ref_guard::{GitIgnore, canonical_root, is_secret_path, rel_to_root, resolve_target};
 use super::at_ref_parse::{AtRef, AtRefError};
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -187,20 +187,39 @@ pub fn resolve(at: &AtRef, root: &Path) -> Result<AtPayload, AtRefError> {
 /// Resolve `@file`: read one file, honoring the secret + gitignore guards.
 fn resolve_file(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     let full = resolve_under_root(path, root);
+    let ignore = GitIgnore::load(root);
 
+    // Lexical pass, on the name as typed. Cheap, and it keeps `@.env` a
+    // loud refusal even when no such file exists — a denylisted NAME is
+    // refused without the filesystem being touched at all.
     if is_secret_path(&full) {
         return Err(AtRefError::SecretBlocked(display(path)));
     }
     if let Some(rel) = rel_to_root(&full, root)
-        && GitIgnore::load(root).is_ignored(&rel, false)
+        && ignore.is_ignored(&rel, false)
     {
         return Err(AtRefError::GitIgnored(display(path)));
     }
-    if !full.is_file() {
-        return Err(AtRefError::NotFound(display(path)));
+
+    // Identity pass. `full` is still only a name, and the read follows it.
+    // Resolve it once to the object that read will consume, then judge THAT
+    // object: a symlink to `~/.git-credentials` is refused here, a symlink
+    // to an ordinary file is not (core#339). Measuring the canonical path
+    // against the canonical root also gives an absolute or `..`-routed
+    // target the gitignore verdict the lexical pass could not compute,
+    // because `strip_prefix` could not put the two in the same form
+    // (core#335).
+    let target = resolve_target(&full).map_err(|e| target_error(&e, path))?;
+    if is_secret_path(target.canonical()) {
+        return Err(AtRefError::SecretBlocked(display(path)));
+    }
+    if let Some(rel) = rel_to_root(target.canonical(), &canonical_root(root))
+        && ignore.is_ignored(&rel, false)
+    {
+        return Err(AtRefError::GitIgnored(display(path)));
     }
 
-    let content = fs::read_to_string(&full).map_err(|e| AtRefError::Io {
+    let content = target.read_to_string().map_err(|e| AtRefError::Io {
         path: display(path),
         message: e.to_string(),
     })?;
@@ -319,13 +338,30 @@ fn walk_dir(
             }
             walk_dir(&path, root, ignore, out, skipped, truncated)?;
         } else {
+            // Lexical pass first: a denylisted NAME never needs opening.
             if is_secret_path(&path) {
+                *skipped += 1;
+                continue;
+            }
+            // Then the identity pass. The second of the guard's three
+            // production call sites: without this the walk inlines whatever
+            // an entry points at, so a fix applied only to `resolve_file`
+            // would leave `@dir` wide open (core#339).
+            //
+            // A target that will not resolve — a dangling link, a device, a
+            // file that cannot be opened — is skipped, exactly as an
+            // unreadable file was before.
+            let Ok(target) = resolve_target(&path) else {
+                *skipped += 1;
+                continue;
+            };
+            if is_secret_path(target.canonical()) {
                 *skipped += 1;
                 continue;
             }
             // Read text files only; a binary file is skipped silently
             // rather than corrupting the payload with lossy bytes.
-            match fs::read_to_string(&path) {
+            match target.read_to_string() {
                 Ok(content) => out.push(ResolvedFile {
                     path: PathBuf::from(&rel),
                     content,
@@ -402,31 +438,22 @@ fn resolve_under_root(path: &Path, root: &Path) -> PathBuf {
     }
 }
 
-/// The path of `full` relative to `root`, as a `/`-joined string, if
-/// `full` is inside `root`. Returns `None` for a path that escapes the
-/// root (a `..` traversal or an unrelated absolute path) — such a path is
-/// outside the gitignore's jurisdiction and is treated conservatively by
-/// the caller.
-fn rel_to_root(full: &Path, root: &Path) -> Option<String> {
-    let stripped = full.strip_prefix(root).ok()?;
-    // Reject any residual `..` — a relative path that climbs out of root.
-    if stripped
-        .components()
-        .any(|c| matches!(c, Component::ParentDir))
-    {
-        return None;
-    }
-    let joined: Vec<String> = stripped
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(s) => s.to_str().map(str::to_string),
-            _ => None,
-        })
-        .collect();
-    if joined.is_empty() {
-        None
-    } else {
-        Some(joined.join("/"))
+/// Map a target-resolution failure onto the resolver's error vocabulary.
+///
+/// A missing path and a path that is not a regular file are both "there is
+/// no file here" to the composer, and that is what the previous
+/// `!full.is_file()` check reported for either. Anything else — a
+/// permission failure, an identity that moved mid-resolution — is a real
+/// I/O refusal and is surfaced as one rather than disguised as absence.
+fn target_error(e: &std::io::Error, path: &Path) -> AtRefError {
+    match e.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput => {
+            AtRefError::NotFound(display(path))
+        }
+        _ => AtRefError::Io {
+            path: display(path),
+            message: e.to_string(),
+        },
     }
 }
 
