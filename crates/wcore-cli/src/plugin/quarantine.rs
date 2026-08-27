@@ -10,6 +10,13 @@
 // (`-`-leading) values so a crafted ref can't smuggle a `git` option past the
 // argv boundary, and reject absolute/`..` subdir paths so a git-subdir source
 // can't escape the clone. See `run_git` for why the async shell helper is unused.
+//
+// core#338: the clone also gets NO authority over the user's TERMINAL. Handing
+// `git` a `/dev/null` stdin does not stop it — or a credential helper it spawns
+// — opening `/dev/tty` directly and drawing a credential prompt the user has no
+// way to tell apart from one Wayland wrote. Installing a plugin is consent to
+// fetch someone else's code; it is not consent to hand that someone your
+// credentials. See `deny_terminal` and the askpass hardening in `run_git`.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -276,6 +283,93 @@ fn normalize_copy(src: &Path, dst: &Path, copied: &mut u64, cap: u64) -> Result<
     Ok(())
 }
 
+/// Take the user's terminal away from the quarantine child (core#338).
+///
+/// `Stdio::null()` on stdin is NOT enough. `git` — and every credential helper,
+/// `git-remote-*` and `ssh` it spawns — can `open("/dev/tty")` itself, which is
+/// a fresh handle on the controlling terminal and is blind to what we handed
+/// the child as fd 0. Measured through this function on git 2.43: with stdin on
+/// `/dev/null`, a `401` from an attacker-chosen URL drew
+/// `Username for 'http://…':` in the user's own terminal, and a credential
+/// helper reading `/dev/tty` drew a prompt of the attacker's own wording there.
+///
+/// A new process GROUP does not close this, and must not be mistaken for a
+/// cheaper spelling of it. Measured on this box, three arms, child stdin on
+/// `/dev/null` in all three:
+///
+/// | child does      | write to `/dev/tty` | read from `/dev/tty` |
+/// |-----------------|---------------------|----------------------|
+/// | nothing         | lands on the user's screen | blocks, reading their keystrokes |
+/// | `setpgid(0, 0)` | STILL lands on the user's screen | `SIGTTIN`, child stops — a wedged install |
+/// | `setsid()`      | `ENXIO`, open fails | `ENXIO`, open fails |
+///
+/// So `Command::process_group(0)` — which is `setpgid`, not `setsid`, whatever
+/// the comments at the `cron.rs` and `profile_router.rs` call sites say — would
+/// leave an untrusted clone able to paint arbitrary text (a forged prompt, raw
+/// escape sequences) on the user's terminal and would turn the credential read
+/// into a hang. Only a new SESSION fails closed. Do not "simplify" this.
+///
+/// The cost, measured rather than assumed: a new session also puts the child
+/// out of the terminal's foreground process group, so a `Ctrl+C` that kills
+/// `wayland-core` no longer reaches the clone (probe: child survives = false
+/// without `setsid`, true with it). The clone is then an orphan until it
+/// finishes on its own. That is accepted. The obvious mitigation,
+/// `PR_SET_PDEATHSIG`, is Linux-only and fires when the spawning THREAD exits,
+/// which in this tokio-threaded binary would kill healthy clones whenever a
+/// blocking worker is retired — a worse failure than an orphan.
+#[cfg(unix)]
+fn deny_terminal(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY: the closure runs in the child between `fork` and `exec`, where
+    // only async-signal-safe work is legal. `setsid(2)` is a bare syscall — no
+    // allocation, no locks, no re-entrancy. It cannot fail here for the one
+    // documented reason (`EPERM`, caller already a process-group leader),
+    // because a freshly forked child never leads its parent's group; if it
+    // somehow does, returning `Err` fails the spawn, which is the behaviour we
+    // want. `run_git`'s timeout path kills the child's process GROUP and relies
+    // on this call having made the child its own leader, so a child that could
+    // not detach must never start.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Windows has no `/dev/tty`. The askpass and `GIT_TERMINAL_PROMPT` hardening
+/// in [`run_git`] still applies there, but a GUI credential manager is a
+/// different authority (the desktop session) that this function does not claim
+/// to close.
+#[cfg(not(unix))]
+fn deny_terminal(_cmd: &mut std::process::Command) {}
+
+/// Kill the whole quarantine child, not just its leader.
+#[cfg(unix)]
+fn kill_child_tree(child: &mut std::process::Child) {
+    // [`deny_terminal`] made the child a session leader, so its pgid equals its
+    // pid and the negated pid names exactly this clone and its descendants —
+    // `git-remote-http`, credential helpers, `ssh`. Killing only the leader
+    // leaves those alive holding the write ends of our stdout/stderr pipes,
+    // which is what stranded a reader thread in `read()` for the lifetime of
+    // the process (measured: 2 threads before the clone, 3 after).
+    //
+    // SAFETY: a bare `kill(2)`. The target group was created by `setsid` in
+    // `deny_terminal` and is the child's own, so this can never name our own
+    // group; a spawn whose `setsid` failed returns no child at all.
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.kill();
+}
+
+#[cfg(not(unix))]
+fn kill_child_tree(child: &mut std::process::Child) {
+    let _ = child.kill();
+}
+
 /// Run `git` in argv mode with a wall-clock timeout. stdout/stderr are drained
 /// on dedicated threads so a chatty `git` can never deadlock on a full pipe.
 ///
@@ -286,8 +380,22 @@ fn normalize_copy(src: &Path, dst: &Path, copied: &mut u64, cap: u64) -> Result<
 /// interprets `;`/`&&`/`$()` — combined with `--`, `protocol.ext.allow=never`,
 /// and the leading-`-` reject above. Mirrors the sync git calls in
 /// `tui/commands/at_ref_send.rs` and `wcore-skills/src/discovery.rs`.
+///
+/// core#338 adds the terminal and askpass boundary on top of that; see
+/// [`deny_terminal`].
 fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<String> {
     let mut cmd = std::process::Command::new("git");
+    // core#338, the ASKPASS door — a second, independent way for an untrusted
+    // clone to collect credentials, and one that needs no terminal at all, so
+    // `deny_terminal` cannot reach it. An `askPass` program in the user's own
+    // gitconfig answers `git` silently. Measured on git 2.43 against a remote
+    // that answers `401`: without this override the askpass ran twice and the
+    // remote received an `Authorization: Basic` header; with it the askpass ran
+    // zero times and the remote received nothing. An EMPTY value is how git
+    // spells "no askpass" (`if (askpass && *askpass)`), and `-c` must precede
+    // the subcommand — every `args` array here starts with either `-c` or the
+    // subcommand itself, so prepending is always well-formed.
+    cmd.arg("-c").arg("core.askPass=");
     cmd.args(args);
     if let Some(c) = cwd {
         cmd.current_dir(c);
@@ -295,6 +403,26 @@ fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<Strin
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // `GIT_ASKPASS` outranks `core.askPass` and `SSH_ASKPASS` backs it up, so
+    // the config override above is only half of that door; these close the
+    // environment half, including the desktop-session askpass an IDE exports.
+    //
+    // `GIT_TERMINAL_PROMPT=0` is NOT the boundary and must never be mistaken
+    // for one: it governs git's OWN prompting and says nothing about what a
+    // credential helper does with `/dev/tty`. Measured by mutation on Linux, it
+    // is REDUNDANT here — delete it and every leg of
+    // `quarantine_terminal_authority.rs` still passes, because `deny_terminal`
+    // has already taken the terminal away. It is kept for exactly two reasons,
+    // neither of them "defence": on non-Unix, where `deny_terminal` is a no-op,
+    // it is the ONLY thing holding git's own prompt; and it turns git's refusal
+    // into `terminal prompts disabled` instead of an `ENXIO` on `/dev/tty`,
+    // which is what a user reading the error has to work with.
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_ASKPASS")
+        .env_remove("SSH_ASKPASS")
+        .env_remove("SSH_ASKPASS_REQUIRE");
+    deny_terminal(&mut cmd);
 
     let mut child = cmd
         .spawn()
@@ -322,7 +450,19 @@ fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<Strin
             Some(s) => break s,
             None => {
                 if start.elapsed() > timeout {
-                    let _ = child.kill();
+                    // core#338: kill the GROUP, not just the leader.
+                    // Returning after killing only the leader left a reader
+                    // thread blocked in `read()` for the lifetime of the
+                    // process whenever a descendant — a credential helper that
+                    // backgrounds a worker, `git-remote-http` — still held the
+                    // inherited write end (measured: 2 threads before the
+                    // clone, 3 after). Killing the group closes those write
+                    // ends, and the readers then hit EOF and exit on their own;
+                    // an explicit bounded join here was MEASURED to change
+                    // nothing and was removed. The `setsid` in `deny_terminal`
+                    // is what makes the group addressable, so one mechanism
+                    // closes both this and the terminal door.
+                    kill_child_tree(&mut child);
                     let _ = child.wait();
                     return Err(PluginCliError::Git(format!(
                         "git {:?} timed out after {} ms",

@@ -294,6 +294,16 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Threading",
 ] }
 
+# core#338: `setsid(2)` on the quarantine git child, and the process-GROUP kill
+# on its timeout path. Taking the controlling terminal away from an untrusted
+# clone is the only thing that stops `git` — or a credential helper it spawns —
+# opening `/dev/tty` behind our `Stdio::null()` stdin, and `std`'s
+# `CommandExt::process_group` is `setpgid`, which was MEASURED not to close it.
+# `libc` is already in this build graph (wcore-sandbox, wcore-mcp), so this
+# compiles no new crate.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 # `start_paused` tests need tokio's `test-util`, which the workspace `full`
 # feature set does NOT include. Without this line the crate compiles only when
