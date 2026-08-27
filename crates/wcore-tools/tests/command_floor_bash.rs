@@ -608,9 +608,13 @@ async fn a_cd_does_not_move_the_floor_off_the_authority_directories() {
         .await;
         assert_not_refused(&result, "control: a link to an ancestor");
         // The floor's verdict above is the control. The link itself is made
-        // here so the leg below does not depend on the platform having a
-        // working `ln`.
-        if !link.exists() && symlink_dir_or_skip(&decoy_parent, &link).is_some() {
+        // here when the platform's `ln` did not make one, so the leg below does
+        // not depend on `ln` — and, just as important, is NOT skipped when `ln`
+        // did work. Writing this as `!link.exists() && make(...)` would have
+        // short-circuited the whole leg away on every platform where `ln`
+        // succeeds, which is all of them except the one this was written for.
+        let have_link = link.exists() || symlink_dir_or_skip(&decoy_parent, &link).is_some();
+        if have_link {
             let (result, chunks) = run(
                 entry,
                 &format!(
