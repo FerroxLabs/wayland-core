@@ -1484,7 +1484,7 @@ jobs:
       #
       # `cargo test --workspace --lib` is one process per LIB BINARY, and it is
       # the only leg in this repository that runs tests in a shared process.
-      # Three live instances it caught on the commit that added it, all green
+      # Four live instances it caught on the commit that added it, all green
       # under nextest every time:
       #   * wcore-cli::lib -- an ambient WAYLAND_HOME reached `profile_home()`
       #     and made a signed-in ChatGPT user read as not-configured (2 of 4
@@ -1494,6 +1494,10 @@ jobs:
       #   * wcore-eval-scenarios::lib -- two tests installing the same
       #     process-global chown pause hook HUNG the binary outright
       #     (rc=124 at a 420 s timeout; the test passes alone in 0.00s).
+      #   * wcore-cli::lib -- nine onboarding tests wrote a real config.toml
+      #     through the process-global WAYLAND_HOME, landing this module's
+      #     fixture in a concurrent config test's tempdir (and, unset, in the
+      #     developer's own home).
       #
       # BLOCKING on purpose. A non-blocking shared-process leg is a gate that
       # cannot fail, which is exactly the state it replaces.
