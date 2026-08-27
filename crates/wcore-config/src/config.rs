@@ -1615,8 +1615,31 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderType {
+/// Declares [`ProviderType`] and, from the SAME variant list, the
+/// [`ProviderType::ALL`] table every provider-keyed runtime check iterates.
+///
+/// A hand-written `[ProviderType; N]` beside the enum can silently omit a new
+/// variant: the exhaustive `match`es force the variant to be CLASSIFIED, but a
+/// table the classification is read against is a separate list, and a
+/// `assert_eq!(TABLE.len(), N)` staleness guard on a fixed-size array compares
+/// a literal to itself and can never fire (wayland#559). Generating the table
+/// from the declaration makes that drift unrepresentable.
+macro_rules! provider_types {
+    ($( $(#[$meta:meta])* $variant:ident ),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum ProviderType {
+            $( $(#[$meta])* $variant, )+
+        }
+
+        impl ProviderType {
+            /// Every variant, in declaration order. Generated from the same
+            /// list as the enum itself, so it cannot go stale.
+            pub const ALL: &[ProviderType] = &[$( ProviderType::$variant ),+];
+        }
+    };
+}
+
+provider_types! {
     Anthropic,
     OpenAI,
     Bedrock,
@@ -8330,39 +8353,16 @@ mod tests {
         // delegation would write a DIFFERENT slot than `resolve_api_key` reads
         // — a key that reports "saved" and then resolves to nothing.
         //
-        // The list is explicit because `ProviderType` has no iterator. It is
-        // every arm of `provider_type_slug` as of this commit; a NEW provider
-        // added later is not covered here (named residual).
-        const ALL: [ProviderType; 23] = [
-            ProviderType::Anthropic,
-            ProviderType::OpenAI,
-            ProviderType::Bedrock,
-            ProviderType::Vertex,
-            ProviderType::Gemini,
-            ProviderType::AzureOpenAI,
-            ProviderType::Together,
-            ProviderType::Fireworks,
-            ProviderType::Nvidia,
-            ProviderType::Perplexity,
-            ProviderType::Cerebras,
-            ProviderType::OpenRouter,
-            ProviderType::FluxRouter,
-            ProviderType::Sakana,
-            ProviderType::Deepseek,
-            ProviderType::Xai,
-            ProviderType::Groq,
-            ProviderType::Moonshot,
-            ProviderType::Qwen,
-            ProviderType::Mistral,
-            ProviderType::Cohere,
-            ProviderType::OpenAIChatGpt,
-            ProviderType::MiniMax,
-        ];
+        // Driven by `ProviderType::ALL`, which the macro that declares the
+        // variants generates, so a NEW provider is covered here the day it is
+        // added — the previous hand-written `[ProviderType; 23]` left that as
+        // a named residual.
+        const ALL: &[ProviderType] = ProviderType::ALL;
         let slugs: std::collections::HashSet<&str> =
             ALL.iter().copied().map(provider_type_slug).collect();
         assert_eq!(slugs.len(), ALL.len(), "duplicate slug in the arm list");
 
-        for provider in ALL {
+        for &provider in ALL {
             let slug = provider_type_slug(provider);
             assert_eq!(
                 parse_builtin_provider(slug),
