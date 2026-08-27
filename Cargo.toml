@@ -513,6 +513,10 @@ workspace-hack = { path = "workspace-hack" }
 wiremock    = "0.6"
 tokio-test  = "0.4"
 tempfile    = "3"
+# Cross-platform file IDENTITY (device+inode on Unix, volume serial + file
+# index on Windows). Already present in Cargo.lock at 1.0.6 via the ignore/
+# walkdir tree, so declaring it directly adds ZERO packages.
+same-file   = "1"
 mockall     = "0.14"
 rstest      = "0.26"
 serial_test = "3"

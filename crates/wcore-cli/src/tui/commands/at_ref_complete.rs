@@ -105,7 +105,25 @@ fn complete_paths(body: &str, root: &Path) -> Vec<Completion> {
         if is_secret_path(&path) {
             continue;
         }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let file_type = entry.file_type().ok();
+        // core#339. Only a symlink can be named one thing and be another,
+        // and this loop runs on EVERY KEYSTROKE — so the resolution is paid
+        // only where it can possibly change the answer. `read_dir`'s
+        // `file_type` does not follow links, so this test is reliable.
+        //
+        // The popup never reads a file, but offering the link is the whole
+        // leak: the user presses Tab and `resolve_file` inlines the target.
+        if file_type.is_some_and(|t| t.is_symlink()) {
+            match fs::canonicalize(&path) {
+                Ok(target) if is_secret_path(&target) => continue,
+                // A link that does not resolve cannot be attached either;
+                // not offering it keeps the popup honest about what Tab
+                // will actually do.
+                Err(_) => continue,
+                Ok(_) => {}
+            }
+        }
+        let is_dir = file_type.map(|t| t.is_dir()).unwrap_or(false);
         let rel = if dir_part.is_empty() {
             name.to_string()
         } else {
@@ -282,7 +300,8 @@ mod tests {
         let root = tmp.path();
         let outside = TempDir::new().expect("outside");
         let secret = outside.path().join(".git-credentials");
-        fs::write(&secret, "https://fake-user:fake-token@example.invalid\n").expect("write fixture");
+        fs::write(&secret, "https://fake-user:fake-token@example.invalid\n")
+            .expect("write fixture");
         fs::write(root.join("notes-real.txt"), "ok").expect("write control");
         std::os::unix::fs::symlink(&secret, root.join("notes.txt")).expect("symlink");
 

@@ -275,6 +275,11 @@ zip          = { workspace = true }
 # user's default browser via `open::that_detached`.
 open         = { workspace = true }
 
+# core#339: the @-ref guard must judge the OBJECT a path resolves to, not
+# the name typed. `same-file` compares two open handles by filesystem
+# identity on every platform, which keeps `cfg(windows)` out of the guard.
+same-file    = { workspace = true }
+
 workspace-hack.workspace = true
 # F25-04: `plugin sign --new-key` mints the Ed25519 keypair an author signs
 # with, so key generation is a PRODUCTION path, not a test one. `rand` was

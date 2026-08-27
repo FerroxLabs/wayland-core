@@ -12,7 +12,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use super::at_ref_guard::{GitIgnore, is_secret_path};
+use super::at_ref_guard::{GitIgnore, OpenRefusal, canonical_dir, is_secret_path, open_attached};
 use super::at_ref_parse::{AtRef, AtRefError};
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -187,23 +187,45 @@ pub fn resolve(at: &AtRef, root: &Path) -> Result<AtPayload, AtRefError> {
 /// Resolve `@file`: read one file, honoring the secret + gitignore guards.
 fn resolve_file(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     let full = resolve_under_root(path, root);
+    let ignore = GitIgnore::load(root);
 
+    // Lexical pass, unchanged. It still runs FIRST because it is the only
+    // pass that can speak about a path which does not resolve at all: a
+    // named-but-missing `.env` stays a loud `SecretBlocked`, not a
+    // `NotFound`, exactly as before.
     if is_secret_path(&full) {
         return Err(AtRefError::SecretBlocked(display(path)));
     }
     if let Some(rel) = rel_to_root(&full, root)
-        && GitIgnore::load(root).is_ignored(&rel, false)
+        && ignore.is_ignored(&rel, false)
     {
         return Err(AtRefError::GitIgnored(display(path)));
     }
-    if !full.is_file() {
-        return Err(AtRefError::NotFound(display(path)));
+
+    // core#339 — identity. The lexical pass above judged the NAME; from
+    // here on every judgement is about the OBJECT the read will return.
+    // `open_attached` opens once and proves `target()` names that object,
+    // so nothing below can be invalidated by repointing a link.
+    let opened = open_attached(&full).map_err(|r| open_error(r, path))?;
+
+    if is_secret_path(opened.target()) {
+        return Err(AtRefError::SecretBlocked(display(path)));
+    }
+    // core#335 — scope. Comparing the CANONICAL target against the
+    // CANONICAL root, so a file that genuinely sits inside the workspace is
+    // subject to its `.gitignore` however the user spelled the way there
+    // (`sub/../x`, an absolute path, a symlinked root). A target that
+    // genuinely resolves OUTSIDE the workspace still yields `None` here and
+    // is still attachable: this repo's `.gitignore` holds no jurisdiction
+    // over an unrelated directory, and refusing such a path would remove a
+    // capability rather than close a hole.
+    if let Some(rel) = rel_to_root(opened.target(), &canonical_dir(root))
+        && ignore.is_ignored(&rel, false)
+    {
+        return Err(AtRefError::GitIgnored(display(path)));
     }
 
-    let content = fs::read_to_string(&full).map_err(|e| AtRefError::Io {
-        path: display(path),
-        message: e.to_string(),
-    })?;
+    let content = opened.read_to_string().map_err(|r| open_error(r, path))?;
 
     Ok(AtPayload {
         kind: PayloadKind::File,
@@ -231,9 +253,15 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     let mut skipped = 0usize;
     let mut truncated = false;
 
+    // The walk starts at the directory the user NAMED, not its canonical
+    // form: a directory named explicitly is the user's own authority, the
+    // same call core#335 makes for an absolute file path. Only directories
+    // the walk DISCOVERS are contained below — those arrive unasked for.
+    let croot = canonical_dir(root);
     walk_dir(
         &full,
         root,
+        &croot,
         &ignore,
         &mut files,
         &mut skipped,
@@ -279,6 +307,7 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
 fn walk_dir(
     dir: &Path,
     root: &Path,
+    croot: &Path,
     ignore: &GitIgnore,
     out: &mut Vec<ResolvedFile>,
     skipped: &mut usize,
@@ -317,15 +346,50 @@ fn walk_dir(
             if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
                 continue;
             }
-            walk_dir(&path, root, ignore, out, skipped, truncated)?;
+            // core#339 at directory grain. `is_dir` follows links, so a
+            // symlinked directory would otherwise pull a whole tree the
+            // user never named into the payload. A directory that resolves
+            // outside the workspace is not part of `@dir` by any reading of
+            // what the user asked for.
+            let cdir = canonical_dir(&path);
+            if !cdir.starts_with(croot) {
+                *skipped += 1;
+                continue;
+            }
+            // Identity again, at directory grain. `build/` is a DIR-ONLY
+            // rule: it prunes the directory and never matches the files
+            // beneath it. A symlink named `alias` does not match that rule,
+            // so descending it would re-enter the ignored tree under a name
+            // the rule cannot see and attach everything inside. Containment
+            // above does not catch this — the target is inside the
+            // workspace; only re-testing the RESOLVED directory does.
+            if rel_to_root(&cdir, croot).is_some_and(|r| ignore.is_ignored(&r, true)) {
+                *skipped += 1;
+                continue;
+            }
+            walk_dir(&path, root, croot, ignore, out, skipped, truncated)?;
         } else {
             if is_secret_path(&path) {
                 *skipped += 1;
                 continue;
             }
+            // core#339 — the walk's own read site. Same rule as
+            // `resolve_file`: open once, then judge and read one object.
+            // A file that cannot be opened is skipped exactly as an
+            // unreadable one was before.
+            let Ok(opened) = open_attached(&path) else {
+                *skipped += 1;
+                continue;
+            };
+            if is_secret_path(opened.target())
+                || rel_to_root(opened.target(), croot).is_some_and(|r| ignore.is_ignored(&r, false))
+            {
+                *skipped += 1;
+                continue;
+            }
             // Read text files only; a binary file is skipped silently
             // rather than corrupting the payload with lossy bytes.
-            match fs::read_to_string(&path) {
+            match opened.read_to_string() {
                 Ok(content) => out.push(ResolvedFile {
                     path: PathBuf::from(&rel),
                     content,
@@ -433,6 +497,25 @@ fn rel_to_root(full: &Path, root: &Path) -> Option<String> {
 /// A lossy display string for a path, for error messages.
 fn display(path: &Path) -> String {
     path.display().to_string()
+}
+
+/// Map an [`OpenRefusal`] onto the error the composer renders. A `Raced`
+/// refusal is surfaced rather than retried: retrying hands the attacker
+/// another attempt at the same window.
+fn open_error(refusal: OpenRefusal, path: &Path) -> AtRefError {
+    match refusal {
+        OpenRefusal::NotFound => AtRefError::NotFound(display(path)),
+        OpenRefusal::Raced => AtRefError::Io {
+            path: display(path),
+            message: "the target changed identity between the guard and the read; \
+                      refused rather than attaching an unverified file"
+                .to_string(),
+        },
+        OpenRefusal::Io(message) => AtRefError::Io {
+            path: display(path),
+            message,
+        },
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -764,7 +847,10 @@ mod tests {
         // Control: the walk produced output, so the refutation below cannot
         // pass by returning nothing.
         let bodies: Vec<&str> = payload.files.iter().map(|f| f.content.as_str()).collect();
-        assert!(bodies.contains(&"safe"), "walk produced nothing: {bodies:?}");
+        assert!(
+            bodies.contains(&"safe"),
+            "walk produced nothing: {bodies:?}"
+        );
         assert!(
             !bodies.iter().any(|b| b.contains("fake-token")),
             "the @dir walk inlined a credential store through a symlink"
@@ -786,10 +872,25 @@ mod tests {
         let at = AtRef::parse("@./").expect("parse");
         let payload = resolve(&at, root).expect("resolve dir");
         let bodies: Vec<&str> = payload.files.iter().map(|f| f.content.as_str()).collect();
-        assert!(bodies.contains(&"safe"), "walk produced nothing: {bodies:?}");
+        assert!(
+            bodies.contains(&"safe"),
+            "walk produced nothing: {bodies:?}"
+        );
         assert!(
             !bodies.iter().any(|b| b.contains("PRIVATE-OUTSIDE")),
             "the @dir walk escaped the workspace through a directory symlink"
+        );
+        // The exclusion must also be REPORTED. Without the containment
+        // check the walk descends the outside tree anyway and every file is
+        // dropped unconted by `rel_to_root`, so the payload looks complete
+        // and the user is never told anything was left out.
+        assert!(
+            payload
+                .warnings
+                .iter()
+                .any(|w| matches!(w, AtWarning::SkippedFiles { count } if *count >= 1)),
+            "the escaped directory vanished silently: {:?}",
+            payload.warnings
         );
     }
 
@@ -811,10 +912,7 @@ mod tests {
         // cannot pass because the gitignore failed to load.
         let plain = AtRef::parse("@secret-notes.txt").expect("parse");
         assert!(
-            matches!(
-                resolve(&plain, &root),
-                Err(AtRefError::GitIgnored(_))
-            ),
+            matches!(resolve(&plain, &root), Err(AtRefError::GitIgnored(_))),
             "control failed: the plain spelling was not git-ignored"
         );
 
@@ -843,5 +941,68 @@ mod tests {
         let at = AtRef::parse(&format!("@{}", target.display())).expect("parse");
         let payload = resolve(&at, &root).expect("an absolute path outside the root must attach");
         assert_eq!(payload.files[0].content, "outside body");
+    }
+
+    /// A directory symlink INSIDE the workspace must not launder a
+    /// git-ignored directory into the payload.
+    ///
+    /// The walk prunes an ignored directory at the directory level
+    /// (`build/` is a dir-only rule, so it never matches the FILES beneath
+    /// it). A symlink named `alias` does not match that rule, so descending
+    /// it re-enters the ignored tree from a name the rule cannot see and
+    /// every file inside is attached. Containment does not catch this — the
+    /// target is inside the workspace.
+    #[cfg(unix)]
+    #[test]
+    fn an_at_dir_walk_does_not_launder_a_gitignored_dir_through_a_symlink() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir(root.join("build")).expect("mkdir");
+        fs::write(root.join("build/artifact.txt"), "BUILD-OUTPUT").expect("write");
+        fs::write(root.join("ok.txt"), "safe").expect("write ok");
+        fs::write(root.join(".gitignore"), "build/\n").expect("write gi");
+        std::os::unix::fs::symlink(root.join("build"), root.join("alias")).expect("symlink");
+
+        let at = AtRef::parse("@./").expect("parse");
+        let payload = resolve(&at, root).expect("resolve dir");
+        let bodies: Vec<&str> = payload.files.iter().map(|f| f.content.as_str()).collect();
+        // Control: the walk produced output, and the DIRECT spelling of the
+        // ignored directory was already pruned — so the assertion below is
+        // about the symlink, not about the gitignore failing to load.
+        assert!(
+            bodies.contains(&"safe"),
+            "walk produced nothing: {bodies:?}"
+        );
+        assert_eq!(
+            bodies.iter().filter(|b| b.contains("BUILD-OUTPUT")).count(),
+            0,
+            "a git-ignored directory was laundered in through a symlink"
+        );
+    }
+
+    /// The capability boundary for `@dir`, and the mirror of the
+    /// absolute-path decision in core#335: a directory the user NAMES is
+    /// their own authority, even when it leaves the workspace. Only
+    /// directories the walk DISCOVERS on its own are the vulnerability —
+    /// those arrive without the user asking for them.
+    ///
+    /// This is what stops the containment check from quietly turning
+    /// `@escape/` into an empty payload with nothing said about it.
+    #[cfg(unix)]
+    #[test]
+    fn an_explicitly_named_directory_symlink_still_resolves() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let outside = TempDir::new().expect("outside");
+        fs::write(outside.path().join("named.txt"), "NAMED-BY-THE-USER").expect("write");
+        std::os::unix::fs::symlink(outside.path(), root.join("escape")).expect("symlink");
+
+        let at = AtRef::parse("@escape/").expect("parse");
+        let payload = resolve(&at, root).expect("resolve dir");
+        let bodies: Vec<&str> = payload.files.iter().map(|f| f.content.as_str()).collect();
+        assert!(
+            bodies.contains(&"NAMED-BY-THE-USER"),
+            "a directory the user named explicitly was silently emptied: {bodies:?}"
+        );
     }
 }
