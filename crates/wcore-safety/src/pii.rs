@@ -285,7 +285,9 @@ fn split_secret_windows(text: &str) -> Vec<SplitWindow> {
                 end: tokens[hi].1,
                 label,
             });
-            pos = norm_end[hi].max(start + 1);
+            // `norm_end[hi] >= norm_end[lo] > start`, so this always
+            // advances, and a token end is always a char boundary.
+            pos = norm_end[hi];
         }
     }
 

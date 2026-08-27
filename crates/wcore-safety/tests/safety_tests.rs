@@ -402,3 +402,45 @@ fn a_clean_multi_kilobyte_document_is_returned_untouched() {
     let out = PIIScrubber.scrub(&input);
     assert_eq!(out, input, "clean document was modified");
 }
+
+#[test]
+fn two_split_secrets_in_one_run_are_both_redacted_and_the_prose_between_lives() {
+    // Exercises the multi-window path: two secrets, split across CRLF and LF,
+    // separated by ordinary prose inside a single greedy candidate run.
+    let pat = planted_pat();
+    let oauth = ["gh", "s", "_", "ZYXWvutSRQponMLKjihGFEdcba9876543210zz"].concat();
+    let middle = " and then some ordinary words in between here ";
+    let input = format!(
+        "{}{}\r\n{}{middle}{}\n{} {}",
+        prose_head(),
+        &pat[..6],
+        &pat[6..],
+        &oauth[..5],
+        &oauth[5..],
+        prose_tail()
+    );
+
+    let out = PIIScrubber.scrub(&input);
+
+    assert!(!out.contains(&pat), "PAT survived");
+    assert!(!out.contains(&pat[6..]), "PAT tail survived");
+    assert!(!out.contains(&oauth), "OAuth token survived");
+    assert!(!out.contains(&oauth[5..]), "OAuth token tail survived");
+    assert!(
+        out.contains("and then some ordinary words in between here"),
+        "prose between the two secrets was destroyed"
+    );
+    assert!(out.contains(HEAD_PHRASE), "prose before was destroyed");
+    assert!(out.contains(TAIL_PHRASE), "prose after was destroyed");
+    assert_eq!(
+        out.matches("[REDACTED:").count(),
+        2,
+        "expected exactly two redactions"
+    );
+    assert!(
+        out.len() + 200 >= input.len(),
+        "scrubber destroyed {} of {} bytes",
+        input.len() - out.len(),
+        input.len()
+    );
+}
