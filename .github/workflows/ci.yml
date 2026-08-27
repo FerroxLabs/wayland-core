@@ -153,7 +153,30 @@ jobs:
     # `contains()` is used rather than `matrix.os[0]` because the matrix mixes a
     # plain string (`macos-latest`) with a label array, and indexing a string in
     # a GitHub expression does not do what indexing an array does.
-    runs-on: ${{ (contains(matrix.os, 'self-hosted') && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'windows-latest' || matrix.os }}
+    # 2026-08-27: the `windows-hosted` LABEL joins the fork condition as a
+    # second reason to substitute a GitHub-hosted Windows box for the
+    # self-hosted one. Both self-hosted Windows runners report `offline` (they
+    # are the same physical machine), and `CI (Array)` is a REQUIRED context,
+    # so while that box is down NO pull request can merge at all.
+    #
+    # This is deliberately done on `runs-on` and NOT on the matrix: the job
+    # NAME is rendered from `matrix.os`, and an array-valued matrix entry
+    # renders as literally "Array" — which is where the required check name
+    # `CI (Array)` comes from. Leaving the matrix untouched therefore keeps
+    # the check name identical by construction, while `runs-on` alone decides
+    # the machine. It is the same substitution this line already performs for
+    # fork PRs, which is the precedent for it being sound.
+    #
+    # NOT equivalent in one MEASURED respect: the matrix comment records that
+    # the "AppContainer probed available" lines came from the hosted leg and
+    # not from either self-hosted box. Hosted Windows probes AppContainer as
+    # AVAILABLE where self-hosted does not, so the sandbox tests can take a
+    # different path. A green here is real Windows evidence; it is NOT proof
+    # the self-hosted fleet is green.
+    #
+    # With no label the expression is byte-identical in effect to before, so
+    # nothing changes the moment the self-hosted box comes back.
+    runs-on: ${{ (contains(matrix.os, 'self-hosted') && (contains(github.event.pull_request.labels.*.name, 'windows-hosted') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))) && 'windows-latest' || matrix.os }}
     # gh#1072. Without this the job inherits GitHub's 6-HOUR default, and this
     # is a required context, so one wedged job blocks every PR in the repo.
     # Sized from measurement, not guesswork: across the last four successful
@@ -751,49 +774,8 @@ jobs:
     # self-hosted boxes ever die, Windows work QUEUES rather than passing
     # vacuously — visible as a pending required check, never a false green —
     # and this leg is one `[ci-windows]` commit tag away from covering it.
-    #
-    # 2026-08-27: the commit-tag route above reads `github.event.head_commit`
-    # and `github.event.commits`, which exist ONLY on a `push` event. `push:`
-    # here covers `main` and `lane/**` and nothing else, so on an integration
-    # branch — the exact case where self-hosted Windows being down actually
-    # matters — a `[ci-windows]` tag is silently inert: the push fires only
-    # the `pull_request` event, both fields are null, and this job reports
-    # `skipped`. Measured, not assumed (run 33027398596).
-    #
-    # A LABEL is the pull_request-side equivalent: it is available on the
-    # event, it is opt-in exactly like the tag, and it can be applied to a PR
-    # that is already open without rewriting a commit.
-    #
-    # ORDERING MATTERS, and it is not obvious. `on: pull_request:` above
-    # declares no `types:`, so it defaults to
-    # [opened, synchronize, reopened] -- `labeled` is NOT among them.
-    # Applying the label therefore does NOT start a run, and a run that was
-    # already created carries the label set as it was AT CREATION TIME.
-    # Measured: labelled PR #341, and the in-flight run (33028709448, pushed
-    # moments earlier) still reported `skipped`.
-    #
-    # So: LABEL FIRST, THEN PUSH. Every later `synchronize` sees the label and
-    # honours it, so this is a one-time ordering cost per PR, not per commit.
-    # `labeled` is deliberately NOT added to `types:` -- that would fire the
-    # whole matrix on every routine label change (`area:core` and friends),
-    # which is a large recurring cost to save a single push.
-    #
-    # ORDERING MATTERS, and it is not obvious. `on: pull_request:` above
-    # declares no `types:`, so it defaults to
-    # [opened, synchronize, reopened] -- `labeled` is NOT among them.
-    # Applying the label therefore does NOT start a run, and a run that was
-    # already created carries the label set as it was AT CREATION TIME.
-    # Measured: labelled PR #341, and the in-flight run (33028709448, pushed
-    # moments earlier) still reported `skipped`.
-    #
-    # So: LABEL FIRST, THEN PUSH. Every later `synchronize` sees the label and
-    # honours it, so this is a one-time ordering cost per PR, not per commit.
-    # `labeled` is deliberately NOT added to `types:` -- that would fire the
-    # whole matrix on every routine label change (`area:core` and friends),
-    # which is a large recurring cost to save a single push.
     if: >-
       contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
-      || contains(github.event.pull_request.labels.*.name, 'ci-windows')
     # Bounded on purpose. The matrix job is unbounded (GHA default 6h), which is
     # tolerable on a box whose target/ is warm; a cold hosted compile that wedges
     # would otherwise burn six hours of hosted minutes per run. Sized from the
