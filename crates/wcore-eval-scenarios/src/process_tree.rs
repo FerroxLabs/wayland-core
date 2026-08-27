@@ -1758,6 +1758,25 @@ mod linux {
     static MATERIALIZATION_EXCHANGE_PAUSE: OnceLock<Mutex<Option<DirectoryOpenPause>>> =
         OnceLock::new();
 
+    /// #1134. The three pause hooks above are PROCESS-GLOBAL: test code
+    /// installs one, and the production walk (`chown_tree_without_following`)
+    /// reads it. Under `cargo nextest` every test owns its own process and
+    /// that is sound; under plain `cargo test` one binary is one process, and
+    /// the four tests that install a hook run CONCURRENTLY on libtest's thread
+    /// pool. Two of them install `REGULAR_MATERIALIZATION_PAUSE`, so whichever
+    /// installed second clobbered the first — whose worker then never reached
+    /// its two-party `Barrier` and blocked forever. Measured on this tree:
+    /// `cargo test -p wcore-eval-scenarios --lib` HUNG (rc=124 at a 420 s
+    /// timeout) on `pre_exchange_failure_retains_private_materialization_for_recovery`,
+    /// which passes alone in 0.00s.
+    ///
+    /// ONE lock for all three hooks, not one per hook: they fire from the same
+    /// walk, so a hook installed for one test can be reached inside another
+    /// test's worker. Poison is tolerated deliberately — a panicking test must
+    /// not convert one failure into a cascade of unrelated ones.
+    #[cfg(test)]
+    static PAUSE_HOOK_SERIAL: Mutex<()> = Mutex::new(());
+
     #[cfg(test)]
     fn pause_before_directory_open(name: &[u8]) {
         let pause = DIRECTORY_OPEN_PAUSE
@@ -1964,8 +1983,13 @@ mod linux {
             }
             use std::os::unix::fs::{MetadataExt, symlink};
 
-            static TEST_SERIAL: Mutex<()> = Mutex::new(());
-            let _serial = TEST_SERIAL.lock().expect("serialize swap hook");
+            // #1134: one lock across every pause-hook test in this binary;
+            // see PAUSE_HOOK_SERIAL. The function-local mutex this replaces
+            // serialized this test only against ITSELF, which libtest never
+            // runs concurrently anyway — a ritual, not a contract.
+            let _pause_hook = PAUSE_HOOK_SERIAL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let fixture = tempfile::tempdir().expect("create ownership fixture");
             let workspace = fixture.path().join("workspace");
             let target = workspace.join("swap-target");
@@ -2084,6 +2108,9 @@ mod linux {
             let outside = fixture.path().join("outside");
             std::fs::create_dir(&workspace).expect("create workspace");
             std::fs::create_dir(&outside).expect("create outside directory");
+            let _pause_hook = PAUSE_HOOK_SERIAL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let workspace_file = workspace.join("race-target");
             let outside_alias = outside.join("late-hard-link");
             std::fs::write(&workspace_file, b"host data").expect("seed workspace file");
@@ -2166,6 +2193,9 @@ mod linux {
             let fixture = tempfile::tempdir().expect("create ownership fixture");
             let workspace = fixture.path().join("workspace");
             std::fs::create_dir(&workspace).expect("create workspace");
+            let _pause_hook = PAUSE_HOOK_SERIAL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let workspace_file = workspace.join("rollback-target");
             let recovery_file = fixture.path().join("recovered-original");
             std::fs::write(&workspace_file, b"original host data").expect("seed workspace file");
@@ -2253,6 +2283,9 @@ mod linux {
             let fixture = tempfile::tempdir().expect("create ownership fixture");
             let workspace = fixture.path().join("workspace");
             std::fs::create_dir(&workspace).expect("create workspace");
+            let _pause_hook = PAUSE_HOOK_SERIAL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let workspace_file = workspace.join("pre-exchange-target");
             let recovery_file = fixture.path().join("recovered-original");
             std::fs::write(&workspace_file, b"original host data").expect("seed workspace file");
