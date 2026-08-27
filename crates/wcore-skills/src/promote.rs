@@ -601,19 +601,45 @@ pub(crate) fn staging_root_for(skills_root: &Path) -> PathBuf {
     }
 }
 
-/// Join `rel` under `base`, rejecting absolute paths and any `..` component.
+/// Join `rel` under `base`, rejecting absolute paths, any `..` component, and
+/// any `.` component.
+///
+/// `Component::CurDir` used to be accepted here. It is refused now because this
+/// function is the WRITER for payload-supplied keys, while fences elsewhere
+/// identify the same entries by comparing the key STRING (for example
+/// `loader::generated_provenance_in_files`, which asks `rel == "manifest.json"`).
+/// Accepting `.` meant `"./manifest.json"` and `"manifest.json"` resolved to the
+/// same file while comparing as different strings — one spelling written, a
+/// different spelling matched. On a branch that gated an evidence fence behind
+/// such a match, the `./` spelling walked straight past it and produced a
+/// promotion grant with `evidence: None`.
+///
+/// Normalising instead of refusing would NOT close that gap: it fixes the path
+/// the write lands on and leaves every string-keyed matcher still looking at the
+/// raw spelling. Refusing is what makes the writer and those matchers agree by
+/// construction, so a payload can only ever name an entry one way.
 fn resolve_under(base: &Path, rel: &str) -> Option<PathBuf> {
     let p = Path::new(rel);
     if p.is_absolute() {
         return None;
     }
+    let mut normal = PathBuf::new();
     for c in p.components() {
         match c {
-            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normal.push(part),
             _ => return None,
         }
     }
-    Some(base.join(p))
+    // A leading `.` is refused by the loop above, but `Path::components()`
+    // NORMALISES AWAY an interior one -- `"nested/./SKILL.md"` yields exactly
+    // the components of `"nested/SKILL.md"`, so the loop cannot see it, and
+    // `base.join(rel)` would then write through the raw spelling. Requiring the
+    // re-rendered components to reproduce `rel` is what catches that: any key
+    // that is not already canonical names a file some other key also names.
+    if normal.as_os_str() != p.as_os_str() {
+        return None;
+    }
+    Some(base.join(normal))
 }
 
 /// Best-effort directory fsync, so a rename's effects survive a power loss.
@@ -699,4 +725,72 @@ fn tree_stats(dir: &Path) -> Result<(usize, u64), GovernError> {
         }
     }
     Ok((files.len(), bytes))
+}
+
+#[cfg(test)]
+mod resolve_under_tests {
+    use super::resolve_under;
+    use std::path::Path;
+
+    /// A payload key may name an entry exactly ONE way.
+    ///
+    /// `resolve_under` is the writer for payload-supplied keys, while fences
+    /// elsewhere identify the same entries by comparing the key STRING. When
+    /// `.` was accepted, `"./manifest.json"` and `"manifest.json"` landed on the
+    /// same file yet compared as different strings, so a fence keyed on the
+    /// canonical spelling never saw the prefixed one.
+    ///
+    /// The canonical arms are the known-positive control: without them a
+    /// `resolve_under` that refused EVERYTHING would satisfy the refusals below
+    /// and grade nothing.
+    #[test]
+    fn a_dot_prefixed_key_cannot_name_the_same_file_as_its_canonical_spelling() {
+        let base = Path::new("/tmp/base");
+
+        // Control: the canonical spellings still resolve.
+        assert_eq!(
+            resolve_under(base, "manifest.json"),
+            Some(base.join("manifest.json")),
+            "control: a canonical key must still resolve, or the refusals below prove nothing"
+        );
+        assert_eq!(
+            resolve_under(base, "nested/SKILL.md"),
+            Some(base.join("nested/SKILL.md")),
+            "control: a nested canonical key must still resolve"
+        );
+
+        // The bypass spelling, and its relatives, are refused outright.
+        for rel in [
+            "./manifest.json",
+            "./SKILL.md",
+            "././manifest.json",
+            "nested/./SKILL.md",
+            "./nested/SKILL.md",
+        ] {
+            assert_eq!(
+                resolve_under(base, rel),
+                None,
+                "{rel} resolves to the same file as its canonical spelling but compares as a \
+                 different string, so a string-keyed fence would not see it"
+            );
+        }
+
+        // Pre-existing guarantees must not regress.
+        assert_eq!(
+            resolve_under(base, "../escape"),
+            None,
+            "`..` must stay refused"
+        );
+        assert_eq!(
+            resolve_under(base, "nested/../escape"),
+            None,
+            "an interior `..` must stay refused"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            resolve_under(base, "/etc/passwd"),
+            None,
+            "an absolute path must stay refused"
+        );
+    }
 }
