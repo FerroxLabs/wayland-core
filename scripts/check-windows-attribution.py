@@ -27,6 +27,22 @@ Two things have to hold before a Windows red means anything:
       dashboards and humans read — cannot tell churn from green. Two of the
       three also carry an in-test `RACE_ATTEMPTS` loop, so nextest retries were
       stacking on top of an internal retry.
+  R3  The aggregate `report` job — the REQUIRED status context, and therefore
+      the thing everyone actually reads — states whether Windows was exercised
+      at all. On PR #341 `CI (windows-latest, hosted)` was SKIPPED and the
+      overall report read as passing: a skipped leg contributes no red, so it
+      contributes to a green it never earned. This is checked BOTH ways: the
+      wiring (the `report` job depends on the hosted leg and runs the
+      annotation step with both leg results, under `if: always()`) and the
+      BEHAVIOUR (the annotation script is executed against five fixture states,
+      because a script that always said "exercised" would satisfy every grep).
+
+R3 is enforced on LINUX on purpose. A coverage check that itself runs on the
+Windows leg would be skipped by the same mechanism that produced the unearned
+green, so it could never fire in the case it exists for. It also ANNOTATES
+rather than fails: hosted Windows is separately red on main's own byte-identical
+tree, and gating main on that would block every merge. The defect being closed
+is the honesty of the conclusion, not the redness of the platform.
 
 Scope note: this covers the workflows that draw a TEST verdict about a tree on
 Windows. Release/artifact-build workflows are deliberately out of scope — they
@@ -71,6 +87,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -84,8 +101,38 @@ RECORD_STEP_NAME = "Record which Windows executor served this job"
 #                          logs, so an A/B pair is one command, not two archives.
 REQUIRED_IN_STEP = ("RUNNER_NAME", "exit 1", "GITHUB_STEP_SUMMARY")
 
+CI_WORKFLOW = ".github/workflows/ci.yml"
+
+# R3. `report` is the required status context; `ci-windows-hosted` is the leg
+# that was SKIPPED while it read as passing. The annotation lives in a script so
+# it can be executed by this gate rather than only grepped for.
+REPORT_JOB = "report"
+HOSTED_WINDOWS_JOB = "ci-windows-hosted"
+ANNOTATE_SCRIPT = ".github/scripts/annotate-windows-coverage.sh"
+ANNOTATE_STEP_NAME = "Annotate Windows coverage (a skipped leg is not a pass)"
+
+# Each token is load-bearing:
+#   the script path                    — the annotation is actually run;
+#   needs.ci.result                    — the self-hosted matrix leg's result;
+#   needs.ci-windows-hosted.result     — the leg the unearned green came from;
+#   always()                           — a failing evidence gate earlier in the
+#                                        job must not suppress the coverage
+#                                        statement, which is exactly when it
+#                                        matters most.
+REQUIRED_IN_ANNOTATE_STEP = (
+    ANNOTATE_SCRIPT,
+    "needs.ci.result",
+    f"needs.{HOSTED_WINDOWS_JOB}.result",
+    "always()",
+)
+
+# The two verdicts the annotation may reach. `Windows: not exercised` does not
+# contain `Windows: exercised`, so the pair tests in both directions.
+EXERCISED_MARKER = "Windows: exercised"
+NOT_EXERCISED_MARKER = "Windows: not exercised"
+
 WINDOWS_TEST_WORKFLOWS = (
-    ".github/workflows/ci.yml",
+    CI_WORKFLOW,
     ".github/workflows/nightly-windows-soak.yml",
     ".github/workflows/windows-flake-ledger.yml",
 )
@@ -328,6 +375,166 @@ def check_nextest(text: str) -> list[str]:
     ]
 
 
+def check_report_coverage(path: str, text: str) -> list[str]:
+    """R3 wiring: `report` must be able to tell a SKIPPED Windows leg from a pass.
+
+    Two things have to be true and neither implies the other. The job has to
+    DEPEND on the hosted Windows leg — without that, `needs.ci-windows-hosted`
+    does not resolve and the skip is invisible — and it has to RUN the
+    annotation with both leg results. Deleting either one restores the exact
+    state #1146 measured: a green `report` covering no Windows test.
+    """
+    jobs = dict(split_jobs(text))
+    if REPORT_JOB not in jobs:
+        return [
+            f"{path}: no `{REPORT_JOB}` job — the required status context that "
+            f"has to state whether Windows was exercised is gone (gh#1146)"
+        ]
+    job = jobs[REPORT_JOB]
+    violations: list[str] = []
+
+    if HOSTED_WINDOWS_JOB not in key_block(job, "needs"):
+        violations.append(
+            f"{path}: job `{REPORT_JOB}` does not `needs:` `{HOSTED_WINDOWS_JOB}`, "
+            f"so that leg being SKIPPED is invisible to it and goes on quietly "
+            f"contributing to a green it never earned (gh#1146)"
+        )
+
+    body = step_body(job, ANNOTATE_STEP_NAME)
+    if body is None:
+        violations.append(
+            f"{path}: job `{REPORT_JOB}` has no `{ANNOTATE_STEP_NAME}` step — its "
+            f"conclusion cannot distinguish a Windows leg that PASSED from one "
+            f"that was never run (gh#1146)"
+        )
+        return violations
+
+    missing = [tok for tok in REQUIRED_IN_ANNOTATE_STEP if tok not in body]
+    if missing:
+        violations.append(
+            f"{path}: job `{REPORT_JOB}`'s `{ANNOTATE_STEP_NAME}` step is missing "
+            f"{missing} — it must run `{ANNOTATE_SCRIPT}`, be handed BOTH Windows "
+            f"leg results, and carry `if: always()` so a failing evidence gate "
+            f"cannot suppress the coverage statement (gh#1146)"
+        )
+    return violations
+
+
+# A junit that certifies something, and the one nextest writes for a filterset
+# that matched nothing — the same tests=0 file .github/scripts/assert-test-evidence.sh
+# documents. A Windows artifact holding zero test cases is not Windows coverage.
+_JUNIT_ONE = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="nextest-run" tests="1">\n'
+    '<testsuite name="s" tests="1"><testcase name="t" classname="c" time="0.1"/></testsuite>\n'
+    "</testsuites>\n"
+)
+_JUNIT_EMPTY = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<testsuites name="nextest-run" tests="0" failures="0" errors="0" time="0.000">\n</testsuites>\n'
+)
+
+# (label, {artifact dir: junit body} or None, needs.ci-windows-hosted.result,
+#  must say exercised).  `None` means the evidence directory does not exist at
+#  all — `download-artifact` runs under `continue-on-error` and leaves no
+#  directory when nothing matched, which is the shape a run with no uploads
+#  actually has.
+#
+# Case 2 is the defect verbatim: macOS and Linux reported, Windows skipped, and
+# the aggregate read as a pass. Every negative case is paired with a positive
+# one over the same code, so a script that ALWAYS said "not exercised" fails
+# this too — a gate that cannot pass is as worthless as one that cannot fail.
+_ANNOTATE_CASES = (
+    ("no evidence directory at all, hosted leg skipped", None, "skipped", False),
+    ("no Windows report at all, hosted leg skipped", {}, "skipped", False),
+    (
+        "only macOS + Linux reported, hosted leg skipped",
+        {"nextest-junit-macos-latest": _JUNIT_ONE, "nextest-junit-linux-containerized": _JUNIT_ONE},
+        "skipped",
+        False,
+    ),
+    ("Windows junit present but declares zero tests", {"nextest-junit-Array": _JUNIT_EMPTY}, "skipped", False),
+    ("self-hosted Windows leg reported tests", {"nextest-junit-Array": _JUNIT_ONE}, "skipped", True),
+    (
+        "hosted Windows leg reported tests",
+        {"nextest-junit-windows-latest-hosted": _JUNIT_ONE},
+        "success",
+        True,
+    ),
+)
+
+
+def check_annotate_behaviour(script: str) -> list[str]:
+    """R3 behaviour: EXECUTE the annotation and pin what it says, both ways.
+
+    The wiring check above is a set of greps, and a script that hardcoded
+    "Windows: exercised" would satisfy every one of them. So the script itself
+    is run against the fixture states in `_ANNOTATE_CASES`, and its verdict —
+    read from stdout AND from the step summary it writes — is compared to what
+    that state means. It must also always exit 0: this step annotates the
+    conclusion, it does not gate main.
+    """
+    if not os.path.exists(script):
+        return [
+            f"{ANNOTATE_SCRIPT}: missing — the `{REPORT_JOB}` job's Windows "
+            f"coverage annotation has no implementation (gh#1146)"
+        ]
+
+    violations: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, (label, dirs, hosted_result, want_exercised) in enumerate(_ANNOTATE_CASES):
+            evidence = os.path.join(tmp, f"case{i}")
+            if dirs is not None:
+                os.makedirs(evidence, exist_ok=True)
+            for name, body in (dirs or {}).items():
+                os.makedirs(os.path.join(evidence, name), exist_ok=True)
+                with open(os.path.join(evidence, name, "junit.xml"), "w", encoding="utf-8") as fh:
+                    fh.write(body)
+            summary = os.path.join(tmp, f"summary{i}.md")
+            env = dict(os.environ)
+            env.update(
+                {
+                    "EVIDENCE_DIR": evidence,
+                    "SELF_HOSTED_RESULT": "success",
+                    "HOSTED_RESULT": hosted_result,
+                    "GITHUB_STEP_SUMMARY": summary,
+                }
+            )
+            proc = subprocess.run(["bash", script], capture_output=True, text=True, env=env)
+            said = proc.stdout + proc.stderr
+            if os.path.exists(summary):
+                with open(summary, encoding="utf-8") as fh:
+                    said += fh.read()
+            if proc.returncode != 0:
+                violations.append(
+                    f"{ANNOTATE_SCRIPT}: `{label}` exited {proc.returncode} — this "
+                    f"step annotates the conclusion and must never fail the "
+                    f"`{REPORT_JOB}` job (gh#1146)"
+                )
+            no = NOT_EXERCISED_MARKER in said
+            yes = EXERCISED_MARKER in said
+            want, got = (
+                (EXERCISED_MARKER, NOT_EXERCISED_MARKER) if want_exercised else (NOT_EXERCISED_MARKER, EXERCISED_MARKER)
+            )
+            # NAMING THE SKIP IS THE FIX. "Windows: exercised" over a run
+            # where one of the two legs never ran is the PR #341 shape one
+            # notch quieter, so a skipped leg has to be called out whichever
+            # verdict the run reaches.
+            if hosted_result == "skipped" and "SKIPPED" not in said:
+                violations.append(
+                    f"{ANNOTATE_SCRIPT}: `{label}` never says the hosted Windows "
+                    f"leg was SKIPPED — an omitted leg reads as coverage it did "
+                    f"not provide (gh#1146)"
+                )
+            if (yes and not no) != want_exercised:
+                violations.append(
+                    f"{ANNOTATE_SCRIPT}: `{label}` must report `{want}` and not "
+                    f"`{got}` — it said exercised={yes} not_exercised={no}, so the "
+                    f"`{REPORT_JOB}` conclusion does not distinguish a skipped "
+                    f"Windows leg from a passing one (gh#1146)"
+                )
+    return violations
+
+
 def nextest_select(root: str, expr: str) -> set[str]:
     """The test names `cargo nextest list -E <expr>` selects under profile `ci`.
 
@@ -395,10 +602,13 @@ def check_nextest_live(root: str) -> list[str]:
 def scan(root: str) -> int:
     violations: list[str] = []
     seen = 0
+    ci_text = ""
     for rel in WINDOWS_TEST_WORKFLOWS:
         path = os.path.join(root, rel)
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
+        if rel == CI_WORKFLOW:
+            ci_text = text
         jobs = windows_jobs(text)
         seen += len(jobs)
         print(f"  {rel}: {len(jobs)} Windows job(s): {', '.join(jobs) or '-'}")
@@ -415,6 +625,10 @@ def scan(root: str) -> int:
     with open(os.path.join(root, NEXTEST_CONFIG), encoding="utf-8") as fh:
         violations += check_nextest(fh.read())
 
+    # R3 — wiring, then behaviour. Both, because neither implies the other.
+    violations += check_report_coverage(CI_WORKFLOW, ci_text)
+    violations += check_annotate_behaviour(os.path.join(root, ANNOTATE_SCRIPT))
+
     if violations:
         print()
         for v in violations:
@@ -423,7 +637,9 @@ def scan(root: str) -> int:
         return 1
     print(
         f"OK: {seen} Windows job(s) record their executor; "
-        f"{len(QUARANTINED_TESTS)} churning test(s) at retries=0"
+        f"{len(QUARANTINED_TESTS)} churning test(s) at retries=0; "
+        f"`{REPORT_JOB}` states Windows coverage over "
+        f"{len(_ANNOTATE_CASES)} fixture state(s)"
     )
     return 0
 
@@ -483,6 +699,52 @@ jobs:
 
 def _wf(hosted: str = _GOOD_STEP, self_: str = _GOOD_STEP, matrixed: str = _GOOD_STEP) -> str:
     return _WF.format(hosted_step=hosted, self_step=self_, matrix_step=matrixed)
+
+
+# ── R3 fixtures ────────────────────────────────────────────────────────────
+
+_GOOD_ANNOTATE = (
+    "      - name: " + ANNOTATE_STEP_NAME + "\n"
+    "        if: always()\n"
+    "        env:\n"
+    "          EVIDENCE_DIR: junit-reports\n"
+    "          SELF_HOSTED_RESULT: ${{ needs.ci.result }}\n"
+    "          HOSTED_RESULT: ${{ needs.ci-windows-hosted.result }}\n"
+    "        run: bash " + ANNOTATE_SCRIPT + "\n"
+)
+
+_REPORT_WF = """name: x
+
+on:
+  push:
+
+jobs:
+  report:
+    name: report
+{needs}    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+{annotate}      - name: Assert test evidence exists (a skipped test step is not a pass)
+        run: bash .github/scripts/assert-test-evidence.sh
+"""
+
+
+def _report_wf(
+    annotate: str = _GOOD_ANNOTATE,
+    needs: str = "    needs: [ci, ci-windows-hosted]\n",
+) -> str:
+    return _REPORT_WF.format(annotate=annotate, needs=needs)
+
+
+# Stubs that satisfy every grep in check_report_coverage while saying one thing
+# unconditionally — the shape a wiring-only gate cannot see.
+_STUB_ALWAYS = """#!/usr/bin/env bash
+echo "CI (windows-latest, hosted) : SKIPPED"
+echo "{marker}"
+echo "{marker}" >> "$GITHUB_STEP_SUMMARY"
+exit 0
+"""
 
 
 def self_test() -> int:
@@ -567,11 +829,78 @@ def self_test() -> int:
         strip_toml_comments("filter = 'test(=a#b)'") == "filter = 'test(=a#b)'",
     )
 
+    # ── R3 wiring, both directions ────────────────────────────────────────
+    check("clean report fixture must not fire", check_report_coverage("f.yml", _report_wf()) == [])
+    v = check_report_coverage("f.yml", _report_wf(needs="    needs: ci\n"))
+    check(
+        "report without the hosted Windows leg in needs must fire",
+        len(v) == 1 and HOSTED_WINDOWS_JOB in v[0],
+    )
+    v = check_report_coverage("f.yml", _report_wf(annotate=""))
+    check(
+        "report without the annotation step must fire",
+        len(v) == 1 and ANNOTATE_STEP_NAME in v[0],
+    )
+    # A step that runs the script but is never told the hosted leg's result
+    # cannot say a skipped leg was skipped.
+    blind = _GOOD_ANNOTATE.replace(
+        "          HOSTED_RESULT: ${{ needs.ci-windows-hosted.result }}\n", ""
+    )
+    v = check_report_coverage("f.yml", _report_wf(annotate=blind))
+    check(
+        "annotation blind to the hosted leg result must fire",
+        len(v) == 1 and f"needs.{HOSTED_WINDOWS_JOB}.result" in v[0],
+    )
+    # ...and one an earlier failing gate can suppress is not a guarantee.
+    suppressible = _GOOD_ANNOTATE.replace("        if: always()\n", "")
+    v = check_report_coverage("f.yml", _report_wf(annotate=suppressible))
+    check(
+        "annotation without always() must fire",
+        len(v) == 1 and "always()" in v[0],
+    )
+
+    # ── R3 behaviour, both directions ─────────────────────────────────────
+    # The repo's own script over all five states is the positive control; the
+    # two stubs are the mutation arms a grep-only gate would have accepted.
+    check(
+        "the repo annotation script must satisfy every fixture state",
+        check_annotate_behaviour(os.path.join(REPO_ROOT, ANNOTATE_SCRIPT)) == [],
+    )
+    negatives = sum(1 for c in _ANNOTATE_CASES if not c[3])
+    positives = len(_ANNOTATE_CASES) - negatives
+    with tempfile.TemporaryDirectory() as tmp:
+        for marker, want, label in (
+            (EXERCISED_MARKER, negatives, "always-exercised"),
+            (NOT_EXERCISED_MARKER, positives, "always-not-exercised"),
+        ):
+            stub = os.path.join(tmp, f"{label}.sh")
+            with open(stub, "w", encoding="utf-8") as fh:
+                fh.write(_STUB_ALWAYS.format(marker=marker))
+            v = check_annotate_behaviour(stub)
+            check(f"{label} stub must fire on {want} state(s)", len(v) == want)
+        # A script that fails the job is a gate, not an annotation: #1146 is
+        # explicit that main must not be blocked on a known-red Windows test.
+        failing = os.path.join(tmp, "failing.sh")
+        with open(failing, "w", encoding="utf-8") as fh:
+            fh.write(_STUB_ALWAYS.format(marker=NOT_EXERCISED_MARKER).replace("exit 0", "exit 1"))
+        v = check_annotate_behaviour(failing)
+        check(
+            "a script that fails the report job must fire",
+            any("must never fail" in x for x in v),
+        )
+    check(
+        "a missing annotation script must fire",
+        len(check_annotate_behaviour(os.path.join(REPO_ROOT, "no-such-script.sh"))) == 1,
+    )
+
     if failures:
         for f in failures:
             print(f"SELF-TEST FAIL: {f}")
         return 1
-    print("self-test OK: classifier, R1 (both directions), R2 (both directions)")
+    print(
+        "self-test OK: classifier, R1 (both directions), R2 (both directions), "
+        "R3 wiring + behaviour (both directions)"
+    )
     return 0
 
 

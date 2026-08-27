@@ -2110,7 +2110,14 @@ jobs:
     # identify what had passed (wayland#1115). That one is now `E2E report`;
     # this is the sole producer of `report` and says so.
     name: report
-    needs: ci
+    # `ci-windows-hosted` is listed so a SKIPPED Windows leg is OBSERVABLE here
+    # (gh#1146). That leg is opt-in behind a `[ci-windows]` commit marker and is
+    # deliberately NOT a required check, so on `main` and on every PR it is
+    # skipped — and a skipped leg contributes no red, which is how it silently
+    # contributed to a green. `if: always()` below already carries `report`
+    # through a skipped dependency, so nothing about WHEN this job runs changes;
+    # what changes is that it can now say so out loud.
+    needs: [ci, ci-windows-hosted]
     if: always()
     runs-on: ubuntu-latest
     # gh#1072. Pure aggregation — measures under a minute in every sampled
@@ -2150,6 +2157,35 @@ jobs:
           pattern: nextest-junit-*
           path: junit-reports
         continue-on-error: true
+
+      # A SKIPPED WINDOWS LEG MUST NOT READ AS WINDOWS COVERAGE (gh#1146).
+      #
+      # This job publishes the aggregate verdict every reviewer and the release
+      # process read as "CI passed", and it has never said which platforms
+      # produced it. Measured on PR #341: `CI (windows-latest, hosted)` SKIPPED,
+      # overall report passing. Nothing was red, so nothing was noticed.
+      #
+      # It ANNOTATES and never fails, on purpose. Hosted Windows fails three
+      # tests on main's own byte-identical tree; that is a separately-filed
+      # defect, and gating main on it would block every merge. The defect being
+      # closed here is the honesty of the conclusion, not the redness of the
+      # platform.
+      #
+      # Placed BEFORE the evidence assert and marked `always()` so the coverage
+      # statement is emitted whether or not that gate then fails — an absence of
+      # Windows signal is most worth saying when something else is also wrong.
+      #
+      # Behaviour and wiring are both enforced on Linux by
+      # `scripts/check-windows-attribution.py` (R3), which runs in `just
+      # check-all` and in the `ci-linux` lint job — deliberately not on Windows,
+      # since the whole point is a check that survives Windows being skipped.
+      - name: Annotate Windows coverage (a skipped leg is not a pass)
+        if: always()
+        env:
+          EVIDENCE_DIR: junit-reports
+          SELF_HOSTED_RESULT: ${{ needs.ci.result }}
+          HOSTED_RESULT: ${{ needs.ci-windows-hosted.result }}
+        run: bash .github/scripts/annotate-windows-coverage.sh
 
       # A TEST STEP THAT NEVER RAN MUST NOT BE REPORTABLE AS ANYTHING BUT A
       # FAILURE. Added 2026-07-30 (lane/fix-clippy-gate) after measuring the
