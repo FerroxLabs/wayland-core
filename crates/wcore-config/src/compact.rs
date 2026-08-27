@@ -115,7 +115,16 @@ pub struct CompactConfig {
     /// an answered question) carry state and stay untouched, so this is not a
     /// licence to erase everything.
     ///
-    /// `0` restores the old name-only behaviour.
+    /// This field also sizes the pass's *retained tail*, which is otherwise a
+    /// pure count and so is blind to volume: the tail keeps at most
+    /// `micro_keep_recent * micro_large_result_bytes` bytes of body (100 KB at
+    /// the defaults), always retaining the newest result whatever its size.
+    /// Without that bound three 500 KB delegated transcripts were all
+    /// protected purely because there were fewer than `micro_keep_recent` of
+    /// them, and the count trigger — which needs ELEVEN results at the default
+    /// — could not see them either.
+    ///
+    /// `0` restores the old name-and-count-only behaviour.
     #[serde(default = "default_micro_large_result_bytes")]
     pub micro_large_result_bytes: usize,
 

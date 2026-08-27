@@ -130,7 +130,20 @@ fn time_trigger(messages: &[Message], config: &CompactConfig) -> bool {
     gap.num_seconds() >= config.micro_gap_seconds as i64
 }
 
-/// Count-based trigger: compactable tool results > keep_recent * 2.
+/// Count/volume trigger: compactable results > keep_recent * 2, OR more than
+/// twice the retained byte budget of compactable body.
+///
+/// The count half alone is blind to volume. At the shipped `micro_keep_recent`
+/// of 5 it needs ELEVEN compactable results before it fires, so ten 200 KB
+/// delegated transcripts — 2 MB of stale context at any pressure — leave it
+/// `false` (issue #559). A leader's loop produces few, huge results, which is
+/// exactly the shape a count cannot see.
+///
+/// The volume half mirrors the count rule's shape: the count fires at more
+/// than twice the retained tail, so the byte arm fires at more than twice the
+/// retained byte budget. That keeps it non-vacuous by construction — above it
+/// there is strictly more than one budget's worth left for the clear pass to
+/// clear once the tail is retained.
 fn count_trigger(messages: &[Message], config: &CompactConfig) -> bool {
     let tool_names = build_tool_name_map(messages);
     let compactable_set: HashSet<&str> = config
@@ -139,13 +152,102 @@ fn count_trigger(messages: &[Message], config: &CompactConfig) -> bool {
         .map(String::as_str)
         .collect();
 
-    let count = count_compactable_results(
+    // The SAME collection the clear pass runs on, so the two can never
+    // disagree about what is eligible — a structural property now, not a
+    // discipline to remember at two call sites.
+    let targets = collect_compactable_locations(
         messages,
         &tool_names,
         &compactable_set,
         config.micro_large_result_bytes,
     );
-    count > config.micro_keep_recent * 2
+
+    if targets.len() > config.micro_keep_recent * 2 {
+        return true;
+    }
+
+    let budget = retain_byte_budget(config);
+    if budget == 0 {
+        return false;
+    }
+    let bytes: usize = targets
+        .iter()
+        .map(|&(mi, bi)| target_len(messages, mi, bi))
+        .sum();
+    // Mirror the count rule's shape: it fires above twice the retained tail,
+    // so the byte arm fires above twice the retained byte budget.
+    if bytes <= budget.saturating_mul(2) {
+        return false;
+    }
+    // Non-vacuity. The clear pass retains the newest result unconditionally
+    // however large it is, so ONE oversized result is volume the pass can
+    // never act on — without this conjunct the trigger would sit permanently
+    // true against a pass that clears nothing, running a full walk on every
+    // API call forever.
+    targets.len() > retained_tail_len(messages, &targets, config)
+}
+
+/// Bytes of tool-result body the clear pass retains in its recent tail.
+///
+/// Derived from the two fields that already exist rather than adding a knob:
+/// `micro_keep_recent` results at the largest size microcompact considers
+/// ordinary (`micro_large_result_bytes`). So the documented `0` escape hatch
+/// on that field disables the byte arms along with the size arm, restoring the
+/// pre-#559 name-and-count behaviour exactly.
+fn retain_byte_budget(config: &CompactConfig) -> usize {
+    config
+        .micro_keep_recent
+        .max(1)
+        .saturating_mul(config.micro_large_result_bytes)
+}
+
+/// Byte length of the tool-result body at a collected target location.
+/// Non-`ToolResult` blocks are never collected, so the fallback is unreachable.
+fn target_len(messages: &[Message], mi: usize, bi: usize) -> usize {
+    match &messages[mi].content[bi] {
+        ContentBlock::ToolResult { content, .. } => content.len(),
+        _ => 0,
+    }
+}
+
+/// How many of the most recent compactable results the clear pass retains.
+///
+/// `micro_keep_recent`, additionally bounded by [`retain_byte_budget`]. The
+/// tail is meant to be the model's working set, but the count-only rule sized
+/// it in blocks, so three 500 KB delegated transcripts were all protected
+/// purely because there were fewer than `micro_keep_recent` of them — a
+/// leader's biggest results were precisely the ones the pass could never trim
+/// (issue #559).
+///
+/// The newest result is retained UNCONDITIONALLY, however large, so the pass
+/// can never erase the model's most recent working data; the budget only
+/// decides how far back from it the tail reaches.
+fn retained_tail_len(
+    messages: &[Message],
+    targets: &[(usize, usize)],
+    config: &CompactConfig,
+) -> usize {
+    let max_keep = config.micro_keep_recent.max(1);
+    let budget = retain_byte_budget(config);
+    if budget == 0 {
+        return max_keep;
+    }
+    let mut kept = 0usize;
+    let mut kept_bytes = 0usize;
+    for &(mi, bi) in targets.iter().rev() {
+        if kept >= max_keep {
+            break;
+        }
+        let len = target_len(messages, mi, bi);
+        // Retain-then-charge: the newest is admitted unconditionally, each
+        // older one only while the tail is still inside the budget.
+        if kept > 0 && kept_bytes + len > budget {
+            break;
+        }
+        kept += 1;
+        kept_bytes += len;
+    }
+    kept.max(1)
 }
 
 // ── Core compaction ─────────────────────────────────────────────────────────
@@ -178,7 +280,7 @@ pub fn microcompact(messages: &mut [Message], config: &CompactConfig) -> Microco
         config.micro_large_result_bytes,
     );
 
-    let keep = config.micro_keep_recent.max(1);
+    let keep = retained_tail_len(messages, &targets, config);
     if targets.len() <= keep {
         return MicrocompactResult {
             cleared_count: superseded_count,
@@ -555,20 +657,6 @@ fn build_tool_name_map(messages: &[Message]) -> HashMap<String, String> {
     map
 }
 
-/// Count compactable, non-cleared tool results.
-fn count_compactable_results(
-    messages: &[Message],
-    tool_names: &HashMap<String, String>,
-    compactable_set: &HashSet<&str>,
-    large_result_bytes: usize,
-) -> usize {
-    messages
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter(|b| is_compactable_and_live(b, tool_names, compactable_set, large_result_bytes))
-        .count()
-}
-
 /// Collect `(message_index, block_index)` of every compactable, non-cleared
 /// tool result in conversation order.
 fn collect_compactable_locations(
@@ -791,6 +879,73 @@ mod tests {
             &set,
             LARGE
         ));
+    }
+
+    // ── retain_byte_budget / retained_tail_len ──────────────────────────
+
+    /// `n` single-block user messages each holding a `size`-byte result, plus
+    /// the target list the clear pass would collect for them.
+    fn tail_fixture(n: usize, size: usize) -> (Vec<Message>, Vec<(usize, usize)>) {
+        let body = "x".repeat(size);
+        let msgs: Vec<Message> = (0..n)
+            .map(|i| user_msg(vec![tool_result_block(&format!("t{i}"), &body)]))
+            .collect();
+        let targets: Vec<(usize, usize)> = (0..n).map(|i| (i, 0)).collect();
+        (msgs, targets)
+    }
+
+    #[test]
+    fn byte_budget_is_keep_recent_times_large_result_bytes() {
+        let cfg = CompactConfig::default();
+        assert_eq!(
+            retain_byte_budget(&cfg),
+            cfg.micro_keep_recent * cfg.micro_large_result_bytes
+        );
+    }
+
+    #[test]
+    fn retained_tail_is_count_bounded_for_ordinary_results() {
+        let cfg = CompactConfig::default();
+        let (msgs, targets) = tail_fixture(12, 1_000);
+        // Five 1 KB results are nowhere near the 100 KB budget, so the count
+        // rule still governs and the byte arm is invisible.
+        assert_eq!(
+            retained_tail_len(&msgs, &targets, &cfg),
+            cfg.micro_keep_recent
+        );
+    }
+
+    #[test]
+    fn retained_tail_is_byte_bounded_for_huge_results() {
+        let cfg = CompactConfig::default();
+        let (msgs, targets) = tail_fixture(4, 200_000);
+        // A single 200 KB result overruns the whole budget; the newest is
+        // admitted unconditionally, and nothing older joins it.
+        assert_eq!(retained_tail_len(&msgs, &targets, &cfg), 1);
+    }
+
+    #[test]
+    fn retained_tail_never_drops_below_one() {
+        let cfg = CompactConfig {
+            micro_keep_recent: 0,
+            ..Default::default()
+        };
+        let (msgs, targets) = tail_fixture(3, 500_000);
+        assert_eq!(retained_tail_len(&msgs, &targets, &cfg), 1);
+    }
+
+    #[test]
+    fn zero_threshold_restores_the_count_only_tail() {
+        let cfg = CompactConfig {
+            micro_large_result_bytes: 0,
+            ..Default::default()
+        };
+        assert_eq!(retain_byte_budget(&cfg), 0);
+        let (msgs, targets) = tail_fixture(4, 200_000);
+        assert_eq!(
+            retained_tail_len(&msgs, &targets, &cfg),
+            cfg.micro_keep_recent
+        );
     }
 
     // ── time_trigger ────────────────────────────────────────────────────
