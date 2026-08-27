@@ -1,6 +1,6 @@
 [package]
 name = "wcore-browser"
-description = "Multi-backend browser tool family (Camoufox sidecar primary, chromiumoxide fallback, Browserbase cloud) — design §5.16"
+description = "Multi-backend browser tool family (Camoufox sidecar primary, Browserbase cloud) — design §5.16"
 version.workspace    = true
 edition.workspace    = true
 license.workspace    = true
@@ -8,17 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-# Default is Camoufox sidecar (HTTP) only. Heavy backends are opt-in.
+# Default is Camoufox sidecar (HTTP) only. The cloud backend is opt-in.
 default = []
-# chromiumoxide fallback via CDP — pulls in ~30MB of dependency surface.
-chromium = ["dep:chromiumoxide"]
 # Browserbase cloud — env-gated at runtime (BROWSERBASE_API_KEY/PROJECT_ID).
 browserbase = []
-# W10 — gates the chromium live-browser e2e suite. Requires a real Chromium
-# binary on PATH (or via WCORE_CHROMIUM_PATH). NOT enabled by default; the
-# dedicated `browser-live` CI job opts in. Implies `chromium` so the test
-# can spawn the real backend.
-browser-live-tests = ["chromium"]
 
 [dependencies]
 wcore-types.workspace    = true
@@ -60,8 +53,6 @@ zip.workspace    = true
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
-# Optional — gated behind feature flags above.
-chromiumoxide = { version = "0.7", optional = true, default-features = false, features = ["tokio-runtime"] }
 
 workspace-hack.workspace = true
 

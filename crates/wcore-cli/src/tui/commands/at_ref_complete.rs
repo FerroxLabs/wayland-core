@@ -172,6 +172,31 @@ mod tests {
         assert!(d.iter().any(|c| c.insert == "@diff"));
     }
 
+    /// The third production call site of the secret guard. The popup listing
+    /// a credential store is the whole leak: the user presses Tab and the
+    /// content is inlined.
+    #[test]
+    fn completion_never_offers_a_workspace_policy_secret() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(
+            root.join(".git-credentials"),
+            "https://fake-user:fake-token@example.invalid\n",
+        )
+        .expect("write fixture");
+        fs::write(root.join(".gitignore"), "").expect("write gitignore");
+
+        let comps = complete("@.git", root);
+        let inserts: Vec<&str> = comps.iter().map(|c| c.insert.as_str()).collect();
+        assert!(
+            !inserts.iter().any(|i| i.contains(".git-credentials")),
+            "completion offered a credential store: {inserts:?}"
+        );
+        // Control: an ordinary dotfile in the same directory IS offered, so
+        // the refutation above cannot pass by listing nothing.
+        assert!(inserts.contains(&"@.gitignore"), "{inserts:?}");
+    }
+
     #[test]
     fn completion_lists_filesystem_entries_matching_the_leaf() {
         let tmp = TempDir::new().expect("tempdir");

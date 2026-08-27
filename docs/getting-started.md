@@ -537,7 +537,6 @@ separately under [API Key Resolution Order](#api-key-resolution-order).
 | `WAYLAND_WEB_BACKEND` | Pins the web-search backend: `off`, `duckduckgo`, `parallel`, or `auto`. Other values are ignored and reported ([tools.md](tools.md)) |
 | `WAYLAND_CORE_SKIP_UPDATE_CHECK` | `1` opts out of the launcher's update check ([troubleshooting.md](troubleshooting.md)) |
 | `WCORE_MEMORY_DIR` | Overrides where long-term memory is stored ([advanced.md](advanced.md)) |
-| `WCORE_CHROMIUM_PATH` | Points the browser tools at a Chromium or Chrome binary ([troubleshooting.md](troubleshooting.md)) |
 | `RUST_LOG` | Standard `tracing` filter, e.g. `RUST_LOG=wcore_agent::plugins=debug` |
 
 Plugin authoring adds `WAYLAND_PLUGINS_DIR`, `WAYLAND_TRUSTED_KEYS_DIR`, and

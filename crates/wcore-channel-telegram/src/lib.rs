@@ -597,6 +597,13 @@ mod tests {
 
     #[test]
     fn max_message_len_is_telegram_cap() {
+        // wayland#934: this asserts the literal the function returns one line above, so it
+        // restates the code rather than testing it. It is retained as a change-detector, but
+        // the check that can actually catch a wrong cap is
+        // `wcore-channels-registry/tests/delivery_semantics_declaration.rs`, which binds this
+        // number to `telegram.cap` in `docs/delivery-semantics.md` through the PRODUCTION
+        // factory. Whether either number equals the PLATFORM's real limit is still
+        // unmeasured -- see `cap_measured` and §4.2 of that document.
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
         let ch = TelegramChannel::new("test", cfg(), creds);
         assert_eq!(ch.max_message_len(), Some(4096));

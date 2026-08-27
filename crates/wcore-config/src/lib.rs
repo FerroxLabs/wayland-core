@@ -55,6 +55,10 @@ pub mod plugin_governance;
 pub mod plugins_config;
 pub mod portability;
 pub mod profile;
+// wayland#896: quiesced snapshot lease over profile state. Lives here because
+// it is the crate that owns profile_home()/profiles_root() — the roots it must
+// enumerate completely — and it must stay reachable from every producer surface.
+pub mod quiesce;
 pub mod resolution_provenance;
 pub mod shell;
 // Filesystem-aware SQLite journal-mode selection. WAL corrupts databases on

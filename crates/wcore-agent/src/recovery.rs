@@ -607,7 +607,7 @@ pub(crate) fn admit_session_resume(
     if !plan.requires_sealed_replay() {
         return Ok(());
     }
-    match protection.sealed_request_key_available(config) {
+    match protection.sealed_request_key_available_for_resume(config) {
         Ok(()) => Ok(()),
         Err(cause) => anyhow::bail!("{}", locked_session_refusal(&plan.session_id, &cause)),
     }
@@ -629,9 +629,15 @@ fn locked_session_refusal(
     // environment — so appending the passphrase advice for that cause would
     // tell the operator to do something that provably cannot lift this
     // refusal. Its own text already names the config change that can.
+    //
+    // `KeyStoreTimedOut` joins it for the same reason from the other
+    // direction: the store was never reached, so nothing is known about
+    // whether a passphrase would help, and its own text already names the
+    // remedy that fits — unlock or repair the OS keyring and resume again.
     let unlock = if matches!(
         cause,
         crate::recovery_confidential::RecoveryConfidentialError::PlaintextBackendRejected
+            | crate::recovery_confidential::RecoveryConfidentialError::KeyStoreTimedOut { .. }
     ) {
         ""
     } else {

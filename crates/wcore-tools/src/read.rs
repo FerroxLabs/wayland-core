@@ -12,6 +12,7 @@ use crate::Tool;
 use crate::context::ToolContext;
 use crate::file_cache::{FileStateCache, file_mtime_ms};
 use crate::path_validation::validate_user_path;
+use crate::tool_output_limits::ToolOutputLimits;
 
 /// Stub returned when a file has not changed since the model last read it.
 /// Saves tokens by avoiding re-sending identical content.
@@ -28,6 +29,79 @@ const DIFF_RESEND_HEADER: &str = "File changed since your last read. Showing onl
 /// Token-opt (diff-resend): a diff is only emitted when it is at most this
 /// fraction of the full numbered content it would replace.
 const DIFF_RESEND_MAX_RATIO: f64 = 0.6;
+
+/// Hard ceiling on the on-disk size of a file `Read` will load
+/// (FerroxLabs/wayland#946).
+///
+/// Both entry points materialise the WHOLE file and then build several derived
+/// copies of it — a UTF-8 conversion, a `Vec<&str>` of line slices, and a
+/// numbered `String`. MEASURED on the pre-bound tree: a 125,829,120-byte
+/// (120 MiB) text file drove process peak RSS from 5,344 kB to 469,248 kB, a
+/// 453 MiB delta (~3.8x the file), and returned a 137,412,032-byte
+/// `ToolResult`. A modestly larger file exhausts the process, and the agent
+/// dies mid-turn on an ordinary tool call.
+///
+/// 25 MiB is the figure this codebase already uses as the ceiling for a single
+/// file (`wcore_config::file_cache::FileCacheConfig::max_size_bytes`,
+/// `crate::transcription_tools::TRANSCRIPTION_MAX_BYTES`), and at the measured
+/// ~3.8x amplification it holds worst-case transient allocation near 95 MiB —
+/// survivable on any host that can run the engine at all. It is deliberately
+/// NOT configurable: this is a process-survival bound, not a policy knob, and
+/// the codebase's rule is not to invent a config surface for one constant. A
+/// user who legitimately needs a bigger file is not blocked — they are routed
+/// to a streaming tool by the refusal below.
+///
+/// This bound is stat-based, which looks like it should be defeated by a
+/// source that under-reports its length — and the premise is true:
+/// `/dev/zero` and `/proc/self/maps` both stat as 0 bytes (MEASURED). The
+/// conclusion does not follow, because none of them reaches this guard.
+/// `validate_user_path` runs first at BOTH entry points and refuses them:
+/// its file-type rule is an ALLOWLIST (`!is_file() && !is_dir()` -> reject,
+/// #644) that excludes FIFOs, devices and sockets, and `is_denied_proc_path`
+/// excludes the per-process procfs subtree and `/proc/kcore` by location.
+/// Both predate this bound and both were written for this exact hazard. The
+/// guard those rules leave for this one is therefore honest regular files,
+/// whose length can be trusted at the moment it is read.
+///
+/// `tests/wl947_pseudo_file_refusal_test.rs` holds that closed, because it is
+/// the refusals — not this constant — that make a stat-based bound sufficient.
+///
+/// The one residual that IS reachable: a regular file APPENDED to between the
+/// stat and the read. `fs::read` / `VirtualFs::read` both read to EOF, so a
+/// file growing faster than it is consumed can exceed this limit, and neither
+/// entry point can currently stop it — the bound would have to move onto the
+/// stream, and `VirtualFs::read` cannot express one. It is left open
+/// deliberately rather than half-closed: fixing only the legacy `execute`
+/// path would change nothing a user meets, because the engine dispatches
+/// through `execute_with_ctx` (`ToolRegistry::dispatch_with_ctx`). Close it
+/// by adding a bounded read to the `VirtualFs` trait, forwarded through
+/// `SandboxedFs` / `SecretDenyFs` / `RepoControlDenyFs` the way `read_pinned`
+/// already is; trigger to do that work is the first report of a Read against
+/// an actively-written log.
+pub const READ_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Refusal for a file past [`READ_MAX_BYTES`].
+///
+/// Names the actual size, the limit, and a route that actually works on a file
+/// this size. It deliberately does NOT suggest `offset`/`limit`: those select
+/// lines only after the whole file has been materialised, so they do not
+/// reduce what this tool allocates. MEASURED on the pre-bound tree,
+/// `{"offset":0,"limit":1}` against a 120 MiB file returned 86 bytes of
+/// content and still took peak RSS from 4,872 kB to 151,296 kB. Sending the
+/// model there would be sending it back into the same wall.
+fn too_large_result(file_path: &str, size: u64) -> ToolResult {
+    ToolResult {
+        content: format!(
+            "Refused to read {file_path}: the file is {size} bytes, over the Read tool's \
+             {READ_MAX_BYTES}-byte limit. Read loads the whole file, so offset/limit will not \
+             help — they select lines only after it is in memory. Use Bash to take just the part \
+             you need (`head -n N {file_path}`, `tail -n N {file_path}`, or \
+             `sed -n 'START,ENDp' {file_path}` for a line range), or the Grep tool to locate the \
+             lines first and then read that range with Bash."
+        ),
+        is_error: true,
+    }
+}
 
 /// Token-opt (semantic slicing): build the Read result for a `symbol=` request.
 /// Returns the symbol's line window (numbered, with a header + expansion hint),
@@ -97,6 +171,20 @@ fn build_symbol_result(text: &str, path: &Path, symbol: &str) -> ToolResult {
 
 pub struct ReadTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
+    /// Output-shape caps applied to the numbered result this tool returns
+    /// (FerroxLabs/wayland#947).
+    ///
+    /// `tool_output_limits` documents `max_lines` as the "read_file
+    /// pagination + truncation cap" and `max_line_length` as the file-ops
+    /// per-line cap, but `Read` never consulted either. The only bound on its
+    /// result was therefore the blunt head/tail byte cut
+    /// `orchestration::truncate_result` applies at `max_result_size()`
+    /// downstream, which slices mid-line, drops the middle of the file, and
+    /// destroys the line numbering this tool exists to provide.
+    ///
+    /// Held as a field, mirroring `JsonlTool` — the one tool that already
+    /// honours these knobs — so the two file-ops tools share one idiom.
+    limits: ToolOutputLimits,
 }
 
 impl ReadTool {
@@ -104,7 +192,10 @@ impl ReadTool {
     ///
     /// Pass `None` to disable caching (all reads return full content).
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
-        Self { file_cache }
+        Self {
+            file_cache,
+            limits: ToolOutputLimits::default(),
+        }
     }
 }
 
@@ -210,6 +301,17 @@ impl Tool for ReadTool {
             };
         }
 
+        // Bound the read BEFORE it allocates. `fs::read` sizes its buffer from
+        // the file length, so any check placed after it has already paid the
+        // cost it was meant to prevent. A stat failure is left to fall through:
+        // the read below fails for the same reason and its own error names it
+        // better than a guard could.
+        if let Ok(meta) = std::fs::metadata(&validated)
+            && meta.len() > READ_MAX_BYTES
+        {
+            return too_large_result(file_path, meta.len());
+        }
+
         // Read file from disk.
         let content = match std::fs::read(&validated) {
             Ok(bytes) => bytes,
@@ -241,16 +343,43 @@ impl Tool for ReadTool {
         let effective_offset = offset.unwrap_or(0);
         let effective_limit = limit.unwrap_or(lines.len());
 
-        let end = (effective_offset + effective_limit).min(lines.len());
-        let slice = &lines[effective_offset.min(lines.len())..end];
+        let start = effective_offset.min(lines.len());
+        let requested_end = (effective_offset + effective_limit).min(lines.len());
+        // `max_lines` caps the window the caller asked for. It is applied AFTER
+        // offset/limit, so an explicit narrower `limit` still wins, and
+        // `offset` stays the paging escape hatch the notice below points at.
+        let end = requested_end.min(start.saturating_add(self.limits.max_lines));
+        let slice = &lines[start..end];
 
-        let numbered: Vec<String> = slice
+        // Clamp each line BEFORE numbering. `clamped` is reused as the diff's
+        // "current" side further down: building that from the raw `slice`
+        // instead would make every clamped line read as an edit against an
+        // equally-clamped base.
+        let clamped: Vec<String> = slice.iter().map(|l| self.limits.clamp_line(l)).collect();
+
+        let numbered: Vec<String> = clamped
             .iter()
             .enumerate()
             .map(|(i, line)| format!("{:>6}\t{}", effective_offset + i + 1, line))
             .collect();
 
         let result_content = numbered.join("\n");
+
+        // Disclose the line cap. Silent truncation is the failure mode that
+        // matters here: the model cannot tell a 2000-line file from the first
+        // 2000 lines of a 200000-line one, so it reasons about a tail it never
+        // saw. Marker shape matches `JsonlTool::finish`, the existing
+        // convention for this cap, plus the offset needed to continue.
+        let cap_notice = if end < requested_end {
+            format!(
+                "\n... [truncated: showing {} of {} lines — re-read with offset={} to continue]",
+                end - start,
+                requested_end - start,
+                end
+            )
+        } else {
+            String::new()
+        };
 
         // Update cache after successful read.
         if let Some(cache_arc) = &self.file_cache
@@ -271,7 +400,7 @@ impl Tool for ReadTool {
         }
 
         ToolResult {
-            content: result_content,
+            content: format!("{result_content}{cap_notice}"),
             is_error: false,
         }
     }
@@ -403,6 +532,15 @@ impl Tool for ReadTool {
             }
         }
 
+        // Same bound as `execute`, stated through the vfs so a sandboxed
+        // sub-agent's jail decides what may be stat'd exactly as it decides
+        // what may be read. Stat before reading, for the reason above.
+        if let Ok(meta) = ctx.vfs.metadata(path).await
+            && meta.size > READ_MAX_BYTES
+        {
+            return too_large_result(file_path, meta.size);
+        }
+
         let content = match ctx.vfs.read(path).await {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -432,16 +570,43 @@ impl Tool for ReadTool {
         let effective_offset = offset.unwrap_or(0);
         let effective_limit = limit.unwrap_or(lines.len());
 
-        let end = (effective_offset + effective_limit).min(lines.len());
-        let slice = &lines[effective_offset.min(lines.len())..end];
+        let start = effective_offset.min(lines.len());
+        let requested_end = (effective_offset + effective_limit).min(lines.len());
+        // `max_lines` caps the window the caller asked for. It is applied AFTER
+        // offset/limit, so an explicit narrower `limit` still wins, and
+        // `offset` stays the paging escape hatch the notice below points at.
+        let end = requested_end.min(start.saturating_add(self.limits.max_lines));
+        let slice = &lines[start..end];
 
-        let numbered: Vec<String> = slice
+        // Clamp each line BEFORE numbering. `clamped` is reused as the diff's
+        // "current" side further down: building that from the raw `slice`
+        // instead would make every clamped line read as an edit against an
+        // equally-clamped base.
+        let clamped: Vec<String> = slice.iter().map(|l| self.limits.clamp_line(l)).collect();
+
+        let numbered: Vec<String> = clamped
             .iter()
             .enumerate()
             .map(|(i, line)| format!("{:>6}\t{}", effective_offset + i + 1, line))
             .collect();
 
         let result_content = numbered.join("\n");
+
+        // Disclose the line cap. Silent truncation is the failure mode that
+        // matters here: the model cannot tell a 2000-line file from the first
+        // 2000 lines of a 200000-line one, so it reasons about a tail it never
+        // saw. Marker shape matches `JsonlTool::finish`, the existing
+        // convention for this cap, plus the offset needed to continue.
+        let cap_notice = if end < requested_end {
+            format!(
+                "\n... [truncated: showing {} of {} lines — re-read with offset={} to continue]",
+                end - start,
+                requested_end - start,
+                end
+            )
+        } else {
+            String::new()
+        };
 
         // Token-burn fix: if the exact numbered lines we would return are already
         // present verbatim in a still-current cached Read of this file, the model
@@ -468,7 +633,7 @@ impl Tool for ReadTool {
         let mut response_content = result_content.clone();
         if let Some(base_numbered) = &diff_base {
             let base_raw = crate::read_diff::strip_line_numbers(base_numbered);
-            let cur_raw: Vec<String> = slice.iter().map(|s| s.to_string()).collect();
+            let cur_raw: Vec<String> = clamped.clone();
             if base_raw != cur_raw
                 && let Some(diff_body) = crate::read_diff::build_read_diff(
                     &base_raw,
@@ -502,7 +667,7 @@ impl Tool for ReadTool {
         }
 
         ToolResult {
-            content: response_content,
+            content: format!("{response_content}{cap_notice}"),
             is_error: false,
         }
     }

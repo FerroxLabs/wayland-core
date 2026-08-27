@@ -243,6 +243,106 @@ fn unsaved_shell_refusal(
     crate::unsaved_work::shell_refusal(command, &cwd)
 }
 
+/// #1142 — the ceiling on the P2b unsaved-work guard's own cost.
+///
+/// [`unsaved_shell_refusal`] runs BEFORE the caller's deadline is armed, so
+/// until this bound existed its cost sat outside the only clock that could
+/// stop it. That is the same shape as the pre-timeout secret-deny walk behind
+/// #1000/#921/#1002, where an unbounded pre-timeout walk turned a single
+/// `echo` into an apparent HANG — 39,794 ms on a 1.17M-file tree — rather than
+/// a timeout with a message.
+///
+/// It may NOT be closed by folding the guard under the caller's deadline and
+/// letting it pass on expiry. The guard exists to refuse a command that would
+/// destroy work existing nowhere else; one that gives up under time pressure
+/// and lets the command through is strictly worse than an unbounded one. So
+/// expiry REFUSES — see [`bounded_unsaved_shell_refusal`].
+///
+/// Making the guard cheap enough for a bound not to matter was measured and
+/// rejected. On hetzner-dsm, 2026-08-27, interleaved, n=6:
+///
+/// | shape                                    | measured                     |
+/// |------------------------------------------|------------------------------|
+/// | `git checkout .`, 40k-file tree, warm    | 14.8 ms, of which 12.4 ms is ONE `git status --porcelain -uno` |
+/// | `git checkout .`, 40k-file tree, cold    | 1,396 ms (recorded in-tree by #1111) |
+/// | `rm -rf <dir>`, per file underneath it   | 1.3 ms, linear — 124 ms at 100 files, 276 ms at 200 |
+///
+/// 84% of the git path is one subprocess that has to compare the whole work
+/// tree, so there is nothing to prefilter (the command names the whole tree)
+/// and nothing to parallelise (it is one process). The rm path parallelises,
+/// but both stay O(work tree) with no ceiling, which is the property under
+/// complaint. A constant-factor win does not bound anything.
+///
+/// 10 s is ~7x the cold 40k-file `git checkout .` cost, so a tree an order of
+/// magnitude larger still answers rather than being refused; ~2x the 5.3 s
+/// that the rm path's own 4096-file walk budget implies at 1.3 ms each; and
+/// far below the 39,794 ms #1000 measured as reading like a hang.
+///
+/// Always taken as `min(caller timeout, this)`: the guard may never spend more
+/// than the entire budget the caller asked for.
+const UNSAVED_GUARD_BUDGET_MS: u64 = 10_000;
+
+/// Prefix on every refusal produced because the unsaved-work guard did not
+/// ANSWER, as opposed to one produced because it found lines at risk.
+///
+/// Owned here so the producer and anything matching on it cannot drift apart.
+pub(crate) const UNSAVED_GUARD_UNANSWERED_PREFIX: &str =
+    "Refused to run this command: the unsaved-work check did not finish";
+
+/// The refusal returned when the guard did not answer, saying which way the
+/// unknown falls and why.
+fn unsaved_guard_unanswered(why: &str) -> String {
+    format!(
+        "{UNSAVED_GUARD_UNANSWERED_PREFIX} — {why}. Nothing ran. Whether this command \
+         would destroy lines that are on disk and in no commit is therefore UNKNOWN, \
+         and an unknown answer has to refuse: of the two ways to be wrong, only \
+         letting it through cannot be undone. Name the paths you actually mean, or \
+         commit the work first, and run it again. Raising `timeout` only helps while \
+         it is still below the guard's own {UNSAVED_GUARD_BUDGET_MS}ms ceiling — above \
+         that the ceiling binds and the answer will not change."
+    )
+}
+
+/// Run the P2b unsaved-work guard under a ceiling, FAIL-CLOSED.
+///
+/// `Some(_)` is a refusal to return to the caller; `None` means nothing the
+/// command would discard is unsaved. There is exactly ONE way to reach `None`
+/// — the guard finishing and saying so. Expiry, a panic inside the guard and a
+/// runtime that dropped the task all return `Some(_)`, because the question
+/// "would this destroy the user's only copy?" was not answered, and an
+/// unanswered destructive command is refused.
+///
+/// The guard runs on the blocking pool for the reason [`spawn_manifest_build`]
+/// gives: it walks the work tree and spawns `git` synchronously and never
+/// yields, so called inline from an `async fn` it pins the runtime thread and
+/// no timer can fire until it is done. Wrapping an inline call in
+/// `tokio::time::timeout` would bound nothing at all.
+///
+/// On expiry the blocking task is left to finish — `spawn_blocking` cannot be
+/// aborted — so it costs one pool thread until the walk it is in ends. That is
+/// the same residual `spawn_manifest_build` already carries, and it is bounded
+/// by the walk, not by the caller.
+async fn bounded_unsaved_shell_refusal(
+    command: &str,
+    workspace: Option<Arc<crate::workspace_policy::WorkspacePolicy>>,
+    timeout: Duration,
+) -> Option<String> {
+    let budget = timeout.min(Duration::from_millis(UNSAVED_GUARD_BUDGET_MS));
+    let owned = command.to_string();
+    let task =
+        tokio::task::spawn_blocking(move || unsaved_shell_refusal(&owned, workspace.as_deref()));
+    match tokio::time::timeout(budget, task).await {
+        Ok(Ok(verdict)) => verdict,
+        Ok(Err(join)) => Some(unsaved_guard_unanswered(&format!(
+            "it could not be run to completion ({join})"
+        ))),
+        Err(_) => Some(unsaved_guard_unanswered(&format!(
+            "it was still running after {} ms",
+            budget.as_millis()
+        ))),
+    }
+}
+
 pub fn platform_enforces_read_deny() -> bool {
     default_for_platform().enforces_read_deny()
 }
@@ -498,20 +598,26 @@ impl Tool for BashTool {
             };
         }
 
+        let timeout_ms = input["timeout"]
+            .as_u64()
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .min(MAX_TIMEOUT_MS);
+
         // P2b — a command that discards the work tree may not take the user's
         // unsaved lines with it. Same question Write's guard asks, asked of the
         // shell, before any shell is spawned.
-        if let Some(refusal) = unsaved_shell_refusal(command, None) {
+        //
+        // #1142: bounded, and fail-closed on expiry. Fixing only the ctx paths
+        // would leave this one live, which is the mistake the note on the
+        // `deadline` below already records once.
+        if let Some(refusal) =
+            bounded_unsaved_shell_refusal(command, None, Duration::from_millis(timeout_ms)).await
+        {
             return ToolResult {
                 content: refusal,
                 is_error: true,
             };
         }
-
-        let timeout_ms = input["timeout"]
-            .as_u64()
-            .unwrap_or(DEFAULT_TIMEOUT_MS)
-            .min(MAX_TIMEOUT_MS);
 
         let timeout = Duration::from_millis(timeout_ms);
 
@@ -565,20 +671,26 @@ impl Tool for BashTool {
             };
         }
 
+        let timeout_ms = input["timeout"]
+            .as_u64()
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .min(MAX_TIMEOUT_MS);
+
         // P2b — a command that discards the work tree may not take the user's
         // unsaved lines with it. Same question Write's guard asks, asked of the
         // shell, before any shell is spawned.
-        if let Some(refusal) = unsaved_shell_refusal(command, None) {
+        //
+        // #1142: bounded, and fail-closed on expiry. Fixing only the ctx paths
+        // would leave this one live, which is the mistake the note on the
+        // `deadline` below already records once.
+        if let Some(refusal) =
+            bounded_unsaved_shell_refusal(command, None, Duration::from_millis(timeout_ms)).await
+        {
             return ToolResult {
                 content: refusal,
                 is_error: true,
             };
         }
-
-        let timeout_ms = input["timeout"]
-            .as_u64()
-            .unwrap_or(DEFAULT_TIMEOUT_MS)
-            .min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
 
         // `execute_streaming` takes `self: Arc<Self>` so the backend can
@@ -678,20 +790,29 @@ impl Tool for BashTool {
             };
         }
 
-        // P2b — a command that discards the work tree may not take the user's
-        // unsaved lines with it. Same question Write's guard asks, asked of the
-        // shell, before any shell is spawned.
-        if let Some(refusal) = unsaved_shell_refusal(command, ctx.workspace.as_deref()) {
-            return ToolResult {
-                content: refusal,
-                is_error: true,
-            };
-        }
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
+
+        // P2b — a command that discards the work tree may not take the user's
+        // unsaved lines with it. Same question Write's guard asks, asked of the
+        // shell, before any shell is spawned.
+        //
+        // #1142: bounded by `UNSAVED_GUARD_BUDGET_MS`, raced against cancel,
+        // and REFUSING on either — see `bounded_unsaved_shell_refusal` for why
+        // expiry cannot be allowed to pass.
+        let verdict = tokio::select! {
+            _ = ctx.cancel.cancelled() => Some("Bash command cancelled by cancellation token".to_string()),
+            v = bounded_unsaved_shell_refusal(command, ctx.workspace.clone(), timeout) => v,
+        };
+        if let Some(refusal) = verdict {
+            return ToolResult {
+                content: refusal,
+                is_error: true,
+            };
+        }
         let backend = Arc::clone(&ctx.sandbox);
         if let Some(policy) = ctx.workspace.as_deref()
             && !policy.delegated_roots_are_current()
@@ -729,15 +850,13 @@ impl Tool for BashTool {
         // pool — see `spawn_manifest_build` for why an inline call cannot be
         // raced.
         //
-        // NOT "the whole execution", and this comment used to say so:
-        // `unsaved_shell_refusal` above still runs synchronously ahead of this
-        // clock, so it is neither cancellable nor bounded. Measured on
-        // hetzner-dsm against a 40,000-file git work tree: 5 ms for `echo hi`,
-        // but 1,396 ms for `git checkout .` and 968 ms for `rm -rf <dir>` —
-        // the same order as the secret-deny walk this fix bounds. Closing it is
-        // a SEPARATE change and deliberately not attempted here: the P2b
-        // unsaved-work guard must never be skipped because it timed out, or a
-        // destructive command runs unguarded. Recorded rather than claimed.
+        // The P2b unsaved-work guard above used to sit outside this clock
+        // entirely — 1,396 ms for `git checkout .` and 968 ms for
+        // `rm -rf <dir>` on a 40,000-file work tree, neither cancellable nor
+        // bounded. #1142 closed that with a bound of its own rather than by
+        // moving this line up: a guard folded under this deadline would PASS
+        // on expiry, and a destructive command running unguarded is worse
+        // than a slow one. See `bounded_unsaved_shell_refusal`.
         let deadline = tokio::time::Instant::now() + timeout;
         let build = spawn_manifest_build(
             command,
@@ -836,21 +955,27 @@ impl Tool for BashTool {
             };
         }
 
-        // P2b — a command that discards the work tree may not take the user's
-        // unsaved lines with it. Same question Write's guard asks, asked of the
-        // shell, before any shell is spawned.
-        if let Some(refusal) = unsaved_shell_refusal(command, ctx.workspace.as_deref()) {
-            return ToolResult {
-                content: refusal,
-                is_error: true,
-            };
-        }
-
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
+
+        // P2b — a command that discards the work tree may not take the user's
+        // unsaved lines with it. Same question Write's guard asks, asked of the
+        // shell, before any shell is spawned.
+        //
+        // #1142: same bound and same fail-closed expiry as `execute_with_ctx`.
+        let verdict = tokio::select! {
+            _ = ctx.cancel.cancelled() => Some("Bash command cancelled by cancellation token".to_string()),
+            v = bounded_unsaved_shell_refusal(command, ctx.workspace.clone(), timeout) => v,
+        };
+        if let Some(refusal) = verdict {
+            return ToolResult {
+                content: refusal,
+                is_error: true,
+            };
+        }
 
         // Task 8 — exec-time capability gate (streaming path, same logic as
         // execute_with_ctx). Must check BEFORE wrapping in Arc.

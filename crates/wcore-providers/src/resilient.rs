@@ -266,9 +266,11 @@ impl ResilientProvider {
         let candidates = fallbacks
             .into_iter()
             .map(|(label, pricing_provider, model, provider)| {
+                // Same composed resolver as bootstrap's typed constructor —
+                // this legacy-tuple path is the SECOND production site and had
+                // the identical Flux-alias gap.
                 let context_window =
-                    wcore_config::limits::model_output_ceiling(&pricing_provider, &model)
-                        .map(|(_, window)| u64::from(window));
+                    wcore_config::context_window::static_context_window(&pricing_provider, &model);
                 let metadata = FailoverCandidateMetadata {
                     label,
                     provider: pricing_provider,
@@ -879,6 +881,63 @@ mod tests {
         }
     }
 
+    /// WIRING grade, site 2 of 2. `new_with_fallback_identities` is the OTHER
+    /// production constructor of `CandidateCapabilities` (bootstrap's
+    /// `build_fallback_providers` is the first), and it had the same gap: it
+    /// derived `context_window` from `model_output_ceiling` alone, which
+    /// returns `None` for a Flux tier alias by design.
+    ///
+    /// Counting the construction sites is the point. Patching only the one that
+    /// was reported would have left this one silently wrong.
+    #[test]
+    fn flux_alias_via_the_legacy_identity_constructor_gets_the_core4_floor() {
+        use std::sync::Arc;
+
+        let provider = ResilientProvider::new_with_fallback_identities(
+            "primary",
+            Arc::new(RefusedProvider),
+            vec![
+                (
+                    "flux-auto".into(),
+                    "flux-router".into(),
+                    "flux-auto".into(),
+                    Arc::new(RefusedProvider) as Arc<dyn LlmProvider>,
+                ),
+                (
+                    "gpt-4o".into(),
+                    "openai".into(),
+                    "gpt-4o".into(),
+                    Arc::new(RefusedProvider) as Arc<dyn LlmProvider>,
+                ),
+                (
+                    "mystery".into(),
+                    "openai".into(),
+                    "totally-unknown-model".into(),
+                    Arc::new(RefusedProvider) as Arc<dyn LlmProvider>,
+                ),
+            ],
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(1),
+                cooldown: Duration::from_secs(1),
+            },
+            Arc::new(NoOpCircuitReporter),
+        );
+
+        let windows: Vec<Option<u64>> = provider
+            .fallbacks
+            .iter()
+            .map(|f| f.metadata.capabilities.context_window)
+            .collect();
+        assert_eq!(
+            windows,
+            vec![Some(128_000), Some(128_000), None],
+            "flux-auto must carry the CORE-4 floor; gpt-4o keeps its own real \
+             128k window; an unknown model must still be None (the floor is \
+             for the four tier aliases only, never fabricated generally)"
+        );
+    }
+
     fn candidate(
         label: &str,
         tools: bool,
@@ -1083,6 +1142,77 @@ mod tests {
 
         assert_eq!(small.0.load(Ordering::SeqCst), 0);
         assert_eq!(large.0.load(Ordering::SeqCst), 1);
+    }
+
+    /// Wiring grade for the unknown-context-window admission rule.
+    ///
+    /// This exercises the production `evaluate_candidate` call site in
+    /// `stream()`, not the policy function in isolation: a candidate whose
+    /// window is not statically known must be physically DISPATCHED, while a
+    /// candidate with a known-too-small window must still be skipped.
+    ///
+    /// `wcore_config::limits::model_output_ceiling` returns `None` for every
+    /// model outside its static table, which is what both
+    /// `new_with_fallback_identities` and the production
+    /// `wcore_agent::bootstrap::build_fallback_providers` feed into
+    /// `CandidateCapabilities::context_window`. The Flux tier aliases are the
+    /// headline case. Before this rule the chain below dispatched NOTHING and
+    /// the turn died with no answer and no evidence.
+    #[tokio::test]
+    async fn unknown_context_window_candidate_is_dispatched() {
+        struct CountOk(AtomicUsize);
+        #[async_trait]
+        impl LlmProvider for CountOk {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(ok_done_channel())
+            }
+        }
+
+        let too_small = Arc::new(CountOk(AtomicUsize::new(0)));
+        let unknown = Arc::new(CountOk(AtomicUsize::new(0)));
+        let reporter = Arc::new(ReceiptReporter::default());
+        let resilient = ResilientProvider::new_with_policy(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![
+                (
+                    candidate("too-small", true, Some(10_000)),
+                    too_small.clone(),
+                ),
+                (candidate("flux-auto", true, None), unknown.clone()),
+            ],
+            CircuitConfig::default(),
+            reporter.clone(),
+            FailoverRoutingPolicy::default(),
+        );
+        let mut request = dummy_request();
+        request.client_context_tokens = Some(50_000);
+
+        resilient.stream(&request).await.unwrap();
+
+        assert_eq!(
+            too_small.0.load(Ordering::SeqCst),
+            0,
+            "a known-too-small window must still be refused"
+        );
+        assert_eq!(
+            unknown.0.load(Ordering::SeqCst),
+            1,
+            "an unknown window must be attempted, not refused"
+        );
+
+        let receipts = reporter.receipts.lock().clone();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts[0].candidates[0].disposition,
+            Err(CandidateRejection::ContextWindowTooSmall)
+        );
+        assert_eq!(receipts[0].candidates[1].disposition, Ok(()));
+        assert_eq!(receipts[0].selected_model.as_deref(), Some("flux-auto"));
     }
 
     #[tokio::test]

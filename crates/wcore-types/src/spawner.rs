@@ -643,6 +643,12 @@ impl SubAgentResult {
     }
 }
 
+/// Default per-child output-token cap shared by every delegation surface.
+///
+/// The single spelling of the value `wcore-agent::spawn_tool` and
+/// `wcore-tools::delegate` each used to define for themselves.
+pub const DEFAULT_SUB_AGENT_MAX_TOKENS: u32 = 4096;
+
 /// Abstraction over fork-mode agent spawning — enables mock implementations in tests.
 #[async_trait]
 pub trait Spawner: Send + Sync {
@@ -662,6 +668,25 @@ pub trait Spawner: Send + Sync {
     ) -> SubAgentResult {
         let _ = origin;
         self.spawn_fork(config, overrides).await
+    }
+
+    /// The parent session's own configured output-token cap.
+    ///
+    /// #862 — a delegation surface floors its children at this so a child is
+    /// never handed LESS output room than the session that dispatched it.
+    /// `size_output_cap` only ever clamps DOWNWARD, so a child left on the
+    /// 4096 sub-agent default cannot reach the reasoning-aware ceiling
+    /// (`UNKNOWN_REASONING_CAP` = 32768) at all: on a router alias that routes
+    /// to a reasoning model the reasoning tokens consume the whole 4096 and the
+    /// turn ends `finish_reason=length` having emitted no answer and no tool
+    /// call.
+    ///
+    /// Defaulted rather than required so the mock spawners in tests are
+    /// unaffected. The default is the sub-agent default itself, i.e. "no
+    /// floor" — an implementation that does not know the parent's cap must not
+    /// invent one.
+    fn base_max_tokens(&self) -> u32 {
+        DEFAULT_SUB_AGENT_MAX_TOKENS
     }
 }
 

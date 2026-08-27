@@ -647,6 +647,7 @@ async fn scenario_multi_turn_proposer_uses_read_only_tools_and_fuses() {
                 output_tokens: 30,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -661,6 +662,7 @@ async fn scenario_multi_turn_proposer_uses_read_only_tools_and_fuses() {
                 output_tokens: 60,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];

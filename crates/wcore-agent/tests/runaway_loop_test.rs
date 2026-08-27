@@ -74,6 +74,7 @@ fn loop_turn(i: usize) -> Vec<LlmEvent> {
                 output_tokens: 10,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ]
@@ -703,6 +704,7 @@ fn named_turn(i: usize, tool: &str) -> Vec<LlmEvent> {
                 output_tokens: 10,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ]

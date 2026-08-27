@@ -12,14 +12,17 @@
 //! - True HMAC / asymmetric (Ed25519) signing.
 //!
 //! Layer: this crate is mid-layer per `AGENTS.md`. Allowed deps:
-//! `wcore-types`, `wcore-config`, third-party. FORBIDDEN: `wcore-agent`,
-//! `wcore-cli`. `wcore-agent` depends on us, not the other way around.
+//! `wcore-types`, `wcore-config`, `wcore-protocol`, third-party. FORBIDDEN:
+//! `wcore-agent`, `wcore-cli`. `wcore-agent` depends on us, not the other way
+//! around; `wcore-protocol` depends only on `wcore-types`, so the edge
+//! [`grants`] adds cannot close a cycle.
 
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
 pub mod actor;
 pub mod error;
+pub mod grants;
 pub mod learning;
 pub mod policy;
 pub mod revocation;
@@ -27,6 +30,7 @@ pub mod token;
 
 pub use actor::CallActor;
 pub use error::{DenyReason, PolicyResult};
+pub use grants::LearnedGrants;
 pub use learning::{EvalResult, LearnedDecision, LearnedPolicy, LearningError};
 pub use policy::{
     Action, Actor, GrantAuditEvent, GrantAuditSink, Permission, PolicyEngine, Resource,

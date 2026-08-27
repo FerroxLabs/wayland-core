@@ -260,6 +260,9 @@ protocol_command_surface! {
     ProtocolCommand::RevokePath { .. } => "revoke_path",
     ProtocolCommand::ApprovalResume { .. } => "approval_resume",
     ProtocolCommand::HostSendMessageResult { .. } => "host_send_message_result",
+    ProtocolCommand::QuiesceAcquire(_) => "quiesce_acquire",
+    ProtocolCommand::QuiesceRelease(_) => "quiesce_release",
+    ProtocolCommand::QuiesceStatus(_) => "quiesce_status",
     ProtocolCommand::Ping => "ping",
 }
 
@@ -335,17 +338,23 @@ fn every_command_fixture_round_trips_to_the_variant_it_names() {
     );
 }
 
+// 26 -> 29 commands and 61 -> 66 events: wayland#896 adds `quiesce_acquire`,
+// `quiesce_release` and `quiesce_status`, answered by `quiesce_lease_granted`,
+// `quiesce_lease_released`, `quiesce_lease_expired`, `quiesce_status_report`
+// and `quiesce_refused`. The literals are the point of this test — they force a
+// widening of the producer surface to be a decision someone typed, next to the
+// CONTRACT_MINOR bump it requires, rather than a number that drifts.
 #[test]
-fn inventory_is_exactly_twenty_six_commands_and_sixty_one_events() {
-    assert_eq!(COMMAND_SPECS.len(), 26);
-    assert_eq!(EVENT_SPECS.len(), 61);
+fn inventory_is_exactly_twenty_nine_commands_and_sixty_six_events() {
+    assert_eq!(COMMAND_SPECS.len(), 29);
+    assert_eq!(EVENT_SPECS.len(), 66);
     assert_eq!(
         COMMAND_SPECS
             .iter()
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        26
+        29
     );
     assert_eq!(
         EVENT_SPECS
@@ -353,7 +362,7 @@ fn inventory_is_exactly_twenty_six_commands_and_sixty_one_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        61
+        66
     );
 }
 
@@ -438,10 +447,13 @@ fn manifest_pins_generator_and_all_three_digests() {
     }
     assert_eq!(manifest["contract"]["major"], CONTRACT_MAJOR);
     assert_eq!(manifest["contract"]["minor"], CONTRACT_MINOR);
-    assert_eq!(manifest["commands"].as_array().unwrap().len(), 26);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 61);
-    assert_eq!(manifest["counts"]["commands"], 26);
-    assert_eq!(manifest["counts"]["events"], 61);
+    // 26 -> 29 / 61 -> 66: wayland#896's three quiescence commands and five
+    // receipts. Additive; see the CONTRACT_MINOR 1.19 -> 1.20 note in
+    // `generate.rs`.
+    assert_eq!(manifest["commands"].as_array().unwrap().len(), 29);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 66);
+    assert_eq!(manifest["counts"]["commands"], 29);
+    assert_eq!(manifest["counts"]["events"], 66);
     assert_eq!(manifest["counts"]["child_types"], 3);
     assert_eq!(
         manifest["child_types"],
@@ -531,8 +543,8 @@ fn manifest_publishes_a_wire_shape_for_every_command_and_event() {
     );
     assert_eq!(
         shapes.len(),
-        26 + 61 + 1,
-        "26 commands, 61 events, and the legacy sub-agent compatibility branch"
+        29 + 66 + 1,
+        "29 commands, 66 events, and the legacy sub-agent compatibility branch"
     );
     // The correlation anchors every later tool frame is matched against. A
     // rename here is the exact break regeneration used to bless.

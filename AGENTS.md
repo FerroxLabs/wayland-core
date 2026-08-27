@@ -241,7 +241,7 @@ Dependencies flow **downward** — never introduce circular or upward references
 | Mid | `wcore-memory` | Long-term cross-session memory (user prefs, feedback, project context) |
 | Mid | `wcore-observability` | Trace schema, span sinks, OTLP exporter, prompt-cache discipline — sits between `wcore-types`/`wcore-config` and `wcore-agent`; protocol crate stays decoupled via opaque `serde_json::Value` payloads |
 | Mid | `wcore-repomap` | Aider-style light symbol extractor + codebase index. Deliberately isolated — NO internal `wcore-*` deps |
-| Mid | `wcore-browser` | Multi-backend browser tool family (Camoufox primary, chromiumoxide fallback, Browserbase cloud); ARIA-tree-first surface; BrowserPolicy network boundary; BrowserSupervisor lifecycle |
+| Mid | `wcore-browser` | Multi-backend browser tool family (Camoufox primary, Browserbase cloud); ARIA-tree-first surface; BrowserPolicy network boundary; BrowserSupervisor lifecycle |
 | Mid | `wcore-cua` | Multi-platform computer use (macOS / Linux X11 / Linux Wayland / Windows); background-mode invariant; CuaPolicy gating |
 | Mid | `wcore-eval` | Acceptance / evaluation gate runner (precision/recall thresholds, eval-gate justfile target) |
 | Mid | `wcore-evolve` | W10B GEPA evolution loop — child generation, scoring, retention. Paraphrase mutator backed by real `LlmParaphraseProvider` in production; fixture-replay in tests |

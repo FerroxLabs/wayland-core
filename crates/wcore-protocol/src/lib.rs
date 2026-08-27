@@ -10,6 +10,8 @@ pub mod events;
 pub mod execution_policy;
 pub mod goal;
 pub mod output_pump;
+/// wayland#896 — versioned quiesced-snapshot-lease wire contract.
+pub mod quiescence;
 pub mod reader;
 pub mod workflow;
 pub mod writer;
@@ -799,6 +801,37 @@ impl ToolApprovalManager {
         }
     }
 
+    /// Register a prefix-scoped always-allow rule without a pending approval
+    /// to resolve.
+    ///
+    /// #693 — `auto_approved_prefixes` is in-memory and therefore
+    /// session-scoped, so an [`ApprovalScope::AlwaysPrefix`] grant the user
+    /// made in an earlier session is gone at process exit. This is the restore
+    /// side: the host reads the durable learned policy at launch and replays
+    /// each prefix grant through here, exactly as
+    /// [`add_auto_approve_tool_name`](Self::add_auto_approve_tool_name) does
+    /// for whole-tool grants.
+    ///
+    /// A restored rule is NOT more authority than a live one: it lands in the
+    /// same map [`approve`](Self::approve) writes and is read back by the same
+    /// [`is_auto_approved_tool_cmd`](Self::is_auto_approved_tool_cmd), so the
+    /// chained-command and metacharacter refusals (H-4) apply unchanged.
+    ///
+    /// An empty prefix is dropped. `prefix_matches` already refuses to match
+    /// on one, but storing it would put an allow-everything-looking rule in
+    /// the operator's file.
+    pub fn add_auto_approve_prefix(&self, category: &str, prefix: &str) {
+        if prefix.trim().is_empty() {
+            return;
+        }
+        if let Ok(mut map) = self.auto_approved_prefixes.lock() {
+            let bucket = map.entry(category.to_string()).or_default();
+            if !bucket.iter().any(|p| p == prefix) {
+                bucket.push(prefix.to_string());
+            }
+        }
+    }
+
     /// The tool NAME of a still-pending approval, or `None` when `call_id` is
     /// unknown / already resolved.
     ///
@@ -810,6 +843,21 @@ impl ToolApprovalManager {
             .lock()
             .ok()
             .and_then(|pending| pending.get(call_id).map(|p| p.tool_name.clone()))
+    }
+
+    /// The tool CATEGORY of a still-pending approval, or `None` when `call_id`
+    /// is unknown / already resolved.
+    ///
+    /// #693 — [`ApprovalScope::AlwaysPrefix`] registers under the category,
+    /// not the tool name, so the durable write side needs THIS key or the
+    /// grant it saves cannot be replayed into the same bucket it was granted
+    /// in. Like [`pending_tool_name`](Self::pending_tool_name) it must be read
+    /// BEFORE [`approve`](Self::approve) consumes the pending entry.
+    pub fn pending_tool_category(&self, call_id: &str) -> Option<String> {
+        self.pending
+            .lock()
+            .ok()
+            .and_then(|pending| pending.get(call_id).map(|p| p.category.clone()))
     }
 }
 

@@ -50,10 +50,19 @@ pub const DELEGATE_MAX_TASKS: usize = 5;
 /// `DEFAULT_MAX_ITERATIONS = 50`).
 pub const DELEGATE_DEFAULT_MAX_TURNS: usize = 50;
 
-/// Default per-child max output tokens. Matches the value used by
-/// `wcore-agent::spawn_tool` so a delegated child has the same token
-/// budget regardless of which surface dispatched it.
-pub const DELEGATE_DEFAULT_MAX_TOKENS: u32 = 4096;
+/// Default per-child max output tokens, used when the spawner cannot report
+/// the parent session's own cap.
+///
+/// #862 — this doc used to claim the constant "matches the value used by
+/// `wcore-agent::spawn_tool` so a delegated child has the same token budget
+/// regardless of which surface dispatched it". That parity was BROKEN when
+/// Spawn started flooring its children at the parent cap
+/// (`spawn_tool::floor_task_caps_at_parent`) and this surface did not: the same
+/// child dispatched through Delegate stayed pinned at 4096, could never reach
+/// the reasoning-aware ceiling, and a Delegate caller had no escape because
+/// `parse_budget` is narrowing-only by construction. Parity is restored by
+/// [`floor_at_parent_cap`]; this constant is now only the floor's lower bound.
+pub const DELEGATE_DEFAULT_MAX_TOKENS: u32 = wcore_types::spawner::DEFAULT_SUB_AGENT_MAX_TOKENS;
 
 /// Built-in delegate tool. Wires LLM-supplied delegation requests to
 /// the engine's `Spawner` trait.
@@ -233,16 +242,36 @@ pub fn build_child_prompt(goal: &str, context: Option<&str>) -> String {
     parts.join("\n")
 }
 
+/// #862 — raise a delegated child's output cap to at least the parent
+/// session's own.
+///
+/// The mirror of `wcore-agent::spawn_tool::floor_task_caps_at_parent`, and it
+/// exists for the same reason: `size_output_cap` only ever clamps DOWNWARD, so
+/// a child left on [`DELEGATE_DEFAULT_MAX_TOKENS`] can never reach the
+/// reasoning-aware ceiling (`UNKNOWN_REASONING_CAP` = 32768). On a router alias
+/// that routes to a reasoning model the reasoning tokens consume the whole 4096
+/// and the turn ends `finish_reason=length` having emitted no answer text and
+/// no tool call — the child terminates without completing, while the identical
+/// prompt run WITHOUT delegation succeeds on the session's own larger cap.
+///
+/// This is a FLOOR, never a widening of authority: the resolved cap is still
+/// intersected with what actually binds the requester at the spawn seam, and a
+/// per-task cap already wider than the parent's is left alone.
+fn floor_at_parent_cap(requested: u32, parent_cap: u32) -> u32 {
+    requested.max(parent_cap)
+}
+
 fn task_to_config(
     task: &Task,
     max_turns: usize,
     budget: Option<&ChildBudgetRequest>,
+    parent_cap: u32,
 ) -> (SubAgentConfig, ForkOverrides) {
     let cfg = SubAgentConfig {
         name: format!("delegate-{}", first_word(&task.goal)),
         prompt: task.goal.clone(),
         max_turns,
-        max_tokens: DELEGATE_DEFAULT_MAX_TOKENS,
+        max_tokens: floor_at_parent_cap(DELEGATE_DEFAULT_MAX_TOKENS, parent_cap),
         system_prompt: Some(build_child_prompt(&task.goal, task.context.as_deref())),
         provider: None,
         model: None,
@@ -400,7 +429,8 @@ impl Tool for DelegateTool {
         let jobs: Vec<_> = tasks
             .iter()
             .map(|t| {
-                let (cfg, overrides) = task_to_config(t, max_turns, budget.as_ref());
+                let (cfg, overrides) =
+                    task_to_config(t, max_turns, budget.as_ref(), spawner.base_max_tokens());
                 let s = spawner.clone();
                 async move {
                     s.spawn_fork_with_origin(cfg, overrides, ChildOrigin::Delegate)
@@ -632,5 +662,127 @@ mod tests {
 
         // No invalid path should have reached the spawner.
         assert_eq!(spawner.calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Records the output cap every dispatched child was actually given, and
+    /// reports a parent session cap through the trait the way `AgentSpawner`
+    /// does. #862.
+    struct CapRecordingSpawner {
+        parent_cap: u32,
+        seen: std::sync::Mutex<Vec<u32>>,
+    }
+
+    impl CapRecordingSpawner {
+        fn new(parent_cap: u32) -> Self {
+            Self {
+                parent_cap,
+                seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Spawner for CapRecordingSpawner {
+        async fn spawn_fork(
+            &self,
+            config: SubAgentConfig,
+            _overrides: ForkOverrides,
+        ) -> SubAgentResult {
+            self.seen.lock().unwrap().push(config.max_tokens);
+            SubAgentResult {
+                name: config.name,
+                text: "ok".to_string(),
+                usage: TokenUsage::default(),
+                turns: 1,
+                is_error: false,
+            }
+        }
+
+        fn base_max_tokens(&self) -> u32 {
+            self.parent_cap
+        }
+    }
+
+    /// `wcore-agent::engine::UNKNOWN_REASONING_CAP` — the reasoning-aware
+    /// ceiling a child must be able to reach. Private to that crate, and
+    /// `wcore-tools` cannot depend on `wcore-agent`, so the value is restated
+    /// here the way the Spawn-side test names it.
+    const UNKNOWN_REASONING_CAP: u32 = 32_768;
+
+    /// #862 — the mirror of `spawn_tool::spawn_child_cap_is_floored_at_the_parent_cap`.
+    ///
+    /// Spawn was fixed and Delegate was not, so the SAME child got a different
+    /// budget depending only on which surface dispatched it — and a Delegate
+    /// caller had no way to raise it, because `parse_budget` narrows only. Left
+    /// on the 4096 default a delegated child on a reasoning alias cannot reach
+    /// the reasoning ceiling at all: the reasoning tokens consume the whole
+    /// budget and the turn ends having emitted nothing.
+    #[tokio::test]
+    async fn delegate_child_cap_is_floored_at_the_parent_cap() {
+        let parent_cap = 64_000;
+        let spawner = Arc::new(CapRecordingSpawner::new(parent_cap));
+        let tool = DelegateTool::new(spawner.clone());
+
+        let out = tool.execute(json!({ "goal": "do the work" })).await;
+        assert!(
+            !out.is_error,
+            "the delegation must succeed: {}",
+            out.content
+        );
+
+        let seen = spawner.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![parent_cap],
+            "the child must get the parent's cap"
+        );
+        assert!(
+            seen[0] >= UNKNOWN_REASONING_CAP,
+            "a delegated child must be able to reach the reasoning-aware \
+             ceiling; {} would clamp below it and starve a reasoning model",
+            seen[0]
+        );
+        assert!(
+            seen[0] > DELEGATE_DEFAULT_MAX_TOKENS,
+            "the floor must have actually raised the default, or this test \
+             would pass on the unfixed code"
+        );
+    }
+
+    /// The floor must never SHRINK a child. A parent configured below the
+    /// sub-agent default keeps the default — this is a floor, not an
+    /// assignment, and Delegate's own narrowing-by-request contract is
+    /// untouched by it.
+    #[tokio::test]
+    async fn delegate_child_cap_is_never_shrunk_by_a_smaller_parent() {
+        let spawner = Arc::new(CapRecordingSpawner::new(1_024));
+        let tool = DelegateTool::new(spawner.clone());
+
+        let out = tool.execute(json!({ "goal": "do the work" })).await;
+        assert!(
+            !out.is_error,
+            "the delegation must succeed: {}",
+            out.content
+        );
+
+        let seen = spawner.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![DELEGATE_DEFAULT_MAX_TOKENS],
+            "a parent cap below the sub-agent default must not lower the child"
+        );
+    }
+
+    /// A spawner that cannot report a parent cap (every mock, and any
+    /// out-of-tree implementation) must be unchanged by the floor: the trait
+    /// default is the sub-agent default, i.e. no floor at all.
+    #[tokio::test]
+    async fn a_spawner_without_a_parent_cap_leaves_the_default_alone() {
+        assert_eq!(
+            MockSpawner::new().base_max_tokens(),
+            DELEGATE_DEFAULT_MAX_TOKENS,
+            "the trait default must not invent a cap the implementation did \
+             not declare"
+        );
     }
 }

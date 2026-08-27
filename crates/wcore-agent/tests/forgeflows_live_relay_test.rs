@@ -79,6 +79,7 @@ impl LlmProvider for ChattyProvider {
                         output_tokens: 5,
                         cache_creation_tokens: 0,
                         cache_read_tokens: 0,
+                        ..Default::default()
                     },
                 },
             ];

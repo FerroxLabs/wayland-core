@@ -36,6 +36,10 @@ use crate::goal::{
     GOAL_PROTOCOL_VERSION, GoalAuthorityWire, GoalLifecycleWire, GoalLoopOwnerWire, GoalProjection,
     GoalTaskWire, GoalTaskWireStatus, GoalTransitionKind,
 };
+use crate::quiescence::{
+    QUIESCENCE_PROTOCOL_VERSION, QuiesceCoverage, QuiesceHeldLease, QuiesceProfileIdentity,
+    QuiesceRefusalReason, QuiesceReleaseVerdict, QuiesceRoot,
+};
 use wcore_types::execution_policy::{
     ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, PolicySource,
 };
@@ -352,6 +356,46 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         Safety,
         "request_id_and_goal_id",
         "durable_goals_v1"
+    ),
+    // wayland#896 host quiescence control. `Safety`, not `Observational`: a
+    // host that mishandles one of these stores a torn recovery point and
+    // believes it succeeded.
+    wire!(
+        "quiesce_acquire",
+        "commands/quiesce_acquire.json",
+        [
+            "quiescence_version",
+            "request_id",
+            "lease_id",
+            "session_id",
+            "scope",
+            "ttl_ms"
+        ],
+        Safety,
+        "request_id_and_lease_id",
+        "quiesced_snapshot_lease_v1"
+    ),
+    wire!(
+        "quiesce_release",
+        "commands/quiesce_release.json",
+        [
+            "quiescence_version",
+            "request_id",
+            "lease_id",
+            "session_id",
+            "epoch"
+        ],
+        Safety,
+        "request_id_and_lease_id",
+        "quiesced_snapshot_lease_v1"
+    ),
+    wire!(
+        "quiesce_status",
+        "commands/quiesce_status.json",
+        ["quiescence_version", "request_id", "session_id"],
+        Safety,
+        "request_id",
+        "quiesced_snapshot_lease_v1"
     ),
     wire!(
         "ping",
@@ -1045,6 +1089,91 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "request_id_and_goal_id",
         "durable_goals_v1"
     ),
+    // wayland#896 quiescence receipts. Every one is `Safety`: `coverage`,
+    // `epoch` and `verdict` are what decide whether a stored recovery point is
+    // real, and `quiesce_refused` is what keeps a rejected capture from being
+    // indistinguishable from an accepted one that did nothing.
+    wire!(
+        "quiesce_lease_granted",
+        "events/quiesce_lease_granted.json",
+        [
+            "quiescence_version",
+            "request_id",
+            "lease_id",
+            "session_id",
+            "epoch",
+            "coverage",
+            "acquired_unix_ms",
+            "expires_unix_ms",
+            "idempotent_replay"
+        ],
+        Safety,
+        "request_id_and_lease_id",
+        "quiesced_snapshot_lease_v1"
+    ),
+    wire!(
+        "quiesce_lease_released",
+        "events/quiesce_lease_released.json",
+        [
+            "quiescence_version",
+            "request_id",
+            "lease_id",
+            "session_id",
+            "epoch_at_acquire",
+            "epoch_at_release",
+            "verdict",
+            "released_unix_ms"
+        ],
+        Safety,
+        "request_id_and_lease_id",
+        "quiesced_snapshot_lease_v1"
+    ),
+    wire!(
+        "quiesce_lease_expired",
+        "events/quiesce_lease_expired.json",
+        [
+            "quiescence_version",
+            "lease_id",
+            "owner",
+            "session_id",
+            "request_id",
+            "epoch_at_acquire",
+            "expires_unix_ms",
+            "observed_unix_ms"
+        ],
+        Safety,
+        "lease_id",
+        "quiesced_snapshot_lease_v1"
+    ),
+    wire!(
+        "quiesce_status_report",
+        "events/quiesce_status_report.json",
+        [
+            "quiescence_version",
+            "request_id",
+            "session_id",
+            "held",
+            "available"
+        ],
+        Observational,
+        "request_id",
+        "quiesced_snapshot_lease_v1"
+    ),
+    wire!(
+        "quiesce_refused",
+        "events/quiesce_refused.json",
+        [
+            "quiescence_version",
+            "request_id",
+            "lease_id",
+            "session_id",
+            "reason",
+            "detail"
+        ],
+        Safety,
+        "request_id_and_lease_id",
+        "quiesced_snapshot_lease_v1"
+    ),
 ];
 
 pub const PRODUCER_COMMAND_TYPES: &[&str] = &[
@@ -1074,6 +1203,10 @@ pub const PRODUCER_COMMAND_TYPES: &[&str] = &[
     "goal_advance",
     "goal_cancel",
     "goal_resync",
+    // wayland#896 host quiescence control.
+    "quiesce_acquire",
+    "quiesce_release",
+    "quiesce_status",
     "ping",
 ];
 
@@ -1138,6 +1271,12 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "goal_snapshot",
     "goal_transition",
     "goal_control_refused",
+    // wayland#896 quiescence receipts.
+    "quiesce_lease_granted",
+    "quiesce_lease_released",
+    "quiesce_lease_expired",
+    "quiesce_status_report",
+    "quiesce_refused",
     "pong",
 ];
 
@@ -1151,6 +1290,7 @@ pub const SOURCE_INPUTS: &[&str] = &[
     "crates/wcore-protocol/src/anvil.rs",
     "crates/wcore-protocol/src/execution_policy.rs",
     "crates/wcore-protocol/src/goal.rs",
+    "crates/wcore-protocol/src/quiescence.rs",
     "crates/wcore-protocol/src/workflow.rs",
     "crates/wcore-protocol/src/contract/mod.rs",
     "crates/wcore-protocol/src/contract/canonical.rs",
@@ -1338,6 +1478,24 @@ pub fn command_fixture_values() -> BTreeMap<String, Value> {
         (
             "commands/goal_resync.json".into(),
             json!({"type":"goal_resync","goal_version":1,"request_id":"goal-resync-001","session_id":"session-desktop-001","goal_id":"goal-001"}),
+        ),
+        // wayland#896 host quiescence control. `scope.include_default` is
+        // carried explicitly although it is `#[serde(default)]`: the schema
+        // branch is inferred from the fixture, so omitting it would publish a
+        // branch that says nothing about the frames a host really sends — and
+        // this is the field whose silent absence would drop the default home
+        // out of a recovery point.
+        (
+            "commands/quiesce_acquire.json".into(),
+            json!({"type":"quiesce_acquire","quiescence_version":1,"request_id":"quiesce-acquire-001","lease_id":"lease-desktop-001","session_id":"session-desktop-001","scope":{"include_default":true,"profiles":{"select":"all"}},"ttl_ms":120000}),
+        ),
+        (
+            "commands/quiesce_release.json".into(),
+            json!({"type":"quiesce_release","quiescence_version":1,"request_id":"quiesce-release-001","lease_id":"lease-desktop-001","session_id":"session-desktop-001","epoch":"sha256:quiesceepoch"}),
+        ),
+        (
+            "commands/quiesce_status.json".into(),
+            json!({"type":"quiesce_status","quiescence_version":1,"request_id":"quiesce-status-001","session_id":"session-desktop-001"}),
         ),
         (
             "commands/approval_resume.json".into(),
@@ -1719,6 +1877,35 @@ pub(super) fn workflow_lifecycle_events() -> Vec<ProtocolEvent> {
 }
 
 /// Canonical events constructed through the real `ProtocolEvent` enum.
+/// Canonical two-root coverage: the default home AND one named profile.
+///
+/// Deliberately not a single root. "All named profile state" is the part of
+/// wayland#896 a one-root fixture lets a host implement as "the default home,
+/// probably", which is the exact partial capture the contract refuses.
+fn quiesce_coverage() -> QuiesceCoverage {
+    QuiesceCoverage {
+        roots: vec![
+            QuiesceRoot {
+                identity: QuiesceProfileIdentity::Default,
+                path: "/home/user/.wayland".into(),
+                root_digest: "sha256:defaultroot".into(),
+                file_count: 128,
+                byte_count: 4_194_304,
+            },
+            QuiesceRoot {
+                identity: QuiesceProfileIdentity::Named {
+                    name: "work".into(),
+                },
+                path: "/home/user/.config/wayland-core-profiles/work".into(),
+                root_digest: "sha256:workroot".into(),
+                file_count: 42,
+                byte_count: 1_048_576,
+            },
+        ],
+        complete: true,
+    }
+}
+
 pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
     use wcore_types::message::FinishReason;
 
@@ -2102,6 +2289,86 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             ProtocolEvent::MidFlightMonitorDecision {
                 directive: MonitorDirective::Stop,
                 reason: MonitorReason::RepeatedToolRoute,
+            },
+        ),
+        // wayland#896 quiescence receipts. The coverage carries BOTH root
+        // identities, because "all named profile state" is the requirement a
+        // single-root fixture would quietly let a host under-implement.
+        (
+            "events/quiesce_lease_granted.json".into(),
+            ProtocolEvent::QuiesceLeaseGranted {
+                quiescence_version: QUIESCENCE_PROTOCOL_VERSION,
+                request_id: "quiesce-acquire-001".into(),
+                lease_id: "lease-desktop-001".into(),
+                session_id: "session-desktop-001".into(),
+                epoch: "sha256:quiesceepoch".into(),
+                coverage: quiesce_coverage(),
+                acquired_unix_ms: 1_767_225_600_000,
+                expires_unix_ms: 1_767_225_720_000,
+                idempotent_replay: false,
+            },
+        ),
+        (
+            "events/quiesce_lease_released.json".into(),
+            ProtocolEvent::QuiesceLeaseReleased {
+                quiescence_version: QUIESCENCE_PROTOCOL_VERSION,
+                request_id: "quiesce-release-001".into(),
+                lease_id: "lease-desktop-001".into(),
+                session_id: "session-desktop-001".into(),
+                epoch_at_acquire: "sha256:quiesceepoch".into(),
+                epoch_at_release: "sha256:quiesceepoch".into(),
+                verdict: QuiesceReleaseVerdict::Clean,
+                released_unix_ms: 1_767_225_660_000,
+            },
+        ),
+        (
+            "events/quiesce_lease_expired.json".into(),
+            ProtocolEvent::QuiesceLeaseExpired {
+                quiescence_version: QUIESCENCE_PROTOCOL_VERSION,
+                lease_id: "lease-desktop-000".into(),
+                owner: "session-desktop-000".into(),
+                session_id: "session-desktop-001".into(),
+                request_id: "quiesce-acquire-001".into(),
+                epoch_at_acquire: "sha256:staleepoch".into(),
+                expires_unix_ms: 1_767_225_540_000,
+                observed_unix_ms: 1_767_225_600_000,
+            },
+        ),
+        (
+            "events/quiesce_status_report.json".into(),
+            ProtocolEvent::QuiesceStatusReport {
+                quiescence_version: QUIESCENCE_PROTOCOL_VERSION,
+                request_id: "quiesce-status-001".into(),
+                session_id: "session-desktop-001".into(),
+                held: Some(QuiesceHeldLease {
+                    lease_id: "lease-desktop-001".into(),
+                    owner: "session-desktop-001".into(),
+                    epoch: "sha256:quiesceepoch".into(),
+                    acquired_unix_ms: 1_767_225_600_000,
+                    expires_unix_ms: 1_767_225_720_000,
+                    coverage: quiesce_coverage(),
+                }),
+                available: vec![
+                    QuiesceProfileIdentity::Default,
+                    QuiesceProfileIdentity::Named {
+                        name: "work".into(),
+                    },
+                ],
+            },
+        ),
+        (
+            "events/quiesce_refused.json".into(),
+            ProtocolEvent::QuiesceRefused {
+                quiescence_version: QUIESCENCE_PROTOCOL_VERSION,
+                request_id: "quiesce-acquire-002".into(),
+                lease_id: "lease-desktop-002".into(),
+                session_id: "session-desktop-001".into(),
+                // `partial_coverage` deliberately: it is the refusal a correct
+                // host meets first, because it is the one produced by asking
+                // for a profile that has since been deleted — not a
+                // malformed-input case a host will never send.
+                reason: QuiesceRefusalReason::PartialCoverage,
+                detail: "coverage is incomplete: [\"profile:archive\"]".into(),
             },
         ),
         ("events/pong.json".into(), ProtocolEvent::Pong),

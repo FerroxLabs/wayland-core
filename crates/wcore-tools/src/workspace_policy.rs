@@ -252,6 +252,32 @@ struct DenyCache {
 /// stops paying for itself and starts costing memory instead.
 const DENY_CACHE_MAX_DIRS: usize = 100_000;
 
+/// #1145 - how far a directory mtime must lag the instant a walk started before
+/// that walk's answer may be trusted, on a filesystem that stamps SUB-SECOND
+/// modification times.
+///
+/// `stamped_at` is a `SystemTime::now()` and is therefore fine-grained, but a
+/// directory mtime is stamped by the kernel from a COARSE clock: measured on
+/// this project's Linux build host, ext4 and tmpfs both report exactly one
+/// jiffy of granularity (1.000010 ms at `CONFIG_HZ=1000`), and 2000 of 2000
+/// post-walk writes produced an mtime STRICTLY LESS than a `stamped_at` taken
+/// moments before. A bare `now >= stamped_at` test can therefore essentially
+/// never fire, which is what left the same-tick write in #1145 invisible.
+///
+/// A change made within one tick of the walk cannot be witnessed by an mtime at
+/// all, so the only sound answer is to distrust the memo for that long. 20 ms is
+/// 20x the granularity measured here and 2x the coarsest jiffy any supported
+/// Linux kernel uses (10 ms at `CONFIG_HZ=100`); APFS and NTFS stamp finer
+/// still. It costs one extra walk per `Bash` execution that starts within 20 ms
+/// of the workspace changing.
+const SUBSECOND_MTIME_GRANULARITY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// #1145 - the same slack for a filesystem that stamps WHOLE SECONDS: HFS+,
+/// FAT/exFAT (two-second resolution), and older NFS servers. 20 ms would be
+/// meaningless there - the tick such a filesystem can hide a write inside is a
+/// thousand times longer.
+const WHOLE_SECOND_MTIME_GRANULARITY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// #667/#1118 — THE shell-principal predicate, in one place.
 ///
 /// True when the ONLY principal that can drive a shell built from this decision
@@ -837,6 +863,44 @@ impl WorkspacePolicy {
         is_secret_path_static(&canon) && canon.starts_with(&self.root)
     }
 
+    /// FerroxLabs/wayland-core#244 + #322: true when `path` is inside a VCS
+    /// CONTENT store — `.git/objects`, `.git/modules`, `.git/lfs`, `.hg/store`,
+    /// `.svn/pristine`, `.bzr/repository`.
+    ///
+    /// The IN-PROCESS sibling of the OS-sandbox deny [`vcs_content_stores`]
+    /// builds. Those two layers had drifted: `Bash` could not `git show
+    /// HEAD:.env`, but the file tools read `.git/objects/ab/cdef...` straight
+    /// off disk, because the only `SecretDenyFs` predicate
+    /// ([`is_project_secret`](Self::is_project_secret)) matches secret NAMES and
+    /// an object file is named after its hash. The blobs are zlib-compressed, so
+    /// #244 is a gap rather than a plaintext leak — but a gap between two layers
+    /// that are supposed to agree is how a boundary stops being one.
+    ///
+    /// Two arms, cheap one first:
+    ///
+    /// 1. **Lexical, any depth, under this workspace root** — the #322 half.
+    ///    Costs nothing beyond the canonicalization the caller pays anyway, and
+    ///    covers the nested/vendored store that root-relative discovery never
+    ///    sees.
+    /// 2. **The stores this root's own `.git` NAMES** — a gitfile's gitdir and
+    ///    commondir (#242), an `objects/info/alternates` borrow, and a `.git`
+    ///    SYMLINK whose target sits outside the root. None of those resolve to a
+    ///    path whose parent component is still `.git`, so arm 1 cannot see them.
+    ///    Reached only when arm 1 misses.
+    ///
+    /// NOT routed through any sandbox-backend capability, for the reason
+    /// `crates/wcore-tools/tests/vfs_secret_deny_backend_independent.rs` pins:
+    /// this refusal is enforced by THIS process.
+    pub fn is_vcs_content_store(&self, path: &Path) -> bool {
+        let canon = canon_for_scope(path);
+        if canon.starts_with(&self.root) && inside_vcs_store(&canon) {
+            return true;
+        }
+        vcs_content_stores(&self.root)
+            .iter()
+            .any(|store| canon.starts_with(store))
+    }
+
     /// True when `path` names this workspace's own REPOSITORY-CONTROL surface
     /// ([`REPO_CONTROL_DIRS`]) — the directories whose contents are executed or
     /// obeyed rather than merely read back.
@@ -1332,10 +1396,35 @@ impl WorkspacePolicy {
                 return None;
             }
             let now = std::fs::symlink_metadata(dir).ok()?.modified().ok()?;
-            // `>= stamped_at` is the timestamp-granularity guard: a write that
-            // landed in the same clock tick as the walk leaves an mtime the
-            // equality test above cannot distinguish from the one recorded.
-            if now != *seen || now >= cache.stamped_at {
+            // The timestamp-granularity guard (#1145): a write that landed in
+            // the same COARSE filesystem tick as the walk leaves an mtime the
+            // equality test above cannot distinguish from the one recorded, so
+            // an mtime is evidence of quiescence only once it is further behind
+            // the walk's own start instant than one tick can account for.
+            // Comparing against `stamped_at` alone is not enough - `stamped_at`
+            // is fine-grained, so a same-tick mtime is strictly LESS than it and
+            // the old `now >= stamped_at` test never fired.
+            // Take the granularity from the stamp actually in hand rather than
+            // assuming the build host's: a filesystem that resolves only whole
+            // seconds reports a zero nanosecond part for every mtime it stamps.
+            // A sub-second stamp that happens to land exactly on a second
+            // boundary is misread here, and falls in the conservative
+            // direction - a walk that was not strictly needed, never a hit that
+            // was not earned.
+            let granularity = if now
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |since_epoch| since_epoch.subsec_nanos())
+                == 0
+            {
+                WHOLE_SECOND_MTIME_GRANULARITY
+            } else {
+                SUBSECOND_MTIME_GRANULARITY
+            };
+            let settled = cache
+                .stamped_at
+                .duration_since(now)
+                .is_ok_and(|behind| behind > granularity);
+            if now != *seen || !settled {
                 return None;
             }
         }
@@ -2009,7 +2098,13 @@ fn path_is_in_credential_store(path: &Path) -> bool {
 /// reach it via [`WorkspacePolicy::is_secret_path`]; `grep_policy` (SR-05) uses
 /// it directly, because Grep has no policy instance and must not grow a second,
 /// divergent copy of this list.
-pub(crate) fn is_secret_path_static(path: &Path) -> bool {
+///
+/// `pub` rather than crate-private because `wcore-cli`'s `@`-attach guard
+/// (`tui::commands::at_ref_guard::is_secret_path`) unions its own file-name
+/// rules with this one. It used to keep a private copy, and the two lists had
+/// drifted apart in BOTH directions — the divergence is the defect the union
+/// closes, and a second copy is what re-opens it.
+pub fn is_secret_path_static(path: &Path) -> bool {
     // ASCII case is folded on EVERY rule, on EVERY platform — not just on the
     // extension, which is how this was written and how `.ENV` escaped while
     // `server.KEY` did not.
@@ -2339,6 +2434,9 @@ fn project_committed_secrets(
                 if let Some(secret) = secret_entry(&entry, &under_mounted) {
                     out.push(secret);
                 }
+                if let Some(store) = vcs_store_entry(&entry, &under_mounted) {
+                    out.push(store);
+                }
             }
         }
         if !oversized {
@@ -2370,6 +2468,9 @@ fn project_committed_secrets(
                 }
                 if let Some(secret) = secret_entry(&entry, &under_mounted) {
                     found.lock().expect(POISONED).push(secret);
+                }
+                if let Some(store) = vcs_store_entry(&entry, &under_mounted) {
+                    found.lock().expect(POISONED).push(store);
                 }
             }
             ignore::WalkState::Continue
@@ -2434,6 +2535,31 @@ pub const SERIAL_WALK_BUDGET: usize = 256;
 /// The lock is taken only to push a path that has already been canonicalized,
 /// so nothing that can panic runs while it is held and this cannot fire.
 const POISONED: &str = "secret-deny walk mutex poisoned";
+
+/// The DIRECTORY half of the per-entry decision of
+/// [`project_committed_secrets`]: a VCS content store found at any depth under
+/// the walk root (#322).
+///
+/// Emits the store DIRECTORY, never its members. That is the whole reason the
+/// fix lives here rather than in [`is_secret_path_static`] / [`secret_entry`]:
+/// a real `.git/objects` holds hundreds of thousands of files, the walk
+/// deliberately does not prune, and classifying object FILES as secrets would
+/// buy one deny-list entry and one symlink-resolving `canonicalize` syscall per
+/// object. One entry per store is the same denial at a bounded cost, and it is
+/// exactly what the OS backends already consume from [`vcs_content_stores`].
+///
+/// Shared verbatim by the serial and parallel arms, like [`secret_entry`].
+fn vcs_store_entry(
+    entry: &ignore::DirEntry,
+    under_mounted: &impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if !entry.file_type().is_some_and(|t| t.is_dir()) || !is_vcs_store_dir(entry.path()) {
+        return None;
+    }
+    std::fs::canonicalize(entry.path())
+        .ok()
+        .filter(|canon| under_mounted(canon))
+}
 
 /// The per-entry decision of [`project_committed_secrets`], shared verbatim by
 /// its serial and parallel arms so the two cannot answer differently.
@@ -2521,8 +2647,8 @@ fn walk_root_is_covered(covering: &Path, candidate: &Path) -> bool {
 /// deny above silently covers nothing. See [`gitfile_content_stores`].
 fn vcs_content_stores(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for rel in VCS_CONTENT_STORES {
-        push_store(&mut out, root.join(rel));
+    for (dir, store) in VCS_CONTENT_STORES {
+        push_store(&mut out, root.join(dir).join(store));
     }
     out.extend(gitfile_content_stores(root));
     out.extend(alternate_object_dirs(root.join(".git/objects")));
@@ -2533,14 +2659,52 @@ fn vcs_content_stores(root: &Path) -> Vec<PathBuf> {
 /// one per VCS. Each holds committed CONTENT; none is needed to answer a
 /// metadata question (branch name, dirty state), which is what keeps the deny
 /// from breaking ordinary session work.
-const VCS_CONTENT_STORES: &[&str] = &[
-    ".git/objects",
-    ".git/modules",
-    ".git/lfs",
-    ".hg/store",
-    ".svn/pristine",
-    ".bzr/repository",
+///
+/// Held as (control directory, store leaf) PAIRS rather than joined strings so
+/// the same list drives two consumers that must not drift: the root-relative
+/// join in [`vcs_content_stores`], and the any-depth shape test in
+/// [`is_vcs_store_dir`] that #322 needs.
+const VCS_CONTENT_STORES: &[(&str, &str)] = &[
+    (".git", "objects"),
+    (".git", "modules"),
+    (".git", "lfs"),
+    (".hg", "store"),
+    (".svn", "pristine"),
+    (".bzr", "repository"),
 ];
+
+/// True when the last two components of `path` name a VCS content store — the
+/// [`VCS_CONTENT_STORES`] shape recognised at ANY depth, not only directly
+/// under the workspace root.
+///
+/// FerroxLabs/wayland-core#322: discovery was root-relative only
+/// (`root.join(".git/objects")`), so a vendored or nested checkout
+/// (`<root>/vendor/x/.git/objects`, a submodule working copy, a bundled example
+/// repo) reconstructed a committed secret through its own porcelain while the
+/// deny list covered nothing. Purely lexical over an already-canonicalized
+/// path, so it costs no syscall.
+///
+/// Deliberately matches the STORE directory only. `<root>/vendor/x/.git/HEAD`
+/// and `.../refs/heads/main` are not stores and stay readable, mirroring the
+/// `git rev-parse` carve-out [`vcs_content_stores`] documents for the root
+/// repository.
+fn is_vcs_store_dir(path: &Path) -> bool {
+    use std::path::Component;
+    let mut rev = path.components().rev();
+    let (Some(Component::Normal(leaf)), Some(Component::Normal(parent))) = (rev.next(), rev.next())
+    else {
+        return false;
+    };
+    VCS_CONTENT_STORES.iter().any(|(dir, store)| {
+        parent == std::ffi::OsStr::new(dir) && leaf == std::ffi::OsStr::new(store)
+    })
+}
+
+/// [`is_vcs_store_dir`] applied to `path` and every ancestor of it: true when
+/// `path` IS a content store or lives inside one.
+fn inside_vcs_store(path: &Path) -> bool {
+    path.ancestors().any(is_vcs_store_dir)
+}
 
 /// Canonicalize and record `p` when it exists. A path that does not exist is
 /// dropped rather than denied: the deny list is handed to the OS sandbox, and a

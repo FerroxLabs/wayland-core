@@ -98,6 +98,8 @@ pub fn synthesize_initialize_outcome_wasm(
                 category: ToolCategory::Info,
                 is_deferred: meta.is_deferred,
                 max_result_size: meta.max_result_size as usize,
+                // Real wasm-hosted tool, not a name reservation.
+                namespace_claim: false,
                 execute,
             },
         });

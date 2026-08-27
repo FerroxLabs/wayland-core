@@ -76,6 +76,7 @@ async fn test_engine_tool_use_executes_and_continues() {
                 output_tokens: 30,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -91,6 +92,7 @@ async fn test_engine_tool_use_executes_and_continues() {
                 output_tokens: 50,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -131,6 +133,7 @@ async fn test_engine_max_tokens_handling() {
                 output_tokens: 100,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -184,6 +187,7 @@ async fn test_engine_message_accumulation() {
                         output_tokens: 5,
                         cache_creation_tokens: 0,
                         cache_read_tokens: 0,
+                        ..Default::default()
                     },
                 },
             ],
@@ -199,6 +203,7 @@ async fn test_engine_message_accumulation() {
                         output_tokens: 5,
                         cache_creation_tokens: 0,
                         cache_read_tokens: 0,
+                        ..Default::default()
                     },
                 },
             ],
@@ -272,6 +277,7 @@ async fn test_engine_token_usage_tracking() {
                 output_tokens: 30,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -287,6 +293,7 @@ async fn test_engine_token_usage_tracking() {
                 output_tokens: 50,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         },
     ];
@@ -342,6 +349,7 @@ async fn test_engine_max_turns_returns_ok() {
                     output_tokens: 20,
                     cache_creation_tokens: 0,
                     cache_read_tokens: 0,
+                    ..Default::default()
                 },
             },
         ]

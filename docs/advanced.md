@@ -561,9 +561,30 @@ The converse does hold, and it is asymmetric on purpose: `[memory] enabled = fal
 Generated drafts are written once to the canonical skills directory with an
 `auto_drafted` manifest. They remain inspectable but hidden from model listings,
 routers, guessed-name execution, and cross-project resolution. Review metadata
-does not grant activation authority. `--skills-promote` is temporarily
-unavailable until F23 provides a governed one-procedure-to-one-artifact
-promotion transaction; `--skills-archive` remains available.
+does not grant activation authority.
+
+`--skills-promote <NAME|PROCEDURE_ID>` is the governed one-procedure-to-one-artifact
+transaction that lifts that quarantine, and it is **eval-gated**. Before any grant is
+written, `wcore-eval` scores the artifact's `SKILL.md` with the same LOCKED W10A scorer the
+reference corpus is graded by; the promotion is refused unless the combined score reaches
+the acceptance cutoff. The score, the threshold and the evaluator's name are copied into
+the grant, so a grant stays interpretable after the threshold moves — and a procedure-path
+promotion also records an episode in project memory (`episode_type = "skill_promoted"`)
+carrying the promotion id, the content digest and the score.
+
+Two properties of that gate are worth stating because they are the ones that make it
+evidence rather than decoration:
+
+- **It refuses rather than skips.** A missing or frontmatter-less `SKILL.md` aborts the
+  promotion with the evaluator's error. "Could not evaluate" is never read as "nothing to
+  object to".
+- **It is enforced at the governance boundary, not at the command.** `GovernanceStore::`
+  `promote_existing` / `promote_new` take the evidence as a required argument and refuse
+  below-threshold evidence themselves, so there is no promotion path that can forget to ask.
+
+`--skills-archive` remains available, and `--skills-revoke` / `--skills-rollback` are the
+reversal path: revoking a promoted skill withdraws its grant, so the artifact returns to
+quarantine rather than staying model-facing.
 
 ### Status in this release
 
@@ -628,16 +649,15 @@ to the forge; judgment work with no checkable reward goes to the council.
 
 ## Browser tool family (W8c.1)
 
-`wcore-browser` is a multi-backend browser tool family. The three
+`wcore-browser` is a multi-backend browser tool family. The
 backends share an ARIA-tree-first surface (`BrowserOp::Navigate /
 Snapshot / Click / Type / NewTab / Download`) so prompt budgets stay
 under control regardless of which provider actually drives the
 session:
 
 - **Camoufox** — primary. Stealth-fingerprinted Firefox; the default
-  choice for any production session.
-- **chromiumoxide** — local-Chromium fallback when Camoufox is
-  unavailable.
+  choice for any production session. Installed on first use, so there
+  is no fallback backend to fall back to.
 - **Browserbase** — cloud-hosted browser sessions, opt-in via
   `BrowserPolicy.allow_cloud`.
 

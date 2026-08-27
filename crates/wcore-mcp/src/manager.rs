@@ -32,7 +32,38 @@ use wcore_config::shell::{LaunchValueSource, McpStdioLaunchContext};
 /// before it ever speaks MCP. 30s covers a legitimately slow server (npm
 /// cold start, slow network init) while still converting a hung server into
 /// a skip so `bootstrap.build()` — and therefore the CLI/TUI — can start.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// `pub` so the user-facing "still connecting" notice can state the deadline
+/// it is counting towards without keeping a second literal of it. This repo
+/// has already been bitten by a copied deadline drifting from the live one
+/// (see `wcore_providers::http_client::CONNECT_TIMEOUT`'s note); the notice is
+/// exactly the kind of place that copy would have gone.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound on tearing a half-connected transport down after the handshake has
+/// already failed or timed out.
+///
+/// The teardown itself waits on the server: it kills the child, then waits for
+/// the reader to observe EOF. A server that is killed but whose pipe write
+/// handles are still held open by a surviving descendant produces neither, so
+/// an unbounded `close()` here charges the user a SECOND [`CONNECT_TIMEOUT`]
+/// (or worse) for a server that has already been given up on. The transports
+/// bound their own internals too; this is the outer guarantee that no single
+/// misbehaving server can hold the connect phase past its own budget.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `transport.close()` under [`CLOSE_TIMEOUT`], flattened to the same
+/// `Option<McpError>` shape the callers already handle. Elapsing is reported
+/// as a cleanup error rather than swallowed: a teardown that did not finish is
+/// exactly the condition that leaks a process, and the connect outcome carries
+/// a `cleanup` field so it can be said out loud.
+async fn close_transport_bounded(transport: &dyn McpTransport) -> Option<McpError> {
+    match timeout(CLOSE_TIMEOUT, transport.close()).await {
+        Ok(result) => result.err(),
+        Err(_) => Some(McpError::Transport(format!(
+            "transport close did not finish within {CLOSE_TIMEOUT:?}"
+        ))),
+    }
+}
 
 /// A connected MCP server with its discovered tools and capabilities
 struct McpServer {
@@ -612,7 +643,7 @@ impl McpManager {
                 supports_resources,
             }),
             Ok(Err(error)) => {
-                let cleanup = transport.close().await.err();
+                let cleanup = close_transport_bounded(transport.as_ref()).await;
                 if let Some(cleanup) = cleanup {
                     Err(McpError::InitFailed(format!(
                         "{error}; transport cleanup failed: {cleanup}"
@@ -622,10 +653,8 @@ impl McpManager {
                 }
             }
             Err(_) => {
-                let cleanup = transport
-                    .close()
+                let cleanup = close_transport_bounded(transport.as_ref())
                     .await
-                    .err()
                     .map(|error| format!("; cleanup failed: {error}"))
                     .unwrap_or_default();
                 Err(McpError::ConnectTimedOut {

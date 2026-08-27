@@ -38,6 +38,29 @@ pub struct ContextWindow {
     pub window: Option<u64>,
 }
 
+/// The model's STATIC context window: its real window if known, else the
+/// conservative Flux tier-alias floor.
+///
+/// Extracted because three production paths need exactly this pair of lookups
+/// and two of them had only the first half. `model_output_ceiling` returns
+/// `None` for the four Flux tier aliases BY DESIGN — #112/#426 keep them
+/// unknown to the OUTPUT lookup so `size_output_cap` stays conservative and
+/// `should_omit_max_tokens` keeps omitting the wire field — so any caller that
+/// wants a WINDOW must also consult [`flux_tier_context_window`]. Calling only
+/// the first is silently wrong for Flux and looks completely correct.
+///
+/// The two tables stay SEPARATE (see `flux_tier_context_window`'s own doc for
+/// why merging them would revoke both contracts); this composes them at the
+/// one place callers actually need, instead of at three.
+///
+/// `None` means genuinely unknown — callers must fail open and never fabricate
+/// a denominator.
+pub fn static_context_window(provider: &str, model: &str) -> Option<u64> {
+    model_output_ceiling(provider, model)
+        .map(|(_, ctx)| u64::from(ctx))
+        .or_else(|| flux_tier_context_window(model).map(u64::from))
+}
+
 impl ContextWindow {
     /// THE KERNEL. Resolve the active model's window for this turn.
     ///
@@ -58,14 +81,11 @@ impl ContextWindow {
     /// `context_window`); when both are absent the window is `None` and no
     /// denominator is fabricated.
     pub fn resolve(used_tokens: u64, provider: &str, model: &str, config_window: u64) -> Self {
-        let window = model_output_ceiling(provider, model)
-            .map(|(_, ctx)| ctx as u64)
-            .or_else(|| flux_tier_context_window(model).map(u64::from))
-            .or(if config_window > 0 {
-                Some(config_window)
-            } else {
-                None
-            });
+        let window = static_context_window(provider, model).or(if config_window > 0 {
+            Some(config_window)
+        } else {
+            None
+        });
         ContextWindow {
             used_tokens,
             window,

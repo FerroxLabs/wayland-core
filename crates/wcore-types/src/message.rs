@@ -203,6 +203,16 @@ pub struct TokenUsage {
     /// Input tokens read from the provider's prompt cache.
     #[serde(default)]
     pub cache_read_tokens: u64,
+    /// The per-call USD figure the PROVIDER itself reported for this response
+    /// (FluxRouter and other OpenAI-wire aggregators return `usage.cost_usd`).
+    ///
+    /// `None` means the provider said nothing about cost — **never zero**. An
+    /// unknown cost and a free call are different claims, and collapsing them
+    /// is how a real spend renders as `0.000000`. Consumers that can price a
+    /// turn from a catalog must prefer this value when it is present: it is
+    /// what the account was actually billed, not an estimate of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_cost_usd: Option<f64>,
 }
 
 impl TokenUsage {
@@ -555,6 +565,7 @@ mod tests {
             output_tokens: 99,
             cache_creation_tokens: 20,
             cache_read_tokens: 80,
+            ..Default::default()
         };
         assert_eq!(usage.total_input_tokens(), 200);
 
@@ -563,6 +574,7 @@ mod tests {
             output_tokens: 0,
             cache_creation_tokens: 1,
             cache_read_tokens: 1,
+            ..Default::default()
         };
         assert_eq!(overflow.total_input_tokens(), u64::MAX);
         assert_eq!(TokenUsage::total_input_from(u64::MAX, 1, 1), u64::MAX);

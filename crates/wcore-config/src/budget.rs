@@ -6,4 +6,4 @@
 //! TOML schema without an upward dep. Pre-existing call sites that import
 //! `wcore_config::budget::BudgetConfig` keep compiling unchanged.
 
-pub use wcore_budget::BudgetConfig;
+pub use wcore_budget::{BudgetConfig, BudgetPreset};

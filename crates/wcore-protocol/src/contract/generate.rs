@@ -87,8 +87,12 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // gap: each records why a specific widening needed a signal, and rewriting them
 // to look consecutive would destroy that reasoning to tidy a sequence no host
 // reads. A pinned host moves 1.16 -> 1.19 and finds every capability named.
-pub const CONTRACT_MINOR: u64 = 19;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/19";
+// 19 -> 20: wayland#896 quiesced snapshot lease. Three commands and five
+// events are added and nothing existing changes shape, so this is a MINOR
+// move: a host pinned to 1.19 keeps working, and the bump is the only way it
+// can learn the capability exists to ask for.
+pub const CONTRACT_MINOR: u64 = 20;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/20";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -1569,6 +1573,18 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
             "durable_goals_v1".into(),
             ContractCapabilityStatus::Available,
         ),
+        // wayland#896. `Available`, not `ShapeOnly`, and only because the
+        // dispatcher lands in the SAME change as the wire types: the round trip
+        // a host completes is `quiesce_acquire`/`quiesce_release`/
+        // `quiesce_status` in, `quiesce_lease_granted`/
+        // `quiesce_lease_released`/`quiesce_lease_expired`/
+        // `quiesce_status_report`/`quiesce_refused` out. Declaring it while
+        // only the types existed would tell a host it can stop faking
+        // quiescence with filesystem timestamps before anything answered.
+        (
+            "quiesced_snapshot_lease_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
         (
             "host_delegated_delivery".into(),
             ContractCapabilityStatus::Available,
@@ -2194,6 +2210,141 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         "adversarial/commands/continue-with-budget-wrong-numeric-type.jsonl".into(),
         b"{\"additional_tokens\":\"1\",\"request_id\":\"budget-wrong-type\",\"type\":\"continue_with_budget\"}\n".to_vec(),
     );
+    // wayland#896 quiescence adversarial corpus. Split from
+    // `adversarial/commands/` on purpose: those fixtures are frames that must
+    // fail to DESERIALIZE, while most of these are perfectly well-formed frames
+    // that must be REFUSED. A host that only ever tests the decoder never
+    // exercises the refusal path at all, which is how a fail-open guard ships
+    // looking exactly like a working one.
+    artifacts.insert(
+        "adversarial/quiescence/valid-acquire.jsonl".into(),
+        json_lines([json!({
+            "type":"quiesce_acquire",
+            "quiescence_version":1,
+            "request_id":"quiesce-acquire-001",
+            "lease_id":"lease-desktop-001",
+            "session_id":"session-desktop-001",
+            "scope":{"include_default":true,"profiles":{"select":"all"}},
+            "ttl_ms":120000
+        })])?,
+    );
+    artifacts.insert(
+        "adversarial/quiescence/acquire-unsupported-version.jsonl".into(),
+        json_lines([json!({
+            "type":"quiesce_acquire",
+            "quiescence_version":2,
+            "request_id":"quiesce-acquire-002",
+            "lease_id":"lease-desktop-002",
+            "session_id":"session-desktop-001",
+            "scope":{"include_default":true,"profiles":{"select":"all"}},
+            "ttl_ms":120000
+        })])?,
+    );
+    artifacts.insert(
+        "adversarial/quiescence/acquire-empty-profile-selection.jsonl".into(),
+        json_lines([json!({
+            "type":"quiesce_acquire",
+            "quiescence_version":1,
+            "request_id":"quiesce-acquire-003",
+            "lease_id":"lease-desktop-003",
+            "session_id":"session-desktop-001",
+            "scope":{"include_default":false,"profiles":{"select":"named","names":[]}},
+            "ttl_ms":120000
+        })])?,
+    );
+    artifacts.insert(
+        "adversarial/quiescence/acquire-traversal-profile-name.jsonl".into(),
+        json_lines([json!({
+            "type":"quiesce_acquire",
+            "quiescence_version":1,
+            "request_id":"quiesce-acquire-004",
+            "lease_id":"lease-desktop-004",
+            "session_id":"session-desktop-001",
+            "scope":{"include_default":false,"profiles":{"select":"named","names":["../../etc"]}},
+            "ttl_ms":120000
+        })])?,
+    );
+    artifacts.insert(
+        "adversarial/quiescence/acquire-unbounded-ttl.jsonl".into(),
+        json_lines([json!({
+            "type":"quiesce_acquire",
+            "quiescence_version":1,
+            "request_id":"quiesce-acquire-005",
+            "lease_id":"lease-desktop-005",
+            "session_id":"session-desktop-001",
+            "scope":{"include_default":true,"profiles":{"select":"all"}},
+            "ttl_ms":86400000u64
+        })])?,
+    );
+    artifacts.insert(
+        "adversarial/quiescence/acquire-zero-ttl.jsonl".into(),
+        json_lines([json!({
+            "type":"quiesce_acquire",
+            "quiescence_version":1,
+            "request_id":"quiesce-acquire-006",
+            "lease_id":"lease-desktop-006",
+            "session_id":"session-desktop-001",
+            "scope":{"include_default":true,"profiles":{"select":"all"}},
+            "ttl_ms":0
+        })])?,
+    );
+    artifacts.insert(
+        "adversarial/quiescence/acquire-unknown-scope-field.jsonl".into(),
+        b"{\"type\":\"quiesce_acquire\",\"quiescence_version\":1,\"request_id\":\"quiesce-acquire-007\",\"lease_id\":\"lease-desktop-007\",\"session_id\":\"session-desktop-001\",\"scope\":{\"include_default\":true,\"profiles\":{\"select\":\"all\"},\"include_secrets\":true},\"ttl_ms\":120000}\n".to_vec(),
+    );
+    artifacts.insert(
+        "adversarial/quiescence/release-missing-epoch.jsonl".into(),
+        json_lines([json!({
+            "type":"quiesce_release",
+            "quiescence_version":1,
+            "request_id":"quiesce-release-002",
+            "lease_id":"lease-desktop-001",
+            "session_id":"session-desktop-001",
+            "epoch":""
+        })])?,
+    );
+    artifacts.insert(
+        "adversarial/quiescence/release-unsupported-version.jsonl".into(),
+        json_lines([json!({
+            "type":"quiesce_release",
+            "quiescence_version":99,
+            "request_id":"quiesce-release-003",
+            "lease_id":"lease-desktop-001",
+            "session_id":"session-desktop-001",
+            "epoch":"sha256:quiesceepoch"
+        })])?,
+    );
+    // Receipt-side adversarial cases: shapes a host must refuse to act on even
+    // though they decode cleanly.
+    artifacts.insert(
+        "adversarial/quiescence/granted-incomplete-coverage.jsonl".into(),
+        json_lines([json!({
+            "type":"quiesce_lease_granted",
+            "quiescence_version":1,
+            "request_id":"quiesce-acquire-008",
+            "lease_id":"lease-desktop-008",
+            "session_id":"session-desktop-001",
+            "epoch":"sha256:quiesceepoch",
+            "coverage":{"roots":[{"identity":{"kind":"default"},"path":"/home/user/.wayland","root_digest":"sha256:defaultroot","file_count":128,"byte_count":4194304}],"complete":false},
+            "acquired_unix_ms":1767225600000u64,
+            "expires_unix_ms":1767225720000u64,
+            "idempotent_replay":false
+        })])?,
+    );
+    artifacts.insert(
+        "adversarial/quiescence/released-mutated.jsonl".into(),
+        json_lines([json!({
+            "type":"quiesce_lease_released",
+            "quiescence_version":1,
+            "request_id":"quiesce-release-004",
+            "lease_id":"lease-desktop-001",
+            "session_id":"session-desktop-001",
+            "epoch_at_acquire":"sha256:quiesceepoch",
+            "epoch_at_release":"sha256:movedepoch",
+            "verdict":"mutated",
+            "released_unix_ms":1767225660000u64
+        })])?,
+    );
     artifacts.insert(
         "adversarial/commands/invalid-json.jsonl".into(),
         b"{not-json}\n".to_vec(),
@@ -2336,6 +2487,7 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
             "durable_child": "1.0",
             "execution_policy": "1.0",
             "operator_tool_effect_resolution": "1.0",
+            "quiesced_snapshot_lease": "1.0",
             "runtime_diagnostics": "1.0",
             "semantic_failover_receipts": "1.0",
             "turn_recovery": "1.0",

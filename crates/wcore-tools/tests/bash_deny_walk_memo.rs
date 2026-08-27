@@ -223,6 +223,13 @@ async fn two_execs_perform_exactly_one_walk() {
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
     }
 
+    // #1145: the memo may not answer for a tree that changed within one
+    // filesystem timestamp tick of the walk - a change that recent leaves an
+    // mtime identical to the recorded one, so it cannot be witnessed. Let the
+    // fixture settle past that tick before asking for a HIT; the walk counts
+    // asserted below are unchanged.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+
     let policy = Arc::new(WorkspacePolicy::contained(&root));
     assert_eq!(
         policy.secret_deny_walk_count(),
@@ -272,6 +279,13 @@ async fn a_secret_created_after_the_memo_is_still_denied() {
     let nested = root.join("packages").join("api");
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(nested.join("main.rs"), b"fn main() {}").unwrap();
+
+    // #1145: the memo may not answer for a tree that changed within one
+    // filesystem timestamp tick of the walk - a change that recent leaves an
+    // mtime identical to the recorded one, so it cannot be witnessed. Let the
+    // fixture settle past that tick before asking for a HIT; the walk counts
+    // asserted below are unchanged.
+    std::thread::sleep(std::time::Duration::from_millis(60));
 
     let policy = Arc::new(WorkspacePolicy::contained(&root));
     let ctx = ctx_for(Arc::clone(&policy));

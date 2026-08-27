@@ -47,10 +47,10 @@
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -120,6 +120,48 @@ fn child_tool_registries(mock: &MockServer, rt: &tokio::runtime::Runtime) -> Vec
             })
             .collect()
     })
+}
+
+/// How long to keep looking for the delegated child's provider request after
+/// the parent's stream has ended.
+const CHILD_TURN_DEADLINE: Duration = Duration::from_secs(30);
+
+/// [`child_tool_registries`], polled until a child provider turn has been
+/// served or `within` elapses.
+///
+/// # Why a poll, and not the bare read this replaced
+///
+/// The delegation itself is synchronous end to end — `DelegateTool::execute`
+/// `join_all`s its children, `spawn_durable` awaits `engine.run`, and the ACP
+/// `done` frame is only emitted after the whole parent turn returns — so on a
+/// CLEAN end of stream the child's request is already recorded and the first
+/// poll returns it.
+///
+/// The hazard is that `AcpServer::post` cannot tell a clean end of stream from
+/// a socket read timeout: it ends on `let _ = stream.read_to_end(..)` and
+/// returns whatever accumulated. Its 180s read budget is shorter than the 600s
+/// `ToolCategory::Exec` ceiling the `Delegate` dispatch runs under, so on a
+/// loaded runner the read can end while the child is still mid-turn. The bare
+/// read then saw an empty registry and fired the anti-vacuity guard below —
+/// correctly reporting that the run measured nothing, but for a scheduling
+/// reason rather than a product one.
+///
+/// The deadline is what keeps the guard's teeth. When no child turn is ever
+/// served this still returns empty, and the caller's assertion fails with its
+/// own message.
+fn await_child_tool_registries(
+    mock: &MockServer,
+    rt: &tokio::runtime::Runtime,
+    within: Duration,
+) -> Vec<Vec<String>> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let registries = child_tool_registries(mock, rt);
+        if !registries.is_empty() || std::time::Instant::now() >= deadline {
+            return registries;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// The persona id, and the two tools it is allowed. `Bash` is deliberately
@@ -240,6 +282,28 @@ async fn start_routed_mock() -> MockServer {
 }
 
 /// A live `acp serve` process plus the address it actually bound.
+/// How long [`AcpServer::post`] may spend reading one prompt response.
+///
+/// A DELIBERATE CAP, set BELOW nextest's kill rather than above the operation
+/// it reads. Two measured facts put it there:
+///
+///   * A prompt turn contains at least one tool dispatch, and
+///     `tool_dispatch_timeout` (crates/wcore-agent/src/orchestration/mod.rs)
+///     allows a `ToolCategory::Exec` dispatch 600s. A turn is that plus model
+///     latency, so NO read budget can be proved to cover one. This can only be
+///     a cap that says so when it binds — which is what `post` now does.
+///   * nextest hard-kills this binary at 180s under `--profile ci`
+///     (`[profile.ci] slow-timeout = { period = "90s", terminate-after = 2 }`)
+///     and at 60s under the default profile. The previous 180s budget was
+///     therefore UNREACHABLE under ci: the prompt read starts seconds into the
+///     test, so nextest always won the race and the budget never fired.
+///     Raising it to 600s to "match" the Exec ceiling would deepen that — a
+///     number that cannot be reached certifies nothing.
+///
+/// 150s leaves ~30s of headroom under the ci kill, so the diagnostic in `post`
+/// is reachable on the profile CI actually runs.
+const PROMPT_READ_BUDGET: Duration = Duration::from_secs(150);
+
 struct AcpServer {
     child: std::process::Child,
     addr: String,
@@ -274,10 +338,37 @@ impl AcpServer {
             .expect("write the request");
         stream.flush().expect("flush the request");
         let mut raw = Vec::new();
-        // A read timeout ends the read; an SSE body that has finished is closed
-        // by the server, so the common case returns on EOF rather than timing
-        // out. Either way the accumulated bytes are the response.
-        let _ = stream.read_to_end(&mut raw);
+        let started = Instant::now();
+        // NEVER `let _ =` here. `read_to_end` returns `Ok` only on a clean
+        // EOF, which IS the normal path: the server closes a finished response
+        // (`Connection: close`). Any error means `raw` holds a PREFIX, and a
+        // prefix returned as a plain `String` is indistinguishable from a
+        // whole response — the session-create call then dies inside
+        // `json_body` blaming the server for invalid JSON, and the prompt call
+        // fails an assertion blaming the product for a frame the harness
+        // simply never read. Both misattribute a harness timeout to the code
+        // under test, which is worse than a red test.
+        if let Err(err) = stream.read_to_end(&mut raw) {
+            // Read-timeout expiry is `WouldBlock` on Unix and `TimedOut` on
+            // Windows (`TcpStream::set_read_timeout`); CI runs both.
+            let timed_out = matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            );
+            panic!(
+                "POST {path} was not read to completion after {:?} (budget \
+                 {read_for:?}, timed out: {timed_out}, io error: {err}). The {} \
+                 bytes received are a PREFIX of the response, not the response. \
+                 A single `ToolCategory::Exec` dispatch is allowed 600s \
+                 (wcore_agent tool_dispatch_timeout), so a legitimately slow \
+                 turn can outlast this budget: raise the budget at the call \
+                 site and this binary's nextest slow-timeout TOGETHER, rather \
+                 than reading the partial body as a result. Partial body: {:?}",
+                started.elapsed(),
+                raw.len(),
+                String::from_utf8_lossy(&raw),
+            );
+        }
         String::from_utf8_lossy(&raw).into_owned()
     }
 }
@@ -370,7 +461,7 @@ fn drive_one_turn(server: &AcpServer, agent: Option<&str>) -> String {
     server.post(
         &format!("/v1/sessions/{session_id}/prompt"),
         &json!({ "text": "delegate the probe write" }),
-        Duration::from_secs(180),
+        PROMPT_READ_BUDGET,
     )
 }
 
@@ -395,7 +486,7 @@ fn f21_02_01_delegated_child_cannot_obtain_a_tool_the_parent_lacks() {
     // Anti-vacuity: a child must have EXISTED and taken its own provider turn,
     // or "the child had no Bash" is a statement about the harness rather than
     // about the product.
-    let registries = child_tool_registries(&mock, &rt);
+    let registries = await_child_tool_registries(&mock, &rt, CHILD_TURN_DEADLINE);
     assert!(
         !registries.is_empty(),
         "no delegated child provider turn was served, so this run measures nothing about child \
@@ -438,7 +529,7 @@ fn f21_02_01_control_unnarrowed_parent_still_delegates_bash() {
     let server = spawn_acp(home.path(), &workspace);
     let transcript = drive_one_turn(&server, None);
 
-    let registries = child_tool_registries(&mock, &rt);
+    let registries = await_child_tool_registries(&mock, &rt, CHILD_TURN_DEADLINE);
     let granted = registries
         .iter()
         .any(|names| names.iter().any(|n| n == "Bash"));
@@ -448,5 +539,118 @@ fn f21_02_01_control_unnarrowed_parent_still_delegates_bash() {
          {registries:?}), so the narrowed run above cannot be attributed to the tool-authority \
          intersection rather than to some unrelated refusal. transcript: {transcript}",
         registries.len()
+    );
+}
+
+// ── The read guard in `AcpServer::post` ──────────────────────────────────
+//
+// `post` used to end on `let _ = stream.read_to_end(&mut raw)`, which makes a
+// budget expiry indistinguishable from a clean EOF: it returned the PREFIX it
+// had managed to read as an ordinary `String`. Nothing downstream can tell —
+// `json_body` blames the server for invalid JSON, and a prompt assertion
+// blames the product for an SSE frame the harness never read. So a harness
+// timeout was reported as a product defect.
+//
+// Graded HERE, at the call site, and not on an extracted helper: the thing
+// that has to stay true is that `post` itself refuses to return a prefix.
+
+/// The frame the stalling listener emits only AFTER its stall. Its presence is
+/// what separates a whole body from a truncated one.
+const TERMINAL_FRAME: &str = "event: turn_complete\ndata: {\"done\":true}\n\n";
+
+/// A listener that writes the head of an SSE body immediately and the terminal
+/// frame only after `stall`. That is the wire shape of a turn whose tool
+/// dispatch is slow: headers and early frames are on the wire, completion is
+/// not. Returns the bound address.
+fn stalling_listener(stall: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the stalling listener");
+    let addr = listener
+        .local_addr()
+        .expect("the stalling listener bound an address")
+        .to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut conn = stream;
+                let mut scratch = [0u8; 4096];
+                // The request is not parsed — only its arrival matters.
+                let _ = conn.read(&mut scratch);
+                let _ = conn.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                      Connection: close\r\n\r\nevent: tool_call\ndata: {}\n\n",
+                );
+                let _ = conn.flush();
+                std::thread::sleep(stall);
+                let _ = conn.write_all(TERMINAL_FRAME.as_bytes());
+                let _ = conn.flush();
+                // Dropping `conn` closes the socket, which is the EOF the
+                // control arm below reads to completion.
+            });
+        }
+    });
+    addr
+}
+
+/// A real `AcpServer` aimed at `addr` instead of a spawned `acp serve`. The
+/// `child` field needs a genuine `Child`, so a short-lived `--version` run of
+/// the same binary fills it; `Drop` kills and reaps it either way.
+fn server_pointed_at(addr: String) -> AcpServer {
+    let mut cmd = Command::new(binary());
+    cmd.arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let vault = support::vault::configure_process(&mut cmd);
+    let child = cmd.spawn().expect("spawn the short-lived stand-in child");
+    AcpServer {
+        child,
+        addr,
+        key: "read-guard-test-key".to_owned(),
+        _vault: vault,
+    }
+}
+
+/// Pull a readable message out of a caught panic payload.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+        .unwrap_or_else(|| "<non-string panic payload>".to_owned())
+}
+
+#[test]
+fn post_reports_a_read_that_ran_out_of_budget_instead_of_returning_a_prefix() {
+    let stall = Duration::from_secs(2);
+    let server = server_pointed_at(stalling_listener(stall));
+
+    // CONTROL FIRST. With a budget above the stall the whole body arrives, so
+    // the red arm below cannot pass merely because this listener never emits a
+    // terminal frame, and a clean EOF is proved to still be a success.
+    let whole = server.post("/control", &json!({}), stall * 8);
+    assert!(
+        whole.contains("turn_complete"),
+        "control: a budget above the stall must return the WHOLE body and a \
+         clean EOF must stay a success — got {whole:?}"
+    );
+
+    // RED ARM. A budget below the stall must fail, not return the prefix that
+    // the control arm just proved is only part of the response.
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        server.post("/truncated", &json!({}), stall / 4)
+    }))
+    .expect_err(
+        "a read that ran out of budget returned a body as an ordinary success — \
+         that is the defect this test exists to hold closed",
+    );
+    let message = panic_text(payload.as_ref());
+    assert!(
+        message.contains("PREFIX of the response"),
+        "the failure must name the truncation so it is not misread as a product \
+         defect — got: {message}"
+    );
+    assert!(
+        message.contains("timed out: true"),
+        "the failure must report that the budget, not the peer, ended the read \
+         — got: {message}"
     );
 }

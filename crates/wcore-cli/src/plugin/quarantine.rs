@@ -24,6 +24,25 @@ use crate::plugin::marketplace::reject_traversal;
 const DEFAULT_GIT_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_MAX_BYTES: u64 = 100_000_000;
 
+/// How long to wait for a drain thread once `git` itself has exited.
+///
+/// A pipe reaches EOF only when EVERY write end is closed. `git` spawns
+/// helpers (credential, askpass, transport) with its own stdout/stderr
+/// INHERITED and does not detach them, so a helper that leaves a background
+/// worker running holds the pipe open after `git` has gone. Measured on git
+/// 2.43 with a credential helper on the real clone argv: `git` exited after
+/// 301 ms with the wall-clock guard above (120 s) untouched, and the stderr
+/// drain then blocked forever -- a guard that reports nothing while the
+/// install is wedged.
+///
+/// `git`'s OWN background processes are safe and do not need this: measured,
+/// `git-credential-cache--daemon` runs with fd 0 and fd 2 on `/dev/null` and
+/// fd 1 closed. This bounds third-party helpers, which git does not detach.
+///
+/// Five seconds is ~4 orders of magnitude above a healthy drain, which
+/// completes as soon as the child exits.
+const DRAIN_GRACE: Duration = Duration::from_secs(5);
+
 /// A cloned + normalized source ready to lower. `path` contains only
 /// allowlisted regular files and directories; `resolved_sha` pins the exact
 /// commit fetched.
@@ -316,8 +335,8 @@ fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<Strin
         }
     };
 
-    let out = h_out.join().unwrap_or_default();
-    let err = h_err.join().unwrap_or_default();
+    let out = join_drain(h_out, "stdout")?;
+    let err = join_drain(h_err, "stderr")?;
     if !status.success() {
         return Err(PluginCliError::Git(format!(
             "git {:?} failed: {}",
@@ -328,9 +347,98 @@ fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<Strin
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
+/// Join one drain thread within [`DRAIN_GRACE`], or fail.
+///
+/// FAILS CLOSED in both directions, and that is the whole point. A thread still
+/// blocked on a pipe some helper is holding, and a thread that panicked, both
+/// become `Err`. Neither may turn into an empty-but-successful capture: this
+/// function's stdout is the supply-chain pin (`rev-parse HEAD` at the call site
+/// below) that gets written to the lockfile, and `resolved_sha.is_empty()` is
+/// the only thing standing between an empty capture and a recorded provenance
+/// entry.
+fn join_drain(handle: std::thread::JoinHandle<Vec<u8>>, stream: &str) -> Result<Vec<u8>> {
+    let deadline = Instant::now() + DRAIN_GRACE;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return Err(PluginCliError::Git(format!(
+                "git exited but its {stream} pipe is still open after {} s. A process \
+                 git spawned (a credential, askpass or transport helper) has left a \
+                 background worker holding the inherited pipe, so this read can never \
+                 reach EOF. Refusing to wait: an unbounded join here hangs the install \
+                 with no diagnostic, after the wall-clock guard has already passed.",
+                DRAIN_GRACE.as_secs()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    handle.join().map_err(|_| {
+        PluginCliError::Git(format!(
+            "the git {stream} drain thread panicked; the capture is unusable and is \
+             reported as an error rather than as empty output"
+        ))
+    })
+}
+
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// `run_git` must not be wedgeable by a process `git` leaves behind.
+    ///
+    /// The production trigger is a credential / askpass / transport helper that
+    /// keeps a background worker alive; git spawns those with its own stdio
+    /// INHERITED and does not detach them. A `!`-alias is the cheapest way to
+    /// reproduce that exact shape with no network and no stored credentials.
+    ///
+    /// Graded at the call site: this drives `run_git` itself, so rewiring it
+    /// around `join_drain` is caught, not just a change to `join_drain`.
+    ///
+    /// Unix-only because backgrounding a process portably from a git alias
+    /// needs a POSIX shell. The guard itself is platform-independent.
+    #[test]
+    fn a_helper_holding_a_pipe_is_reported_instead_of_hanging_the_install() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let budget = Duration::from_secs(60);
+        run_git(&["init", "-q", "."], Some(repo), budget).expect("git init");
+
+        // CONTROL FIRST. An ordinary call through the same path still returns,
+        // so the arm below cannot pass merely because run_git is broken.
+        let inside = run_git(&["rev-parse", "--is-inside-work-tree"], Some(repo), budget)
+            .expect("control: an ordinary git call must still succeed");
+        assert_eq!(inside.trim(), "true", "control returned {inside:?}");
+
+        // The defect arm: git spawns a child that backgrounds a worker holding
+        // the pipes it inherited, then exits promptly. The pipe never sees EOF.
+        let started = Instant::now();
+        let err = run_git(
+            &["-c", "alias.leak=!sh -c 'sleep 120 & exit 0'", "leak"],
+            Some(repo),
+            budget,
+        )
+        .expect_err("run_git returned instead of reporting a pipe held open");
+        let elapsed = started.elapsed();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("pipe is still open"),
+            "the failure must name the held pipe so it is not read as a git error: {message}"
+        );
+        assert!(
+            elapsed >= DRAIN_GRACE,
+            "it must actually wait the grace period, not fail early for some other \
+             reason: {elapsed:?}"
+        );
+        assert!(
+            elapsed < budget,
+            "it must be the drain guard that fires, not the wall-clock guard: {elapsed:?}"
+        );
+    }
 }

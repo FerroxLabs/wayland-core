@@ -75,4 +75,12 @@ pub enum McpError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// FerroxLabs/wayland#1137 — the pre-spawn malware gate refused the
+    /// launch. Its own variant, not an `InitFailed`, so a host can render a
+    /// supply-chain refusal differently from a server that merely failed to
+    /// start: one is a security decision the user should see, the other is an
+    /// operational error they can retry.
+    #[error("MCP server launch refused: {0}")]
+    MalwareBlocked(String),
 }

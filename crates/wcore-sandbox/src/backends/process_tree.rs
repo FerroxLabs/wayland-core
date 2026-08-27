@@ -1,5 +1,14 @@
 //! Centralized child-process lifecycle ownership.
 
+/// The kill-on-close Job Object that owns a Windows process tree.
+///
+/// The implementation is shared with the MCP stdio transport — Windows
+/// descendant ownership is one mechanism, not one per crate — and therefore
+/// lives in `wcore-types`, the only crate both consumers already depend on.
+/// See `wcore_types::job_object` for the suspend/attach contract.
+#[cfg(windows)]
+use wcore_types::job_object::WindowsJobObject as WindowsJob;
+
 /// Prepare a Tokio command for platform process containment.
 ///
 /// Call [`ProcessTreeGuard::new`] immediately after spawning the configured
@@ -22,13 +31,10 @@ pub fn isolate_std(_command: &mut std::process::Command) {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
-
         // The child cannot create an unowned descendant before `new` assigns
-        // it to a Job Object. `WindowsJob::attach` resumes it only after the
-        // kernel accepts that assignment.
-        _command.creation_flags(CREATE_SUSPENDED);
+        // it to a Job Object. `WindowsJobObject::attach` resumes it only after
+        // the kernel accepts that assignment.
+        wcore_types::job_object::WindowsJobObject::create_suspended(_command);
     }
 }
 
@@ -1311,143 +1317,4 @@ fn wait_until_pid_gone(pid: libc::pid_t, timeout: std::time::Duration) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     !pid_is_alive(pid)
-}
-
-#[cfg(windows)]
-struct WindowsJob(windows_sys::Win32::Foundation::HANDLE);
-
-// SAFETY: Job Object handles are process-wide kernel references and this
-// wrapper has unique ownership, so moving it with the execution future cannot
-// duplicate a close or invalidate the handle.
-#[cfg(windows)]
-unsafe impl Send for WindowsJob {}
-
-#[cfg(windows)]
-impl WindowsJob {
-    fn attach(pid: u32) -> std::io::Result<Self> {
-        use std::mem;
-        use std::ptr;
-        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
-        use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-            SetInformationJobObject,
-        };
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
-        };
-
-        unsafe {
-            let job = CreateJobObjectW(ptr::null(), ptr::null());
-            if job.is_null() {
-                return Err(std::io::Error::from_raw_os_error(GetLastError() as i32));
-            }
-            let job = Self(job);
-
-            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = mem::zeroed();
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if SetInformationJobObject(
-                job.0,
-                JobObjectExtendedLimitInformation,
-                &limits as *const _ as _,
-                mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            ) == 0
-            {
-                return Err(std::io::Error::from_raw_os_error(GetLastError() as i32));
-            }
-
-            let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
-            if process.is_null() {
-                return Err(std::io::Error::from_raw_os_error(GetLastError() as i32));
-            }
-            let assigned = AssignProcessToJobObject(job.0, process);
-            let assign_error = if assigned == 0 {
-                Some(std::io::Error::from_raw_os_error(GetLastError() as i32))
-            } else {
-                None
-            };
-            CloseHandle(process);
-            if let Some(error) = assign_error {
-                return Err(error);
-            }
-            Self::resume_process_threads(pid)?;
-            Ok(job)
-        }
-    }
-
-    fn resume_process_threads(pid: u32) -> std::io::Result<()> {
-        use std::mem;
-        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
-        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
-        };
-        use windows_sys::Win32::System::Threading::{
-            OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
-        };
-
-        unsafe {
-            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-            if snapshot == INVALID_HANDLE_VALUE {
-                return Err(std::io::Error::from_raw_os_error(GetLastError() as i32));
-            }
-
-            let result = (|| {
-                let mut entry: THREADENTRY32 = mem::zeroed();
-                entry.dwSize = mem::size_of::<THREADENTRY32>() as u32;
-                if Thread32First(snapshot, &mut entry) == 0 {
-                    return Err(std::io::Error::from_raw_os_error(GetLastError() as i32));
-                }
-
-                let mut resumed = false;
-                loop {
-                    if entry.th32OwnerProcessID == pid {
-                        let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
-                        if thread.is_null() {
-                            return Err(std::io::Error::from_raw_os_error(GetLastError() as i32));
-                        }
-                        let resume_result = ResumeThread(thread);
-                        let resume_error = if resume_result == u32::MAX {
-                            Some(std::io::Error::from_raw_os_error(GetLastError() as i32))
-                        } else {
-                            None
-                        };
-                        CloseHandle(thread);
-                        if let Some(error) = resume_error {
-                            return Err(error);
-                        }
-                        resumed = true;
-                    }
-                    if Thread32Next(snapshot, &mut entry) == 0 {
-                        break;
-                    }
-                }
-
-                if resumed {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "suspended child thread was not found",
-                    ))
-                }
-            })();
-            CloseHandle(snapshot);
-            result
-        }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for WindowsJob {
-    fn drop(&mut self) {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-
-        unsafe {
-            // Termination is idempotent for an already-empty job and closes the
-            // cancellation race before the last job handle is released.
-            TerminateJobObject(self.0, 1);
-            CloseHandle(self.0);
-        }
-    }
 }

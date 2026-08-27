@@ -803,29 +803,48 @@ impl OpenAIProvider {
             body[max_tokens_field] = json!(request.max_tokens);
         }
 
-        // FluxRouter web_search grounding (contract §5.2 / §5.8). Grounding only
-        // fires when the model is a tier alias (the customer let Flux pick) AND
-        // no real function tools ride along (Sonar rejects tools — function tools
-        // SUPPRESS grounding). When the caller asked for `web_search` on a tier
-        // alias, prefer grounding semantics for the turn: emit ONLY the
-        // `{"type":"web_search"}` tool and drop any function tools. A concrete
-        // model id (or `web_search` unset) keeps the normal function-tool path —
-        // injecting the tool there would not ground and would only confuse the
-        // concrete model, so we skip it.
+        // FluxRouter web_search grounding (contract §5.2 / §5.8). The grounding
+        // tool is attached when the model is a tier alias (the customer let
+        // Flux pick); a concrete model id (or `web_search` unset) keeps the
+        // plain function-tool path, since attaching `web_search` there would
+        // never ground and would only confuse the concrete model.
         //
-        // On the normal function-tool path, also gate on the model family:
-        // Groq's agentic Compound models reject a caller-supplied `tools` array
+        // #1136 — this used to OVERWRITE `tools` with the lone web_search
+        // entry, on the theory that "Sonar rejects tools — function tools
+        // suppress grounding". That theory was MEASURED against the live
+        // FluxRouter API and is false. Results (HTTP status / citations):
+        //   flux-reasoning + [web_search]                 → 200, citations
+        //   flux-reasoning + [web_search, function tool]  → 200, citations
+        //   flux-reasoning + [function tool] only         → 200, no citations
+        //   flux-standard  + [web_search]                 → 200, no citations
+        //   flux-standard  + [web_search, function tool]  → 200, no citations
+        // Two conclusions. (a) A mixed tools array is accepted and does NOT
+        // suppress grounding. (b) Grounding is TIER-DEPENDENT — flux-standard
+        // never grounds regardless of the array, so the old overwrite stripped
+        // every agent tool on that tier and bought nothing back. Whether a tier
+        // grounds is the server's business, not ours to guess client-side, so
+        // the merge is unconditional across tiers: build the function tools
+        // exactly as the plain path does, then append the web_search entry.
+        //
+        // On the function-tool path, also gate on the model family: Groq's
+        // agentic Compound models reject a caller-supplied `tools` array
         // with a 400 that kills the turn (they do their own internal tool use).
         // Per-request, since one provider serves many models in a session —
         // mirrors the `reasoning_effort` gate below.
         let ground_web_search = request.web_search && is_flux_tier_alias(&request.model);
-        if ground_web_search {
-            body["tools"] = json!([{ "type": "web_search" }]);
-        } else if !request.tools.is_empty()
+        let mut tools = if !request.tools.is_empty()
             && openai_compat::model_supports_tool_calling(&request.model)
             && self.tool_support.allows(&request.model)
         {
-            body["tools"] = json!(Self::build_tools(&request.tools));
+            Self::build_tools(&request.tools)
+        } else {
+            Vec::new()
+        };
+        if ground_web_search {
+            tools.push(json!({ "type": "web_search" }));
+        }
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
         }
 
         // Flux sticky-session / prefix-cache key. On a Flux tier alias the
@@ -1347,6 +1366,15 @@ struct StreamState {
     /// Cache-read (prompt cache hit) tokens reported by the chat path's usage
     /// chunk. Disjoint from `input_tokens`, which contains cache misses only.
     cache_read_tokens: u64,
+    /// #1139 — the per-call USD figure the PROVIDER reported on the usage
+    /// chunk (`usage.cost_usd` on FluxRouter; `usage.total_cost_usd` on other
+    /// OpenAI-wire aggregators). `None` when the provider said nothing, and
+    /// deliberately never `0.0`: the media-tool path already draws this
+    /// distinction (`tool_backends::shared::cost_from_headers` — "unknown" and
+    /// "free" are not the same claim) and the chat path was dropping the field
+    /// on the floor, so a real spend reached the ledger as a pure-pricing
+    /// estimate — or as `$0.000000`.
+    reported_cost_usd: Option<f64>,
     /// Deferred Done event: populated when finish_reason arrives, emitted on
     /// [DONE] so the final usage-only chunk has a chance to update token counts.
     pending_done: Option<LlmEvent>,
@@ -1370,6 +1398,7 @@ impl StreamState {
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
+            reported_cost_usd: None,
             pending_done: None,
             citations: Vec::new(),
             search_results: Vec::new(),
@@ -1432,6 +1461,7 @@ impl StreamState {
                     output_tokens: self.output_tokens,
                     cache_creation_tokens: 0,
                     cache_read_tokens: self.cache_read_tokens,
+                    reported_cost_usd: self.reported_cost_usd,
                 },
             },
             other => other,
@@ -1994,6 +2024,12 @@ pub(crate) async fn process_responses_sse_stream(
     Ok(())
 }
 
+/// Keys under `usage` at which an OpenAI-wire provider reports a per-call
+/// dollar figure. Mirrors the media path's `COST_BODY_POINTERS`
+/// (`wcore_agent::tool_backends::shared`), minus the top-level `/cost_usd`
+/// pointer that has no analogue inside a streamed usage object.
+const USAGE_COST_KEYS: &[&str] = &["cost_usd", "total_cost_usd"];
+
 fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
     let mut events = Vec::new();
 
@@ -2060,6 +2096,18 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
             .and_then(|d| d.get("cached_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        // #1139: the provider's OWN dollar figure for this call. Only a finite,
+        // non-negative number counts; anything else leaves the field `None`
+        // (unknown), never `Some(0.0)` (free). A later usage frame that omits
+        // the key does not erase an earlier one — `usage` may arrive split.
+        if let Some(reported) = USAGE_COST_KEYS
+            .iter()
+            .filter_map(|key| usage.get(*key))
+            .filter_map(Value::as_f64)
+            .find(|v| v.is_finite() && *v >= 0.0)
+        {
+            state.reported_cost_usd = Some(reported);
+        }
         if let Some(prompt_tokens) = usage.get("prompt_tokens").and_then(Value::as_u64) {
             if let Some(cache_hit) = deepseek_cache_hit {
                 state.input_tokens =
@@ -4365,12 +4413,65 @@ mod tests {
         );
     }
 
-    /// web_search on a tier-alias model injects the `{"type":"web_search"}`
-    /// tool and DROPS the function tools (function tools suppress grounding,
-    /// contract §5.8).
+    /// #1136 — web_search on a tier-alias model MERGES: the
+    /// `{"type":"web_search"}` entry rides ALONGSIDE the caller's function
+    /// tools. Measured against the live FluxRouter API: a mixed array is
+    /// accepted and still returns citations, so overwriting the array (the
+    /// old behaviour) destroyed every agent tool for nothing.
     #[test]
-    fn web_search_injects_tool_on_tier_alias_and_drops_function_tools() {
+    fn web_search_merges_with_function_tools_on_tier_alias() {
         let provider = stop_provider();
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.web_search = true;
+        req.tools = vec![
+            ToolDef {
+                name: "Read".into(),
+                description: "read a file".into(),
+                input_schema: json!({"type": "object"}),
+                deferred: false,
+                server: None,
+            },
+            ToolDef {
+                name: "Bash".into(),
+                description: "run a command".into(),
+                input_schema: json!({"type": "object"}),
+                deferred: false,
+                server: None,
+            },
+        ];
+        let body = provider.build_request_body(&req);
+        let tools = body["tools"].as_array().expect("tools array present");
+        assert_eq!(
+            tools.len(),
+            3,
+            "both function tools plus the web_search entry: {tools:?}"
+        );
+        assert!(
+            tools.iter().any(|t| t["type"] == "web_search"),
+            "the web_search grounding entry must be present: {tools:?}"
+        );
+        let fn_names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("function"))
+            .filter_map(|f| f.get("name"))
+            .filter_map(|n| n.as_str())
+            .collect();
+        assert_eq!(
+            fn_names,
+            vec!["Bash", "Read"],
+            "every function tool must survive alongside grounding (sorted by name)"
+        );
+    }
+
+    /// #1136 polarity control for the merge: the tier-alias grounding path
+    /// still honours the per-model tool-support cache. When the model is
+    /// known NOT to accept function tools, only the web_search entry rides —
+    /// the merge must not smuggle function tools past that gate.
+    #[test]
+    fn web_search_alone_when_model_rejects_function_tools() {
+        let provider = stop_provider();
+        provider.tool_support.set("flux-auto", false);
         let mut req = stop_req();
         req.model = "flux-auto".into();
         req.web_search = true;
@@ -4383,13 +4484,8 @@ mod tests {
         }];
         let body = provider.build_request_body(&req);
         let tools = body["tools"].as_array().expect("tools array present");
-        assert_eq!(tools.len(), 1, "only the web_search tool survives");
+        assert_eq!(tools.len(), 1, "only the web_search entry: {tools:?}");
         assert_eq!(tools[0]["type"], "web_search");
-        // The function tool must NOT be present (no `function` key anywhere).
-        assert!(
-            tools.iter().all(|t| t.get("function").is_none()),
-            "function tools must be dropped when grounding"
-        );
     }
 
     /// web_search on a CONCRETE model id does NOT inject the tool — grounding

@@ -458,6 +458,60 @@ mod tests {
         assert!(matches!(err, AtRefError::SecretBlocked(_)));
     }
 
+    /// `resolve_file` must refuse a credential store the FILE TOOLS already
+    /// refuse to read. `.git-credentials` is a plaintext
+    /// `https://user:token@host` store on `wcore-tools`' denylist; the
+    /// `@`-attach guard carried its own, shorter list and inlined the file
+    /// into the outgoing prompt verbatim.
+    #[test]
+    fn resolving_a_git_credentials_file_is_a_loud_error() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(
+            root.join(".git-credentials"),
+            "https://fake-user:fake-token@example.invalid\n",
+        )
+        .expect("write fixture");
+
+        let at = AtRef::parse("@.git-credentials").expect("parse");
+        let err = resolve(&at, root).expect_err("must refuse a credential store");
+        assert!(matches!(err, AtRefError::SecretBlocked(_)), "got {err:?}");
+    }
+
+    /// The other production call site of the same guard: the `@dir` walk.
+    /// A guard fixed only in `resolve_file` would leave this path open.
+    #[test]
+    fn an_at_dir_walk_skips_a_workspace_policy_secret() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("ok.txt"), "safe").expect("write ok");
+        fs::write(
+            root.join(".git-credentials"),
+            "https://fake-user:fake-token@example.invalid\n",
+        )
+        .expect("write fixture");
+        fs::write(root.join("terraform.tfstate"), "{}").expect("write fixture");
+
+        let at = AtRef::parse("@./").expect("parse");
+        let payload = resolve(&at, root).expect("resolve dir");
+        let names: Vec<String> = payload
+            .files
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect();
+        // Control: the walk did produce output, so the two refutations below
+        // cannot pass by returning nothing.
+        assert!(names.iter().any(|n| n.contains("ok.txt")), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n.contains(".git-credentials")),
+            "{names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("terraform.tfstate")),
+            "{names:?}"
+        );
+    }
+
     #[test]
     fn an_at_dir_walk_never_pulls_in_a_secret_file() {
         let tmp = TempDir::new().expect("tempdir");

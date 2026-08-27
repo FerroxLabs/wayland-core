@@ -2418,9 +2418,23 @@ async fn run() -> anyhow::Result<ExitCode> {
         && let Some((driver, goal_id)) = wcore_cli::goal_cmd::GoalAttachArgs::default().resolve()?
     {
         use wcore_agent::goal::{DirectOutcome, StrategyTermination};
+        // #946: this arm ended `return Ok(ExitCode::SUCCESS)`, so the exit-code
+        // contract did not exist for a Goal-attached headless run AT ALL — a
+        // turn-cap stop, a provider error and a run that answered nothing all
+        // reported 0. The code is decided inside the closure (that is where the
+        // run result lives) and read out after `run_direct` returns. Atomic
+        // rather than a `Cell` because the closure's future must stay `Send`.
+        let goal_exit_code =
+            std::sync::Arc::new(std::sync::atomic::AtomicU8::new(wcore_cli::exit_code::OK));
+        let exit_sink = std::sync::Arc::clone(&goal_exit_code);
         let cursor = driver
             .run_direct(&goal_id, |owner| async {
-                match engine.run(&prompt, "").await {
+                // Bound to a `let` so the `&mut engine` borrow held by the
+                // future ends here; the arms below need `&engine` for the
+                // human latch.
+                let run_outcome = engine.run(&prompt, "").await;
+                let awaiting_human = engine.awaiting_human();
+                match run_outcome {
                     Ok(run_result) => {
                         output.emit_stream_end(
                             "",
@@ -2430,6 +2444,16 @@ async fn run() -> anyhow::Result<ExitCode> {
                             run_result.usage.cache_creation_tokens,
                             run_result.usage.cache_read_tokens,
                             run_result.finish_reason,
+                        );
+                        exit_sink.store(
+                            wcore_cli::exit_code::for_run_outcome(
+                                run_result.stop_reason,
+                                run_result.finish_reason,
+                                &run_result.text,
+                                run_result.ended_on_unrecovered_tool_failure,
+                                awaiting_human,
+                            ),
+                            std::sync::atomic::Ordering::SeqCst,
                         );
                         // A completed Direct run is UNCHECKED — Direct has no
                         // verification owner — so the adapter maps it to
@@ -2447,6 +2471,10 @@ async fn run() -> anyhow::Result<ExitCode> {
                     }
                     Err(error) => {
                         output.emit_error(&format!("{error:#}"), false);
+                        exit_sink.store(
+                            wcore_cli::exit_code::FAILURE,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
                         StrategyTermination::from_direct(owner, DirectOutcome::Failed(&error))
                     }
                 }
@@ -2459,7 +2487,9 @@ async fn run() -> anyhow::Result<ExitCode> {
         for mgr in &result.mcp_managers {
             mgr.shutdown().await;
         }
-        return Ok(ExitCode::SUCCESS);
+        return Ok(ExitCode::from(
+            goal_exit_code.load(std::sync::atomic::Ordering::SeqCst),
+        ));
     }
 
     let exit_code = if prompt.is_empty() {
@@ -2497,8 +2527,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                 // completed `engine.run`, so a run stopped by the turn cap and
                 // one that gave up on a failing tool both reported 0. The
                 // contract lives in `wcore_cli::exit_code`.
+                // #946: `stop_reason` alone is blind to a turn that ended in a
+                // provider error and to a run that answered with nothing at
+                // all, so both used to exit 0. Both are now inputs.
                 ExitCode::from(wcore_cli::exit_code::for_run_outcome(
                     run_result.stop_reason,
+                    run_result.finish_reason,
+                    &run_result.text,
                     run_result.ended_on_unrecovered_tool_failure,
                     awaiting_human,
                 ))
@@ -2859,6 +2894,12 @@ async fn run_tui_mode(
     // channel messages into agent turns for the lifetime of this session).
     let mut bootstrap = execution
         .apply(AgentBootstrap::new(config, cwd, output.clone()))
+        // The ONLY production waiver of the MCP dial notice. The alt screen is
+        // entered immediately below, precisely so the dial runs behind a
+        // branded splash — this surface has already told the user, on a
+        // surface built to say it, and a second line into a live frame is
+        // noise. Every other entry point announces by default.
+        .without_mcp_dial_notice(true)
         .active_assistant(active_assistant.clone())
         .with_approval_manager(approval_manager.clone())
         .plugin_provider_router(make_plugin_provider_router())
@@ -3866,6 +3907,20 @@ fn session_command_readiness(command: &ProtocolCommand) -> SessionCommandReadine
 /// boundary. Hosts may send setup commands (`InitHistory`, `SetMode`, etc.)
 /// before their first `Message`; those commands must not let the message race
 /// ahead of the already-running MCP handshake.
+/// Wait for the deferred MCP dial to settle, and say so if it takes a while.
+///
+/// The session loop's readiness boundary reaches this; the boot dial in
+/// `wcore_agent::bootstrap` reaches the same notice from the other side. One
+/// notice, one budget, one deadline read from `wcore_mcp` — see
+/// [`wcore_agent::mcp_dial_notice::announce_slow_mcp_dial`] for why a bounded
+/// wait still has to be announced and why it cannot be a `tracing` line.
+async fn await_deferred_mcp_connect(
+    rx: DeferredMcpReceiver,
+    output: &Arc<dyn OutputSink>,
+) -> Result<DeferredMcpConnectResult, tokio::sync::oneshot::error::RecvError> {
+    wcore_agent::mcp_dial_notice::announce_slow_mcp_dial(rx, output).await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn settle_deferred_mcp_before_message(
     deferred_mcp_rx: &mut Option<DeferredMcpReceiver>,
@@ -3878,7 +3933,7 @@ async fn settle_deferred_mcp_before_message(
     late_mcp: &mut LateMcpBinder,
 ) -> bool {
     if let Some(rx) = deferred_mcp_rx.take()
-        && let Ok(result) = rx.await
+        && let Ok(result) = await_deferred_mcp_connect(rx, output).await
     {
         *pending_deferred_mcp = note_deferred_mcp_connect(
             result,
@@ -4437,6 +4492,21 @@ where
                 }
                 Some(ProtocolCommand::Ping) => {
                     let _ = writer.emit(&ProtocolEvent::Pong);
+                }
+                // wayland#896 — quiescence is a PROCESS-level operation, not a
+                // turn-level one, so it is answered at every command site
+                // rather than only between turns. A host that could take a
+                // recovery point only while Core happened to be idle would be
+                // back to guessing at quiescence, which is what this contract
+                // removes.
+                Some(quiesce_command @ (ProtocolCommand::QuiesceAcquire(_)
+                | ProtocolCommand::QuiesceRelease(_)
+                | ProtocolCommand::QuiesceStatus(_))) => {
+                    for event in
+                        wcore_cli::quiesce_control::handle_quiesce_control(&quiesce_command)
+                    {
+                        let _ = writer.emit(&event);
+                    }
                 }
                 Some(ProtocolCommand::SessionResync(command)) => {
                     emit_recovery_unavailable(
@@ -5352,6 +5422,16 @@ async fn run_json_stream_mode(
                     writer.as_ref(),
                 );
             }
+            // wayland#896 — see the note at the recovery-loop arm. Available
+            // before the first Message too: Desktop's recovery capture must not
+            // have to start a turn to reach it.
+            ref quiesce_command @ (ProtocolCommand::QuiesceAcquire(_)
+            | ProtocolCommand::QuiesceRelease(_)
+            | ProtocolCommand::QuiesceStatus(_)) => {
+                for event in wcore_cli::quiesce_control::handle_quiesce_control(quiesce_command) {
+                    let _ = writer.emit(&event);
+                }
+            }
             ProtocolCommand::AddMcpServer {
                 name,
                 transport,
@@ -5612,7 +5692,7 @@ async fn run_json_stream_mode(
                 // `McpManager` bounds every server handshake independently.
                 if matches!(&other, ProtocolCommand::Message { .. })
                     && let Some(rx) = deferred_mcp_rx.take()
-                    && let Ok(result) = rx.await
+                    && let Ok(result) = await_deferred_mcp_connect(rx, &output).await
                 {
                     pending_deferred_mcp = note_deferred_mcp_connect(
                         result,
@@ -6099,6 +6179,23 @@ async fn run_json_stream_mode(
                                     ProtocolCommand::Ping => {
                                         let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Pong);
                                     }
+                                    // wayland#896 — see the note at the
+                                    // recovery-loop arm. MID-turn matters most
+                                    // of all: a long turn is exactly when a
+                                    // host wants a recovery point, and it is
+                                    // also exactly when Core is most likely to
+                                    // be writing profile state.
+                                    ref quiesce_command @ (ProtocolCommand::QuiesceAcquire(_)
+                                    | ProtocolCommand::QuiesceRelease(_)
+                                    | ProtocolCommand::QuiesceStatus(_)) => {
+                                        for event in
+                                            wcore_cli::quiesce_control::handle_quiesce_control(
+                                                quiesce_command,
+                                            )
+                                        {
+                                            let _ = writer.emit(&event);
+                                        }
+                                    }
                                     ProtocolCommand::ApprovalResume {
                                         resume_token,
                                         approved,
@@ -6521,6 +6618,14 @@ async fn run_json_stream_mode(
             }
             ProtocolCommand::Ping => {
                 let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Pong);
+            }
+            // wayland#896 — see the note at the recovery-loop arm.
+            ref quiesce_command @ (ProtocolCommand::QuiesceAcquire(_)
+            | ProtocolCommand::QuiesceRelease(_)
+            | ProtocolCommand::QuiesceStatus(_)) => {
+                for event in wcore_cli::quiesce_control::handle_quiesce_control(quiesce_command) {
+                    let _ = writer.emit(&event);
+                }
             }
             ProtocolCommand::ApprovalResume {
                 resume_token,
@@ -9149,6 +9254,201 @@ mod tests {
             other => panic!("expected McpReady, got {other:?}"),
         }
         assert_eq!(dynamic_managers.len(), 1, "manager must remain alive");
+    }
+
+    /// The dial notice is ON by default, and exactly one surface waives it.
+    ///
+    /// This is a COUNT, not an opinion: the whole failure mode being closed is
+    /// a wait that some surface takes silently, so the thing worth pinning is
+    /// how many surfaces are allowed to. Walks the crate's real sources rather
+    /// than one file, because a waiver added in `acp_engine.rs` or `tui/` would
+    /// be exactly the drift this exists to catch and a single-file gate would
+    /// never see it.
+    #[test]
+    fn the_mcp_dial_notice_is_waived_only_where_a_splash_already_covers_it() {
+        fn rust_sources(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+            for entry in std::fs::read_dir(dir).expect("crate sources must be readable") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    rust_sources(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("readable source");
+                    // Cut the test modules off. THIS test quotes the waiver
+                    // string three times, so a gate that searched whole files
+                    // would report main.rs as a waiver site whether or not the
+                    // production line still existed — it would be matching its
+                    // own text and could never fail in the deleted direction.
+                    let production = match text.find("\n#[cfg(test)]\n") {
+                        Some(at) => text[..at].to_string(),
+                        None => text,
+                    };
+                    out.push((path, production));
+                }
+            }
+        }
+        let mut sources = Vec::new();
+        rust_sources(
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src")),
+            &mut sources,
+        );
+
+        // Known-positive control: prove the walk actually read this crate,
+        // so "zero waivers" can never be produced by an empty scan.
+        let bootstraps: usize = sources
+            .iter()
+            .map(|(_, text)| text.matches("AgentBootstrap::new").count())
+            .sum();
+        assert!(
+            bootstraps >= 3,
+            "the source walk found only {bootstraps} AgentBootstrap::new sites — it is not \
+             reading this crate, so every count below it is meaningless"
+        );
+
+        let waivers: Vec<&std::path::Path> = sources
+            .iter()
+            .filter(|(_, text)| text.contains(".without_mcp_dial_notice(true)"))
+            .map(|(path, _)| path.as_path())
+            .collect();
+        assert_eq!(
+            waivers.len(),
+            1,
+            "exactly one surface may take the MCP dial silently — the TUI, whose splash covers \
+             this window. Waivers found in: {waivers:?}"
+        );
+
+        let (path, text) = sources
+            .iter()
+            .find(|(_, text)| text.contains(".without_mcp_dial_notice(true)"))
+            .expect("asserted present above");
+        assert!(
+            path.ends_with("main.rs"),
+            "the one waiver moved out of main.rs, to {path:?}"
+        );
+        let waiver = text
+            .find(".without_mcp_dial_notice(true)")
+            .expect("asserted present above");
+        let enclosing = text[..waiver]
+            .rfind("async fn ")
+            .expect("the waiver must sit inside a function");
+        assert!(
+            text[enclosing..].starts_with("async fn run_tui_mode("),
+            "the waiver must stay in the splash-covered TUI entry point, found it in {:?}",
+            &text[enclosing..enclosing + 40]
+        );
+    }
+
+    /// A turn held open by the MCP dial must SAY it is being held open.
+    ///
+    /// Measured on 0.13.8 with one stdio server that never speaks
+    /// (`command = "sleep"`): the host got NOTHING for 30.3 s — no event of
+    /// any kind — then `mcp_failed`, then `stream_start`. Identical on
+    /// 0.13.7, so this is not a regression; it is a hole in what the turn
+    /// discloses about itself, and thirty seconds of a blank turn reads as a
+    /// dead app whatever caused it.
+    ///
+    /// Grades the real call site (`settle_deferred_mcp_before_message`, the
+    /// session loop's readiness boundary), not the notice helper in
+    /// isolation. Deleting the `sleep` arm from the `select!` inside
+    /// `await_deferred_mcp_connect` turns this red.
+    ///
+    /// `start_paused` so the clock is driven by the runtime rather than by
+    /// the wall: the fixture's dial settles one second short of the real
+    /// per-server deadline, which is the window the notice exists to fill,
+    /// and the whole test still runs in milliseconds.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_mcp_dial_announces_itself_instead_of_showing_a_blank_turn() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _engine_sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable")
+            .refresh_tool_search_catalog(&defer_cold);
+
+        let resolved = HashMap::from([(
+            "slow".to_string(),
+            to_mcp_server_config(
+                "stdio",
+                Some("unused-test-command".to_string()),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .expect("valid test server config"),
+        )]);
+        let reservations = lifecycle_reservations(&resolved);
+        let manager = McpManager::new_for_test_with_tools(vec![(
+            "slow",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("slow_after_dial")],
+        )]);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(wcore_mcp::manager::CONNECT_TIMEOUT - Duration::from_secs(1)).await;
+            let _ = tx.send(DeferredMcpConnectResult {
+                outcome: Ok(manager),
+                resolved,
+                reservations,
+            });
+        });
+
+        let sink = wcore_agent::test_utils::TestSink::new();
+        let events = sink.handle();
+        let output: Arc<dyn OutputSink> = Arc::new(sink);
+        let writer = ProtocolWriter::new();
+        let mut deferred_mcp_rx = Some(rx);
+        let mut pending_deferred_mcp = None;
+        let mut dynamic_managers = Vec::new();
+        let mut late_mcp = inert_late_binder();
+
+        let ready = settle_deferred_mcp_before_message(
+            &mut deferred_mcp_rx,
+            &mut pending_deferred_mcp,
+            &mut engine,
+            &writer,
+            &output,
+            &mut dynamic_managers,
+            None,
+            &mut late_mcp,
+        )
+        .await;
+
+        assert!(
+            ready,
+            "the notice must not change the outcome — the dial still settles"
+        );
+        let notices: Vec<String> = events
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("info"))
+            .filter_map(|e| e["message"].as_str().map(str::to_string))
+            .filter(|m| m.contains("Still waiting on MCP servers"))
+            .collect();
+        assert_eq!(
+            notices.len(),
+            1,
+            "a host must be told once that the turn is waiting on MCP, got {notices:?}"
+        );
+        assert!(
+            notices[0].contains(&format!(
+                "{}s",
+                wcore_mcp::manager::CONNECT_TIMEOUT.as_secs()
+            )),
+            "the notice must name the deadline it is counting towards, got {:?}",
+            notices[0]
+        );
+        assert!(
+            engine
+                .tools()
+                .to_tool_defs()
+                .iter()
+                .any(|def| def.name == "slow_after_dial"),
+            "the settled dial must still have registered its tools"
+        );
     }
 
     /// #562 structural ordering regression: execute the same readiness seam

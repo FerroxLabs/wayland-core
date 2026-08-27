@@ -15,11 +15,10 @@ chrono.workspace      = true
 thiserror.workspace   = true
 sha2.workspace        = true
 
-# `process_liveness` only. This crate holds no other OS-facing code and should
-# not acquire any: the module is one enum plus two functions, it spawns
-# nothing and signals nothing. Both deps are target-gated leaf system crates
-# with no transitive Rust dependencies, so they cost nothing on the platform
-# that does not select them.
+# `process_liveness` and `job_object` only. This crate holds no other OS-facing
+# code and should not acquire any. Both deps are target-gated leaf system
+# crates with no transitive Rust dependencies, so they cost nothing on the
+# platform that does not select them.
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
@@ -27,6 +26,16 @@ libc.workspace = true
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_System_Threading",
+  # `CreateJobObjectW` takes a `SECURITY_ATTRIBUTES`, so windows-sys gates it on
+  # `Win32_Security` as well as on `Win32_System_JobObjects`. Without this the
+  # crate only builds because a sibling crate happens to enable it — measured:
+  # `cargo test -p wcore-types --lib` on Windows failed with "no
+  # `CreateJobObjectW` in Win32::System::JobObjects" until it was declared here.
+  "Win32_Security",
+  # `job_object`: CreateJobObjectW / AssignProcessToJobObject, and the thread
+  # snapshot used to resume a CREATE_SUSPENDED child once it is in the job.
+  "Win32_System_JobObjects",
+  "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 # tests/real_zombie.rs asserts that the OLD probe shape reports a real corpse
@@ -36,8 +45,12 @@ windows-sys = { version = "0.59", features = [
 [target.'cfg(unix)'.dev-dependencies]
 libc.workspace = true
 
+# Kept a mirror of the `[dependencies]` list above so the two cannot drift.
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_System_Threading",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Diagnostics_ToolHelp",
 ] }

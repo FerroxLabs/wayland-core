@@ -24,6 +24,10 @@
 //! match would 400 the old model. Only id shapes we are confident about are
 //! listed; everything else is `None`.
 
+mod catalogue;
+
+use catalogue::CATALOGUE_CEILINGS;
+
 /// Returns `(max_output_tokens, context_window)` for a known model, or `None`
 /// when the model is unknown (caller must fail open).
 ///
@@ -186,6 +190,18 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     if m.contains("minimax-m2") {
         // Base MiniMax-M2: 196,608 window (smaller than the point releases).
         return Some((128_000, 196_608));
+    }
+
+    // --- Catalogue-refresh families (GLM / Qwen / Kimi / Mistral / Llama) ---
+    // See [`catalogue::CATALOGUE_CEILINGS`]. Kept as an ordered table in its own
+    // module rather than more `if` arms: 33 entries is where a chain stops being
+    // auditable, and a table lets `catalogue_table_has_no_shadowed_entries`
+    // prove the ordering STRUCTURALLY instead of by spot-check.
+    if let Some(&(_, output, context)) = CATALOGUE_CEILINGS
+        .iter()
+        .find(|(pattern, _, _)| m.contains(pattern))
+    {
+        return Some((output, context));
     }
 
     None

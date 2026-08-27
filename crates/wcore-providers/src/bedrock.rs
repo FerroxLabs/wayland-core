@@ -874,6 +874,7 @@ async fn process_aws_event_stream(
                     output_tokens: state.output_tokens,
                     cache_creation_tokens: state.cache_creation_tokens,
                     cache_read_tokens: state.cache_read_tokens,
+                    ..Default::default()
                 },
             })
             .await;
@@ -1249,6 +1250,7 @@ pub mod mistral {
                 output_tokens,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         })
     }
@@ -1421,6 +1423,7 @@ pub mod cohere {
                 output_tokens,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                ..Default::default()
             },
         });
         Ok(events)

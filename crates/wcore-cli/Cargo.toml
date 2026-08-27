@@ -33,9 +33,8 @@ remote-registry = ["dep:reqwest", "dep:wcore-egress"]
 # User-flow harness Layer 3: the `harness_failure_injection` integration
 # test reproduces the audit's hang-class bugs (wedged MCP server, Ctrl+C
 # mid-task). It is slow — it boots the real binary and waits out the
-# bounded 30s MCP connect handshake — so it is gated OFF by default,
-# mirroring how `wcore-browser` gates its live Chromium tests behind
-# `browser-live-tests`. Run with:
+# bounded 30s MCP connect handshake — so it is gated OFF by default.
+# Run with:
 #   cargo test -p wcore-cli --features harness-failure-injection \
 #       --test harness_failure_injection
 harness-failure-injection = []
@@ -135,6 +134,10 @@ wcore-protocol.workspace = true
 # current provider's models.
 wcore-types.workspace    = true
 wcore-skills.workspace   = true
+# 0.12.0 L5 (wayland#694): governed promotion is eval-gated. `wcore-skills` owns the
+# rule and refuses without evidence; `wcore-eval` is what produces the score, and this
+# binary is where the two are wired together.
+wcore-eval.workspace          = true
 # v0.7.0 Task 1.A.10: `acp` subcommand wires `wcore-acp` into the CLI.
 wcore-acp = { path = "../wcore-acp" }
 # v0.7.0 Task 1.A.10: `StreamExt::next` for the streaming `acp request send`
@@ -292,6 +295,12 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
+# `start_paused` tests need tokio's `test-util`, which the workspace `full`
+# feature set does NOT include. Without this line the crate compiles only when
+# some other crate in the same cargo invocation happens to turn the feature on
+# (wcore-agent does), so `cargo nextest run -p wcore-cli` alone fails to build
+# while a whole-workspace run passes. Declare it where it is used.
+tokio = { workspace = true, features = ["test-util"] }
 libc.workspace = true
 # P2: `p2_open_admission_entry_points` asserts the refusal carries a real
 # admission-shape token. It pins the CURRENT encoding via

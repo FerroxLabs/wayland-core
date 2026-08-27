@@ -116,6 +116,23 @@ jobs:
       - uses: actions/checkout@v6
         if: steps.filter.outputs.run == 'true'
 
+      # Build-time system deps. Every Linux job in ci.yml installs exactly
+      # this set (ci.yml lines ~1653/1721); e2e.yml installed NOTHING, so this
+      # job could never have linked:
+      #
+      #   rust-lld: error: unable to find library -lseccomp
+      #
+      # It went unnoticed because the credential check above fails closed and
+      # runs BEFORE the build, so every previous run of this workflow exited
+      # before it ever reached a linker. Configuring the secrets is what
+      # surfaced it -- the credential gap was hiding a second, independent
+      # defect underneath it.
+      - name: Install system deps
+        if: steps.filter.outputs.run == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libdbus-1-dev libseccomp-dev libasound2-dev pkg-config mold
+
       - name: Setup vx (installs Rust from vx.toml)
         if: steps.filter.outputs.run == 'true'
         uses: loonghao/vx@v0.9.17
@@ -134,6 +151,23 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ matrix.provider == 'anthropic' && secrets.ANTHROPIC_API_KEY || '' }}
           OPENAI_API_KEY:    ${{ matrix.provider == 'openai'    && secrets.OPENAI_API_KEY    || '' }}
+          # Endpoint and model overrides. Repository VARIABLES, not secrets --
+          # a base URL and a model id are not secret, and keeping them visible
+          # means anyone reading a green check can see WHAT it dialled. Unset
+          # variables expand to '' and every consumer falls back to the vendor
+          # default, so the no-variable behaviour is unchanged.
+          #
+          # These exist because a green here means "the endpoint we dialled
+          # works", which is only "the vendor works" when the endpoint IS the
+          # vendor. If E2E_*_BASE_URL points at a router, this suite is
+          # proving our wire format against that router's normalisation and
+          # can no longer catch vendor drift. That is a deliberate trade to
+          # keep a REQUIRED check honest-and-running rather than permanently
+          # red; it is not equivalent coverage.
+          E2E_OPENAI_BASE_URL:    ${{ vars.E2E_OPENAI_BASE_URL }}
+          E2E_ANTHROPIC_BASE_URL: ${{ vars.E2E_ANTHROPIC_BASE_URL }}
+          E2E_ANTHROPIC_HAIKU:    ${{ vars.E2E_ANTHROPIC_HAIKU }}
+          E2E_OPENAI_GPT4O_MINI:  ${{ vars.E2E_OPENAI_GPT4O_MINI }}
         run: |
           vx cargo nextest run \
             -p wcore-agent \

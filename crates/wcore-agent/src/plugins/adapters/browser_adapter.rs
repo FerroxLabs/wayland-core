@@ -84,7 +84,6 @@ pub fn spec_to_core(s: &BrowserToolSpec) -> CoreBrowserToolSpec {
         preferred_provider: match s.preferred_provider {
             BrowserProviderHint::Auto => CoreProviderHint::Auto,
             BrowserProviderHint::Camoufox => CoreProviderHint::Camoufox,
-            BrowserProviderHint::Chromium => CoreProviderHint::Chromium,
             BrowserProviderHint::Browserbase => CoreProviderHint::Browserbase,
         },
         policy,

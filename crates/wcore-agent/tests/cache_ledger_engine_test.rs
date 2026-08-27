@@ -79,6 +79,7 @@ fn usage(input: u64, output: u64, cache_read: u64, cache_write: u64) -> TokenUsa
         output_tokens: output,
         cache_read_tokens: cache_read,
         cache_creation_tokens: cache_write,
+        ..Default::default()
     }
 }
 

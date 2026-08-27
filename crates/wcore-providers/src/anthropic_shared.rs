@@ -606,6 +606,7 @@ pub fn parse_sse_data(event_type: &str, data: &str, state: &mut StreamState) -> 
                     output_tokens: state.output_tokens,
                     cache_creation_tokens: state.cache_creation_tokens,
                     cache_read_tokens: state.cache_read_tokens,
+                    ..Default::default()
                 },
             });
         }

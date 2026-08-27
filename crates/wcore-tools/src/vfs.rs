@@ -1907,7 +1907,14 @@ impl<F: VirtualFs> SecretDenyFs<F> {
         Self { inner, policy }
     }
     fn guard(&self, path: &Path) -> Result<(), VfsError> {
-        if self.policy.is_project_secret(path) {
+        // core#244 / core#322: a VCS CONTENT store is refused alongside the
+        // secret-NAME predicate. `is_project_secret` matches names, and an
+        // object file is named after its hash, so `.git/objects/ab/cdef...`
+        // sailed through the in-process layer while `Bash` was already denied
+        // the same bytes by `WorkspacePolicy::secret_deny_paths_dynamic`. This
+        // call site is the whole of the in-process wiring: remove it and the
+        // predicate still answers correctly and still denies nothing.
+        if self.policy.is_project_secret(path) || self.policy.is_vcs_content_store(path) {
             return Err(VfsError::SecretDenied {
                 path: path.to_path_buf(),
             });

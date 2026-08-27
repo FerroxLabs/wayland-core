@@ -1137,6 +1137,16 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         // chip rendering is an A2 concern — the TUI ignores it for now.
         | ProtocolEvent::AnvilReceipt { .. }
         | ProtocolEvent::AnvilReceiptInvalidated { .. }
+        // wayland#896: the quiescence lease is a JSON-stream host surface.
+        // The in-process TUI is not a snapshot consumer — it never sends
+        // `quiesce_acquire`, so it can never receive these — and inventing a
+        // terminal rendering of a lease receipt would be a second, silently
+        // divergent answer to "is this recovery point valid?".
+        | ProtocolEvent::QuiesceLeaseGranted { .. }
+        | ProtocolEvent::QuiesceLeaseReleased { .. }
+        | ProtocolEvent::QuiesceLeaseExpired { .. }
+        | ProtocolEvent::QuiesceStatusReport { .. }
+        | ProtocolEvent::QuiesceRefused { .. }
         | ProtocolEvent::Pong => {}
         // ── F22-C1: durable Goals ────────────────────────────────────
         //

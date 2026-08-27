@@ -464,6 +464,22 @@ pub struct AgentBootstrap {
     /// local shells whose connects are bounded and cheap. Default `false`
     /// keeps TUI/one-shot behavior unchanged.
     defer_config_mcp: bool,
+    /// Suppress the "still waiting on MCP servers" notice for this build.
+    ///
+    /// Default `false` — ANNOUNCE — and the default is the decision. Every
+    /// surface that reaches `build()` puts a user or a host on the other end
+    /// of a wait that can run to `wcore_mcp::manager::CONNECT_TIMEOUT` per
+    /// server with nothing on the wire, and a surface added later inherits
+    /// the silent treatment if silence is the default. The exception has to
+    /// justify itself, not the disclosure.
+    ///
+    /// Exactly ONE production caller sets this: the interactive TUI, which
+    /// enters its alternate screen before `build()` specifically so this
+    /// window runs behind a branded splash. It has already told the user, on
+    /// a surface built for it, and a second telling into a live frame is
+    /// noise. `main.rs`'s `the_mcp_dial_notice_is_waived_only_where_a_splash_
+    /// already_covers_it` pins that count at one.
+    quiet_mcp_dial: bool,
     /// #111 — the host-supplied active assistant identity for per-assistant MCP
     /// scoping. `None` (the default, and always the case for a bare CLI/TUI
     /// session) means no assistant is identified, so any config MCP server
@@ -616,6 +632,7 @@ impl AgentBootstrap {
             channel_tool_posture: None,
             persona_tool_allowlist: None,
             defer_config_mcp: false,
+            quiet_mcp_dial: false,
             active_assistant: None,
             dangerous_grant: None,
             baseline_policy: None,
@@ -722,6 +739,14 @@ impl AgentBootstrap {
     /// or recurse.
     pub fn without_channels(mut self, v: bool) -> Self {
         self.without_channels = v;
+        self
+    }
+
+    /// Waive the slow-MCP-dial notice for a surface that already covers this
+    /// window itself. See [`AgentBootstrap::quiet_mcp_dial`] — there is one
+    /// legitimate caller and a test that says so.
+    pub fn without_mcp_dial_notice(mut self, v: bool) -> Self {
+        self.quiet_mcp_dial = v;
         self
     }
 
@@ -1804,7 +1829,18 @@ impl AgentBootstrap {
                     .expect("session egress policy is installed before scoped bootstrap")
                     .clone(),
             );
-            match McpManager::connect_all_with_policy(&resolved_servers, egress_policy).await {
+            // The boot dial is the last unannounced wait on the path to a
+            // session. It is bounded per server, but a bound nobody is told
+            // about is indistinguishable from a wedge — see
+            // `announce_slow_mcp_dial`. The TUI is the one surface that opts
+            // out, because its splash already covers this exact window.
+            let dial = McpManager::connect_all_with_policy(&resolved_servers, egress_policy);
+            let dialled = if self.quiet_mcp_dial {
+                dial.await
+            } else {
+                crate::mcp_dial_notice::announce_slow_mcp_dial(dial, &self.output).await
+            };
+            match dialled {
                 Ok(mgr) => {
                     let mgr = Arc::new(mgr);
                     wcore_mcp::tool_proxy::register_mcp_tools(
@@ -4721,11 +4757,15 @@ fn build_fallback_providers(
                 tools: fallback.compat.supports_tools(),
                 vision: fallback.compat.supports_vision(),
                 structured_output: fallback.compat.supports_structured_output(),
-                context_window: wcore_config::limits::model_output_ceiling(
+                // MUST be the composed resolver, not `model_output_ceiling`
+                // alone: the latter returns None for the four Flux tier
+                // aliases by design, which advertised a Flux fallback with no
+                // window at all (CORE-4's 128k floor existed and was never
+                // consulted on this path).
+                context_window: wcore_config::context_window::static_context_window(
                     &provider_name,
                     &fallback.model,
-                )
-                .map(|(_, window)| u64::from(window)),
+                ),
             },
             pricing: PricingEvidence {
                 source: source.into(),
@@ -5071,6 +5111,83 @@ mod fallback_pricing_identity_tests {
         assert_eq!(metadata.provider, "anthropic");
         assert_eq!(metadata.model, "claude-haiku-4-5");
         assert!(metadata.capabilities.tools);
+    }
+
+    /// WIRING grade, site 1 of 2. `flux_tier_context_window` (CORE-4) exists to
+    /// give the four Flux tier aliases a conservative 128k window, and
+    /// `ContextWindow::resolve` has consulted it since #255. This path did not:
+    /// it called `model_output_ceiling` alone, which returns `None` for a tier
+    /// alias BY DESIGN (#112/#426 keep the aliases unknown to the OUTPUT
+    /// lookup), so a Flux fallback advertised `context_window: None` and the
+    /// routing policy had no denominator to admit it against.
+    ///
+    /// The table was correct and simply never consulted here -- graded the
+    /// function, not the wiring.
+    #[test]
+    fn flux_tier_fallback_advertises_the_core4_128k_floor() {
+        let mut config = Config {
+            provider_label: "flux-router".into(),
+            compat: wcore_config::compat::ProviderCompat::flux_router_defaults(),
+            ..Default::default()
+        };
+        config.provider_chain.enabled = true;
+        config.provider_chain.fallback_models = vec!["flux-auto".into()];
+        let mut fallback = config.clone();
+        fallback.model = "flux-auto".into();
+        fallback.resolved_fallbacks.clear();
+        config.resolved_fallbacks = vec![fallback];
+
+        let mut pricing_refresher_constructed = false;
+        let fallbacks =
+            build_fallback_providers(&config, &mut pricing_refresher_constructed).unwrap();
+
+        assert_eq!(fallbacks.len(), 1);
+        let (metadata, _) = &fallbacks[0];
+        assert_eq!(metadata.model, "flux-auto");
+        assert_eq!(
+            metadata.capabilities.context_window,
+            Some(128_000),
+            "a Flux tier alias fallback must carry the CORE-4 128k pool-minimum \
+             floor; `model_output_ceiling` alone returns None for the aliases \
+             by design, so this path must also consult flux_tier_context_window"
+        );
+    }
+
+    /// All four aliases, and a NON-alias control proving the assertion above
+    /// can fail: a pinned concrete model resolves its own real window through
+    /// `model_output_ceiling`, and an unknown one still yields `None`.
+    #[test]
+    fn every_flux_alias_gets_the_floor_and_non_aliases_are_unaffected() {
+        fn window_for(model: &str) -> Option<u64> {
+            let mut config = Config {
+                provider_label: "flux-router".into(),
+                compat: wcore_config::compat::ProviderCompat::flux_router_defaults(),
+                ..Default::default()
+            };
+            config.provider_chain.enabled = true;
+            config.provider_chain.fallback_models = vec![model.to_string()];
+            let mut fallback = config.clone();
+            fallback.model = model.to_string();
+            fallback.resolved_fallbacks.clear();
+            config.resolved_fallbacks = vec![fallback];
+            let mut constructed = false;
+            let built = build_fallback_providers(&config, &mut constructed).unwrap();
+            built[0].0.capabilities.context_window
+        }
+
+        for alias in ["flux-auto", "flux-fast", "flux-standard", "flux-reasoning"] {
+            assert_eq!(
+                window_for(alias),
+                Some(128_000),
+                "{alias} must get the floor"
+            );
+        }
+        // Controls. A concrete model keeps its OWN window (the Flux floor must
+        // not overwrite a real one), and a genuinely unknown model stays None
+        // (the floor must not be fabricated for everything).
+        assert_eq!(window_for("gpt-4o"), Some(128_000));
+        assert_eq!(window_for("claude-opus-4-8"), Some(1_000_000));
+        assert_eq!(window_for("totally-unknown-model"), None);
     }
 
     #[test]

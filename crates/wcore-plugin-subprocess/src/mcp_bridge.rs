@@ -650,6 +650,9 @@ fn synthesize_plugin_tool(def: McpToolDef, runner: Arc<McpBridgePluginRunner>) -
         category: ToolCategory::Mcp,
         is_deferred: false,
         max_result_size: 50_000,
+        // A real MCP tool: it executes through the bridge's tools/call
+        // channel, so it is emphatically not a namespace claim.
+        namespace_claim: false,
         execute: Arc::new(move |inv: PluginToolInvocation| {
             let runner = Arc::clone(&runner);
             let name = tool_name.clone();

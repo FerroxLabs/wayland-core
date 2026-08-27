@@ -31,7 +31,6 @@ pub enum BrowserProviderHint {
     #[default]
     Auto,
     Camoufox,
-    Chromium,
     Browserbase,
 }
 

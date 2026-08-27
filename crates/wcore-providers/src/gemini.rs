@@ -883,6 +883,7 @@ pub(crate) async fn process_sse_stream(
                     output_tokens: state.output_tokens,
                     cache_creation_tokens: 0,
                     cache_read_tokens: state.cache_read_tokens,
+                    ..Default::default()
                 },
             })
             .await;
@@ -2465,6 +2466,7 @@ mod tests {
                     output_tokens: state.output_tokens,
                     cache_creation_tokens: 0,
                     cache_read_tokens: state.cache_read_tokens,
+                    ..Default::default()
                 },
             };
             return (events, Ok(Some(done)));

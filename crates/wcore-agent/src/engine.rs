@@ -738,7 +738,55 @@ struct ResolvedTurnCost {
     bounded: bool,
 }
 
+/// #1139 — accept a provider-reported per-call USD figure, or reject it.
+///
+/// A non-finite or negative number is not a cost; rejecting it leaves the
+/// caller on its catalog/compat resolution rather than propagating garbage.
+/// `None` in means `None` out: the provider said nothing, which is "unknown",
+/// and must never be turned into a `0.0` that reads as "free".
+fn provider_reported_usd(reported: Option<f64>) -> Option<f64> {
+    reported.filter(|usd| usd.is_finite() && *usd >= 0.0)
+}
+
+/// #1139 — fold one round-trip's provider-reported cost into a running
+/// session/run aggregate.
+///
+/// `complete` stays true only while EVERY round-trip folded so far carried a
+/// figure. The first silent turn clears it and blanks the aggregate for good.
+///
+/// That is the point, and it is not caution for its own sake: summing only the
+/// turns that happened to report produces a FLOOR, and a floor rendered into a
+/// `cost_usd` field is indistinguishable from a total. An unknown total and a
+/// smaller total are different claims — the same distinction
+/// `reported_cost_usd` exists to keep one level down, at the round-trip.
+fn fold_reported_cost(total: &mut Option<f64>, complete: &mut bool, turn: Option<f64>) {
+    match provider_reported_usd(turn) {
+        Some(usd) if *complete => *total = Some(total.unwrap_or(0.0) + usd),
+        _ => {
+            *complete = false;
+            *total = None;
+        }
+    }
+}
+
 impl ResolvedTurnCost {
+    /// #1139 — let a figure the PROVIDER reported outrank this resolution.
+    ///
+    /// A catalog row is our model of what a call costs; `usage.cost_usd` is
+    /// what the account was billed for the call that actually happened, so it
+    /// wins — and it is `priced`, because it is spend rather than an estimate
+    /// of spend. Absent (or invalid) provider figure leaves `self` untouched.
+    fn with_provider_reported(self, reported: Option<f64>) -> Self {
+        match provider_reported_usd(reported) {
+            Some(usd) => Self {
+                usd,
+                priced: true,
+                bounded: true,
+            },
+            None => self,
+        }
+    }
+
     /// The figure that may be shown to the user as spend.
     ///
     /// A conservative preset ceiling is not spend, so it reports zero
@@ -3705,6 +3753,57 @@ impl<'a> UserTurnInput<'a> {
     }
 }
 
+/// Why a journaled turn is running without crash-replay protection.
+///
+/// Two conditions, one notice. They share every word that describes what
+/// is lost and what is still true, because that half is identical and a
+/// user comparing two nearly-identical paragraphs learns nothing; they
+/// differ only in the clause that names the condition and the clause that
+/// names the way out, because those are the only parts an operator can
+/// act on and acting on the wrong one wastes their time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayProtectionLoss {
+    /// The host has nowhere to keep a sealing key.
+    NoSecureStore,
+    /// The host has somewhere to keep it, and that somewhere did not
+    /// answer inside the budget the pre-provider path imposes on itself.
+    KeyStoreTimedOut,
+}
+
+impl ReplayProtectionLoss {
+    fn condition(self) -> &'static str {
+        match self {
+            Self::NoSecureStore => {
+                "this host has no usable OS keyring and no unlocked credentials vault"
+            }
+            Self::KeyStoreTimedOut => "this profile's credential store did not answer in time",
+        }
+    }
+
+    fn remedy(self) -> &'static str {
+        match self {
+            Self::NoSecureStore => {
+                "Set WAYLAND_VAULT_PASSPHRASE_FD or WAYLAND_VAULT_PASSPHRASE to restore \
+                 replay, or [session] require_durability = true to refuse to run this way \
+                 at all."
+            }
+            Self::KeyStoreTimedOut => {
+                "Unlock or repair the OS keyring for this profile to restore replay — a \
+                 store that answers later is picked up on a later turn without a restart \
+                 — or set [session] require_durability = true to refuse to run this way \
+                 at all."
+            }
+        }
+    }
+
+    fn log_cause(self) -> &'static str {
+        match self {
+            Self::NoSecureStore => "no-secure-store",
+            Self::KeyStoreTimedOut => "key-store-timed-out",
+        }
+    }
+}
+
 pub struct AgentEngine {
     provider: Arc<dyn LlmProvider>,
     /// Immutable outbound authority for this session. Runtime-lazy clients
@@ -3769,6 +3868,30 @@ pub struct AgentEngine {
     /// `stream_end` protocol event's `usage_delta` sibling field; never
     /// persisted (a resumed session starts with a fresh zero delta).
     run_usage: TokenUsage,
+    /// #1139 — did EVERY round-trip folded into `total_usage` report its own
+    /// cost? Cleared by the first silent turn, which also blanks
+    /// `total_usage.reported_cost_usd` — see [`fold_reported_cost`].
+    total_reported_cost_complete: bool,
+    /// The same question, scoped to the current run (`run_usage`).
+    run_reported_cost_complete: bool,
+    /// #1140 — provider round-trips this run has actually completed.
+    ///
+    /// `AgentResult.turns` reports this on the success path, but a run that
+    /// returns `Err` carries no `AgentResult` at all, so a caller (the spawner,
+    /// reporting a failed child to its parent) had nothing to read and printed
+    /// `turns: 0` over work that really happened.
+    run_turns: usize,
+    /// #1140 — optional tap recording the last error text this engine emitted.
+    ///
+    /// A sub-agent's `OutputSink` is the CHILD's sink (`NullSink`, or a
+    /// `ChannelSink` feeding `--json-stream`), never the parent's tool result.
+    /// So the engine's real diagnostic — "The model produced only reasoning…",
+    /// the exhausted-provider remedy, the budget-cap line — was emitted into a
+    /// channel the parent LLM cannot see, and the parent was handed a generic
+    /// "terminated without completing its task" instead. The tap gives the
+    /// spawner a way to read that text back and put the real cause in the tool
+    /// result. `None` on a top-level engine, whose sink IS the user's.
+    error_tap: Option<Arc<std::sync::Mutex<Option<String>>>>,
     thinking: Option<wcore_types::llm::ThinkingConfig>,
     /// Resolved provider compat settings (for capability validation)
     compat: wcore_config::compat::ProviderCompat,
@@ -4515,6 +4638,10 @@ impl AgentEngine {
             temperature: config.temperature,
             max_turns: config.max_turns,
             total_usage: TokenUsage::default(),
+            run_turns: 0,
+            error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: TokenUsage::default(),
             thinking: config.thinking,
             compat: config.compat.clone(),
@@ -4796,6 +4923,15 @@ impl AgentEngine {
             total_usage: session.total_usage.clone(),
             // CORE-2: cumulative usage carries over from the persisted
             // session; the per-run delta always starts fresh.
+            run_turns: 0,
+            error_tap: None,
+            // #1139: a restored total is complete only if it actually carries a
+            // figure. A persisted `None` cannot distinguish "no round-trips
+            // yet" from "already poisoned by a silent turn", so it is read as
+            // the latter — that can leave a resumed session reporting `None`
+            // (unknown), and never a number it cannot back.
+            total_reported_cost_complete: session.total_usage.reported_cost_usd.is_some(),
+            run_reported_cost_complete: true,
             run_usage: TokenUsage::default(),
             thinking: config.thinking,
             compat: config.compat.clone(),
@@ -5257,6 +5393,7 @@ impl AgentEngine {
         let session_usage = session.total_usage.clone();
         self.messages = canonical_messages;
         self.total_usage = session_usage.clone();
+        self.total_reported_cost_complete = self.total_usage.reported_cost_usd.is_some();
         self.run_usage = TokenUsage::default();
         self.current_session = Some(session);
         self.session_journal = Some(journal);
@@ -5312,6 +5449,38 @@ impl AgentEngine {
         self.clear_file_cache();
         self.output.bind_session_id(&session_id);
         Ok(())
+    }
+
+    /// #1140 — install a tap that records the last error this engine emits.
+    ///
+    /// Set by the spawner on a CHILD engine so the parent can report the real
+    /// cause instead of a generic termination line. Nothing else reads it, and
+    /// a top-level engine leaves it `None`.
+    pub fn set_error_tap(&mut self, tap: Arc<std::sync::Mutex<Option<String>>>) {
+        self.error_tap = Some(tap);
+    }
+
+    /// #1140 — provider round-trips completed by the current (or last) run.
+    ///
+    /// Readable after `run()` returns `Err`, which is the whole point: the
+    /// success path already reports `AgentResult.turns`.
+    pub fn run_turns(&self) -> usize {
+        self.run_turns
+    }
+
+    /// #1140 — the single funnel for engine-emitted errors.
+    ///
+    /// Every `emit_error` in this file goes through here so the tap cannot be
+    /// bypassed by a new call site. Forwards verbatim to the sink; the tap is
+    /// a side-channel, not a filter.
+    fn emit_error(&self, msg: &str, retryable: bool) {
+        if let Some(tap) = self.error_tap.as_ref() {
+            match tap.lock() {
+                Ok(mut slot) => *slot = Some(msg.to_string()),
+                Err(poisoned) => *poisoned.into_inner() = Some(msg.to_string()),
+            }
+        }
+        self.output.emit_error(msg, retryable);
     }
 
     /// CORE-2 — snapshot of the engine's usage counters:
@@ -8229,12 +8398,40 @@ impl AgentEngine {
         // both are decisions or mistakes with a specific fix, both must keep
         // failing loudly, and neither may be quietly reinterpreted as "this
         // host is just like a headless server".
+        //
+        // A SECOND cause degrades, and it is a different kind of thing from
+        // the first. `KeyStoreTimedOut` is not the store answering — it is
+        // the store not answering, inside a budget this path now imposes on
+        // itself (`KEY_STORE_ACQUIRE_BUDGET`). It is the one verdict here
+        // that `Config::resolve` cannot have screened at startup, because it
+        // is about a wait that had not happened yet, so unlike every other
+        // arm it must consult `require_durability` itself: an operator who
+        // demanded durability is refused, and everyone else is told and runs.
         match self.recovery_request_protection.preflight(&self.config) {
             Ok(()) => {}
             Err(
                 crate::recovery_confidential::RecoveryConfidentialError::NoSecureBackendAvailable,
             ) => {
-                self.announce_replay_protection_unavailable_for_this_turn();
+                self.announce_replay_protection_unavailable_for_this_turn(
+                    ReplayProtectionLoss::NoSecureStore,
+                );
+            }
+            Err(crate::recovery_confidential::RecoveryConfidentialError::KeyStoreTimedOut {
+                ..
+            }) => {
+                if self.config.session.require_durability {
+                    return Err(AgentError::SessionAuthority(
+                        "[session] require_durability = true, but this profile's credential \
+                         store did not answer in time, so this turn's provider request cannot \
+                         be sealed for crash recovery. Unlock or repair the OS keyring for this \
+                         profile and send the message again, or set [session] \
+                         require_durability = false to run turns that cannot be replayed."
+                            .to_string(),
+                    ));
+                }
+                self.announce_replay_protection_unavailable_for_this_turn(
+                    ReplayProtectionLoss::KeyStoreTimedOut,
+                );
             }
             Err(error) => return Err(AgentError::SessionAuthority(error.to_string())),
         }
@@ -10979,6 +11176,18 @@ impl AgentEngine {
             Arc::new(crate::recovery_confidential::RecoveryRequestProtector::with_test_key(bytes));
     }
 
+    /// Point this engine's request protection at a credential store that
+    /// never answers — the macOS keychain wedge that
+    /// `KEY_STORE_ACQUIRE_BUDGET` exists to bound, reproduced on a host whose
+    /// real store answers (or fails) immediately.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn use_wedged_recovery_key_store(&mut self) {
+        self.recovery_request_protection = Arc::new(
+            crate::recovery_confidential::RecoveryRequestProtector::with_wedged_key_store_for_test(
+            ),
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn commit_provider_recovery_checkpoint(
         &self,
@@ -11343,7 +11552,7 @@ impl AgentEngine {
     /// host still gets it every turn (asserted by `f14_sigkill_recovery`); a
     /// human gets it once, because they were already told at config
     /// resolution and the condition cannot change mid-process.
-    fn announce_replay_protection_unavailable_for_this_turn(&self) {
+    fn announce_replay_protection_unavailable_for_this_turn(&self, cause: ReplayProtectionLoss) {
         tracing::warn!(
             target: "wcore_agent::session",
             session = %self
@@ -11351,20 +11560,19 @@ impl AgentEngine {
                 .as_ref()
                 .map(|s| s.id.as_str())
                 .unwrap_or("<none>"),
-            "this turn cannot be replayed if it is interrupted: the host has no usable OS \
-             keyring and no unlocked credentials vault, so the exact provider request is not \
-             sealed. The turn IS journaled"
+            cause = cause.log_cause(),
+            "this turn cannot be replayed if it is interrupted: the exact provider request is \
+             not sealed. The turn IS journaled"
         );
-        self.output.emit_durability_degraded(
-            "crash replay protection is OFF for this run: this host has no usable OS \
-             keyring and no unlocked credentials vault, so the exact provider request \
-             cannot be sealed. This turn IS being recorded — the journal keeps its \
+        self.output.emit_durability_degraded(&format!(
+            "crash replay protection is OFF for this run: {}, so the exact provider \
+             request cannot be sealed. This turn IS being recorded — the journal keeps its \
              provider, tool, approval and delivery boundaries — but if it is interrupted \
              mid-dispatch it will not resume itself; you will be asked to resume, \
-             reconcile or cancel it. Set WAYLAND_VAULT_PASSPHRASE_FD or \
-             WAYLAND_VAULT_PASSPHRASE to restore replay, or \
-             [session] require_durability = true to refuse to run this way at all.",
-        );
+             reconcile or cancel it. {}",
+            cause.condition(),
+            cause.remedy(),
+        ));
     }
 
     /// Legacy loop body. `journal_turn_id` is present only for an engine that
@@ -11520,6 +11728,21 @@ impl AgentEngine {
             .map_or_else(TokenUsage::default, |checkpoint| {
                 checkpoint.run_usage.clone()
             });
+        // #1140: the round-trip counter and the error tap are run-scoped for
+        // the same reason — a caller reading them after this run must not be
+        // handed the PREVIOUS run's turn count or the previous run's error.
+        self.run_turns = 0;
+        // #1139: a fresh run starts complete — nothing is missing yet. A
+        // RESUMED run inherits the checkpoint's aggregate under the same
+        // conservative reading as the restored session total above.
+        self.run_reported_cost_complete =
+            resume_checkpoint.is_none() || self.run_usage.reported_cost_usd.is_some();
+        if let Some(tap) = self.error_tap.as_ref() {
+            match tap.lock() {
+                Ok(mut slot) => *slot = None,
+                Err(poisoned) => *poisoned.into_inner() = None,
+            }
+        }
         // #403: clear tool circuit breakers at the start of each user turn.
         // A transient burst of `web`/`WebFetch` failures in one turn opened the
         // breaker and, with no per-turn reset, left every web tool short-circuited
@@ -12422,7 +12645,7 @@ impl AgentEngine {
                              (smaller) session is still resumable; reopen it or \
                              start a new chat."
                                 };
-                                self.output.emit_error(
+                                self.emit_error(
                                     &format!(
                                         "Run stopped: estimated request size ({sent} tokens) \
                                  reached the context-window ceiling ({ceiling}) for model \
@@ -12755,7 +12978,7 @@ impl AgentEngine {
                             })
                             .collect::<Vec<_>>()
                             .join(", ");
-                        self.output.emit_error(
+                        self.emit_error(
                             &format!(
                                 "Run stopped: the recovered turn had been cut off by the \
                                  model's output token limit while writing a tool call \
@@ -12828,7 +13051,7 @@ impl AgentEngine {
                         &request.tools,
                     ) == wedge
                 {
-                    self.output.emit_error(
+                    self.emit_error(
                         &format!(
                             "Run stopped: the conversation has exceeded the context \
                              window of model '{}' (a previous attempt ended with \
@@ -12889,7 +13112,7 @@ impl AgentEngine {
                             &format!("{reservation_provider}/{effective_model}"),
                             "a provider/model with known pricing",
                         );
-                        self.output.emit_error(
+                        self.emit_error(
                             &format!(
                                 "Provider call not started: pricing is unavailable for \
                                  {reservation_provider}/{effective_model}, so the explicit or \
@@ -12950,7 +13173,7 @@ impl AgentEngine {
                             observed,
                         }) => {
                             self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                            self.output.emit_error(
+                            self.emit_error(
                                 &format!(
                                     "Provider call not started: budget cap '{kind}' would be exceeded \
                                      (limit {limit}, reserved total {observed}). Continue with \
@@ -12985,7 +13208,7 @@ impl AgentEngine {
                             observed,
                         }) => {
                             self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                            self.output.emit_error(
+                            self.emit_error(
                                 &format!(
                                     "Provider call not started: budget cap '{kind}' would be exceeded \
                                      (limit {limit}, reserved total {observed}). Continue with \
@@ -13308,7 +13531,7 @@ impl AgentEngine {
                             ),
                         ) => {
                             self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                            self.output.emit_error(
+                            self.emit_error(
                                 &format!(
                                     "Configured provider fallback not started: budget cap \
                                      '{kind}' would be exceeded (limit {limit}, reserved total \
@@ -13328,7 +13551,7 @@ impl AgentEngine {
                                 &format!("{provider}/{model}"),
                                 "a provider/model with known pricing",
                             );
-                            self.output.emit_error(
+                            self.emit_error(
                                 &format!(
                                     "Configured provider fallback not started: pricing is \
                                      unavailable for {provider}/{model}, so the explicit or \
@@ -13411,7 +13634,7 @@ impl AgentEngine {
                                     },
                                 ) => {
                                     self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                                    self.output.emit_error(
+                                    self.emit_error(
                                         &format!(
                                             "Run stopped after an unknown provider outcome exhausted \
                                              budget cap '{kind}' (limit {limit}, observed {observed})."
@@ -13613,7 +13836,7 @@ impl AgentEngine {
                                  not re-sent, because a second send would be identical.",
                             );
                         }
-                        self.output.emit_error(&surfaced, false);
+                        self.emit_error(&surfaced, false);
                         // #923(2) — fail the TURN, not the session. The dispatch
                         // left this turn's provider attempt nonterminal, and the
                         // reducer will not let a turn holding one take ANY
@@ -13882,6 +14105,10 @@ impl AgentEngine {
                                 attempt_usage.cache_creation_tokens,
                                 &self.compat,
                             )
+                            // #1139: settle the reservation at the figure the
+                            // provider reported, when it reported one — that is
+                            // the billed amount this envelope is tracking.
+                            .with_provider_reported(attempt_usage.reported_cost_usd)
                             .usd;
                             (input_tokens, attempt_usage.output_tokens, cost)
                         } else {
@@ -13914,7 +14141,7 @@ impl AgentEngine {
                                 },
                             ) => {
                                 self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                                self.output.emit_error(
+                                self.emit_error(
                                     &format!(
                                         "Run stopped after a failed provider attempt exhausted budget \
                                          cap '{kind}' (limit {limit}, observed {observed})."
@@ -14081,7 +14308,7 @@ impl AgentEngine {
                                  session is still resumable; reopen it or start a new \
                                  session."
                             };
-                            self.output.emit_error(
+                            self.emit_error(
                                 &format!(
                                     "Run stopped: the conversation has exceeded the context \
                                      window of model '{}' (finish_reason=length at \
@@ -14151,7 +14378,7 @@ impl AgentEngine {
                             self.midflight_monitor.record_stream_attempt(false, false);
                             continue 'stream;
                         }
-                        self.output.emit_error(
+                        self.emit_error(
                             &format!(
                                 "Run stopped: the model hit the output token limit while \
                                  writing a tool call ({cut}), and again on the retry. The \
@@ -14373,7 +14600,7 @@ impl AgentEngine {
                                 MonitorDirective::Stop,
                                 MonitorReason::OutputStall,
                             );
-                            self.output.emit_error(&gate_msg, false);
+                            self.emit_error(&gate_msg, false);
                             self.emit_midflight_monitor_occurrence();
                             return Err(AgentError::ApiError(gate_msg));
                         }
@@ -14501,12 +14728,29 @@ impl AgentEngine {
             self.total_usage.output_tokens += turn_usage.output_tokens;
             self.total_usage.cache_creation_tokens += turn_usage.cache_creation_tokens;
             self.total_usage.cache_read_tokens += turn_usage.cache_read_tokens;
+            // #1139: the provider's own dollar figure accumulates alongside the
+            // token counters, or the session total stays `None` forever and
+            // every consumer of `AgentResult.usage` — the Spawn tool's parent
+            // result above all — reports an unpriced child for a priced run.
+            fold_reported_cost(
+                &mut self.total_usage.reported_cost_usd,
+                &mut self.total_reported_cost_complete,
+                turn_usage.reported_cost_usd,
+            );
 
             // CORE-2: mirror into the run-scoped delta (reset per run()).
+            // #1140: and the round-trip count alongside it, so a run that ends
+            // in `Err` can still say how many turns it took.
+            self.run_turns = turn.saturating_add(1);
             self.run_usage.input_tokens += turn_usage.input_tokens;
             self.run_usage.output_tokens += turn_usage.output_tokens;
             self.run_usage.cache_creation_tokens += turn_usage.cache_creation_tokens;
             self.run_usage.cache_read_tokens += turn_usage.cache_read_tokens;
+            fold_reported_cost(
+                &mut self.run_usage.reported_cost_usd,
+                &mut self.run_reported_cost_complete,
+                turn_usage.reported_cost_usd,
+            );
 
             // B7 writer-side wiring: mirror this turn's token usage into the
             // live introspection state so `wayland_status` /
@@ -14733,7 +14977,7 @@ impl AgentEngine {
                      The endpoint or model may be incompatible (verify it speaks the OpenAI \
                      chat-completions streaming format and that the model name is valid)."
                 };
-                self.output.emit_error(message, false);
+                self.emit_error(message, false);
             }
 
             // …and do not COMMIT the empty turn either. The error above is the
@@ -14783,7 +15027,7 @@ impl AgentEngine {
                 };
                 self.repair_orphaned_tool_use();
                 self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                self.output.emit_error(
+                self.emit_error(
                     &format!(
                         "Run stopped: budget cap '{kind}' exceeded \
                      (limit {limit}, observed {observed}). The session has reached \
@@ -14819,7 +15063,10 @@ impl AgentEngine {
                     turn_usage.cache_read_tokens,
                     turn_usage.cache_creation_tokens,
                     &self.compat,
-                );
+                )
+                // #1139: a figure the provider reported for THIS call outranks the
+                // catalog estimate — it is spend, not a model of spend.
+                .with_provider_reported(turn_usage.reported_cost_usd);
                 let trace = TurnTrace {
                     turn,
                     // Finding #174: attribute to the model ACTUALLY dispatched
@@ -15453,7 +15700,7 @@ impl AgentEngine {
             // hence `turn + 1`).
             if let Some((failing_tool, count)) = failure_break {
                 self.repair_orphaned_tool_use();
-                self.output.emit_error(
+                self.emit_error(
                     &format!(
                         "Run stopped: tool calls failed {count} times in a row (most \
                          recently `{failing_tool}`). Retrying with new guesses is burning \
@@ -15482,7 +15729,7 @@ impl AgentEngine {
             // yet, hence `turn + 1`).
             if let Some((looping_tool, count)) = loop_break {
                 self.repair_orphaned_tool_use();
-                self.output.emit_error(
+                self.emit_error(
                     &format!(
                         "Run stopped: the `{looping_tool}` tool was called with the same \
                          arguments and produced the same result {count} times in a row — \
@@ -15515,7 +15762,7 @@ impl AgentEngine {
                         MonitorDirective::Stop,
                         MonitorReason::RepeatedError,
                     );
-                    self.output.emit_error(
+                    self.emit_error(
                         "Run stopped: the same underlying tool error repeated after the \
                          mid-flight monitor required a strategy change. Continue with a \
                          materially different approach or explain the blocker.",
@@ -15540,7 +15787,7 @@ impl AgentEngine {
                         MonitorDirective::Stop,
                         MonitorReason::RepeatedToolRoute,
                     );
-                    self.output.emit_error(
+                    self.emit_error(
                         "Run stopped: the same normalized tool route repeated after the \
                          mid-flight monitor required a strategy change. Continue with a \
                          materially different tool sequence or explain the blocker.",
@@ -15560,7 +15807,7 @@ impl AgentEngine {
                         MonitorDirective::Stop,
                         MonitorReason::BudgetExceeded,
                     );
-                    self.output.emit_error(
+                    self.emit_error(
                         &format!(
                             "Run stopped: execution budget cap '{reason}' exceeded \
                              (limit {limit}, observed {observed})."
@@ -15589,7 +15836,10 @@ impl AgentEngine {
                 turn_usage.cache_read_tokens,
                 turn_usage.cache_creation_tokens,
                 &self.compat,
-            );
+            )
+            // #1139: a figure the provider reported for THIS call outranks the
+            // catalog estimate — it is spend, not a model of spend.
+            .with_provider_reported(turn_usage.reported_cost_usd);
             let trace = TurnTrace {
                 turn,
                 // Finding #174: attribute to the dispatched model (see the
@@ -16578,13 +16828,20 @@ impl AgentEngine {
             turn_usage.cache_read_tokens,
             turn_usage.cache_creation_tokens,
             &self.compat,
-        );
+        )
+        .with_provider_reported(turn_usage.reported_cost_usd);
         // `resolve_turn_cost` reports `priced = true` for BOTH an exact catalog
         // row and the `ProviderCompat` family fallback. Ask the catalog
         // separately so the ledger can tell an operator which one they are
         // looking at — measured: model `test-model` came back `priced = true`
         // at Anthropic's generic rate, which is an estimate, not spend.
-        let cost_source = if pricing_turn_cost_with_cache(
+        let cost_source = if provider_reported_usd(turn_usage.reported_cost_usd).is_some() {
+            // #1139: the provider billed this call and told us the number. That
+            // is the strongest provenance there is, and it was being discarded
+            // in favour of a catalog estimate — or, with no catalog row, in
+            // favour of `$0.000000`.
+            CostSource::ProviderReported
+        } else if pricing_turn_cost_with_cache(
             &provider,
             effective_model,
             turn_usage.input_tokens,
@@ -19644,6 +19901,10 @@ mod set_config_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -21517,6 +21778,10 @@ mod phase6_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -21841,6 +22106,10 @@ mod compact_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -23549,6 +23818,10 @@ mod plan_mode_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -24006,6 +24279,10 @@ mod hook_integration_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -25174,6 +25451,10 @@ mod approval_bridge_engine_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -26242,6 +26523,10 @@ mod user_model_writeback_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_turns: 0,
+            error_tap: None,
+            total_reported_cost_complete: true,
+            run_reported_cost_complete: true,
             run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
@@ -27774,6 +28059,7 @@ mod audit_2026_05_22_tests {
     ///
     /// Runs on a paused clock, so neither arm costs real time.
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
     async fn an_unserved_outage_is_bounded_by_the_count_and_by_the_window() {
         let slow_step = wcore_providers::http_client::READ_TIMEOUT;
         let (fast_sends, fast_elapsed) = unserved_outage(std::time::Duration::ZERO).await;
@@ -27895,6 +28181,7 @@ mod audit_2026_05_22_tests {
     /// same shape misclassified as SERVED would spend the whole count and
     /// send more. The arms differ, so the assertion can fail.
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
     async fn an_http_529_outage_is_classified_unserved_and_capped_by_the_window() {
         struct Overloaded {
             calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -27947,6 +28234,132 @@ mod audit_2026_05_22_tests {
         assert!(sends > 1, "a 529 must be retried at all");
     }
 
+    /// A journaled engine whose credential store never answers.
+    ///
+    /// The tempdir is returned because dropping it deletes the session the
+    /// journal is writing to.
+    ///
+    /// The mock server is the fixture's physical-attempt endpoint: a journaled
+    /// turn only completes when the provider's PHYSICAL attempt is durably
+    /// accepted, which needs a real 2xx. Returned so it outlives the turn, as
+    /// is the tempdir the journal writes into.
+    async fn journaled_engine_with_a_wedged_key_store() -> (
+        super::AgentEngine,
+        crate::test_utils::TestSinkHandle,
+        tempfile::TempDir,
+        MockServer,
+    ) {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("anthropic", "m-1", "/tmp", Some("deadbeefdead"))
+            .unwrap();
+        let (mut engine, events) = engine_and_events(Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("answered".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        ));
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
+        engine.use_wedged_recovery_key_store();
+        (engine, events, dir, server)
+    }
+
+    fn replay_protection_notices(handle: &crate::test_utils::TestSinkHandle) -> Vec<String> {
+        info_messages(handle)
+            .into_iter()
+            .filter(|m| m.contains("crash replay protection is OFF"))
+            .collect()
+    }
+
+    /// Nothing on the pre-provider path may hold a turn open without a bound
+    /// and without telling the user.
+    ///
+    /// This is the WIRING grade for the seal: a real journaled turn, the real
+    /// `RecoveryRequestProtector`, and a credential store that never answers.
+    /// Before the bound existed this turn produced nothing at all — no
+    /// provider dispatch, no notice, no error — for as long as anyone was
+    /// willing to wait.
+    ///
+    /// Three separate things are asserted because dropping any one of them
+    /// leaves a fix that is not a fix: the turn must REACH the provider, it
+    /// must SAY what it gave up, and it must do both inside the budget.
+    /// Multi-threaded on purpose — the store call is synchronous, so on a
+    /// single-threaded runtime it takes the whole runtime with it and even
+    /// this test's own deadline could not fire.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_wedged_key_store_still_lets_the_turn_reach_the_provider_and_says_so() {
+        let (mut engine, events, _dir, _server) = journaled_engine_with_a_wedged_key_store().await;
+
+        let started = std::time::Instant::now();
+        let result = engine.run("say something", "m-1").await;
+        let took = started.elapsed();
+
+        assert!(
+            result.is_ok(),
+            "a credential store that never answers must degrade the turn, not fail it: \
+             {result:?}"
+        );
+        assert_eq!(
+            result.unwrap().text.trim(),
+            "answered",
+            "the turn must actually have reached the provider"
+        );
+        assert!(
+            took < crate::recovery_confidential::KEY_STORE_ACQUIRE_BUDGET * 4,
+            "the turn must clear the wedged store at its budget, not wait on it: took {took:?}"
+        );
+
+        let notices = replay_protection_notices(&events);
+        assert_eq!(
+            notices.len(),
+            1,
+            "the user must be told exactly once that this turn is unreplayable: {notices:?}"
+        );
+        assert!(
+            notices[0].contains("did not answer in time"),
+            "the notice must name the condition an operator can act on, got {:?}",
+            notices[0]
+        );
+    }
+
+    /// An operator who demanded durability is refused, not quietly downgraded.
+    ///
+    /// This arm exists only because a seal timeout is the one verdict on this
+    /// path that `Config::resolve` cannot have screened at startup — it is
+    /// about a wait that had not happened yet. Without the check the timeout
+    /// would silently deliver exactly the posture `require_durability = true`
+    /// was set to forbid.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn require_durability_refuses_a_turn_whose_key_store_timed_out() {
+        let (mut engine, events, _dir, _server) = journaled_engine_with_a_wedged_key_store().await;
+        engine.config.session.require_durability = true;
+
+        let result = engine.run("say something", "m-1").await;
+
+        match result {
+            Err(super::AgentError::SessionAuthority(message)) => {
+                assert!(
+                    message.contains("require_durability"),
+                    "the refusal must name the setting that caused it, got {message:?}"
+                );
+                assert!(
+                    message.contains("did not answer in time"),
+                    "the refusal must name the condition, got {message:?}"
+                );
+            }
+            other => panic!("require_durability must refuse an unsealable turn, got {other:?}"),
+        }
+        assert!(
+            replay_protection_notices(&events).is_empty(),
+            "a refused turn must not also announce a downgrade it did not take"
+        );
+    }
+
     /// An engine whose emitted events can be read back.
     fn engine_and_events(
         provider: Arc<dyn LlmProvider>,
@@ -27992,6 +28405,7 @@ mod audit_2026_05_22_tests {
     /// saying "some requests" would satisfy a weaker test and tell the user
     /// nothing they could act on.
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
     async fn a_turn_reports_how_many_requests_never_returned_a_response() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (mut engine, events) = engine_and_events(Arc::new(SlowStreamErrProvider {
@@ -28592,6 +29006,7 @@ mod audit_2026_05_22_tests {
                 output_tokens: 5,
                 cache_creation_tokens: 3,
                 cache_read_tokens: 7,
+                ..Default::default()
             }),
         ]]));
         let mut engine = engine_with(provider);
@@ -29270,6 +29685,7 @@ mod audit_2026_05_22_tests {
             output_tokens: output,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
+            ..Default::default()
         }
     }
 
@@ -29330,6 +29746,7 @@ mod audit_2026_05_22_tests {
                         output_tokens: 10,
                         cache_creation_tokens: 7,
                         cache_read_tokens: 3,
+                        ..Default::default()
                     },
                 },
             ],
@@ -29414,6 +29831,7 @@ mod audit_2026_05_22_tests {
                         output_tokens: 10,
                         cache_creation_tokens: 7,
                         cache_read_tokens: 3,
+                        ..Default::default()
                     },
                 },
             ],
@@ -34647,6 +35065,7 @@ mod retry_wedge_protection_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn failing_stream_with_failed_tool_round_stubs_body_and_stops_at_progress_gate() {
         let huge_error = format!("CONTAMINATED-MARKER {}", "x".repeat(50_000));
         let provider = Arc::new(RecordingProvider::new(vec![
@@ -35845,7 +36264,12 @@ mod stream_retry_budget_tests {
         for (requested, expected_sends) in [("0", 1usize), ("1", 2usize)] {
             let prior = std::env::var(super::MAX_STREAM_RETRIES_ENV).ok();
             // SAFETY: same contract as the clamp test above — every test in
-            // this module that reads the budget is `#[serial_test::serial]`.
+            // this module that READS the budget is `#[serial_test::serial]`,
+            // not just the ones that write it. Six readers were untagged when
+            // this comment first claimed otherwise, and `serial_test` does not
+            // exclude an untagged test from running beside a tagged one: the
+            // lock binds only the tests that take it, so an untagged reader
+            // shares the process with a tagged writer and sees its value.
             unsafe {
                 std::env::set_var(super::MAX_STREAM_RETRIES_ENV, requested);
             }
@@ -36180,6 +36604,7 @@ mod stream_retry_budget_tests {
     /// user was told the wrong cause for the stop. At the shipped retry
     /// budget one failed turn eats 70 % of a 1 000 000-token session.
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
     async fn a_503_releases_its_reservation_instead_of_being_billed_for_it() {
         let (sends, surface, charged) = run_under_output_cap(api_503, 100).await;
         assert_eq!(
@@ -36432,6 +36857,7 @@ mod stream_retry_budget_tests {
     /// Without this, a notice that only ever printed a hard-coded string
     /// would satisfy the 7 s assertion.
     #[tokio::test(start_paused = true)]
+    #[serial_test::serial]
     async fn a_sub_second_wait_is_named_in_milliseconds() {
         let events = wcore_providers::backoff::scope_jitter(0.0, async {
             let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
