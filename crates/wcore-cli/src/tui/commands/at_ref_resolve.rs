@@ -1020,4 +1020,189 @@ mod tests {
             payload.files.iter().map(|f| &f.path).collect::<Vec<_>>()
         );
     }
+
+    // == REFUTATION PROBES (external auditor) =============================
+
+    /// The @dir walk still leaves the workspace - through a symlink to a
+    /// FILE. The fix closed only the DIRECTORY half.
+    #[cfg(unix)]
+    #[test]
+    fn refut_at_dir_walk_inlines_a_file_symlinked_outside_the_root() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, outside) = workspace_and_outside(&tmp);
+        let private = outside.join("private");
+        fs::create_dir_all(&private).expect("mkdir private");
+        fs::write(private.join("diary.txt"), "OUTSIDE-BODY-MARKER").expect("write diary");
+        std::os::unix::fs::symlink(private.join("diary.txt"), root.join("notes.txt"))
+            .expect("symlink file");
+        fs::write(root.join("kept.txt"), "kept body").expect("write kept");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), &root).expect("resolve dir");
+        assert!(
+            payload.files.iter().any(|f| f.content == "kept body"),
+            "control missing: the walk produced nothing in-root"
+        );
+        assert!(
+            !payload
+                .files
+                .iter()
+                .any(|f| f.content.contains("OUTSIDE-BODY-MARKER")),
+            "REFUTED: @dir inlined an out-of-workspace file via a FILE symlink: {:?}",
+            payload
+                .files
+                .iter()
+                .map(|f| (f.path.display().to_string(), f.content.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The @dir walk never applies the CANONICAL gitignore verdict that
+    /// resolve_file applies, so the walk inlines a body the direct
+    /// reference refuses by name.
+    #[cfg(unix)]
+    #[test]
+    fn refut_at_dir_walk_honors_the_canonical_gitignore_name() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join(".gitignore"), "artifact.txt\n").expect("gitignore");
+        fs::write(root.join("artifact.txt"), "IGNORED-BODY-MARKER").expect("write artifact");
+        std::os::unix::fs::symlink(root.join("artifact.txt"), root.join("notable.txt"))
+            .expect("symlink");
+        fs::write(root.join("kept.txt"), "kept body").expect("write kept");
+
+        let direct = resolve(&AtRef::parse("@notable.txt").expect("parse"), root);
+        let walk = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
+        assert!(
+            walk.files.iter().any(|f| f.content == "kept body"),
+            "control missing"
+        );
+        assert!(
+            !walk
+                .files
+                .iter()
+                .any(|f| f.content.contains("IGNORED-BODY-MARKER")),
+            "REFUTED: @dir inlined a body the direct reference refuses ({:?}): {:?}",
+            direct.as_ref().err(),
+            walk.files
+                .iter()
+                .map(|f| f.path.display().to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Polarity control: the symlinked-credential case IS covered.
+    #[cfg(unix)]
+    #[test]
+    fn refut_control_at_dir_walk_still_refuses_a_symlinked_credential_store() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, outside) = workspace_and_outside(&tmp);
+        plant_credential_symlink(&root, &outside, "notes.txt", ".git-credentials");
+        fs::write(root.join("kept.txt"), "kept body").expect("write kept");
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), &root).expect("resolve dir");
+        assert!(
+            payload.files.iter().any(|f| f.content == "kept body"),
+            "control missing"
+        );
+        assert!(
+            !payload
+                .files
+                .iter()
+                .any(|f| f.content.contains("fake-token")),
+            "the credential symlink was inlined: {:?}",
+            payload.files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    /// An IN-ROOT symlink to a directory is no longer walked.
+    #[cfg(unix)]
+    #[test]
+    fn refut_an_in_root_symlinked_directory_is_no_longer_walked() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, _outside) = workspace_and_outside(&tmp);
+        fs::create_dir(root.join("real")).expect("mkdir real");
+        fs::write(root.join("real/inner.txt"), "inner body").expect("write inner");
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).expect("symlink dir");
+        fs::write(root.join("kept.txt"), "kept body").expect("write kept");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), &root).expect("resolve dir");
+        let names: Vec<String> = payload
+            .files
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect();
+        eprintln!("REFUT in-root dir symlink: names={names:?} warnings={:?}", payload.warnings);
+        assert!(names.iter().any(|n| n.contains("kept.txt")), "control missing");
+        assert!(
+            names.iter().any(|n| n.starts_with("alias")),
+            "REFUTED-AS-REGRESSION: an in-root symlinked directory produced no entries: {names:?}"
+        );
+    }
+
+    /// @alias/ where alias is an IN-ROOT symlink to an in-root directory.
+    #[cfg(unix)]
+    #[test]
+    fn refut_at_dir_on_an_in_root_symlinked_directory_still_resolves() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, _outside) = workspace_and_outside(&tmp);
+        fs::create_dir(root.join("real")).expect("mkdir real");
+        fs::write(root.join("real/inner.txt"), "inner body").expect("write inner");
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).expect("symlink dir");
+        let got = resolve(&AtRef::parse("@alias/").expect("parse"), &root);
+        eprintln!("REFUT @alias/ -> {got:?}");
+        let p = got.expect("REFUTED: @alias/ on an in-root symlinked dir was refused");
+        assert!(
+            p.files.iter().any(|f| f.content == "inner body"),
+            "@alias/ produced nothing: {:?}",
+            p.files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A mutual (dangling) symlink loop must terminate.
+    #[cfg(unix)]
+    #[test]
+    fn refut_at_dir_walk_terminates_on_a_mutual_symlink_loop() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, _outside) = workspace_and_outside(&tmp);
+        std::os::unix::fs::symlink(root.join("b"), root.join("a")).expect("a->b");
+        std::os::unix::fs::symlink(root.join("a"), root.join("b")).expect("b->a");
+        fs::write(root.join("kept.txt"), "kept body").expect("write kept");
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), &root).expect("resolve dir");
+        assert_eq!(
+            payload
+                .files
+                .iter()
+                .filter(|f| f.content == "kept body")
+                .count(),
+            1,
+            "mutual loop mis-walked: {:?}",
+            payload.files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A FIFO planted in a walked tree must not wedge the walk.
+    #[cfg(unix)]
+    #[test]
+    fn refut_at_dir_walk_does_not_block_on_a_fifo_in_the_tree() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, _outside) = workspace_and_outside(&tmp);
+        fs::write(root.join("kept.txt"), "kept body").expect("write kept");
+        let fifo = root.join("pipe");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).expect("cstr");
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let r2 = root.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(
+                resolve(&AtRef::parse("@./").expect("parse"), &r2)
+                    .map(|p| p.files.len())
+                    .map_err(|e| format!("{e:?}")),
+            );
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("REFUTED: the @dir walk blocked on a FIFO in the tree");
+        assert!(got.is_ok(), "walk errored: {got:?}");
+    }
 }

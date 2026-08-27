@@ -793,4 +793,151 @@ mod tests {
         );
         assert!(verdict.is_err(), "a FIFO is not a regular file");
     }
+
+    // ══ REFUTATION PROBES (external auditor) ═════════════════════════════
+
+    /// A REAL blocking character device, not just a FIFO.
+    ///
+    /// Opt-in: set `REFUT_BLOCKING_CHARDEV` to a device whose plain
+    /// `open(O_RDONLY)` blocks (e.g. `/dev/ttyS1` after `stty -clocal`).
+    /// The test proves the device blocks a PLAIN open first, so a pass
+    /// cannot come from a device that never blocked.
+    #[cfg(unix)]
+    #[test]
+    fn refut_resolve_target_refuses_a_blocking_character_device() {
+        let Ok(dev) = std::env::var("REFUT_BLOCKING_CHARDEV") else {
+            eprintln!("REFUT: skipped, REFUT_BLOCKING_CHARDEV unset");
+            return;
+        };
+        let dev = PathBuf::from(dev);
+
+        // Precondition: a PLAIN open really does block on this device.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let d2 = dev.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(File::open(&d2).map(|_| ()));
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)).is_err(),
+            "PRECONDITION FAILED: a plain open on {dev:?} did not block, so this test proves nothing"
+        );
+
+        // Positive control on the same binary/call/deadline.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let control = tmp.path().join("plain.txt");
+        fs::write(&control, "ordinary").expect("write control");
+        assert!(
+            resolve_within(&control, 5).expect("the control blocked").is_ok(),
+            "the control file must resolve"
+        );
+
+        let verdict = resolve_within(&dev, 5)
+            .expect("REFUTED: resolve_target blocked on a character device");
+        assert!(verdict.is_err(), "a character device is not a regular file");
+    }
+
+    /// O_NONBLOCK must not turn a legitimate regular file into a refusal
+    /// or a short read. 8 MiB, read back byte-for-byte.
+    #[cfg(unix)]
+    #[test]
+    fn refut_a_large_regular_file_still_reads_whole_under_o_nonblock() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let big = tmp.path().join("big.txt");
+        let body: String = "abcdefghijklmnopqrstuvwxyz0123456789\n".repeat(230_000);
+        fs::write(&big, &body).expect("write big");
+        let t = resolve_target(&big).expect("REFUTED: a large regular file was refused");
+        let got = t.read_to_string().expect("REFUTED: read failed under O_NONBLOCK");
+        assert_eq!(got.len(), body.len(), "short read under O_NONBLOCK");
+        assert_eq!(got, body, "corrupt read under O_NONBLOCK");
+    }
+
+    /// A regular file whose data arrives slowly (written by a concurrent
+    /// writer while the read is in flight) must not produce EAGAIN.
+    #[cfg(unix)]
+    #[test]
+    fn refut_a_slow_regular_file_is_not_spuriously_refused() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let slow = tmp.path().join("slow.txt");
+        fs::write(&slow, "seed\n").expect("seed");
+        let w = slow.clone();
+        let h = std::thread::spawn(move || {
+            use std::io::Write;
+            for i in 0..40 {
+                let mut f = fs::OpenOptions::new().append(true).open(&w).expect("append");
+                writeln!(f, "line {i}").expect("write");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let t = resolve_target(&slow).expect("REFUTED: a slow regular file was refused");
+        let got = t.read_to_string().expect("REFUTED: EAGAIN on a regular file");
+        h.join().expect("writer");
+        assert!(got.starts_with("seed"), "unexpected body: {got:?}");
+    }
+
+    /// TOCTOU: while a symlink flips between two fixed files, every
+    /// accepted resolution must bind the canonical NAME to the bytes that
+    /// name owns. A single mismatch is a live check-vs-use split.
+    #[cfg(unix)]
+    #[test]
+    fn refut_identity_binding_survives_a_live_symlink_flip() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        fs::write(root.join("a.txt"), "AAA").expect("a");
+        fs::write(root.join("b.txt"), "BBB").expect("b");
+        let link = root.join("link");
+        std::os::unix::fs::symlink(root.join("a.txt"), &link).expect("symlink");
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s2 = stop.clone();
+        let r2 = root.clone();
+        let flipper = std::thread::spawn(move || {
+            let link = r2.join("link");
+            let tmpl = r2.join(".link.tmp");
+            let mut on_a = true;
+            while !s2.load(std::sync::atomic::Ordering::Relaxed) {
+                let target = if on_a { r2.join("b.txt") } else { r2.join("a.txt") };
+                let _ = fs::remove_file(&tmpl);
+                if std::os::unix::fs::symlink(&target, &tmpl).is_ok() {
+                    let _ = fs::rename(&tmpl, &link);
+                }
+                on_a = !on_a;
+            }
+        });
+
+        let mut ok = 0usize;
+        let mut refused = 0usize;
+        let mut violations: Vec<String> = Vec::new();
+        for _ in 0..20_000 {
+            match resolve_target(&link) {
+                Ok(t) => {
+                    let name = t
+                        .canonical()
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let body = t.read_to_string().unwrap_or_default();
+                    let want = match name.as_str() {
+                        "a.txt" => "AAA",
+                        "b.txt" => "BBB",
+                        _ => "?",
+                    };
+                    if body != want {
+                        violations.push(format!("canonical={name} body={body:?}"));
+                    }
+                    ok += 1;
+                }
+                Err(_) => refused += 1,
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        flipper.join().expect("flipper");
+        eprintln!("REFUT toctou: ok={ok} refused={refused} violations={}", violations.len());
+        assert!(ok > 0, "PRECONDITION: no resolution ever succeeded");
+        assert!(
+            violations.is_empty(),
+            "REFUTED: canonical name bound to foreign bytes: {violations:?}"
+        );
+    }
 }
