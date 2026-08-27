@@ -132,54 +132,19 @@ const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
 /// the [`wcore_agent::plugins::PluginRunner`] pattern from Task 1.2.
 pub const CRASH_THRESHOLD: u8 = 3;
 
-/// Minimal env vars forwarded to subprocess plugin child processes after
-/// [`std::process::Command::env_clear`]. Everything else — including
-/// `OPENAI_API_KEY`, `WAYLAND_VAULT_*`, `ANTHROPIC_*`, etc. — is withheld
-/// (`WAYLAND_HOME` is an intentional exception below, forwarded so the child
-/// resolves the same isolated profile — C3; the vault secret stays withheld).
-/// Kept minimal: just enough for CLI tools to locate executables and
-/// behave correctly under different locales on every supported OS.
-///
-/// Windows entries are mandatory — without `SYSTEMROOT`/`WINDIR`/etc. the
-/// spawned child cannot initialise (CreateProcess returns
-/// `ERROR_ENVVAR_NOT_FOUND` / 0xcb, observed v0.8.6 round 17). Mirrors
-/// the same list in `wcore_mcp::transport::stdio::FORWARDED_ENV_VARS` and
-/// `wcore_plugin_subprocess::mcp_bridge::FORWARDED_ENV_VARS` — keep all
-/// three in sync when adding vars.
-pub(crate) const FORWARDED_ENV_VARS: &[&str] = &[
-    // Unix essentials
-    "PATH",
-    "HOME",
-    "USER",
-    "LANG",
-    "TZ",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LC_MESSAGES",
-    "LC_MONETARY",
-    "LC_NUMERIC",
-    "LC_TIME",
-    "TMPDIR",
-    // C3: the isolated-profile home. Engine-controlled children must resolve the
-    // SAME profile as the parent — without this they fall back to the default
-    // ~/.wayland (cross-profile leak). Non-secret path; the vault passphrase
-    // (WAYLAND_VAULT_*) is never forwarded.
-    "WAYLAND_HOME",
-    // Windows essentials
-    "SYSTEMROOT",
-    "WINDIR",
-    "COMSPEC",
-    "PATHEXT",
-    "PROCESSOR_ARCHITECTURE",
-    "USERPROFILE",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "PROGRAMFILES",
-    "PROGRAMFILES(X86)",
-    "PSMODULEPATH",
-    "TEMP",
-    "TMP",
-];
+// Minimal env vars forwarded to subprocess plugin child processes after
+// `Command::env_clear`. Everything else — including `OPENAI_API_KEY`,
+// `WAYLAND_VAULT_*`, `ANTHROPIC_*`, etc. — is withheld (`WAYLAND_HOME` is an
+// intentional exception, forwarded so the child resolves the same isolated
+// profile — C3; the vault secret stays withheld).
+//
+// #928: this was a hand-maintained copy of the MCP stdio allowlist, held in
+// step by a doc comment naming two sibling constants that no longer exist —
+// so nothing kept the two spawn paths together and nothing noticed when the
+// mandatory Windows entries went missing. It is now an alias for the one
+// shared list in `wcore_config::shell`; see that constant for why the Windows
+// entries are load-bearing.
+pub(crate) use wcore_config::shell::FORWARDED_ENVIRONMENT_VARIABLES as FORWARDED_ENV_VARS;
 
 /// v0.6.5 Task 3.3 — backoff schedule per restart attempt, indexed by the
 /// current strike count (1 → 100ms, 2 → 500ms, 3+ never restarts).
@@ -1141,6 +1106,14 @@ mod tests {
         assert!(FORWARDED_ENV_VARS.contains(&"LANG"));
         // C3 profile propagation.
         assert!(FORWARDED_ENV_VARS.contains(&"WAYLAND_HOME"));
+        // #928: the Windows entries are mandatory — a plugin child spawned
+        // without SYSTEMROOT/WINDIR never initialises (CreateProcess 0xcb).
+        for key in wcore_config::shell::MANDATORY_WINDOWS_CHILD_VARIABLES {
+            assert!(
+                FORWARDED_ENV_VARS.contains(key),
+                "{key} must stay in the forwarded allowlist"
+            );
+        }
     }
 
     /// Audit rel-panic-68/M-21: the stdout reader must NOT buffer an unbounded

@@ -38,6 +38,15 @@ Usage
 -----
     python3 scripts/flake-ledger.py --runs 10 --out ledger.json
     python3 scripts/flake-ledger.py --runs 10 --conditions isolated
+    python3 scripts/flake-ledger.py --runs 20 --conditions isolated \
+        --tests 'wcore-tools::wcore-tools::bash::tests::the_bash_timeout_bounds_the_secret_deny_walk'
+
+`DEFAULT_TARGETS` below is a DEFAULT, not a ceiling. `--tests` / `--targets-file`
+point the same instrument at any other set — which is what gh#1146 needed: the
+red arm it asks for (same tree, same box, N runs, retries off) could not be run
+against the three tests it names, because they were not in the hardcoded table
+and there was no way to add them. A triple that does not resolve grades NOTRUN
+through the existing presence check, never PASS.
 """
 
 from __future__ import annotations
@@ -140,6 +149,53 @@ class Row:
 
 def filterset(package: str, binary: str, test: str) -> str:
     return f"package({package}) and binary({binary}) and test(={test})"
+
+
+def parse_target_spec(spec: str) -> tuple[str, str, str]:
+    """`PKG::BINARY::TEST` -> the triple `DEFAULT_TARGETS` holds.
+
+    Split on the FIRST TWO separators only: a unit test inside a lib carries
+    its module path in the test name (`bash::tests::the_...`) and the lib's own
+    binary id is the package name, so the honest spelling of one is
+    `wcore-tools::wcore-tools::bash::tests::the_...` — five components, three
+    fields.
+
+    Refuses a two-component spec instead of guessing a binary. `package(x) and
+    binary(y)` with the wrong `y` selects nothing, and a filter that selects
+    nothing is graded NOTRUN, which reads like a platform-absent test rather
+    than like a typo.
+    """
+    parts = spec.split("::", 2)
+    if len(parts) != 3 or not all(p.strip() for p in parts):
+        raise ValueError(
+            f"target must be PKG::BINARY::TEST with three non-empty parts, got {spec!r}"
+        )
+    p, b, t = (part.strip() for part in parts)
+    return p, b, t
+
+
+def parse_targets(tests: list[str], targets_file: str) -> list[tuple[str, str, str]]:
+    """Every triple named on the command line, in order, deduplicated.
+
+    Empty return means "the caller supplied none", which is what selects
+    `DEFAULT_TARGETS`.
+    """
+    specs: list[str] = []
+    for chunk in tests:
+        specs += chunk.replace("\n", ",").split(",")
+    if targets_file:
+        with open(targets_file, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.split("#", 1)[0]
+                specs.append(line)
+    out: list[tuple[str, str, str]] = []
+    for spec in specs:
+        if not spec.strip():
+            continue
+        triple = parse_target_spec(spec)
+        if triple not in out:
+            out.append(triple)
+    return out
 
 
 def parse_summary(text: str) -> tuple[int, int, int] | None:
@@ -315,6 +371,65 @@ class Load:
             p.wait()
 
 
+def self_test() -> int:
+    """Prove the target parser before anyone measures with it.
+
+    A misparsed triple does not crash: it selects zero tests and grades NOTRUN,
+    which is indistinguishable from a platform-absent test. So the parser is
+    checked directly, in both directions.
+    """
+    import tempfile
+
+    failures: list[str] = []
+
+    def check(label: str, cond: bool) -> None:
+        if not cond:
+            failures.append(label)
+
+    check("plain triple", parse_target_spec("a::b::c") == ("a", "b", "c"))
+    check(
+        "module path stays in the test field",
+        parse_target_spec("wcore-tools::wcore-tools::bash::tests::x")
+        == ("wcore-tools", "wcore-tools", "bash::tests::x"),
+    )
+    for bad in ("a::b", "", "   ", "a::b::", "::b::c", "a::::c"):
+        try:
+            parse_target_spec(bad)
+        except ValueError:
+            pass
+        else:
+            failures.append(f"{bad!r} must be refused")
+
+    check(
+        "comma separated, order preserved",
+        parse_targets(["a::b::c, d::e::f"], "") == [("a", "b", "c"), ("d", "e", "f")],
+    )
+    check("repeatable", parse_targets(["a::b::c", "d::e::f"], "") == [("a", "b", "c"), ("d", "e", "f")])
+    check("deduplicated", parse_targets(["a::b::c", "a::b::c"], "") == [("a", "b", "c")])
+    check("empty selection falls back", parse_targets([], "") == [])
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "targets.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("# a comment\n\na::b::c   # trailing\n\nd::e::f\n")
+        check("targets-file", parse_targets([], path) == [("a", "b", "c"), ("d", "e", "f")])
+
+    # The spelling is the whole point: this exact string is what nextest is
+    # asked for, and a wrong one selects nothing and grades NOTRUN.
+    check(
+        "filterset spelling",
+        filterset("wcore-tools", "wcore-tools", "bash::tests::x")
+        == "package(wcore-tools) and binary(wcore-tools) and test(=bash::tests::x)",
+    )
+
+    if failures:
+        for f in failures:
+            print(f"SELF-TEST FAIL: {f}")
+        return 1
+    print("self-test OK: target parser, both directions")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=10)
@@ -329,16 +444,41 @@ def main() -> int:
     ap.add_argument("--load", type=int, default=0, help="busy workers for `loaded` (0 = num-cpus)")
     ap.add_argument("--out", default="flake-ledger.json")
     ap.add_argument("--logdir", default="")
+    ap.add_argument(
+        "--tests",
+        action="append",
+        default=[],
+        metavar="PKG::BINARY::TEST",
+        help="target triple(s); repeatable, or comma/newline separated. "
+        "Replaces DEFAULT_TARGETS when given.",
+    )
+    ap.add_argument(
+        "--targets-file",
+        default="",
+        help="file of PKG::BINARY::TEST lines; '#' comments and blanks ignored",
+    )
+    ap.add_argument("--self-test", action="store_true", help="check the parser and exit")
     args = ap.parse_args()
+
+    if args.self_test:
+        return self_test()
 
     conditions = [c.strip() for c in args.conditions.split(",") if c.strip()]
     load_workers = args.load or (os.cpu_count() or 4)
-    rows = [Row(f"{p}::{b} {t}", p, b, t) for (p, b, t) in DEFAULT_TARGETS]
+    try:
+        selected = parse_targets(args.tests, args.targets_file)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    source = "--tests/--targets-file" if selected else "DEFAULT_TARGETS"
+    targets = selected or DEFAULT_TARGETS
+    rows = [Row(f"{p}::{b} {t}", p, b, t) for (p, b, t) in targets]
     if args.logdir:
         os.makedirs(args.logdir, exist_ok=True)
 
     print(f"host={platform.node()} os={platform.system()} {platform.release()}")
     print(f"cpus={os.cpu_count()} profile={args.profile} runs={args.runs} retries=0")
+    print(f"targets={len(targets)} source={source}")
     print(f"conditions={conditions} load_workers={load_workers}")
     print("", flush=True)
 

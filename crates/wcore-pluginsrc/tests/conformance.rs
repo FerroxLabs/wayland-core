@@ -21,6 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use wcore_pluginsrc::claude_code::ClaudeCodeAdapter;
+use wcore_pluginsrc::codex::CodexAdapter;
 use wcore_pluginsrc::model::{SourceEntry, SourceKind};
 use wcore_pluginsrc::{InstallPlan, PluginFormatAdapter};
 
@@ -36,12 +37,23 @@ fn entry(name: &str) -> SourceEntry {
         strict: true,
         declared_version: None,
         description: None,
+        unsupported: Vec::new(),
     }
 }
 
 /// Lower a fixture dir and produce the normalized plan JSON.
 fn plan_json(marketplace: &str, plugin: &str, root: &Path) -> String {
-    let draft = ClaudeCodeAdapter
+    plan_json_with(&ClaudeCodeAdapter, marketplace, plugin, root)
+}
+
+/// Same, for a corpus case whose fixture is in a non-Claude-Code format.
+fn plan_json_with(
+    adapter: &dyn PluginFormatAdapter,
+    marketplace: &str,
+    plugin: &str,
+    root: &Path,
+) -> String {
+    let draft = adapter
         .lower(marketplace, &entry(plugin), root)
         .expect("lowering must succeed");
     // store_path is overridden in normalize, so its value here is irrelevant.
@@ -157,6 +169,35 @@ fn build_http_mcp_with_injection(root: &Path) {
     );
 }
 
+/// Codex shape: declared skills + commands + stdio MCP, plus the three
+/// surfaces Wayland cannot honor (hooks, apps/connectors, interface). Freezes
+/// the foreign-format lowering AND the lossy report that rides the consent
+/// surface, so drift in either is a corpus diff rather than a silent parity
+/// claim.
+fn build_codex_full(root: &Path) {
+    w(
+        &root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"codekit","version":"3.1.0","description":"codex sample",
+             "skills":"./extra-skills","commands":["./cmds"],
+             "mcpServers":{"idx":{"command":"node","args":["idx.js"],"cwd":"./srv"}},
+             "hooks":{"PreToolUse":[{"command":"./h.sh"}]},
+             "apps":"./connectors.app.json","interface":{"theme":"dark"}}"#,
+    );
+    w(
+        &root.join("skills/lookup/SKILL.md"),
+        "---\nname: lookup\ndescription: default-root skill\n---\nLook it up.",
+    );
+    w(
+        &root.join("extra-skills/index/SKILL.md"),
+        "---\nname: index\ndescription: declared-root skill\n---\nIndex it.",
+    );
+    w(&root.join("cmds/reindex.md"), "Reindex the workspace.");
+    w(
+        &root.join("connectors.app.json"),
+        r#"{"apps":{"drive":{"id":"google-drive"}}}"#,
+    );
+}
+
 // --- Tests ----------------------------------------------------------------
 
 #[test]
@@ -183,5 +224,15 @@ fn conformance_http_mcp_with_injection() {
     check(
         "http_mcp_with_injection",
         &plan_json("acme", "paykit", tmp.path()),
+    );
+}
+
+#[test]
+fn conformance_codex_full() {
+    let tmp = tempfile::tempdir().unwrap();
+    build_codex_full(tmp.path());
+    check(
+        "codex_full",
+        &plan_json_with(&CodexAdapter, "acme", "codekit", tmp.path()),
     );
 }

@@ -185,6 +185,7 @@ fn golden_provider_circuit_event_closed_w7() {
 fn golden_provider_attempt() {
     let failed = ProtocolEvent::ProviderAttempt {
         failure: Some("http_503".into()),
+        attempt: 2,
     };
     let got = serde_json::to_value(&failed).unwrap();
     assert_eq!(
@@ -192,19 +193,28 @@ fn golden_provider_attempt() {
         json!({
             "type": "provider_attempt",
         "failure": "http_503",
+        "attempt": 2,
         })
     );
 
-    let success = ProtocolEvent::ProviderAttempt { failure: None };
+    let success = ProtocolEvent::ProviderAttempt {
+        failure: None,
+        attempt: 1,
+    };
     let got = serde_json::to_value(&success).unwrap();
     assert!(got.get("failure").is_none());
+    // #372: the ordinal is NOT skipped on a clean attempt. A host counting
+    // physical sends reads it from every frame or from none.
+    assert_eq!(got["attempt"], 1);
 
     let retry = ProtocolEvent::ProviderRetry {
         failure: Some("http_503".into()),
+        retry: 3,
     };
     let got = serde_json::to_value(&retry).unwrap();
     assert_eq!(got["type"], "provider_retry");
     assert_eq!(got["failure"], "http_503");
+    assert_eq!(got["retry"], 3);
 
     let failure = ProtocolEvent::ProviderFailure {
         failure: "stream_truncated".into(),

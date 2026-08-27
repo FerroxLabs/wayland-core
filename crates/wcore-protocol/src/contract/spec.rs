@@ -27,7 +27,7 @@ use crate::events::{
     OperatorResolutionEvidence, OperatorResolutionEvidenceSource, OperatorToolEffectOutcome,
     OperatorToolEffectResolution, OutputType, ProtocolEvent, RecoveryBudgetSnapshot,
     RecoveryCursor, RecoveryLifecycle, RecoveryReconcileReason, RecoveryReplayItem,
-    RecoveryReplayKind, RecoveryTurnSnapshot, RecoveryUnavailableReason, RenderMime,
+    RecoveryReplayKind, RecoveryTurnSnapshot, RecoveryUnavailableReason, RenderMime, RouteInfo,
     SessionPersistence, ToolCategory, ToolInfo, ToolStatus, TurnCost, Usage,
     WorkflowChildTerminalState, WorkflowNodeState, WorkflowTerminalState,
 };
@@ -799,22 +799,24 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "semantic_failover_receipts"
     ),
     // One physical provider request attempt. `failure` is absent on a clean
-    // attempt, so nothing beyond the discriminator is required.
+    // attempt; `attempt` is present on every one (#372), so it is required.
     wire!(
         "provider_attempt",
         "events/provider_attempt.json",
-        [],
+        ["attempt"],
         Observational,
         "session",
         "available"
     ),
     // A scheduled retry decision. Deliberately a separate variant from
     // `provider_attempt` so a host counting physical attempts never
-    // double-counts a decision.
+    // double-counts a decision. `retry` (#372) is the ordinal within the turn
+    // and is always present, so a host never has to derive the count by
+    // counting frames it may not have received.
     wire!(
         "provider_retry",
         "events/provider_retry.json",
-        [],
+        ["retry"],
         Observational,
         "session",
         "available"
@@ -825,6 +827,16 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "provider_failure",
         "events/provider_failure.json",
         ["failure"],
+        Observational,
+        "session",
+        "available"
+    ),
+    // #372 route diagnostics. Observational: a host reads it to label a step
+    // local or cloud and to show the endpoint. `base_url` arrives scrubbed.
+    wire!(
+        "route_info",
+        "events/route_info.json",
+        ["route"],
         Observational,
         "session",
         "available"
@@ -1249,6 +1261,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "provider_attempt",
     "provider_retry",
     "provider_failure",
+    "route_info",
     "mid_flight_monitor_decision",
     "approval_required",
     "suspend",
@@ -2128,6 +2141,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 body: "The run completed.".into(),
                 subject: Some("Wayland update".into()),
                 conversation_id: Some("session-desktop-001".into()),
+                idempotency_key: Some("tool-effect-0001".into()),
             },
         ),
         (
@@ -2203,6 +2217,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             ProtocolEvent::McpReady {
                 name: "desktop-tools".into(),
                 tools: vec!["search".into(), "fetch".into()],
+                already_connected: true,
             },
         ),
         (
@@ -2374,12 +2389,15 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
         ("events/pong.json".into(), ProtocolEvent::Pong),
         // `failure` is optional on both attempt and retry: a clean attempt
         // carries none. The fixtures populate it so the published schema
-        // describes the field a host has to read, and `required` stays at the
-        // discriminator alone so a clean attempt still validates.
+        // describes the field a host has to read, and `failure` stays out of
+        // `required` so a clean attempt still validates. #372's ordinals are
+        // NOT optional — the fixtures carry a value past 1 so the published
+        // schema cannot be read as a constant.
         (
             "events/provider_attempt.json".into(),
             ProtocolEvent::ProviderAttempt {
                 failure: Some("http_503".into()),
+                attempt: 2,
             },
         ),
         (
@@ -2388,10 +2406,24 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 failure: "stream_truncated".into(),
             },
         ),
+        // #372: the fixture deliberately uses a local endpoint, which is the
+        // route the reporter could not identify from the wire.
+        (
+            "events/route_info.json".into(),
+            ProtocolEvent::RouteInfo {
+                route: RouteInfo::from_endpoint(
+                    0,
+                    "openai",
+                    "qwen3:8b",
+                    Some("http://127.0.0.1:11434/v1"),
+                ),
+            },
+        ),
         (
             "events/provider_retry.json".into(),
             ProtocolEvent::ProviderRetry {
                 failure: Some("timeout".into()),
+                retry: 1,
             },
         ),
         (
@@ -2751,6 +2783,7 @@ pub fn compatibility_event_values() -> BTreeMap<String, ProtocolEvent> {
                 body: "hello".into(),
                 subject: None,
                 conversation_id: None,
+                idempotency_key: None,
             },
         ),
         (

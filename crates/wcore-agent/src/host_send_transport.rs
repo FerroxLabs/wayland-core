@@ -249,9 +249,17 @@ impl HostDelegatedTransport {
     }
 }
 
-#[async_trait]
-impl MessageTransport for HostDelegatedTransport {
-    async fn send(&self, target: &ParsedTarget, message: &str) -> SendOutcome {
+impl HostDelegatedTransport {
+    /// The one delegated-send body. `send` and `send_keyed` differ ONLY in
+    /// the `idempotency_key` they pass, so the unkeyed path stays
+    /// byte-identical and no second copy of the throttle / register-before-
+    /// emit / timeout discipline can drift away from this one.
+    async fn dispatch(
+        &self,
+        target: &ParsedTarget,
+        message: &str,
+        idempotency_key: Option<&str>,
+    ) -> SendOutcome {
         // wayland#585 — throttle the tool seam per conversation. Keyed on the
         // platform token plus the chat id, joined by an ASCII unit separator
         // so no platform / conversation pair can alias another. Checked here,
@@ -311,6 +319,12 @@ impl MessageTransport for HostDelegatedTransport {
             message,
             None, // subject: no subject input on the send_message schema today
             None, // conversation_id: session id not threaded to transports
+            // F13 (#889): the durable key rides to the HOST, which performs
+            // the delivery here. Without it a crash-resume re-dispatch of one
+            // interrupted send is indistinguishable at the host from a second
+            // send the user asked for, and `call_id` cannot stand in - it is
+            // minted fresh per request just above.
+            idempotency_key,
         );
         match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(result)) => {
@@ -357,6 +371,32 @@ impl MessageTransport for HostDelegatedTransport {
     }
 }
 
+#[async_trait]
+impl MessageTransport for HostDelegatedTransport {
+    async fn send(&self, target: &ParsedTarget, message: &str) -> SendOutcome {
+        self.dispatch(target, message, None).await
+    }
+
+    /// F13 (#889): forward the session journal's durable idempotency key into
+    /// the `host_send_message_request` frame.
+    ///
+    /// The engine owns no channel credentials on this path - the HOST performs
+    /// the delivery - so the key must cross the protocol boundary or it cannot
+    /// reach the destination at all. Inheriting the trait default here would
+    /// leave every desktop send unkeyed while the standalone
+    /// `ChannelManagerTransport` carried one, which is the asymmetry this
+    /// closes. Whether the host honours the key is the host's contract; the
+    /// engine's obligation is to offer it.
+    async fn send_keyed(
+        &self,
+        target: &ParsedTarget,
+        message: &str,
+        idempotency_key: Option<&str>,
+    ) -> SendOutcome {
+        self.dispatch(target, message, idempotency_key).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,8 +405,15 @@ mod tests {
     use wcore_tools::send_message::MessagingPlatform;
 
     /// One captured request frame:
-    /// `(call_id, platform, chat_id, thread_id, body)`.
-    type CapturedRequest = (String, String, Option<String>, Option<String>, String);
+    /// `(call_id, platform, chat_id, thread_id, body, idempotency_key)`.
+    type CapturedRequest = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+    );
 
     /// Capturing sink that records every host-send request frame.
     #[derive(Default)]
@@ -402,6 +449,7 @@ mod tests {
             body: &str,
             _subject: Option<&str>,
             _conversation_id: Option<&str>,
+            idempotency_key: Option<&str>,
         ) {
             if let Ok(mut v) = self.requests.lock() {
                 v.push((
@@ -410,6 +458,7 @@ mod tests {
                     chat_id.map(str::to_string),
                     thread_id.map(str::to_string),
                     body.to_string(),
+                    idempotency_key.map(str::to_string),
                 ));
             }
         }
@@ -452,6 +501,7 @@ mod tests {
             _body: &str,
             _subject: Option<&str>,
             _conversation_id: Option<&str>,
+            _idempotency_key: Option<&str>,
         ) {
             let resolved = self.bridge.resolve(
                 call_id,
@@ -541,7 +591,7 @@ mod tests {
         };
         assert!(outcome.is_none(), "send must park awaiting the host");
 
-        let (call_id, platform, chat_id, thread_id, body) = {
+        let (call_id, platform, chat_id, thread_id, body, _key) = {
             let reqs = sink.requests.lock().unwrap();
             assert_eq!(reqs.len(), 1, "exactly one request frame");
             reqs[0].clone()
@@ -807,6 +857,7 @@ mod tests {
             _body: &str,
             _subject: Option<&str>,
             _conversation_id: Option<&str>,
+            _idempotency_key: Option<&str>,
         ) {
             if let Ok(mut v) = self.delivered.lock() {
                 v.push(format!("{platform}\u{1f}{}", chat_id.unwrap_or_default()));
@@ -1011,5 +1062,83 @@ mod tests {
             1,
             "the fresh transport's send must reach the host"
         );
+    }
+    // ── F13 (#889): the durable idempotency key reaches the HOST ──────────
+    //
+    // Under host delegation the engine owns no channel credentials: the host
+    // performs the delivery. So the ONLY way the session journal's durable key
+    // can reach the destination is across the `host_send_message_request`
+    // frame. Before this pair `HostDelegatedTransport` inherited the defaulted
+    // `MessageTransport::send_keyed`, which drops its key and calls `send`, so
+    // every desktop send went out unkeyed while the standalone
+    // `ChannelManagerTransport` carried one.
+    //
+    // The two arms are a matched pair and BOTH must stay green. The positive
+    // arm alone would also pass against a transport that fabricated a key on
+    // every frame (a constant, or the `call_id`, which differs per re-dispatch
+    // and would therefore never suppress a duplicate); the negative arm is
+    // what forbids that, by pinning that a send with no durable identity puts
+    // NOTHING on the wire.
+
+    /// Positive arm: `send_keyed` puts the caller's key in the emitted frame,
+    /// verbatim, alongside the unchanged target/body fields.
+    #[tokio::test]
+    async fn a_keyed_delegated_send_carries_the_key_to_the_host() {
+        let bridge = Arc::new(HostSendBridge::new());
+        let sink = Arc::new(CaptureSink::default());
+        let transport = HostDelegatedTransport::new(Arc::clone(&bridge), sink.clone())
+            .with_timeout(Duration::from_millis(50));
+
+        let outcome = transport
+            .send_keyed(&email_target(), "body text", Some("tool-effect-42"))
+            .await;
+        // The host never answers, so this times out — the frame is what is
+        // under test, not the reply path (covered by the tests above).
+        assert!(matches!(outcome, SendOutcome::Err { .. }));
+
+        let reqs = sink.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 1, "exactly one request frame");
+        let (call_id, platform, _chat_id, _thread_id, body, key) = reqs[0].clone();
+        assert_eq!(
+            key.as_deref(),
+            Some("tool-effect-42"),
+            "the durable idempotency key must ride the host_send_message_request frame"
+        );
+        assert_ne!(
+            key.as_deref(),
+            Some(call_id.as_str()),
+            "the key must be the journal's durable identity, not the per-request call_id"
+        );
+        // The rest of the frame is untouched by the keyed path.
+        assert_eq!(platform, "email");
+        assert_eq!(body, "body text");
+    }
+
+    /// Negative arm: a send with no durable identity emits NO key. This is
+    /// what keeps the positive arm honest — a fabricated or defaulted key
+    /// would show up here.
+    #[tokio::test]
+    async fn an_unkeyed_delegated_send_carries_no_key_to_the_host() {
+        let bridge = Arc::new(HostSendBridge::new());
+        let sink = Arc::new(CaptureSink::default());
+        let transport = HostDelegatedTransport::new(Arc::clone(&bridge), sink.clone())
+            .with_timeout(Duration::from_millis(50));
+
+        // Both the plain `send` and an explicitly key-less `send_keyed` are
+        // the no-identity case, and neither may invent one.
+        let _ = transport.send(&email_target(), "unkeyed").await;
+        let _ = transport
+            .send_keyed(&email_target(), "also unkeyed", None)
+            .await;
+
+        let reqs = sink.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 2, "both sends must reach the host");
+        for (i, req) in reqs.iter().enumerate() {
+            assert!(
+                req.5.is_none(),
+                "frame {i} must carry no idempotency_key, got {:?}",
+                req.5
+            );
+        }
     }
 }

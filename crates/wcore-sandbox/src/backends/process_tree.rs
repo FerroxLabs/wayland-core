@@ -241,6 +241,69 @@ fn terminate_process_tree(
     }
 }
 
+/// What one raw `read` return means to a parked process-group sentinel.
+///
+/// Deliberately NOT gated on a single target. The parked loops that consume
+/// it are per-platform, but the RULE is the whole defect, so it is compiled
+/// and tested on every Unix host rather than only on the leg that fails.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // per-target: consumed by the Linux and macOS sentinels.
+enum SentinelPark {
+    /// Stay in the group and keep pinning this process-group generation.
+    KeepParked,
+    /// The channel is really gone: leave the group and exit.
+    Release,
+}
+
+/// Decide whether a sentinel may stop pinning its process group.
+///
+/// # The defect this exists to name (FerroxLabs/wayland#1054)
+///
+/// A sentinel parks in a blocking `read` on its end of the socketpair and is
+/// meant to leave only when the parent drops the channel. Both loops were
+/// written `while read(..) > 0 {}`, which releases on EVERY non-positive
+/// return — including `-1`/`EINTR`, which is not the channel closing but this
+/// process failing to stay asleep. The macOS PARENT loop already treats an
+/// interrupted read as the absence of a report and says so at length; the
+/// forked children did not, and that asymmetry is the bug.
+///
+/// An interrupted park is not harmless in either direction:
+///
+/// * On macOS the released sentinel `_exit`s into an UNREAPED zombie, and the
+///   very next probe — `MacProcessIdentity::open(sentinel_pid)`, the one
+///   probe left in `attach_with_hook` that propagates a raw errno — answers
+///   `ESRCH` for a zombie. That escapes as `failed to establish process-tree
+///   containment: No such process (os error 3)` for a workload that had
+///   already run to completion. Measured on `CI (macos-latest)` job
+///   97087919091 (head `ae389c3e`, which already contains the entry-probe
+///   repair 22edff93): a swarm `git` capture failed that way, the delegated
+///   child never took its provider turn, and the f21_02_01 anti-vacuity guard
+///   fired against an innocent product.
+/// * On Linux it is silent and worse: `/proc/<pid>/stat` survives a zombie,
+///   so `still_matches` keeps answering `Same` and `signal_group` keeps
+///   addressing a group whose generation nothing pins any more — the exact
+///   numeric PGID-reuse race the sentinel exists to prevent.
+///
+/// Staying parked is therefore the fail-CLOSED direction.
+#[cfg(unix)]
+#[allow(dead_code)] // per-target: called by the Linux and macOS sentinels.
+fn sentinel_park_decision(read: isize, errno: libc::c_int) -> SentinelPark {
+    // A byte arrived. Nobody writes to this channel in production, but a
+    // wakeup carrying data is still not the channel closing.
+    if read > 0 {
+        return SentinelPark::KeepParked;
+    }
+    // Interrupted before the channel said anything: the absence of a report,
+    // not a report of EOF.
+    if read < 0 && errno == libc::EINTR {
+        return SentinelPark::KeepParked;
+    }
+    // `read == 0` is a genuine EOF (the parent dropped the channel); any
+    // other errno is a genuine failure. Both mean the pin is over.
+    SentinelPark::Release
+}
+
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug)]
 struct MacProcessIdentity {
@@ -373,9 +436,21 @@ impl MacProcessGroupAuthority {
                 // the final atomic SIGKILL.
                 libc::signal(libc::SIGTERM, libc::SIG_IGN);
                 let ready = if joined { 1_u8 } else { 0_u8 };
+                // A 1-byte write into an empty socketpair cannot block, so it
+                // cannot be interrupted before transferring. Only the park
+                // below blocks, and only it can be interrupted.
                 libc::write(sockets[1], (&ready as *const u8).cast(), 1);
                 let mut byte = 0_u8;
-                while libc::read(sockets[1], (&mut byte as *mut u8).cast(), 1) > 0 {}
+                loop {
+                    let read = libc::read(sockets[1], (&mut byte as *mut u8).cast(), 1);
+                    // `__error()` is the raw errno slot: no allocation and no
+                    // locks, so reading it stays async-signal-safe in a forked
+                    // child of a multithreaded process.
+                    if sentinel_park_decision(read, *libc::__error()) == SentinelPark::KeepParked {
+                        continue;
+                    }
+                    break;
+                }
                 libc::_exit(if joined { 0 } else { 1 });
             }
         }
@@ -686,6 +761,52 @@ fn macos_process_group(pid: libc::pid_t) -> std::io::Result<libc::pid_t> {
     }
 }
 
+#[cfg(all(test, unix))]
+mod sentinel_park_tests {
+    use super::{SentinelPark, sentinel_park_decision};
+
+    /// The wayland#1054 arm. One interrupted park read must NOT read as the
+    /// channel closing: the released sentinel stops pinning its process-group
+    /// generation, and on Darwin the resulting zombie makes the sentinel
+    /// probe answer ESRCH — which escapes as `failed to establish
+    /// process-tree containment: No such process`.
+    #[test]
+    fn an_interrupted_park_read_never_releases_the_sentinel() {
+        assert_eq!(
+            sentinel_park_decision(-1, libc::EINTR),
+            SentinelPark::KeepParked,
+            "EINTR is this process failing to stay asleep, not the parent dropping the \
+             channel; releasing on it un-pins the process-group generation"
+        );
+    }
+
+    /// The boundary that keeps the rule above from being satisfied by a
+    /// decision stuck on `KeepParked`, which would park every sentinel
+    /// forever and leak one process per contained command.
+    #[test]
+    fn a_closed_channel_or_a_real_error_still_releases_the_sentinel() {
+        assert_eq!(
+            sentinel_park_decision(0, 0),
+            SentinelPark::Release,
+            "EOF is the parent dropping the channel: the pin is over"
+        );
+        assert_eq!(
+            sentinel_park_decision(-1, libc::EBADF),
+            SentinelPark::Release,
+            "a non-EINTR errno is a real failure, not an interruption"
+        );
+    }
+
+    #[test]
+    fn a_byte_on_the_channel_keeps_the_sentinel_parked() {
+        assert_eq!(
+            sentinel_park_decision(1, 0),
+            SentinelPark::KeepParked,
+            "a wakeup carrying data is not the channel closing"
+        );
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod macos_tests {
     use super::*;
@@ -912,6 +1033,42 @@ mod macos_tests {
             .expect("the attached authority must be able to signal its own group");
     }
 
+    /// The Darwin twin of
+    /// `linux_tests::a_signalled_sentinel_keeps_pinning_its_process_group`,
+    /// and the leg wayland#1054 was measured on. Here the released sentinel
+    /// is not merely un-pinning: `MacProcessIdentity::open(sentinel_pid)`
+    /// answers ESRCH for the zombie, which is the raw errno that reaches the
+    /// user as `failed to establish process-tree containment: No such process
+    /// (os error 3)`.
+    #[test]
+    fn a_signalled_sentinel_keeps_pinning_its_process_group() {
+        super::install_interrupting_handler();
+
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        isolate_std(&mut command);
+        let mut child = command.spawn().expect("spawn fixture");
+        let process_group = child.id() as libc::pid_t;
+        let authority = MacProcessGroupAuthority::attach(process_group)
+            .expect("attach sentinel")
+            .expect("a live root means there IS a group to own");
+
+        let exited =
+            super::sentinel_exit_after_group_signals(process_group, authority.sentinel.pid);
+        assert!(
+            exited.is_none(),
+            "the sentinel left its process group after a group signal (wait status {exited:?}); \
+             the next MacProcessIdentity::open of that zombie answers ESRCH, which is exactly \
+             the containment failure wayland#1054 reports"
+        );
+
+        authority
+            .signal_group(libc::SIGKILL)
+            .expect("a still-parked sentinel must keep the authority usable");
+        drop(authority);
+        child.wait().expect("reap fixture");
+    }
+
     /// The kernel fact the whole sentinel argument rests on.
     ///
     /// If Apple ever lets a process join a process group that no longer has
@@ -1075,7 +1232,17 @@ impl LinuxProcessGroupAuthority {
                 let ready = if joined { 1_u8 } else { 0_u8 };
                 libc::write(sockets[1], (&ready as *const u8).cast(), 1);
                 let mut byte = 0_u8;
-                while libc::read(sockets[1], (&mut byte as *mut u8).cast(), 1) > 0 {}
+                loop {
+                    let read = libc::read(sockets[1], (&mut byte as *mut u8).cast(), 1);
+                    // See `sentinel_park_decision`: an interrupted park is not
+                    // the parent dropping the channel.
+                    if sentinel_park_decision(read, *libc::__errno_location())
+                        == SentinelPark::KeepParked
+                    {
+                        continue;
+                    }
+                    break;
+                }
                 libc::_exit(if joined { 0 } else { 1 });
             }
         }
@@ -1242,6 +1409,43 @@ mod linux_tests {
         child.wait().expect("reap fixture");
     }
 
+    /// A signal aimed at the workload's process group must not release the
+    /// parked sentinel (FerroxLabs/wayland#1054).
+    ///
+    /// The sentinel joins the WORKLOAD's group, so every group-wide signal
+    /// reaches it. With the park written `while read(..) > 0 {}`, the first
+    /// EINTR ended it. Here that is silent — `/proc` answers for a zombie, so
+    /// `still_matches` stays `Same` — and containment quietly degrades to an
+    /// unpinned `kill(-pgid)`. On Darwin the identical release is loud: the
+    /// zombie sentinel answers ESRCH and the capture fails outright.
+    #[test]
+    fn a_signalled_sentinel_keeps_pinning_its_process_group() {
+        super::install_interrupting_handler();
+
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        isolate_std(&mut command);
+        let mut child = command.spawn().expect("spawn fixture");
+        let process_group = child.id() as libc::pid_t;
+        let root = LinuxProcessIdentity::open(child.id()).expect("open root");
+        let authority = LinuxProcessGroupAuthority::attach(&root).expect("attach sentinel");
+
+        let exited =
+            super::sentinel_exit_after_group_signals(process_group, authority.sentinel.pid);
+        assert!(
+            exited.is_none(),
+            "the sentinel left its process group after a group signal (wait status {exited:?}); \
+             it no longer pins the generation, so signal_group can address a recycled PGID, and \
+             on Darwin the same exit answers ESRCH from the sentinel probe and fails the capture"
+        );
+
+        authority
+            .signal_group(libc::SIGKILL)
+            .expect("a still-parked sentinel must keep the authority usable");
+        drop(authority);
+        child.wait().expect("reap fixture");
+    }
+
     /// Required Linux live acceptance: the owned process tree — including a
     /// descendant — is reaped by terminal teardown BEFORE workspace cleanup
     /// runs. Fails if a descendant survives teardown.
@@ -1249,6 +1453,60 @@ mod linux_tests {
     fn required_live_descendant_teardown_before_workspace_cleanup() {
         super::assert_descendant_teardown_before_workspace_cleanup();
     }
+}
+
+/// Install a SIGWINCH handler that INTERRUPTS blocking syscalls, then report
+/// the group-wide signal a test can use to interrupt a parked sentinel.
+///
+/// `sa_flags = 0` is the whole point: `signal(3)` on glibc sets `SA_RESTART`,
+/// which resumes the `read` and would make the fixture prove nothing.
+#[cfg(all(test, unix))]
+fn install_interrupting_handler() {
+    extern "C" fn absorb(_signal: libc::c_int) {}
+    let handler: extern "C" fn(libc::c_int) = absorb;
+    // SAFETY: a zeroed `sigaction` with an empty mask and no flags is valid,
+    // and `absorb` is async-signal-safe.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = handler as libc::sighandler_t;
+        libc::sigemptyset(&mut action.sa_mask);
+        action.sa_flags = 0;
+        assert_eq!(
+            libc::sigaction(libc::SIGWINCH, &action, std::ptr::null_mut()),
+            0,
+            "install the interrupting handler the forked sentinel inherits"
+        );
+    }
+}
+
+/// Signal `process_group` repeatedly, then answer whether OUR sentinel child
+/// left. `None` means it stayed parked.
+///
+/// Bounded polling rather than a single check: a park that fell out of its
+/// loop reaches `_exit` in microseconds, so half a second is five orders of
+/// magnitude of headroom, and polling is what makes the FAILING direction
+/// reliable instead of a scheduling coin flip.
+#[cfg(all(test, unix))]
+fn sentinel_exit_after_group_signals(
+    process_group: libc::pid_t,
+    sentinel_pid: libc::pid_t,
+) -> Option<libc::c_int> {
+    for _ in 0..8 {
+        // SAFETY: a negative pid addresses the captured group only.
+        unsafe {
+            libc::kill(-process_group, libc::SIGWINCH);
+        }
+    }
+    for _ in 0..50 {
+        let mut status = 0;
+        // SAFETY: `status` is writable and WNOHANG never blocks.
+        let seen = unsafe { libc::waitpid(sentinel_pid, &mut status, libc::WNOHANG) };
+        if seen == sentinel_pid {
+            return Some(status);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    None
 }
 
 /// Spawn an owned tree with a backgrounded descendant, tear the tree down, and

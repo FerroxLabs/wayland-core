@@ -160,6 +160,74 @@ fn bare_api_key_is_honoured_when_explicitly_opted_in() {
     );
 }
 
+/// The opt-in must fail CLOSED for every non-affirmative value, not merely when
+/// it is unset.
+///
+/// [`bare_api_key_is_not_adopted_as_a_provider_credential`] above only ever
+/// exercises the UNSET case, so it survives the two most likely wrong rewrites
+/// of the gate: `std::env::var(ALLOW_BARE_API_KEY_ENV).is_ok()` and
+/// `!value.is_empty()`. Under either of those, an operator who writes
+/// `WAYLAND_ALLOW_BARE_API_KEY=0` in order to turn the bare key OFF turns it
+/// ON, and a generic `API_KEY` exported for an unrelated service is adopted as
+/// this provider's credential and sent to the configured endpoint. That is the
+/// disclosure path #685 closed, so the refusal is asserted value by value
+/// rather than only for the absent variable.
+///
+/// Asserted in BOTH directions: a gate that refused everything would pass a
+/// one-directional test while silently deleting a documented input
+/// (`docs/getting-started.md`, "API Key Resolution Order").
+#[test]
+#[serial(f685_credential_off_state)]
+fn the_bare_api_key_opt_in_fails_closed_on_non_affirmative_values() {
+    /// Not an explicit yes. Every one of these must leave the bare `API_KEY`
+    /// ignored, including the two an operator reaches for to disable it.
+    const REFUSED: &[&str] = &[
+        "0", "false", "FALSE", "no", "off", "", "   ", "2", "onn", "true-ish", "yesno", "null",
+        "disabled",
+    ];
+    /// An explicit yes. The gate trims and lowercases, so the accepted set is
+    /// asserted in the spellings a real shell and a real CI file produce.
+    const ACCEPTED: &[&str] = &["1", "true", "TRUE", "True", "yes", "YES", "on", " on "];
+
+    for value in REFUSED {
+        let (_home, project, mut env) = fixture("");
+        env.set("API_KEY", BARE_ENV_KEY);
+        env.set("WAYLAND_ALLOW_BARE_API_KEY", value);
+
+        match Config::resolve(&cli(project.path())) {
+            Ok(config) => panic!(
+                "WAYLAND_ALLOW_BARE_API_KEY={value:?} is not an affirmative opt-in, yet the \
+                 bare API_KEY was adopted as the anthropic credential (resolved a key of \
+                 len {}). The gate must fail closed on anything that is not an explicit yes.",
+                config.api_key.len()
+            ),
+            Err(err) => assert!(
+                err.to_string().contains("No API key found"),
+                "WAYLAND_ALLOW_BARE_API_KEY={value:?}: expected the missing-credential \
+                 refusal, got: {err}"
+            ),
+        }
+    }
+
+    for value in ACCEPTED {
+        let (_home, project, mut env) = fixture("");
+        env.set("API_KEY", BARE_ENV_KEY);
+        env.set("WAYLAND_ALLOW_BARE_API_KEY", value);
+
+        let config = Config::resolve(&cli(project.path())).unwrap_or_else(|err| {
+            panic!(
+                "WAYLAND_ALLOW_BARE_API_KEY={value:?} IS an affirmative opt-in, yet the \
+                 documented bare API_KEY was refused: {err}"
+            )
+        });
+        assert_eq!(
+            config.api_key, BARE_ENV_KEY,
+            "WAYLAND_ALLOW_BARE_API_KEY={value:?} resolved a credential that is not the \
+             bare API_KEY"
+        );
+    }
+}
+
 // ── 2. The OFF state ─────────────────────────────────────────────────────────
 
 const DISABLED: &str = "[providers.anthropic]\nenabled = false\n";

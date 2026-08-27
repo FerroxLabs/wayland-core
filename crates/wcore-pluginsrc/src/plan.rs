@@ -85,13 +85,34 @@ impl InstallPlan {
         let spawns = draft.mcp_servers.iter().map(spawn_preview).collect();
         let grade = draft.effective_grade();
 
+        // v1 commits a single `[mcp_server]` and grants a single spawn-consent
+        // key, so every server after the first is declared-but-not-installed.
+        // Report it HERE, format-blind, rather than in each adapter: the plan
+        // is the consent surface, and a plugin that ships three servers and
+        // gets one must not read as parity.
+        let mut ignored = draft.ignored.clone();
+        if draft.mcp_servers.len() > 1 {
+            let dropped: Vec<&str> = draft.mcp_servers[1..]
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect();
+            ignored.push(IgnoredFeature {
+                kind: "mcp-extra-servers".to_string(),
+                detail: format!(
+                    "only the first MCP server ({}) is installed; not installed: {}",
+                    draft.mcp_servers[0].name,
+                    dropped.join(", ")
+                ),
+            });
+        }
+
         Self {
             marketplace: marketplace.to_string(),
             plugin: draft.name.clone(),
             resolved_version: draft.version.clone(),
             adds,
             spawns,
-            ignored: draft.ignored.clone(),
+            ignored,
             namespace_collisions: Vec::new(),
             warnings: draft.warnings.clone(),
             grade,

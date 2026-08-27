@@ -668,10 +668,30 @@ Emitted after a dynamically injected MCP server has connected and its tools are 
 }
 ```
 
+An `add_mcp_server` naming a server that is **already connected** is skipped --
+no second connection, no second stdio child -- and the skip is acknowledged with
+an `mcp_ready` carrying the existing server's tools. That receipt would otherwise
+be byte-identical to the one above, so it is annotated:
+
+```json
+{
+  "type": "mcp_ready",
+  "name": "my-tools",
+  "tools": ["tool_a", "tool_b"],
+  "already_connected": true
+}
+```
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Server name (as provided in `add_mcp_server`) |
 | `tools` | string[] | List of tool names registered from this server |
+| `already_connected` | boolean | Optional; omitted when false. `true` means this receipt acknowledges a **skipped** re-add of an already-connected server, not a new connection. Absent means a real connect -- but see the feature-detect note below |
+
+Feature-detect `mcp_ready_skip_annotation_v1` in the contract capabilities before
+reading anything into the field's absence: a Core that predates the annotation
+omits it on *every* `mcp_ready`, skips included, so on such a producer "absent"
+carries no information at all.
 
 ### 1.14 `pong`
 
@@ -2033,22 +2053,63 @@ additive diagnostics: hosts that do not recognize them MUST drop them silently
 under the Host Decoder Contract.
 
 ```json
-{ "type": "provider_attempt", "failure": "http_503" }
-{ "type": "provider_retry", "failure": "http_503" }
-{ "type": "provider_attempt" }
+{ "type": "provider_attempt", "failure": "http_503", "attempt": 1 }
+{ "type": "provider_retry", "failure": "http_503", "retry": 1 }
+{ "type": "provider_attempt", "attempt": 2 }
 { "type": "provider_failure", "failure": "stream_truncated" }
 ```
 
 | Event | Field | Type | Description |
 |---|---|---|---|
 | `provider_attempt` | `failure` | string? | One physical provider request. Omitted when that request reached a usable response. |
+| `provider_attempt` | `attempt` | number | 1-based ordinal of this physical request within the current turn. |
 | `provider_retry` | `failure` | string? | Core scheduled another request after the typed failure. This is not an additional physical-attempt count. |
+| `provider_retry` | `retry` | number | 1-based ordinal of this retry decision within the current turn — the retry count, so a host can show "retry 2 of this step" without keeping its own tally. |
 | `provider_failure` | `failure` | string | A failure discovered after the physical request completed, such as a truncated SSE body. It does not by itself imply a retry. |
+
+`attempt` and `retry` are scoped to ONE turn and restart at `1` on the next
+turn, so they never read as a running total for the run. `retry` counts every
+source of a re-send equally: the provider retry ring, the stream-error re-send,
+the single context-overflow compaction retry, and the orphaned-tool-pair repair.
+Hosts SHOULD read the ordinal from the frame rather than counting frames — these
+events are additive, so a host pinned to an older contract minor drops them, and
+a host that attaches mid-run never received the earlier ones.
 
 `failure` is a stable machine-readable class such as `http_429`, `http_503`,
 `timeout`, `connection`, `stream_truncated`, `context_overflow`, or
 `egress_denied`. Hosts MUST treat the value as an open string and MUST NOT parse
 human-readable provider error messages to infer it.
+
+### 1.N+5a-2 route_info (#372)
+
+Once per committed turn, Core publishes the route that turn actually dispatched
+against. `provider` alone cannot answer "did this step run locally or in the
+cloud?": a local Ollama server and a cloud OpenAI-compatible gateway are both
+driven as `provider = "openai"`, so the two runs are indistinguishable on every
+other route-bearing field. Additive: hosts that do not recognize it MUST drop it
+silently under the Host Decoder Contract.
+
+```json
+{ "type": "route_info", "route": { "turn": 0, "provider": "openai", "model": "qwen3:8b", "base_url": "http://127.0.0.1:11434/v1", "local": true } }
+{ "type": "route_info", "route": { "turn": 1, "provider": "openai", "model": "qwen3:8b", "base_url": "https://openrouter.ai/api/v1", "local": false } }
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `turn` | number | Zero-based turn index this route was dispatched for. |
+| `provider` | string | Structured provider id, same vocabulary as `turn_cost.provider`. |
+| `model` | string | The model actually dispatched this turn, after any tier swap. |
+| `base_url` | string? | The resolved endpoint, scrubbed. Omitted when the provider resolved no explicit endpoint (SDK-default routing). |
+| `local` | boolean | True when `base_url` resolves to a loopback, link-local or private host. False when there is no endpoint. |
+
+`base_url` arrives with userinfo, query string and fragment REMOVED, because a
+base URL can carry an API key in either. Hosts MUST NOT reconstruct an endpoint
+from this field for use as a request target; it is a diagnostic.
+
+`local` is decided against a parsed IP literal, never a string prefix. A host
+MUST NOT re-derive it by inspecting `base_url` — `https://127.0.0.1.evil.example.com/v1`
+is a registrable public name that a prefix test reads as loopback, and this flag
+is what a user trusts to conclude their prompt never left the machine.
 
 ### 1.N+5b capability_activation (F05)
 
@@ -2280,7 +2341,8 @@ would drop it silently per W0).
   "thread_id": "t-17",
   "body": "hello from the agent",
   "subject": "Re: invoice",
-  "conversation_id": "abc123"
+  "conversation_id": "abc123",
+  "idempotency_key": "te-91a4\u2026"
 }
 ```
 
@@ -2293,6 +2355,22 @@ would drop it silently per W0).
 | `body` | string | yes | The message text. |
 | `subject` | string | no | Subject line. The current `send_message` schema has no subject input, so the engine omits it today; part of the wire contract for forward-compat. |
 | `conversation_id` | string | no | Session id of the emitting engine, when known. |
+| `idempotency_key` | string | no | F13 (#889), **`contract.minor` >= 1.20**. The durable key the engine's session journal minted for this tool execution. STABLE across the paths that legitimately re-run one send (an in-turn retry, and the crash-resume re-dispatch), so two frames bearing the same value are **one** logical delivery the engine was interrupted in the middle of, not two the user asked for. `call_id` cannot substitute: it is minted fresh per request and differs across a re-dispatch. Omitted when the send is not running under a durable effect context. |
+
+**Feature-detect on `contract.minor`, not on the field's presence.** An absent
+`idempotency_key` is ambiguous by itself — it means either "this engine never
+sends one" (below 1.20) or "this particular send has no durable identity"
+(1.20+). Those call for opposite host behaviour, and the contract minor is the
+only thing that separates them.
+
+**What a host should do with `idempotency_key`.** A host whose outbound
+provider accepts a caller-supplied idempotency / transaction token SHOULD pass
+this value through, so a re-dispatched send converges to one message at the
+destination. A host that cannot MUST ignore the field — it is additive and
+changes nothing else about the frame. The engine asserts nothing about the
+outcome: carrying the key is the PRECONDITION for exactly-once delivery on this
+path, not a claim of it, and the engine still classifies a delegated send whose
+result never arrived as an unknown effect for the operator to resolve.
 
 ### 1.N+13 `render_artifact` (#1098)
 

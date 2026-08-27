@@ -187,8 +187,21 @@ async fn resource_only_server_is_not_redialled_on_re_add() {
         "fixture must expose zero tools, else this test grades the #135 path: {first}"
     );
 
+    assert!(
+        first["already_connected"].is_null(),
+        "a real connect must not carry the skip annotation: {first}"
+    );
+
     let second = session.add(&server.uri());
     assert_eq!(second["tools"].as_array().map(Vec::len), Some(0));
+    // wayland#605: the skip re-emits mcp_ready. Without an annotation it is
+    // byte-identical to the first, real-connect event, so a json-stream host
+    // cannot tell a no-op re-add from a reconnect.
+    assert_eq!(
+        second["already_connected"],
+        json!(true),
+        "a skipped re-add must be distinguishable from a real reconnect: {second}"
+    );
     session.stop();
 
     let seen = methods(&server).await;

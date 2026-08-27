@@ -248,14 +248,26 @@ pub trait OutputSink: Send + Sync {
 
     /// Emit one physical provider attempt with its typed outcome. Default
     /// no-op for non-protocol sinks; JSON-stream output is always-on evidence.
-    fn emit_provider_attempt(&self, _failure: Option<&str>) {}
+    /// `attempt` is the 1-based ordinal of this send within the current turn
+    /// (#372).
+    fn emit_provider_attempt(&self, _failure: Option<&str>, _attempt: u32) {}
 
     /// Emit an actual Core retry decision, separately from the physical send.
-    fn emit_provider_retry(&self, _failure: Option<&str>) {}
+    /// `retry` is the 1-based ordinal of this retry within the current turn
+    /// (#372) — the retry count the ticket asks to be shown separately from
+    /// the run timer.
+    fn emit_provider_retry(&self, _failure: Option<&str>, _retry: u32) {}
 
     /// Emit a typed provider failure without claiming another physical send or
     /// retry decision.
     fn emit_provider_failure(&self, _failure: &str) {}
+
+    /// #372: emit the route this turn dispatched against — provider, model,
+    /// the scrubbed endpoint and a derived local-vs-cloud flag. Default no-op
+    /// for non-protocol sinks; the JSON-stream sink emits it always-on so a
+    /// host can tell a local model server from a cloud one, which the provider
+    /// name alone cannot express.
+    fn emit_route_info(&self, _route: &wcore_protocol::events::RouteInfo) {}
 
     /// F10: emit a typed monitor control-flow decision. Default no-op for
     /// non-protocol sinks; JSON and test sinks preserve the stable reason.
@@ -302,6 +314,11 @@ pub trait OutputSink: Send + Sync {
     /// forward-additive baseline. Default no-op for non-protocol sinks —
     /// a delegated send under such a sink times out into a loud tool
     /// error rather than reaching a host that doesn't exist.
+    ///
+    /// F13 (#889): `idempotency_key` is the durable key the session journal
+    /// minted for this tool execution, forwarded so the host can recognise a
+    /// re-dispatch of one logical delivery. `None` when the send is not
+    /// running under a durable effect context.
     #[allow(clippy::too_many_arguments)]
     fn emit_host_send_message_request(
         &self,
@@ -312,16 +329,21 @@ pub trait OutputSink: Send + Sync {
         _body: &str,
         _subject: Option<&str>,
         _conversation_id: Option<&str>,
+        _idempotency_key: Option<&str>,
     ) {
     }
 
     /// #1098: whether this sink can actually put a rendered artifact in front
-    /// of a user. Only the json-stream `ProtocolSink` can — a terminal, null,
-    /// or relay sink has no render surface.
+    /// of a user. The json-stream `ProtocolSink` can, and (#1138) so can the
+    /// in-process TUI's `ChannelSink`; a terminal, null, or relay sink has no
+    /// render surface, so the default is `false`.
     ///
-    /// `RenderArtifactTool::is_available()` reads this through
-    /// `ProtocolRenderSink`, so under any other sink the tool is never
-    /// registered and the model is never offered a display nothing would show.
+    /// `RenderArtifactTool` is registered UNCONDITIONALLY (`bootstrap.rs`) —
+    /// an earlier version of this comment claimed the tool was gated on this
+    /// method, and it never was: a tool set that moved with the sink broke
+    /// resume (see `wcore_tools::render`). The gate is runtime liveness:
+    /// `ProtocolRenderSink::is_live` reads this method, and a render into a
+    /// sink that reports `false` fails LOUDLY rather than being discarded.
     fn render_artifact_supported(&self) -> bool {
         false
     }
