@@ -156,13 +156,18 @@ pub(crate) enum RecoveryConfidentialError {
     /// dismiss. Before this variant existed there was no deadline on that
     /// wait anywhere on the path, so the turn did not fail: it stopped, with
     /// nothing on the wire and nothing said to the user.
+    ///
+    /// Carries the budget that was ACTUALLY spent, because it is not one
+    /// number: a turn waits [`KEY_STORE_ACQUIRE_BUDGET`] and a resume waits
+    /// [`RESUME_KEY_WAIT_BUDGET`]. Rendering a constant here would have told
+    /// an operator who waited thirty seconds that we gave up after five.
     #[error(
-        "the configured credential store did not answer within {}s, so the exact provider \
-         request for this turn cannot be sealed for crash recovery. Unlock or repair the OS \
-         keyring for this profile, or turn durable sessions off with [session] enabled = false",
-        KEY_STORE_ACQUIRE_BUDGET.as_secs()
+        "the configured credential store did not answer within {}s, so this profile's \
+         recovery key could not be obtained. Unlock or repair the OS keyring for this \
+         profile, or turn durable sessions off with [session] enabled = false",
+        waited.as_secs()
     )]
-    KeyStoreTimedOut,
+    KeyStoreTimedOut { waited: Duration },
     #[error("secure recovery storage is unavailable")]
     Unavailable,
     #[error("recovery confidential request is invalid")]
@@ -217,6 +222,30 @@ pub(crate) fn reject_backend_without_confidential_storage(
 /// differs, and the failure it bounds is a wedge, not a slow disk.
 pub(crate) const KEY_STORE_ACQUIRE_BUDGET: Duration = Duration::from_secs(5);
 
+/// How long the RESUME-ADMISSION path will wait for the same store.
+///
+/// Six times [`KEY_STORE_ACQUIRE_BUDGET`], and the asymmetry is deliberate:
+/// the two paths are bounding different costs, and are wrong in different
+/// directions.
+///
+/// A turn's budget is bounding DEAD AIR — a user has sent a message and is
+/// watching nothing happen — and overrunning it costs only this turn's
+/// replay protection, which the user is told about and which the next turn
+/// recovers. Five seconds is generous for that.
+///
+/// Admitting a resume is bounding a ONE-SHOT act the user just asked for,
+/// with no stream behind it, and overrunning it costs the whole session:
+/// `admit_session_resume` turns any error here into a refusal to open. That
+/// makes the errors asymmetric. Too long is a slower `--resume` on a host
+/// whose store really is wedged. Too short refuses a session whose sealed
+/// request is perfectly readable, on the say-so of a store that was merely
+/// slow — and tells the operator to repair a keyring that is not broken.
+///
+/// This is the direction the turn budget got right and this path got wrong
+/// (wayland-core CI, `linux-containerized`, 2026-08-27: three `f14` resume
+/// tests refused on a host where the same key loads fine given more time).
+pub(crate) const RESUME_KEY_WAIT_BUDGET: Duration = Duration::from_secs(30);
+
 /// Lazily caches a successfully loaded key for one engine. Backend failures
 /// are not cached, so unlocking the configured store can make a later retry
 /// succeed without restarting Core.
@@ -263,6 +292,10 @@ struct ProtectorState {
 }
 
 struct PendingKeyLoad {
+    /// When the load was started, so a later caller's budget can be applied
+    /// as a DEADLINE on this load rather than as a fresh spend. Without it a
+    /// turn that asks from two call sites pays the budget twice.
+    started: std::time::Instant,
     /// Whether the outstanding load was allowed to CREATE the key. A
     /// read-only load's failure cannot answer a caller that may create one.
     create: bool,
@@ -314,6 +347,26 @@ pub(crate) trait RecoveryRequestProtection: Send + Sync {
         config: &Config,
     ) -> Result<(), RecoveryConfidentialError>;
 
+    /// The same question, asked while ADMITTING A RESUME rather than during a
+    /// turn — and it is a separate method because the two differ in the one
+    /// thing that matters here: how long the answer is worth waiting for.
+    ///
+    /// `sealed_request_key_available` is also asked mid-turn
+    /// (`engine.rs`, before writing a `ProviderDispatch` checkpoint), where a
+    /// user is watching nothing happen and the cost of giving up is one
+    /// turn's replay protection. `admit_session_resume` asks it once, with no
+    /// stream behind it, and turns ANY error into a refusal to open the
+    /// session at all. Same question, two budgets.
+    ///
+    /// Defaulted so that test doubles — which have no store and no budget —
+    /// keep answering exactly as they did.
+    fn sealed_request_key_available_for_resume(
+        &self,
+        config: &Config,
+    ) -> Result<(), RecoveryConfidentialError> {
+        self.sealed_request_key_available(config)
+    }
+
     fn seal(
         &self,
         config: &Config,
@@ -331,14 +384,21 @@ pub(crate) trait RecoveryRequestProtection: Send + Sync {
 
 impl RecoveryRequestProtection for RecoveryRequestProtector {
     fn preflight(&self, config: &Config) -> Result<(), RecoveryConfidentialError> {
-        self.with_key(config, true, |_| Ok(()))
+        self.with_key(config, true, KEY_STORE_ACQUIRE_BUDGET, |_| Ok(()))
     }
 
     fn sealed_request_key_available(
         &self,
         config: &Config,
     ) -> Result<(), RecoveryConfidentialError> {
-        self.with_key(config, false, |_| Ok(()))
+        self.with_key(config, false, KEY_STORE_ACQUIRE_BUDGET, |_| Ok(()))
+    }
+
+    fn sealed_request_key_available_for_resume(
+        &self,
+        config: &Config,
+    ) -> Result<(), RecoveryConfidentialError> {
+        self.with_key(config, false, RESUME_KEY_WAIT_BUDGET, |_| Ok(()))
     }
 
     fn seal(
@@ -347,7 +407,9 @@ impl RecoveryRequestProtection for RecoveryRequestProtector {
         binding: &PreparedRequestBinding<'_>,
         request: &serde_json::Value,
     ) -> Result<SealedPreparedRequest, RecoveryConfidentialError> {
-        self.with_key(config, true, |key| seal_with_key(key, binding, request))
+        self.with_key(config, true, KEY_STORE_ACQUIRE_BUDGET, |key| {
+            seal_with_key(key, binding, request)
+        })
     }
 
     fn open(
@@ -356,7 +418,9 @@ impl RecoveryRequestProtection for RecoveryRequestProtector {
         binding: &PreparedRequestBinding<'_>,
         sealed: &SealedPreparedRequest,
     ) -> Result<serde_json::Value, RecoveryConfidentialError> {
-        self.with_key(config, false, |key| open_with_key(key, binding, sealed))
+        self.with_key(config, false, KEY_STORE_ACQUIRE_BUDGET, |key| {
+            open_with_key(key, binding, sealed)
+        })
     }
 }
 
@@ -385,6 +449,7 @@ impl RecoveryRequestProtector {
         &self,
         config: &Config,
         create: bool,
+        budget: Duration,
         operation: impl FnOnce(&ConfidentialBlobKey) -> Result<T, RecoveryConfidentialError>,
     ) -> Result<T, RecoveryConfidentialError> {
         let mut state = self
@@ -395,7 +460,7 @@ impl RecoveryRequestProtector {
             // Decide the config-determined cause before touching any store, so
             // a plaintext backend is never reported as an environment problem.
             reject_backend_without_confidential_storage(config)?;
-            let key = self.acquire_key(&mut state, config, create)?;
+            let key = self.acquire_key(&mut state, config, create, budget)?;
             state.key = Some(key);
         }
         operation(
@@ -418,6 +483,7 @@ impl RecoveryRequestProtector {
         state: &mut ProtectorState,
         config: &Config,
         create: bool,
+        budget: Duration,
     ) -> Result<ConfidentialBlobKey, RecoveryConfidentialError> {
         if let Some(pending) = state.pending.take() {
             match pending.rx.try_recv() {
@@ -430,18 +496,41 @@ impl RecoveryRequestProtector {
                 // caller that is allowed to create one.
                 Ok(Err(error)) if pending.create || !create => return Err(error),
                 Ok(Err(_)) => {}
-                // Still outstanding. The first caller already spent the
-                // whole budget on this exact load; spending it again would
-                // add another five seconds of dead air per call site for an
-                // answer already known not to be coming.
+                // Still outstanding. Whether to wait again is the CALLER's
+                // budget to spend, not a fixed policy: a turn passes the
+                // short budget precisely because another five seconds of
+                // dead air buys an answer already known not to be coming,
+                // while a resume passes a long one because the alternative
+                // is refusing the session outright. Waiting zero is still
+                // possible and still means the same thing.
+                // Still outstanding. The caller's budget is a DEADLINE on
+                // this load, measured from when the load began — never a
+                // fresh spend. A turn asking from a second call site after
+                // the first already burned the whole budget therefore waits
+                // ZERO and inherits the verdict, which is the invariant the
+                // budget was introduced with. A resume, whose budget is
+                // larger than anything a turn has spent, still has time left
+                // on the clock and waits out the remainder.
                 Err(mpsc::TryRecvError::Empty) => {
-                    state.pending = Some(pending);
-                    return Err(RecoveryConfidentialError::KeyStoreTimedOut);
+                    let remaining = budget.saturating_sub(pending.started.elapsed());
+                    match pending.rx.recv_timeout(remaining) {
+                        Ok(Ok(key)) => return Ok(key),
+                        Ok(Err(error)) if pending.create || !create => return Err(error),
+                        Ok(Err(_)) => {}
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            state.pending = Some(pending);
+                            return Err(RecoveryConfidentialError::KeyStoreTimedOut {
+                                waited: budget,
+                            });
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {}
+                    }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {}
             }
         }
         let (tx, rx) = mpsc::channel();
+        let started = std::time::Instant::now();
         let load = self.key_loader(config, create);
         std::thread::Builder::new()
             .name("wayland-recovery-key".to_owned())
@@ -451,11 +540,15 @@ impl RecoveryRequestProtector {
                 let _ = tx.send(load());
             })
             .map_err(|_| RecoveryConfidentialError::Unavailable)?;
-        match rx.recv_timeout(KEY_STORE_ACQUIRE_BUDGET) {
+        match rx.recv_timeout(budget) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                state.pending = Some(PendingKeyLoad { create, rx });
-                Err(RecoveryConfidentialError::KeyStoreTimedOut)
+                state.pending = Some(PendingKeyLoad {
+                    create,
+                    rx,
+                    started,
+                });
+                Err(RecoveryConfidentialError::KeyStoreTimedOut { waited: budget })
             }
             // The loader thread died without sending. Nothing is known about
             // the key, but nothing is outstanding either.
@@ -627,7 +720,68 @@ mod tests {
     /// The second assertion pair is the one that matters for a real turn: the
     /// pre-provider path asks this type the same question from more than one
     /// call site, and a per-call budget would have multiplied the dead air by
-    /// the number of them.
+    /// the number of them. Both entry points here are TURN entry points, and
+    /// both therefore spend [`KEY_STORE_ACQUIRE_BUDGET`]. The resume entry
+    /// point is deliberately not one of them — it spends a different budget
+    /// on purpose, and is graded by
+    /// `a_resume_does_not_inherit_a_turns_shorter_verdict`.
+    /// The resume-admission path must NOT be answered by a turn's shorter
+    /// give-up.
+    ///
+    /// `admit_session_resume` turns any error from
+    /// `sealed_request_key_available` into a refusal to open the session at
+    /// all, so inheriting a five-second verdict there costs the whole
+    /// session — and costs it on the word of a store that was merely slow.
+    /// wayland-core CI reproduced exactly that on `linux-containerized`:
+    /// three `f14` resume tests refused on a host where the same key loads
+    /// fine given more time.
+    ///
+    /// Graded WITHOUT waiting out `RESUME_KEY_WAIT_BUDGET`. The property is
+    /// "it is still waiting", not "it eventually gave up", so the test
+    /// observes the call from outside and asserts that it has NOT returned
+    /// once a turn's whole budget has elapsed twice over. The wedged store
+    /// never answers, so the worker parks for the life of this test process —
+    /// which nextest gives each test anyway.
+    #[test]
+    fn a_resume_does_not_inherit_a_turns_shorter_verdict() {
+        assert!(
+            RESUME_KEY_WAIT_BUDGET > KEY_STORE_ACQUIRE_BUDGET,
+            "the two budgets differing is the whole point of this path"
+        );
+
+        let protector = RecoveryRequestProtector::with_wedged_key_store_for_test();
+        let config = Config::default();
+
+        // Spend the turn budget first, so a `pending` load exists. Before
+        // this fix, that pending load is precisely what made the resume
+        // return instantly with a verdict it never earned.
+        assert_eq!(
+            protector.preflight(&config),
+            Err(RecoveryConfidentialError::KeyStoreTimedOut {
+                waited: KEY_STORE_ACQUIRE_BUDGET
+            }),
+            "the turn entry point must still give up at its own budget"
+        );
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(protector.sealed_request_key_available_for_resume(&config));
+        });
+
+        match rx.recv_timeout(KEY_STORE_ACQUIRE_BUDGET * 2) {
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the resume worker died instead of waiting")
+            }
+            Ok(verdict) => panic!(
+                "the resume path returned {verdict:?} after less than {:?} — it inherited \
+                 the turn's give-up instead of spending {RESUME_KEY_WAIT_BUDGET:?} of its \
+                 own, and a session that could have been resumed is refused",
+                KEY_STORE_ACQUIRE_BUDGET * 2
+            ),
+        }
+    }
+
     #[test]
     fn a_wedged_key_store_gives_up_inside_its_budget_at_every_entry_point() {
         let protector = RecoveryRequestProtector::with_wedged_key_store_for_test();
@@ -644,7 +798,9 @@ mod tests {
             let first = protector.preflight(&config);
             let first_took = first_at.elapsed();
             let second_at = std::time::Instant::now();
-            let second = protector.sealed_request_key_available(&config);
+            let second = protector
+                .seal(&config, &binding(), &serde_json::json!({"m": 1}))
+                .map(|_| ());
             let _ = tx.send((first, first_took, second, second_at.elapsed()));
         });
         let (first, first_took, second, second_took) = rx
@@ -653,8 +809,11 @@ mod tests {
 
         assert_eq!(
             first,
-            Err(RecoveryConfidentialError::KeyStoreTimedOut),
-            "a store that never answers must be reported as not having answered"
+            Err(RecoveryConfidentialError::KeyStoreTimedOut {
+                waited: KEY_STORE_ACQUIRE_BUDGET
+            }),
+            "a store that never answers must be reported as not having answered, and must \
+             report the budget it actually spent"
         );
         assert!(
             first_took >= KEY_STORE_ACQUIRE_BUDGET,
@@ -667,8 +826,10 @@ mod tests {
 
         assert_eq!(
             second,
-            Err(RecoveryConfidentialError::KeyStoreTimedOut),
-            "the second entry point must inherit the first one's verdict"
+            Err(RecoveryConfidentialError::KeyStoreTimedOut {
+                waited: KEY_STORE_ACQUIRE_BUDGET
+            }),
+            "the second TURN entry point must inherit the first one's verdict"
         );
         assert!(
             second_took < KEY_STORE_ACQUIRE_BUDGET / 2,

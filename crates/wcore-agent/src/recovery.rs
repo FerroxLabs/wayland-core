@@ -607,7 +607,7 @@ pub(crate) fn admit_session_resume(
     if !plan.requires_sealed_replay() {
         return Ok(());
     }
-    match protection.sealed_request_key_available(config) {
+    match protection.sealed_request_key_available_for_resume(config) {
         Ok(()) => Ok(()),
         Err(cause) => anyhow::bail!("{}", locked_session_refusal(&plan.session_id, &cause)),
     }
@@ -637,7 +637,7 @@ fn locked_session_refusal(
     let unlock = if matches!(
         cause,
         crate::recovery_confidential::RecoveryConfidentialError::PlaintextBackendRejected
-            | crate::recovery_confidential::RecoveryConfidentialError::KeyStoreTimedOut
+            | crate::recovery_confidential::RecoveryConfidentialError::KeyStoreTimedOut { .. }
     ) {
         ""
     } else {

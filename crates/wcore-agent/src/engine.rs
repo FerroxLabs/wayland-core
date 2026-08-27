@@ -8416,7 +8416,9 @@ impl AgentEngine {
                     ReplayProtectionLoss::NoSecureStore,
                 );
             }
-            Err(crate::recovery_confidential::RecoveryConfidentialError::KeyStoreTimedOut) => {
+            Err(crate::recovery_confidential::RecoveryConfidentialError::KeyStoreTimedOut {
+                ..
+            }) => {
                 if self.config.session.require_durability {
                     return Err(AgentError::SessionAuthority(
                         "[session] require_durability = true, but this profile's credential \
