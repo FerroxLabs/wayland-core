@@ -769,6 +769,59 @@ mod tests {
         }
     }
 
+    /// The structural invariant behind the Windows separator bug: every path
+    /// `Protected` holds must already be `lexical_normalize`d, because that is
+    /// what every token it is compared against went through.
+    ///
+    /// Asserted on the SHAPE rather than on a spelling, so it holds on any
+    /// platform. On Windows the two forms genuinely differ — a `WAYLAND_HOME`
+    /// spelled with forward slashes normalises to backslashes and then never
+    /// compares equal to itself — and the leg that caught it lives only there.
+    /// This is the arm that fails on Linux and macOS too if the normalization
+    /// is dropped from `protected_paths`.
+    #[test]
+    #[serial_test::serial]
+    fn every_protected_base_is_already_normalized() {
+        let prior = std::env::var_os("WAYLAND_HOME");
+        // A home whose spelling normalization would change: a redundant `.`
+        // and a doubled separator, both of which `components()` removes.
+        // SAFETY: test-only env mutation, serialized against this module's
+        // other env-driven tests.
+        unsafe { std::env::set_var("WAYLAND_HOME", "/tmp/wl693-norm/./deep//home") };
+        let protected = protected_paths(Some(Path::new("/work")));
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+
+        let bases: Vec<&PathBuf> = protected
+            .under
+            .iter()
+            .chain(protected.exact.iter())
+            .collect();
+        assert!(
+            !bases.is_empty(),
+            "no protected base at all, so the assertion below would be vacuous"
+        );
+        for base in &bases {
+            assert_eq!(
+                lexical_normalize(base),
+                ***base,
+                "a protected base must already be normalized, or it can never \
+                 compare equal to a token that went through resolve(): {base:?}"
+            );
+        }
+        // And the specific one: the un-normalized spelling must not survive.
+        assert!(
+            bases
+                .iter()
+                .any(|b| b.ends_with("home") && !b.to_string_lossy().contains("/./")),
+            "the WAYLAND_HOME base is missing or kept its raw spelling: {bases:?}"
+        );
+    }
+
     #[test]
     #[serial_test::serial]
     fn a_glob_that_names_no_directory_is_not_refused() {
