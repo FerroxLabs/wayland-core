@@ -2632,6 +2632,15 @@ mod prompt_cache_expected_pinning_tests {
             "openai_compat_provider() must clear the claim, not inherit it"
         );
         assert!(!ProviderCompat::openai_compat_provider("groq").prompt_cache_expected());
+
+        // The catalog path (`--provider <id>`, 75+ bundled entries) never
+        // reaches `compat_defaults_for`; it wraps the same constructor
+        // (catalog.rs:145), so it inherited the leak too.
+        assert!(
+            !ProviderCompat::from_catalog_entry("novita-ai", Some("/chat/completions"))
+                .prompt_cache_expected(),
+            "a bundled catalog provider must not inherit the native-OpenAI cache claim"
+        );
     }
 
     #[test]
