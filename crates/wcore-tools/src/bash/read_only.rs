@@ -27,10 +27,16 @@
 //!    is the single most common read-only call an agent makes: git runs a
 //!    pager, `diff.external`, textconv filters and `core.fsmonitor` out of
 //!    repository and user configuration, so no analysis of the ARGUMENTS can
-//!    bound what a `git` invocation executes. `sort` (`-o`), `uniq` (its
-//!    second positional argument), `sed` (`-i`), `awk` (`print >`, `system()`),
-//!    `find` (`-delete`, `-exec`) and `env` (which execs its trailing words)
-//!    are absent for the first rule.
+//!    bound what a `git` invocation executes. `rg` is absent for exactly the
+//!    same reason, and was measured doing it: `--pre COMMAND` runs `COMMAND
+//!    FILE` for every file searched, so `rg --pre rm needle .` deletes the
+//!    tree it is pointed at, `--hostname-bin` executes another program, and
+//!    `RIPGREP_CONFIG_PATH` can put `--pre` into a bare `rg needle` from the
+//!    environment, where no command line shows it at all. `sort` (`-o`),
+//!    `uniq` (its second positional argument), `sed` (`-i`), `awk`
+//!    (`print >`, `system()`), `find` (`-delete`, `-exec`), `env` (which
+//!    execs its trailing words) and `file` (`-C` compiles a magic file and
+//!    writes `NAME.mgc`) are absent for the first rule.
 //!
 //! 3. **Per-program argument rules.** Only one program in the set has a
 //!    mutating flag: `date -s` sets the system clock. It is admitted only with
@@ -71,7 +77,6 @@ const READ_ONLY_PROGRAMS: &[&str] = &[
     "egrep",
     "false",
     "fgrep",
-    "file",
     "grep",
     "head",
     "id",
@@ -84,7 +89,6 @@ const READ_ONLY_PROGRAMS: &[&str] = &[
     "pwd",
     "readlink",
     "realpath",
-    "rg",
     "seq",
     "sha1sum",
     "sha256sum",
@@ -143,7 +147,6 @@ mod tests {
             "cat Cargo.toml",
             "wc -l src/main.rs",
             "grep -rn needle src",
-            "rg --files-with-matches needle",
             "head -n 20 README.md",
             "tail -n 5 log.txt",
             "stat Cargo.lock",
@@ -223,6 +226,13 @@ mod tests {
             "python script.py",
             "sh script.sh",
             "bash script.sh",
+            // Proven on the host: `rg --pre rm needle .` runs `rm FILE` for
+            // every file searched and deleted both fixtures; `file -C -m magic`
+            // wrote `magic.mgc`. Both command lines are made entirely of inert
+            // characters, so only the PROGRAM list can refuse them.
+            "rg --pre rm needle .",
+            "rg --hostname-bin rm",
+            "file -C -m magic",
         ] {
             assert!(
                 !is_provably_read_only(command),
