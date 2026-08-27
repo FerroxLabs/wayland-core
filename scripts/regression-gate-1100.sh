@@ -53,11 +53,14 @@ cat "$LOG"
 grep -q "test result:" "$LOG" \
   || fail "the lib test harness never produced a \`test result:\` line (compile failure or harness error) — see $LOG"
 
-# 2. Was each half of the ordering pair actually executed IN THIS PROCESS?
-#    No \$ anchor: cargo writes CRLF on Windows and Git bash grep would miss it.
+# 2. Did each half of the ordering pair RUN AND PASS in this process? The
+#    match is on ` ... ok`, not on the name alone: `#[ignore]` prints the test
+#    name too and `cargo test` still exits 0, so a name-only check would read
+#    an ignored pair as a pass. No `$` anchor: cargo writes CRLF on Windows and
+#    Git bash grep would miss the line.
 for t in "$COLD" "$WARM"; do
-  grep -q "::${t} \.\.\." "$LOG" \
-    || fail "\`$t\` did not execute — the pair this gate exists for was not observed, so a green here certifies nothing (cfg drift, a stale filter, or the test was renamed/removed)"
+  grep -q "::${t} \.\.\. ok" "$LOG" \
+    || fail "\`$t\` did not run and pass — the pair this gate exists for was not observed, so a green here certifies nothing (cfg drift, an #[ignore], a stale filter, or the test was renamed/removed)"
 done
 
 # 3. Non-zero executed count. Belt to the braces of (2): the roll-up is what a
