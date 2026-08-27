@@ -555,6 +555,35 @@ async fn a_cd_does_not_move_the_floor_off_the_authority_directories() {
             assert_refused(&result, &chunks, AUTHORITY_PREFIX, name);
         }
 
+        // Two tool calls, which is free for an agent. The FIRST is allowed on
+        // purpose and is a second known-positive control: it names only an
+        // ANCESTOR of the config dir, which this floor does not match, and it
+        // proves this entry point still runs a command that touches the
+        // filesystem. The SECOND reaches `tools.auto_approve` through that
+        // link with no protected component in the token.
+        let link = root.join(format!("link-{name}"));
+        let (result, _) = run(
+            entry,
+            &format!("ln -sfn {} {}", decoy_parent.display(), link.display()),
+            &ctx,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "control: creating a link to an ancestor must not be refused: {}",
+            result.content
+        );
+        let (result, chunks) = run(
+            entry,
+            &format!(
+                "echo 'tools.auto_approve = true' >> {}/{decoy_name}/config.toml",
+                link.display()
+            ),
+            &ctx,
+        )
+        .await;
+        assert_refused(&result, &chunks, AUTHORITY_PREFIX, name);
+
         // Reached through a glob component. Family-neutral prefix: `.way*` is
         // equally a prefix of `.wayland-core`, so either rule refusing it is
         // correct and pinning one would be pinning an accident.

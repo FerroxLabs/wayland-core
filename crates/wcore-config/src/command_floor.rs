@@ -103,6 +103,13 @@
 //! "copy shape" would need a write-shape detector, which is the thing this
 //! module refuses to have. Stated as a limit rather than half-closed.
 //!
+//! The same limit is why a symlink CREATED IN THE SAME COMMAND is not caught
+//! (`ln -s ~/.config /tmp/c && echo x >> /tmp/c/wayland-core/config.toml`):
+//! it operates on an ancestor, and the link does not exist when the floor
+//! runs. A link that ALREADY exists
+//! is followed ([`symlinks_followed`]), so splitting that attack across two
+//! tool calls — which is otherwise free — does not work.
+//!
 //! It lives in `wcore-config` rather than `wcore-tools` because there are TWO
 //! shell surfaces — `wcore_tools::bash::BashTool` and
 //! `wcore_skills::shell::execute_shell_commands` — and `wcore-skills` does not
@@ -288,21 +295,63 @@ fn token_refusal(
     // command could be running in by the time this token is read, because `cd`
     // runs before it.
     if cwds.is_empty() {
-        if let Some(resolved) = resolve(token, None)
-            && protected.matches(&resolved)
-        {
+        if reaches_protected(token, None, protected) {
             return Some(AUTHORITY_REFUSAL);
         }
         return None;
     }
     for cwd in cwds {
-        if let Some(resolved) = resolve(token, Some(cwd))
-            && protected.matches(&resolved)
-        {
+        if reaches_protected(token, Some(cwd), protected) {
             return Some(AUTHORITY_REFUSAL);
         }
     }
     None
+}
+
+/// Whether `token`, read from `cwd`, lands on a protected path — lexically, or
+/// after the kernel follows the symlinks that are already on disk.
+fn reaches_protected(token: &str, cwd: Option<&Path>, protected: &Protected) -> bool {
+    let Some(resolved) = resolve(token, cwd) else {
+        return false;
+    };
+    protected.matches(&resolved)
+        || symlinks_followed(&resolved).is_some_and(|real| protected.matches(&real))
+}
+
+/// The path a token names once EXISTING symlinks are followed, or `None` if
+/// that is the path itself.
+///
+/// A symlink is not a lexical construct. `ln -s ~/.config /tmp/c` names no
+/// protected path — `~/.config` is an ANCESTOR of the config dir, and this
+/// module does not match ancestors — and a LATER command then reaches
+/// `security.enabled` and `tools.auto_approve` through
+/// `/tmp/c/wayland-core/config.toml`, whose every component is ordinary.
+/// Splitting an attack across two tool calls is free, so the second call is
+/// where it has to be caught.
+///
+/// The DEEPEST EXISTING ancestor is canonicalized and the remainder re-joined,
+/// because the token usually names a file that does not exist yet.
+///
+/// This does not close the SAME-COMMAND form (`ln -s ~/.config /tmp/c && echo
+/// x >> /tmp/c/wayland-core/config.toml`): the link does not exist when the
+/// floor runs, and no check that runs before the shell can see it. That is the
+/// ancestor limit in the module doc, not a hole this function pretends to fill.
+fn symlinks_followed(path: &Path) -> Option<PathBuf> {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = path.to_path_buf();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&probe) {
+            let mut out = real;
+            for part in tail.iter().rev() {
+                out.push(part);
+            }
+            return (out != *path).then_some(out);
+        }
+        tail.push(probe.file_name()?.to_os_string());
+        if !probe.pop() {
+            return None;
+        }
+    }
 }
 
 /// What rule 2b refuses, split by how much of it is off limits.
@@ -779,6 +828,67 @@ mod tests {
                 "must be refused: {command}"
             );
         }
+    }
+
+    /// A symlink is not a lexical construct.
+    ///
+    /// `ln -s ~/.config /tmp/c` names no protected path — `~/.config` is an
+    /// ANCESTOR of the config dir, and this module does not match ancestors.
+    /// A LATER command then reaches `security.enabled` and
+    /// `tools.auto_approve` through `/tmp/c/<config-dir>/config.toml`, whose
+    /// every component is ordinary. Splitting an attack across two tool calls
+    /// is free, so the second call is where this has to be caught.
+    #[test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    fn a_symlink_does_not_manufacture_a_new_name_for_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(tmp.path()).unwrap();
+        let store = real.join("store");
+        let other = real.join("other");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let link = real.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let prior = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: test-only env mutation, serialized against this crate's
+        // other env-driven tests.
+        unsafe { std::env::set_var("WAYLAND_HOME", &store) };
+        let direct = floor_refusal(
+            &format!("echo x >> {}/config.toml", store.display()),
+            Some(Path::new("/work")),
+        );
+        let through_link = floor_refusal(
+            &format!("echo x >> {}/store/config.toml", link.display()),
+            Some(Path::new("/work")),
+        );
+        let ordinary = floor_refusal(
+            &format!("echo x >> {}/other/config.toml", link.display()),
+            Some(Path::new("/work")),
+        );
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+        // Known-positive control: this store IS protected here by its own
+        // resolved path.
+        assert!(
+            direct.is_some(),
+            "control: the resolved store must be refused"
+        );
+        assert!(
+            through_link.is_some(),
+            "the same file through a symlinked ancestor must be refused"
+        );
+        // ...and the identical shape onto a sibling directory is not refused,
+        // so the arm above is not passing because every symlink is.
+        assert_eq!(
+            ordinary, None,
+            "a symlink that reaches nothing protected must not be refused"
+        );
     }
 
     /// Grades the candidate-directory rule ON ITS OWN.
