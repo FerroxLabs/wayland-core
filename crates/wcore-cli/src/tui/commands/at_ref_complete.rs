@@ -11,7 +11,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::at_ref_guard::{GitIgnore, is_secret_path};
+use super::at_ref_guard::{GitIgnore, is_secret_path, is_secret_target};
 
 /// Max completion candidates returned for one partial token. The popup in
 /// the mockup shows a short list; more than this is noise.
@@ -102,10 +102,28 @@ fn complete_paths(body: &str, root: &Path) -> Vec<Completion> {
             continue;
         }
         let path = entry.path();
-        if is_secret_path(&path) {
+        // `file_type` comes from the directory entry and does NOT follow
+        // links, so it is the only place that can tell a symlink apart.
+        // Only a symlink can wear a name other than its target's, so only a
+        // symlink pays for a `canonicalize` — the rest of the popup stays
+        // off the resolution path, which matters on a keystroke.
+        let file_type = entry.file_type().ok();
+        let resolved = match file_type {
+            Some(t) if t.is_symlink() => fs::canonicalize(&path).ok(),
+            _ => None,
+        };
+        // core#339: judging the typed name alone lets `notes.txt ->
+        // ~/.git-credentials` be offered as an ordinary file. A broken link
+        // resolves to nothing and falls back to the lexical gate; it has no
+        // contents to leak.
+        let secret = match &resolved {
+            Some(target) => is_secret_target(&path, target),
+            None => is_secret_path(&path),
+        };
+        if secret {
             continue;
         }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let is_dir = file_type.map(|t| t.is_dir()).unwrap_or(false);
         let rel = if dir_part.is_empty() {
             name.to_string()
         } else {
@@ -256,8 +274,11 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
         let outside = TempDir::new().expect("outside");
-        let cred = outside.path().join(".git-credentials");
-        fs::write(&cred, "https://fake-user:fake-token@example.invalid\n")
+        // `.netrc` was already on the denylist at the base commit, so this
+        // test isolates the identity fix from the `.git-credentials`
+        // addition that ships alongside it.
+        let cred = outside.path().join(".netrc");
+        fs::write(&cred, "machine example.invalid login fake-user password fake-token\n")
             .expect("write fake credential");
         std::os::unix::fs::symlink(&cred, root.join("notes.txt")).expect("symlink");
 
@@ -269,5 +290,23 @@ mod tests {
             offered.is_empty(),
             "completion offered a symlink to a credential store: {offered:?}"
         );
+    }
+
+    /// An ordinary symlink must still be offered — the guard is identity,
+    /// not a blanket refusal of links.
+    #[cfg(unix)]
+    #[test]
+    fn completion_still_offers_an_ordinary_symlink() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("real.rs"), "fn main() {}").expect("write real");
+        std::os::unix::fs::symlink(root.join("real.rs"), root.join("linked.rs"))
+            .expect("symlink");
+
+        let offered: Vec<String> = complete("@linked", root)
+            .into_iter()
+            .map(|c| c.insert)
+            .collect();
+        assert_eq!(offered, vec!["@linked.rs".to_string()]);
     }
 }

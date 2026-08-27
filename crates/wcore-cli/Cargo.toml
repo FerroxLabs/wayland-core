@@ -163,6 +163,13 @@ wcore-budget.workspace = true
 # the TOML brief; `humantime` itself is needed for the flag-side
 # `parse_duration` call.
 humantime = "2"
+# core#339: `GuardedFile` proves that the canonical path it guards names the
+# same object as the handle it reads from. `same_file::Handle` is the
+# cross-platform form of that identity (dev+inode on Unix, volume serial +
+# file index on Windows) taken from an OPEN handle, which is the only place
+# Windows reliably reports it. Already compiled in the graph via
+# walkdir (wcore-tools, wcore-repomap), so this builds no new crate.
+same-file = "1"
 humantime-serde.workspace = true
 
 # W8c.3 H.2: link the plugin shells so their `inventory::submit!`

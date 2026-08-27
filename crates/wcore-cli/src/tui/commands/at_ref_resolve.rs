@@ -8,11 +8,13 @@
 //! `@symbol`, `@diff`) resolve to deferred placeholders whose real work
 //! happens behind the protocol bridge. Split out of `at_refs.rs` (W3-B).
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use super::at_ref_guard::{GitIgnore, is_secret_path};
+use super::at_ref_guard::{GitIgnore, GuardedFile, is_secret_path, is_secret_target};
 use super::at_ref_parse::{AtRef, AtRefError};
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -185,22 +187,44 @@ pub fn resolve(at: &AtRef, root: &Path) -> Result<AtPayload, AtRefError> {
 }
 
 /// Resolve `@file`: read one file, honoring the secret + gitignore guards.
+///
+/// The file is opened exactly once and every guard judges the object that
+/// open resolved to, not the spelling the user typed — see [`GuardedFile`].
 fn resolve_file(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     let full = resolve_under_root(path, root);
 
+    // Gate 1 — the caller's own spelling, before the filesystem is touched,
+    // so `@.env` is refused whether or not the file exists.
     if is_secret_path(&full) {
         return Err(AtRefError::SecretBlocked(display(path)));
     }
-    if let Some(rel) = rel_to_root(&full, root)
+
+    // One open. Every gate below judges this handle's proven identity, and
+    // the read below consumes the same handle.
+    let mut opened = GuardedFile::open(&full).map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound | io::ErrorKind::InvalidInput => {
+            AtRefError::NotFound(display(path))
+        }
+        _ => AtRefError::Io {
+            path: display(path),
+            message: e.to_string(),
+        },
+    })?;
+
+    // Gate 2 — the resolved target's own name (core#339).
+    if is_secret_target(&full, opened.resolved()) {
+        return Err(AtRefError::SecretBlocked(display(path)));
+    }
+    // Gate 3 — gitignore, judged on the resolved path against the resolved
+    // root, so a `..` component or a root spelled through a symlink can no
+    // longer land the path outside the matcher's reach (core#335).
+    if let Some(rel) = rel_to_canonical_root(opened.resolved(), root)
         && GitIgnore::load(root).is_ignored(&rel, false)
     {
         return Err(AtRefError::GitIgnored(display(path)));
     }
-    if !full.is_file() {
-        return Err(AtRefError::NotFound(display(path)));
-    }
 
-    let content = fs::read_to_string(&full).map_err(|e| AtRefError::Io {
+    let content = opened.read_to_string().map_err(|e| AtRefError::Io {
         path: display(path),
         message: e.to_string(),
     })?;
@@ -224,20 +248,35 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     if !full.is_dir() {
         return Err(AtRefError::NotFound(display(path)));
     }
+    // The walk runs entirely in resolved coordinates: the root the payload
+    // paths are relative to, and the tree the walk descends, are both the
+    // symlink-free spellings. That is what makes `rel_to_root` a real
+    // containment test rather than a string comparison (core#335).
+    let canon_root = fs::canonicalize(root).map_err(|e| AtRefError::Io {
+        path: display(root),
+        message: e.to_string(),
+    })?;
+    let start = fs::canonicalize(&full).map_err(|e| AtRefError::Io {
+        path: display(path),
+        message: e.to_string(),
+    })?;
 
     let ignore = GitIgnore::load(root);
     let mut files = Vec::new();
     let mut warnings = Vec::new();
     let mut skipped = 0usize;
     let mut truncated = false;
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    visited.insert(start.clone());
 
     walk_dir(
-        &full,
-        root,
+        &start,
+        &canon_root,
         &ignore,
         &mut files,
         &mut skipped,
         &mut truncated,
+        &mut visited,
     )?;
 
     if truncated {
@@ -276,6 +315,12 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
 }
 
 /// Depth-first directory walk for `@dir`, applying both guardrails.
+///
+/// `dir` and `root` are both already canonical. `visited` holds the
+/// canonical directories already descended, which is what makes a
+/// self-referential symlink terminate — a name-keyed check cannot see that
+/// `a/link` and `a` are the same directory.
+#[allow(clippy::too_many_arguments)]
 fn walk_dir(
     dir: &Path,
     root: &Path,
@@ -283,6 +328,7 @@ fn walk_dir(
     out: &mut Vec<ResolvedFile>,
     skipped: &mut usize,
     truncated: &mut bool,
+    visited: &mut HashSet<PathBuf>,
 ) -> Result<(), AtRefError> {
     if *truncated {
         return Ok(());
@@ -302,30 +348,80 @@ fn walk_dir(
             *truncated = true;
             return Ok(());
         }
-        let is_dir = path.is_dir();
+        // `path` is the entry as this workspace spells it — the spelling
+        // the user's `.gitignore` patterns are written against.
         let rel = match rel_to_root(&path, root) {
             Some(r) => r,
             None => continue,
+        };
+        // `metadata` follows the link, so this is the kind of the object,
+        // not the kind of the name. An unreadable or broken entry is
+        // skipped honestly rather than guessed at.
+        let is_dir = match fs::metadata(&path) {
+            Ok(m) => m.is_dir(),
+            Err(_) => {
+                *skipped += 1;
+                continue;
+            }
         };
         if ignore.is_ignored(&rel, is_dir) {
             *skipped += 1;
             continue;
         }
         if is_dir {
+            let Ok(resolved) = fs::canonicalize(&path) else {
+                *skipped += 1;
+                continue;
+            };
             // `.git` is always skipped — it is never useful context and
-            // can be enormous.
-            if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
+            // can be enormous. Checked on both spellings so a link cannot
+            // rename it in.
+            if path.file_name().and_then(|n| n.to_str()) == Some(".git")
+                || resolved.file_name().and_then(|n| n.to_str()) == Some(".git")
+            {
                 continue;
             }
-            walk_dir(&path, root, ignore, out, skipped, truncated)?;
-        } else {
-            if is_secret_path(&path) {
+            // A directory link whose target leaves the workspace would pull
+            // an arbitrary out-of-tree slice into an `@dir` of *this*
+            // workspace, under this workspace's gitignore — which does not
+            // govern it. Skipping is counted, not silent, and removes no
+            // way to attach anything: `@<path>` still resolves a path
+            // outside the root when the user names it deliberately.
+            let Some(resolved_rel) = rel_to_root(&resolved, root) else {
+                *skipped += 1;
+                continue;
+            };
+            if ignore.is_ignored(&resolved_rel, true) {
                 *skipped += 1;
                 continue;
             }
-            // Read text files only; a binary file is skipped silently
+            // Identity, not name, is what makes a cycle detectable.
+            if !visited.insert(resolved.clone()) {
+                continue;
+            }
+            walk_dir(&resolved, root, ignore, out, skipped, truncated, visited)?;
+        } else {
+            // One open; both remaining gates judge its proven identity.
+            // Read text files only — a binary file is skipped silently
             // rather than corrupting the payload with lossy bytes.
-            match fs::read_to_string(&path) {
+            let mut opened = match GuardedFile::open(&path) {
+                Ok(f) => f,
+                Err(_) => {
+                    *skipped += 1;
+                    continue;
+                }
+            };
+            if is_secret_target(&path, opened.resolved()) {
+                *skipped += 1;
+                continue;
+            }
+            if rel_to_root(opened.resolved(), root)
+                .is_some_and(|r| ignore.is_ignored(&r, false))
+            {
+                *skipped += 1;
+                continue;
+            }
+            match opened.read_to_string() {
                 Ok(content) => out.push(ResolvedFile {
                     path: PathBuf::from(&rel),
                     content,
@@ -428,6 +524,26 @@ fn rel_to_root(full: &Path, root: &Path) -> Option<String> {
     } else {
         Some(joined.join("/"))
     }
+}
+
+/// The path of an already-resolved `resolved` relative to `root`, with
+/// `root` canonicalized first.
+///
+/// `rel_to_root` is a lexical prefix test, so it answers "is this inside the
+/// workspace?" only when both sides are spelled the same way. They routinely
+/// are not: a `..` component, or a root reached through a symlink (`/tmp` is
+/// `/private/tmp` on macOS), makes a path that really is inside the
+/// workspace fail the prefix test — and a `None` here means the caller skips
+/// the gitignore guard entirely (core#335). Canonicalizing both sides makes
+/// the test about containment rather than spelling.
+///
+/// Still `None` for a target genuinely outside the workspace: this root's
+/// `.gitignore` has no jurisdiction over `/etc/hosts`, and pretending
+/// otherwise would be the wrong guard, not a stronger one. Such a path is
+/// still subject to both name gates.
+fn rel_to_canonical_root(resolved: &Path, root: &Path) -> Option<String> {
+    let canonical_root = fs::canonicalize(root).ok()?;
+    rel_to_root(resolved, &canonical_root)
 }
 
 /// A lossy display string for a path, for error messages.
@@ -645,9 +761,16 @@ mod tests {
     // Every fixture below uses an OBVIOUSLY FAKE credential body. The point
     // is that the bytes reach the payload at all, not what they say.
 
-    /// A stand-in for `~/.git-credentials`. Deliberately non-resolvable.
+    /// Deliberately non-resolvable, and obviously not a real credential.
     #[cfg(unix)]
     const FAKE_CREDENTIAL: &str = "https://fake-user:fake-token@example.invalid\n";
+
+    /// A secret file name that was ALREADY on the denylist at the base
+    /// commit. Using it keeps the identity tests independent of this
+    /// change's `.git-credentials` addition: they fail before the fix and
+    /// pass after it purely because of *which object* the guard judges.
+    #[cfg(unix)]
+    const PRE_EXISTING_SECRET_NAME: &str = ".netrc";
 
     /// core#339, call site `resolve_file` — `fs::read_to_string(&full)`.
     /// The guard matches the LEXICAL name (`notes.txt`); the read follows
@@ -658,7 +781,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
         let outside = TempDir::new().expect("outside");
-        let cred = outside.path().join(".git-credentials");
+        let cred = outside.path().join(PRE_EXISTING_SECRET_NAME);
         fs::write(&cred, FAKE_CREDENTIAL).expect("write fake credential");
         std::os::unix::fs::symlink(&cred, root.join("notes.txt")).expect("symlink");
 
@@ -680,7 +803,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
         let outside = TempDir::new().expect("outside");
-        let cred = outside.path().join(".git-credentials");
+        let cred = outside.path().join(PRE_EXISTING_SECRET_NAME);
         fs::write(&cred, FAKE_CREDENTIAL).expect("write fake credential");
         fs::write(root.join("ok.txt"), "safe").expect("write ok");
         std::os::unix::fs::symlink(&cred, root.join("notes.txt")).expect("symlink");
@@ -774,6 +897,76 @@ mod tests {
                 p.files[0].content
             ),
         }
+    }
+
+    /// core#339 as reported, verbatim: `ln -s ~/.git-credentials notes.txt`
+    /// then `@notes.txt`. Needs BOTH halves of this change — the denylist
+    /// entry for `.git-credentials` and the identity guard that judges the
+    /// symlink's target instead of its name.
+    #[cfg(unix)]
+    #[test]
+    fn the_reported_git_credentials_symlink_is_refused() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let home = TempDir::new().expect("home");
+        let cred = home.path().join(".git-credentials");
+        fs::write(&cred, FAKE_CREDENTIAL).expect("write fake credential");
+        std::os::unix::fs::symlink(&cred, root.join("notes.txt")).expect("symlink");
+
+        let err = resolve(&AtRef::parse("@notes.txt").unwrap(), root)
+            .expect_err("the reported exploit must be refused");
+        assert!(matches!(err, AtRefError::SecretBlocked(_)), "got {err:?}");
+
+        // …and the `@dir` walk must not pick it up either.
+        let payload = resolve(&AtRef::parse("@./").unwrap(), root).expect("resolve dir");
+        assert!(
+            !payload.files.iter().any(|f| f.content.contains("fake-token")),
+            "@dir walk inlined the reported credential store"
+        );
+    }
+
+    /// An ordinary symlink to an ordinary file must still resolve. A
+    /// blanket refusal of symlinks would pass every test above and break
+    /// every repo that links a real file.
+    #[cfg(unix)]
+    #[test]
+    fn an_ordinary_symlink_to_an_ordinary_file_still_resolves() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/real.rs"), "fn main() {}\n").expect("write real");
+        std::os::unix::fs::symlink(root.join("src/real.rs"), root.join("link.rs"))
+            .expect("symlink");
+
+        let payload = resolve(&AtRef::parse("@link.rs").unwrap(), root).expect("resolve");
+        assert_eq!(payload.files[0].content, "fn main() {}\n");
+
+        // And through the walk, from both spellings.
+        let dir = resolve(&AtRef::parse("@./").unwrap(), root).expect("resolve dir");
+        let names: Vec<_> = dir
+            .files
+            .iter()
+            .map(|f| f.path.display().to_string().replace('\\', "/"))
+            .collect();
+        assert!(names.iter().any(|n| n == "link.rs"), "{names:?}");
+        assert!(names.iter().any(|n| n == "src/real.rs"), "{names:?}");
+    }
+
+    /// core#335's capability half: an absolute path OUTSIDE the workspace is
+    /// a real feature and must keep working. It gets both name gates, but
+    /// this root's `.gitignore` has no jurisdiction over it.
+    #[test]
+    fn an_absolute_path_outside_the_workspace_still_resolves() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join(".gitignore"), "notes.txt\n").expect("write gitignore");
+        let outside = TempDir::new().expect("outside");
+        let target = outside.path().join("notes.txt");
+        fs::write(&target, "outside body").expect("write outside");
+
+        let at = AtRef::parse(&format!("@{}", target.display())).expect("parse");
+        let payload = resolve(&at, root).expect("an out-of-tree absolute path still attaches");
+        assert_eq!(payload.files[0].content, "outside body");
     }
 
     /// A self-referential directory symlink must not multiply the

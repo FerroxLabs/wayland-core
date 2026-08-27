@@ -8,8 +8,11 @@
 //! `at_refs.rs` (W3-B) so parsing, completion, and resolution each import
 //! only the guard surface they need.
 
-use std::fs;
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+use same_file::Handle;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Secret denylist
@@ -24,6 +27,12 @@ const SECRET_FILENAMES: &[&str] = &[
     ".npmrc",
     ".pypirc",
     ".pgpass",
+    // The store `git credential-store` writes. `credentials` below is the
+    // bare spelling (AWS, gcloud); this is git's, and the red arm for
+    // core#339 found it was on neither list — the very file the issue's
+    // example exfiltrates was not denied by name even before a symlink got
+    // involved.
+    ".git-credentials",
     "credentials",
     "credentials.json",
     "secrets.json",
@@ -72,6 +81,90 @@ pub fn is_secret_path(path: &Path) -> bool {
         return true;
     }
     false
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Identity — the object a name resolves to
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A file opened exactly once, paired with the fully-resolved path that
+/// names the object the open handle refers to.
+///
+/// Every guard in this module judges a *name*. A symlink separates the name
+/// a caller typed from the object a read returns, so a guard applied to the
+/// typed name and a read applied to the target are guarding two different
+/// things — that is core#339: `ln -s ~/.git-credentials notes.txt` makes
+/// `@notes.txt` pass the denylist and inline a credential store.
+///
+/// Canonicalizing and then re-opening by the canonical path does not close
+/// it: a component of that path can be swapped between the check and the
+/// read. So this type opens the target ONCE, canonicalizes it, and refuses
+/// unless the canonical path names *the same object* as the handle it
+/// holds. The guards then judge [`resolved`](Self::resolved) and the read
+/// consumes the handle whose identity was proven against it — check and
+/// read cannot diverge, because there is only ever one open.
+pub struct GuardedFile {
+    /// The one open handle. Also carries the identity used for the check.
+    handle: Handle,
+    /// The symlink-free path naming the object `handle` refers to.
+    resolved: PathBuf,
+}
+
+impl GuardedFile {
+    /// Open `path`, following symlinks, and prove the canonical path names
+    /// the object that was opened.
+    ///
+    /// Errors:
+    /// - [`io::ErrorKind::NotFound`] — no such path.
+    /// - [`io::ErrorKind::InvalidInput`] — the target is not a regular file
+    ///   (a directory, a device, a socket).
+    /// - any other kind — the open, the canonicalize, or the identity check
+    ///   failed. An identity mismatch means the target was swapped while it
+    ///   was being resolved; refusing is the only safe answer.
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let file = File::open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+        let resolved = fs::canonicalize(path)?;
+        let handle = Handle::from_file(file)?;
+        if handle != Handle::from_path(&resolved)? {
+            return Err(io::Error::other(
+                "the target changed identity while it was being resolved",
+            ));
+        }
+        Ok(Self { handle, resolved })
+    }
+
+    /// The symlink-free path of the object this handle refers to. This — not
+    /// the caller's spelling — is what the guards must judge.
+    pub fn resolved(&self) -> &Path {
+        &self.resolved
+    }
+
+    /// Read the opened handle's contents as UTF-8. Reads the object whose
+    /// identity [`open`](Self::open) proved, never a re-resolution of the
+    /// original path.
+    pub fn read_to_string(&mut self) -> io::Result<String> {
+        let file = self.handle.as_file_mut();
+        file.seek(SeekFrom::Start(0))?;
+        let mut out = String::new();
+        file.read_to_string(&mut out)?;
+        Ok(out)
+    }
+}
+
+/// True if either spelling of a path is a secret: the name the caller wrote
+/// or the name of the object it actually resolves to.
+///
+/// The union is the point (core#323's remaining half). Keeping the lexical
+/// arm means `@.env` is still refused whatever it points at; adding the
+/// resolved arm means an innocuous name cannot launder a secret target.
+pub fn is_secret_target(lexical: &Path, resolved: &Path) -> bool {
+    is_secret_path(lexical) || is_secret_path(resolved)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -265,6 +358,8 @@ mod tests {
         assert!(is_secret_path(Path::new("id_rsa")));
         assert!(is_secret_path(Path::new("certs/tls.key")));
         assert!(is_secret_path(Path::new("CREDENTIALS.JSON"))); // case-insensitive
+        assert!(is_secret_path(Path::new(".git-credentials")));
+        assert!(is_secret_path(Path::new("/home/u/.git-credentials")));
 
         assert!(!is_secret_path(Path::new("src/main.rs")));
         assert!(!is_secret_path(Path::new("README.md")));
