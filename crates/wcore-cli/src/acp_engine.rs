@@ -1752,13 +1752,30 @@ mod tests {
         assert!(reply.capabilities.tools.is_empty());
     }
 
+    /// #946: the input MUST contain the tools under discussion. The previous
+    /// version fed only Read/Bash/Grep, so when `default_allow_list()` gained
+    /// `pdf_extract`/`doc_extract` — and `retain_default_tool_allow_list()`
+    /// still keyed off that same list — this guard could not observe the two
+    /// names becoming network authority for every ACP/A2A session. A guard
+    /// whose input cannot contain the risk is not a guard.
     #[test]
     fn network_sessions_drop_local_grants_and_a2a_honors_force() {
         let mut config = placeholder_config();
-        config.tools.allow_list = vec!["Read".into(), "Bash".into(), "Grep".into()];
+        config.tools.allow_list = vec![
+            "Read".into(),
+            "Bash".into(),
+            "Grep".into(),
+            "pdf_extract".into(),
+            "doc_extract".into(),
+        ];
         assert_eq!(
             network_session_config(config).tools.allow_list,
-            vec!["Read", "Grep"]
+            vec!["Read", "Grep"],
+            "the office/PDF extractors are LOCAL-ONLY grants: doc_extract \
+             writes $TMPDIR/wayland-doc-extract and neither tool claims \
+             Tool::read_only_safe, so neither may survive into a network \
+             session where allow-list membership skips the approval gate and \
+             no TTY exists to refuse a prompt"
         );
 
         let handler = EngineA2aHandler::new("server-agent", placeholder_config(), ".".to_string())

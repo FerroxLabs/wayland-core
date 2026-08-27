@@ -1083,6 +1083,25 @@ pub struct SkillsPermissionConfig {
 pub struct ToolsConfig {
     #[serde(default)]
     pub auto_approve: bool,
+    /// REACH (#946 item D) — read this before assuming a change to
+    /// [`AUDITED_DEFAULT_GRANTS`] ships to anyone.
+    ///
+    /// `#[serde(default)]` fires ONLY when `[tools] allow_list` is ABSENT
+    /// from config.toml. `ConfigFile::tools` is non-`Option`, this field has
+    /// no `skip_serializing_if`, and `patch_config_file_at` round-trips the
+    /// WHOLE struct on every partial save. Every production writer therefore
+    /// freezes whatever list was current at that moment onto disk:
+    /// `wcore_cli::migrate`, the TUI `/config` surface
+    /// (`tui::engine_bridge`), and the paste-detect modal that saves a pasted
+    /// API key (`tui::surfaces::paste_detect_modal`).
+    ///
+    /// So a change here reaches (a) fresh installs and (b) users who delete
+    /// the key. It does NOT reach anyone who has ever saved settings in the
+    /// TUI, pasted an API key into it, or been through the migrator — they
+    /// keep the list frozen at their save time. That is deliberate:
+    /// rewriting a user's explicit grant list behind their back is a
+    /// privilege change, and this is a security boundary. The limitation is
+    /// pinned by `default_allow_list_only_applies_when_the_key_is_absent`.
     #[serde(default = "default_allow_list")]
     pub allow_list: Vec<String>,
     /// Skill-level deny/allow rules. Merged by concatenation across global + project configs.
@@ -1261,34 +1280,110 @@ fn default_max_tokens() -> u32 {
 /// low-usage provider or novel-tool loop that otherwise makes no bounded
 /// progress for the full session lifetime.
 const SMART_MAX_TURNS: usize = 512;
+/// Where an audited default tool grant applies.
+///
+/// `default_allow_list()` feeds TWO consumers with very different threat
+/// models, and that split is exactly how #946's first attempt at this fix
+/// widened REMOTE authority while analysing only the local approval prompt:
+///
+///   * `ToolsConfig::default()` / `#[serde(default = "default_allow_list")]`
+///     — what a LOCAL operator, who launched this process themselves, gets
+///     without a prompt.
+///   * [`Config::retain_default_tool_allow_list`] — what SURVIVES for a
+///     REMOTE principal. Two production callers:
+///     `wcore_cli::acp_engine::network_session_config` (applied to EVERY
+///     ACP/A2A network session) and
+///     `wcore_agent::channel_dispatch::remote_channel_config` (remote chat
+///     senders).
+///
+/// A remote grant has no operator behind it. Allow-list membership SKIPS the
+/// approval gate outright — `ToolConfirmer::requires_confirmation_for`
+/// short-circuits on `allow_list.contains(tool_name)` before it ever looks at
+/// the policy — and with no TTY to answer a prompt the call would otherwise
+/// be DENIED. Adding a name to the remote set is therefore not "one fewer
+/// prompt"; it is the difference between denied and executed for an untrusted
+/// network principal. So the two sets are separate and every entry has to
+/// declare which one it is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrantScope {
+    /// Auto-approved locally AND retained for remote principals. The bar is
+    /// the one this list has always claimed: for ANY input it accepts, the
+    /// tool cannot write, execute, or send a message.
+    Remote,
+    /// Auto-approved for the LOCAL operator only. Stripped from every remote
+    /// surface by [`Config::retain_default_tool_allow_list`], so a remote
+    /// caller still has to be granted it explicitly (or run under `force`).
+    LocalOnly,
+}
+
+/// The single audit table behind BOTH default allow lists. Adding a row is a
+/// privilege grant, so it is gated twice:
+///
+///   * `default_grant_table_pins_both_scopes` (this file) pins both derived
+///     lists in FULL, so no row can appear in either scope silently;
+///   * `crates/wcore-tools/tests/default_allow_list_is_read_only.rs`
+///     re-derives every name against the REAL registered tool and asserts
+///     its category (`Info`, or a pinned deliberate exception), so a writer
+///     or an exec tool cannot be added under either scope even with the
+///     sequence pins updated.
+const AUDITED_DEFAULT_GRANTS: &[(&str, GrantScope)] = &[
+    ("Read", GrantScope::Remote),
+    ("Grep", GrantScope::Remote),
+    ("Glob", GrantScope::Remote),
+    ("web", GrantScope::Remote),
+    ("WebFetch", GrantScope::Remote),
+    ("vision_analyze", GrantScope::Remote),
+    ("transcribe_audio", GrantScope::Remote),
+    ("ToolSearch", GrantScope::Remote),
+    ("Skill", GrantScope::Remote),
+    ("wayland_status", GrantScope::Remote),
+    ("wayland_telemetry_query", GrantScope::Remote),
+    // #946 A-10, re-graded 2026-08-27. The office/PDF extractors are the
+    // `Read` of a binary document: `ToolCategory::Info`, no mutation of the
+    // source file, no macro or formula evaluation. Without them a stock
+    // install could not read a .pdf/.docx/.xlsx/.pptx at all — `Read` answers
+    // "(binary file, N bytes)", the extractor prompts, and in a headless run
+    // a prompt is a denial, so no route to the content survived.
+    //
+    // LOCAL ONLY, on two grounds:
+    //   1. `doc_extract` WRITES. `wcore_tools::doc_tool::write_doc_artifact`
+    //      creates `$TMPDIR/wayland-doc-extract/<hash>.md` for the
+    //      over-budget full document. It is content-addressed, atomically
+    //      published, not user data, and not a path the model chooses — fine
+    //      on the operator's own machine, but it IS a write, and the remote
+    //      set's bar is "cannot write".
+    //   2. Neither tool claims `wcore_tools::Tool::read_only_safe`, the
+    //      codebase's own mutation predicate (default-deny, deliberately not
+    //      derived from `ToolCategory`). Only `Read`/`Grep`/`Glob`/`render`
+    //      claim it. A tool that will not vouch for itself does not get
+    //      unattended network authority.
+    ("pdf_extract", GrantScope::LocalOnly),
+    ("doc_extract", GrantScope::LocalOnly),
+];
+
+/// Tools auto-approved for the LOCAL operator out of the box.
+///
+/// REACH (#946 item D): this is the `#[serde(default)]` for
+/// `[tools] allow_list`, so it applies only when that key is ABSENT from
+/// config.toml. It does NOT reach an existing install whose config already
+/// carries the key — see the note on [`ToolsConfig::allow_list`].
 fn default_allow_list() -> Vec<String> {
-    // Read-only info-gathering tools — no destructive action, safe to
-    // auto-approve. Anything that writes, executes, or sends a message
-    // is NOT in this list and still gates on the approval flow. New
-    // installs get this default; existing users keep whatever they
-    // have (the legacy three-tool list still passes the
-    // `is-default` check via `default_allow_list_legacy_set`).
-    vec![
-        "Read".into(),
-        "Grep".into(),
-        "Glob".into(),
-        // #946 A-10: the office/PDF extractors are the `Read` of a binary
-        // document -- `ToolCategory::Info`, no mutation of the file, no macro
-        // or formula evaluation. Leaving them out made .pdf/.docx/.xlsx/.pptx
-        // unreachable on a stock install: `Read` answers "(binary file, N
-        // bytes)", the extractor prompts, and in a headless run a prompt is a
-        // denial, so no route to the content survived.
-        "pdf_extract".into(),
-        "doc_extract".into(),
-        "web".into(),
-        "WebFetch".into(),
-        "vision_analyze".into(),
-        "transcribe_audio".into(),
-        "ToolSearch".into(),
-        "Skill".into(),
-        "wayland_status".into(),
-        "wayland_telemetry_query".into(),
-    ]
+    AUDITED_DEFAULT_GRANTS
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect()
+}
+
+/// The subset of [`AUDITED_DEFAULT_GRANTS`] that survives for a REMOTE
+/// principal. This — not [`default_allow_list`] — is what
+/// [`Config::retain_default_tool_allow_list`] retains, so widening the local
+/// convenience list can never widen network authority.
+fn remote_retained_allow_list() -> Vec<String> {
+    AUDITED_DEFAULT_GRANTS
+        .iter()
+        .filter(|(_, scope)| matches!(scope, GrantScope::Remote))
+        .map(|(name, _)| (*name).to_string())
+        .collect()
 }
 fn default_true() -> bool {
     true
@@ -1482,11 +1577,19 @@ impl Config {
     /// read-only defaults. Remote launch surfaces use this so local Bash/Write
     /// convenience grants never become network authority, without disabling
     /// safe inspection tools such as Read/Grep/Glob.
+    ///
+    /// #946: this retains [`remote_retained_allow_list`], NOT
+    /// [`default_allow_list`]. The two used to be the same function, which
+    /// meant every addition to the local convenience default was silently
+    /// also a grant to every ACP/A2A network session and every remote chat
+    /// sender — with no approval gate and no TTY to refuse one. The local
+    /// default may now be a strict superset; only `GrantScope::Remote` rows
+    /// cross the network boundary.
     pub fn retain_default_tool_allow_list(&mut self) {
-        let defaults = default_allow_list();
+        let retained = remote_retained_allow_list();
         self.tools
             .allow_list
-            .retain(|name| defaults.iter().any(|allowed| allowed == name));
+            .retain(|name| retained.iter().any(|allowed| allowed == name));
     }
 }
 
@@ -5441,6 +5544,19 @@ fn merge_config_files_with_trust(
     // intersected with global's, so a project may only NARROW the approved set,
     // never approve a tool the user's global config didn't. A project that
     // doesn't customize the list keeps global's list unchanged.
+    //
+    // #946 item E — the `!= default_allow_list()` sentinel means "did the
+    // project customize the list", and it is VERSION-SENSITIVE: it compares
+    // against the CURRENT default, not against the default that was current
+    // when the project file was written. Adding `pdf_extract`/`doc_extract`
+    // to `AUDITED_DEFAULT_GRANTS` therefore flips a `.wayland-core.toml` that
+    // carries the previous 11-name default from the else-branch (take
+    // global's list verbatim) to this intersect branch (project ∩ global).
+    // The result is the project's own 11 names, so the change is
+    // TIGHTEN-ONLY — such a repo loses the two extractors locally rather
+    // than gaining anything — but it is a silent behaviour change and is
+    // recorded here rather than discovered later. Pinned by
+    // `project_file_carrying_a_stale_default_narrows_tighten_only`.
     let clamped_allow_list: Vec<String> = if project.tools.allow_list != default_allow_list() {
         project
             .tools
@@ -5461,6 +5577,7 @@ fn merge_config_files_with_trust(
         merged.extend(project.tools.media_pricing.clone());
         merged
     };
+    // Same version-sensitive sentinel as the clamp above (#946 item E).
     let tools = if project.tools.allow_list != default_allow_list() || project.tools.auto_approve {
         ToolsConfig {
             auto_approve: clamped_auto_approve,
@@ -8934,42 +9051,198 @@ command = "local-mcp"
         );
     }
 
-    /// #946 A-10 (re-graded 2026-08-27): the office/PDF extractors must be
-    /// auto-approved out of the box, exactly like `Read`.
+    /// #946 A-10 (re-graded 2026-08-27). Two properties, pinned in FULL.
     ///
-    /// RED ARM: `default_allow_list()` held neither name, so a stock install
-    /// could not read a `.pdf`/`.docx`/`.xlsx`/`.pptx` at all -- the extractor
-    /// needed approval, `Read` returned only "(binary file, N bytes)", and
-    /// every fallback (`Bash`, `execute`) needed approval too. Headless that
-    /// means denial, so the content was unreachable by any route.
+    /// The first pass at this fix asserted only that two names were PRESENT
+    /// and that four cherry-picked names were ABSENT. That test could not
+    /// observe the thing that actually mattered — every addition to
+    /// `default_allow_list()` was also an addition to what
+    /// `retain_default_tool_allow_list()` hands a REMOTE principal, with no
+    /// approval gate and no TTY to refuse one. A negative assertion over four
+    /// hardcoded names can never fail on the property it claims to guard,
+    /// because the widening it needs to catch is by definition a name the
+    /// test does not mention.
     ///
-    /// #946 claimed this had already shipped as `fix/media-readonly-allowlist`.
-    /// No such branch exists on the remote (checked with `git ls-remote`, with
-    /// `refs/heads/main` as the known-positive control) and neither name was in
-    /// the list.
-    ///
-    /// Both tools are `ToolCategory::Info`, never modify the document and never
-    /// run macros or formulas (`DocExtractTool`/`PdfExtractTool::category`).
-    /// `doc_extract`'s only write is the content-addressed artifact under
-    /// `std::env::temp_dir()` -- not user data, and not a path the model picks.
+    /// Both lists are therefore pinned as WHOLE SEQUENCES. Any row added to
+    /// `AUDITED_DEFAULT_GRANTS` fails this test whatever its scope, and any
+    /// row promoted from `LocalOnly` to `Remote` fails the second assertion
+    /// specifically. The semantic half — that no row is a tool that writes,
+    /// executes or sends — is enforced across the crate boundary by
+    /// `crates/wcore-tools/tests/default_allow_list_is_read_only.rs`, which
+    /// re-derives each name against the real registered tool; this crate
+    /// cannot see `ToolCategory` (`wcore-tools` depends on `wcore-config`,
+    /// not the reverse).
     #[test]
-    fn media_extractors_are_auto_approved_out_of_the_box() {
-        let defaults = default_allow_list();
+    fn default_grant_table_pins_both_scopes() {
+        assert_eq!(
+            default_allow_list(),
+            vec![
+                "Read",
+                "Grep",
+                "Glob",
+                "web",
+                "WebFetch",
+                "vision_analyze",
+                "transcribe_audio",
+                "ToolSearch",
+                "Skill",
+                "wayland_status",
+                "wayland_telemetry_query",
+                "pdf_extract",
+                "doc_extract",
+            ],
+            "LOCAL auto-approve set changed. Every entry skips the approval \
+             prompt for the operator; justify the row in AUDITED_DEFAULT_GRANTS \
+             and update this pin deliberately."
+        );
+
+        assert_eq!(
+            remote_retained_allow_list(),
+            vec![
+                "Read",
+                "Grep",
+                "Glob",
+                "web",
+                "WebFetch",
+                "vision_analyze",
+                "transcribe_audio",
+                "ToolSearch",
+                "Skill",
+                "wayland_status",
+                "wayland_telemetry_query",
+            ],
+            "REMOTE retained set changed. This is what an ACP/A2A network \
+             session and a remote chat sender keep after \
+             retain_default_tool_allow_list(); membership SKIPS the approval \
+             gate and there is no TTY to refuse a prompt, so an addition here \
+             is the difference between denied and executed for an untrusted \
+             principal."
+        );
+
+        // The remote set must stay a SUBSET of the local one: a tool no local
+        // operator gets by default must never be handed to a remote caller.
+        let local = default_allow_list();
+        for name in remote_retained_allow_list() {
+            assert!(
+                local.contains(&name),
+                "{name} is retained remotely but is not even a local default"
+            );
+        }
+    }
+
+    /// #946 A-10, the user-visible half: a stock install must be able to read
+    /// a `.pdf`/`.docx`/`.xlsx`/`.pptx`, and must not thereby hand the
+    /// extractors to the network.
+    ///
+    /// RED ARM (measured): with the two rows removed from
+    /// `AUDITED_DEFAULT_GRANTS`, this fails on the first assertion. Before
+    /// the split, a version that added them to the single old list failed the
+    /// SECOND assertion — which is the regression the refuter caught and the
+    /// reason the two lists are now distinct.
+    #[test]
+    fn media_extractors_are_local_only() {
+        let local = default_allow_list();
+        let remote = remote_retained_allow_list();
         for tool in ["pdf_extract", "doc_extract"] {
             assert!(
-                defaults.contains(&tool.to_string()),
-                "{tool} is a read-only Info extractor and must be auto-approved \
-                 like Read/Grep/Glob; without it .pdf/.docx/.xlsx/.pptx are \
+                local.contains(&tool.to_string()),
+                "{tool} is the `Read` of a binary document and must be \
+                 auto-approved locally; without it .pdf/.docx/.xlsx/.pptx are \
                  unreadable on a stock install (#946 A-10)"
             );
-        }
-        // The list stays read-only: nothing that writes, executes or sends.
-        for tool in ["Bash", "Write", "Edit", "send_message"] {
             assert!(
-                !defaults.contains(&tool.to_string()),
-                "{tool} mutates and must keep gating on the approval flow"
+                !remote.contains(&tool.to_string()),
+                "{tool} must NOT survive retain_default_tool_allow_list(): \
+                 doc_extract writes $TMPDIR/wayland-doc-extract and neither \
+                 tool claims Tool::read_only_safe, so neither may become \
+                 unattended network authority"
             );
         }
+
+        // And the retain step, driven end to end, agrees.
+        let mut config = Config::default();
+        config.tools.allow_list = default_allow_list();
+        config.retain_default_tool_allow_list();
+        assert!(!config.tools.allow_list.contains(&"pdf_extract".to_string()));
+        assert!(!config.tools.allow_list.contains(&"doc_extract".to_string()));
+        assert!(
+            config.tools.allow_list.contains(&"Read".to_string()),
+            "known-positive control: the retain step is running and Read survives"
+        );
+    }
+
+    /// #946 item D, pinned rather than assumed: the serde default fires ONLY
+    /// when `[tools] allow_list` is absent, so a change to
+    /// `AUDITED_DEFAULT_GRANTS` does not reach a config that already carries
+    /// the key — which is every install that has ever saved settings in the
+    /// TUI, pasted an API key into it, or been through the migrator, because
+    /// `patch_config_file_at` re-emits the whole struct.
+    #[test]
+    fn default_allow_list_only_applies_when_the_key_is_absent() {
+        // Absent → the default applies. This is the known-positive control:
+        // it proves the parse path is live, so the negative case below is a
+        // real absence rather than a broken instrument.
+        let absent: ToolsConfig = toml::from_str("auto_approve = false").unwrap();
+        assert_eq!(absent.allow_list, default_allow_list());
+
+        // Present → whatever is on disk wins, verbatim and frozen.
+        let present: ToolsConfig =
+            toml::from_str("auto_approve = false\nallow_list = [\"Read\", \"Grep\", \"Glob\"]")
+                .unwrap();
+        assert_eq!(
+            present.allow_list,
+            vec!["Read", "Grep", "Glob"],
+            "an existing install keeps its frozen list; the new defaults do \
+             NOT reach it (#946 item D)"
+        );
+        assert!(
+            !present.allow_list.contains(&"pdf_extract".to_string()),
+            "documented limitation, asserted so it cannot be quietly claimed \
+             otherwise: existing installs do not get the extractors"
+        );
+    }
+
+    /// #946 item E: a project `.wayland-core.toml` carrying the PREVIOUS
+    /// default list stops matching `default_allow_list()` and falls into the
+    /// tighten-only intersect branch. Tighten-only, but not silent.
+    #[test]
+    fn project_file_carrying_a_stale_default_narrows_tighten_only() {
+        let stale_default: Vec<String> = vec![
+            "Read",
+            "Grep",
+            "Glob",
+            "web",
+            "WebFetch",
+            "vision_analyze",
+            "transcribe_audio",
+            "ToolSearch",
+            "Skill",
+            "wayland_status",
+            "wayland_telemetry_query",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        let global = ConfigFile::default();
+        let project = ConfigFile {
+            tools: ToolsConfig {
+                allow_list: stale_default.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config_files(global, project);
+
+        assert_eq!(
+            merged.tools.allow_list, stale_default,
+            "intersect branch: the project's own (stale) list survives"
+        );
+        assert!(
+            !merged.tools.allow_list.contains(&"pdf_extract".to_string()),
+            "tighten-only: such a repo LOSES the new extractors rather than \
+             gaining anything (#946 item E)"
+        );
     }
 
     #[test]
@@ -10149,7 +10422,18 @@ enabled = false
     #[test]
     fn remote_allow_list_retains_only_audited_defaults() {
         let mut config = Config::default();
-        config.tools.allow_list = vec!["Read".into(), "Bash".into(), "Grep".into(), "Write".into()];
+        // #946: the input MUST contain the tools under discussion. The
+        // previous version fed only Read/Bash/Grep/Write, so it could not
+        // observe the extractors being added to the retained set — a guard
+        // whose input cannot contain the risk is not a guard.
+        config.tools.allow_list = vec![
+            "Read".into(),
+            "Bash".into(),
+            "Grep".into(),
+            "pdf_extract".into(),
+            "doc_extract".into(),
+            "Write".into(),
+        ];
 
         config.retain_default_tool_allow_list();
 
