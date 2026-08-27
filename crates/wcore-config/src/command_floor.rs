@@ -654,18 +654,66 @@ fn components(token: &str) -> Vec<String> {
     out
 }
 
-/// Split a command into path-shaped words. Everything the shell treats as a
-/// word separator or an operator is a delimiter, so `dd of=.git/hooks/x` and
-/// `echo x>>~/.wayland/permissions.toml` both surface their path.
+/// Split a command into path-shaped words, the way the shell would.
+///
+/// Everything the shell treats as a word separator or an operator is a
+/// delimiter, so `dd of=.git/hooks/x` and `echo x>>~/.wayland/permissions.toml`
+/// both surface their path — but a delimiter INSIDE a quoted span, or escaped
+/// with a backslash, is not one. A plain `split_whitespace` cut every path
+/// containing a space in half, and neither half matched anything: on macOS the
+/// default config dir is `~/Library/Application Support/wayland-core`, so the
+/// floor did not protect the operator's own config directory at all, in the one
+/// spelling a shell actually executes.
+///
+/// The UNQUOTED spelling of such a path stays split, and correctly: `echo x >>
+/// /a b/c` writes to `/a`, so there is nothing there for the floor to refuse.
 fn path_tokens(command: &str) -> Vec<String> {
-    command
-        .split(|c: char| {
-            c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>' | '(' | ')' | '=' | ',')
-        })
-        .filter(|s| !s.is_empty())
-        .map(|s| s.trim_matches(['"', '\'', '`']).to_owned())
-        .filter(|s| !s.is_empty())
-        .collect()
+    let mut out: Vec<String> = Vec::new();
+    let mut token = String::new();
+    let mut single = false;
+    let mut double = false;
+    let mut chars = command.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            // A quoted span is ONE token, space included. Without this, every
+            // path containing a space was split in half and matched nothing --
+            // and on macOS the default config dir is inside `Library/
+            // Application Support`, so the floor did not protect the
+            // operator's own config directory at all.
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            // A backslash keeps the NEXT character in the token, but only when
+            // that character is one the shell would otherwise treat as a
+            // boundary. Escaping unconditionally would eat Windows separators
+            // (`C:\Users\x` -> `C:Usersx`), which is exactly the damage the
+            // de-obfuscated pass does and the reason both forms are scanned.
+            '\\' if !single
+                && chars
+                    .peek()
+                    .is_some_and(|n| n.is_whitespace() || matches!(n, '"' | '\'' | '`')) =>
+            {
+                if let Some(n) = chars.next() {
+                    token.push(n);
+                }
+            }
+            '`' if !single && !double => {}
+            c if !single
+                && !double
+                && (c.is_whitespace()
+                    || matches!(c, ';' | '|' | '&' | '<' | '>' | '(' | ')' | '=' | ',')) =>
+            {
+                if !token.is_empty() {
+                    out.push(std::mem::take(&mut token));
+                }
+            }
+            other => token.push(other),
+        }
+    }
+    if !token.is_empty() {
+        out.push(token);
+    }
+    out
 }
 
 /// Best-effort de-obfuscation of trivial shell quoting tricks, so
@@ -897,6 +945,160 @@ mod tests {
         assert_eq!(
             beside, None,
             "control: an ordinary sibling path must still be allowed"
+        );
+    }
+
+    /// A protected path containing a SPACE is refused in every spelling a
+    /// shell would actually execute, and only in those.
+    ///
+    /// `path_tokens` used to split on whitespace with no quote awareness, so
+    /// any such path was cut in half and neither half matched anything. That is
+    /// not a corner case: on macOS the default config dir is
+    /// `~/Library/Application Support/wayland-core`, so on that platform the
+    /// floor did not protect the operator's own config directory at all — and
+    /// the suite did not show it, because every test spelled the command the
+    /// one way a shell would not run.
+    #[test]
+    #[serial_test::serial]
+    fn a_protected_path_with_a_space_is_refused_in_the_spellings_a_shell_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("Application Support").join("wayland-core");
+        std::fs::create_dir_all(&home).unwrap();
+        let target = home.join("config.toml");
+        let prior = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: test-only env mutation, serialized against this module's
+        // other env-driven tests.
+        unsafe { std::env::set_var("WAYLAND_HOME", &home) };
+
+        let quoted = floor_refusal(
+            &format!("echo x >> \"{}\"", target.display()),
+            Some(Path::new("/work")),
+        );
+        let single_quoted = floor_refusal(
+            &format!("echo x >> '{}'", target.display()),
+            Some(Path::new("/work")),
+        );
+        let escaped = floor_refusal(
+            &format!(
+                "echo x >> {}",
+                target.display().to_string().replace(' ', "\\ ")
+            ),
+            Some(Path::new("/work")),
+        );
+        // The BARE spelling stays split, and correctly: the shell writes to
+        // `<root>/Application`, which is not protected, so there is nothing
+        // here to refuse. Asserting a refusal would be asserting that the floor
+        // guesses at a command the shell will not run.
+        let bare = floor_refusal(
+            &format!("echo x >> {}", target.display()),
+            Some(Path::new("/work")),
+        );
+        // Control: quoting alone must not become a refusal.
+        let ordinary = floor_refusal(
+            &format!(
+                "echo x >> \"{}/notes with spaces.txt\"",
+                root.path().display()
+            ),
+            Some(Path::new("/work")),
+        );
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+
+        assert!(quoted.is_some(), "a double-quoted path must be refused");
+        assert!(
+            single_quoted.is_some(),
+            "a single-quoted path must be refused"
+        );
+        assert!(
+            escaped.is_some(),
+            "a backslash-escaped space must not split the token"
+        );
+        assert_eq!(
+            bare, None,
+            "an UNQUOTED path with a space reaches nothing protected — refusing \
+             it would be refusing a command the shell will not run"
+        );
+        assert_eq!(
+            ordinary, None,
+            "control: quoting is not itself a reason to refuse"
+        );
+    }
+
+    /// Rule 2b's yield must recognise the workspace as being inside the
+    /// authority directory even when the two are spelled differently.
+    ///
+    /// The yield exists so a session LAUNCHED inside an authority directory can
+    /// still write its own files — refusing there refuses every command it can
+    /// make. Windows hands the same directory out under an 8.3 short name and a
+    /// long one, so `starts_with` said "different" and a live
+    /// migrate-quarantine leg had its own sentinel write refused by the floor.
+    ///
+    /// Built from a symlink so the two spellings differ on any Unix rather than
+    /// only on the runner that showed it. The subject asserts a NON-refusal, so
+    /// it carries two controls: the same command outside the workspace must
+    /// still be refused, and the grant store must still be refused by name
+    /// inside the yield.
+    #[test]
+    #[serial_test::serial]
+    fn the_yield_recognises_the_workspace_under_a_second_spelling() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.path().join("link");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&real, &link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&real, &link);
+        if made.is_err() {
+            eprintln!("skipped: this platform would not create a directory symlink");
+            return;
+        }
+
+        let prior = std::env::var_os("WAYLAND_HOME");
+        // The profile home is the LINK, and so is the path in the command; the
+        // WORKSPACE is that same directory reached by its real name — exactly
+        // as Windows hands out a long path for a home configured through a
+        // short one.
+        // SAFETY: test-only env mutation, serialized against this module's
+        // other env-driven tests.
+        unsafe { std::env::set_var("WAYLAND_HOME", &link) };
+        let own_file = floor_refusal(
+            &format!("echo x > \"{}/run-sentinel\"", link.display()),
+            Some(&real),
+        );
+        let without_yield = floor_refusal(
+            &format!("echo x > \"{}/run-sentinel\"", link.display()),
+            Some(Path::new("/work")),
+        );
+        let store = floor_refusal(
+            &format!("echo x > \"{}/permissions.toml\"", link.display()),
+            Some(&real),
+        );
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+
+        assert_eq!(
+            own_file, None,
+            "a session launched inside its own profile home must be able to \
+             write there — the yield has to see through the second spelling"
+        );
+        assert!(
+            without_yield.is_some(),
+            "control: the same path is refused when the session is NOT inside \
+             the profile home, or the assertion above proves nothing"
+        );
+        assert!(
+            store.is_some(),
+            "control: the yield narrows rule 2b, it does not switch off the \
+             bare-name rule that protects the grant store"
         );
     }
 
@@ -1185,7 +1387,18 @@ mod tests {
         // RESOLVED PATH only. This is the arm that grades rule 2b on its own:
         // drop the resolved-path check and the bare-name rule does not cover it.
         let target = crate::config::wayland_config_dir().join("config.toml");
-        let command = format!("echo 'security.enabled = false' >> {}", target.display());
+        // QUOTED, because that is the only spelling a shell actually executes
+        // when the path contains a space — and on macOS the default config dir
+        // is inside `Library/Application Support`. Unquoted, this command
+        // writes to `.../Library/Application`, reaches nothing protected, and
+        // the floor is right not to refuse it; asserting the bare spelling made
+        // this test pass on Linux and Windows for a reason that had nothing to
+        // do with the rule it grades, and fail on macOS for one that had
+        // nothing to do with the rule either.
+        let command = format!(
+            "echo 'security.enabled = false' >> \"{}\"",
+            target.display()
+        );
         assert!(
             floor_refusal(&command, None).is_some(),
             "the global config.toml carries security.enabled and tools.auto_approve"
@@ -1193,7 +1406,7 @@ mod tests {
         let oauth = crate::config::profile_home()
             .join("oauth")
             .join("token.json");
-        assert!(floor_refusal(&format!("cat {}", oauth.display()), None).is_some());
+        assert!(floor_refusal(&format!("cat \"{}\"", oauth.display()), None).is_some());
     }
 
     #[test]
