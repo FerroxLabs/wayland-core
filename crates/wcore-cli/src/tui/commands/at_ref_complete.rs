@@ -246,4 +246,28 @@ mod tests {
         assert_eq!(human_size(2048), "2 KB");
         assert_eq!(human_size(3 * 1024 * 1024), "3.0 MB");
     }
+
+    /// core#339, call site `complete_paths` — `is_secret_path(&path)`. The
+    /// popup judges the LEXICAL name, so a symlink named `notes.txt` whose
+    /// target is a credential store is offered as an ordinary file.
+    #[cfg(unix)]
+    #[test]
+    fn completion_must_not_offer_a_symlink_to_a_secret() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let outside = TempDir::new().expect("outside");
+        let cred = outside.path().join(".git-credentials");
+        fs::write(&cred, "https://fake-user:fake-token@example.invalid\n")
+            .expect("write fake credential");
+        std::os::unix::fs::symlink(&cred, root.join("notes.txt")).expect("symlink");
+
+        let offered: Vec<String> = complete("@notes", root)
+            .into_iter()
+            .map(|c| c.insert)
+            .collect();
+        assert!(
+            offered.is_empty(),
+            "completion offered a symlink to a credential store: {offered:?}"
+        );
+    }
 }

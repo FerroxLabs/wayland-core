@@ -639,4 +639,160 @@ mod tests {
         );
         assert!(rel_to_root(Path::new("/elsewhere/x.rs"), root).is_none());
     }
+
+    // ── identity guards: core#339 / core#335 / core#323 ───────────────────
+    //
+    // Every fixture below uses an OBVIOUSLY FAKE credential body. The point
+    // is that the bytes reach the payload at all, not what they say.
+
+    /// A stand-in for `~/.git-credentials`. Deliberately non-resolvable.
+    #[cfg(unix)]
+    const FAKE_CREDENTIAL: &str = "https://fake-user:fake-token@example.invalid\n";
+
+    /// core#339, call site `resolve_file` — `fs::read_to_string(&full)`.
+    /// The guard matches the LEXICAL name (`notes.txt`); the read follows
+    /// the symlink to the real target.
+    #[cfg(unix)]
+    #[test]
+    fn at_file_through_a_symlink_must_not_launder_a_secret() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let outside = TempDir::new().expect("outside");
+        let cred = outside.path().join(".git-credentials");
+        fs::write(&cred, FAKE_CREDENTIAL).expect("write fake credential");
+        std::os::unix::fs::symlink(&cred, root.join("notes.txt")).expect("symlink");
+
+        let at = AtRef::parse("@notes.txt").expect("parse");
+        match resolve(&at, root) {
+            Err(AtRefError::SecretBlocked(_)) => {}
+            Err(other) => panic!("expected SecretBlocked, got {other:?}"),
+            Ok(payload) => panic!(
+                "credential laundered through a symlink: {:?}",
+                payload.files[0].content
+            ),
+        }
+    }
+
+    /// core#339, call site `walk_dir` — `fs::read_to_string(&path)`.
+    #[cfg(unix)]
+    #[test]
+    fn at_dir_walk_must_not_inline_a_secret_reached_through_a_symlink() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let outside = TempDir::new().expect("outside");
+        let cred = outside.path().join(".git-credentials");
+        fs::write(&cred, FAKE_CREDENTIAL).expect("write fake credential");
+        fs::write(root.join("ok.txt"), "safe").expect("write ok");
+        std::os::unix::fs::symlink(&cred, root.join("notes.txt")).expect("symlink");
+
+        let at = AtRef::parse("@./").expect("parse");
+        let payload = resolve(&at, root).expect("resolve dir");
+        let leaked: Vec<_> = payload
+            .files
+            .iter()
+            .filter(|f| f.content.contains("fake-token"))
+            .map(|f| f.path.display().to_string())
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "@dir walk inlined a symlinked credential via {leaked:?}"
+        );
+    }
+
+    /// core#339 amplification: a symlink to a DIRECTORY outside the
+    /// workspace pulls that whole tree into an `@dir` of the workspace,
+    /// because the walk judges the lexical path and reads the target.
+    #[cfg(unix)]
+    #[test]
+    fn at_dir_walk_must_not_escape_the_workspace_through_a_directory_symlink() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let outside = TempDir::new().expect("outside");
+        fs::write(outside.path().join("private.txt"), "outside-the-workspace")
+            .expect("write outside");
+        fs::write(root.join("ok.txt"), "safe").expect("write ok");
+        std::os::unix::fs::symlink(outside.path(), root.join("vendor")).expect("symlink dir");
+
+        let at = AtRef::parse("@./").expect("parse");
+        let payload = resolve(&at, root).expect("resolve dir");
+        let escaped: Vec<_> = payload
+            .files
+            .iter()
+            .filter(|f| f.content.contains("outside-the-workspace"))
+            .map(|f| f.path.display().to_string())
+            .collect();
+        assert!(
+            escaped.is_empty(),
+            "@dir walk escaped the workspace via {escaped:?}"
+        );
+    }
+
+    /// core#335: a `..` component makes `rel_to_root` return `None`, so the
+    /// gitignore guard is skipped entirely for a path that is really inside
+    /// the workspace.
+    #[test]
+    fn a_parent_dir_component_must_not_skip_the_gitignore_guard() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join(".gitignore"), "secret.txt\n").expect("write gitignore");
+        fs::write(root.join("secret.txt"), "ignored body").expect("write file");
+        fs::create_dir(root.join("sub")).expect("mkdir sub");
+
+        let at = AtRef::parse("@sub/../secret.txt").expect("parse");
+        match resolve(&at, root) {
+            Err(AtRefError::GitIgnored(_)) => {}
+            Err(other) => panic!("expected GitIgnored, got {other:?}"),
+            Ok(p) => panic!(
+                "`..` skipped the gitignore guard: {:?}",
+                p.files[0].content
+            ),
+        }
+    }
+
+    /// core#335: the same skip, reached the way the issue describes — an
+    /// ABSOLUTE path, against a root that is spelled through a symlink (the
+    /// ordinary case on macOS, where `/tmp` is `/private/tmp`).
+    #[cfg(unix)]
+    #[test]
+    fn an_absolute_path_under_a_symlinked_root_must_not_skip_the_gitignore_guard() {
+        let tmp = TempDir::new().expect("tempdir");
+        let real = tmp.path().join("real");
+        fs::create_dir(&real).expect("mkdir real");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink root");
+        fs::write(real.join(".gitignore"), "secret.txt\n").expect("write gitignore");
+        fs::write(real.join("secret.txt"), "ignored body").expect("write file");
+
+        let abs = real.join("secret.txt");
+        let at = AtRef::parse(&format!("@{}", abs.display())).expect("parse");
+        // `link` is the workspace root as the composer knows it.
+        match resolve(&at, &link) {
+            Err(AtRefError::GitIgnored(_)) => {}
+            Err(other) => panic!("expected GitIgnored, got {other:?}"),
+            Ok(p) => panic!(
+                "absolute path under a symlinked root skipped the gitignore guard: {:?}",
+                p.files[0].content
+            ),
+        }
+    }
+
+    /// A self-referential directory symlink must not multiply the
+    /// workspace. Today the walk re-enters the link at every level and only
+    /// stops at `DIR_MAX_FILES`.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_symlink_cycle_must_not_multiply_the_walk() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("ok.txt"), "safe").expect("write ok");
+        std::os::unix::fs::symlink(root, root.join("loop")).expect("symlink cycle");
+
+        let at = AtRef::parse("@./").expect("parse");
+        let payload = resolve(&at, root).expect("resolve dir");
+        assert!(
+            payload.files.len() <= 2,
+            "symlink cycle multiplied the walk to {} entries",
+            payload.files.len()
+        );
+    }
 }
