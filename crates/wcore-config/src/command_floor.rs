@@ -39,13 +39,16 @@
 //! directories are the agent's own state, not the user's work.
 //!
 //! **With one yield, and only one.** Where the session's own working directory
-//! is INSIDE an authority directory, refusing the whole directory refuses every
-//! command the session can make - breaking, not widening - so rule 2b falls
-//! back there to a named-entry list. Rule 1 and the bare-name rule 2a still
-//! apply, so the grant store, workspace trust and the credential stores stay
-//! protected by name in that layout too. The yield keys off the working
-//! directory the session was launched with, which no command can change: an
-//! in-shell `cd` does not move it.
+//! is INSIDE an authority directory, refusing everything under that directory
+//! refuses every command the session can make - breaking, not widening - so
+//! rule 2b falls back there to the directory ITSELF by exact name plus a
+//! named-entry list. The session can still work in its own directory; the
+//! directory still cannot be renamed, replaced, symlinked or copied out whole,
+//! which is how the store was reached without naming it. Rule 1 and the
+//! bare-name rule 2a apply unchanged, so the grant store, workspace trust and
+//! the credential stores stay protected by name in that layout too. The yield
+//! keys off the working directory the session was launched with, which no
+//! command can change: an in-shell `cd` does not move it.
 //!
 //! **This module reads no switch.** No config field, no CLI flag, no
 //! enable/disable environment variable. The single `env::var` it performs is
