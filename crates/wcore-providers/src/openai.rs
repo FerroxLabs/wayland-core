@@ -803,29 +803,44 @@ impl OpenAIProvider {
             body[max_tokens_field] = json!(request.max_tokens);
         }
 
-        // FluxRouter web_search grounding (contract §5.2 / §5.8). Grounding only
-        // fires when the model is a tier alias (the customer let Flux pick) AND
-        // no real function tools ride along (Sonar rejects tools — function tools
-        // SUPPRESS grounding). When the caller asked for `web_search` on a tier
-        // alias, prefer grounding semantics for the turn: emit ONLY the
-        // `{"type":"web_search"}` tool and drop any function tools. A concrete
-        // model id (or `web_search` unset) keeps the normal function-tool path —
-        // injecting the tool there would not ground and would only confuse the
-        // concrete model, so we skip it.
+        // FluxRouter web_search grounding (contract §5.2 / §5.8). The grounding
+        // entry rides along when the model is a tier alias (the customer let
+        // Flux pick) AND the caller asked for `web_search`. A concrete model id
+        // (or `web_search` unset) keeps the plain function-tool path — injecting
+        // the tool there would not ground and would only confuse the concrete
+        // model, so we skip it.
         //
-        // On the normal function-tool path, also gate on the model family:
-        // Groq's agentic Compound models reject a caller-supplied `tools` array
-        // with a 400 that kills the turn (they do their own internal tool use).
+        // #1136 — the grounding entry is APPENDED to the function tools, never
+        // substituted for them. Overwriting the array meant `--search` on a tier
+        // alias reached the model with a system prompt still describing
+        // Bash/Read/Write/Edit/Grep and ZERO tools attached: the model
+        // hand-wrote tool-call markup as plain text and the turn executed
+        // nothing. Contract §5.8 says function tools suppress Sonar grounding;
+        // if Flux therefore declines to ground a turn that also carries function
+        // tools, `--search` degrades to a no-op for that turn — the agent still
+        // works, and its own `web` tool still searches. A turn with no function
+        // tools (the ask-a-question case grounding was built for) is unchanged:
+        // it still sends exactly `[{"type":"web_search"}]`.
+        //
+        // On the function-tool path, also gate on the model family: Groq's
+        // agentic Compound models reject a caller-supplied `tools` array with a
+        // 400 that kills the turn (they do their own internal tool use).
         // Per-request, since one provider serves many models in a session —
         // mirrors the `reasoning_effort` gate below.
         let ground_web_search = request.web_search && is_flux_tier_alias(&request.model);
-        if ground_web_search {
-            body["tools"] = json!([{ "type": "web_search" }]);
-        } else if !request.tools.is_empty()
+        let mut tools: Vec<Value> = if !request.tools.is_empty()
             && openai_compat::model_supports_tool_calling(&request.model)
             && self.tool_support.allows(&request.model)
         {
-            body["tools"] = json!(Self::build_tools(&request.tools));
+            Self::build_tools(&request.tools)
+        } else {
+            Vec::new()
+        };
+        if ground_web_search {
+            tools.push(json!({ "type": "web_search" }));
+        }
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
         }
 
         // Flux sticky-session / prefix-cache key. On a Flux tier alias the
@@ -4365,30 +4380,23 @@ mod tests {
         );
     }
 
-    /// web_search on a tier-alias model injects the `{"type":"web_search"}`
-    /// tool and DROPS the function tools (function tools suppress grounding,
-    /// contract §5.8).
+    /// web_search on a tier-alias model with NO function tools sends exactly
+    /// the `{"type":"web_search"}` grounding entry — the ask-a-question shape
+    /// grounding was built for, byte-identical to the pre-#1136 wire body.
     #[test]
-    fn web_search_injects_tool_on_tier_alias_and_drops_function_tools() {
+    fn web_search_injects_tool_on_tier_alias_when_no_function_tools() {
         let provider = stop_provider();
         let mut req = stop_req();
         req.model = "flux-auto".into();
         req.web_search = true;
-        req.tools = vec![ToolDef {
-            name: "Read".into(),
-            description: "read a file".into(),
-            input_schema: json!({"type": "object"}),
-            deferred: false,
-            server: None,
-        }];
+        req.tools = vec![];
         let body = provider.build_request_body(&req);
         let tools = body["tools"].as_array().expect("tools array present");
-        assert_eq!(tools.len(), 1, "only the web_search tool survives");
+        assert_eq!(tools.len(), 1, "only the web_search tool is sent");
         assert_eq!(tools[0]["type"], "web_search");
-        // The function tool must NOT be present (no `function` key anywhere).
         assert!(
             tools.iter().all(|t| t.get("function").is_none()),
-            "function tools must be dropped when grounding"
+            "no function tools were supplied, so none may appear"
         );
     }
 
