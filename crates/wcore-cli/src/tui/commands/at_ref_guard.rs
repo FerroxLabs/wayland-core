@@ -694,4 +694,62 @@ mod tests {
             "the read followed the path instead of the handle it guarded"
         );
     }
+
+    // ── target identity: the open must not block ─────────────────────────
+
+    /// A named pipe with no writer — the cheapest object whose
+    /// `open(O_RDONLY)` blocks inside the syscall.
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("fifo path");
+        let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    }
+
+    /// Run `resolve_target` on another thread and refuse to wait forever.
+    /// `None` means it never returned — the failure this test exists for,
+    /// expressed as a failing assertion rather than a hung harness.
+    #[cfg(unix)]
+    fn resolve_within(path: &Path, secs: u64) -> Option<std::io::Result<()>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let owned = path.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(resolve_target(&owned).map(|_| ()));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(secs)).ok()
+    }
+
+    /// A FIFO must be refused, and refused *without the open blocking*.
+    ///
+    /// The type check has to run on a handle that cannot wait. Opening
+    /// first and asking the handle for its type afterwards never reaches
+    /// the refusal at all: `open(O_RDONLY)` on a writer-less FIFO — or on
+    /// a blocking character device such as a serial tty — sleeps in the
+    /// kernel, so `@<fifo>` typed into the composer wedges the TUI with no
+    /// way back.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_target_refuses_a_fifo_without_blocking_on_the_open() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let fifo = tmp.path().join("pipe");
+        make_fifo(&fifo);
+        let control = tmp.path().join("plain.txt");
+        fs::write(&control, "ordinary").expect("write control");
+
+        // Positive control on the same binary, same call, same deadline: a
+        // regular file returns. A timeout below is therefore the FIFO and
+        // not a harness that never lets anything finish.
+        assert!(
+            resolve_within(&control, 5)
+                .expect("the control blocked")
+                .is_ok(),
+            "the control file must resolve"
+        );
+
+        let verdict = resolve_within(&fifo, 5).expect(
+            "resolve_target never returned on a FIFO — the open blocked before the type check",
+        );
+        assert!(verdict.is_err(), "a FIFO is not a regular file");
+    }
 }

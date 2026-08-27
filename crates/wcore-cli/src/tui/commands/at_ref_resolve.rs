@@ -884,4 +884,109 @@ mod tests {
         let err = resolve(&at, root).expect_err("a git-ignored file must be refused");
         assert!(matches!(err, AtRefError::GitIgnored(_)), "got {err:?}");
     }
+
+    // ── @dir walk confinement (core#339 follow-up) ───────────────────────
+
+    /// The `@dir` walk was never root-confined.
+    ///
+    /// `Path::is_dir` FOLLOWS symlinks, so a symlink to a directory took
+    /// the recurse branch — the one with no identity guard at all — and
+    /// `rel_to_root` then answered `link/…` for every entry underneath.
+    /// The walk left the workspace while every path it reported looked
+    /// in-root.
+    #[cfg(unix)]
+    #[test]
+    fn an_at_dir_walk_does_not_follow_a_symlink_to_a_directory_outside_the_root() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, outside) = workspace_and_outside(&tmp);
+        let private = outside.join("private");
+        fs::create_dir_all(&private).expect("mkdir private");
+        fs::write(private.join("leak.txt"), FAKE_CREDENTIAL_BODY).expect("write leak");
+        std::os::unix::fs::symlink(&private, root.join("link")).expect("symlink dir");
+        fs::create_dir(root.join("sub")).expect("mkdir sub");
+        fs::write(root.join("sub/kept.txt"), "kept body").expect("write kept");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), &root).expect("resolve dir");
+        // Control: an ordinary sub-directory IS walked, so the refutations
+        // below cannot pass by walking nothing.
+        assert!(
+            payload.files.iter().any(|f| f.content == "kept body"),
+            "the walk skipped an ordinary sub-directory: {:?}",
+            payload.files
+        );
+        assert!(
+            !payload
+                .files
+                .iter()
+                .any(|f| f.content.contains("fake-token")),
+            "the @dir walk inlined a file from outside the workspace"
+        );
+        assert!(
+            !payload.files.iter().any(|f| f.path.starts_with("link")),
+            "the walk descended through a symlinked directory: {:?}",
+            payload.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+    }
+
+    /// The walk ROOT has to be confined too. `@link/`, where `link` points
+    /// at a directory outside the workspace, satisfies `is_dir` and then
+    /// hands `walk_dir` an out-of-tree tree whose every entry strips to
+    /// `link/…` against the root.
+    #[cfg(unix)]
+    #[test]
+    fn an_at_dir_reference_to_a_symlinked_directory_outside_the_root_is_refused() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, outside) = workspace_and_outside(&tmp);
+        let private = outside.join("private");
+        fs::create_dir_all(&private).expect("mkdir private");
+        fs::write(private.join("leak.txt"), FAKE_CREDENTIAL_BODY).expect("write leak");
+        std::os::unix::fs::symlink(&private, root.join("link")).expect("symlink dir");
+        fs::create_dir(root.join("sub")).expect("mkdir sub");
+        fs::write(root.join("sub/kept.txt"), "kept body").expect("write kept");
+
+        // Control: an ordinary in-root directory still resolves.
+        let ok = resolve(&AtRef::parse("@sub/").expect("parse"), &root).expect("control");
+        assert!(
+            ok.files.iter().any(|f| f.content == "kept body"),
+            "the control directory produced nothing"
+        );
+
+        match resolve(&AtRef::parse("@link/").expect("parse"), &root) {
+            Err(AtRefError::NotFound(_)) => {}
+            Ok(p) => panic!(
+                "@dir walked outside the workspace: {:?}",
+                p.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+            ),
+            Err(other) => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    /// A symlink cycle must terminate exactly once. `root/loop -> root` is
+    /// INSIDE the root, so a containment test alone does not stop it: the
+    /// `DIR_MAX_FILES` budget only trips when files are pushed, and each
+    /// lap pushes the same file again under a longer `loop/…/` prefix.
+    #[cfg(unix)]
+    #[test]
+    fn an_at_dir_walk_terminates_on_a_symlink_cycle() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, _outside) = workspace_and_outside(&tmp);
+        fs::write(root.join("kept.txt"), "kept body").expect("write kept");
+        std::os::unix::fs::symlink(&root, root.join("loop")).expect("symlink cycle");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), &root).expect("resolve dir");
+        assert!(
+            payload.files.iter().any(|f| f.content == "kept body"),
+            "the walk produced nothing"
+        );
+        assert_eq!(
+            payload
+                .files
+                .iter()
+                .filter(|f| f.content == "kept body")
+                .count(),
+            1,
+            "the cycle was walked more than once: {:?}",
+            payload.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+    }
 }

@@ -356,4 +356,52 @@ mod tests {
             .collect();
         assert!(inserts.iter().any(|i| i == "@link.md"), "{inserts:?}");
     }
+
+    /// The popup's gitignore verdict must be ADDITIVE, not substitutive.
+    ///
+    /// A candidate has two relative names — the one it is typed as and the
+    /// one its target canonicalizes to — and either being ignored is a
+    /// reason not to offer it. Judging only the canonical name un-ignores
+    /// every lexically-ignored link: the popup offers the row, the user
+    /// presses Tab, and `resolve_file`'s own lexical check refuses it —
+    /// which is exactly the popup/resolver disagreement the identity pass
+    /// was added to remove. Both directions need a symlink to be visible at
+    /// all: a real file's two names are equal, so the passes cannot differ.
+    #[cfg(unix)]
+    #[test]
+    fn completion_honors_both_the_typed_and_the_canonical_gitignore_name() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join(".gitignore"), "notes.txt\nbuild/\n").expect("write gitignore");
+        fs::create_dir(root.join("real")).expect("mkdir real");
+        fs::create_dir(root.join("build")).expect("mkdir build");
+        fs::write(root.join("real/out.txt"), "kept body").expect("write out");
+        fs::write(root.join("build/out.txt"), "ignored body").expect("write build out");
+        // Ignored by the name it is TYPED as; its target is not ignored.
+        std::os::unix::fs::symlink(root.join("real/out.txt"), root.join("notes.txt"))
+            .expect("symlink notes");
+        // Ignored by the name it CANONICALIZES to; its own name is not.
+        std::os::unix::fs::symlink(root.join("build/out.txt"), root.join("notable.txt"))
+            .expect("symlink notable");
+        fs::write(root.join("noted.txt"), "ordinary").expect("write control");
+
+        let inserts: Vec<String> = complete("@no", root)
+            .into_iter()
+            .map(|c| c.insert)
+            .collect();
+        // Control: the ordinary sibling IS offered, so neither refutation
+        // below can pass by offering nothing.
+        assert!(
+            inserts.iter().any(|i| i == "@noted.txt"),
+            "control candidate missing: {inserts:?}"
+        );
+        assert!(
+            !inserts.iter().any(|i| i == "@notes.txt"),
+            "offered a candidate the resolver refuses as git-ignored: {inserts:?}"
+        );
+        assert!(
+            !inserts.iter().any(|i| i == "@notable.txt"),
+            "offered a link whose target is git-ignored: {inserts:?}"
+        );
+    }
 }
