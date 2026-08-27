@@ -488,11 +488,15 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
     // core#336 showed could only ever be satisfied by the stale
     // pre-resize frame: measured, the reflow lands in ~31ms, one poll
     // interval, and every "pass" was a poll that beat it. The 5s budget
-    // was never the problem — the anchor was unreachable.
+    // was never the problem — the anchor was unreachable, so it stays at
+    // 5s: with the anchor corrected, 5s and 10s are indistinguishable at
+    // n=288 runs each (48-way parallel, load 41-53, 0 failures either
+    // way), and a budget widened without evidence only delays the next
+    // regression it was supposed to catch.
     h.resize(80, 40);
     h.wait_for(
         |s| s.contains("WAYLAND") && !s.contains("Workspace"),
-        Duration::from_secs(10),
+        Duration::from_secs(5),
         "the surface to reflow to 80 cols (tab labels truncate)",
     );
 
@@ -516,7 +520,7 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
     h.resize(120, 40);
     h.wait_for(
         |s| s.contains("WAYLAND") && s.contains("Workspace"),
-        Duration::from_secs(10),
+        Duration::from_secs(5),
         "chrome to stay coherent after resizing back to 120 cols",
     );
 
