@@ -87,6 +87,10 @@ fn tool_turn() -> Vec<LlmEvent> {
                 output_tokens: 30,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                // These fixtures carry no provider-reported price. `None` is
+                // "the provider said nothing about cost", which is the honest
+                // value here -- zero would claim the calls were free.
+                reported_cost_usd: None,
             },
         },
     ]
@@ -103,6 +107,10 @@ fn text_turn() -> Vec<LlmEvent> {
                 output_tokens: 50,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
+                // These fixtures carry no provider-reported price. `None` is
+                // "the provider said nothing about cost", which is the honest
+                // value here -- zero would claim the calls were free.
+                reported_cost_usd: None,
             },
         },
     ]
