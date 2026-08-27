@@ -17341,12 +17341,44 @@ impl AgentEngine {
             // pre-compaction buffer still holds it, so the fold below can
             // re-attach it verbatim.
             self.remember_original_instruction(live_user_turn.as_ref());
+            // #863 F2/F3 — a compaction turn is loop material of whatever
+            // loop this session belongs to, so it must carry the SAME
+            // ownership marking as the session's ordinary turns. Left
+            // unmarked (the pre-fix hardcoded `None` in `compact/auto.rs`) an
+            // Anvil builder's summarization request reaches Flux anonymous:
+            // cacheable across sibling builders, and eligible for the
+            // router's OWN server-side Elevation ladder on mid-loop
+            // material — the two-ladder collision this whole handshake
+            // exists to prevent.
+            //
+            // The nonce is DERIVED, never randomly minted, for the same
+            // reason as the per-turn nonce at the ordinary dispatch site: the
+            // session journal digests the prepared request, so a value that
+            // differed between preparing a compaction and replaying it would
+            // break recovery. `active_journal_turn_id` is the correct key
+            // precisely because it is `Some` exactly when there IS journal
+            // authority to break — the `(Some(journal), None)` arm above
+            // hard-errors — and it is restored verbatim on resume, which no
+            // counter kept in this process would be.
+            let compact_provenance = auto::CompactLoopProvenance {
+                intent: self.flux_loop_intent.clone(),
+                nonce: self.flux_loop_intent.as_ref().map(|_| {
+                    format!(
+                        "{}:compact:{}",
+                        self.conversation_id,
+                        self.active_journal_turn_id
+                            .as_deref()
+                            .unwrap_or("no-journal")
+                    )
+                }),
+            };
             let result = auto::autocompact(
                 provider.as_ref(),
                 &self.messages,
                 &self.model,
                 &self.compact_config,
                 &mut self.compact_state,
+                &compact_provenance,
             )
             .await;
             // Restore the live turn regardless of the compaction
@@ -23306,6 +23338,150 @@ mod compact_tests {
 
     /// A provider whose `stream()` always returns a fixed summary text
     /// followed by a clean `Done` — enough for `autocompact` to succeed.
+    /// Same wire answer as [`SummaryProvider`], but it keeps the `LlmRequest`
+    /// autocompact actually dispatched so a test can inspect what went out.
+    struct CapturingSummaryProvider {
+        seen: Arc<Mutex<Option<LlmRequest>>>,
+    }
+    #[async_trait::async_trait]
+    impl LlmProvider for CapturingSummaryProvider {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            *self.seen.lock().unwrap() = Some(request.clone());
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(LlmEvent::TextDelta(
+                        "<summary>prior conversation summary</summary>".into(),
+                    ))
+                    .await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: super::StopReason::EndTurn,
+                        finish_reason: FinishReason::Stop,
+                        usage: wcore_types::message::TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    /// Build the standard above-threshold compaction fixture: a config, a
+    /// state whose watermarks trip AUTO (but not emergency), and a short
+    /// history ending in a live user turn.
+    fn compaction_fixture() -> (CompactConfig, CompactState, Vec<Message>) {
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
+        let messages = vec![
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "old turn one".into(),
+                }],
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "old reply".into(),
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "keep climbing".into(),
+                }],
+            ),
+        ];
+        (config, state, messages)
+    }
+
+    /// #863 F2/F3 — a compaction turn is loop material of the SAME task the
+    /// session's loop is climbing, so the request that carries it must be
+    /// marked the way the session's ordinary turns are.
+    ///
+    /// Fails without the fix: `compact/auto.rs` hardcoded
+    /// `flux_loop_intent: None` / `flux_turn_nonce: None`, so an Anvil
+    /// builder that crossed the autocompact threshold sent its summarization
+    /// turn to Flux anonymous — no `X-Flux-Loop-Owner`, no nonce — leaving it
+    /// cacheable across sibling builders and eligible for the router's own
+    /// server-side Elevation ladder on mid-loop material.
+    #[tokio::test]
+    async fn autocompact_carries_the_session_loop_ownership() {
+        let (config, state, messages) = compaction_fixture();
+        let seen: Arc<Mutex<Option<LlmRequest>>> = Arc::new(Mutex::new(None));
+
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(CapturingSummaryProvider {
+            seen: Arc::clone(&seen),
+        });
+        engine.set_flux_loop_intent(wcore_types::llm::FluxLoopIntent::ClientOwned(
+            wcore_types::llm::ANVIL_LOOP_OWNER.to_string(),
+        ));
+        engine.run_compaction().await.expect("autocompact succeeds");
+
+        let request = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("autocompact must dispatch a provider request");
+        assert_eq!(
+            request.flux_loop_intent.as_ref().and_then(|i| i.owner()),
+            Some(wcore_types::llm::ANVIL_LOOP_OWNER),
+            "the compaction request must declare the session's loop owner; \
+             got {:?}",
+            request.flux_loop_intent
+        );
+        // F3 — DERIVED, never randomly minted: the session journal digests the
+        // prepared request, so the value must be reproducible. This fixture has
+        // no journal, which is exactly the arm where there is no digest to
+        // break, and the derivation says so out loud rather than inventing a
+        // counter that a resume could not restore.
+        assert_eq!(
+            request.flux_turn_nonce.as_deref(),
+            Some(format!("{}:compact:no-journal", engine.conversation_id).as_str()),
+            "the compaction nonce must be derived from the session identity"
+        );
+    }
+
+    /// The other half of the same seam: a session that owns no loop must keep
+    /// sending an UNMARKED compaction request. A nonce on ordinary traffic
+    /// would defeat the semantic cache for every non-loop session, which is a
+    /// cost regression rather than a fix.
+    #[tokio::test]
+    async fn ordinary_session_autocompact_stays_unmarked() {
+        let (config, state, messages) = compaction_fixture();
+        let seen: Arc<Mutex<Option<LlmRequest>>> = Arc::new(Mutex::new(None));
+
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(CapturingSummaryProvider {
+            seen: Arc::clone(&seen),
+        });
+        // No `set_flux_loop_intent` — this session owns no loop.
+        engine.run_compaction().await.expect("autocompact succeeds");
+
+        let request = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("autocompact must dispatch a provider request");
+        assert!(
+            request.flux_loop_intent.is_none(),
+            "an ordinary session must not claim loop ownership on compaction"
+        );
+        assert!(
+            request.flux_turn_nonce.is_none(),
+            "an ordinary session must not add per-turn cache variance"
+        );
+    }
+
     struct SummaryProvider;
     #[async_trait::async_trait]
     impl LlmProvider for SummaryProvider {
