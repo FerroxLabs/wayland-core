@@ -528,6 +528,38 @@ context window.
 > (context-overflow) error envelopes that the engine decodes into typed provider
 > errors — see `parse_flux_402` / `parse_flux_overflow` in the same module.
 
+### `flux-verified` runs the router's own ladder (#893)
+
+`flux-verified` is not a fifth tier alias. The four above only **route** a turn;
+`flux-verified` runs Flux's server-side **Elevation** loop — the router iterates
+and verifies on its own side and owns the loop for that turn.
+
+That makes it the one Flux alias an Anvil forge cannot sit on. Anvil is itself a
+client-side ladder (worktree builders, sandboxed gate, receipt), so pointing any
+of its seats at `flux-verified` runs two ladders on one task: both pay for the
+iteration, they converge on each other's output, and each receipt describes work
+it never governed.
+
+Core **refuses** it rather than warning, at every place a seat config can reach a
+provider, and refuses before the provider is built so you get a message instead
+of a mid-climb API error:
+
+| Surface | Behaviour |
+|---------|-----------|
+| Anvil driver seat | Refused — `anvil.driver_model = "flux-verified"` fails the forge |
+| Driver-seat fallback | Refused — a routed seat that fails to build may not land on it either |
+| Anvil valve seat | Refused — the valve's diagnostic turn is mid-loop material of the same climb |
+| `provider_chain.fallback_models` | The entry is **dropped** from the chain (a fallback is a degradation path, not the seat you asked for) and the drop is reported in the seat notes |
+
+Use `flux-auto` for an Anvil seat: it routes, and leaves the loop to Core. Outside
+Anvil, `flux-verified` is an ordinary model choice with no restriction — the
+collision is specifically "two ladders on one task".
+
+> Structurally, "Core owns the loop" and "run the server ladder" are made
+> unrepresentable on a single turn by `wcore_types::llm::FluxLoopIntent`, and the
+> engine hard-faults on an `X-Flux-Loop-Engaged: elevation` echo it did not ask
+> for. The seat refusals above are the legible layer on top of that.
+
 ---
 
 ## Sign in with ChatGPT
