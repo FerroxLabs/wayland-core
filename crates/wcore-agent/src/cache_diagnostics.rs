@@ -57,6 +57,17 @@ pub const CACHE_HEALTH_WARN_RATIO: f64 = 0.3;
 /// written to the provider cache).
 pub const CACHE_HEALTH_WARM_AFTER_ROUND_TRIPS: u64 = 2;
 
+/// #559 — the smallest per-turn input for which a TOTALLY dead prompt cache
+/// (zero cache tokens for the whole session) is reported.
+///
+/// Every provider that caches has a minimum cacheable prompt size, around
+/// 1k-2k tokens; below it, zero cached tokens is correct behaviour and a
+/// warning would be a false alarm. This floor sits an order of magnitude
+/// above the largest of those minima, so nothing under it can be mistaken
+/// for a break. The session that motivated it ran 61k-4.9M input tokens per
+/// turn.
+pub const CACHE_DEAD_MIN_INPUT_TOKENS: u64 = 20_000;
+
 /// Layer E1 — a warm round-trip whose cache hit-ratio fell below
 /// [`CACHE_HEALTH_WARN_RATIO`]. Detection-side fields only; the engine
 /// wraps this in the wire-shaped
@@ -72,6 +83,12 @@ pub struct CacheHealthAlert {
     pub cache_read_tokens: u64,
     /// `cache_read_tokens / total_input_tokens`.
     pub ratio: f64,
+    /// #559 — no response in this session has reported a single cache token,
+    /// read or written. Distinct from an ordinary low ratio: the prefix was
+    /// never served from cache even once, so the whole context is being
+    /// re-billed on every round trip. The engine reports this one to the
+    /// user; an ordinary low ratio stays telemetry-only.
+    pub dead_cache: bool,
 }
 
 /// Detects prompt cache breaks by comparing consecutive turns.
@@ -148,20 +165,50 @@ impl CacheBreakDetector {
     /// [`check_response`] for the same turn (so `round_trips` includes the
     /// turn being probed). Returns `Some` when the session is warm (more
     /// than [`CACHE_HEALTH_WARM_AFTER_ROUND_TRIPS`] round-trips), the
-    /// provider has demonstrated prompt-cache support at least once, and
+    /// provider has demonstrated prompt-cache support at least once OR is
+    /// declared to have one via `cache_expected`, and
     /// this turn's `cache_read / total_input` ratio fell below
     /// [`CACHE_HEALTH_WARN_RATIO`]. Warning-only telemetry — callers must
     /// never alter the request based on it.
-    pub fn check_cache_health(&self, stats: &CacheStats) -> Option<CacheHealthAlert> {
+    ///
+    /// `cache_expected` is the caller's resolved
+    /// `ProviderCompat::prompt_cache_expected()`. It is what lets a session
+    /// that has NEVER been served a cached token be reported (#559) without
+    /// firing on every turn of an endpoint that simply has no prompt cache.
+    /// It is passed per call rather than held on the detector because the
+    /// engine's compat can be replaced mid-session.
+    pub fn check_cache_health(
+        &self,
+        stats: &CacheStats,
+        cache_expected: bool,
+    ) -> Option<CacheHealthAlert> {
         if self.round_trips <= CACHE_HEALTH_WARM_AFTER_ROUND_TRIPS {
-            return None;
-        }
-        if !self.seen_cache_tokens {
             return None;
         }
         let total_input_tokens = stats.total_input_tokens();
         if total_input_tokens == 0 {
             return None;
+        }
+        // #559 — a session that has never seen a single cache token is either
+        // an endpoint with no prompt cache (nothing to report) or an endpoint
+        // with one that is serving us nothing (the whole context re-billed
+        // every round trip). The response cannot tell them apart; only the
+        // resolved provider capability can, which is why `cache_expected`
+        // comes from the caller instead of being inferred here.
+        //
+        // Without this branch the probe was blind to the total-failure case
+        // and reported only a cache that worked and then broke — so the
+        // reported session ran 26 turns at `cache_read = 0` in silence.
+        let dead_cache = !self.seen_cache_tokens;
+        if dead_cache {
+            if !cache_expected {
+                return None;
+            }
+            // Below every provider's minimum cacheable prompt size, zero
+            // cached tokens is correct, not a break.
+            if total_input_tokens < CACHE_DEAD_MIN_INPUT_TOKENS {
+                return None;
+            }
         }
         let ratio = stats.cache_read_tokens as f64 / total_input_tokens as f64;
         if ratio >= CACHE_HEALTH_WARN_RATIO {
@@ -172,6 +219,7 @@ impl CacheBreakDetector {
             input_tokens: total_input_tokens,
             cache_read_tokens: stats.cache_read_tokens,
             ratio,
+            dead_cache,
         })
     }
 
@@ -515,9 +563,19 @@ mod tests {
         detector: &mut CacheBreakDetector,
         stats: CacheStats,
     ) -> Option<CacheHealthAlert> {
+        round_trip_on(detector, stats, false)
+    }
+
+    /// As [`round_trip`], on a route whose prompt-cache capability is stated
+    /// by `cache_expected` (the resolved `ProviderCompat` value).
+    fn round_trip_on(
+        detector: &mut CacheBreakDetector,
+        stats: CacheStats,
+        cache_expected: bool,
+    ) -> Option<CacheHealthAlert> {
         detector.record_request("prompt", &make_tools());
         detector.check_response(stats.clone());
-        detector.check_cache_health(&stats)
+        detector.check_cache_health(&stats, cache_expected)
     }
 
     #[test]
@@ -592,6 +650,124 @@ mod tests {
                 }
             )
             .is_none()
+        );
+    }
+
+    /// RED ARM (#559) — the reported signature: a long session whose every
+    /// turn reports `cache_read = 0` on a route where prompt caching is
+    /// expected to work. 26 warm round trips at 50k input each.
+    #[test]
+    fn dead_cache_from_the_first_turn_is_reported() {
+        let mut detector = CacheBreakDetector::new();
+        let mut alerts = Vec::new();
+        for _ in 0..26 {
+            if let Some(a) = round_trip_on(
+                &mut detector,
+                CacheStats {
+                    input_tokens: 50_000,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
+                },
+                true,
+            ) {
+                alerts.push(a);
+            }
+        }
+        let first = alerts.first();
+        assert!(
+            first.is_some_and(|a| a.dead_cache && a.round_trip == 3),
+            "the first alert must be the dead-cache class and must arrive on \
+             round trip 3 (the first warm one), saw {:?}",
+            first
+        );
+        let alerts = alerts.len();
+        assert!(
+            alerts > 0,
+            "26 warm round trips, 50k input each, cache_read=0 on every one \
+             (the #559 signature: 77.7M input tokens, cache_read=0 on 26/26 \
+             turns) and the cache-health detector raised {alerts} alerts"
+        );
+    }
+
+    /// The other direction of the same gate: identical traffic on a route
+    /// that does NOT declare a prompt cache must stay silent. Without this,
+    /// the #559 fix would accuse every OpenAI-compatible endpoint that has no
+    /// cache of having a broken one.
+    #[test]
+    fn dead_cache_is_silent_when_no_cache_is_declared() {
+        let mut detector = CacheBreakDetector::new();
+        for turn in 0..26 {
+            assert!(
+                round_trip_on(
+                    &mut detector,
+                    CacheStats {
+                        input_tokens: 50_000,
+                        cache_read_tokens: 0,
+                        cache_creation_tokens: 0,
+                    },
+                    false,
+                )
+                .is_none(),
+                "turn {turn} warned on a route with no declared prompt cache"
+            );
+        }
+    }
+
+    /// Below every provider's minimum cacheable prompt size, zero cached
+    /// tokens is correct behaviour, so a declared cache must not warn there.
+    #[test]
+    fn dead_cache_is_silent_below_the_minimum_cacheable_size() {
+        let mut detector = CacheBreakDetector::new();
+        let small = CACHE_DEAD_MIN_INPUT_TOKENS - 1;
+        for turn in 0..8 {
+            assert!(
+                round_trip_on(
+                    &mut detector,
+                    CacheStats {
+                        input_tokens: small,
+                        cache_read_tokens: 0,
+                        cache_creation_tokens: 0,
+                    },
+                    true,
+                )
+                .is_none(),
+                "turn {turn} warned at {small} input tokens, under the \
+                 {CACHE_DEAD_MIN_INPUT_TOKENS} floor"
+            );
+        }
+    }
+
+    /// A cache that WORKED and then broke is not the dead-cache class, even
+    /// on a route that declares a cache. The two carry different advice, so
+    /// the flag must separate them.
+    #[test]
+    fn a_break_after_a_working_cache_is_not_the_dead_cache_class() {
+        let mut detector = CacheBreakDetector::new();
+        for _ in 0..2 {
+            round_trip_on(
+                &mut detector,
+                CacheStats {
+                    input_tokens: 10_000,
+                    cache_read_tokens: 40_000,
+                    cache_creation_tokens: 0,
+                },
+                true,
+            );
+        }
+        let alert = round_trip_on(
+            &mut detector,
+            CacheStats {
+                input_tokens: 50_000,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+            true,
+        )
+        .expect("a warm turn that lost its cache must still warn");
+        assert!(
+            !alert.dead_cache,
+            "the cache was served on earlier turns, so this is a break, not a \
+             cache that was never alive"
         );
     }
 

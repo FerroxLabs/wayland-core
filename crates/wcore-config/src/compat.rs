@@ -152,6 +152,23 @@ pub struct ProviderCompat {
     /// extra marker for this provider.
     pub cache_message_breakpoints: Option<bool>,
 
+    /// Whether this endpoint is expected to SERVE prompt-cached input, i.e.
+    /// whether a warm session that reads zero cached tokens is a defect
+    /// rather than the endpoint simply having no cache.
+    ///
+    /// This is a capability statement, not a switch: nothing in the request
+    /// changes. It is read only by the engine's warm-session cache-health
+    /// probe, which without it cannot tell "this provider has no prompt
+    /// cache" from "this provider has one and we are getting nothing from
+    /// it" - the two are identical in the response (all-zero cache counters
+    /// forever). Issue #559 was the second case and went unreported for
+    /// 77.7M input tokens because of that ambiguity.
+    ///
+    /// `None` resolves to `false`: an endpoint we know nothing about is never
+    /// accused of a broken cache. Set `Some(true)` only where the capability
+    /// is established - see the presets.
+    pub prompt_cache_expected: Option<bool>,
+
     /// W6 — structured provider identity for trace and cost attribution.
     /// Replaces the W1 `supports_thinking()` heuristic in `wcore-agent`.
     /// Set to one of: "anthropic" | "bedrock" | "vertex" | "openai" | "ollama".
@@ -455,6 +472,11 @@ impl ProviderCompat {
             supports_thinking: Some(true),
             supports_effort: Some(false),
             cache_message_breakpoints: Some(true),
+            // The same evidence that sets `cache_message_breakpoints` above:
+            // this family honours explicit `cache_control` and prices cached
+            // reads (`cost_per_cache_read_token` below). A warm session here
+            // reading zero cached tokens is a break, not an absent feature.
+            prompt_cache_expected: Some(true),
             provider_type: Some("anthropic".into()),
             // Per-PROVIDER (NOT per-model) Q2-2026 list price as a coarse default.
             // Every Anthropic model reports this price in TurnTrace.cost_usd
@@ -483,6 +505,11 @@ impl ProviderCompat {
             supports_thinking: Some(true),
             supports_effort: Some(false),
             cache_message_breakpoints: Some(true),
+            // The same evidence that sets `cache_message_breakpoints` above:
+            // this family honours explicit `cache_control` and prices cached
+            // reads (`cost_per_cache_read_token` below). A warm session here
+            // reading zero cached tokens is a break, not an absent feature.
+            prompt_cache_expected: Some(true),
             provider_type: Some("bedrock".into()),
             // Bedrock hosts Anthropic models; mirror the Anthropic list price.
             cost_per_input_token: Some(15.0 / 1_000_000.0),
@@ -602,6 +629,13 @@ impl ProviderCompat {
             supports_effort: Some(true),
             effort_levels: Some(vec!["low".into(), "medium".into(), "high".into()]),
             provider_type: Some("openai".into()),
+            // OpenAI caches prompts automatically above its minimum
+            // cacheable size and reports the hit under
+            // `prompt_tokens_details.cached_tokens`, which `openai.rs` already
+            // parses. The dead-cache probe only fires far above that minimum
+            // (CACHE_DEAD_MIN_INPUT_TOKENS), so a small-prompt session cannot
+            // trip it.
+            prompt_cache_expected: Some(true),
             // Fix(pricing-audit-2026-05-24): was $8/$32 (GPT-5-class), which caused silent
             // 53x overcharge for every common OpenAI model not in the catalog (e.g. gpt-4o-mini).
             // Changed to $0/$0 sentinel — matches the openai_compat_provider() pattern.
@@ -825,6 +859,15 @@ impl ProviderCompat {
             // anti-collision handshake (Elevation is its server-side ladder), so
             // it is the one preset that opts in.
             flux_loop_provenance: Some(true),
+            // #559: measured live against the real endpoint - a repeated
+            // prefix reports `prompt_tokens_details.cached_tokens` 99.5% warm
+            // from turn 2, and a real 112-round-trip session served 86% of its
+            // input from cache. Flux caches server-side and reports it, so
+            // zero cached tokens across a warm session is a defect worth
+            // telling the user about. (Caching is automatic on the OpenAI
+            // wire - this claims nothing about `cache_control`, which Flux
+            // ignores; see `cache_message_breakpoints`, deliberately unset.)
+            prompt_cache_expected: Some(true),
             ..Self::openai_compat_provider("flux-router")
         }
     }
@@ -1013,6 +1056,9 @@ impl ProviderCompat {
             cache_message_breakpoints: user
                 .cache_message_breakpoints
                 .or(defaults.cache_message_breakpoints),
+            prompt_cache_expected: user
+                .prompt_cache_expected
+                .or(defaults.prompt_cache_expected),
             provider_type: user.provider_type.or(defaults.provider_type),
             cost_per_input_token: user.cost_per_input_token.or(defaults.cost_per_input_token),
             cost_per_output_token: user
@@ -1194,6 +1240,12 @@ impl ProviderCompat {
     /// Resolved accessor for `cache_message_breakpoints`. None → false.
     pub fn cache_message_breakpoints(&self) -> bool {
         self.cache_message_breakpoints.unwrap_or(false)
+    }
+
+    /// Resolved accessor for `prompt_cache_expected`. None → false, so an
+    /// unknown endpoint is never reported as having a broken prompt cache.
+    pub fn prompt_cache_expected(&self) -> bool {
+        self.prompt_cache_expected.unwrap_or(false)
     }
 
     /// W6 — structured provider identity. Defaults to `"unknown"` when not set.

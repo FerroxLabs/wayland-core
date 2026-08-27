@@ -3814,6 +3814,11 @@ pub struct AgentEngine {
     plan_active_flag: Option<Arc<AtomicBool>>,
     /// Prompt cache break detector for diagnostics.
     cache_detector: CacheBreakDetector,
+    /// #559 — whether the dead-prompt-cache notice has already been shown in
+    /// this session. The condition holds for every remaining round trip once
+    /// it is true, so without a latch the user would get the same line dozens
+    /// of times in one turn.
+    cache_dead_notice_shown: bool,
     /// F23-04 — the durable cache/compaction ledger. Arms itself lazily on the
     /// first recorded round-trip, so it costs the constructors nothing but a
     /// `Default`. Everything the detector above computes per turn is
@@ -4550,6 +4555,7 @@ impl AgentEngine {
             plan_state: PlanState::default(),
             plan_active_flag: None,
             cache_detector: CacheBreakDetector::new(),
+            cache_dead_notice_shown: false,
             cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: config.compact.compaction,
             toon_enabled: config.compact.toon,
@@ -4829,6 +4835,7 @@ impl AgentEngine {
             plan_state: PlanState::default(),
             plan_active_flag: None,
             cache_detector: CacheBreakDetector::new(),
+            cache_dead_notice_shown: false,
             cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: config.compact.compaction,
             toon_enabled: config.compact.toon,
@@ -5274,6 +5281,7 @@ impl AgentEngine {
             flag.store(false, Ordering::Release);
         }
         self.cache_detector = CacheBreakDetector::new();
+        self.cache_dead_notice_shown = false;
         // F23-04: seal the outgoing session's ledger before the conversation id
         // rotates below, so its record stays attributable to the session that
         // produced it rather than bleeding into the next one.
@@ -14627,7 +14635,10 @@ impl AgentEngine {
             // back (the 128-flat signature). Warning-only structured
             // telemetry: greppable in the engine log, never alters the
             // request.
-            if let Some(alert) = self.cache_detector.check_cache_health(&cache_stats) {
+            if let Some(alert) = self
+                .cache_detector
+                .check_cache_health(&cache_stats, self.compat.prompt_cache_expected())
+            {
                 let warn = wcore_providers::cache_observation::CacheHealthWarn {
                     conversation_id: self.conversation_id.clone(),
                     round_trip: alert.round_trip,
@@ -14654,6 +14665,25 @@ impl AgentEngine {
                     warn.cache_read_tokens,
                     warn.routed_model,
                 );
+                // #559 — the dead-cache class is the one the user has to be
+                // told about, and `tracing::warn!` above does not tell them:
+                // with `RUST_LOG` unset only ERROR reaches stderr, so that
+                // event is invisible outside a debug session. The reported
+                // case ran 26 turns and 77.7M input tokens re-billed in full
+                // with nothing on screen. This is deliberately NOT behind the
+                // `cache_diagnostics` debug flag, unlike the per-turn
+                // hit-rate lines above: an operator cannot opt in to a
+                // warning they have no reason to expect. Latched to once per
+                // session.
+                if alert.dead_cache && !self.cache_dead_notice_shown {
+                    self.cache_dead_notice_shown = true;
+                    self.output.emit_info(&format!(
+                        "Prompt cache is not being served on this route: {} round trips, \
+                         0 cached input tokens, {} input tokens this turn. Every turn is \
+                         re-billing the full context at uncached rates.",
+                        alert.round_trip, alert.input_tokens
+                    ));
+                }
             }
 
             // ── F23-04 — record this round-trip into the cache/compaction
@@ -15627,6 +15657,13 @@ impl AgentEngine {
                 cost_usd: trace.cost_usd,
                 priced: trace.cost_priced,
             });
+            // #174/#559 — publish the running aggregate NOW, not at run end.
+            // This is the tool-loop boundary: the loop can run for dozens of
+            // round trips inside ONE user turn, which is precisely the window
+            // a runaway burns through. The text-only exit path does not need
+            // its own call — `fire_on_session_end` runs immediately after that
+            // push and publishes the same aggregate.
+            self.publish_session_cost();
             // W9.1 T3 (T10b): feed the trace into the F10 detect+stage+emit
             // flow. Consumes `trace` — every read above this line has
             // already happened. No-op when `skills_lifecycle` is off.
@@ -17845,6 +17882,29 @@ impl AgentEngine {
         // W6 F7: emit aggregate SessionCost. The sink's emit_session_cost
         // is a no-op when advertised.cost_attribution is false, so we do
         // not need to gate here (single-authority gate lives on the sink).
+        self.publish_session_cost();
+    }
+
+    /// #174/#559 — publish the running spend aggregate as `SessionCost`.
+    ///
+    /// This is the ONLY cost surface a host has: the TUI status bar reads
+    /// `app.cost.total_cost_usd` from it and the `/cost` screen renders its
+    /// `per_turn` rows. It used to be published exclusively from
+    /// `fire_on_session_end`, i.e. once the run was already over — so for the
+    /// entire window in which a runaway is actually burning, the meter showed
+    /// the PREVIOUS run's total. #559 measured a single leader turn at 4.88M
+    /// input tokens across ~37 agentic round trips; under the old emission
+    /// schedule that whole turn published nothing.
+    ///
+    /// Now it is also published at each per-turn cost boundary, so the meter
+    /// tracks spend as it accumulates. The payload is an aggregate over the
+    /// whole session (not a delta), so a host that only reads the last one
+    /// sees exactly what it saw before.
+    ///
+    /// No gate here: `ProtocolSink::emit_session_cost` is a no-op when
+    /// `advertised.cost_attribution` is false, and that stays the single
+    /// authority (audit rev-2 finding 5).
+    fn publish_session_cost(&self) {
         let session_id = self
             .current_session
             .as_ref()
@@ -19667,6 +19727,7 @@ mod set_config_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_dead_notice_shown: false,
             cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
@@ -21540,6 +21601,7 @@ mod phase6_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_dead_notice_shown: false,
             cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
@@ -21864,6 +21926,7 @@ mod compact_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_dead_notice_shown: false,
             cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
@@ -23572,6 +23635,7 @@ mod plan_mode_tests {
             plan_state: PlanState::default(),
             plan_active_flag: Some(flag),
             cache_detector: super::CacheBreakDetector::new(),
+            cache_dead_notice_shown: false,
             cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
@@ -24029,6 +24093,7 @@ mod hook_integration_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_dead_notice_shown: false,
             cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
@@ -25197,6 +25262,7 @@ mod approval_bridge_engine_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_dead_notice_shown: false,
             cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
@@ -26265,6 +26331,7 @@ mod user_model_writeback_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_dead_notice_shown: false,
             cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
