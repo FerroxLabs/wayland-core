@@ -125,24 +125,47 @@ async fn a_git_hook_may_not_be_authored_from_the_shell() {
     );
 }
 
-/// `.git/config` is both write-to-RCE (`core.sshCommand`, `[alias]`) and a
-/// credential store (`https://user:token@host`), so it is denied in both
-/// directions — a READ of it is the exfil half.
+/// `.git/config` is write-to-RCE (`core.sshCommand`, `core.fsmonitor`, the
+/// `[alias]` table), so AUTHORING it is refused — including through `git`'s own
+/// `--file`, which is the only way `git config` names a path at all.
+///
+/// READING it is not refused, and the read rows are the load-bearing half of
+/// this test. An earlier revision of the floor refused them, which broke
+/// `git config --file .git/config --list` and `cat .git/config` for every user
+/// in the DEFAULT posture — a cost the flag never bought.
 #[tokio::test]
-async fn git_config_is_denied_in_both_directions() {
+async fn git_config_is_write_denied_and_read_allowed() {
     open_every_hatch();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
     std::fs::create_dir_all(root.join(".git")).expect("mkdir");
     std::fs::write(root.join(".git/config"), "SENTINEL\n").expect("seed");
 
-    floor_refuses_everywhere("cat .git/config", &root, REPO_CONTROL).await;
     floor_refuses_everywhere("echo '[alias]' >> .git/config", &root, REPO_CONTROL).await;
+    floor_refuses_everywhere(
+        "git config --file .git/config core.sshCommand /tmp/x",
+        &root,
+        REPO_CONTROL,
+    )
+    .await;
     assert_eq!(
         std::fs::read_to_string(root.join(".git/config")).expect("read back"),
         "SENTINEL\n",
         "nothing ran, so the file is untouched"
     );
+
+    for cmd in [
+        "cat .git/config",
+        "git config --file .git/config --list",
+        "grep -n url .git/config",
+    ] {
+        assert!(
+            wcore_tools::bash::check_command_floor(cmd, Some(&root)).is_none(),
+            "the floor refused a READ (`{cmd}`). The predicate it is the \
+             shell-side copy of says verbatim: \"The predicate for a WRITE \
+             deny, never a read deny.\""
+        );
+    }
 }
 
 /// `.wayland-core/skills/**` is instruction injection into the next session —
@@ -159,7 +182,16 @@ async fn a_project_skill_may_not_be_authored_from_the_shell() {
         REPO_CONTROL,
     )
     .await;
-    floor_refuses_everywhere("cat .wayland-core.toml", &root, REPO_CONTROL).await;
+    floor_refuses_everywhere("echo 'x = 1' > .wayland-core.toml", &root, REPO_CONTROL).await;
+    // Deleting the skill tree is authoring it too — the next session loads a
+    // different set of instructions than the operator installed.
+    floor_refuses_everywhere("rm -rf .wayland-core/skills", &root, REPO_CONTROL).await;
+    floor_refuses_everywhere(
+        "cp /tmp/evil.md .wayland-core/skills/x/SKILL.md",
+        &root,
+        REPO_CONTROL,
+    )
+    .await;
 }
 
 /// The floor resolves `..` and undoes the quoting tricks the shell would undo
@@ -189,9 +221,13 @@ async fn interior_dot_dot_and_empty_quote_pairs_do_not_get_past_it() {
 /// The self-referential case: a command that appends to the learned-grant store
 /// has disabled the guard it is running under, for this session and every
 /// future one.
+///
+/// Writing only. Reading it is asserted to PASS at the bottom: knowing which
+/// grants exist changes nothing about what may happen without asking, and it is
+/// the shape `wayland-core permissions list` produces.
 #[tokio::test]
 #[serial_test::serial]
-async fn the_learned_grant_store_may_not_be_read_or_written() {
+async fn the_learned_grant_store_may_not_be_written() {
     open_every_hatch();
     let tmp = tempfile::tempdir().expect("tempdir");
     let home = std::fs::canonicalize(tmp.path()).expect("canonicalize");
@@ -203,9 +239,15 @@ async fn the_learned_grant_store_may_not_be_read_or_written() {
     let work = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(work.path()).expect("canonicalize");
 
-    floor_refuses_everywhere(&format!("cat {}", store.display()), &root, AUTHORITY).await;
     floor_refuses_everywhere(
         &format!("echo '[[rules]]' >> {}", store.display()),
+        &root,
+        AUTHORITY,
+    )
+    .await;
+    floor_refuses_everywhere(&format!("rm -f {}", store.display()), &root, AUTHORITY).await;
+    floor_refuses_everywhere(
+        &format!("sed -i s/x/y/ {}", store.display()),
         &root,
         AUTHORITY,
     )
@@ -215,10 +257,24 @@ async fn the_learned_grant_store_may_not_be_read_or_written() {
         "SENTINEL\n",
         "nothing ran"
     );
+
+    // The other direction, asserted against the predicate so nothing executes.
+    assert!(
+        wcore_tools::bash::check_command_floor(&format!("cat {}", store.display()), Some(&root))
+            .is_none(),
+        "the floor refused a READ of the learned-grant store; rule 2 is a write \
+         deny, and only the credential leaves carry the `fs_read_deny` \
+         carry-over"
+    );
 }
 
 /// Everything else in the authority set, in one table so a leaf that is added
 /// to the floor and forgotten here is visible as a missing row.
+///
+/// Three tables, because the floor now answers two different questions: every
+/// leaf is WRITE-denied, only the credential leaves are also READ-denied, and
+/// the rest of the profile is readable. The third table is what stops the read
+/// deny from silently creeping back to the whole set.
 #[tokio::test]
 #[serial_test::serial]
 async fn every_authority_file_is_denied() {
@@ -229,7 +285,9 @@ async fn every_authority_file_is_denied() {
     let work = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(work.path()).expect("canonicalize");
 
+    // WRITE — every leaf.
     for leaf in [
+        "permissions.toml",
         "config.toml",
         "workspace-trust.json",
         "credentials.toml",
@@ -238,7 +296,36 @@ async fn every_authority_file_is_denied() {
         "oauth/anthropic.json",
     ] {
         let p = home.join(leaf);
+        floor_refuses_everywhere(&format!("echo x > {}", p.display()), &root, AUTHORITY).await;
+        assert!(
+            !p.exists(),
+            "the refusal must mean NOTHING RAN, not merely that the result said so"
+        );
+    }
+
+    // READ — only the credential stores, which `workspace_policy`'s
+    // `fs_read_deny` already names and hands to the OS sandbox. The floor is
+    // what is left of that list when there is no sandbox to hand it to.
+    for leaf in [
+        "credentials.toml",
+        "credentials.enc",
+        "credentials.kdf.json",
+        "oauth/anthropic.json",
+    ] {
+        let p = home.join(leaf);
         floor_refuses_everywhere(&format!("cat {}", p.display()), &root, AUTHORITY).await;
+    }
+
+    // READ — and NOT the rest of the profile. This is the row that keeps the
+    // blanket read deny from coming back: `fs_read_deny` does not name these,
+    // so neither may the floor.
+    for leaf in ["permissions.toml", "config.toml", "workspace-trust.json"] {
+        let p = home.join(leaf);
+        let cmd = format!("cat {}", p.display());
+        assert!(
+            wcore_tools::bash::check_command_floor(&cmd, Some(&root)).is_none(),
+            "the floor refused `{cmd}` — a read deny wider than `fs_read_deny`"
+        );
     }
 
     // The profile root ITSELF, so a wholesale copy or delete is covered too.
@@ -268,9 +355,10 @@ async fn moving_wayland_home_does_not_move_the_floor_off_the_default_profile() {
     let work = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(work.path()).expect("canonicalize");
 
-    // Direction 1: the relocated profile is protected.
+    // Direction 1: the relocated profile is protected. A write, because that is
+    // rule 2's direction, and it lands in a tempdir.
     floor_refuses_everywhere(
-        &format!("cat {}/permissions.toml", elsewhere.display()),
+        &format!("echo x >> {}/permissions.toml", elsewhere.display()),
         &root,
         AUTHORITY,
     )
@@ -278,14 +366,20 @@ async fn moving_wayland_home_does_not_move_the_floor_off_the_default_profile() {
 
     // Direction 2 — the one that matters: the DEFAULT profile still is, even
     // though the environment says the profile lives somewhere else.
+    //
+    // Asked as a READ of the credential store rather than as a write. These
+    // rows name the operator's REAL `~/.wayland`, and `floor_refuses_everywhere`
+    // EXECUTES: a write here would author their live profile the moment the
+    // floor regressed, which is not a thing a test may be able to do. The
+    // credential read deny is non-waivable in exactly the same way.
     let default_home = dirs::home_dir().expect("home dir").join(".wayland");
     floor_refuses_everywhere(
-        &format!("cat {}/permissions.toml", default_home.display()),
+        &format!("cat {}/credentials.toml", default_home.display()),
         &root,
         AUTHORITY,
     )
     .await;
-    floor_refuses_everywhere("cat ~/.wayland/permissions.toml", &root, AUTHORITY).await;
+    floor_refuses_everywhere("cat ~/.wayland/credentials.toml", &root, AUTHORITY).await;
     floor_refuses_everywhere("cat $HOME/.wayland/credentials.toml", &root, AUTHORITY).await;
 }
 
@@ -298,15 +392,30 @@ async fn moving_wayland_home_does_not_move_the_floor_off_the_default_profile() {
 /// it, so the everyday shapes are asserted to PASS — including the ones that
 /// sit closest to the rules above.
 ///
-/// `git add .` is the load-bearing row. An earlier draft matched a token that
-/// was an ANCESTOR of the control surface, and the shortest such token is `.`.
+/// **The eight rows in `MEASURED_COST` are the reason this test exists in this
+/// shape.** An earlier revision of this test used `ls {r}/.git` and
+/// `cat {r}/.git/HEAD` — the only two `.git` reads that happen NOT to match any
+/// rule — and contained no `.wayland-core` read and no `.git/config` read at
+/// all. It passed while the floor refused all eight of these, permanently and
+/// with no override, for every user in the DEFAULT posture. A cost test that
+/// avoids the failing inputs is not a cost test, so the failing inputs are now
+/// the test.
+///
+/// `git add .` is the other load-bearing row. An earlier draft matched a token
+/// that was an ANCESTOR of the control surface, and the shortest such token is
+/// `.`.
 #[tokio::test]
 async fn ordinary_work_is_untouched() {
     open_every_hatch();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
-    std::fs::create_dir_all(root.join(".git")).expect("mkdir .git");
+    std::fs::create_dir_all(root.join(".git/hooks")).expect("mkdir .git/hooks");
     std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").expect("seed HEAD");
+    std::fs::write(root.join(".git/config"), "[core]\n").expect("seed config");
+    std::fs::write(root.join(".git/hooks/pre-commit"), "#!/bin/sh\n").expect("seed hook");
+    std::fs::create_dir_all(root.join(".wayland-core/skills/x")).expect("mkdir skills");
+    std::fs::write(root.join(".wayland-core/skills/x/SKILL.md"), "s\n").expect("seed skill");
+    std::fs::write(root.join(".wayland-core.toml"), "t\n").expect("seed toml");
     std::fs::create_dir_all(root.join("target")).expect("mkdir target");
 
     // EVERY command here is addressed with `git -C <root>` or an absolute path
@@ -341,25 +450,157 @@ async fn ordinary_work_is_untouched() {
         }
     }
 
-    // The load-bearing row, asserted against the PREDICATE rather than through
-    // the shell, because a bare `.` cannot be addressed absolutely and must not
-    // be run relative to the test's own checkout. An earlier draft of the floor
-    // matched a token that was an ANCESTOR of the control surface, and the
-    // shortest such token is `.` — which would have refused every `git add .`
-    // in the product.
+    // The relative rows, asserted against the PREDICATE rather than through the
+    // shell. A relative token cannot be addressed absolutely, and two of the
+    // four entry points run in the PROCESS working directory rather than in
+    // `root` — so executing these would run them against the checkout the test
+    // itself is in. The predicate is asked with `cwd = root`, which is exactly
+    // what `floor_cwd` hands it on the two entry points that DO have a policy.
+    //
+    // MEASURED_COST is the refuted set, verbatim: every one of these was
+    // REFUSED, 8 of 8, at commit 3a288b08.
+    const MEASURED_COST: &[&str] = &[
+        // The tokenizer split on the quote, so a path inside a COMMIT MESSAGE
+        // became a path token.
+        r#"git commit -m "fix .git/config parsing""#,
+        "grep -rn wayland .wayland-core",
+        "ls .wayland-core/skills",
+        // Skills could not load.
+        "cat .wayland-core/skills/x/SKILL.md",
+        "git config --file .git/config --list",
+        "cat .git/hooks/pre-commit",
+        "ls -la .git/hooks",
+        "echo see .wayland-core.toml for config",
+    ];
+    for cmd in MEASURED_COST {
+        assert!(
+            wcore_tools::bash::check_command_floor(cmd, Some(&root)).is_none(),
+            "the floor refused `{cmd}` — this is one of the eight ordinary \
+             commands the floor was refused over. It has no override and it \
+             fires in the DEFAULT posture, so it breaks the product for every \
+             user, not only for the flag."
+        );
+    }
     for cmd in ["git add .", "git commit -m wip", "ls .", "cargo build"] {
         assert!(
             wcore_tools::bash::check_command_floor(cmd, Some(&root)).is_none(),
             "the floor refused `{cmd}`"
         );
     }
-    // Known-positive control for the two lines above: the same predicate, same
-    // cwd, DOES refuse the surface — so a predicate that answered `None` to
-    // everything could not pass this test.
-    assert!(
-        wcore_tools::bash::check_command_floor("cat .git/config", Some(&root)).is_some(),
-        "positive control: the predicate must still refuse the control surface"
-    );
+    // Known-positive controls for the block above: the same predicate, same
+    // cwd, DOES still refuse the surface in the WRITE direction — so a
+    // predicate that answered `None` to everything could not pass this test.
+    for cmd in [
+        "printf x > .git/hooks/pre-commit",
+        "echo x > .wayland-core/skills/x/SKILL.md",
+        "rm -f .git/config",
+    ] {
+        assert!(
+            wcore_tools::bash::check_command_floor(cmd, Some(&root)).is_some(),
+            "positive control: the predicate must still refuse `{cmd}`"
+        );
+    }
+}
+
+/// The tokenizer bug the eight-row table caught, isolated so its cause is
+/// pinned rather than merely its symptom.
+///
+/// The refuted revision split the command on quote characters, which made
+/// `.git/config` inside a commit MESSAGE indistinguishable from
+/// `.git/config` as an argument. The floor now lexes the command the way a
+/// shell does: a quoted run is ONE word however many spaces it contains, so a
+/// message never becomes a path.
+///
+/// Graded in both directions — the message passes, the real argument does not.
+#[test]
+fn a_quoted_message_is_one_word_not_a_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+
+    for cmd in [
+        r#"git commit -m "fix .git/config parsing""#,
+        r#"git commit -m 'rewrite .wayland-core/skills loader'"#,
+        r#"echo "wrote .git/hooks/pre-commit by hand""#,
+    ] {
+        assert!(
+            wcore_tools::bash::check_command_floor(cmd, Some(&root)).is_none(),
+            "a path inside a quoted string became a path token: `{cmd}`"
+        );
+    }
+
+    // Known-positive control in the same test: the same words UNQUOTED, in the
+    // write position, are still refused — so the fix is a tokenizer fix and not
+    // a deleted rule.
+    for cmd in [
+        "cp /tmp/x .git/hooks/pre-commit",
+        r#"printf 'x' > ".git/hooks/pre-commit""#,
+    ] {
+        assert!(
+            wcore_tools::bash::check_command_floor(cmd, Some(&root)).is_some(),
+            "positive control: `{cmd}` must still be refused"
+        );
+    }
+}
+
+/// The write verbs, in one table. The floor classifies a token by what the
+/// command would DO to it, so the classification is what needs grading.
+///
+/// Each row is the same protected path under a different authoring shape. A
+/// verb that stops being recognised shows up here as one failing row rather
+/// than as a silently unguarded surface.
+#[test]
+fn every_authoring_shape_is_seen() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    std::fs::create_dir_all(root.join(".git/hooks")).expect("mkdir");
+
+    for cmd in [
+        "echo x > .git/hooks/pre-commit",
+        "echo x >> .git/hooks/pre-commit",
+        "echo x 1> .git/hooks/pre-commit",
+        "echo x &> .git/hooks/pre-commit",
+        "tee .git/hooks/pre-commit",
+        "cp /tmp/x .git/hooks/pre-commit",
+        "mv /tmp/x .git/hooks/pre-commit",
+        "mv .git/hooks/pre-commit /tmp/x",
+        "rm -f .git/hooks/pre-commit",
+        "truncate -s 0 .git/hooks/pre-commit",
+        "chmod +x .git/hooks/pre-commit",
+        "ln -s /tmp/x .git/hooks/pre-commit",
+        "sed -i s/a/b/ .git/hooks/pre-commit",
+        "perl -pi -e s/a/b/ .git/hooks/pre-commit",
+        "dd if=/tmp/x of=.git/hooks/pre-commit",
+        "install -m 755 /tmp/x .git/hooks/pre-commit",
+        "sudo rm .git/hooks/pre-commit",
+        "FOO=bar rm .git/hooks/pre-commit",
+        "true && echo x > .git/hooks/pre-commit",
+        "true; rm .git/hooks/pre-commit",
+        "echo $(rm .git/hooks/pre-commit)",
+        "cat /tmp/x | tee .git/hooks/pre-commit",
+    ] {
+        assert!(
+            wcore_tools::bash::check_command_floor(cmd, Some(&root)).is_some(),
+            "the floor did not see the write in `{cmd}`"
+        );
+    }
+
+    // The other direction, in the same test: the same paths in a READ position
+    // pass. Without this the table above could be satisfied by a rule that
+    // refuses the path outright, which is the revision this replaced.
+    for cmd in [
+        "cat .git/hooks/pre-commit",
+        "ls -la .git/hooks",
+        "cp .git/hooks/pre-commit /tmp/backup",
+        "diff .git/hooks/pre-commit /tmp/x",
+        "grep -rn sh .git/hooks",
+        "sed s/a/b/ .git/hooks/pre-commit",
+        "echo 2>/tmp/err .git/hooks/pre-commit",
+    ] {
+        assert!(
+            wcore_tools::bash::check_command_floor(cmd, Some(&root)).is_none(),
+            "the floor refused a read: `{cmd}`"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

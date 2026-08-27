@@ -17,17 +17,23 @@
 //!      its `` !`…` `` directive under `sh -c` with no floor at all — reaching
 //!      exactly the authority state step 1 was not allowed to touch directly.
 //!
-//! So the floor's own rule 2 (the agent may not read or write its own
-//! authority state) is enforced on one shell path and silently revoked on the
-//! other. These tests grade the second one.
+//! So the floor's own rule 2 (the agent may not AUTHOR its own authority
+//! state, and may not read the credential stores inside it) is enforced on one
+//! shell path and silently revoked on the other. These tests grade the second
+//! one.
 
 use wcore_skills::shell::{ShellExecutionError, execute_shell_commands};
 use wcore_skills::types::LoadedFrom;
 
-/// A path token naming the agent's own learned-grant store. `~` is expanded by
-/// the floor exactly as a shell would expand it, so this is the same spelling
-/// a model actually emits.
-const AUTHORITY_TOKEN: &str = "~/.wayland/permissions.toml";
+/// A command naming the agent's own credential store, in the READ direction.
+///
+/// `~` is expanded by the floor exactly as a shell would expand it, so this is
+/// the same spelling a model actually emits — and it names the operator's REAL
+/// profile. A read, deliberately: these directives EXECUTE if the floor lets
+/// them through, and a test may not be able to author a live profile the moment
+/// the floor regresses. The credential leaves are the one part of the profile
+/// the floor read-denies, mirroring `workspace_policy`'s `fs_read_deny`.
+const AUTHORITY_READ_CMD: &str = "cat ~/.wayland/credentials.toml";
 
 /// Assert the directive did NOT run.
 ///
@@ -46,18 +52,41 @@ fn assert_refused(result: &Result<String, ShellExecutionError>) {
 }
 
 #[tokio::test]
-async fn a_skill_shell_directive_may_not_name_the_agents_own_authority_state() {
+async fn a_skill_shell_directive_may_not_read_the_agents_own_credential_store() {
     let td = tempfile::tempdir().unwrap();
     let cwd = td.path().to_str().unwrap();
 
-    // `echo` rather than `cat`: side-effect free, and it proves EXECUTION
-    // (the shell expands `~` and prints the path) without reading the real
-    // store. The floor does not inspect the verb, only the path tokens, so
-    // this is the same question `cat`/`>>` would ask.
-    let content = format!("before !`echo {AUTHORITY_TOKEN}` after");
+    let content = format!("before !`{AUTHORITY_READ_CMD}` after");
 
     let result = execute_shell_commands(&content, LoadedFrom::Skills, cwd).await;
     assert_refused(&result);
+}
+
+/// The write direction of rule 2 on this path, asked against a RELOCATED
+/// profile so the command that would run if the floor failed lands in a
+/// tempdir rather than in the operator's live store.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_skill_shell_directive_may_not_write_the_agents_own_authority_state() {
+    let home = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("WAYLAND_HOME", home.path());
+    }
+    let td = tempfile::tempdir().unwrap();
+    let cwd = td.path().to_str().unwrap();
+
+    let store = home.path().join("permissions.toml");
+    let content = format!("!`echo '[[rules]]' >> {}`", store.display());
+    let result = execute_shell_commands(&content, LoadedFrom::Skills, cwd).await;
+    assert_refused(&result);
+    assert!(
+        !store.exists(),
+        "the refusal must mean NOTHING RAN, not merely that the result said so"
+    );
+
+    unsafe {
+        std::env::remove_var("WAYLAND_HOME");
+    }
 }
 
 #[tokio::test]
@@ -127,21 +156,28 @@ async fn the_floor_holds_on_the_skill_path_with_every_hatch_open() {
     let td = tempfile::tempdir().unwrap();
     let cwd = td.path().to_str().unwrap();
 
+    // READ — the credential leaves only. `permissions.toml`, `config.toml` and
+    // `workspace-trust.json` are NOT here, deliberately: the floor is a write
+    // deny, and its one read carry-over is `fs_read_deny`, which names exactly
+    // these. They are asserted to PASS in
+    // `ordinary_skill_directives_with_real_paths_are_untouched`.
     for token in [
-        "~/.wayland/permissions.toml",
-        "~/.wayland/config.toml",
         "~/.wayland/credentials.toml",
-        "~/.wayland/workspace-trust.json",
+        "~/.wayland/credentials.enc",
+        "~/.wayland/oauth/anthropic.json",
     ] {
         let content = format!("!`cat {token}`");
         let result = execute_shell_commands(&content, LoadedFrom::Skills, cwd).await;
         assert_refused(&result);
     }
 
+    // WRITE — the rest of the floor.
     for cmd in [
         "echo x > .git/hooks/pre-commit",
-        "cat .git/config",
+        "echo x >> .git/config",
         "echo x > .wayland-core/skills/evil/SKILL.md",
+        "rm -rf .wayland-core/skills",
+        "cp /tmp/x .git/hooks/pre-push",
     ] {
         let content = format!("!`{cmd}`");
         let result = execute_shell_commands(&content, LoadedFrom::Skills, cwd).await;
@@ -165,15 +201,17 @@ async fn moving_wayland_home_does_not_move_the_floor_on_the_skill_path() {
     let cwd = td.path().to_str().unwrap();
 
     // The DEFAULT root, while WAYLAND_HOME points somewhere else entirely.
-    let content = format!("!`echo {AUTHORITY_TOKEN}`");
+    let content = format!("!`{AUTHORITY_READ_CMD}`");
     let result = execute_shell_commands(&content, LoadedFrom::Skills, cwd).await;
     assert_refused(&result);
 
-    // And the relocated root, which must also be protected.
+    // And the relocated root, which must also be protected. A write, because
+    // it lands in a tempdir and rule 2's own direction is the write one.
     let moved = elsewhere.path().join("permissions.toml");
-    let content = format!("!`echo {}`", moved.display());
+    let content = format!("!`echo x >> {}`", moved.display());
     let result = execute_shell_commands(&content, LoadedFrom::Skills, cwd).await;
     assert_refused(&result);
+    assert!(!moved.exists(), "nothing ran");
 
     unsafe {
         std::env::remove_var("WAYLAND_HOME");
@@ -192,7 +230,7 @@ async fn one_refused_directive_stops_the_whole_skill_body() {
     let canary = td.path().join("canary");
 
     let content = format!(
-        "!`echo {AUTHORITY_TOKEN}`\nand also !`touch {}`",
+        "!`{AUTHORITY_READ_CMD}`\nand also !`touch {}`",
         canary.display()
     );
     let result = execute_shell_commands(&content, LoadedFrom::Skills, cwd).await;
@@ -253,30 +291,86 @@ fn the_skill_shell_path_calls_the_floor() {
 /// path in it to match. These do. A floor that refused these would have broken
 /// the skills feature rather than floored it.
 ///
-/// The load-bearing rows are `git status` and `ls .`: an earlier draft of the
-/// floor matched an ANCESTOR of the protected surface, and the shortest such
-/// token is `.` — which would refuse every one of these.
+/// The `MEASURED_COST` rows are the eight commands the first revision of the
+/// floor refused, verbatim, on BOTH shell surfaces. They are graded here as
+/// well as in `wcore-tools/tests/command_floor_test.rs` because the skill path
+/// is where `cat .wayland-core/skills/x/SKILL.md` is not a hypothetical: a
+/// skill that shells out to read its own sibling data hits it every load.
 #[tokio::test]
+#[serial_test::serial]
 async fn ordinary_skill_directives_with_real_paths_are_untouched() {
     open_every_hatch();
+    // A relocated profile, so the non-credential authority rows below name a
+    // tempdir rather than the operator's real store — they are asserted to RUN.
+    let home = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("WAYLAND_HOME", home.path());
+    }
+    std::fs::write(home.path().join("permissions.toml"), "p\n").unwrap();
+    std::fs::write(home.path().join("config.toml"), "c\n").unwrap();
+
     let td = tempfile::tempdir().unwrap();
     std::fs::write(td.path().join("README.md"), "hello\n").unwrap();
     std::fs::create_dir_all(td.path().join("src")).unwrap();
+    std::fs::create_dir_all(td.path().join(".git/hooks")).unwrap();
+    std::fs::write(
+        td.path().join(".git/config"),
+        "[core]\n\trepositoryformatversion = 0\n",
+    )
+    .unwrap();
+    std::fs::write(td.path().join(".git/hooks/pre-commit"), "#!/bin/sh\n").unwrap();
+    std::fs::create_dir_all(td.path().join(".wayland-core/skills/x")).unwrap();
+    // Contains the word `wayland` on purpose: `grep -rn wayland .wayland-core`
+    // below exits 1 with EMPTY output when it matches nothing, and this path
+    // reports that as a command failure — which would make the row red for a
+    // reason that has nothing to do with the floor.
+    std::fs::write(
+        td.path().join(".wayland-core/skills/x/SKILL.md"),
+        "wayland demo\n",
+    )
+    .unwrap();
+    std::fs::write(td.path().join(".wayland-core.toml"), "t\n").unwrap();
     let cwd = td.path().to_str().unwrap();
 
-    for cmd in [
-        "cat README.md",
-        "ls .",
-        "ls src",
-        "git status --porcelain",
-        "cat ./README.md",
+    let profile_reads = [
+        format!("cat {}", home.path().join("permissions.toml").display()),
+        format!("cat {}", home.path().join("config.toml").display()),
+    ];
+
+    let measured_cost = [
+        r#"git commit -m "fix .git/config parsing""#.to_string(),
+        "grep -rn wayland .wayland-core".to_string(),
+        "ls .wayland-core/skills".to_string(),
+        "cat .wayland-core/skills/x/SKILL.md".to_string(),
+        "git config --file .git/config --list".to_string(),
+        "cat .git/hooks/pre-commit".to_string(),
+        "ls -la .git/hooks".to_string(),
+        "echo see .wayland-core.toml for config".to_string(),
+    ];
+
+    let ordinary = [
+        "cat README.md".to_string(),
+        "ls .".to_string(),
+        "ls src".to_string(),
+        "git status --porcelain".to_string(),
+        "cat ./README.md".to_string(),
         // Not `.wayland-core`: a component-wise match must not fire on a name
         // that merely CONTAINS the protected one.
-        "echo mywayland-core-notes",
+        "echo mywayland-core-notes".to_string(),
         // Nor on `.gitignore`, which shares a prefix with `.git` but is not
         // the `.git` DIRECTORY.
-        "echo .gitignore",
-    ] {
+        "echo .gitignore".to_string(),
+        // Ordinary writes, inside the workspace and outside every protected
+        // surface — the floor must not have become a blanket write deny either.
+        "echo hi > notes.txt".to_string(),
+        "rm -rf src".to_string(),
+    ];
+
+    for cmd in ordinary
+        .iter()
+        .chain(measured_cost.iter())
+        .chain(profile_reads.iter())
+    {
         let content = format!("!`{cmd}`");
         let result = execute_shell_commands(&content, LoadedFrom::Skills, cwd).await;
         assert!(
@@ -286,30 +380,75 @@ async fn ordinary_skill_directives_with_real_paths_are_untouched() {
             result.err()
         );
     }
+
+    // Known-positive control in the SAME run: the floor is still installed on
+    // this path, so the clean sweep above is narrowness and not absence.
+    let refused = execute_shell_commands(
+        "!`echo x > .wayland-core/skills/x/SKILL.md`",
+        LoadedFrom::Skills,
+        cwd,
+    )
+    .await;
+    assert_refused(&refused);
+    assert_eq!(
+        std::fs::read_to_string(td.path().join(".wayland-core/skills/x/SKILL.md")).unwrap(),
+        "wayland demo\n",
+        "the control command RAN — the refusal above was some other error, so \
+         the clean sweep proves nothing"
+    );
+
+    unsafe {
+        std::env::remove_var("WAYLAND_HOME");
+    }
 }
 
 /// The cost the floor DOES impose on this path, pinned so it is a decision
-/// rather than a surprise.
+/// rather than a surprise — and its exact boundary.
 ///
-/// Rule 1 refuses reads as well as writes, so a project skill may not shell
-/// out to read a file inside its own `.wayland-core` tree. That is consistent
-/// — `BashTool` already refuses `cat .wayland-core/...` for the same reason,
-/// since the bytes there are obeyed rather than merely read — but it is more
-/// natural to hit from a skill, so it is asserted rather than left to be
-/// discovered.
+/// A project skill may READ its own `.wayland-core` tree from the shell; that
+/// is ordinary work and the row above asserts it. What it may not do is AUTHOR
+/// that tree, because those bytes are obeyed by the next session rather than
+/// merely read. An earlier revision of this test asserted the opposite, which
+/// is the defect this file was reworked to remove: it meant a project skill
+/// could not shell out to read its own sibling data at all.
 ///
-/// Measured cost at the time of writing: ZERO shipped skills use a shell
-/// directive at all (`grep -rln '!`' crates/wcore-skills/src/bundled/` is
-/// empty), so nothing in the product regresses. A skill that needs its own
-/// sibling data should read it through the skill's `${SKILL_ROOT}` file
-/// substitution rather than by shelling out.
+/// Measured cost of the write half at the time of writing: ZERO shipped skills
+/// use a shell directive at all (`grep -rln '!`' crates/wcore-skills/src/bundled/`
+/// is empty), so nothing in the product regresses.
 #[tokio::test]
-async fn a_skill_may_not_shell_out_to_read_its_own_control_tree() {
+async fn a_skill_may_read_its_own_control_tree_but_not_author_it() {
     open_every_hatch();
     let td = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(td.path().join(".wayland-core/skills/demo")).unwrap();
+    std::fs::write(
+        td.path().join(".wayland-core/skills/demo/data.txt"),
+        "SENTINEL\n",
+    )
+    .unwrap();
     let cwd = td.path().to_str().unwrap();
 
-    let content = "!`cat .wayland-core/skills/demo/data.txt`";
-    let result = execute_shell_commands(content, LoadedFrom::Skills, cwd).await;
-    assert_refused(&result);
+    let out = execute_shell_commands(
+        "!`cat .wayland-core/skills/demo/data.txt`",
+        LoadedFrom::Skills,
+        cwd,
+    )
+    .await
+    .expect("a skill must be able to read its own sibling data");
+    assert!(
+        out.contains("SENTINEL"),
+        "the directive did not run: {out:?}"
+    );
+
+    let refused = execute_shell_commands(
+        "!`echo pwned > .wayland-core/skills/demo/data.txt`",
+        LoadedFrom::Skills,
+        cwd,
+    )
+    .await;
+    assert_refused(&refused);
+    assert_eq!(
+        std::fs::read_to_string(td.path().join(".wayland-core/skills/demo/data.txt")).unwrap(),
+        "SENTINEL\n",
+        "nothing ran"
+    );
 }
