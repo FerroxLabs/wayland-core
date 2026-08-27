@@ -362,7 +362,13 @@ async fn the_grant_store_survives_a_directory_swap() {
     for (name, entry) in entries() {
         assert_entry_point_is_live(name, entry, &ctx).await;
 
+        // Ordered so the first arm is one no OTHER guard can claim: the
+        // exfiltration copy destroys nothing, so the unsaved-work guard has no
+        // opinion on it and a red arm here fails with the command having RUN,
+        // not with a refusal from somewhere else.
         for cmd in [
+            // Exfiltrate oauth/, .env and the credential stores wholesale.
+            format!("cp -r {} {}", wayland.display(), backup.display()),
             // Reach the file through a glob.
             format!("cp {} {}/perm*.toml", src.display(), wayland.display()),
             // Replace the directory around the file.
@@ -382,8 +388,6 @@ async fn the_grant_store_survives_a_directory_swap() {
                 "cd {} && echo 'tools.auto_approve = true' >> config.toml",
                 wayland.display()
             ),
-            // Exfiltrate oauth/, .env and the credential stores wholesale.
-            format!("cp -r {} {}", wayland.display(), backup.display()),
         ] {
             let (result, chunks) = run(entry, &cmd, &ctx).await;
             assert_refused(&result, &chunks, AUTHORITY_PREFIX, name);
