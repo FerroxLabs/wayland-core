@@ -348,7 +348,10 @@ fn symlinks_followed(path: &Path) -> Option<PathBuf> {
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     let mut probe = path.to_path_buf();
     loop {
-        if let Ok(real) = std::fs::canonicalize(&probe) {
+        // `dunce`, not `std::fs`: the latter answers with the `\\?\` verbatim
+        // spelling on Windows, which matches no protected base and made this
+        // whole fallback dead there.
+        if let Ok(real) = dunce::canonicalize(&probe) {
             let mut out = real;
             for part in tail.iter().rev() {
                 out.push(part);
@@ -425,27 +428,32 @@ fn protected_paths(cwd: Option<&Path>) -> Protected {
     ]
     .into_iter()
     .flatten()
-    // Same normalization as the resolved token it will be compared against.
-    .map(|p| lexical_normalize(&p))
-    // A base that is a filesystem root would refuse every command on the
-    // machine.
-    .filter(|p| p.parent().is_some())
     {
-        if cwd.is_some_and(|c| c.starts_with(&base)) {
-            // The operator has put the session's own working directory inside the
-            // authority directory (the migrate-quarantine live legs do exactly
-            // this: the sandbox only grants writes inside the workspace, so the
-            // workspace has to BE the per-run home). Refusing the whole
-            // directory there refuses every command the session can make, which
-            // is breaking, not widening, so rule 2b falls back to the named
-            // entries. Rule 1 and the bare-name rule 2a are untouched, so the
-            // grant store, workspace trust and the credential stores stay
-            // protected by name even in this layout.
-            out.under
-                .extend(AUTHORITY_DIR_ENTRIES.iter().map(|entry| base.join(entry)));
-            out.exact.push(base);
-        } else {
-            out.under.push(base);
+        // Decided ONCE for the base, then applied to every spelling of it, so
+        // the yield cannot fire for one name and not the other.
+        let yields = cwd_is_under(cwd, &base);
+        for base in spellings(&base)
+            .into_iter()
+            // A base that is a filesystem root would refuse every command on
+            // the machine.
+            .filter(|p| p.parent().is_some())
+        {
+            if yields {
+                // The operator has put the session's own working directory inside the
+                // authority directory (the migrate-quarantine live legs do exactly
+                // this: the sandbox only grants writes inside the workspace, so the
+                // workspace has to BE the per-run home). Refusing the whole
+                // directory there refuses every command the session can make, which
+                // is breaking, not widening, so rule 2b falls back to the named
+                // entries. Rule 1 and the bare-name rule 2a are untouched, so the
+                // grant store, workspace trust and the credential stores stay
+                // protected by name even in this layout.
+                out.under
+                    .extend(AUTHORITY_DIR_ENTRIES.iter().map(|entry| base.join(entry)));
+                out.exact.push(base);
+            } else {
+                out.under.push(base);
+            }
         }
     }
     out.under.sort();
@@ -568,6 +576,50 @@ fn expand_home_prefix(token: &str) -> Option<PathBuf> {
 /// set — nothing here consults a value to decide whether to enforce.
 fn wayland_home_var() -> Option<PathBuf> {
     std::env::var("WAYLAND_HOME").ok().map(PathBuf::from)
+}
+
+/// Every spelling of `base` a resolved token might arrive in.
+///
+/// Windows hands the same directory out under two names: `std::env::temp_dir`
+/// on a service account answers the 8.3 form
+/// `C:\WINDOWS\SERVIC~1\NETWOR~1\...`, while the workspace the tool layer is
+/// handed is the long form. macOS does the same with a symlinked ancestor
+/// (`/var` -> `/private/var`).
+///
+/// BOTH are kept, never one INSTEAD of the other. A base is a thing to refuse,
+/// so listing an extra spelling of it can only ever refuse more — which is the
+/// only direction this module may be wrong in. Replacing the lexical form with
+/// the canonical one looked equivalent and was not: it moved the protected set
+/// rather than widening it, and measured as the floor under-refusing on both
+/// Windows and macOS.
+///
+/// `dunce::canonicalize` rather than `std::fs::canonicalize`: the latter returns
+/// the `\\?\` verbatim spelling on Windows, which is a THIRD form that matches
+/// neither of the two a command can actually contain.
+fn spellings(base: &Path) -> Vec<PathBuf> {
+    let lexical = lexical_normalize(base);
+    match dunce::canonicalize(base) {
+        Ok(real) if real != lexical => vec![lexical, real],
+        _ => vec![lexical],
+    }
+}
+
+/// Whether the session was launched at or under `base`, in ANY spelling of
+/// either.
+///
+/// This decides rule 2b's yield, and the yield NARROWS what is refused, so it
+/// must not be defeated by a spelling: a session whose workspace IS the
+/// authority directory under one name and not under another would have every
+/// command it can make refused. Compared both ways for the same reason
+/// `spellings` returns both.
+fn cwd_is_under(cwd: Option<&Path>, base: &Path) -> bool {
+    let Some(cwd) = cwd else {
+        return false;
+    };
+    let cwds = spellings(cwd);
+    spellings(base)
+        .iter()
+        .any(|b| cwds.iter().any(|c| c.starts_with(b)))
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {
@@ -779,6 +831,75 @@ mod tests {
     /// compares equal to itself — and the leg that caught it lives only there.
     /// This is the arm that fails on Linux and macOS too if the normalization
     /// is dropped from `protected_paths`.
+    /// BOTH spellings of an authority directory are refused — the one the
+    /// operator configured and the one the kernel answers with.
+    ///
+    /// This is the arm that fails if the protected set is MOVED to the
+    /// canonical spelling instead of WIDENED to include it. That looked
+    /// equivalent and was not: measured as the floor under-refusing on Windows
+    /// (8.3 short components) and macOS (`/var` -> `/private/var`), on a change
+    /// whose Linux run was 2,604/2,604 green.
+    ///
+    /// Built from a symlink so the two spellings differ on any Unix, rather
+    /// than relying on a platform quirk only one runner has.
+    #[test]
+    #[serial_test::serial]
+    fn both_spellings_of_the_profile_home_are_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir_all(real.join("oauth")).unwrap();
+        let link = root.path().join("link");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&real, &link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&real, &link);
+        if made.is_err() {
+            // Windows without the symlink privilege. The invariant is real
+            // there too, but it cannot be built here; say so rather than pass.
+            eprintln!("skipped: this platform would not create a directory symlink");
+            return;
+        }
+
+        let prior = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: test-only env mutation, serialized against this module's
+        // other env-driven tests.
+        unsafe { std::env::set_var("WAYLAND_HOME", &link) };
+        let through_link = floor_refusal(
+            &format!("cat {}/oauth/token.json", link.display()),
+            Some(Path::new("/work")),
+        );
+        let through_real = floor_refusal(
+            &format!("cat {}/oauth/token.json", real.display()),
+            Some(Path::new("/work")),
+        );
+        // Control: an ordinary path beside them is still allowed, so a
+        // refuse-everything regression cannot satisfy the two above.
+        let beside = floor_refusal(
+            &format!("cat {}/notes.txt", root.path().display()),
+            Some(Path::new("/work")),
+        );
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+
+        assert!(
+            through_link.is_some(),
+            "the configured spelling of the profile home must be refused"
+        );
+        assert!(
+            through_real.is_some(),
+            "the spelling the KERNEL answers with names the same directory and \
+             must be refused too — a command can contain either"
+        );
+        assert_eq!(
+            beside, None,
+            "control: an ordinary sibling path must still be allowed"
+        );
+    }
+
     #[test]
     #[serial_test::serial]
     fn every_protected_base_is_already_normalized() {
@@ -806,11 +927,11 @@ mod tests {
             "no protected base at all, so the assertion below would be vacuous"
         );
         for base in &bases {
-            assert_eq!(
-                lexical_normalize(base),
-                ***base,
-                "a protected base must already be normalized, or it can never \
-                 compare equal to a token that went through resolve(): {base:?}"
+            assert!(
+                spellings(base).contains(base),
+                "a protected base must be one of its own spellings, or it can \
+                 never compare equal to a token that resolved to the same \
+                 directory: {base:?}"
             );
         }
         // And the specific one: the un-normalized spelling must not survive.

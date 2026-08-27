@@ -502,10 +502,19 @@ async fn the_grant_store_survives_a_directory_swap() {
 async fn a_cd_does_not_move_the_floor_off_the_authority_directories() {
     let home = tempfile::tempdir().unwrap();
     // `WAYLAND_HOME` — the resolved profile home AND config dir. Its basename
-    // is a temporary name, so no name rule can see it.
-    let decoy = tempfile::tempdir().unwrap();
+    // is a fixed ordinary word, so no name rule can see it.
+    //
+    // A CHILD of its own tempdir, not the tempdir itself, so that
+    // `decoy_parent` below is a private directory holding one entry rather than
+    // the machine's SHARED temp root. This test links the workspace to that
+    // parent, and a link to the shared temp root makes every later command walk
+    // the whole of it — on a CI Windows box that is gigabytes of other jobs'
+    // build output, and the test times out instead of failing.
+    let decoy_root = tempfile::tempdir().unwrap();
+    let decoy = decoy_root.path().join("profile-home");
+    std::fs::create_dir_all(&decoy).unwrap();
     let prior_home = std::env::var_os("HOME");
-    open_every_escape_hatch(home.path(), decoy.path());
+    open_every_escape_hatch(home.path(), &decoy);
 
     let wayland = home.path().join(".wayland");
     let store = wayland.join("permissions.toml");
@@ -514,15 +523,10 @@ async fn a_cd_does_not_move_the_floor_off_the_authority_directories() {
     let oauth = wayland.join("oauth").join("token.json");
     std::fs::write(&oauth, OAUTH_SENTINEL).unwrap();
 
-    let decoy_config = decoy.path().join("config.toml");
+    let decoy_config = decoy.join("config.toml");
     std::fs::write(&decoy_config, CONFIG_SENTINEL).unwrap();
-    let decoy_parent = decoy.path().parent().unwrap().to_path_buf();
-    let decoy_name = decoy
-        .path()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
+    let decoy_parent = decoy_root.path().to_path_buf();
+    let decoy_name = "profile-home".to_string();
 
     let work = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(work.path()).unwrap();
