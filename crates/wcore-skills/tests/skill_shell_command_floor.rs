@@ -245,3 +245,71 @@ fn the_skill_shell_path_calls_the_floor() {
          that skips the first cannot skip both"
     );
 }
+
+/// The other direction, with real PATH TOKENS rather than a bare `echo`.
+///
+/// `an_ordinary_skill_shell_directive_still_runs` proves the feature still
+/// works; it does not prove the floor is narrow, because its command has no
+/// path in it to match. These do. A floor that refused these would have broken
+/// the skills feature rather than floored it.
+///
+/// The load-bearing rows are `git status` and `ls .`: an earlier draft of the
+/// floor matched an ANCESTOR of the protected surface, and the shortest such
+/// token is `.` — which would refuse every one of these.
+#[tokio::test]
+async fn ordinary_skill_directives_with_real_paths_are_untouched() {
+    open_every_hatch();
+    let td = tempfile::tempdir().unwrap();
+    std::fs::write(td.path().join("README.md"), "hello\n").unwrap();
+    std::fs::create_dir_all(td.path().join("src")).unwrap();
+    let cwd = td.path().to_str().unwrap();
+
+    for cmd in [
+        "cat README.md",
+        "ls .",
+        "ls src",
+        "git status --porcelain",
+        "cat ./README.md",
+        // Not `.wayland-core`: a component-wise match must not fire on a name
+        // that merely CONTAINS the protected one.
+        "echo mywayland-core-notes",
+        // Nor on `.gitignore`, which shares a prefix with `.git` but is not
+        // the `.git` DIRECTORY.
+        "echo .gitignore",
+    ] {
+        let content = format!("!`{cmd}`");
+        let result = execute_shell_commands(&content, LoadedFrom::Skills, cwd).await;
+        assert!(
+            result.is_ok(),
+            "the floor refused ordinary skill work `{cmd}` — that breaks the \
+             feature rather than flooring it: {:?}",
+            result.err()
+        );
+    }
+}
+
+/// The cost the floor DOES impose on this path, pinned so it is a decision
+/// rather than a surprise.
+///
+/// Rule 1 refuses reads as well as writes, so a project skill may not shell
+/// out to read a file inside its own `.wayland-core` tree. That is consistent
+/// — `BashTool` already refuses `cat .wayland-core/...` for the same reason,
+/// since the bytes there are obeyed rather than merely read — but it is more
+/// natural to hit from a skill, so it is asserted rather than left to be
+/// discovered.
+///
+/// Measured cost at the time of writing: ZERO shipped skills use a shell
+/// directive at all (`grep -rln '!`' crates/wcore-skills/src/bundled/` is
+/// empty), so nothing in the product regresses. A skill that needs its own
+/// sibling data should read it through the skill's `${SKILL_ROOT}` file
+/// substitution rather than by shelling out.
+#[tokio::test]
+async fn a_skill_may_not_shell_out_to_read_its_own_control_tree() {
+    open_every_hatch();
+    let td = tempfile::tempdir().unwrap();
+    let cwd = td.path().to_str().unwrap();
+
+    let content = "!`cat .wayland-core/skills/demo/data.txt`";
+    let result = execute_shell_commands(content, LoadedFrom::Skills, cwd).await;
+    assert_refused(&result);
+}
