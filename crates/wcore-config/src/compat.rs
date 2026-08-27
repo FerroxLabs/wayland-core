@@ -167,6 +167,13 @@ pub struct ProviderCompat {
     /// `None` resolves to `false`: an endpoint we know nothing about is never
     /// accused of a broken cache. Set `Some(true)` only where the capability
     /// is established - see the presets.
+    ///
+    /// Because `Some(true)` is an accusation, it must never arrive by
+    /// accident: any preset built with `..Self::some_other_defaults()` struct
+    /// update inherits this field unless it clears it explicitly. The pinning
+    /// test `only_justified_presets_expect_a_served_prompt_cache` reads the
+    /// RESOLVED value off every real preset and fails if an unjustified one
+    /// turns true.
     pub prompt_cache_expected: Option<bool>,
 
     /// W6 — structured provider identity for trace and cost attribution.
@@ -523,10 +530,21 @@ impl ProviderCompat {
         }
     }
 
-    /// Defaults for Vertex (Anthropic via Google Cloud)
+    /// Defaults for Vertex (Anthropic via Google Cloud).
+    ///
+    /// Inherits the Anthropic behavioural flags and overrides only:
+    /// - `provider_type` -> `"vertex"` for distinct cost/trace attribution.
+    /// - `prompt_cache_expected` -> unset: whether Anthropic-on-Vertex serves
+    ///   and reports prompt-cached input through this pipeline is unverified,
+    ///   and the flag is an accusation (it makes the engine tell the user
+    ///   their provider is re-billing an uncached prompt). Inheriting
+    ///   Anthropic's `Some(true)` would make that accusation on evidence
+    ///   gathered from a different endpoint. Same reason `minimax_defaults()`
+    ///   clears `cache_message_breakpoints`.
     pub fn vertex_defaults() -> Self {
         Self {
             provider_type: Some("vertex".into()),
+            prompt_cache_expected: None,
             ..Self::anthropic_defaults()
         }
     }
@@ -545,10 +563,14 @@ impl ProviderCompat {
     ///   Anthropic prompt-caching beta is unverified (the factory also builds
     ///   this provider with caching off), so do not inject `cache_control`
     ///   blocks the endpoint may reject.
+    /// - `prompt_cache_expected` → unset, for the same unverified reason: with
+    ///   `cache_control` deliberately off there is no established capability
+    ///   here, so never accuse this endpoint of a dead prompt cache.
     pub fn minimax_defaults() -> Self {
         Self {
             provider_type: Some("minimax".into()),
             cache_message_breakpoints: Some(false),
+            prompt_cache_expected: None,
             cost_per_input_token: Some(0.0),
             cost_per_output_token: Some(0.0),
             cost_per_cache_read_token: None,
@@ -727,6 +749,17 @@ impl ProviderCompat {
             // exists to remove. Providers that DO serve the endpoint declare it
             // explicitly (see `flux_router_defaults`).
             image_model: None,
+            // Cleared for the same reason as `image_model` above: an
+            // openai-compat provider is NOT OpenAI. `openai_defaults()` claims
+            // an automatic prompt cache reported as
+            // `prompt_tokens_details.cached_tokens`, which is a statement about
+            // OpenAI's own endpoint. Inheriting it here would make the engine
+            // accuse Groq, Together, Cerebras, Mistral, DeepSeek and every
+            // other Tier-2 provider of silently re-billing an uncached prompt
+            // on evidence gathered from a different vendor. Providers whose
+            // capability IS established declare it explicitly (see
+            // `flux_router_defaults`).
+            prompt_cache_expected: None,
             ..Self::openai_defaults()
         }
     }
