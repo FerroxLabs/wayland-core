@@ -8,12 +8,17 @@ use wcore_sandbox::NetworkPolicy;
 use wcore_sandbox::manifest::SandboxManifest;
 use wcore_types::tool::ToolResult;
 
-// #693 — `command_path_tokens` and `deobfuscate` moved DOWN into
-// `wcore-config`. They are shared with the command floor, which had to
-// move below `wcore-tools` so that `wcore-skills`' shell surface — the
-// second `sh -c` path, which never touches `BashTool` — sits under the
-// same floor. Re-exported rather than copied: two spellings of a guard
-// is how one of them rots.
+// #693 — `command_path_tokens` and `deobfuscate` live DOWN in
+// `wcore-config`, alongside the command floor, which had to move below
+// `wcore-tools` so that `wcore-skills`' shell surface — the second `sh -c`
+// path, which never touches `BashTool` — sits under the same floor.
+//
+// The floor itself no longer uses either of them: splitting on quote
+// characters is what turned a path inside `git commit -m "fix .git/config
+// parsing"` into a path token, so the floor lexes with its own quote-aware
+// parser. These two remain the masked-read annotation's tokenizer, which is
+// a different question — it only ever ANNOTATES an already-finished result,
+// so an over-eager token there costs a stray note, not a refusal.
 pub(super) use wcore_config::command_floor::{command_path_tokens, deobfuscate};
 
 /// Does `command` look like it needs network egress? Used only to attach a
