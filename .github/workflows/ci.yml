@@ -763,6 +763,34 @@ jobs:
     # A LABEL is the pull_request-side equivalent: it is available on the
     # event, it is opt-in exactly like the tag, and it can be applied to a PR
     # that is already open without rewriting a commit.
+    #
+    # ORDERING MATTERS, and it is not obvious. `on: pull_request:` above
+    # declares no `types:`, so it defaults to
+    # [opened, synchronize, reopened] -- `labeled` is NOT among them.
+    # Applying the label therefore does NOT start a run, and a run that was
+    # already created carries the label set as it was AT CREATION TIME.
+    # Measured: labelled PR #341, and the in-flight run (33028709448, pushed
+    # moments earlier) still reported `skipped`.
+    #
+    # So: LABEL FIRST, THEN PUSH. Every later `synchronize` sees the label and
+    # honours it, so this is a one-time ordering cost per PR, not per commit.
+    # `labeled` is deliberately NOT added to `types:` -- that would fire the
+    # whole matrix on every routine label change (`area:core` and friends),
+    # which is a large recurring cost to save a single push.
+    #
+    # ORDERING MATTERS, and it is not obvious. `on: pull_request:` above
+    # declares no `types:`, so it defaults to
+    # [opened, synchronize, reopened] -- `labeled` is NOT among them.
+    # Applying the label therefore does NOT start a run, and a run that was
+    # already created carries the label set as it was AT CREATION TIME.
+    # Measured: labelled PR #341, and the in-flight run (33028709448, pushed
+    # moments earlier) still reported `skipped`.
+    #
+    # So: LABEL FIRST, THEN PUSH. Every later `synchronize` sees the label and
+    # honours it, so this is a one-time ordering cost per PR, not per commit.
+    # `labeled` is deliberately NOT added to `types:` -- that would fire the
+    # whole matrix on every routine label change (`area:core` and friends),
+    # which is a large recurring cost to save a single push.
     if: >-
       contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
       || contains(github.event.pull_request.labels.*.name, 'ci-windows')
