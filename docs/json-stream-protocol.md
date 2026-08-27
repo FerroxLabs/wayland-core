@@ -2280,7 +2280,8 @@ would drop it silently per W0).
   "thread_id": "t-17",
   "body": "hello from the agent",
   "subject": "Re: invoice",
-  "conversation_id": "abc123"
+  "conversation_id": "abc123",
+  "idempotency_key": "te-91a4\u2026"
 }
 ```
 
@@ -2293,6 +2294,22 @@ would drop it silently per W0).
 | `body` | string | yes | The message text. |
 | `subject` | string | no | Subject line. The current `send_message` schema has no subject input, so the engine omits it today; part of the wire contract for forward-compat. |
 | `conversation_id` | string | no | Session id of the emitting engine, when known. |
+| `idempotency_key` | string | no | F13 (#889), **`contract.minor` >= 1.20**. The durable key the engine's session journal minted for this tool execution. STABLE across the paths that legitimately re-run one send (an in-turn retry, and the crash-resume re-dispatch), so two frames bearing the same value are **one** logical delivery the engine was interrupted in the middle of, not two the user asked for. `call_id` cannot substitute: it is minted fresh per request and differs across a re-dispatch. Omitted when the send is not running under a durable effect context. |
+
+**Feature-detect on `contract.minor`, not on the field's presence.** An absent
+`idempotency_key` is ambiguous by itself — it means either "this engine never
+sends one" (below 1.20) or "this particular send has no durable identity"
+(1.20+). Those call for opposite host behaviour, and the contract minor is the
+only thing that separates them.
+
+**What a host should do with `idempotency_key`.** A host whose outbound
+provider accepts a caller-supplied idempotency / transaction token SHOULD pass
+this value through, so a re-dispatched send converges to one message at the
+destination. A host that cannot MUST ignore the field — it is additive and
+changes nothing else about the frame. The engine asserts nothing about the
+outcome: carrying the key is the PRECONDITION for exactly-once delivery on this
+path, not a claim of it, and the engine still classifies a delegated send whose
+result never arrived as an unknown effect for the operator to resolve.
 
 ### 1.N+13 `render_artifact` (#1098)
 

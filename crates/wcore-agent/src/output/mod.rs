@@ -302,6 +302,11 @@ pub trait OutputSink: Send + Sync {
     /// forward-additive baseline. Default no-op for non-protocol sinks —
     /// a delegated send under such a sink times out into a loud tool
     /// error rather than reaching a host that doesn't exist.
+    ///
+    /// F13 (#889): `idempotency_key` is the durable key the session journal
+    /// minted for this tool execution, forwarded so the host can recognise a
+    /// re-dispatch of one logical delivery. `None` when the send is not
+    /// running under a durable effect context.
     #[allow(clippy::too_many_arguments)]
     fn emit_host_send_message_request(
         &self,
@@ -312,6 +317,7 @@ pub trait OutputSink: Send + Sync {
         _body: &str,
         _subject: Option<&str>,
         _conversation_id: Option<&str>,
+        _idempotency_key: Option<&str>,
     ) {
     }
 

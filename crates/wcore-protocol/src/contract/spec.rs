@@ -1941,6 +1941,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 body: "The run completed.".into(),
                 subject: Some("Wayland update".into()),
                 conversation_id: Some("session-desktop-001".into()),
+                idempotency_key: Some("tool-effect-0001".into()),
             },
         ),
         (
@@ -2484,6 +2485,7 @@ pub fn compatibility_event_values() -> BTreeMap<String, ProtocolEvent> {
                 body: "hello".into(),
                 subject: None,
                 conversation_id: None,
+                idempotency_key: None,
             },
         ),
         (

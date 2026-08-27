@@ -87,8 +87,28 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // gap: each records why a specific widening needed a signal, and rewriting them
 // to look consecutive would destroy that reasoning to tidy a sequence no host
 // reads. A pinned host moves 1.16 -> 1.19 and finds every capability named.
-pub const CONTRACT_MINOR: u64 = 19;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/19";
+//
+// 19 -> 20: F13 (#889). `host_send_message_request` gains an OPTIONAL
+// `idempotency_key` — the durable key the engine's session journal minted for
+// the tool execution behind the send, stable across the two paths that
+// legitimately re-run one call (an in-turn retry and the crash-resume
+// re-dispatch). `major` holds at 1: no field is renamed, removed, retyped or
+// newly required, and a host that ignores the field behaves exactly as before.
+//
+// The version IS the feature-detect here, and it needs to be. On this path the
+// HOST performs the delivery, so the host is the only party that can dedupe;
+// but an ABSENT `idempotency_key` is ambiguous on its own — it means either
+// "this engine never sends one" or "this particular send has no durable
+// identity". Those demand opposite host behaviour: the first says a
+// same-looking second frame may be a genuine second message, the second says
+// the host simply has nothing to key on for this one. `contract.minor >= 1.20`
+// is what separates them, and it is the ONLY signal that does.
+//
+// No new capability name: the field rides `host_send_message_request`, which
+// already declares `host_delegated_delivery`, and a host that has not opted
+// into host-delegated sends never sees the frame at all.
+pub const CONTRACT_MINOR: u64 = 20;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/20";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
