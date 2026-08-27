@@ -38,6 +38,15 @@
 //! next bypass would live. Nothing else on the machine is affected: the
 //! directories are the agent's own state, not the user's work.
 //!
+//! **With one yield, and only one.** Where the session's own working directory
+//! is INSIDE an authority directory, refusing the whole directory refuses every
+//! command the session can make - breaking, not widening - so rule 2b falls
+//! back there to a named-entry list. Rule 1 and the bare-name rule 2a still
+//! apply, so the grant store, workspace trust and the credential stores stay
+//! protected by name in that layout too. The yield keys off the working
+//! directory the session was launched with, which no command can change: an
+//! in-shell `cd` does not move it.
+//!
 //! **This module reads no switch.** No config field, no CLI flag, no
 //! enable/disable environment variable. The single `env::var` it performs is
 //! `WAYLAND_HOME`, which only ADDS to the protected set — the default
@@ -45,6 +54,11 @@
 //! an environment variable cannot move the floor off the operator's real store.
 //! A base that is a filesystem root is dropped, so that variable cannot turn
 //! the floor into a denial of service either.
+//!
+//! A component that is a glob is treated as the name it could expand onto
+//! (`.git/hoo*/pre-commit`, `~/.way*`), because `cp` globs its arguments - that
+//! is how the first form of this floor was walked past. A component that is
+//! NOTHING but a glob (`.git/*`) names nothing in particular and is left alone.
 //!
 //! **Deliberately not wider.** An ancestor of a protected path is NOT matched:
 //! the shortest ancestor token of `.git/hooks` is `.`, and refusing that would
@@ -89,6 +103,23 @@ const AUTHORITY_BASENAMES: &[&str] = &[
     "credentials.kdf.json",
 ];
 
+/// Entries protected INSIDE an authority directory when the whole-directory
+/// rule has to yield — see [`protected_paths`]. This is a fallback list, not
+/// the primary rule, and it is why the primary rule protects the directory.
+const AUTHORITY_DIR_ENTRIES: &[&str] = &[
+    "permissions.toml",
+    "workspace-trust.json",
+    "config.toml",
+    "config.yaml",
+    "oauth",
+    "credentials.toml",
+    "credentials.enc",
+    "credentials.kdf.json",
+    "plugins",
+    "trusted-keys",
+    ".env",
+];
+
 /// Repository-control path components matched wherever they appear in a token.
 const REPO_CONTROL_COMPONENTS: &[&str] = &[".wayland-core", ".wayland-core.toml"];
 
@@ -120,7 +151,7 @@ pub fn floor_refusal(command: &str, cwd: Option<&Path>) -> Option<String> {
     let cwd = cwd
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok());
-    let protected = protected_roots();
+    let protected = protected_paths(cwd.as_deref());
 
     // Match the raw command AND a de-obfuscated form. `deobfuscate` strips
     // quoting, which both reveals `.git/'hooks'` and destroys Windows
@@ -146,7 +177,10 @@ fn token_refusal(token: &str, cwd: Option<&Path>, protected: &[PathBuf]) -> Opti
     // only thing keeping a command away from ANOTHER repository's hooks is the
     // sandbox, and the sandbox is exactly the layer a floor sits under.
     for (i, part) in parts.iter().enumerate() {
-        if REPO_CONTROL_COMPONENTS.contains(&part.as_str()) {
+        if REPO_CONTROL_COMPONENTS
+            .iter()
+            .any(|name| component_may_be(part, name))
+        {
             return Some(REPO_CONTROL_REFUSAL);
         }
         // `.git` alone is NOT a match — only `.git` followed by a child that is
@@ -155,10 +189,12 @@ fn token_refusal(token: &str, cwd: Option<&Path>, protected: &[PathBuf]) -> Opti
         // `.git/modules/<name>/hooks`. `parts` is lexically normalized first,
         // so `.git/x/../hooks` is seen as `.git/hooks` (refused) while
         // `.git/../hooks` is seen as plain `hooks` (allowed).
-        if part == ".git"
-            && parts[i + 1..]
-                .iter()
-                .any(|child| GIT_CONTROL_CHILDREN.contains(&child.as_str()))
+        if component_may_be(part, ".git")
+            && parts[i + 1..].iter().any(|child| {
+                GIT_CONTROL_CHILDREN
+                    .iter()
+                    .any(|name| component_may_be(child, name))
+            })
         {
             return Some(REPO_CONTROL_REFUSAL);
         }
@@ -188,19 +224,52 @@ fn token_refusal(token: &str, cwd: Option<&Path>, protected: &[PathBuf]) -> Opti
 /// A base with no parent (a filesystem root, or empty) is dropped. Widening the
 /// protected set is the only thing `WAYLAND_HOME` may do; turning every command
 /// on the machine into a refusal is not widening, it is breaking.
-fn protected_roots() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = [
+fn protected_paths(cwd: Option<&Path>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for base in [
         Some(crate::config::profile_home()),
         Some(crate::config::wayland_config_dir()),
         dirs::home_dir().map(|h| h.join(".wayland")),
     ]
     .into_iter()
     .flatten()
+    // A base that is a filesystem root would refuse every command on the
+    // machine.
     .filter(|p| p.parent().is_some())
-    .collect();
+    {
+        if cwd.is_some_and(|c| c.starts_with(&base)) {
+            // The operator has put the session's own working directory inside the
+            // authority directory (the migrate-quarantine live legs do exactly
+            // this: the sandbox only grants writes inside the workspace, so the
+            // workspace has to BE the per-run home). Refusing the whole
+            // directory there refuses every command the session can make, which
+            // is breaking, not widening, so rule 2b falls back to the named
+            // entries. Rule 1 and the bare-name rule 2a are untouched, so the
+            // grant store, workspace trust and the credential stores stay
+            // protected by name even in this layout.
+            out.extend(AUTHORITY_DIR_ENTRIES.iter().map(|entry| base.join(entry)));
+        } else {
+            out.push(base);
+        }
+    }
     out.sort();
     out.dedup();
     out
+}
+
+/// Whether a path component IS `name`, or is a glob that could expand onto it.
+/// `cp evil .git/hoo*/pre-commit` globs exactly like `cp evil ~/.wayland/perm*.toml`
+/// did, so a component rule that compares only equality carries the same hole
+/// the resolved-path rule carried. A component that is nothing but a glob
+/// (`.git/*`) names no child in particular and is not treated as one.
+fn component_may_be(part: &str, name: &str) -> bool {
+    if part == name {
+        return true;
+    }
+    match part.find(GLOB_CHARS) {
+        None | Some(0) => false,
+        Some(cut) => name.starts_with(&part[..cut]),
+    }
 }
 
 /// A token containing a glob metacharacter is not the path it looks like. It is
@@ -369,6 +438,11 @@ mod tests {
             "echo x >> .git/modules/sub/config",
             // Lexical `..` inside the token must not dodge it either.
             "echo id > .git/objects/../hooks/pre-commit",
+            // `cp` globs its arguments, so a partial name reaches the same
+            // file. This is the shape that walked past the first form of the
+            // floor on the authority side.
+            "cp /tmp/evil .git/hoo*/pre-commit",
+            "cp /tmp/evil .git/conf*",
         ] {
             assert!(
                 floor_refusal(command, Some(Path::new("/work"))).is_some(),
@@ -377,7 +451,13 @@ mod tests {
         }
         // ...and the same normalization must not INVENT a match: these two
         // name `hooks` in the working tree, not under `.git`.
-        for command in ["cat .git/../hooks/pre-commit", "cat hooks/pre-commit"] {
+        for command in [
+            "cat .git/../hooks/pre-commit",
+            "cat hooks/pre-commit",
+            // A component that is nothing but a glob names no child in
+            // particular.
+            "ls .git/*",
+        ] {
             assert_eq!(
                 floor_refusal(command, Some(Path::new("/work"))),
                 None,
@@ -458,10 +538,28 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn a_glob_that_names_no_directory_is_not_refused() {
-        // Known-positive control in the same test: the glob rule IS live here.
+        // Known-positive control in the same test: the glob arm of rule 2b IS
+        // live here. The decoy home matters — every `~/.way*` spelling is also
+        // a prefix of `.wayland-core`, so rule 1 would satisfy this assertion
+        // and the control would prove nothing about the arm it is guarding.
+        let prior = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: test-only env mutation, serialized against the crate's other
+        // env-driven tests.
+        unsafe { std::env::set_var("WAYLAND_HOME", "/tmp/wl693-decoy-home") };
+        let control = floor_refusal(
+            "cp -r /tmp/evil /tmp/wl693-decoy-hom*",
+            Some(Path::new("/work")),
+        );
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
         assert!(
-            floor_refusal("cp -r /tmp/evil ~/.way*", Some(Path::new("/work"))).is_some(),
+            control.is_some(),
             "control: a mid-component glob onto the profile home must be refused"
         );
         // A glob that starts a fresh component names no directory in
@@ -490,6 +588,51 @@ mod tests {
             .join("oauth")
             .join("token.json");
         assert!(floor_refusal(&format!("cat {}", oauth.display()), None).is_some());
+    }
+
+    #[test]
+    fn rule_2b_yields_where_the_workspace_is_inside_the_authority_directory() {
+        // The migrate-quarantine live legs put the session workspace INSIDE the
+        // per-run profile home, because the sandbox only grants writes inside
+        // the workspace. Refusing the whole directory there refuses every
+        // command the session can make.
+        let base = crate::config::profile_home();
+        let sentinel = base.join("run-sentinel");
+        let inside = Some(base.as_path());
+
+        // Control: from an ordinary workspace the whole-directory rule IS live
+        // on this exact path. Without it the assertion below would be satisfied
+        // by a floor that never fired at all.
+        assert!(
+            floor_refusal(
+                &format!("touch {}", sentinel.display()),
+                Some(Path::new("/work"))
+            )
+            .is_some(),
+            "control: the whole-directory rule must refuse this from outside"
+        );
+        assert_eq!(
+            floor_refusal(&format!("touch {}", sentinel.display()), inside),
+            None,
+            "a session working inside the authority directory must still work"
+        );
+
+        // ...and the authority state itself is STILL refused there.
+        for command in [
+            format!("echo x >> {}", base.join("permissions.toml").display()),
+            format!("echo x >> {}", base.join("config.toml").display()),
+            format!(
+                "cp /tmp/evil {}",
+                base.join("plugins").join("e.so").display()
+            ),
+            format!("cat {}", base.join("oauth").join("t.json").display()),
+            format!("cat {}", base.join(".env").display()),
+        ] {
+            assert!(
+                floor_refusal(&command, inside).is_some(),
+                "must still be refused from inside: {command}"
+            );
+        }
     }
 
     #[test]

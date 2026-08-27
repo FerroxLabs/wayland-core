@@ -33,6 +33,8 @@ use wcore_types::tool::ToolResult;
 /// The two refusal families, spelled as prefixes so the assertion cannot be
 /// satisfied by an unrelated error (a missing binary, a timeout, a fail-closed
 /// sandbox all set `is_error`).
+/// The family-neutral prefix, for an arm where either rule is a correct answer.
+const FLOOR_PREFIX: &str = "Refused by the command floor:";
 const AUTHORITY_PREFIX: &str =
     "Refused by the command floor: this command references the agent's own authority state";
 const REPO_CONTROL_PREFIX: &str =
@@ -378,8 +380,6 @@ async fn the_grant_store_survives_a_directory_swap() {
                 evil.display(),
                 wayland.display()
             ),
-            // Reach the directory through a glob.
-            format!("cp -r {} {}/.way*", evil.display(), home.path().display()),
             // Point the directory at attacker-controlled content.
             format!("ln -sfn {} {}", evil.display(), wayland.display()),
             // `security.enabled` / `tools.auto_approve` through a basename too
@@ -392,6 +392,18 @@ async fn the_grant_store_survives_a_directory_swap() {
             let (result, chunks) = run(entry, &cmd, &ctx).await;
             assert_refused(&result, &chunks, AUTHORITY_PREFIX, name);
         }
+
+        // Reach the directory through a glob. Asserted against the family-
+        // neutral prefix: `.way*` is equally a prefix of `.wayland-core`, so
+        // either floor rule refusing it is correct and pinning one would be
+        // pinning an accident.
+        let (result, chunks) = run(
+            entry,
+            &format!("cp -r {} {}/.way*", evil.display(), home.path().display()),
+            &ctx,
+        )
+        .await;
+        assert_refused(&result, &chunks, FLOOR_PREFIX, name);
 
         // Assert the WORLD, not the receipt.
         assert_eq!(
