@@ -1025,3 +1025,121 @@ fn reserve(driver: &GoalFleetDriver, id: &str) -> String {
         .expect("reservation commits");
     id.to_owned()
 }
+
+// ---------------------------------------------------------------------------
+// 9. #946 B-01: an empty claimable set is not a finished Goal.
+// ---------------------------------------------------------------------------
+
+/// A resume INSIDE the claim-lease window must not borrow the finished Goal's
+/// words.
+///
+/// The measured defect: a process killed mid-wave leaves every task it claimed
+/// under a live, unexpired lease. `recover` revokes only EXPIRED claims — by
+/// design, because revoking a live one is how a task gets run twice — so a
+/// restart within the lease window finds `claimable()` empty and reported
+/// `stopped_because=no claimable task remains`, the exact sentence a Goal that
+/// is genuinely done produces, with exit 0 behind it.
+///
+/// The abandoned-claim state is reached the same way
+/// `a_shard_timeout_aborts_its_siblings_and_the_ledger_survives_it` reaches it,
+/// so the premise is a state the wire really produces, not one hand-written
+/// into the journal.
+///
+/// CONTROL (`census_of_a_finished_goal_keeps_the_historical_sentence`, below)
+/// proves the new wording is not simply always emitted.
+#[tokio::test]
+async fn a_resume_inside_the_lease_window_does_not_report_the_finished_sentence() {
+    let fixture = Fixture::new("leasewindow");
+    let driver = fixture.driver("sup-a");
+    fixture.open(&driver, 8);
+    for index in 0..4 {
+        fixture.declare(&driver, &task_name(index), &[]);
+    }
+
+    let effects = Arc::new(EffectLog::default());
+    let executor = Arc::new(
+        DelayedExecutor::new(effects.clone())
+            .delay(&task_name(0), Duration::from_secs(30))
+            .default_delay(Duration::from_secs(10)),
+    );
+    let dispatcher = FleetDispatcher::new("wire-leasewindow")
+        .with_shard_size(1)
+        .with_shard_timeout(Duration::from_millis(150));
+
+    // The kill. Four claims won at t=1_000, every agent aborted before it could
+    // record anything, so all four leases run to 1_000 + LEASE_MS.
+    let wave = driver
+        .run_wave(&dispatcher, executor.clone(), 4, 1_000, LEASE_MS)
+        .await
+        .expect("wave returns");
+    assert_eq!(wave.abandoned, 4, "premise not reached: {wave:?}");
+
+    // The resume, by a DIFFERENT supervisor, still inside the lease window.
+    let resumed = fixture.driver("sup-b");
+    let run = resumed
+        .run_to_completion(&dispatcher, executor, 4, LEASE_MS, &|| 1_500)
+        .await
+        .expect("run returns");
+
+    assert!(
+        run.waves.is_empty(),
+        "nothing should have been claimed: {run:?}"
+    );
+    let census = run.idle.expect("the idle exit must carry a census");
+    assert_eq!(census.lease_held, 4, "{census:?}");
+    assert_eq!(census.awaiting_resolution, 0, "{census:?}");
+    assert_eq!(census.dependency_blocked, 0, "{census:?}");
+    assert!(!census.is_finished(), "{census:?}");
+    assert_eq!(
+        census.earliest_lease_expiry_unix_ms,
+        Some(1_000 + LEASE_MS),
+        "the sentence must be able to say when the work comes back"
+    );
+
+    // THE DEFECT, stated as an assertion: this run must not describe itself
+    // with the finished Goal's sentence.
+    assert!(
+        !run.stopped_because.contains("no claimable task remains"),
+        "a resume inside the lease window reported the FINISHED sentence over \
+         four unfinished tasks: {}",
+        run.stopped_because
+    );
+    assert!(
+        run.stopped_because.contains("leased to another worker")
+            && run
+                .stopped_because
+                .contains(&(1_000 + LEASE_MS).to_string()),
+        "the sentence must name the lease and when it expires: {}",
+        run.stopped_because
+    );
+}
+
+/// The CONTROL. A Goal that really is finished keeps the historical sentence
+/// byte for byte, so the assertion above is discriminating rather than a
+/// tautology about the new wording.
+#[tokio::test]
+async fn census_of_a_finished_goal_keeps_the_historical_sentence() {
+    let fixture = Fixture::new("leasecontrol");
+    let driver = fixture.driver("sup-a");
+    fixture.open(&driver, 8);
+    for index in 0..3 {
+        fixture.declare(&driver, &task_name(index), &[]);
+    }
+
+    let effects = Arc::new(EffectLog::default());
+    let executor = Arc::new(DelayedExecutor::new(effects.clone()));
+    let dispatcher = FleetDispatcher::new("wire-leasecontrol").with_shard_size(2);
+
+    let run = driver
+        .run_to_completion(&dispatcher, executor, 3, LEASE_MS, &|| 1_000)
+        .await
+        .expect("run completes");
+
+    assert_eq!(run.completed(), 3, "{run:?}");
+    let census = run.idle.expect("the idle exit must carry a census");
+    assert!(census.is_finished(), "{census:?}");
+    assert_eq!(
+        run.stopped_because, "no claimable task remains",
+        "a finished goal must keep the historical wording"
+    );
+}

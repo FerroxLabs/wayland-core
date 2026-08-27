@@ -868,6 +868,30 @@ async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
                                 },
                             );
                         }
+                        // #946 B-01, the OTHER way a run can end over an
+                        // unfinished Goal. The arm above catches tasks the
+                        // effect boundary parked; this one catches the case
+                        // where the loop never claimed anything at all because
+                        // every remaining task is under a live, unexpired lease
+                        // (a killed predecessor), parked, or dependency-blocked.
+                        // Before this, that reported `run_complete … no
+                        // claimable task remains` and exit 0 — the finished
+                        // Goal's own words over a job nobody had finished.
+                        if let Some(census) = run.idle.filter(|c| !c.is_finished()) {
+                            println!(
+                                "GOAL: unfinished lease_held={} awaiting_resolution={} \
+                                 dependency_blocked={}",
+                                census.lease_held,
+                                census.awaiting_resolution,
+                                census.dependency_blocked
+                            );
+                            return StrategyTermination::from_fleet(
+                                owner,
+                                FleetOutcome::DriverFailed {
+                                    detail: run.stopped_because.clone(),
+                                },
+                            );
+                        }
                         // Bound at shard level, never at a caller-chosen `T`:
                         // one `ShardSummary` per wave, carrying the
                         // completed/failed counts the driver itself measured.
@@ -932,6 +956,20 @@ async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
         run.delivered(),
         run.stopped_because
     );
+    // #946 B-01. `goal run` without `--terminate` returned `Ok(())` whatever
+    // the ledger said, so a scripted caller could not tell "the goal is done"
+    // from "everything left belongs to a process that has not released it".
+    // The sentence above already carries the distinction; this puts it on the
+    // channel a script actually reads. A FINISHED goal still exits 0, and so
+    // does a run that stopped on its authorized loop bound (`idle` is `None`
+    // there — the loop never consulted the ledger).
+    if let Some(census) = run.idle.filter(|c| !c.is_finished()) {
+        println!(
+            "GOAL: unfinished lease_held={} awaiting_resolution={} dependency_blocked={}",
+            census.lease_held, census.awaiting_resolution, census.dependency_blocked
+        );
+        anyhow::bail!("{}", run.stopped_because);
+    }
     Ok(())
 }
 

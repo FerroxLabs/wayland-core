@@ -176,6 +176,12 @@ pub struct FleetRun {
     pub iterations_consumed: u32,
     /// Why the loop stopped. Always populated.
     pub stopped_because: String,
+    /// The ledger census taken at the moment the loop found nothing claimable.
+    ///
+    /// `Some` ONLY on that exit. The loop-bound and no-progress exits leave it
+    /// `None` on purpose: they did not consult the ledger, so a census there
+    /// would be a fabricated reading of a Goal nobody looked at.
+    pub idle: Option<IdleCensus>,
 }
 
 impl FleetRun {
@@ -187,6 +193,111 @@ impl FleetRun {
     #[must_use]
     pub fn delivered(&self) -> usize {
         self.waves.iter().map(|wave| wave.delivered.len()).sum()
+    }
+}
+
+/// Why a Goal had nothing claimable, when it had nothing claimable.
+///
+/// `claimable().is_empty()` used to be reported as `no claimable task remains`
+/// in every case, which is true of exactly one of them: the Goal is finished.
+/// #946 B-01 measured another. A process killed mid-wave leaves its tasks under
+/// LIVE, UNEXPIRED leases — `GoalTaskState::live_attempt` takes no clock, and
+/// [`GoalFleetDriver::recover`] revokes only claims whose lease has already
+/// expired, deliberately, because revoking a live lease is precisely how a task
+/// gets run twice. So a resume INSIDE the lease window found nothing claimable
+/// and printed `run_complete … stopped_because=no claimable task remains` over
+/// an unfinished job, with exit 0 behind it.
+///
+/// This census is the missing half. It does not change what is claimable and
+/// takes no lease away from anyone; it reports the shape of what is left so the
+/// sentence, and the caller's `$?`, can tell "done" from "not mine yet".
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct IdleCensus {
+    /// Incomplete tasks held by a live claim — another worker's, or a dead
+    /// process's whose lease has not run out yet.
+    pub lease_held: usize,
+    /// Incomplete tasks parked for an operator decision (`--resolve`).
+    pub awaiting_resolution: usize,
+    /// Incomplete tasks whose dependencies are not all durably complete.
+    pub dependency_blocked: usize,
+    /// Earliest lease expiry among the `lease_held` tasks, so the sentence can
+    /// say WHEN the work becomes reclaimable instead of only that it is not.
+    pub earliest_lease_expiry_unix_ms: Option<u64>,
+}
+
+impl IdleCensus {
+    /// Walk the reduced Goal once, counting the incomplete tasks by why they
+    /// are not claimable. A task is counted at most once, in the order a worker
+    /// would meet the refusals: resolution first (it outranks everything), then
+    /// a live lease, then unmet dependencies.
+    #[must_use]
+    pub fn of(goal: &super::GoalState) -> Self {
+        let mut census = Self::default();
+        for task in goal.tasks.values() {
+            if task.completion.is_some() {
+                continue;
+            }
+            if task.requires_resolution() {
+                census.awaiting_resolution += 1;
+            } else if let Some(attempt) = task.live_attempt() {
+                census.lease_held += 1;
+                census.earliest_lease_expiry_unix_ms = Some(
+                    census
+                        .earliest_lease_expiry_unix_ms
+                        .map_or(attempt.lease_expires_unix_ms, |seen| {
+                            seen.min(attempt.lease_expires_unix_ms)
+                        }),
+                );
+            } else if !goal.dependencies_met(task) {
+                census.dependency_blocked += 1;
+            }
+        }
+        census
+    }
+
+    /// True when the Goal really has nothing left — the one reading the old
+    /// sentence was right about.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.lease_held == 0 && self.awaiting_resolution == 0 && self.dependency_blocked == 0
+    }
+
+    /// The `stopped_because` sentence for this census.
+    ///
+    /// The finished case is BYTE-IDENTICAL to the historical wording: operators
+    /// and tests read it, and it was never wrong for a Goal that was done.
+    #[must_use]
+    pub fn stopped_because(&self) -> String {
+        if self.is_finished() {
+            return "no claimable task remains".to_owned();
+        }
+        let mut parts = Vec::new();
+        if self.lease_held > 0 {
+            parts.push(match self.earliest_lease_expiry_unix_ms {
+                Some(expiry) => format!(
+                    "{} task(s) leased to another worker (earliest lease expires at \
+                     {expiry} unix-ms; re-run after that to reclaim)",
+                    self.lease_held
+                ),
+                None => format!("{} task(s) leased to another worker", self.lease_held),
+            });
+        }
+        if self.awaiting_resolution > 0 {
+            parts.push(format!(
+                "{} task(s) awaiting `goal exec-task --resolve produced|retry`",
+                self.awaiting_resolution
+            ));
+        }
+        if self.dependency_blocked > 0 {
+            parts.push(format!(
+                "{} task(s) blocked on unmet dependencies",
+                self.dependency_blocked
+            ));
+        }
+        format!(
+            "nothing is claimable YET and the goal is NOT finished: {}",
+            parts.join("; ")
+        )
     }
 }
 
@@ -469,7 +580,14 @@ impl GoalFleetDriver {
         let mut run = FleetRun::default();
         loop {
             if self.ledger.claimable(&self.goal)?.is_empty() {
-                run.stopped_because = "no claimable task remains".to_owned();
+                // #946 B-01: an empty claimable set is not the same fact as a
+                // finished Goal. Census the ledger and say which one this is.
+                let census = self
+                    .goal_state()?
+                    .as_ref()
+                    .map_or_else(IdleCensus::default, IdleCensus::of);
+                run.stopped_because = census.stopped_because();
+                run.idle = Some(census);
                 break;
             }
             if let Err(error) = self.kernel.start_iteration(&self.goal) {

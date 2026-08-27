@@ -33,8 +33,8 @@ pub mod wire;
 
 pub use control::{GoalParentEnvelope, handle_goal_control};
 pub use fleet::{
-    FleetRecovery, FleetRun, GoalFleetDriver, TaskAssignment, TaskExecution, TaskExecutor,
-    WaveOutcome,
+    FleetRecovery, FleetRun, GoalFleetDriver, IdleCensus, TaskAssignment, TaskExecution,
+    TaskExecutor, WaveOutcome,
 };
 pub use kernel::{GoalKernel, GoalRecovery};
 pub use ledger::{ClaimOutcome, GoalLedger, TaskAuthority};
