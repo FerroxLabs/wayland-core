@@ -80,6 +80,27 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // host reads, so the version moves once and all three capabilities name
 // themselves.
 //
+// 19 -> 20: `route_info_v1` (#372). A new always-on event carrying the route a
+// turn dispatched against — provider, model, the scrubbed endpoint, and a
+// derived local-vs-cloud flag. The reporter ran the same task against a local
+// Ollama server and a cloud OpenRouter gateway; both are driven as
+// `provider = "openai"`, so every route-bearing field already published read
+// identically for the two runs and the endpoint was absent from the protocol
+// entirely. A host cannot feature-detect a new event type by sending anything —
+// it either sees the frame or it does not — so the version is the only way a
+// pinned host learns the route is now answerable.
+//
+// 20 -> 21: `provider_retry_count_v1` (#372). `provider_attempt` gains
+// `attempt` and `provider_retry` gains `retry`, each the 1-based ordinal within
+// the turn. Two already-published shapes move, so the wire-shape gate refuses
+// the regeneration under a standing 1.20 and forces this bump — which is that
+// gate deciding the version question it exists to force. `major` holds at 1:
+// both events already published `additionalProperties: true`, so a host that
+// has never heard of the fields validates and renders exactly as before. The
+// ticket asks for a retry count by name, and counting frames cannot supply one:
+// these events are additive, so a host pinned below the minor that introduced
+// them drops them, and a host attaching mid-run never saw the earlier ones.
+//
 // ON THE GAP BETWEEN 16 AND 19. The last TAGGED contract is 1.16 — v0.13.5,
 // v0.13.6 and `main` all publish it. 17 and 18 were assembled on this branch
 // and never reached a tag, so no host has ever pinned them. The entries above
@@ -87,12 +108,13 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // gap: each records why a specific widening needed a signal, and rewriting them
 // to look consecutive would destroy that reasoning to tidy a sequence no host
 // reads. A pinned host moves 1.16 -> 1.19 and finds every capability named.
-// 19 -> 20: wayland#896 quiesced snapshot lease. Three commands and five
-// events are added and nothing existing changes shape, so this is a MINOR
-// move: a host pinned to 1.19 keeps working, and the bump is the only way it
-// can learn the capability exists to ask for.
-pub const CONTRACT_MINOR: u64 = 20;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/20";
+// 19 -> 21: wayland#896's quiesced snapshot lease (three commands, five
+// events) and wayland#372's dispatched-route receipt (one event). Both are
+// additive and nothing existing changes shape, so this whole integration is a
+// single MINOR move: a host pinned to 1.19 keeps working, and the bump is the
+// only way it can learn the new capabilities exist to ask for.
+pub const CONTRACT_MINOR: u64 = 21;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/21";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases

@@ -345,9 +345,9 @@ fn every_command_fixture_round_trips_to_the_variant_it_names() {
 // widening of the producer surface to be a decision someone typed, next to the
 // CONTRACT_MINOR bump it requires, rather than a number that drifts.
 #[test]
-fn inventory_is_exactly_twenty_nine_commands_and_sixty_six_events() {
+fn inventory_is_exactly_twenty_nine_commands_and_sixty_seven_events() {
     assert_eq!(COMMAND_SPECS.len(), 29);
-    assert_eq!(EVENT_SPECS.len(), 66);
+    assert_eq!(EVENT_SPECS.len(), 67);
     assert_eq!(
         COMMAND_SPECS
             .iter()
@@ -362,7 +362,7 @@ fn inventory_is_exactly_twenty_nine_commands_and_sixty_six_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        66
+        67
     );
 }
 
@@ -447,13 +447,13 @@ fn manifest_pins_generator_and_all_three_digests() {
     }
     assert_eq!(manifest["contract"]["major"], CONTRACT_MAJOR);
     assert_eq!(manifest["contract"]["minor"], CONTRACT_MINOR);
-    // 26 -> 29 / 61 -> 66: wayland#896's three quiescence commands and five
-    // receipts. Additive; see the CONTRACT_MINOR 1.19 -> 1.20 note in
-    // `generate.rs`.
+    // 26 -> 29 / 61 -> 67: wayland#896's three quiescence commands and five
+    // receipts, plus wayland#372's dispatched-route event. Additive; see the
+    // CONTRACT_MINOR 1.19 -> 1.21 note in `generate.rs`.
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 29);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 66);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 67);
     assert_eq!(manifest["counts"]["commands"], 29);
-    assert_eq!(manifest["counts"]["events"], 66);
+    assert_eq!(manifest["counts"]["events"], 67);
     assert_eq!(manifest["counts"]["child_types"], 3);
     assert_eq!(
         manifest["child_types"],
@@ -543,8 +543,8 @@ fn manifest_publishes_a_wire_shape_for_every_command_and_event() {
     );
     assert_eq!(
         shapes.len(),
-        29 + 66 + 1,
-        "29 commands, 66 events, and the legacy sub-agent compatibility branch"
+        29 + 67 + 1,
+        "29 commands, 67 events, and the legacy sub-agent compatibility branch"
     );
     // The correlation anchors every later tool frame is matched against. A
     // rename here is the exact break regeneration used to bless.

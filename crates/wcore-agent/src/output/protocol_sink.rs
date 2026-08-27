@@ -1245,21 +1245,29 @@ impl OutputSink for ProtocolSink {
             .emit(&ProtocolEvent::ProviderFailoverReceipt { receipt });
     }
 
-    fn emit_provider_attempt(&self, failure: Option<&str>) {
+    fn emit_provider_attempt(&self, failure: Option<&str>, attempt: u32) {
         let _ = self.writer.emit(&ProtocolEvent::ProviderAttempt {
             failure: failure.map(String::from),
+            attempt,
         });
     }
 
-    fn emit_provider_retry(&self, failure: Option<&str>) {
+    fn emit_provider_retry(&self, failure: Option<&str>, retry: u32) {
         let _ = self.writer.emit(&ProtocolEvent::ProviderRetry {
             failure: failure.map(String::from),
+            retry,
         });
     }
 
     fn emit_provider_failure(&self, failure: &str) {
         let _ = self.writer.emit(&ProtocolEvent::ProviderFailure {
             failure: failure.to_string(),
+        });
+    }
+
+    fn emit_route_info(&self, route: &wcore_protocol::events::RouteInfo) {
+        let _ = self.writer.emit(&ProtocolEvent::RouteInfo {
+            route: route.clone(),
         });
     }
 

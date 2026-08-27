@@ -248,14 +248,26 @@ pub trait OutputSink: Send + Sync {
 
     /// Emit one physical provider attempt with its typed outcome. Default
     /// no-op for non-protocol sinks; JSON-stream output is always-on evidence.
-    fn emit_provider_attempt(&self, _failure: Option<&str>) {}
+    /// `attempt` is the 1-based ordinal of this send within the current turn
+    /// (#372).
+    fn emit_provider_attempt(&self, _failure: Option<&str>, _attempt: u32) {}
 
     /// Emit an actual Core retry decision, separately from the physical send.
-    fn emit_provider_retry(&self, _failure: Option<&str>) {}
+    /// `retry` is the 1-based ordinal of this retry within the current turn
+    /// (#372) — the retry count the ticket asks to be shown separately from
+    /// the run timer.
+    fn emit_provider_retry(&self, _failure: Option<&str>, _retry: u32) {}
 
     /// Emit a typed provider failure without claiming another physical send or
     /// retry decision.
     fn emit_provider_failure(&self, _failure: &str) {}
+
+    /// #372: emit the route this turn dispatched against — provider, model,
+    /// the scrubbed endpoint and a derived local-vs-cloud flag. Default no-op
+    /// for non-protocol sinks; the JSON-stream sink emits it always-on so a
+    /// host can tell a local model server from a cloud one, which the provider
+    /// name alone cannot express.
+    fn emit_route_info(&self, _route: &wcore_protocol::events::RouteInfo) {}
 
     /// F10: emit a typed monitor control-flow decision. Default no-op for
     /// non-protocol sinks; JSON and test sinks preserve the stable reason.
