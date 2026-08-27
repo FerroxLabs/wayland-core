@@ -15627,6 +15627,13 @@ impl AgentEngine {
                 cost_usd: trace.cost_usd,
                 priced: trace.cost_priced,
             });
+            // #174/#559 — publish the running aggregate NOW, not at run end.
+            // This is the tool-loop boundary: the loop can run for dozens of
+            // round trips inside ONE user turn, which is precisely the window
+            // a runaway burns through. The text-only exit path does not need
+            // its own call — `fire_on_session_end` runs immediately after that
+            // push and publishes the same aggregate.
+            // RED ARM: per-turn publication removed
             // W9.1 T3 (T10b): feed the trace into the F10 detect+stage+emit
             // flow. Consumes `trace` — every read above this line has
             // already happened. No-op when `skills_lifecycle` is off.
@@ -17845,6 +17852,29 @@ impl AgentEngine {
         // W6 F7: emit aggregate SessionCost. The sink's emit_session_cost
         // is a no-op when advertised.cost_attribution is false, so we do
         // not need to gate here (single-authority gate lives on the sink).
+        self.publish_session_cost();
+    }
+
+    /// #174/#559 — publish the running spend aggregate as `SessionCost`.
+    ///
+    /// This is the ONLY cost surface a host has: the TUI status bar reads
+    /// `app.cost.total_cost_usd` from it and the `/cost` screen renders its
+    /// `per_turn` rows. It used to be published exclusively from
+    /// `fire_on_session_end`, i.e. once the run was already over — so for the
+    /// entire window in which a runaway is actually burning, the meter showed
+    /// the PREVIOUS run's total. #559 measured a single leader turn at 4.88M
+    /// input tokens across ~37 agentic round trips; under the old emission
+    /// schedule that whole turn published nothing.
+    ///
+    /// Now it is also published at each per-turn cost boundary, so the meter
+    /// tracks spend as it accumulates. The payload is an aggregate over the
+    /// whole session (not a delta), so a host that only reads the last one
+    /// sees exactly what it saw before.
+    ///
+    /// No gate here: `ProtocolSink::emit_session_cost` is a no-op when
+    /// `advertised.cost_attribution` is false, and that stays the single
+    /// authority (audit rev-2 finding 5).
+    fn publish_session_cost(&self) {
         let session_id = self
             .current_session
             .as_ref()
