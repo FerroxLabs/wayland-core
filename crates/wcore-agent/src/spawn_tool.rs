@@ -823,7 +823,21 @@ mod spawn_output_budget_tests {
     //! output budget on reasoning, so the turn ended `finish_reason=length`
     //! with no answer text and no tool call. Measured live, the identical task
     //! run WITHOUT a fork completed 20/20 while `flux-auto` forks failed 3/8.
-    use super::{DEFAULT_SUB_AGENT_MAX_TOKENS, SubAgentConfig, floor_task_caps_at_parent};
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use serde_json::json;
+    use tokio::sync::mpsc;
+    use wcore_config::config::{Config, SessionConfig};
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::Tool;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    use super::{
+        DEFAULT_SUB_AGENT_MAX_TOKENS, SpawnTool, SubAgentConfig, floor_task_caps_at_parent,
+    };
+    use crate::spawner::{AgentSpawner, bind_test_durable_session};
 
     /// The reasoning-aware ceiling an unknown/router-aliased model is allowed
     /// to grow to (`wcore_agent::engine::UNKNOWN_REASONING_CAP`). Duplicated as
@@ -871,5 +885,85 @@ mod spawn_output_budget_tests {
         let mut tasks = vec![task(128_000)];
         floor_task_caps_at_parent(&mut tasks, 64_000);
         assert_eq!(tasks[0].max_tokens, 128_000);
+    }
+    /// Assertion 3 — grade the WIRING, not just the helper. The two assertions
+    /// above call `floor_task_caps_at_parent` directly, so they still pass if
+    /// the ARGUMENT at the call site is changed (e.g. back to
+    /// `DEFAULT_SUB_AGENT_MAX_TOKENS`) — a one-token edit that fully restores
+    /// the defect. This drives `SpawnTool::execute` end to end against a
+    /// recording provider and grades the cap the child engine actually put on
+    /// its request.
+    #[tokio::test]
+    async fn spawn_child_request_carries_a_cap_above_the_sub_agent_default() {
+        /// `size_output_cap`'s conservative ceiling for a model unknown to the
+        /// limits registry — `flux-auto` is a router alias, so it is unknown.
+        /// Duplicated as a literal for the same reason as
+        /// `UNKNOWN_REASONING_CAP` above: drift on either side must fail.
+        const UNKNOWN_CAP: u32 = 8_192;
+
+        struct RecordingProvider(Arc<Mutex<Vec<u32>>>);
+
+        #[async_trait]
+        impl LlmProvider for RecordingProvider {
+            async fn stream(
+                &self,
+                request: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.0.lock().unwrap().push(request.max_tokens);
+                let (tx, rx) = mpsc::channel(2);
+                tokio::spawn(async move {
+                    let _ = tx.send(LlmEvent::TextDelta("ok".to_string())).await;
+                    let _ = tx
+                        .send(LlmEvent::Done {
+                            stop_reason: StopReason::EndTurn,
+                            finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                            usage: TokenUsage::default(),
+                        })
+                        .await;
+                });
+                Ok(rx)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        // The incident's shape: a router alias unknown to the limits registry,
+        // on a session carrying its own 64000 configured cap.
+        let config = Config {
+            model: "flux-auto".into(),
+            provider_label: "flux-router".into(),
+            max_tokens: 64_000,
+            session: SessionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let spawner = Arc::new(
+            AgentSpawner::new(Arc::new(RecordingProvider(Arc::clone(&recorded))), config)
+                .with_parent_workspace(dir.path())
+                .unwrap(),
+        );
+        bind_test_durable_session(&spawner, dir.path(), "f1860022");
+
+        let out = SpawnTool::new(spawner)
+            .execute(json!({
+                "tasks": [{ "name": "audit", "prompt": "inspect the workspace" }]
+            }))
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+
+        let caps = recorded.lock().unwrap();
+        assert_eq!(caps.len(), 1, "expected exactly one child request");
+        assert!(
+            caps[0] > DEFAULT_SUB_AGENT_MAX_TOKENS,
+            "the child reached the wire on the raw sub-agent default ({}) — \
+             the parent-cap floor is not reaching the dispatch path",
+            caps[0]
+        );
+        assert_eq!(
+            caps[0], UNKNOWN_CAP,
+            "a floored child must size to the unknown-model ceiling, not below it"
+        );
     }
 }
