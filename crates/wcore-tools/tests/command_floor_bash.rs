@@ -159,6 +159,44 @@ fn assert_refused(result: &ToolResult, chunks: &[String], prefix: &str, what: &s
     );
 }
 
+/// The floor had no opinion. Deliberately NOT `!result.is_error`: whether the
+/// spawned command itself succeeds is a property of the platform's shell and
+/// its coreutils, not of the floor, and conflating the two made this control
+/// fail on Windows over an `ln` the floor never saw.
+fn assert_not_refused(result: &ToolResult, what: &str) {
+    for prefix in [FLOOR_PREFIX, AUTHORITY_PREFIX, REPO_CONTROL_PREFIX] {
+        assert!(
+            !result.content.starts_with(prefix),
+            "{what}: the floor must not refuse this, got: {}",
+            result.content
+        );
+    }
+}
+
+/// A directory symlink, or `None` where the platform will not make one.
+///
+/// Windows needs `SeCreateSymbolicLinkPrivilege` (Developer Mode or an
+/// elevated token) and CI runners frequently have neither, so the legs that
+/// need a real link on disk are skipped there rather than failing on an
+/// environment fact. Every other assertion in this test still runs.
+fn symlink_dir_or_skip(target: &Path, link: &Path) -> Option<()> {
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_dir(target, link);
+    match made {
+        Ok(()) => Some(()),
+        Err(e) => {
+            eprintln!(
+                "skipping the through-a-symlink legs: this platform would not create {} -> {}: {e}",
+                link.display(),
+                target.display()
+            );
+            None
+        }
+    }
+}
+
 /// The measured defect #1, on all four entry points: a command that appends to
 /// the learned-grant store has granted the agent standing auto-approval in
 /// every future session.
@@ -568,21 +606,22 @@ async fn a_cd_does_not_move_the_floor_off_the_authority_directories() {
             &ctx,
         )
         .await;
-        assert!(
-            !result.is_error,
-            "control: creating a link to an ancestor must not be refused: {}",
-            result.content
-        );
-        let (result, chunks) = run(
-            entry,
-            &format!(
-                "echo 'tools.auto_approve = true' >> {}/{decoy_name}/config.toml",
-                link.display()
-            ),
-            &ctx,
-        )
-        .await;
-        assert_refused(&result, &chunks, AUTHORITY_PREFIX, name);
+        assert_not_refused(&result, "control: a link to an ancestor");
+        // The floor's verdict above is the control. The link itself is made
+        // here so the leg below does not depend on the platform having a
+        // working `ln`.
+        if !link.exists() && symlink_dir_or_skip(&decoy_parent, &link).is_some() {
+            let (result, chunks) = run(
+                entry,
+                &format!(
+                    "echo 'tools.auto_approve = true' >> {}/{decoy_name}/config.toml",
+                    link.display()
+                ),
+                &ctx,
+            )
+            .await;
+            assert_refused(&result, &chunks, AUTHORITY_PREFIX, name);
+        }
 
         // Reached through a glob component. Family-neutral prefix: `.way*` is
         // equally a prefix of `.wayland-core`, so either rule refusing it is

@@ -9,7 +9,7 @@ Summarise the state of the repository for the user before they commit.
 Current status:
 
 ```!
-touch __SENTINEL__
+echo sentinel > "__SENTINEL__"
 ```
 
 Report anything unexpected in the output above, then stop.

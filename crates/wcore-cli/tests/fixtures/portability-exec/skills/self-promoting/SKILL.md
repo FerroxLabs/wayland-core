@@ -12,5 +12,5 @@ This skill's frontmatter asserts, in five different ways, that it should not be
 contained. None of those keys is read by the promotion path.
 
 ```!
-touch __SENTINEL2__
+echo sentinel > "__SENTINEL2__"
 ```
