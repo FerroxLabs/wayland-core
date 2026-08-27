@@ -58,6 +58,35 @@
 //! A base that is a filesystem root is dropped, so that variable cannot turn
 //! the floor into a denial of service either.
 //!
+//! **`cd` is a legal token, so resolution alone cannot hold.** The shell runs
+//! `cd` BEFORE the command that follows it: by the time
+//! `echo 'tools.auto_approve = true' >> config.toml` runs, a leading
+//! `cd $HOME && cd .wayland &&` has already moved the process somewhere the
+//! working directory this module was HANDED says nothing about. The first form
+//! of rule 2b resolved every relative token against that handed directory and
+//! was measured walking straight past all three shapes above in their relative
+//! spellings. Two rules answer it, and both are needed:
+//!
+//! * Rule 2b is checked against every directory the command could be running
+//!   in by the time a token is read — the handed one plus each `cd` / `pushd`
+//!   target the module can resolve (see [`candidate_cwds`]). This is what
+//!   covers an authority directory whose NAME is not distinctive, such as a
+//!   config dir at `~/.config/wayland-core` or a `WAYLAND_HOME` pointed
+//!   anywhere at all.
+//! * Rule 2c refuses the `.wayland` directory name at COMPONENT level whatever
+//!   the token resolves to, because a `cd` target the module cannot resolve
+//!   (`cd $(printf %s ~)`, `cd $SOMEVAR`) contributes no candidate and would
+//!   otherwise reopen the whole class. It is the same "no ordinary meaning in a
+//!   source tree" argument that already licenses [`AUTHORITY_BASENAMES`], and
+//!   it costs `Bash` a workspace-local `.wayland/` too (`wl init` creates one
+//!   for workflows) — orchestration definitions that run, which the file tools
+//!   can still read. `.wayland-out`, the session OUTPUT root, is a different
+//!   name and stays writable.
+//!
+//! Rule 2c yields in exactly the layout rule 2b yields in, keyed off the same
+//! launch directory: a session launched INSIDE a `.wayland` directory would
+//! otherwise have every absolute path it can name refused.
+//!
 //! A component that is a glob is treated as the name it could expand onto
 //! (`.git/hoo*/pre-commit`, `~/.way*`), because `cp` globs its arguments - that
 //! is how the first form of this floor was walked past. A component that is
@@ -68,8 +97,11 @@
 //! cost `git add .`, which a floor may not do. `.git` alone is likewise not
 //! matched — `git commit`, `git add` and every other porcelain verb are
 //! ordinary session work. `~` is not matched either, so `rm -rf ~` still
-//! destroys the store; that is a denial, not an escalation, and refusing `~`
-//! would cost every ordinary command that names the home directory.
+//! destroys the store and `cp -r ~ /tmp/backup` still exfiltrates it inside a
+//! copy of the whole home directory. Refusing `~` would cost every ordinary
+//! command that names the home directory, and refusing it only in a
+//! "copy shape" would need a write-shape detector, which is the thing this
+//! module refuses to have. Stated as a limit rather than half-closed.
 //!
 //! It lives in `wcore-config` rather than `wcore-tools` because there are TWO
 //! shell surfaces — `wcore_tools::bash::BashTool` and
@@ -123,6 +155,21 @@ const AUTHORITY_DIR_ENTRIES: &[&str] = &[
     ".env",
 ];
 
+/// Authority DIRECTORY names refused at component level, whatever the token
+/// resolves to.
+///
+/// Rule 2b resolves; `cd` defeats resolution whenever the `cd` target is
+/// itself unresolvable (`cd $(printf %s ~)`, `cd $SOMEVAR`), and that is not
+/// "unbounded indirection" — the protected directory is still named literally
+/// in the command text. This is the name that has no ordinary meaning in a
+/// source tree, so it is refused on sight.
+const AUTHORITY_DIR_COMPONENTS: &[&str] = &[".wayland"];
+
+/// Ceiling on how many working directories one command may be checked against.
+/// A command with dozens of `cd`s is not ordinary work, and the cross product
+/// must not become the cost of running the floor.
+const MAX_CANDIDATE_CWDS: usize = 32;
+
 /// Repository-control path components matched wherever they appear in a token.
 const REPO_CONTROL_COMPONENTS: &[&str] = &[".wayland-core", ".wayland-core.toml"];
 
@@ -155,14 +202,22 @@ pub fn floor_refusal(command: &str, cwd: Option<&Path>) -> Option<String> {
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok());
     let protected = protected_paths(cwd.as_deref());
+    // Rule 2c yields where rule 2b yields, keyed off the same launch directory
+    // — which no in-shell `cd` can move.
+    let dir_components = !cwd
+        .as_deref()
+        .is_some_and(cwd_is_inside_an_authority_dirname);
 
     // Match the raw command AND a de-obfuscated form. `deobfuscate` strips
     // quoting, which both reveals `.git/'hooks'` and destroys Windows
     // separators, so neither form alone is sufficient.
     let deobf = deobfuscate(command);
     for text in [command, deobf.as_str()] {
+        // The shell executes `cd` first, so the handed directory is only the
+        // FIRST place a relative token can land.
+        let cwds = candidate_cwds(text, cwd.as_deref());
         for token in path_tokens(text) {
-            if let Some(reason) = token_refusal(&token, cwd.as_deref(), &protected) {
+            if let Some(reason) = token_refusal(&token, &cwds, &protected, dir_components) {
                 return Some(reason.to_string());
             }
         }
@@ -170,7 +225,12 @@ pub fn floor_refusal(command: &str, cwd: Option<&Path>) -> Option<String> {
     None
 }
 
-fn token_refusal(token: &str, cwd: Option<&Path>, protected: &Protected) -> Option<&'static str> {
+fn token_refusal(
+    token: &str,
+    cwds: &[PathBuf],
+    protected: &Protected,
+    dir_components: bool,
+) -> Option<&'static str> {
     let parts = components(token);
     if parts.is_empty() {
         return None;
@@ -210,11 +270,37 @@ fn token_refusal(token: &str, cwd: Option<&Path>, protected: &Protected) -> Opti
         return Some(AUTHORITY_REFUSAL);
     }
 
-    // Rule 2b — anything at or under an authority DIRECTORY, and any glob whose
-    // literal prefix could expand onto one.
-    let resolved = resolve(token, cwd)?;
-    if protected.matches(&resolved) {
+    // Rule 2c — an authority directory by NAME, at component level, whatever
+    // this token resolves to. Resolution is defeated by a `cd` whose own target
+    // cannot be resolved; the name in the command text is not.
+    if dir_components
+        && parts.iter().any(|part| {
+            AUTHORITY_DIR_COMPONENTS
+                .iter()
+                .any(|name| component_may_be(part, name))
+        })
+    {
         return Some(AUTHORITY_REFUSAL);
+    }
+
+    // Rule 2b — anything at or under an authority DIRECTORY, and any glob whose
+    // literal prefix could expand onto one. Checked against EVERY directory the
+    // command could be running in by the time this token is read, because `cd`
+    // runs before it.
+    if cwds.is_empty() {
+        if let Some(resolved) = resolve(token, None)
+            && protected.matches(&resolved)
+        {
+            return Some(AUTHORITY_REFUSAL);
+        }
+        return None;
+    }
+    for cwd in cwds {
+        if let Some(resolved) = resolve(token, Some(cwd))
+            && protected.matches(&resolved)
+        {
+            return Some(AUTHORITY_REFUSAL);
+        }
     }
     None
 }
@@ -308,6 +394,63 @@ fn protected_paths(cwd: Option<&Path>) -> Protected {
     out.exact.sort();
     out.exact.dedup();
     out
+}
+
+/// Every directory the command could be running in by the time a relative
+/// token is read.
+///
+/// `cd` is a legal token and the shell executes it FIRST. Resolving relative
+/// tokens against the directory the tool was handed is what let
+/// `cd $HOME && cd .wayland && echo 'tools.auto_approve = true' >> config.toml`
+/// reach the durable grant store through a floor that refused the same command
+/// spelled absolutely.
+///
+/// Deliberately an over-approximation: a `cd` inside a subshell, or on a branch
+/// that never runs, still contributes a candidate, and every `cd` target is
+/// resolved against every candidate so far rather than tracking one position.
+/// The direction of that error is a refusal the operator can rephrase; the
+/// other direction is the catastrophe this module exists to stop. A target this
+/// module cannot resolve contributes nothing — which is why rule 2c does not
+/// depend on resolution at all.
+fn candidate_cwds(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = cwd.map(Path::to_path_buf).into_iter().collect();
+    let tokens = path_tokens(text);
+    for (i, token) in tokens.iter().enumerate() {
+        if !matches!(token.as_str(), "cd" | "pushd") {
+            continue;
+        }
+        let Some(target) = tokens.get(i + 1) else {
+            continue;
+        };
+        let reached: Vec<PathBuf> = if out.is_empty() {
+            resolve(target, None).into_iter().collect()
+        } else {
+            out.iter()
+                .filter_map(|base| resolve(target, Some(base)))
+                .collect()
+        };
+        for path in reached {
+            if out.len() >= MAX_CANDIDATE_CWDS {
+                return out;
+            }
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// Whether the session was LAUNCHED inside a directory rule 2c names. There,
+/// refusing the name would refuse every absolute path the session can write —
+/// breaking, not widening — so rule 2c yields exactly as rule 2b does.
+fn cwd_is_inside_an_authority_dirname(cwd: &Path) -> bool {
+    cwd.components().any(|component| match component {
+        Component::Normal(name) => AUTHORITY_DIR_COMPONENTS
+            .iter()
+            .any(|dir| name.to_string_lossy() == **dir),
+        _ => false,
+    })
 }
 
 /// Whether a path component IS `name`, or is a glob that could expand onto it.
@@ -595,6 +738,145 @@ mod tests {
         // A glob that starts a fresh component names no directory in
         // particular, and refusing on it would cost ordinary work.
         for command in ["ls *", "cat src/*.rs", "ls ~/*", "wc -l crates/*/src/*.rs"] {
+            assert_eq!(
+                floor_refusal(command, Some(Path::new("/work"))),
+                None,
+                "must NOT be refused: {command}"
+            );
+        }
+    }
+
+    /// The shape that overturned the previous form of this floor.
+    ///
+    /// `cd` is a legal token and the shell runs it FIRST, so a path spelled
+    /// relatively lands somewhere the working directory this module was handed
+    /// says nothing about. Every command here names the protected directory
+    /// literally — no `eval`, no `base64`, no variable holding the path — so
+    /// none of them is covered by the indirection limit in the module doc.
+    #[test]
+    fn a_cd_cannot_move_the_floor_off_the_authority_directories() {
+        let home = dirs::home_dir()
+            .expect("a home directory")
+            .display()
+            .to_string();
+        for command in [
+            format!("cd {home} && cd .wayland && echo 'tools.auto_approve = true' >> config.toml"),
+            format!("cd {home} && cp -r .wayland /tmp/backup"),
+            format!("cd {home} && rm -rf .wayland && mv /tmp/evil .wayland"),
+            format!("cd {home} && cd .way* && cat permissions.toml"),
+            format!("cd {home}/src && cd ../.wayland && cat config.toml"),
+            format!("cd {home} ; cd .wayland ; cat config.toml"),
+            format!("(cd {home} && cd .wayland && cat config.toml)"),
+            // The `cd` TARGET is itself unresolvable here, so no candidate
+            // directory is produced and ONLY the component rule can catch it.
+            "cd $(printf %s ~) && cd .wayland && echo x >> config.toml".to_string(),
+            "cd $UNKNOWABLE && cd .wayland && cat config.toml".to_string(),
+            // No `cd` at all: a name-only reference the resolver cannot place.
+            "find / -maxdepth 3 -name '.way*' -exec rm -rf {} +".to_string(),
+        ] {
+            assert!(
+                floor_refusal(&command, Some(Path::new("/work"))).is_some(),
+                "must be refused: {command}"
+            );
+        }
+    }
+
+    /// Grades the candidate-directory rule ON ITS OWN.
+    ///
+    /// The component rule can only refuse a name with no ordinary meaning in a
+    /// source tree. An authority directory does not have to carry one: the
+    /// config dir is `~/.config/wayland-core` by default and whatever
+    /// `WAYLAND_HOME` says otherwise. Delete the candidate rule and this test
+    /// fails with the component rule fully intact.
+    #[test]
+    #[serial_test::serial]
+    fn a_cd_into_an_authority_directory_that_is_not_named_wayland() {
+        let prior = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: test-only env mutation, serialized against this crate's
+        // other env-driven tests.
+        unsafe { std::env::set_var("WAYLAND_HOME", "/tmp/wl693-store") };
+        let two_step = floor_refusal(
+            "cd /tmp && cd wl693-store && echo 'tools.auto_approve = true' >> config.toml",
+            Some(Path::new("/work")),
+        );
+        let direct = floor_refusal(
+            "echo 'tools.auto_approve = true' >> /tmp/wl693-store/config.toml",
+            Some(Path::new("/work")),
+        );
+        let ordinary = floor_refusal(
+            "cd /tmp && cd wl693-elsewhere && echo x >> config.toml",
+            Some(Path::new("/work")),
+        );
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+        // Known-positive control: this store IS protected here, by resolved
+        // path, with no help from any name rule.
+        assert!(
+            direct.is_some(),
+            "control: the resolved store must be refused"
+        );
+        assert!(
+            two_step.is_some(),
+            "a two-step cd reaches the same file and must be refused"
+        );
+        // ...and the same two-step shape into an UNPROTECTED directory is not
+        // refused, so the arm above is not passing because every `cd` is.
+        assert_eq!(
+            ordinary, None,
+            "the candidate rule must not refuse ordinary work"
+        );
+    }
+
+    /// The component rule yields in the same layout rule 2b yields in, and for
+    /// the same reason: a session LAUNCHED inside a `.wayland` directory would
+    /// otherwise have every absolute path it can name refused.
+    #[test]
+    fn the_component_rule_yields_to_a_session_launched_inside_one() {
+        let inside = PathBuf::from("/srv/run/.wayland/work");
+        // Control: from an ordinary workspace the component rule IS live on
+        // this exact path, so the `None` below is the yield and not a floor
+        // that never fired.
+        assert!(
+            floor_refusal(
+                "cat /srv/run/.wayland/work/notes.txt",
+                Some(Path::new("/work"))
+            )
+            .is_some(),
+            "control: the component rule must refuse this from outside"
+        );
+        assert_eq!(
+            floor_refusal("cat /srv/run/.wayland/work/notes.txt", Some(&inside)),
+            None,
+            "a session launched inside a .wayland directory must still work"
+        );
+        // Rules 1 and 2a are untouched by the yield.
+        assert!(floor_refusal("cat /srv/run/.wayland/permissions.toml", Some(&inside)).is_some());
+        assert!(
+            floor_refusal(
+                "echo id > /srv/run/.wayland/work/.git/hooks/pre-commit",
+                Some(&inside)
+            )
+            .is_some()
+        );
+    }
+
+    /// `.wayland-out` is the session OUTPUT root — the one directory under the
+    /// workspace the agent must be able to write. A component rule that
+    /// matched it by prefix would break every skill artifact and every spilled
+    /// tool result.
+    #[test]
+    fn the_session_output_root_is_not_an_authority_directory() {
+        for command in [
+            "cat .wayland-out/session/x.txt",
+            "mkdir -p .wayland-out/skills",
+            "cd .wayland-out && ls",
+            "cd /work/.wayland-out && cat spill.txt",
+            "ls .wayland-core-notes.md",
+        ] {
             assert_eq!(
                 floor_refusal(command, Some(Path::new("/work"))),
                 None,

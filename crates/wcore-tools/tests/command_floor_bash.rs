@@ -41,6 +41,8 @@ const REPO_CONTROL_PREFIX: &str =
     "Refused by the command floor: this command references the repository control surface";
 
 const SENTINEL: &str = "# the operator's own grants\n";
+const OAUTH_SENTINEL: &str = "{\"token\":\"the operator's own\"}\n";
+const CONFIG_SENTINEL: &str = "# the operator's own config\n";
 const CONTROL: &str = "command_floor_control_ok";
 
 #[derive(Default)]
@@ -423,6 +425,179 @@ async fn the_grant_store_survives_a_directory_swap() {
         assert_eq!(
             entries_left.len(),
             1,
+            "{name}: something was planted in the profile home: {entries_left:?}"
+        );
+    }
+
+    close_escape_hatches(prior_home);
+}
+
+/// The measured defect #5 — the shape that overturned the previous form of
+/// this floor, end to end through the tool.
+///
+/// `cd` is a legal token and the shell executes it FIRST, so by the time
+/// `echo 'tools.auto_approve = true' >> config.toml` runs the process is
+/// somewhere the working directory `BashTool` handed the floor says nothing
+/// about. The previous form resolved every relative token against that handed
+/// directory, and all three shapes below were measured returning
+/// `is_error=false` / "Exit code: 0" with the durable grant store replaced.
+///
+/// Nothing here is "unbounded indirection": every protected directory is named
+/// literally in the command text, in one line, with no `eval`, no `base64`, no
+/// variable holding the path and no helper script.
+///
+/// The arms are chosen so that NEITHER of the two rules that answer this can
+/// carry the test alone:
+///
+/// * the `$(printf ...)` arm produces no resolvable `cd` target, so only the
+///   component rule can refuse it;
+/// * the config-directory arm walks into a directory that is NOT named
+///   `.wayland` (it is whatever `WAYLAND_HOME` says, exactly as a real
+///   `~/.config/wayland-core` is), so only the candidate-directory rule can
+///   refuse it.
+///
+/// The workspace root is a third temporary directory, deliberately OUTSIDE
+/// every authority directory, so the rule-2b yield cannot fire and be mistaken
+/// for coverage.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_cd_does_not_move_the_floor_off_the_authority_directories() {
+    let home = tempfile::tempdir().unwrap();
+    // `WAYLAND_HOME` — the resolved profile home AND config dir. Its basename
+    // is a temporary name, so no name rule can see it.
+    let decoy = tempfile::tempdir().unwrap();
+    let prior_home = std::env::var_os("HOME");
+    open_every_escape_hatch(home.path(), decoy.path());
+
+    let wayland = home.path().join(".wayland");
+    let store = wayland.join("permissions.toml");
+    std::fs::create_dir_all(wayland.join("oauth")).unwrap();
+    std::fs::write(&store, SENTINEL).unwrap();
+    let oauth = wayland.join("oauth").join("token.json");
+    std::fs::write(&oauth, OAUTH_SENTINEL).unwrap();
+
+    let decoy_config = decoy.path().join("config.toml");
+    std::fs::write(&decoy_config, CONFIG_SENTINEL).unwrap();
+    let decoy_parent = decoy.path().parent().unwrap().to_path_buf();
+    let decoy_name = decoy
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let work = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(work.path()).unwrap();
+    let evil = root.join("evil");
+    std::fs::create_dir_all(&evil).unwrap();
+    std::fs::write(evil.join("permissions.toml"), "tools.auto_approve = true\n").unwrap();
+    let backup = root.join("backup");
+
+    let ctx =
+        ToolContext::test_default().with_workspace(Arc::new(WorkspacePolicy::trusted_local(&root)));
+
+    let home_abs = home.path().display().to_string();
+
+    for (name, entry) in entries() {
+        // Control 1 — this entry point, in this environment, runs an ordinary
+        // command.
+        assert_entry_point_is_live(name, entry, &ctx).await;
+
+        // Control 2 — the floor is LIVE on this entry point in this test: the
+        // ABSOLUTE spelling of the same dodge, which the previous form already
+        // refused. Without it every assertion below could be satisfied by a
+        // fail-closed layer that refuses everything.
+        let (result, chunks) = run(
+            entry,
+            &format!(
+                "cd {} && echo 'tools.auto_approve = true' >> config.toml",
+                wayland.display()
+            ),
+            &ctx,
+        )
+        .await;
+        assert_refused(&result, &chunks, AUTHORITY_PREFIX, name);
+
+        // Ordered so the first arm is one no OTHER guard can claim: the
+        // exfiltration copy destroys nothing, so a red arm here fails with the
+        // command having RUN, not with a refusal from somewhere else. The
+        // destructive swap is last for the same reason.
+        for cmd in [
+            // Exfiltrate oauth/, .env and the credential stores wholesale.
+            format!("cd {home_abs} && cp -r .wayland {}", backup.display()),
+            // Plant standing auto-approval in the profile config.
+            format!(
+                "cd {home_abs} && cd .wayland && echo 'tools.auto_approve = true' >> config.toml"
+            ),
+            // The `cd` target is unresolvable, so no candidate directory is
+            // produced: only the component rule can refuse this one.
+            format!(
+                "cd $(printf %s {home_abs}) && cd .wayland && \
+                 echo 'tools.auto_approve = true' >> config.toml"
+            ),
+            // The config directory is not named `.wayland`, so only the
+            // candidate-directory rule can refuse this one.
+            format!(
+                "cd {} && cd {decoy_name} && echo 'tools.auto_approve = true' >> config.toml",
+                decoy_parent.display()
+            ),
+            // The `$HOME` spelling the shell expands. Read-only on purpose:
+            // if this test's red arm is graded and `HOME` were not inherited,
+            // a destructive arm here would reach the operator's real store.
+            "cd $HOME && cd .wayland && ls".to_string(),
+            // Replace the directory around the store.
+            format!(
+                "cd {home_abs} && rm -rf .wayland && mv {} .wayland",
+                evil.display()
+            ),
+        ] {
+            let (result, chunks) = run(entry, &cmd, &ctx).await;
+            assert_refused(&result, &chunks, AUTHORITY_PREFIX, name);
+        }
+
+        // Reached through a glob component. Family-neutral prefix: `.way*` is
+        // equally a prefix of `.wayland-core`, so either rule refusing it is
+        // correct and pinning one would be pinning an accident.
+        let (result, chunks) = run(
+            entry,
+            &format!("cd {home_abs} && cd .way* && cat permissions.toml"),
+            &ctx,
+        )
+        .await;
+        assert_refused(&result, &chunks, FLOOR_PREFIX, name);
+
+        // Assert the WORLD, not the receipt.
+        assert_eq!(
+            std::fs::read_to_string(&store).unwrap(),
+            SENTINEL,
+            "{name}: the grant store was replaced through a relative spelling"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&oauth).unwrap(),
+            OAUTH_SENTINEL,
+            "{name}: the oauth store was replaced"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&decoy_config).unwrap(),
+            CONFIG_SENTINEL,
+            "{name}: tools.auto_approve was written to the resolved config dir"
+        );
+        assert!(
+            !wayland.join("config.toml").exists(),
+            "{name}: tools.auto_approve was written to the profile config"
+        );
+        assert!(!backup.exists(), "{name}: the profile home was exfiltrated");
+        assert!(
+            evil.join("permissions.toml").exists(),
+            "{name}: the replacement store was moved into place"
+        );
+        let entries_left: Vec<_> = std::fs::read_dir(&wayland)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries_left.len(),
+            2,
             "{name}: something was planted in the profile home: {entries_left:?}"
         );
     }
