@@ -693,4 +693,168 @@ mod tests {
         );
         assert!(rel_to_root(Path::new("/elsewhere/x.rs"), root).is_none());
     }
+
+    // ── target identity: symlinks and routes (core#339 / core#335) ───────
+
+    /// An obviously-fake credential-store body. It is a SHAPE, not a
+    /// secret — the tests below assert it never reaches a payload, so the
+    /// fixture must be safe to print in a failure message.
+    #[cfg(unix)]
+    const FAKE_CREDENTIAL_BODY: &str = "https://fake-user:fake-token@example.invalid\n";
+
+    /// Plant `<root>/<link>` as a symlink to `<outside>/<target>`, which
+    /// holds the fake credential body. Returns nothing — every caller
+    /// asserts on the payload, not on the fixture.
+    #[cfg(unix)]
+    fn plant_credential_symlink(root: &Path, outside: &Path, link: &str, target: &str) {
+        let target = outside.join(target);
+        fs::write(&target, FAKE_CREDENTIAL_BODY).expect("write fixture");
+        std::os::unix::fs::symlink(&target, root.join(link)).expect("symlink");
+    }
+
+    /// A workspace + an out-of-tree "home" holding the credential store.
+    #[cfg(unix)]
+    fn workspace_and_outside(tmp: &TempDir) -> (PathBuf, PathBuf) {
+        let root = tmp.path().join("ws");
+        let outside = tmp.path().join("home");
+        fs::create_dir_all(&root).expect("mkdir ws");
+        fs::create_dir_all(&outside).expect("mkdir home");
+        (root, outside)
+    }
+
+    /// core#339, production call site 1 of 3 — `resolve_file`.
+    ///
+    /// Every guard in `at_ref_guard` judges a NAME. `notes.txt` is not on
+    /// any denylist, so it passed; `fs::read_to_string` then followed the
+    /// link and inlined the credential store into the outgoing prompt.
+    #[cfg(unix)]
+    #[test]
+    fn an_at_file_symlinked_to_a_credential_store_is_refused() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, outside) = workspace_and_outside(&tmp);
+        plant_credential_symlink(&root, &outside, "notes.txt", ".git-credentials");
+        fs::write(root.join("real.txt"), "ordinary").expect("write control");
+
+        // Control: an ordinary file in the same workspace still resolves, so
+        // a refusal below cannot come from a resolver that refuses anything.
+        let ok = resolve(&AtRef::parse("@real.txt").expect("parse"), &root).expect("control");
+        assert_eq!(ok.files[0].content, "ordinary");
+
+        match resolve(&AtRef::parse("@notes.txt").expect("parse"), &root) {
+            Err(AtRefError::SecretBlocked(_)) => {}
+            Ok(p) => {
+                let inlined = p.files.iter().any(|f| f.content.contains("fake-token"));
+                panic!("a symlink to a credential store resolved (body inlined: {inlined})");
+            }
+            Err(other) => panic!("expected SecretBlocked, got {other:?}"),
+        }
+    }
+
+    /// The same defect through the file-NAME half of the union rather than
+    /// the path-fragment half, so a fix that only reaches one list is caught.
+    #[cfg(unix)]
+    #[test]
+    fn an_at_file_symlinked_to_a_private_key_is_refused() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, outside) = workspace_and_outside(&tmp);
+        plant_credential_symlink(&root, &outside, "notes.txt", "id_rsa");
+
+        let err = resolve(&AtRef::parse("@notes.txt").expect("parse"), &root)
+            .expect_err("a symlink to a private key must be refused");
+        assert!(matches!(err, AtRefError::SecretBlocked(_)), "got {err:?}");
+    }
+
+    /// core#339, production call site 2 of 3 — the `@dir` walk. A fix
+    /// applied only in `resolve_file` leaves this path wide open.
+    #[cfg(unix)]
+    #[test]
+    fn an_at_dir_walk_refuses_a_symlink_to_a_credential_store() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, outside) = workspace_and_outside(&tmp);
+        plant_credential_symlink(&root, &outside, "notes.txt", ".git-credentials");
+        fs::write(root.join("ok.txt"), "safe").expect("write ok");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), &root).expect("resolve dir");
+        // Control: the walk produced output, so the refutation below cannot
+        // pass by returning an empty payload.
+        assert!(
+            payload.files.iter().any(|f| f.content == "safe"),
+            "the walk produced nothing"
+        );
+        assert!(
+            !payload
+                .files
+                .iter()
+                .any(|f| f.content.contains("fake-token")),
+            "the @dir walk inlined a symlinked credential store"
+        );
+    }
+
+    /// A symlink to an ordinary file is NOT refused. Repositories legitimately
+    /// symlink real files; a guard that blanket-refuses symlinks removes a
+    /// capability and gets routed around, which is worse than the leak.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_an_ordinary_file_still_resolves() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, outside) = workspace_and_outside(&tmp);
+        fs::write(outside.join("shared.md"), "shared body").expect("write");
+        std::os::unix::fs::symlink(outside.join("shared.md"), root.join("link.md"))
+            .expect("symlink");
+
+        let payload = resolve(&AtRef::parse("@link.md").expect("parse"), &root)
+            .expect("an ordinary symlink must still resolve");
+        assert_eq!(payload.files[0].content, "shared body");
+    }
+
+    /// core#335: an ABSOLUTE path was taken as-is, so `rel_to_root` could not
+    /// strip it against a workspace root reached through a symlink and the
+    /// gitignore check was skipped entirely.
+    #[cfg(unix)]
+    #[test]
+    fn a_gitignored_file_named_by_absolute_path_under_a_symlinked_root_is_refused() {
+        let tmp = TempDir::new().expect("tempdir");
+        let real = tmp.path().join("real");
+        fs::create_dir_all(&real).expect("mkdir real");
+        fs::write(real.join(".gitignore"), "ignored.txt\n").expect("write gitignore");
+        fs::write(real.join("ignored.txt"), "ignored body").expect("write ignored");
+        fs::write(real.join("kept.txt"), "kept body").expect("write kept");
+        let root = tmp.path().join("ws");
+        std::os::unix::fs::symlink(&real, &root).expect("symlink root");
+
+        // Control: a NON-ignored file named the same absolute way resolves,
+        // so the refusal below is the gitignore rule and not the route.
+        let kept = AtRef::parse(&format!("@{}", real.join("kept.txt").display())).expect("parse");
+        assert_eq!(
+            resolve(&kept, &root).expect("control").files[0].content,
+            "kept body"
+        );
+
+        let at = AtRef::parse(&format!("@{}", real.join("ignored.txt").display())).expect("parse");
+        let err = resolve(&at, &root).expect_err("a git-ignored file must be refused");
+        assert!(matches!(err, AtRefError::GitIgnored(_)), "got {err:?}");
+    }
+
+    /// core#335, the same skip reached without a symlink: a `..` that climbs
+    /// and comes back makes `rel_to_root` bail on the residual `ParentDir`.
+    #[test]
+    fn a_gitignored_file_reached_through_a_parent_traversal_is_refused() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir(root.join("sub")).expect("mkdir sub");
+        fs::write(root.join(".gitignore"), "ignored.txt\n").expect("write gitignore");
+        fs::write(root.join("sub/ignored.txt"), "ignored body").expect("write ignored");
+        fs::write(root.join("sub/kept.txt"), "kept body").expect("write kept");
+
+        // Control: the same route to a non-ignored sibling still resolves.
+        let kept = AtRef::parse("@sub/../sub/kept.txt").expect("parse");
+        assert_eq!(
+            resolve(&kept, root).expect("control").files[0].content,
+            "kept body"
+        );
+
+        let at = AtRef::parse("@sub/../sub/ignored.txt").expect("parse");
+        let err = resolve(&at, root).expect_err("a git-ignored file must be refused");
+        assert!(matches!(err, AtRefError::GitIgnored(_)), "got {err:?}");
+    }
 }

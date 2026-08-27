@@ -271,4 +271,63 @@ mod tests {
         assert_eq!(human_size(2048), "2 KB");
         assert_eq!(human_size(3 * 1024 * 1024), "3.0 MB");
     }
+
+    /// core#339, production call site 3 of 3 — the completion popup.
+    ///
+    /// Offering the candidate is the first half of attaching it: the user
+    /// presses Tab and `resolve_file` inlines whatever the name points at.
+    /// The popup therefore has to judge the same thing the read will.
+    #[cfg(unix)]
+    #[test]
+    fn completion_never_offers_a_symlink_to_a_credential_store() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("ws");
+        let outside = tmp.path().join("home");
+        fs::create_dir_all(&root).expect("mkdir ws");
+        fs::create_dir_all(&outside).expect("mkdir home");
+        fs::write(
+            outside.join(".git-credentials"),
+            "https://fake-user:fake-token@example.invalid\n",
+        )
+        .expect("write fixture");
+        std::os::unix::fs::symlink(outside.join(".git-credentials"), root.join("notes.txt"))
+            .expect("symlink");
+        fs::write(root.join("notepad.txt"), "ordinary").expect("write control");
+
+        let inserts: Vec<String> = complete("@note", &root)
+            .into_iter()
+            .map(|c| c.insert)
+            .collect();
+        // Control: the ordinary sibling IS offered, so the refutation below
+        // cannot pass by offering nothing.
+        assert!(
+            inserts.iter().any(|i| i == "@notepad.txt"),
+            "control candidate missing: {inserts:?}"
+        );
+        assert!(
+            !inserts.iter().any(|i| i == "@notes.txt"),
+            "the popup offered a symlink to a credential store: {inserts:?}"
+        );
+    }
+
+    /// A symlink to an ordinary file must stay offerable — the popup is not
+    /// allowed to hide legitimate symlinked sources.
+    #[cfg(unix)]
+    #[test]
+    fn completion_still_offers_a_symlink_to_an_ordinary_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("ws");
+        let outside = tmp.path().join("home");
+        fs::create_dir_all(&root).expect("mkdir ws");
+        fs::create_dir_all(&outside).expect("mkdir home");
+        fs::write(outside.join("shared.md"), "shared body").expect("write");
+        std::os::unix::fs::symlink(outside.join("shared.md"), root.join("link.md"))
+            .expect("symlink");
+
+        let inserts: Vec<String> = complete("@link", &root)
+            .into_iter()
+            .map(|c| c.insert)
+            .collect();
+        assert!(inserts.iter().any(|i| i == "@link.md"), "{inserts:?}");
+    }
 }
