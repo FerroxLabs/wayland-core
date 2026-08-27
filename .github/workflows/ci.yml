@@ -176,6 +176,19 @@ jobs:
     #
     # With no label the expression is byte-identical in effect to before, so
     # nothing changes the moment the self-hosted box comes back.
+    #
+    # ORDERING MATTERS, and it is not obvious. `on: pull_request:` declares no
+    # `types:`, so it defaults to [opened, synchronize, reopened] -- `labeled`
+    # is NOT among them. Applying the label therefore starts NO run, and any
+    # run already in flight carries the label set as it was AT CREATION TIME.
+    # Measured on 2026-08-27: labelled PR #341 and the in-flight run
+    # (33028709448, pushed moments earlier) still resolved without the label.
+    # So: LABEL FIRST, THEN PUSH. Every later `synchronize` sees it, making
+    # this a one-time ordering cost per PR rather than per commit.
+    #
+    # `labeled` is deliberately NOT added to `types:`: that would fire the
+    # entire matrix on every routine label change (`area:core` and friends),
+    # a large recurring cost to save a single push.
     runs-on: ${{ (contains(matrix.os, 'self-hosted') && (contains(github.event.pull_request.labels.*.name, 'windows-hosted') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))) && 'windows-latest' || matrix.os }}
     # gh#1072. Without this the job inherits GitHub's 6-HOUR default, and this
     # is a required context, so one wedged job blocks every PR in the repo.
