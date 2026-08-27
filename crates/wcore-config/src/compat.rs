@@ -2598,8 +2598,8 @@ mod prompt_cache_expected_pinning_tests {
         // `ProviderType`, and neither may ever be accused.
         let ollama = ProviderCompat::ollama_defaults().prompt_cache_expected();
         let bare = ProviderCompat::default().prompt_cache_expected();
-        println!("{:<24} {:<9} {}", "ollama_defaults()", ollama, false);
-        println!("{:<24} {:<9} {}", "ProviderCompat::default()", bare, false);
+        println!("{:<24} {:<9} false", "ollama_defaults()", ollama);
+        println!("{:<24} {:<9} false", "ProviderCompat::default()", bare);
         assert!(!ollama, "control: ollama must never expect a prompt cache");
         assert!(
             !bare,
