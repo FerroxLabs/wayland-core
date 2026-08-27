@@ -619,27 +619,37 @@ pub(crate) fn staging_root_for(skills_root: &Path) -> PathBuf {
 /// raw spelling. Refusing is what makes the writer and those matchers agree by
 /// construction, so a payload can only ever name an entry one way.
 fn resolve_under(base: &Path, rel: &str) -> Option<PathBuf> {
-    let p = Path::new(rel);
-    if p.is_absolute() {
+    // The RAW key is what is validated, not a re-rendered path.
+    // `Path::components()` normalises an interior `.` away AND re-renders with
+    // the platform separator, so comparing the re-render against `rel` refused
+    // ordinary `nested/SKILL.md` on Windows (it comes back with a backslash)
+    // while still needing a separate rule for `nested/./SKILL.md`. Reading the
+    // segments directly answers both, identically on every platform.
+    //
+    // `/` is the ONE separator a key may use. A backslash is refused
+    // everywhere, not only where it would separate: a key that names a
+    // different file depending on the host is exactly the ambiguity this
+    // function exists to remove, and no skill entry needs one.
+    if rel.is_empty() || rel.contains('\\') {
         return None;
     }
-    let mut normal = PathBuf::new();
-    for c in p.components() {
-        match c {
-            std::path::Component::Normal(part) => normal.push(part),
-            _ => return None,
+    for segment in rel.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return None;
         }
     }
-    // A leading `.` is refused by the loop above, but `Path::components()`
-    // NORMALISES AWAY an interior one -- `"nested/./SKILL.md"` yields exactly
-    // the components of `"nested/SKILL.md"`, so the loop cannot see it, and
-    // `base.join(rel)` would then write through the raw spelling. Requiring the
-    // re-rendered components to reproduce `rel` is what catches that: any key
-    // that is not already canonical names a file some other key also names.
-    if normal.as_os_str() != p.as_os_str() {
+    // Belt and braces for the one spelling `split('/')` cannot see: on Windows
+    // `C:entry` is a single segment carrying a Prefix component, and `join`
+    // REPLACES the base with it instead of extending it. Every other refusal
+    // above is reachable on both platforms; this arm only ever fires on
+    // Windows, where a bare drive-relative key would otherwise escape.
+    if Path::new(rel)
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
         return None;
     }
-    Some(base.join(normal))
+    Some(base.join(rel))
 }
 
 /// Best-effort directory fsync, so a rename's effects survive a power loss.
@@ -766,6 +776,14 @@ mod resolve_under_tests {
             "././manifest.json",
             "nested/./SKILL.md",
             "./nested/SKILL.md",
+            // Second spellings of a separator: `nested\\SKILL.md` is one file on
+            // Windows and a different, single-component file on Unix.
+            "nested\\SKILL.md",
+            ".\\manifest.json",
+            // Empty segments name the same entry as the collapsed spelling.
+            "nested//SKILL.md",
+            "nested/",
+            "",
         ] {
             assert_eq!(
                 resolve_under(base, rel),
@@ -786,11 +804,18 @@ mod resolve_under_tests {
             None,
             "an interior `..` must stay refused"
         );
-        #[cfg(unix)]
         assert_eq!(
             resolve_under(base, "/etc/passwd"),
             None,
             "an absolute path must stay refused"
+        );
+        // Drive-relative on Windows: `join` would REPLACE the base rather than
+        // extend it, so the entry lands outside the staging root entirely.
+        #[cfg(windows)]
+        assert_eq!(
+            resolve_under(base, "C:entry"),
+            None,
+            "a drive-relative key must not escape the base"
         );
     }
 }
