@@ -48,7 +48,9 @@
 //! bare-name rule 2a apply unchanged, so the grant store, workspace trust and
 //! the credential stores stay protected by name in that layout too. The yield
 //! keys off the working directory the session was launched with, which no
-//! command can change: an in-shell `cd` does not move it.
+//! command can change: an in-shell `cd` does not move it. The entry list is
+//! matched through [`candidate_cwds`] like everything else, so
+//! `cd <base>/logs && echo x >> ../config.toml` is refused in that layout too.
 //!
 //! **This module reads no switch.** No config field, no CLI flag, no
 //! enable/disable environment variable. The single `env::var` it performs is
@@ -1056,6 +1058,19 @@ mod tests {
                 "the authority directory itself must still be refused: {command}"
             );
         }
+
+        // The yield's own residual hole, which the first form of it left open:
+        // from INSIDE the layout, a `cd` into a subdirectory plus a relative
+        // `..` reached the entry list without naming it. The
+        // candidate-directory rule closes it.
+        assert!(
+            floor_refusal(
+                &format!("cd {}/logs && echo x >> ../config.toml", base.display()),
+                inside
+            )
+            .is_some(),
+            "a cd + relative `..` must not reach the entry list"
+        );
 
         // ...and the authority state itself is STILL refused there.
         for command in [
