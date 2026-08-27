@@ -581,6 +581,34 @@ jobs:
             exit 1
           fi
 
+      # Regression gate for FerroxLabs/wayland#1100 — it lives HERE, in `ci`,
+      # because `CI (Array)` is the REQUIRED status check on `main` and this is
+      # the only job that always reports it. The same step also exists in
+      # `ci-windows-hosted` below, but that job's `if:` is a bare `[ci-windows]`
+      # commit-message opt-in read off `github.event.head_commit.message` /
+      # `github.event.commits.*.message`, and NEITHER key exists on a
+      # `pull_request` payload — so it never runs on a PR and only runs on a
+      # push whose message carries the tag. A gate that lives only there is a
+      # gate that a revert walks straight past with every required check green.
+      #
+      # Windows-only: the probe cache the gate is about lives in the
+      # `#[cfg(windows)]` AppContainer backend, so on the `macos-latest` leg
+      # neither test in the ordering pair is compiled in and the run would
+      # certify nothing. `runner.os`, not `matrix.os` — the Windows matrix entry
+      # is a label LIST and renders as the literal string "Array".
+      #
+      # `!cancelled()` rather than `success()`, matching the steps around it: an
+      # earlier red must not suppress this verdict, but a cancelled run was
+      # never going to produce evidence and must not be re-reported as a defect.
+      #
+      # Cheap: `just test-ci` above already compiled this crate's lib test
+      # binary with the same dev profile into the same target dir, so this is a
+      # re-run, not a rebuild.
+      - name: Regression gate — wcore-sandbox lib suite in ONE process (#1100)
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: bash
+        run: bash scripts/regression-gate-1100.sh
+
       # 2026-07-27: MOVED to after the test step. It used to run before it, so a
       # contract digest drift failed the job at that step and macOS and
       # self-hosted Windows never reached the tests at all — three separate
@@ -922,6 +950,17 @@ jobs:
             echo "::error title=ZERO TESTS (hosted Windows)::$report exists but declares ${tests:-no} tests. A suite that collected nothing certifies nothing."
             exit 1
           fi
+
+      # Regression gate for FerroxLabs/wayland#1100. See the script header for
+      # why `cargo test --test-threads=1` is the only instrument that can see
+      # this class and why it reads its own executed count back instead of
+      # trusting exit status. This job is NOT a required check (see the note at
+      # the top of it) — the copy that gates is in the `ci` job above, on the
+      # `CI (Array)` leg. This one is the opt-in `[ci-windows]` supplier.
+      - name: Regression gate — wcore-sandbox lib suite in ONE process (#1100)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/regression-gate-1100.sh
 
       # Windows has no other clippy supplier: `ci-linux` and the macOS leg
       # cannot compile the `#[cfg(windows)]` branches at all. Runs AFTER the
