@@ -1280,6 +1280,21 @@ fn default_allow_list() -> Vec<String> {
         "Skill".into(),
         "wayland_status".into(),
         "wayland_telemetry_query".into(),
+        // #946 A-10. `Read` is here and returns "(binary file, N bytes)" for
+        // every office document and PDF, so without the two extractors a stock
+        // install cannot read a .pdf/.docx/.xlsx/.pptx AT ALL: the extractor
+        // prompts, and so does every fallback (`Bash`, `execute`). They belong
+        // in the same class as `Read`/`Grep`/`Glob` — `ToolCategory::Info`,
+        // read-only, no macros or formulas evaluated.
+        //
+        // `doc_extract` does write ONE thing, and it is named here rather than
+        // waved past: the over-budget full-document artifact under
+        // `std::env::temp_dir()/wayland-doc-extract`, at a content-addressed
+        // name published by atomic rename (`wcore_tools::doc_tool::
+        // write_doc_artifact`). It is not user data, the model does not choose
+        // the path, and it exists so a truncated extraction is still readable.
+        "pdf_extract".into(),
+        "doc_extract".into(),
     ]
 }
 fn default_true() -> bool {
@@ -8924,6 +8939,42 @@ command = "local-mcp"
             Some(false),
             "a project may tighten allow_no_sandbox from a permissive global"
         );
+    }
+
+    /// #946 A-10: the office/PDF extractors must be auto-approved out of the
+    /// box, exactly like `Read`.
+    ///
+    /// RED ARM: before the fix `default_allow_list()` held neither name, so a
+    /// stock install could not read a `.docx`/`.xlsx`/`.pptx`/`.pdf` at all --
+    /// the extractor prompted, `Read` returned only "(binary file, N bytes)",
+    /// and every fallback (`Bash`, `execute`) prompted too. #946 claimed this
+    /// had already shipped as `fix/media-readonly-allowlist`; no such branch
+    /// exists among the 497 remote refs and neither name was in the list.
+    ///
+    /// Both tools are `ToolCategory::Info`, never modify the document and
+    /// never run macros/formulas (`DocExtractTool::description`,
+    /// `PdfExtractTool::category`). `doc_extract`'s only write is the
+    /// content-addressed, atomically published over-budget artifact under
+    /// `std::env::temp_dir()/wayland-doc-extract` (`write_doc_artifact`) --
+    /// not user data, and not a path the model chooses.
+    #[test]
+    fn media_extractors_are_auto_approved_out_of_the_box() {
+        let defaults = default_allow_list();
+        for tool in ["pdf_extract", "doc_extract"] {
+            assert!(
+                defaults.contains(&tool.to_string()),
+                "{tool} is a read-only Info extractor and must be auto-approved \
+                 like Read/Grep/Glob; without it .pdf/.docx/.xlsx/.pptx are \
+                 unreadable on a stock install (#946 A-10)"
+            );
+        }
+        // The list stays read-only: nothing that writes, executes or sends.
+        for tool in ["Bash", "Write", "Edit", "send_message"] {
+            assert!(
+                !defaults.contains(&tool.to_string()),
+                "{tool} mutates and must keep gating on the approval flow"
+            );
+        }
     }
 
     #[test]
