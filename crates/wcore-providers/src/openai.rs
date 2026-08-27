@@ -4392,6 +4392,49 @@ mod tests {
         );
     }
 
+    /// #1136 — `--search` on a Flux tier alias must NOT strip the agent's
+    /// function tools. Before the fix the whole array was OVERWRITTEN with the
+    /// single grounding entry, so a real agent turn reached the model with the
+    /// system prompt still describing Bash/Read/Write/Edit/Grep and zero tools
+    /// attached: the model hand-wrote tool-call markup as plain text and the
+    /// turn executed nothing. Grounding now rides ALONGSIDE the function tools.
+    #[test]
+    fn web_search_grounding_preserves_function_tools_issue_1136() {
+        let provider = stop_provider();
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.web_search = true;
+        req.tools = ["Bash", "Read", "Write", "Edit", "Grep"]
+            .into_iter()
+            .map(|name| ToolDef {
+                name: name.into(),
+                description: format!("the {name} tool"),
+                input_schema: json!({"type": "object"}),
+                deferred: false,
+                server: None,
+            })
+            .collect();
+
+        let body = provider.build_request_body(&req);
+        let tools = body["tools"].as_array().expect("tools array present");
+
+        assert_eq!(
+            tools.len(),
+            6,
+            "5 function tools + the web_search entry must all ride the wire, got {tools:#?}"
+        );
+        assert!(
+            tools.iter().any(|t| t["type"] == "web_search"),
+            "the grounding tool must still be attached"
+        );
+        for name in ["Bash", "Read", "Write", "Edit", "Grep"] {
+            assert!(
+                tools.iter().any(|t| t["function"]["name"] == name),
+                "function tool `{name}` was stripped by --search (#1136)"
+            );
+        }
+    }
+
     /// web_search on a CONCRETE model id does NOT inject the tool — grounding
     /// would not fire there, so the normal function-tool path is preserved.
     #[test]
