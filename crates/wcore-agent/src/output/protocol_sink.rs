@@ -1121,6 +1121,7 @@ impl OutputSink for ProtocolSink {
         body: &str,
         subject: Option<&str>,
         conversation_id: Option<&str>,
+        idempotency_key: Option<&str>,
     ) {
         let _ = self.writer.emit(&ProtocolEvent::HostSendMessageRequest {
             call_id: call_id.to_string(),
@@ -1130,6 +1131,7 @@ impl OutputSink for ProtocolSink {
             body: body.to_string(),
             subject: subject.map(str::to_string),
             conversation_id: conversation_id.map(str::to_string),
+            idempotency_key: idempotency_key.map(str::to_string),
         });
     }
 

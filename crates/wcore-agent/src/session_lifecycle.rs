@@ -496,11 +496,13 @@ fn unanswerable_reason(item: &ReconcileItem) -> String {
 /// Can the product settle this item from the journal alone?
 ///
 /// `None` means it genuinely cannot, and the honest response is to say so and
-/// ask — never to pick a default. The one class that reaches `None` in
-/// practice is a tool whose effect contract is `Opaque` (`Bash`, `Write`,
-/// `Edit`): the journal records that the tool STARTED and nothing after it,
-/// there is no receipt to compare, and repeating it is not safe. No amount of
-/// reading the journal turns that into knowledge.
+/// ask — never to pick a default. The class that reaches `None` in practice is
+/// a tool whose effect contract is `Opaque` (`Bash`, `Script`, `send_message`,
+/// the MCP proxy — NOT `Write`/`Edit`, which have been
+/// `FilesystemTransactional` with a real reconciler since d1f55f0b): the
+/// journal records that the tool STARTED and nothing after it, there is no
+/// receipt to compare, and repeating it is not safe. No amount of reading the
+/// journal turns that into knowledge.
 pub fn determined_disposition(
     state: &ReducedSessionState,
     item: &ReconcileItem,

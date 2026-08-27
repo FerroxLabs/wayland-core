@@ -1507,6 +1507,28 @@ pub enum ProtocolEvent {
         /// Session id of the emitting engine, when known. Omitted otherwise.
         #[serde(skip_serializing_if = "Option::is_none")]
         conversation_id: Option<String>,
+        /// F13 (#889): the durable idempotency key the session journal minted
+        /// for this tool execution, when the engine has one.
+        ///
+        /// The key is STABLE across exactly the paths that legitimately re-run
+        /// one `send_message` call: an in-turn retry and the crash-resume
+        /// re-dispatch both carry the prior execution's key forward. So two
+        /// `host_send_message_request` frames bearing the SAME
+        /// `idempotency_key` are one logical delivery the engine was
+        /// interrupted in the middle of - NOT two messages the user asked for.
+        /// `call_id` cannot be used for this: it is minted fresh per request
+        /// (`hsm-{uuid}`) and differs across a re-dispatch.
+        ///
+        /// A host that can pass a caller-supplied idempotency token to its
+        /// outbound provider SHOULD do so; a host that cannot is unchanged by
+        /// this field and MUST ignore it. The engine asserts nothing about what
+        /// the host does with it - carrying the key is a PRECONDITION for
+        /// exactly-once delivery, not a claim of it.
+        ///
+        /// Omitted when the send is not running under a durable tool effect
+        /// context, because there is then no stable identity to offer.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        idempotency_key: Option<String>,
     },
     /// FerroxLabs/wayland#1098: "show this to the user" as a RENDER
     /// capability instead of an OS `open`.
@@ -2561,6 +2583,7 @@ mod tests {
             body: "hello".to_string(),
             subject: Some("Re: invoice".to_string()),
             conversation_id: Some("abc123".to_string()),
+            idempotency_key: Some("eff-7".to_string()),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "host_send_message_request");
@@ -2571,6 +2594,7 @@ mod tests {
         assert_eq!(json["body"], "hello");
         assert_eq!(json["subject"], "Re: invoice");
         assert_eq!(json["conversation_id"], "abc123");
+        assert_eq!(json["idempotency_key"], "eff-7");
     }
 
     /// #1098: the render frame serializes with the field names a host
@@ -2722,12 +2746,19 @@ mod tests {
             body: "ping".to_string(),
             subject: None,
             conversation_id: None,
+            idempotency_key: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "host_send_message_request");
         assert_eq!(json["platform"], "telegram");
         assert_eq!(json["body"], "ping");
-        for key in ["chat_id", "thread_id", "subject", "conversation_id"] {
+        for key in [
+            "chat_id",
+            "thread_id",
+            "subject",
+            "conversation_id",
+            "idempotency_key",
+        ] {
             assert!(
                 json.get(key).is_none(),
                 "{key} must be omitted when None, got {json}"
