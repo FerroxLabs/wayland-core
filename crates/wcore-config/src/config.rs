@@ -1306,9 +1306,33 @@ const SMART_MAX_TURNS: usize = 512;
 /// declare which one it is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GrantScope {
-    /// Auto-approved locally AND retained for remote principals. The bar is
-    /// the one this list has always claimed: for ANY input it accepts, the
-    /// tool cannot write, execute, or send a message.
+    /// Auto-approved locally AND retained for remote principals.
+    ///
+    /// The bar for adding a NEW row is: for any input it accepts, the tool
+    /// cannot write, execute, or send a message.
+    ///
+    /// That is stated as the bar for new rows, deliberately, and NOT as an
+    /// invariant of the set — because one grandfathered row already breaks
+    /// it and saying otherwise here would make this comment the third place
+    /// the product asserts something false about this list.
+    /// `Skill` is that row. `wcore_agent::skill_tool::SkillTool::category_for`
+    /// returns `ToolCategory::Exec` for a fork-mode skill AND for a skill it
+    /// cannot resolve, and an inline body runs its embedded `!shell:`
+    /// directives through `sh -c`. The only gate that stops either is
+    /// `[default] read_only`, and neither remote builder
+    /// (`acp_engine::network_session_config`,
+    /// `channel_dispatch::remote_channel_config`) sets it. So a remote
+    /// principal that can name a skill can run a shell.
+    ///
+    /// This is PRE-EXISTING authority: `Skill` was in the retained set before
+    /// #946 and this table does not widen it. Narrowing it is its own
+    /// privilege change with its own blast radius and is not done here. It is
+    /// recorded in three places that must agree — here, the `Skill` entry in
+    /// `UNRESOLVABLE_IN_THIS_CRATE`
+    /// (`wcore-tools/tests/default_allow_list_is_read_only.rs`, which pins
+    /// `Skill` as unresolvable rather than asserting a category it does not
+    /// have), and the `Skill` bullet in `docs/getting-started.md`, bound by
+    /// `scripts/verify-doc-truth.sh` claim (11).
     Remote,
     /// Auto-approved for the LOCAL operator only. Stripped from every remote
     /// surface by [`Config::retain_default_tool_allow_list`], so a remote

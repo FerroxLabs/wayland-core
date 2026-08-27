@@ -495,14 +495,33 @@ Allow? [y]es / [n]o / [a]lways / [q]uit > y
 | `a` / `always` | Auto-approve this tool for the rest of the session |
 | `q` / `quit` | Abort the entire agent run |
 
-- **Eleven** tools are auto-approved by default, not three
-  (`config.rs:1186-1206`): `Read`, `Grep`, `Glob`, `web`, `WebFetch`,
-  `vision_analyze`, `transcribe_audio`, `ToolSearch`, `Skill`, `wayland_status`,
-  `wayland_telemetry_query`. Nothing that writes, executes or sends a message is in
-  that list. Two entries are worth knowing about before you rely on the default:
-  `web` and `WebFetch` reach the network, and `Skill` can write declared artifacts
-  and run a skill's embedded `!` shell directives. If that is more than you want
-  approved silently, narrow `tools.allow_list`.
+- **Thirteen** tools are auto-approved for you, the local operator, by default,
+  not three. The list is the `AUDITED_DEFAULT_GRANTS` table in
+  `crates/wcore-config/src/config.rs`: `Read`, `Grep`, `Glob`, `web`,
+  `WebFetch`, `vision_analyze`, `transcribe_audio`, `ToolSearch`, `Skill`,
+  `wayland_status`, `wayland_telemetry_query`, `pdf_extract`, `doc_extract`.
+  Read that as a list of tools whose job is to read, not as a list of tools that
+  are harmless: three of them do more than read, and you should know which
+  before you rely on the default.
+  - `web` and `WebFetch` reach the network.
+  - `Skill` is the exception to "read-only". A skill body can write the
+    artifacts it declares, and it can run its embedded `!` shell directives
+    through a shell. Set `[default] read_only = true` to refuse skills
+    wholesale, or drop `Skill` from `tools.allow_list` to make every skill
+    prompt.
+  - `doc_extract` writes exactly one file of its own: a content-addressed copy
+    of an over-budget document at `$TMPDIR/wayland-doc-extract/<hash>.md`. It
+    never writes back to the document it read, and never to a path the model
+    chooses.
+
+  If that is more than you want approved silently, narrow `tools.allow_list`.
+- **Eleven** of those thirteen survive for a REMOTE caller: an ACP/A2A network
+  session (`acp_engine::network_session_config`) or a chat sender arriving over
+  a channel (`channel_dispatch::remote_channel_config`). `pdf_extract` and
+  `doc_extract` are local-only and are stripped from every remote surface, so a
+  remote caller has to be granted them explicitly. The `Skill` caveat above is
+  NOT stripped: `Skill` is retained for remote callers, and neither remote
+  builder sets `read_only`.
 - `--auto-approve` skips all confirmations
 - `tools.allow_list` in config customizes the whitelist
 

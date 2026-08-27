@@ -284,24 +284,93 @@ else
 fi
 
 # ------------------------------------------------------------------ claim (11)
-# The default auto-approve list is 11 tools and includes network egress plus
-# Skill, not the three read-only tools getting-started.md named.
-approved=$(sed -n '/fn default_allow_list/,/^}/p' \
-  "$ROOT/crates/wcore-config/src/config.rs" | grep -cE '^\s+"[A-Za-z_]+"\.into\(\),')
-if [ "$approved" = "11" ]; then
-  pass "C11-code: default_allow_list has 11 entries (config.rs)"
+# The default auto-approve set is no longer one flat `vec![...]`. #946 A-10
+# split it into ONE audit table with a per-row scope, `AUDITED_DEFAULT_GRANTS`
+# in config.rs, because `default_allow_list()` feeds two consumers with
+# different threat models and only one of them has an operator behind it:
+#
+#   * LOCAL  — every row — is the `#[serde(default)]` for `[tools] allow_list`.
+#   * REMOTE — the `GrantScope::Remote` rows — is what survives
+#     `Config::retain_default_tool_allow_list()`, i.e. what an ACP/A2A network
+#     session and a remote chat sender keep with no TTY to answer a prompt.
+#
+# getting-started.md now publishes BOTH numbers, so both are bound here.
+#
+# The previous binding counted `"X".into(),` lines inside `fn default_allow_list`.
+# Do not restore that shape. It was never safe: the sed range `/fn
+# default_allow_list/,/^}/` also opens on TEST functions whose names merely
+# START with `default_allow_list` (e.g.
+# `default_allow_list_only_applies_when_the_key_is_absent`), so against the
+# reworked tree it reported SIX entries — a number that exists nowhere in the
+# product. A binding that goes red for the wrong reason teaches the next reader
+# to ignore it. Everything below anchors on `^const AUDITED_DEFAULT_GRANTS` /
+# `^];` and on the row syntax itself.
+grants=$(sed -n '/^const AUDITED_DEFAULT_GRANTS/,/^];/p' \
+  "$ROOT/crates/wcore-config/src/config.rs")
+
+# Known-positive control for the extraction. Without it, a renamed const makes
+# every count below 0 and each one reads as "the tool was removed" rather than
+# "this check stopped working".
+if [ -z "$grants" ]; then
+  fail "C11-code: AUDITED_DEFAULT_GRANTS not found in config.rs; every C11-code check below is vacuous"
 else
-  fail "C11-code: default_allow_list has $approved entries, not 11; docs/getting-started.md must be revisited"
+  pass "C11-code: AUDITED_DEFAULT_GRANTS table located in config.rs (extraction control)"
 fi
 
-for needle in '"WebFetch".into()' '"Skill".into()'; do
-  if sed -n '/fn default_allow_list/,/^}/p' \
-    "$ROOT/crates/wcore-config/src/config.rs" | grep -qF "$needle"; then
-    pass "C11-code: $needle is in the default auto-approve list"
+grant_rows=$(printf '%s\n' "$grants" | grep -cE '^[[:space:]]+\("[A-Za-z_]+", GrantScope::[A-Za-z]+\),$')
+remote_rows=$(printf '%s\n' "$grants" | grep -cE '^[[:space:]]+\("[A-Za-z_]+", GrantScope::Remote\),$')
+local_only_rows=$(printf '%s\n' "$grants" | grep -cE '^[[:space:]]+\("[A-Za-z_]+", GrantScope::LocalOnly\),$')
+
+# Structural check FIRST: if a row carries a scope this script does not know
+# about, the two scope counts stop summing and the doc numbers below would be
+# graded against a set nobody classified.
+if [ "$grant_rows" -eq $((remote_rows + local_only_rows)) ]; then
+  pass "C11-code: every AUDITED_DEFAULT_GRANTS row is Remote or LocalOnly ($grant_rows = $remote_rows + $local_only_rows)"
+else
+  fail "C11-code: $grant_rows grant rows but only $remote_rows Remote + $local_only_rows LocalOnly; a row carries an unclassified GrantScope"
+fi
+
+if [ "$grant_rows" = "13" ]; then
+  pass "C11-code: the LOCAL default allow list has 13 entries (AUDITED_DEFAULT_GRANTS)"
+else
+  fail "C11-code: the LOCAL default allow list has $grant_rows entries, not 13; docs/getting-started.md must be revisited"
+fi
+
+if [ "$remote_rows" = "11" ]; then
+  pass "C11-code: 11 entries are GrantScope::Remote and survive retain_default_tool_allow_list()"
+else
+  fail "C11-code: $remote_rows entries are GrantScope::Remote, not 11; docs/getting-started.md must be revisited"
+fi
+
+# Named rows, with their SCOPE, not merely their presence. `web`/`WebFetch`
+# reach the network and `Skill` can run a skill's embedded `!` shell directives,
+# so the doc warns about them by name; demoting any of them to LocalOnly, or
+# dropping it, makes that warning wrong.
+for needle in '("WebFetch", GrantScope::Remote),' '("Skill", GrantScope::Remote),' '("web", GrantScope::Remote),'; do
+  if printf '%s\n' "$grants" | grep -qF "$needle"; then
+    pass "C11-code: $needle is in the audited grant table"
   else
-    fail "C11-code: $needle is no longer auto-approved by default; the doc's warning is stale"
+    fail "C11-code: $needle is gone from the audited grant table; the doc's warning about it is stale"
   fi
 done
+
+# The extractors are the point of #946 A-10 and are LOCAL ONLY. `doc_extract`
+# writes $TMPDIR/wayland-doc-extract/<hash>.md, which the doc discloses; if it
+# ever became Remote both that sentence and the remote count would be wrong.
+for needle in '("pdf_extract", GrantScope::LocalOnly),' '("doc_extract", GrantScope::LocalOnly),'; do
+  if printf '%s\n' "$grants" | grep -qF "$needle"; then
+    pass "C11-code: $needle is local-only in the audited grant table"
+  else
+    fail "C11-code: $needle is not a LocalOnly row; docs/getting-started.md says both extractors are stripped from every remote surface"
+  fi
+done
+
+# `doc_extract`'s temp-artifact path is quoted verbatim in the doc, so bind it.
+if grep -q 'wayland-doc-extract' "$ROOT/crates/wcore-tools/src/doc_tool.rs"; then
+  pass "C11-code: doc_extract still writes under wayland-doc-extract (doc_tool.rs)"
+else
+  fail "C11-code: doc_tool.rs no longer mentions wayland-doc-extract; the doc quotes that path"
+fi
 
 if grep -q 'Read-only tools (Read, Grep, Glob) are auto-approved by default' \
   "$ROOT/docs/getting-started.md"; then
@@ -310,10 +379,34 @@ else
   pass "C11-doc: docs/getting-started.md does not describe the default auto-approve set as three tools"
 fi
 
-if grep -q '\*\*Eleven\*\* tools are auto-approved by default' "$ROOT/docs/getting-started.md"; then
-  pass "C11-doc: docs/getting-started.md states the real size of the default auto-approve set"
+if grep -q '\*\*Thirteen\*\* tools are auto-approved for you, the local operator' \
+  "$ROOT/docs/getting-started.md"; then
+  pass "C11-doc: docs/getting-started.md states the real size of the LOCAL default auto-approve set"
 else
-  fail "C11-doc: docs/getting-started.md does not state the real size of the default auto-approve set"
+  fail "C11-doc: docs/getting-started.md does not state the real size of the LOCAL default auto-approve set"
+fi
+
+if grep -q '\*\*Eleven\*\* of those thirteen survive for a REMOTE caller' \
+  "$ROOT/docs/getting-started.md"; then
+  pass "C11-doc: docs/getting-started.md states the real size of the REMOTE retained set"
+else
+  fail "C11-doc: docs/getting-started.md does not state the real size of the REMOTE retained set"
+fi
+
+# The honesty clause. The list is NOT "nothing that writes": `doc_extract`
+# writes a temp artifact and `Skill` can write declared artifacts and run a
+# shell. The doc must disclose both, or it is back to the sentence this claim
+# exists to correct.
+if grep -q 'wayland-doc-extract/<hash>.md' "$ROOT/docs/getting-started.md"; then
+  pass "C11-doc: docs/getting-started.md discloses the file doc_extract writes"
+else
+  fail "C11-doc: docs/getting-started.md does not disclose that doc_extract writes \$TMPDIR/wayland-doc-extract/<hash>.md"
+fi
+
+if grep -q 'embedded `!` shell directives' "$ROOT/docs/getting-started.md"; then
+  pass "C11-doc: docs/getting-started.md discloses that an auto-approved Skill can run a shell"
+else
+  fail "C11-doc: docs/getting-started.md no longer discloses that an auto-approved Skill can run a shell"
 fi
 
 printf '\n%s\n' "----------------------------------------"
