@@ -8,6 +8,14 @@ use wcore_sandbox::NetworkPolicy;
 use wcore_sandbox::manifest::SandboxManifest;
 use wcore_types::tool::ToolResult;
 
+// #693 — `command_path_tokens` and `deobfuscate` moved DOWN into
+// `wcore-config`. They are shared with the command floor, which had to
+// move below `wcore-tools` so that `wcore-skills`' shell surface — the
+// second `sh -c` path, which never touches `BashTool` — sits under the
+// same floor. Re-exported rather than copied: two spellings of a guard
+// is how one of them rots.
+pub(super) use wcore_config::command_floor::{command_path_tokens, deobfuscate};
+
 /// Does `command` look like it needs network egress? Used only to attach a
 /// helpful hint when such a command FAILS under the no-network sandbox — a
 /// false positive merely appends an explanation to an already-failed result,
@@ -516,29 +524,6 @@ fn classify(scope: &SandboxScope, token: &str) -> Option<(PathBuf, DeniedBecause
         Presence::Present => Some((resolved, DeniedBecause::NotGranted)),
         Presence::Unverifiable => Some((resolved, DeniedBecause::NotGrantedUnverifiable)),
     }
-}
-
-/// Path-shaped tokens from a COMMAND, for the masked-read check.
-///
-/// Deliberately far more permissive than [`is_path_token`], and the asymmetry
-/// is the whole design. In the FAILURE path a stray token becomes a fabricated
-/// accusation, so a token must look path-shaped before it is trusted. Here a
-/// token survives only if it matches this manifest's OWN deny list, so that
-/// match IS the filter — which is what lets a bare filename through. `cat
-/// secret.txt` has no interior separator and would be dropped by
-/// [`is_path_token`], and it is precisely the case wayland#1078 is about.
-pub(super) fn command_path_tokens(command: &str) -> Vec<&str> {
-    command
-        .split(|c: char| {
-            c.is_whitespace()
-                || matches!(
-                    c,
-                    '\'' | '"' | '`' | ';' | '|' | '&' | '(' | ')' | '<' | '>'
-                )
-        })
-        .map(|token| token.trim_matches(|c| matches!(c, ',' | ']' | '[')))
-        .filter(|token| token.len() >= 2 && !token.contains("://") && !token.starts_with('-'))
-        .collect()
 }
 
 /// When a sandboxed command SUCCEEDS but named a path this workspace masks,
@@ -1099,46 +1084,6 @@ fn network_exfil_denylist() -> &'static RegexSet {
         ];
         RegexSet::new(patterns).expect("#673 network-exfil denylist regex set must compile")
     })
-}
-
-/// tools-exec-14/16: best-effort de-obfuscation of trivial shell quoting
-/// tricks before the denylist runs. A model (or prompt-injection payload)
-/// can dodge the literal `\benv\b` regex with shell forms that the shell
-/// collapses back to `env` at parse time but that the raw regex misses:
-/// `e''nv`, `e""nv`, `e\nv`, `"env"`, `'env'`. We strip empty quote pairs,
-/// backslash-escapes of ordinary chars, and surrounding quotes from each
-/// word so the SAME pattern set sees the post-collapse token.
-///
-/// This is **defense-in-depth only** — it does NOT make the denylist a
-/// security boundary. A determined attacker has unbounded obfuscation
-/// (`$(printf '\145nv')`, variable indirection, base64-decode-then-eval,
-/// runtime path expansion). The real boundaries are the secret-scrubbed
-/// sandbox env and the now-default-Deny network policy; this layer just
-/// raises the cost of the cheapest one-liner bypasses.
-pub(super) fn deobfuscate(command: &str) -> String {
-    let mut out = String::with_capacity(command.len());
-    let mut chars = command.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            // Empty quote pair: `''` / `""` — shell collapses to nothing.
-            '\'' | '"' if chars.peek() == Some(&c) => {
-                chars.next(); // consume the closing quote, emit nothing
-            }
-            // Lone surrounding quote — drop it so `"env"` -> `env`.
-            '\'' | '"' => {}
-            // Backslash-escape of an ordinary char (`e\nv` -> `env`). Keep
-            // the escaped char only; never the backslash. We do not try to
-            // interpret C-style escapes — `\n` here is a literal `n` to the
-            // shell outside of `$'...'`, which is the case we are hardening.
-            '\\' => {
-                if let Some(n) = chars.next() {
-                    out.push(n);
-                }
-            }
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 /// Returns `Some(reason)` if `command` matches a denylist pattern.

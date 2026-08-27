@@ -435,7 +435,13 @@ async fn the_pre_existing_floor_rules_are_still_non_waivable() {
 /// grep works at all (the module DOES contain the one env read it is allowed).
 #[test]
 fn the_floor_module_reads_no_switch() {
-    let raw = include_str!("../src/bash/command_floor.rs");
+    // #693 — the floor moved DOWN to `wcore-config` so that `wcore-skills`'
+    // shell surface could sit under it too; `../src/bash/command_floor.rs` is
+    // now a re-export. Scanning the stub would have made every negative
+    // assertion below vacuously true — the anti-vacuity guard immediately
+    // underneath is what caught the move, and it is the reason this line has
+    // to name the implementation rather than the import.
+    let raw = include_str!("../../wcore-config/src/command_floor.rs");
 
     // CODE only. The module's own prose explains what `config.toml` carries,
     // and an earlier revision of this test failed on the word `auto_approve`
@@ -488,6 +494,50 @@ fn the_floor_module_reads_no_switch() {
             !code.contains(forbidden),
             "the floor's CODE consults `{forbidden}` — a floor with an off \
              switch is not a floor"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The bypass chain the floor's placement used to leave open
+// ---------------------------------------------------------------------------
+
+/// Step 1 of the two-step bypass, pinned as DELIBERATE rather than fixed.
+///
+/// The floor does not refuse `BashTool` authoring a skill under the profile
+/// root: `skills` is not an authority leaf, and a protected root matches only
+/// by exact equality, never as a prefix. That is the right call — "create a
+/// skill for me" is ordinary, legitimate work, the `SkillDrafter` writes into
+/// that same tree on its own, and broadening the floor to a prefix match over
+/// `~/.wayland` would refuse both.
+///
+/// But it is only the right call BECAUSE step 2 is now closed. Until the floor
+/// moved to `wcore-config` and `wcore_skills::shell` began calling it, this
+/// permitted write was the first half of a complete bypass: the skill written
+/// here would, on the next session, run its `` !`…` `` directive under `sh -c`
+/// with no floor at all, reaching exactly the authority state a direct command
+/// is refused. See `wcore-skills/tests/skill_shell_command_floor.rs`.
+///
+/// So this test is load-bearing in a way its assertion does not show: if
+/// someone ever makes it fail by widening the floor, the widening — not this
+/// test — is the thing to re-examine, and if someone makes step 2 waivable
+/// again this test silently becomes the description of a hole.
+#[tokio::test]
+async fn bash_may_still_author_a_user_skill() {
+    open_every_hatch();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+
+    // Named through the DEFAULT profile root, which `protected_roots` always
+    // carries — so this is the strongest form of the question, not the weakest.
+    let cmd = "mkdir -p ~/.wayland/skills/demo";
+    for (name, out) in all_entry_points(cmd, &root).await {
+        assert!(
+            !out.content.contains(AUTHORITY),
+            "{name}: the floor refused ordinary skill authoring. That is not a \
+             free tightening — it also refuses the SkillDrafter's own tree. If \
+             this was intentional, the two-step-bypass note above needs \
+             rewriting, not deleting."
         );
     }
 }

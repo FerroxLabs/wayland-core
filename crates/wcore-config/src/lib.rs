@@ -22,6 +22,7 @@ pub mod catalog;
 // `wcore_providers::OpenAIChatGptProvider::list_models`.
 pub mod chatgpt_catalog;
 // W8c.2 F.1: CuaConfig TOML schema (consumed by wcore-cua::adapter::from_spec).
+pub mod command_floor;
 pub mod compact;
 pub mod compat;
 pub mod confidential_blob;

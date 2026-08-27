@@ -1,5 +1,6 @@
 use futures::future::join_all;
 use regex::Regex;
+use std::path::Path;
 use std::sync::OnceLock;
 
 use crate::types::LoadedFrom;
@@ -28,6 +29,29 @@ pub async fn execute_shell_commands(
     let matches = extract_shell_matches(content);
     if matches.is_empty() {
         return Ok(content.to_owned());
+    }
+
+    // #693 — the non-bypassable command floor, asked of EVERY directive
+    // before any of them runs.
+    //
+    // Pre-screened as a set rather than only per-command, because the
+    // directives below execute in PARALLEL: checking each one only at its own
+    // spawn point would let a skill pair a refused directive with a
+    // side-effecting one and still get the side effect. Nothing in the body
+    // runs unless the whole body is admissible.
+    //
+    // `execute_command` asks again at the spawn point. That is not redundant:
+    // it is what keeps the floor under any future caller that reaches the
+    // shell without coming through here.
+    for m in &matches {
+        if let Some(reason) =
+            wcore_config::command_floor::check_command_floor(&m.command, Some(Path::new(cwd)))
+        {
+            return Err(ShellExecutionError::FloorRefused {
+                pattern: m.full_match.clone(),
+                reason,
+            });
+        }
     }
 
     // Execute all commands in parallel
@@ -80,6 +104,16 @@ pub enum ShellExecutionError {
 
     #[error("Shell execution blocked for MCP skill")]
     McpBlocked,
+
+    /// #693 — refused by the non-bypassable command floor.
+    ///
+    /// An ERROR rather than a silent substitution, deliberately.
+    /// [`execute_shell_commands`] is fail-fast, so a refused directive fails
+    /// the whole skill body: a skill whose shell-out was refused must not go
+    /// on to load looking as though it had succeeded, because its remaining
+    /// content was written on the assumption that the directive ran.
+    #[error("Refused by the command floor for pattern \"{pattern}\": {reason}")]
+    FloorRefused { pattern: String, reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +243,18 @@ fn extract_shell_matches(content: &str) -> Vec<ShellMatch> {
 
 /// Execute a single shell command and return its combined stdout/stderr output.
 async fn execute_command(command: &str, cwd: &str) -> Result<String, ShellExecutionError> {
+    // #693 — the floor, at the point of no return. `execute_shell_commands`
+    // has already screened the whole set; this is the copy that survives a
+    // future caller which has not.
+    if let Some(reason) =
+        wcore_config::command_floor::check_command_floor(command, Some(Path::new(cwd)))
+    {
+        return Err(ShellExecutionError::FloorRefused {
+            pattern: command.to_owned(),
+            reason,
+        });
+    }
+
     let output = wcore_config::shell::shell_command_builder(command)
         .current_dir(cwd)
         .output()
