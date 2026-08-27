@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use wcore_config::compact::CompactConfig;
 use wcore_providers::{LlmProvider, ProviderError};
 use wcore_types::compact::{CompactMetadata, CompactTrigger};
-use wcore_types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
+use wcore_types::llm::{FluxLoopIntent, LlmEvent, LlmRequest, ThinkingConfig};
 use wcore_types::message::{ContentBlock, Message, Role, TokenUsage};
 
 use super::prompt::{
@@ -20,6 +20,29 @@ use super::state::CompactState;
 
 /// Maximum number of prompt-too-long retries.
 const MAX_PTL_RETRIES: u32 = 2;
+
+/// #863 F2/F3 - the loop-ownership provenance a compaction turn carries.
+///
+/// Compaction is a real provider turn on the SAME task the surrounding loop is
+/// climbing, so it must be marked the way that loop's ordinary turns are. Sent
+/// unmarked it reaches a Flux router as anonymous traffic: cacheable across
+/// builders, and eligible for the router's OWN server-side Elevation ladder on
+/// mid-loop material - exactly the two-ladder collision #863 exists to
+/// prevent. The engine therefore threads the live session's intent down here
+/// instead of the request field being hardcoded `None`.
+///
+/// `Default` is the unmarked case: an ordinary session, or any caller that owns
+/// no loop. It keeps the request byte-identical to the pre-#863 shape, so a
+/// non-Flux endpoint is unaffected.
+#[derive(Debug, Clone, Default)]
+pub struct CompactLoopProvenance {
+    /// Who owns the outer loop for this turn - `ClientOwned("anvil")` on an
+    /// Anvil builder fork. `None` leaves the compaction request unmarked.
+    pub intent: Option<FluxLoopIntent>,
+    /// F3 per-turn cache variance. Rides only alongside `intent`; the provider
+    /// drops a nonce on unmarked traffic.
+    pub nonce: Option<String>,
+}
 
 /// Content prefix for the compact boundary marker message.
 pub const BOUNDARY_PREFIX: &str = "[Conversation compacted]";
@@ -192,6 +215,7 @@ pub async fn autocompact(
     model: &str,
     config: &CompactConfig,
     state: &mut CompactState,
+    provenance: &CompactLoopProvenance,
 ) -> Result<CompactResult, CompactError> {
     // Circuit breaker check
     if state.is_circuit_broken(config) {
@@ -229,8 +253,8 @@ pub async fn autocompact(
 
     let summary_text = loop {
         let request = LlmRequest {
-            flux_loop_intent: None,
-            flux_turn_nonce: None,
+            flux_loop_intent: provenance.intent.clone(),
+            flux_turn_nonce: provenance.nonce.clone(),
             model: compact_model.to_string(),
             system: COMPACT_SYSTEM_PROMPT.to_string(),
             messages: conv_messages.clone(),
@@ -665,6 +689,7 @@ mod tests {
             "premium-model",
             &config,
             &mut state,
+            &Default::default(),
         )
         .await
         .expect("autocompact should succeed");
@@ -694,6 +719,7 @@ mod tests {
             "premium-model",
             &config,
             &mut state,
+            &Default::default(),
         )
         .await
         .expect("autocompact should succeed");
