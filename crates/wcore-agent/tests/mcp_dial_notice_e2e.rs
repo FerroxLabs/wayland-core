@@ -1,10 +1,18 @@
 //! The boot MCP dial must not take a session's opening seconds in silence.
 //!
 //! End-to-end through the real `AgentBootstrap::build()`, against a real
-//! stdio server that never speaks MCP — `sleep`, which is the reproducer that
-//! produced the measurement this exists for: on 0.13.8 a `message` sent with
-//! one such server configured put NOTHING on the wire for 30.3 s, then
+//! stdio server that never speaks MCP. The reproducer that produced the
+//! measurement this exists for was `sleep 3600`: on 0.13.8 a `message` sent
+//! with one such server configured put NOTHING on the wire for 30.3 s, then
 //! `mcp_failed`, then `stream_start`.
+//!
+//! The fixture is no longer literally `sleep`. `sleep` is not a Windows
+//! command — it is `C:\Program Files\Git\usr\bin\sleep.exe` — so that
+//! spelling quietly made "Git for Windows is installed" a requirement of this
+//! test, and it gave the test no way to name the process it started. The mute
+//! server is now this test binary re-executed in mute mode
+//! (`wcore_mcp::test_utils::mute_server`), which exists on every platform and
+//! publishes its pid.
 //!
 //! Not a unit test of the notice helper (that lives beside it in
 //! `mcp_dial_notice.rs`). This is the WIRING: the surfaces that reach
@@ -18,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use wcore_agent::bootstrap::AgentBootstrap;
 use wcore_agent::output::OutputSink;
@@ -26,10 +34,18 @@ use wcore_agent::test_utils::{TestSink, TestSinkHandle};
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, McpServerConfig, ProviderType, TransportType};
 
+/// Not a test — the mute MCP server. See `mute_server::serve_if_requested`.
+#[test]
+fn mute_server_helper() {
+    wcore_mcp::test_utils::mute_server::serve_if_requested();
+}
+
 /// A server that accepts the spawn and then never says anything. The dial
 /// cannot distinguish this from a server still starting up, which is exactly
 /// why it has a deadline and exactly why the deadline needs announcing.
-fn config_with_a_server_that_never_speaks() -> Config {
+fn config_with_a_server_that_never_speaks(pid_file: &std::path::Path) -> Config {
+    let (command, args, env) =
+        wcore_mcp::test_utils::mute_server::launch_parts("mute_server_helper", pid_file);
     let mut config = Config {
         provider_label: "openai".into(),
         provider: ProviderType::OpenAI,
@@ -45,9 +61,9 @@ fn config_with_a_server_that_never_speaks() -> Config {
         "mute".to_string(),
         McpServerConfig {
             transport: TransportType::Stdio,
-            command: Some("sleep".to_string()),
-            args: Some(vec!["3600".to_string()]),
-            env: None,
+            command: Some(command),
+            args: Some(args),
+            env: Some(env),
             url: None,
             headers: None,
             deferred: None,
@@ -74,10 +90,11 @@ async fn a_boot_dial_that_hangs_announces_itself_instead_of_going_quiet() {
     let events = sink.handle();
     let output: Arc<dyn OutputSink> = Arc::new(sink);
     let workdir = tempfile::TempDir::new().expect("workdir");
+    let pid_file = workdir.path().join("mute-server.pid");
 
     let started = Instant::now();
     let result = AgentBootstrap::new(
-        config_with_a_server_that_never_speaks(),
+        config_with_a_server_that_never_speaks(&pid_file),
         workdir.path().to_str().expect("utf8 workdir"),
         output,
     )
@@ -122,5 +139,18 @@ async fn a_boot_dial_that_hangs_announces_itself_instead_of_going_quiet() {
     assert!(
         took < wcore_mcp::manager::CONNECT_TIMEOUT * 3,
         "the dial ran far past its own per-server deadline: {took:?}"
+    );
+
+    // Giving up on a server has to mean the process is gone. It did not on
+    // Windows: the deadline killed the `cmd /C` shim and the real server
+    // survived, still holding the pipes it inherited — which leaked a process
+    // per session and left this test's own runtime unable to shut down,
+    // because the blocking reads those pipes are served by never returned.
+    // The pid is read, not searched for, so this cannot pass by finding
+    // nothing.
+    let pid = wcore_mcp::test_utils::mute_server::wait_for_pid(&pid_file, Duration::from_secs(5));
+    assert!(
+        wcore_mcp::test_utils::mute_server::wait_until_gone(pid, Duration::from_secs(10)),
+        "the mute MCP server (pid {pid}) outlived the dial that gave up on it"
     );
 }

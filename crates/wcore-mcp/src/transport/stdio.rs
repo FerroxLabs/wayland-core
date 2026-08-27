@@ -35,6 +35,12 @@ const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(120);
 /// dead (mirrors the timeout/kill path).
 const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Bound on reaping the direct child in [`StdioTransport::close`] after the
+/// process tree has already been terminated. Small on purpose: by this point
+/// the kill has been issued and the only thing being awaited is the OS
+/// updating its bookkeeping.
+const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Stdio transport: communicates with an MCP server over a child process's
 /// stdin/stdout using newline-delimited JSON-RPC.
 ///
@@ -53,11 +59,22 @@ pub struct StdioTransport {
     ///
     /// Unix-only, matching its three readers and the `cfg(unix)`
     /// `cmd.process_group(0)` that gives it meaning. Windows has no process
-    /// group to signal — descendant cleanup there is `kill_on_drop` plus the
-    /// Job Object — so on Windows this field was written at spawn and never
-    /// read again.
+    /// group to signal; its equivalent is [`Self::job`].
     #[cfg(unix)]
     process_group_id: Option<u32>,
+    /// Windows descendant ownership. The exact counterpart of
+    /// `process_group_id`: killing the direct child reaps ONE pid, and the
+    /// direct child on Windows is the `cmd /C` shim, so the real server
+    /// (`npx`->`node`, `uvx`->`python`) survives as an orphan still holding
+    /// the inherited stdout/stderr pipe write handles. Terminating this job
+    /// kills the whole tree, which is also what lets the reader observe EOF.
+    ///
+    /// `Some` for every successfully spawned child: the transport refuses to
+    /// run an unowned tree, so a failed attach fails the spawn. It is an
+    /// `Option` only so `close()`/`Drop` can take it and terminate exactly
+    /// once.
+    #[cfg(windows)]
+    job: std::sync::Mutex<Option<wcore_types::job_object::WindowsJobObject>>,
     next_id: AtomicU64,
     /// Pending request→response channels, keyed by JSON-RPC id.
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
@@ -561,16 +578,46 @@ impl StdioTransport {
         // `sh` PID and the real server is orphaned. `process_group(0)` makes
         // the child's PGID equal its own PID (it becomes the group leader), so
         // `kill(-pid, SIGKILL)` in `kill_process_group` signals every
-        // descendant. Windows keeps its existing `kill_on_drop` / Job-Object
-        // behavior (untouched).
+        // descendant.
         #[cfg(unix)]
         cmd.process_group(0);
+
+        // Windows has no process group. The same subtree — `cmd /C` shim ->
+        // `npx`/`uvx` -> node/python — is owned by a kill-on-close Job Object
+        // instead. The child is created SUSPENDED so it cannot fork a
+        // descendant outside the job before the assignment lands; `attach`
+        // resumes it once the kernel has accepted it.
+        #[cfg(windows)]
+        wcore_types::job_object::WindowsJobObject::create_suspended(cmd.as_std_mut());
 
         let mut child = cmd
             .spawn()
             .map_err(|e| McpError::Transport(format!("Failed to spawn '{}': {}", command, e)))?;
         #[cfg(unix)]
         let process_group_id = child.id();
+
+        // The child is still suspended here. Own it or kill it — never leave a
+        // frozen, unowned process behind, and never run an unowned tree.
+        #[cfg(windows)]
+        let job = match child
+            .id()
+            .ok_or_else(|| McpError::Transport("spawned MCP child reported no PID".to_string()))
+        {
+            Ok(pid) => match wcore_types::job_object::WindowsJobObject::attach(pid) {
+                Ok(job) => job,
+                Err(error) => {
+                    let _ = child.start_kill();
+                    return Err(McpError::Transport(format!(
+                        "Failed to take process-tree ownership of '{}': {}",
+                        command, error
+                    )));
+                }
+            },
+            Err(error) => {
+                let _ = child.start_kill();
+                return Err(error);
+            }
+        };
 
         let stdin = child
             .stdin
@@ -604,6 +651,8 @@ impl StdioTransport {
             child: Mutex::new(child),
             #[cfg(unix)]
             process_group_id,
+            #[cfg(windows)]
+            job: std::sync::Mutex::new(Some(job)),
             next_id: AtomicU64::new(1),
             pending,
             reader_task: Mutex::new(Some(reader_task)),
@@ -766,6 +815,25 @@ impl StdioTransport {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Kill the Windows process tree this transport owns. Idempotent: the
+    /// job handle is taken on the first call, so the second is a no-op.
+    ///
+    /// The Windows counterpart of [`kill_process_group`]. Both are called
+    /// from all three cleanup paths — `mark_dead`, `close` and `Drop` — so
+    /// neither platform has a route that reaps only the direct child.
+    #[cfg(windows)]
+    fn kill_process_tree(&self) {
+        // A poisoned lock still means "some thread owned this job"; taking the
+        // inner value is all that matters, so recover rather than propagate.
+        let mut guard = match self.job.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(job) = guard.take() {
+            job.terminate();
+        }
+    }
+
     /// Mark the child dead and kill it. Idempotent. Used on timeout
     /// (audit C1/C7) so a wedged server can't poison subsequent requests.
     async fn mark_dead(&self) {
@@ -778,6 +846,9 @@ impl StdioTransport {
         if let Some(process_group_id) = self.process_group_id {
             let _ = kill_process_group(process_group_id);
         }
+        // Windows equivalent: kill the job first, for the same reason.
+        #[cfg(windows)]
+        self.kill_process_tree();
         let _ = child.start_kill();
     }
 
@@ -907,13 +978,32 @@ impl McpTransport for StdioTransport {
             let group_cleanup_error = self
                 .process_group_id
                 .and_then(|process_group_id| kill_process_group(process_group_id).err());
+            // Windows equivalent: terminate the job, which is what actually
+            // closes the grandchildren's inherited pipe write handles and so
+            // lets the reader below reach EOF instead of parking forever.
+            #[cfg(windows)]
+            self.kill_process_tree();
             if child.try_wait()?.is_none() {
                 child.start_kill().map_err(|error| {
                     McpError::Transport(format!("failed to kill MCP child: {error}"))
                 })?;
-                child.wait().await.map_err(|error| {
-                    McpError::Transport(format!("failed to reap MCP child: {error}"))
-                })?;
+                // Bounded. `wait()` is the direct child only, and it is
+                // already dead, so this returns in microseconds in every
+                // observed case — but an unbounded await on a process the OS
+                // is slow to reap would put a second full connect deadline on
+                // a path whose whole job is to give up. Elapsing here is not a
+                // cleanup failure: the tree is already terminated above.
+                match timeout(CHILD_REAP_TIMEOUT, child.wait()).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        return Err(McpError::Transport(format!(
+                            "failed to reap MCP child: {error}"
+                        )));
+                    }
+                    Err(_) => warn!(
+                        "[mcp] stdio child did not reap within {CHILD_REAP_TIMEOUT:?} — abandoning it"
+                    ),
+                }
             }
             #[cfg(unix)]
             if let Some(error) = group_cleanup_error {
@@ -948,9 +1038,10 @@ impl McpTransport for StdioTransport {
 
 impl Drop for StdioTransport {
     fn drop(&mut self) {
-        // `shell_command_builder` sets `kill_on_drop(true)`, so dropping the
-        // `Child` reaps the OS process. Abort the background tasks so they
-        // don't outlive the transport.
+        // `shell_command_builder` sets `kill_on_drop(true)`, which reaps the
+        // DIRECT child only — the `sh -c` / `cmd /C` shim. Descendants need
+        // the process group (unix) or the job (Windows) below. Abort the
+        // background tasks so they don't outlive the transport.
         if let Ok(mut guard) = self.reader_task.try_lock()
             && let Some(handle) = guard.take()
         {
@@ -965,6 +1056,8 @@ impl Drop for StdioTransport {
         if let Some(process_group_id) = self.process_group_id {
             let _ = kill_process_group(process_group_id);
         }
+        #[cfg(windows)]
+        self.kill_process_tree();
     }
 }
 

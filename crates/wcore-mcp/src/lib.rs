@@ -4,6 +4,8 @@ pub mod malware_gate;
 pub mod manager;
 pub mod protocol;
 pub mod server;
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
 pub mod tool_proxy;
 pub mod transport;
 pub mod transports;

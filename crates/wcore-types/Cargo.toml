@@ -15,11 +15,10 @@ chrono.workspace      = true
 thiserror.workspace   = true
 sha2.workspace        = true
 
-# `process_liveness` only. This crate holds no other OS-facing code and should
-# not acquire any: the module is one enum plus two functions, it spawns
-# nothing and signals nothing. Both deps are target-gated leaf system crates
-# with no transitive Rust dependencies, so they cost nothing on the platform
-# that does not select them.
+# `process_liveness` and `job_object` only. This crate holds no other OS-facing
+# code and should not acquire any. Both deps are target-gated leaf system
+# crates with no transitive Rust dependencies, so they cost nothing on the
+# platform that does not select them.
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
@@ -27,6 +26,10 @@ libc.workspace = true
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_System_Threading",
+  # `job_object`: CreateJobObjectW / AssignProcessToJobObject, and the thread
+  # snapshot used to resume a CREATE_SUSPENDED child once it is in the job.
+  "Win32_System_JobObjects",
+  "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 # tests/real_zombie.rs asserts that the OLD probe shape reports a real corpse

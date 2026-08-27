@@ -8,6 +8,11 @@ pub mod crucible;
 pub mod execution_policy;
 pub mod file_state;
 pub mod goal;
+// Windows kill-on-close Job Object — the only kernel-backed way to own a
+// process TREE on Windows. Lives beside `process_liveness` and for the same
+// AGENTS.md reason: `wcore-sandbox` and `wcore-mcp` both need it, and this is
+// the only crate both already depend on. Whole module is `cfg(windows)`.
+pub mod job_object;
 pub mod llm;
 pub mod message;
 pub mod model_aliases;
