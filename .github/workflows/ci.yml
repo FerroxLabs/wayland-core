@@ -887,6 +887,18 @@ jobs:
             exit 1
           fi
 
+      # Regression gate for FerroxLabs/wayland#1100, and the ONLY step in CI
+      # that can observe this class. `nextest` runs every test in its own
+      # process, so a test whose precondition is a cold process-global cache is
+      # green under it no matter what a sibling does. `cargo test` runs the
+      # whole lib suite in ONE process, and `--test-threads=1` makes the
+      # ordering deterministic, so a cache-warming sibling that runs first is
+      # guaranteed to be observed here. This is Windows-only because the probe
+      # cache lives in the `#[cfg(windows)]` AppContainer backend.
+      - name: Regression gate — wcore-sandbox lib suite in ONE process (#1100)
+        if: ${{ !cancelled() }}
+        run: vx cargo test -p wcore-sandbox --lib -- --test-threads=1
+
       # Windows has no other clippy supplier: `ci-linux` and the macOS leg
       # cannot compile the `#[cfg(windows)]` branches at all. Runs AFTER the
       # tests (and under `!cancelled()`) so a lint red cannot suppress the test

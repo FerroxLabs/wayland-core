@@ -93,6 +93,33 @@ pub(super) fn probe_cache() -> &'static Mutex<ProbeCache> {
     CACHE.get_or_init(|| Mutex::new(ProbeCache::new()))
 }
 
+/// Test-only isolation lock for every test that reads or warms [`probe_cache`].
+///
+/// The cache is process-global and `cargo test` runs the whole lib suite in ONE
+/// process, so a test that needs a cold cache cannot obtain one from the
+/// scheduler: any sibling that reaches the availability gate warms it first
+/// under `--test-threads=1`, and only misses it by luck under the default
+/// parallel runner (FerroxLabs/wayland#1100). Every such test takes this lock
+/// as its first statement, so the reset-then-read window cannot be interleaved.
+#[cfg(test)]
+pub(super) fn probe_isolation() -> &'static Mutex<()> {
+    static ISOLATION: OnceLock<Mutex<()>> = OnceLock::new();
+    ISOLATION.get_or_init(|| Mutex::new(()))
+}
+
+/// Test-only: return the process-global probe cache to its cold state.
+///
+/// Callers must already hold [`probe_isolation`]. Poison is absorbed rather
+/// than unwrapped so a single panicking test does not cascade into every
+/// sibling that shares the cache.
+#[cfg(test)]
+pub(super) fn reset_probe_cache_for_test() {
+    let mut cache = probe_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *cache = ProbeCache::new();
+}
+
 /// Single-flight gate for the availability probe (FerroxLabs/wayland#754).
 ///
 /// The probe cache alone does NOT prevent a stampede: when the cache is

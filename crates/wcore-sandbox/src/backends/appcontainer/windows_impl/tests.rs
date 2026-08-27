@@ -436,7 +436,14 @@ async fn allow_hosts_rejected() {
 /// suite so a missing opt-in cannot be misreported as a passing spawn.
 #[tokio::test]
 #[ignore = "explicit native Windows AppContainer acceptance"]
+#[allow(clippy::await_holding_lock)] // holding it across the await IS the serialisation
 async fn echo_runs_live() {
+    // The probe cache is process-global and every test that reaches the
+    // availability gate warms it, so cache-touching tests must not run
+    // concurrently with the one that needs it cold (#1100).
+    let _isolation = probe_isolation()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
         Ok("1")
@@ -476,7 +483,14 @@ async fn echo_runs_live() {
 /// `echo_runs_live`.
 #[tokio::test]
 #[ignore = "explicit native Windows AppContainer acceptance"]
+#[allow(clippy::await_holding_lock)] // holding it across the await IS the serialisation
 async fn large_output_survives_live() {
+    // The probe cache is process-global and every test that reaches the
+    // availability gate warms it, so cache-touching tests must not run
+    // concurrently with the one that needs it cold (#1100).
+    let _isolation = probe_isolation()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
         Ok("1")
@@ -527,7 +541,14 @@ async fn large_output_survives_live() {
 /// backend's copy of it.
 #[tokio::test]
 #[ignore = "explicit native Windows AppContainer acceptance"]
+#[allow(clippy::await_holding_lock)] // holding it across the await IS the serialisation
 async fn output_past_the_cap_is_truncated_not_discarded_live() {
+    // The probe cache is process-global and every test that reaches the
+    // availability gate warms it, so cache-touching tests must not run
+    // concurrently with the one that needs it cold (#1100).
+    let _isolation = probe_isolation()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
         Ok("1")
@@ -824,12 +845,27 @@ async fn windows_retained_cwd_bind_survives_a_pathname_substitution() {
 /// then reads the production process-global probe cache. If selection probes
 /// again, the cache is populated and this goes red.
 ///
-/// The cache is process-global and `nextest` runs each test in its own process,
-/// so the cold precondition is real. The final block is the anti-vacuity
-/// control: it drives the SAME cache through the production `is_available()` to
-/// prove the observation would have caught a probe if one had happened.
+/// The cache is process-global, so the cold precondition is established here
+/// rather than inherited from the runner: this test takes `probe_isolation()`
+/// and resets the cache itself, which is what makes it green under
+/// `cargo test -- --test-threads=1` as well as under `nextest` (#1100). The
+/// final block is the anti-vacuity control: it drives the SAME cache through
+/// the production `is_available()` to prove the observation would have caught a
+/// probe if one had happened.
 #[test]
 fn session_selection_reaches_ready_without_running_the_appcontainer_probe() {
+    // The cold-cache precondition below used to be inherited from the
+    // scheduler: the cache is process-global, `cargo test` runs the whole lib
+    // suite in ONE process, and a sibling that reaches the availability gate
+    // warms it. Under `--test-threads=1` that sibling always won and this test
+    // was deterministically red; under the default runner it passed on luck
+    // (#1100). Take the isolation lock and establish the precondition by
+    // construction instead.
+    let _isolation = probe_isolation()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_probe_cache_for_test();
+
     // `WAYLAND_SANDBOX` would route selection down the docker / refusal arms
     // instead of the platform cascade under test.
     assert!(
@@ -839,8 +875,8 @@ fn session_selection_reaches_ready_without_running_the_appcontainer_probe() {
     assert_eq!(
         settled_verdict(),
         None,
-        "precondition: the probe cache must be cold at the start of this process — \
-         run this test with `cargo nextest run` (process per test)"
+        "the probe-cache reset did not take — `reset_probe_cache_for_test` must leave \
+         the cache cold before session selection runs"
     );
 
     let registry =
@@ -1076,7 +1112,14 @@ fn a_stalled_probe_is_not_retried_because_that_multiplies_the_hang() {
 /// CI log of every Windows leg, on every runner, without anyone attaching a
 /// debugger or installing a tracing subscriber.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // holding it across the await IS the serialisation
 async fn a_failed_probe_records_a_cause_the_operator_can_actually_read() {
+    // The probe cache is process-global and every test that reaches the
+    // availability gate warms it, so cache-touching tests must not run
+    // concurrently with the one that needs it cold (#1100).
+    let _isolation = probe_isolation()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Drive the PRODUCTION path. `execute` runs the guarded probe through
     // `spawn_blocking` itself, so this is what an operator's first command does
     // — not a hand-rolled probe call that could diverge from it.
@@ -1267,7 +1310,14 @@ fn a_clean_teardown_passes_the_execution_result_through_untouched() {
 /// fix introduces, and it is what the lease-recovery sweep exists for.
 #[tokio::test]
 #[ignore = "explicit native Windows AppContainer acceptance"]
+#[allow(clippy::await_holding_lock)] // holding it across the await IS the serialisation
 async fn cleanup_timeout_reports_the_completed_command_as_completed() {
+    // The probe cache is process-global and every test that reaches the
+    // availability gate warms it, so cache-touching tests must not run
+    // concurrently with the one that needs it cold (#1100).
+    let _isolation = probe_isolation()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
         Ok("1")
