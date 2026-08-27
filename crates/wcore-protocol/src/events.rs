@@ -1191,6 +1191,14 @@ pub enum ProtocolEvent {
         /// Stable failure class (`http_503`, `timeout`, `stream_truncated`, ...).
         #[serde(skip_serializing_if = "Option::is_none")]
         failure: Option<String>,
+        /// #372: 1-based ordinal of this physical attempt within the current
+        /// turn. Counting `provider_attempt` frames is NOT equivalent — this
+        /// event is additive, so a host pinned below the minor that introduced
+        /// it drops it under the W0 decoder contract, and a host that attaches
+        /// mid-run never saw the earlier frames at all. Either way the ordinal
+        /// it never received is unrecoverable unless the frame carries it.
+        #[serde(default)]
+        attempt: u32,
     },
     /// Core scheduled another provider attempt after a typed failure. Kept
     /// separate from `ProviderAttempt` so a retry decision never inflates the
@@ -1198,6 +1206,16 @@ pub enum ProtocolEvent {
     ProviderRetry {
         #[serde(skip_serializing_if = "Option::is_none")]
         failure: Option<String>,
+        /// #372: 1-based ordinal of this retry decision within the current
+        /// turn — the retry count the ticket asks to be surfaced separately
+        /// from the run timer. `1` is the first re-send after the first
+        /// failure, and the sequence restarts at `1` on the next turn, so a
+        /// host renders "retry 2 of this step" rather than a running total
+        /// that never resets. Every retry source shares the sequence: the
+        /// provider ring, the stream-error re-send, the single context-overflow
+        /// compaction retry and the orphaned-tool-pair repair.
+        #[serde(default)]
+        retry: u32,
     },
     /// A typed provider failure discovered after the physical send completed
     /// (for example a truncated SSE body). It does not imply a retry.

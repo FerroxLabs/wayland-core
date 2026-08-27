@@ -90,6 +90,17 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // it either sees the frame or it does not — so the version is the only way a
 // pinned host learns the route is now answerable.
 //
+// 20 -> 21: `provider_retry_count_v1` (#372). `provider_attempt` gains
+// `attempt` and `provider_retry` gains `retry`, each the 1-based ordinal within
+// the turn. Two already-published shapes move, so the wire-shape gate refuses
+// the regeneration under a standing 1.20 and forces this bump — which is that
+// gate deciding the version question it exists to force. `major` holds at 1:
+// both events already published `additionalProperties: true`, so a host that
+// has never heard of the fields validates and renders exactly as before. The
+// ticket asks for a retry count by name, and counting frames cannot supply one:
+// these events are additive, so a host pinned below the minor that introduced
+// them drops them, and a host attaching mid-run never saw the earlier ones.
+//
 // ON THE GAP BETWEEN 16 AND 19. The last TAGGED contract is 1.16 — v0.13.5,
 // v0.13.6 and `main` all publish it. 17 and 18 were assembled on this branch
 // and never reached a tag, so no host has ever pinned them. The entries above
@@ -97,8 +108,8 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // gap: each records why a specific widening needed a signal, and rewriting them
 // to look consecutive would destroy that reasoning to tidy a sequence no host
 // reads. A pinned host moves 1.16 -> 1.19 and finds every capability named.
-pub const CONTRACT_MINOR: u64 = 20;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/20";
+pub const CONTRACT_MINOR: u64 = 21;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/21";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases

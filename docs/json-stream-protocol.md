@@ -2033,22 +2033,63 @@ additive diagnostics: hosts that do not recognize them MUST drop them silently
 under the Host Decoder Contract.
 
 ```json
-{ "type": "provider_attempt", "failure": "http_503" }
-{ "type": "provider_retry", "failure": "http_503" }
-{ "type": "provider_attempt" }
+{ "type": "provider_attempt", "failure": "http_503", "attempt": 1 }
+{ "type": "provider_retry", "failure": "http_503", "retry": 1 }
+{ "type": "provider_attempt", "attempt": 2 }
 { "type": "provider_failure", "failure": "stream_truncated" }
 ```
 
 | Event | Field | Type | Description |
 |---|---|---|---|
 | `provider_attempt` | `failure` | string? | One physical provider request. Omitted when that request reached a usable response. |
+| `provider_attempt` | `attempt` | number | 1-based ordinal of this physical request within the current turn. |
 | `provider_retry` | `failure` | string? | Core scheduled another request after the typed failure. This is not an additional physical-attempt count. |
+| `provider_retry` | `retry` | number | 1-based ordinal of this retry decision within the current turn — the retry count, so a host can show "retry 2 of this step" without keeping its own tally. |
 | `provider_failure` | `failure` | string | A failure discovered after the physical request completed, such as a truncated SSE body. It does not by itself imply a retry. |
+
+`attempt` and `retry` are scoped to ONE turn and restart at `1` on the next
+turn, so they never read as a running total for the run. `retry` counts every
+source of a re-send equally: the provider retry ring, the stream-error re-send,
+the single context-overflow compaction retry, and the orphaned-tool-pair repair.
+Hosts SHOULD read the ordinal from the frame rather than counting frames — these
+events are additive, so a host pinned to an older contract minor drops them, and
+a host that attaches mid-run never received the earlier ones.
 
 `failure` is a stable machine-readable class such as `http_429`, `http_503`,
 `timeout`, `connection`, `stream_truncated`, `context_overflow`, or
 `egress_denied`. Hosts MUST treat the value as an open string and MUST NOT parse
 human-readable provider error messages to infer it.
+
+### 1.N+5a-2 route_info (#372)
+
+Once per committed turn, Core publishes the route that turn actually dispatched
+against. `provider` alone cannot answer "did this step run locally or in the
+cloud?": a local Ollama server and a cloud OpenAI-compatible gateway are both
+driven as `provider = "openai"`, so the two runs are indistinguishable on every
+other route-bearing field. Additive: hosts that do not recognize it MUST drop it
+silently under the Host Decoder Contract.
+
+```json
+{ "type": "route_info", "route": { "turn": 0, "provider": "openai", "model": "qwen3:8b", "base_url": "http://127.0.0.1:11434/v1", "local": true } }
+{ "type": "route_info", "route": { "turn": 1, "provider": "openai", "model": "qwen3:8b", "base_url": "https://openrouter.ai/api/v1", "local": false } }
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `turn` | number | Zero-based turn index this route was dispatched for. |
+| `provider` | string | Structured provider id, same vocabulary as `turn_cost.provider`. |
+| `model` | string | The model actually dispatched this turn, after any tier swap. |
+| `base_url` | string? | The resolved endpoint, scrubbed. Omitted when the provider resolved no explicit endpoint (SDK-default routing). |
+| `local` | boolean | True when `base_url` resolves to a loopback, link-local or private host. False when there is no endpoint. |
+
+`base_url` arrives with userinfo, query string and fragment REMOVED, because a
+base URL can carry an API key in either. Hosts MUST NOT reconstruct an endpoint
+from this field for use as a request target; it is a diagnostic.
+
+`local` is decided against a parsed IP literal, never a string prefix. A host
+MUST NOT re-derive it by inspecting `base_url` — `https://127.0.0.1.evil.example.com/v1`
+is a registrable public name that a prefix test reads as loopback, and this flag
+is what a user trusts to conclude their prompt never left the machine.
 
 ### 1.N+5b capability_activation (F05)
 

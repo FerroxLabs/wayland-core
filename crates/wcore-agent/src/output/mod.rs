@@ -248,10 +248,15 @@ pub trait OutputSink: Send + Sync {
 
     /// Emit one physical provider attempt with its typed outcome. Default
     /// no-op for non-protocol sinks; JSON-stream output is always-on evidence.
-    fn emit_provider_attempt(&self, _failure: Option<&str>) {}
+    /// `attempt` is the 1-based ordinal of this send within the current turn
+    /// (#372).
+    fn emit_provider_attempt(&self, _failure: Option<&str>, _attempt: u32) {}
 
     /// Emit an actual Core retry decision, separately from the physical send.
-    fn emit_provider_retry(&self, _failure: Option<&str>) {}
+    /// `retry` is the 1-based ordinal of this retry within the current turn
+    /// (#372) — the retry count the ticket asks to be shown separately from
+    /// the run timer.
+    fn emit_provider_retry(&self, _failure: Option<&str>, _retry: u32) {}
 
     /// Emit a typed provider failure without claiming another physical send or
     /// retry decision.

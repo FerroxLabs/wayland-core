@@ -755,22 +755,24 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "semantic_failover_receipts"
     ),
     // One physical provider request attempt. `failure` is absent on a clean
-    // attempt, so nothing beyond the discriminator is required.
+    // attempt; `attempt` is present on every one (#372), so it is required.
     wire!(
         "provider_attempt",
         "events/provider_attempt.json",
-        [],
+        ["attempt"],
         Observational,
         "session",
         "available"
     ),
     // A scheduled retry decision. Deliberately a separate variant from
     // `provider_attempt` so a host counting physical attempts never
-    // double-counts a decision.
+    // double-counts a decision. `retry` (#372) is the ordinal within the turn
+    // and is always present, so a host never has to derive the count by
+    // counting frames it may not have received.
     wire!(
         "provider_retry",
         "events/provider_retry.json",
-        [],
+        ["retry"],
         Observational,
         "session",
         "available"
@@ -2118,12 +2120,15 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
         ("events/pong.json".into(), ProtocolEvent::Pong),
         // `failure` is optional on both attempt and retry: a clean attempt
         // carries none. The fixtures populate it so the published schema
-        // describes the field a host has to read, and `required` stays at the
-        // discriminator alone so a clean attempt still validates.
+        // describes the field a host has to read, and `failure` stays out of
+        // `required` so a clean attempt still validates. #372's ordinals are
+        // NOT optional — the fixtures carry a value past 1 so the published
+        // schema cannot be read as a constant.
         (
             "events/provider_attempt.json".into(),
             ProtocolEvent::ProviderAttempt {
                 failure: Some("http_503".into()),
+                attempt: 2,
             },
         ),
         (
@@ -2149,6 +2154,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             "events/provider_retry.json".into(),
             ProtocolEvent::ProviderRetry {
                 failure: Some("timeout".into()),
+                retry: 1,
             },
         ),
         (

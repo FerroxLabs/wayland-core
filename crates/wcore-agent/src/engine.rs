@@ -11776,6 +11776,19 @@ impl AgentEngine {
             let mut stream_attempt = first_recovery_checkpoint
                 .as_ref()
                 .map_or(0, |checkpoint| checkpoint.stream_attempt);
+            // #372 — the retry count, on the wire. `stream_attempt` above
+            // already numbers this turn's re-sends, but only into the
+            // human-readable "attempt 3/10" notice; nothing machine-readable
+            // carried it, and the ticket asks for the count by name. These two
+            // sequences are the published ordinals. They live HERE, beside
+            // `stream_attempt` and outside `'stream`, so every retry source of
+            // one turn shares one sequence (the provider ring, the stream-error
+            // re-send, the single context-overflow retry, the orphaned-tool
+            // repair) and the next turn starts again at one. `Arc<AtomicU32>`
+            // rather than a plain counter because the provider-attempt observer
+            // below is an `Arc` closure that outlives the statement creating it.
+            let provider_attempt_seq = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let provider_retry_seq = Arc::new(std::sync::atomic::AtomicU32::new(0));
             // Deadline for re-issuing requests the provider never served. Armed
             // on the FIRST such failure of this turn, so a turn that never sees
             // one pays nothing, and a turn that recovers and later fails again
@@ -13180,6 +13193,8 @@ impl AgentEngine {
                 let attempt_output = Arc::clone(&self.output);
                 let observed_provider_failure = Arc::new(Mutex::new(None::<String>));
                 let observer_failure = Arc::clone(&observed_provider_failure);
+                let observer_attempt_seq = Arc::clone(&provider_attempt_seq);
+                let observer_retry_seq = Arc::clone(&provider_retry_seq);
                 let attempt_observer: Arc<
                     dyn Fn(wcore_providers::retry::ProviderAttemptEvidence) + Send + Sync,
                 > = Arc::new(move |evidence| {
@@ -13190,10 +13205,16 @@ impl AgentEngine {
                             evidence.failure.clone();
                     }
                     if evidence.physical {
-                        attempt_output.emit_provider_attempt(evidence.failure.as_deref());
+                        attempt_output.emit_provider_attempt(
+                            evidence.failure.as_deref(),
+                            observer_attempt_seq.fetch_add(1, Ordering::SeqCst) + 1,
+                        );
                     }
                     if evidence.retrying {
-                        attempt_output.emit_provider_retry(evidence.failure.as_deref());
+                        attempt_output.emit_provider_retry(
+                            evidence.failure.as_deref(),
+                            observer_retry_seq.fetch_add(1, Ordering::SeqCst) + 1,
+                        );
                     }
                 });
                 let attempt_provider: Arc<dyn LlmProvider> = match (
@@ -13487,7 +13508,10 @@ impl AgentEngine {
                         ..
                     }) if !overflow_retried => {
                         self.output.emit_provider_failure("context_overflow");
-                        self.output.emit_provider_retry(Some("context_overflow"));
+                        self.output.emit_provider_retry(
+                            Some("context_overflow"),
+                            provider_retry_seq.fetch_add(1, Ordering::SeqCst) + 1,
+                        );
                         overflow_retried = true;
                         self.output.emit_info(&format!(
                             "context overflow on {routed_model} ({required_tokens} tokens > \
@@ -13596,7 +13620,10 @@ impl AgentEngine {
                             let demoted = self.demote_all_tool_blocks();
                             if demoted > 0 {
                                 orphan_repair_retried = true;
-                                self.output.emit_provider_retry(Some("orphaned_tool_pair"));
+                                self.output.emit_provider_retry(
+                                    Some("orphaned_tool_pair"),
+                                    provider_retry_seq.fetch_add(1, Ordering::SeqCst) + 1,
+                                );
                                 let mut retry_note = format!(
                                     "provider rejected the conversation for a tool-pairing \
                                      fault — demoted {demoted} tool block(s) to text and \
@@ -14414,7 +14441,10 @@ impl AgentEngine {
                         MonitorAction::Continue => {}
                     }
                     stream_attempt += 1;
-                    self.output.emit_provider_retry(Some(failure_code.as_str()));
+                    self.output.emit_provider_retry(
+                        Some(failure_code.as_str()),
+                        provider_retry_seq.fetch_add(1, Ordering::SeqCst) + 1,
+                    );
                     // One curve for every retryable class, and a server
                     // instruction outranks it. `stream_retry_after_ms` is the
                     // number the provider sent; when it is absent but the
