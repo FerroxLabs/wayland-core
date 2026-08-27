@@ -268,6 +268,13 @@ sha2          = { workspace = true }
 self-replace = "1"
 futures-util = "0.3"
 tempfile     = { workspace = true }
+# core#339: `at_ref_guard::resolve_target` proves the canonical name it
+# guards and the handle it reads are the same filesystem object. std's
+# own by-handle identity (`volume_serial_number` / `file_index`) is still
+# unstable on Windows (`windows_by_handle`, rust#63010), so the portable
+# comparison comes from here. Already in the lockfile via `walkdir`, so
+# this compiles nothing new.
+same-file = "1"
 tar          = { workspace = true }
 flate2       = { workspace = true }
 zip          = { workspace = true }

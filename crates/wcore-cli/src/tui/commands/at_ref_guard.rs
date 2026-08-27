@@ -12,6 +12,8 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
+use same_file::Handle;
+
 // ─────────────────────────────────────────────────────────────────────────
 // Secret denylist
 // ─────────────────────────────────────────────────────────────────────────
@@ -130,7 +132,7 @@ fn is_secret_file_name(path: &Path) -> bool {
 /// provably the same object.
 #[derive(Debug)]
 pub(super) struct ResolvedTarget {
-    file: File,
+    handle: Handle,
     canonical: PathBuf,
 }
 
@@ -149,7 +151,7 @@ impl ResolvedTarget {
     /// one object, then read a path" is not expressible at this surface.
     pub(super) fn read_to_string(mut self) -> io::Result<String> {
         let mut buf = String::new();
-        self.file.read_to_string(&mut buf)?;
+        self.handle.as_file_mut().read_to_string(&mut buf)?;
         Ok(buf)
     }
 }
@@ -203,42 +205,14 @@ pub(super) fn resolve_target(path: &Path) -> io::Result<ResolvedTarget> {
             "an @-reference target must be a regular file",
         ));
     }
+    let handle = Handle::from_file(file)?;
     let canonical = fs::canonicalize(path)?;
-    let probe = File::open(&canonical)?;
-    if file_identity(&file)? != file_identity(&probe)? {
+    if handle != Handle::from_path(&canonical)? {
         return Err(io::Error::other(
             "the @-reference target changed identity while it was being resolved",
         ));
     }
-    Ok(ResolvedTarget { file, canonical })
-}
-
-/// A filesystem object's identity, read from an OPEN HANDLE.
-///
-/// Handle-derived on both platforms rather than path-derived: Windows
-/// reports the volume/index pair only for metadata obtained from a handle,
-/// and a path-derived answer would be one more traversal — one more chance
-/// for the object to change underneath the comparison this exists to make.
-#[cfg(unix)]
-fn file_identity(file: &File) -> io::Result<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    let meta = file.metadata()?;
-    Ok((meta.dev(), meta.ino()))
-}
-
-#[cfg(windows)]
-fn file_identity(file: &File) -> io::Result<(u64, u64)> {
-    use std::os::windows::fs::MetadataExt;
-    let meta = file.metadata()?;
-    match (meta.volume_serial_number(), meta.file_index()) {
-        (Some(volume), Some(index)) => Ok((u64::from(volume), index)),
-        // Fail closed. With no identity to compare there is no proof that
-        // the name being guarded and the handle being read are the same
-        // object, which is the only thing this function exists to supply.
-        _ => Err(io::Error::other(
-            "the filesystem reported no identity for the @-reference target",
-        )),
-    }
+    Ok(ResolvedTarget { handle, canonical })
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -664,27 +638,27 @@ mod tests {
         assert_eq!(canonical_root(missing), missing.to_path_buf());
     }
 
-    /// The comparator the whole identity guard rests on. If it agreed with
-    /// itself across different objects the guard would be vacuous; if it
-    /// disagreed with itself across the same object `resolve_target` would
-    /// refuse every ordinary read.
+    /// Pins the ASSUMPTION `resolve_target` rests on: that `Handle`
+    /// equality is object identity and not something weaker. If it agreed
+    /// across distinct objects the guard would be vacuous; if it disagreed
+    /// across the same object every ordinary read would be refused. This
+    /// grades the assumption, not the dependency.
     #[test]
-    fn file_identity_agrees_with_itself_and_separates_two_objects() {
+    fn handle_equality_is_object_identity() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        fs::write(tmp.path().join("a.txt"), "a").expect("write a");
-        fs::write(tmp.path().join("b.txt"), "b").expect("write b");
-        let first = File::open(tmp.path().join("a.txt")).expect("open a");
-        let again = File::open(tmp.path().join("a.txt")).expect("reopen a");
-        let other = File::open(tmp.path().join("b.txt")).expect("open b");
+        let a = tmp.path().join("a.txt");
+        let b = tmp.path().join("b.txt");
+        fs::write(&a, "a").expect("write a");
+        fs::write(&b, "b").expect("write b");
 
         assert_eq!(
-            file_identity(&first).expect("identity"),
-            file_identity(&again).expect("identity"),
+            Handle::from_path(&a).expect("handle"),
+            Handle::from_path(&a).expect("handle"),
             "two handles on one object must agree"
         );
         assert_ne!(
-            file_identity(&first).expect("identity"),
-            file_identity(&other).expect("identity"),
+            Handle::from_path(&a).expect("handle"),
+            Handle::from_path(&b).expect("handle"),
             "two distinct objects must not share an identity"
         );
     }
