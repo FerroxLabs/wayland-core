@@ -316,12 +316,16 @@ pub trait OutputSink: Send + Sync {
     }
 
     /// #1098: whether this sink can actually put a rendered artifact in front
-    /// of a user. Only the json-stream `ProtocolSink` can — a terminal, null,
-    /// or relay sink has no render surface.
+    /// of a user. The json-stream `ProtocolSink` can, and (#1138) so can the
+    /// in-process TUI's `ChannelSink`; a terminal, null, or relay sink has no
+    /// render surface, so the default is `false`.
     ///
-    /// `RenderArtifactTool::is_available()` reads this through
-    /// `ProtocolRenderSink`, so under any other sink the tool is never
-    /// registered and the model is never offered a display nothing would show.
+    /// `RenderArtifactTool` is registered UNCONDITIONALLY (`bootstrap.rs`) —
+    /// an earlier version of this comment claimed the tool was gated on this
+    /// method, and it never was: a tool set that moved with the sink broke
+    /// resume (see `wcore_tools::render`). The gate is runtime liveness:
+    /// `ProtocolRenderSink::is_live` reads this method, and a render into a
+    /// sink that reports `false` fails LOUDLY rather than being discarded.
     fn render_artifact_supported(&self) -> bool {
         false
     }

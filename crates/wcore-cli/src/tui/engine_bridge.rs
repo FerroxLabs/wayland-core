@@ -429,6 +429,48 @@ impl OutputSink for ChannelSink {
         });
     }
 
+    /// #1138: the in-process TUI IS a display surface. `protocol_bridge`
+    /// folds `RenderArtifact` into a titled transcript element, so this sink
+    /// can honestly claim the capability — and `ProtocolRenderSink::is_live`
+    /// reads exactly this method, so claiming it is what stops
+    /// `render_artifact` refusing in every TUI session.
+    fn render_artifact_supported(&self) -> bool {
+        true
+    }
+
+    /// #1138: forward `ProtocolEvent::RenderArtifact` onto the TUI channel.
+    ///
+    /// Same chokepoint discipline as `ProtocolSink::emit_render_artifact`, and
+    /// deliberately the SAME shared helpers rather than a second local copy:
+    /// `truncate_render_content` / `truncate_render_title` keep the TUI from
+    /// becoming an uncapped render path, and the whole-token approval scrub
+    /// runs BEFORE truncation so a token straddling the cap cannot be cut in
+    /// half and left where no whole-token scrub can ever match it again.
+    fn emit_render_artifact(
+        &self,
+        call_id: &str,
+        title: &str,
+        mime: wcore_protocol::events::RenderMime,
+        content: &str,
+    ) {
+        let redacted = wcore_agent::redact_active_tokens(content);
+        let (content, truncated) = wcore_protocol::events::truncate_render_content(&redacted);
+        self.send(ProtocolEvent::RenderArtifact {
+            // No turn is in scope at the sink, exactly as `emit_info` above;
+            // the bridge attaches the artifact to the in-flight turn itself,
+            // so the TUI never needs the correlation key it would carry.
+            msg_id: String::new(),
+            call_id: call_id.to_string(),
+            title: wcore_protocol::events::truncate_render_title(
+                &wcore_agent::redact_active_tokens(title),
+            ),
+            mime,
+            content,
+            truncated,
+            critical: wcore_protocol::events::NonCritical,
+        });
+    }
+
     fn emit_sub_agent_event(
         &self,
         parent_call_id: &str,
@@ -4735,6 +4777,92 @@ mod tests {
                 assert_eq!(usage.cache_write_tokens, None);
             }
             other => panic!("expected StreamEnd, got {other:?}"),
+        }
+    }
+
+    // ── #1138 — the TUI IS a render surface ──────────────────────────
+
+    #[test]
+    fn channel_sink_reports_a_render_surface() {
+        // #1138: `ProtocolRenderSink::is_live` reads exactly this method, so a
+        // `false` here is what made `render_artifact` refuse in every TUI
+        // session while still being advertised to the model. Mirrors
+        // `protocol_sink::tests::only_the_protocol_sink_reports_render_support`.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink = ChannelSink::new(tx);
+        assert!(OutputSink::render_artifact_supported(&sink));
+    }
+
+    #[test]
+    fn channel_sink_forwards_a_render_artifact() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = ChannelSink::new(tx);
+        sink.emit_render_artifact(
+            "call-9",
+            "Release notes",
+            wcore_protocol::events::RenderMime::Markdown,
+            "# Hi\n\nbody",
+        );
+        match rx.try_recv().expect("event forwarded") {
+            ProtocolEvent::RenderArtifact {
+                call_id,
+                title,
+                mime,
+                content,
+                truncated,
+                ..
+            } => {
+                assert_eq!(call_id, "call-9");
+                assert_eq!(title, "Release notes");
+                assert_eq!(mime, wcore_protocol::events::RenderMime::Markdown);
+                assert_eq!(content, "# Hi\n\nbody");
+                assert!(!truncated, "an under-cap artifact is not truncated");
+            }
+            other => panic!("expected RenderArtifact, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one event per emit_render_artifact"
+        );
+    }
+
+    #[test]
+    fn channel_sink_caps_an_over_sized_render_artifact() {
+        // #1138: the truncation chokepoint used to live only in
+        // `ProtocolSink::emit_render_artifact`. If the TUI path skipped it, the
+        // TUI would be a SECOND, uncapped render path — so assert the shared
+        // helper is actually applied here, in-band marker and flag both.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = ChannelSink::new(tx);
+        let oversized = "a".repeat(wcore_protocol::events::RENDER_ARTIFACT_CONTENT_LIMIT_BYTES + 1);
+        sink.emit_render_artifact(
+            "call-10",
+            "big",
+            wcore_protocol::events::RenderMime::Plain,
+            &oversized,
+        );
+        match rx.try_recv().expect("event forwarded") {
+            ProtocolEvent::RenderArtifact {
+                content, truncated, ..
+            } => {
+                assert!(truncated, "over the cap must set the truncated flag");
+                // The emitted string is deliberately cap PLUS marker, so it
+                // is LONGER than the input here — length proves nothing.
+                // Split at the cap instead: everything before it must be the
+                // original bytes, everything after it must be only the marker,
+                // which is what "actually cut" means.
+                let (kept, marker) =
+                    content.split_at(wcore_protocol::events::RENDER_ARTIFACT_CONTENT_LIMIT_BYTES);
+                assert!(
+                    kept.bytes().all(|b| b == b'a'),
+                    "the kept prefix must be the START of the original content"
+                );
+                assert!(
+                    marker.trim().starts_with("[wcore: CONTENT TRUNCATED"),
+                    "nothing but the marker may follow the cut, got {marker:?}"
+                );
+            }
+            other => panic!("expected RenderArtifact, got {other:?}"),
         }
     }
 

@@ -45,7 +45,7 @@ pub(crate) fn register_active_token_source(inner: &Arc<RwLock<Vec<String>>>) {
 /// Only exact tokens minted by this process seconds earlier are removed, so
 /// this cannot eat a checksum, an errno, or a product name out of an error
 /// message: the underlying error survives intact.
-pub(crate) fn redact_active_tokens(text: &str) -> String {
+pub fn redact_active_tokens(text: &str) -> String {
     let sets: Vec<Arc<RwLock<Vec<String>>>> = {
         let mut sources = ACTIVE_TOKEN_SOURCES.lock();
         sources.retain(|weak| weak.strong_count() > 0);
