@@ -708,9 +708,11 @@ mod tests {
         let target = resolve_target(&link).expect("resolve");
         assert_eq!(target.canonical(), root.join("first.txt"));
 
-        // Re-point the link between the guard and the read.
-        fs::remove_file(&link).expect("unlink");
-        std::os::unix::fs::symlink(root.join("second.txt"), &link).expect("relink");
+        // Swap a DIFFERENT object in at the canonical name, between the
+        // guard and the read. A rename replaces the directory entry, so the
+        // name now points at a new inode while the pinned handle still holds
+        // the old one — exactly the window a path-based read loses.
+        fs::rename(root.join("second.txt"), root.join("first.txt")).expect("rename over");
 
         assert_eq!(
             target.read_to_string().expect("read"),
