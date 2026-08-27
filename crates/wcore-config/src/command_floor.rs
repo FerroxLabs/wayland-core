@@ -1028,6 +1028,68 @@ mod tests {
         );
     }
 
+    /// An UNBALANCED quote must not hide a protected path.
+    ///
+    /// Quote-aware tokenization is only right about a command whose quoting is
+    /// balanced. A stray apostrophe opens a span that never closes and swallows
+    /// every path after it into one token — the direction that refuses LESS.
+    ///
+    /// What answers it is the DE-OBFUSCATED pass, not the raw one: `deobfuscate`
+    /// removes the quote entirely, so the second form `floor_refusal` scans has
+    /// a normal token boundary where the raw form has none. This test exists to
+    /// pin that, because it is not obvious from either function alone and it is
+    /// the reason both forms are scanned.
+    ///
+    /// The profile home here has an ORDINARY name and the file an ordinary
+    /// basename, so neither the component rule nor the bare-name rule can
+    /// answer — only rule 2b. A first version used
+    /// `~/.wayland/permissions.toml` and proved nothing: rule 2a caught it on
+    /// the basename.
+    #[test]
+    #[serial_test::serial]
+    fn a_stray_quote_does_not_swallow_a_protected_path() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("notes.txt");
+        let prior = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: test-only env mutation, serialized against this module's
+        // other env-driven tests.
+        unsafe { std::env::set_var("WAYLAND_HOME", home.path()) };
+
+        // The apostrophe in `don't` is never closed.
+        let hidden = floor_refusal(
+            &format!("echo don't && cat {}", target.display()),
+            Some(Path::new("/work")),
+        );
+        // Control: the same command with balanced quoting is refused too, so
+        // the assertion above is about the tokenization and not about this
+        // path being unreachable for some other reason.
+        let balanced = floor_refusal(
+            &format!("echo dont && cat {}", target.display()),
+            Some(Path::new("/work")),
+        );
+        // Control: an apostrophe is not itself a reason to refuse.
+        let ordinary = floor_refusal("echo don't && rm -rf ./build", Some(Path::new("/work")));
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+
+        assert!(
+            hidden.is_some(),
+            "an unbalanced quote before a protected path must not hide it"
+        );
+        assert!(
+            balanced.is_some(),
+            "control: the same path with balanced quoting must be refused"
+        );
+        assert_eq!(
+            ordinary, None,
+            "control: an apostrophe is not itself a reason to refuse"
+        );
+    }
+
     /// Rule 2b's yield must recognise the workspace as being inside the
     /// authority directory even when the two are spelled differently.
     ///
