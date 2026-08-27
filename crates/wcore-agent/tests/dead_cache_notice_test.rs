@@ -185,23 +185,93 @@ async fn dead_prompt_cache_is_reported_to_the_user() {
     );
 }
 
-/// The other direction: identical traffic on a route with no declared prompt
-/// cache must stay silent. Without this the fix would accuse every
-/// OpenAI-compatible endpoint that simply has no cache.
+/// The other direction, driven from REAL presets.
+///
+/// This deliberately does NOT hand-build `ProviderCompat { prompt_cache_expected:
+/// None, .. }`. A struct literal pins the field the test itself just wrote, so
+/// it cannot observe the way the field actually reaches a provider: struct-update
+/// inheritance. `prompt_cache_expected` first shipped leaking out of
+/// `openai_defaults()` into all 16 openai-compat presets and out of
+/// `anthropic_defaults()` into Vertex and MiniMax, and a literal-based negative
+/// test passed the whole time while this identical traffic on `groq_defaults()`
+/// produced an accusation.
+///
+/// Each preset below is a route with no established prompt-cache capability.
+/// Identical 4-round-trip, 50k-uncached-input traffic must leave every one of
+/// them silent.
 #[tokio::test]
-async fn no_dead_cache_notice_when_the_route_declares_no_cache() {
-    let compat = wcore_config::compat::ProviderCompat {
-        prompt_cache_expected: None,
-        ..wcore_config::compat::ProviderCompat::anthropic_defaults()
-    };
+async fn real_presets_with_no_established_cache_are_never_accused() {
+    let presets: Vec<(&str, wcore_config::compat::ProviderCompat)> = vec![
+        (
+            "groq",
+            wcore_config::compat::ProviderCompat::groq_defaults(),
+        ),
+        (
+            "cerebras",
+            wcore_config::compat::ProviderCompat::cerebras_defaults(),
+        ),
+        (
+            "together",
+            wcore_config::compat::ProviderCompat::together_defaults(),
+        ),
+        (
+            "mistral",
+            wcore_config::compat::ProviderCompat::mistral_defaults(),
+        ),
+        (
+            "deepseek",
+            wcore_config::compat::ProviderCompat::deepseek_defaults(),
+        ),
+        (
+            "openrouter",
+            wcore_config::compat::ProviderCompat::openrouter_defaults(),
+        ),
+        (
+            "vertex",
+            wcore_config::compat::ProviderCompat::vertex_defaults(),
+        ),
+        (
+            "minimax",
+            wcore_config::compat::ProviderCompat::minimax_defaults(),
+        ),
+        (
+            "ollama",
+            wcore_config::compat::ProviderCompat::ollama_defaults(),
+        ),
+    ];
+
+    let mut accused: Vec<String> = Vec::new();
+    for (name, compat) in presets {
+        let lines = run_uncached_session(compat).await;
+        let hits = dead_cache_lines(&lines);
+        if !hits.is_empty() {
+            accused.push(format!("{name}: {hits:?}"));
+        }
+    }
     assert!(
-        !compat.prompt_cache_expected(),
-        "harness precondition: this route declares no prompt cache"
+        accused.is_empty(),
+        "these presets have no measured prompt-cache capability, so telling \
+         their users the provider is re-billing an uncached prompt is a false \
+         alarm with zero evidence behind it:\n  {}",
+        accused.join("\n  ")
+    );
+}
+
+/// The positive control for the test above, run through the same harness: the
+/// silence must come from the presets, not from a harness that can no longer
+/// produce a notice at all.
+#[tokio::test]
+async fn flux_router_preset_still_reports_its_dead_cache() {
+    let compat = wcore_config::compat::ProviderCompat::flux_router_defaults();
+    assert!(
+        compat.prompt_cache_expected(),
+        "control precondition: flux-router declares a measured prompt cache"
     );
     let lines = run_uncached_session(compat).await;
-    assert!(
-        dead_cache_lines(&lines).is_empty(),
-        "a route with no declared prompt cache must not be accused of a \
-         broken one, saw {lines:?}"
+    assert_eq!(
+        dead_cache_lines(&lines).len(),
+        1,
+        "control: a preset that DOES declare a prompt cache must still be \
+         reported, saw {lines:?}"
     );
 }
