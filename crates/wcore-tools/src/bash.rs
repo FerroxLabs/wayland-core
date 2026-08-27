@@ -15,8 +15,10 @@ use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::context::ToolContext;
 
+mod command_floor;
 mod policy;
 use crate::{Tool, ToolOutputSink};
+pub use command_floor::check_command_floor;
 pub use policy::check_denylist;
 use policy::{SandboxScope, annotate_masked_read, annotate_network_block, annotate_sandbox_denial};
 
@@ -226,6 +228,38 @@ fn downgrade_powershell_for_sandbox(argv: &mut Vec<String>, blocks_powershell: b
 /// Retained for direct compatibility tests. Hosted sessions must query their
 /// registry-owned [`SandboxRegistry`] so capability checks and execution use
 /// the same immutable backend.
+/// The directory the floor asks its workspace-relative question about.
+///
+/// Resolved exactly as [`unsaved_shell_refusal`] resolves it — the policy root
+/// when there is one, the process directory otherwise — so the two guards
+/// cannot disagree about which tree a relative token names.
+fn floor_cwd(
+    workspace: Option<&crate::workspace_policy::WorkspacePolicy>,
+) -> Option<std::path::PathBuf> {
+    match workspace {
+        Some(policy) => Some(policy.root().to_path_buf()),
+        None => std::env::current_dir().ok(),
+    }
+}
+
+/// #693 — the non-bypassable command floor, asked BEFORE anything else on
+/// every `BashTool` entry point.
+///
+/// First because it is the floor: a rule that fires only when some earlier
+/// guard happened to let the command through is not underneath anything. See
+/// the [`command_floor`] module for what is in it and why it is this small.
+fn floor_refusal(
+    command: &str,
+    workspace: Option<&crate::workspace_policy::WorkspacePolicy>,
+) -> Option<ToolResult> {
+    command_floor::check_command_floor(command, floor_cwd(workspace).as_deref()).map(|content| {
+        ToolResult {
+            content,
+            is_error: true,
+        }
+    })
+}
+
 /// P2b — refuse a shell command that would throw away unsaved user work.
 ///
 /// The shell runs in the workspace root when a policy supplies one and in the
@@ -591,6 +625,12 @@ impl Tool for BashTool {
 
         // Wave SA — credential exfiltration denylist. Refuse before
         // spawning a shell at all.
+        // #693 — the command floor. First, and unconditional: a rule that
+        // fires only when some earlier guard let the command through is not
+        // underneath anything.
+        if let Some(refusal) = floor_refusal(command, None) {
+            return refusal;
+        }
         if let Some(reason) = check_denylist(command) {
             return ToolResult {
                 content: reason.to_string(),
@@ -664,6 +704,12 @@ impl Tool for BashTool {
         };
 
         // Wave SA — credential exfiltration denylist (streaming path).
+        // #693 — the command floor. First, and unconditional: a rule that
+        // fires only when some earlier guard let the command through is not
+        // underneath anything.
+        if let Some(refusal) = floor_refusal(command, None) {
+            return refusal;
+        }
         if let Some(reason) = check_denylist(command) {
             return ToolResult {
                 content: reason.to_string(),
@@ -783,6 +829,12 @@ impl Tool for BashTool {
                 is_error: true,
             };
         };
+        // #693 — the command floor. First, and unconditional: a rule that
+        // fires only when some earlier guard let the command through is not
+        // underneath anything.
+        if let Some(refusal) = floor_refusal(command, ctx.workspace.as_deref()) {
+            return refusal;
+        }
         if let Some(reason) = check_denylist(command) {
             return ToolResult {
                 content: reason.to_string(),
@@ -948,6 +1000,12 @@ impl Tool for BashTool {
             };
         };
 
+        // #693 — the command floor. First, and unconditional: a rule that
+        // fires only when some earlier guard let the command through is not
+        // underneath anything.
+        if let Some(refusal) = floor_refusal(command, ctx.workspace.as_deref()) {
+            return refusal;
+        }
         if let Some(reason) = check_denylist(command) {
             return ToolResult {
                 content: reason.to_string(),

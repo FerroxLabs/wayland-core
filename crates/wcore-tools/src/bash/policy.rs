@@ -527,7 +527,7 @@ fn classify(scope: &SandboxScope, token: &str) -> Option<(PathBuf, DeniedBecause
 /// match IS the filter — which is what lets a bare filename through. `cat
 /// secret.txt` has no interior separator and would be dropped by
 /// [`is_path_token`], and it is precisely the case wayland#1078 is about.
-fn command_path_tokens(command: &str) -> Vec<&str> {
+pub(super) fn command_path_tokens(command: &str) -> Vec<&str> {
     command
         .split(|c: char| {
             c.is_whitespace()
