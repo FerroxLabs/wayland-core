@@ -89,23 +89,31 @@ fn fifo_streaming_past_the_limit(dir: &std::path::Path) -> std::path::PathBuf {
 /// not the size guard, are what actually holds.
 #[test]
 fn pseudo_sources_really_do_report_a_length_of_zero() {
+    // The character-device half holds on every unix: `/dev/zero` is a
+    // character device everywhere this file compiles.
     let dev_zero = std::fs::metadata("/dev/zero")
         .expect("stat /dev/zero")
         .len();
-    let proc_maps = std::fs::metadata("/proc/self/maps")
-        .expect("stat /proc/self/maps")
-        .len();
-    let real_maps = std::fs::read("/proc/self/maps").expect("read").len();
-    eprintln!(
-        "MEASURED premise: /dev/zero stat_len={dev_zero}, /proc/self/maps stat_len={proc_maps} \
-         real_len={real_maps}"
-    );
+    eprintln!("MEASURED premise: /dev/zero stat_len={dev_zero}");
     assert_eq!(dev_zero, 0, "premise: a character device stats as 0 bytes");
-    assert_eq!(proc_maps, 0, "premise: procfs stats as 0 bytes");
-    assert!(
-        real_maps > proc_maps as usize,
-        "premise: procfs yields more than it claims"
-    );
+
+    // The procfs half is Linux-only. macOS has no `/proc` at all, so
+    // stat'ing `/proc/self/maps` there is not a weaker premise — it is a
+    // missing path, and asserting on it measures nothing. The procfs
+    // location rule this premise motivates only ever fires on Linux.
+    #[cfg(target_os = "linux")]
+    {
+        let proc_maps = std::fs::metadata("/proc/self/maps")
+            .expect("stat /proc/self/maps")
+            .len();
+        let real_maps = std::fs::read("/proc/self/maps").expect("read").len();
+        eprintln!("MEASURED premise: /proc/self/maps stat_len={proc_maps} real_len={real_maps}");
+        assert_eq!(proc_maps, 0, "premise: procfs stats as 0 bytes");
+        assert!(
+            real_maps > proc_maps as usize,
+            "premise: procfs yields more than it claims"
+        );
+    }
 }
 
 /// A FIFO stats as 0 and streams past the limit. It must be refused, and
