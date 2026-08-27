@@ -179,6 +179,197 @@ fn decoded_contains_secret(candidate: &str) -> bool {
     })
 }
 
+/// Maximum number of separate whitespace-split secrets redacted individually
+/// inside one candidate run. A run carrying more than this is a credential
+/// dump rather than a document, so the whole span from the first to the last
+/// secret is redacted instead of scanning on.
+const MAX_SPLIT_WINDOWS: usize = 64;
+
+/// One minimal byte window of a candidate run that carries a secret.
+#[derive(Clone, Copy)]
+struct SplitWindow {
+    start: usize,
+    end: usize,
+    label: &'static str,
+}
+
+/// Byte ranges of the maximal runs of non-whitespace bytes inside `text`.
+///
+/// Every boundary sits next to ASCII whitespace or the end of `text`, so the
+/// ranges are always UTF-8 char boundaries.
+fn whitespace_separated_tokens(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+            continue;
+        }
+        let start = idx;
+        while idx < bytes.len() && !bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        tokens.push((start, idx));
+    }
+    tokens
+}
+
+/// Minimal byte windows of `text` that carry a secret which only becomes
+/// visible once ASCII whitespace is stripped.
+///
+/// DETECTION IS UNCHANGED. A window is produced for every match every
+/// [`PATTERNS`] entry makes against the whitespace-stripped run — exactly the
+/// condition the previous whole-candidate check tested (`scrub_direct`
+/// returning `Owned` is `fast_set()` matching). Only the *extent* shrinks, so
+/// one secret-shaped token can no longer swallow the rest of the document.
+///
+/// Two rules keep the shrink from leaking credential material:
+///
+/// * a window is snapped outward to whole whitespace-separated tokens, so the
+///   tail of a token whose leading characters already satisfy the pattern (a
+///   40-character PAT satisfies `ghp_[A-Za-z0-9]{20,}` after 24) is never left
+///   behind; and
+/// * every pattern contributes its own windows, so a short window from a weak
+///   overlapping pattern (`TOKEN=gh` for SECRET_ASSIGNMENT) cannot stop a
+///   longer one (the GitHub PAT split across the following newline) from being
+///   covered.
+///
+/// Shrinking from the ends of the run instead — dropping tokens while the
+/// remainder still trips the detector — has exactly that second failure: it
+/// stops on the weak pattern and leaves the rest of the strong one in place.
+fn split_secret_windows(text: &str) -> Vec<SplitWindow> {
+    let tokens = whitespace_separated_tokens(text);
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    // The run with whitespace removed, plus the exclusive end of each token in
+    // that normalized coordinate space.
+    let mut normalized = String::with_capacity(text.len());
+    let mut norm_end = Vec::with_capacity(tokens.len());
+    for &(start, end) in &tokens {
+        normalized.push_str(&text[start..end]);
+        norm_end.push(normalized.len());
+    }
+    if !fast_set().is_match(&normalized) {
+        return Vec::new();
+    }
+
+    let mut windows: Vec<SplitWindow> = Vec::new();
+    for (idx, rx) in compiled().iter().enumerate() {
+        let label = PATTERNS[idx].0;
+        let mut pos = 0usize;
+        while pos < normalized.len() {
+            let Some(found) = rx.find(&normalized[pos..]) else {
+                break;
+            };
+            let start = pos + found.start();
+            // The token the secret starts in: first token whose exclusive end
+            // is past `start`.
+            let lo = norm_end.partition_point(|&end| end <= start);
+            // Grow by whole tokens until the pattern is satisfied by the window
+            // alone. Guaranteed to terminate at the token holding the greedy
+            // match end, which is never past the last token.
+            let mut hi = lo;
+            loop {
+                let satisfied = rx
+                    .find(&normalized[start..norm_end[hi]])
+                    .is_some_and(|m| m.start() == 0);
+                if satisfied || hi + 1 >= tokens.len() {
+                    break;
+                }
+                hi += 1;
+            }
+            windows.push(SplitWindow {
+                start: tokens[lo].0,
+                end: tokens[hi].1,
+                label,
+            });
+            // `norm_end[hi] >= norm_end[lo] > start`, so this always
+            // advances, and a token end is always a char boundary.
+            pos = norm_end[hi];
+        }
+    }
+
+    windows.sort_by_key(|window| (window.start, window.end));
+    let mut merged: Vec<SplitWindow> = Vec::new();
+    for window in windows {
+        match merged.last_mut() {
+            Some(previous) if window.start <= previous.end => {
+                previous.end = previous.end.max(window.end);
+            }
+            _ => merged.push(window),
+        }
+    }
+    if merged.len() > MAX_SPLIT_WINDOWS {
+        let first = merged[0];
+        let end = merged[merged.len() - 1].end;
+        return vec![SplitWindow { end, ..first }];
+    }
+    merged
+}
+
+/// Replace each window with a redaction marker, leaving every other byte of
+/// `text` untouched. `forced_label` overrides the per-pattern label.
+fn redact_split_windows(text: &str, windows: &[SplitWindow], forced_label: Option<&str>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for window in windows {
+        if window.start < cursor {
+            continue;
+        }
+        out.push_str(&text[cursor..window.start]);
+        out.push_str("[REDACTED:");
+        out.push_str(forced_label.unwrap_or(window.label));
+        out.push(']');
+        cursor = window.end;
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
+/// True when `text` carries at least one ASCII whitespace byte.
+fn spans_whitespace(text: &str) -> bool {
+    text.bytes().any(|byte| byte.is_ascii_whitespace())
+}
+
+/// Redact secrets that only become visible once ASCII whitespace is stripped,
+/// against the RAW input and before [`scrub_direct`] runs.
+///
+/// `scrub_direct`'s own markers (`[`, `:`, `]`) sit outside the base64-ish
+/// candidate class, so a direct match that consumes the first line of a split
+/// secret fragments the run and hides the rest of it from every later pass:
+/// `TOKEN=gh` + newline + the remaining 38 characters of a GitHub PAT came
+/// back as `[REDACTED:SECRET_ASSIGNMENT]` followed by those 38 characters in
+/// clear. Only windows that actually span whitespace are taken here — a window
+/// inside a single token is not whitespace-split at all, and `scrub_direct`
+/// sees that token verbatim on the raw input anyway.
+fn redact_whitespace_split_secrets(input: &str) -> Cow<'_, str> {
+    let mut last = 0;
+    let mut out = None::<String>;
+    for candidate in wrapped_base64_candidates().find_iter(input) {
+        let text = candidate.as_str();
+        let windows: Vec<SplitWindow> = split_secret_windows(text)
+            .into_iter()
+            .filter(|window| spans_whitespace(&text[window.start..window.end]))
+            .collect();
+        if windows.is_empty() {
+            continue;
+        }
+        let buffer = out.get_or_insert_with(|| String::with_capacity(input.len()));
+        buffer.push_str(&input[last..candidate.start()]);
+        buffer.push_str(&redact_split_windows(text, &windows, None));
+        last = candidate.end();
+    }
+    match out {
+        Some(mut buffer) => {
+            buffer.push_str(&input[last..]);
+            Cow::Owned(buffer)
+        }
+        None => Cow::Borrowed(input),
+    }
+}
+
 /// Scrubs known PII/credential patterns from a string, replacing each match
 /// with `[REDACTED:<KIND>]`.
 ///
@@ -188,7 +379,12 @@ pub struct PIIScrubber;
 impl PIIScrubber {
     /// Scrub `input`, returning the original slice if nothing matched.
     pub fn scrub<'a>(&self, input: &'a str) -> Cow<'a, str> {
-        let direct = scrub_direct(input);
+        // Whitespace-split secrets first: see `redact_whitespace_split_secrets`
+        // for why this cannot run after `scrub_direct`.
+        let direct = match redact_whitespace_split_secrets(input) {
+            Cow::Borrowed(text) => scrub_direct(text),
+            Cow::Owned(text) => Cow::Owned(scrub_direct(&text).into_owned()),
+        };
         // Fast, deterministic MIME-wrapped case: streaming redaction groups a
         // pure base64 candidate before calling us. Strip arbitrary ASCII
         // whitespace and decode the whole record before the more permissive
@@ -200,13 +396,19 @@ impl PIIScrubber {
                     || matches!(byte, b'+' | b'/' | b'_' | b'-' | b'=')
             });
         if wrapped_record {
+            // Redact only the spans that actually carry a secret; the rest of
+            // the record is the user's data and must survive.
+            let windows = split_secret_windows(direct.as_ref());
+            if !windows.is_empty() {
+                return Cow::Owned(redact_split_windows(direct.as_ref(), &windows, None));
+            }
             let normalized_record: String = direct
                 .chars()
                 .filter(|ch| !ch.is_ascii_whitespace())
                 .collect();
-            if let Cow::Owned(redacted) = scrub_direct(&normalized_record) {
-                return Cow::Owned(redacted);
-            }
+            // The base64 branch keeps the whole-record replacement on purpose:
+            // it fires only when the ENTIRE stripped record decodes, which a
+            // document interleaved with prose never does.
             if normalized_record.len() >= 24 && decoded_contains_secret(&normalized_record) {
                 return Cow::Owned("[REDACTED:ENCODED_SECRET]".to_string());
             }
@@ -232,24 +434,26 @@ impl PIIScrubber {
         let mut last = 0;
         let mut wrapped = None::<String>;
         for candidate in wrapped_base64_candidates().find_iter(continuous.as_ref()) {
-            let normalized: String = candidate
-                .as_str()
-                .chars()
-                .filter(|ch| !ch.is_ascii_whitespace())
-                .collect();
-            let contains_direct_secret = matches!(scrub_direct(&normalized), Cow::Owned(_));
-            if !contains_direct_secret
-                && (normalized.len() < 24 || !decoded_contains_secret(&normalized))
-            {
-                continue;
-            }
+            // The candidate regex is greedy and unbounded, so one secret-shaped
+            // token reaches to the end of the surrounding whitespace-separated
+            // run. Replace only the minimal windows inside it, never the run.
+            let text = candidate.as_str();
+            let windows = split_secret_windows(text);
+            let replacement = if windows.is_empty() {
+                let normalized: String = text
+                    .chars()
+                    .filter(|ch| !ch.is_ascii_whitespace())
+                    .collect();
+                if normalized.len() < 24 || !decoded_contains_secret(&normalized) {
+                    continue;
+                }
+                "[REDACTED:ENCODED_SECRET]".to_string()
+            } else {
+                redact_split_windows(text, &windows, Some("WHITESPACE_SPLIT_SECRET"))
+            };
             let out = wrapped.get_or_insert_with(|| String::with_capacity(continuous.len()));
             out.push_str(&continuous[last..candidate.start()]);
-            out.push_str(if contains_direct_secret {
-                "[REDACTED:WHITESPACE_SPLIT_SECRET]"
-            } else {
-                "[REDACTED:ENCODED_SECRET]"
-            });
+            out.push_str(&replacement);
             last = candidate.end();
         }
         if let Some(mut wrapped) = wrapped {
