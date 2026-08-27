@@ -167,7 +167,7 @@ pub fn floor_refusal(command: &str, cwd: Option<&Path>) -> Option<String> {
     None
 }
 
-fn token_refusal(token: &str, cwd: Option<&Path>, protected: &[PathBuf]) -> Option<&'static str> {
+fn token_refusal(token: &str, cwd: Option<&Path>, protected: &Protected) -> Option<&'static str> {
     let parts = components(token);
     if parts.is_empty() {
         return None;
@@ -210,10 +210,56 @@ fn token_refusal(token: &str, cwd: Option<&Path>, protected: &[PathBuf]) -> Opti
     // Rule 2b — anything at or under an authority DIRECTORY, and any glob whose
     // literal prefix could expand onto one.
     let resolved = resolve(token, cwd)?;
-    if protected.iter().any(|p| resolved.starts_with(p)) || glob_could_reach(&resolved, protected) {
+    if protected.matches(&resolved) {
         return Some(AUTHORITY_REFUSAL);
     }
     None
+}
+
+/// What rule 2b refuses, split by how much of it is off limits.
+#[derive(Default)]
+struct Protected {
+    /// Refused at the path AND anywhere under it.
+    under: Vec<PathBuf>,
+    /// Refused only when named EXACTLY: an authority directory that contains
+    /// the session's own working directory. Refusing everything under it would
+    /// refuse every command the session can make; refusing the directory itself
+    /// still stops it being renamed, replaced, symlinked or copied out whole —
+    /// which is how the store was reached without naming it.
+    exact: Vec<PathBuf>,
+}
+
+impl Protected {
+    fn matches(&self, resolved: &Path) -> bool {
+        self.under.iter().any(|p| resolved.starts_with(p))
+            || self.exact.iter().any(|p| resolved == p)
+            || self.glob_could_reach(resolved)
+    }
+
+    /// A token containing a glob metacharacter is not the path it looks like.
+    /// It is refused when its literal prefix could expand onto a protected
+    /// path: `~/.way*` is `~/.wayland` to the shell, and `cp -r /tmp/evil
+    /// ~/.way*` would otherwise walk straight past the checks above.
+    ///
+    /// The prefix has to end MID-component. A glob that starts a fresh
+    /// component (`~/*`, `src/*.rs`, `ls *`) names no directory in particular,
+    /// and refusing on it would cost ordinary work for no gain — a glob that
+    /// expands onto a protected FILE still carries its basename, which rule 2a
+    /// already has.
+    fn glob_could_reach(&self, resolved: &Path) -> bool {
+        let text = resolved.to_string_lossy();
+        let Some(cut) = text.find(GLOB_CHARS) else {
+            return false;
+        };
+        let prefix = &text[..cut];
+        if prefix.is_empty() || prefix.ends_with('/') || prefix.ends_with('\\') {
+            return false;
+        }
+        self.under
+            .iter()
+            .chain(self.exact.iter())
+            .any(|p| p.to_string_lossy().starts_with(prefix))
+    }
 }
 
 /// The authority DIRECTORIES themselves: the active profile home, the resolved
@@ -224,8 +270,8 @@ fn token_refusal(token: &str, cwd: Option<&Path>, protected: &[PathBuf]) -> Opti
 /// A base with no parent (a filesystem root, or empty) is dropped. Widening the
 /// protected set is the only thing `WAYLAND_HOME` may do; turning every command
 /// on the machine into a refusal is not widening, it is breaking.
-fn protected_paths(cwd: Option<&Path>) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
+fn protected_paths(cwd: Option<&Path>) -> Protected {
+    let mut out = Protected::default();
     for base in [
         Some(crate::config::profile_home()),
         Some(crate::config::wayland_config_dir()),
@@ -247,13 +293,17 @@ fn protected_paths(cwd: Option<&Path>) -> Vec<PathBuf> {
             // entries. Rule 1 and the bare-name rule 2a are untouched, so the
             // grant store, workspace trust and the credential stores stay
             // protected by name even in this layout.
-            out.extend(AUTHORITY_DIR_ENTRIES.iter().map(|entry| base.join(entry)));
+            out.under
+                .extend(AUTHORITY_DIR_ENTRIES.iter().map(|entry| base.join(entry)));
+            out.exact.push(base);
         } else {
-            out.push(base);
+            out.under.push(base);
         }
     }
-    out.sort();
-    out.dedup();
+    out.under.sort();
+    out.under.dedup();
+    out.exact.sort();
+    out.exact.dedup();
     out
 }
 
@@ -270,29 +320,6 @@ fn component_may_be(part: &str, name: &str) -> bool {
         None | Some(0) => false,
         Some(cut) => name.starts_with(&part[..cut]),
     }
-}
-
-/// A token containing a glob metacharacter is not the path it looks like. It is
-/// refused when its literal prefix could expand onto a protected directory:
-/// `~/.way*` is `~/.wayland` to the shell, and `cp -r /tmp/evil ~/.way*` would
-/// otherwise walk straight past rule 2b.
-///
-/// The prefix has to end MID-component. A glob that starts a fresh component
-/// (`~/*`, `src/*.rs`, `ls *`) names no directory in particular, and refusing on
-/// it would cost ordinary work for no gain — a glob that expands onto a
-/// protected FILE still carries its basename, which rule 2a already has.
-fn glob_could_reach(resolved: &Path, protected: &[PathBuf]) -> bool {
-    let text = resolved.to_string_lossy();
-    let Some(cut) = text.find(GLOB_CHARS) else {
-        return false;
-    };
-    let prefix = &text[..cut];
-    if prefix.is_empty() || prefix.ends_with('/') || prefix.ends_with('\\') {
-        return false;
-    }
-    protected
-        .iter()
-        .any(|p| p.to_string_lossy().starts_with(prefix))
 }
 
 /// Expand a leading `~`, `$HOME`/`${HOME}` or `$WAYLAND_HOME`/`${WAYLAND_HOME}`
@@ -616,6 +643,24 @@ mod tests {
             None,
             "a session working inside the authority directory must still work"
         );
+
+        // ...and the directory ITSELF is still refused by exact name, so the
+        // shape that reached the store without naming it — replacing the
+        // directory around it — does not reopen in this layout.
+        for command in [
+            format!(
+                "rm -rf {} && mv /tmp/evil {}",
+                base.display(),
+                base.display()
+            ),
+            format!("ln -sfn /tmp/evil {}", base.display()),
+            format!("cp -r {} /tmp/backup", base.display()),
+        ] {
+            assert!(
+                floor_refusal(&command, inside).is_some(),
+                "the authority directory itself must still be refused: {command}"
+            );
+        }
 
         // ...and the authority state itself is STILL refused there.
         for command in [
