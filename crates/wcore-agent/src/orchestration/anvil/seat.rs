@@ -138,6 +138,35 @@ fn refuse_nested_server_ladder(seat_kind: &str, cfg: &Config) -> anyhow::Result<
     Ok(())
 }
 
+/// Drop provider-chain fallbacks that name the server-owned climb (#893).
+///
+/// `refuse_nested_server_ladder` clears the seat MODEL. The chain underneath it
+/// is a separate surface: a config whose seat models are all clean can still
+/// carry `fallback_models = ["flux-router:flux-verified"]`, and a build failure
+/// then lands the forge on the nested ladder by a path nobody chose.
+///
+/// Dropped, not refused. A fallback is a degradation path rather than the seat
+/// the operator asked for, so removing the entry keeps the rest of the chain —
+/// and the forge — usable, which is the same "seat routing may cheapen a forge,
+/// never break it" contract the routed lane already follows. The drop is
+/// recorded in the seat notes so it is not silent.
+fn refuse_server_owned_fallbacks(cfg: &mut Config, notes: &mut Vec<String>) {
+    let before = cfg.provider_chain.fallback_models.len() + cfg.resolved_fallbacks.len();
+    cfg.provider_chain
+        .fallback_models
+        .retain(|entry| !entry.contains(FLUX_SERVER_LADDER_ALIAS));
+    cfg.resolved_fallbacks
+        .retain(|fallback| !fallback.model.contains(FLUX_SERVER_LADDER_ALIAS));
+    let dropped =
+        before - (cfg.provider_chain.fallback_models.len() + cfg.resolved_fallbacks.len());
+    if dropped > 0 {
+        notes.push(format!(
+            "{dropped} provider-chain fallback(s) run the router's own \
+             server-side climb; refused"
+        ));
+    }
+}
+
 async fn resolve_driver_seat(
     anvil: &AnvilConfig,
     session_cfg: &Config,
@@ -147,6 +176,9 @@ async fn resolve_driver_seat(
     session_seat.tools.auto_approve = true;
 
     let mut notes = Vec::new();
+    // The session seat is what every refusal below retreats to, so its chain is
+    // scrubbed before anything is cloned from it.
+    refuse_server_owned_fallbacks(&mut session_seat, &mut notes);
     // `connected_providers()` iterates KNOWN_PROVIDER_TYPES, which deliberately
     // excludes FluxRouter (it is not a model-catalog provider) — probe Flux
     // connectivity explicitly or the routed lane is unreachable in practice.
@@ -156,7 +188,7 @@ async fn resolve_driver_seat(
     }
     let plan = anvil.resolve_driver_seat(session_seat.provider, &connected);
 
-    let driver_cfg = match &plan {
+    let mut driver_cfg = match &plan {
         DriverSeatPlan::Session => session_seat.clone(),
         DriverSeatPlan::SessionModel { model } => {
             let mut c = session_seat.clone();
@@ -189,6 +221,9 @@ async fn resolve_driver_seat(
     // spent an API handshake, and the message must name the driver seat rather
     // than whatever the fallback would have been.
     refuse_nested_server_ladder("driver seat", &driver_cfg)?;
+    // The routed branch resolves a FRESH config, so its chain has not been
+    // through the scrub the session seat got above.
+    refuse_server_owned_fallbacks(&mut driver_cfg, &mut notes);
 
     let (provider, spawner_cfg) =
         match create_provider_with_policy(&driver_cfg, egress_policy.clone()).await {
@@ -239,6 +274,8 @@ pub async fn materialize_valve_seat(
     // Callers treat a valve failure as best-effort, so refusing here costs the
     // escalation turn and never the forge.
     refuse_nested_server_ladder("valve seat", &cfg)?;
+    let mut notes = Vec::new();
+    refuse_server_owned_fallbacks(&mut cfg, &mut notes);
     let provider = create_provider_with_policy(&cfg, egress_policy.clone()).await?;
     let label = format!("{}/{}", cfg.provider_label, cfg.model);
     let spawner = session_spawner
@@ -247,7 +284,7 @@ pub async fn materialize_valve_seat(
     Ok(MaterializedSeat {
         spawner,
         label,
-        notes: Vec::new(),
+        notes,
     })
 }
 
@@ -496,6 +533,124 @@ mod tests {
         assert!(
             msg.contains("valve seat") && msg.contains("flux-verified"),
             "refusal must name the valve seat: {msg}"
+        );
+    }
+
+    /// #893 — the chain UNDER the seat.
+    ///
+    /// `refuse_nested_server_ladder` only ever reads `cfg.model`. A config
+    /// whose every seat model is clean can still carry the server-owned climb
+    /// as a provider-chain fallback, and a build failure then lands the forge
+    /// on the nested ladder by a path nobody chose.
+    ///
+    /// Both directions in one test: the entry naming the climb is dropped from
+    /// BOTH lists, and the ordinary entry beside it survives. Without the
+    /// second half a `retain(|_| false)` would pass.
+    #[test]
+    fn a_server_owned_fallback_is_dropped_and_an_ordinary_one_is_not() {
+        let mut cfg = Config {
+            model: "claude-test".into(),
+            ..Default::default()
+        };
+        cfg.provider_chain.fallback_models = vec![
+            "flux-router:flux-verified".into(),
+            "anthropic:claude-haiku".into(),
+        ];
+        cfg.resolved_fallbacks = vec![
+            Config {
+                model: "flux-verified".into(),
+                ..Default::default()
+            },
+            Config {
+                model: "claude-haiku".into(),
+                ..Default::default()
+            },
+        ];
+
+        let mut notes = Vec::new();
+        refuse_server_owned_fallbacks(&mut cfg, &mut notes);
+
+        assert_eq!(
+            cfg.provider_chain.fallback_models,
+            vec!["anthropic:claude-haiku".to_string()],
+            "the labelled entry naming the climb must go, and only it"
+        );
+        assert_eq!(
+            cfg.resolved_fallbacks
+                .iter()
+                .map(|c| c.model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-haiku"],
+            "the resolved entry naming the climb must go, and only it"
+        );
+        assert_eq!(notes.len(), 1, "the drop must not be silent: {notes:?}");
+        assert!(
+            notes[0].contains('2'),
+            "both lists were scrubbed, so the count must say 2: {notes:?}"
+        );
+
+        // A chain with nothing to drop leaves no note — otherwise every seat
+        // would carry one and the note would stop meaning anything.
+        let mut notes = Vec::new();
+        refuse_server_owned_fallbacks(&mut cfg, &mut notes);
+        assert!(notes.is_empty(), "nothing was dropped: {notes:?}");
+    }
+
+    /// The wiring, not the function: a clean driver seat whose CHAIN names the
+    /// climb comes back with the entry gone. Deleting the call in
+    /// `resolve_driver_seat` leaves the test above green and this one red.
+    #[tokio::test]
+    #[serial]
+    async fn the_driver_seat_scrubs_a_server_owned_fallback() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let mut session_cfg = seat_test_config(home.path(), sessions.path(), "claude-test");
+        session_cfg.provider_chain.fallback_models = vec!["flux-router:flux-verified".into()];
+        let _home = WaylandHomeGuard::install(home.path());
+
+        let seat = materialize_standalone_driver_seat(
+            &AnvilConfig::default(),
+            &session_cfg,
+            wcore_egress::default_policy(),
+        )
+        .await
+        .expect("dropping a fallback must never break the forge");
+
+        assert!(
+            seat.notes.iter().any(|n| n.contains("server-side climb")),
+            "the driver seat must report the dropped fallback: {:?}",
+            seat.notes
+        );
+    }
+
+    /// The same wiring on the valve seat, which builds its config on a
+    /// different path and therefore needs its own call.
+    #[tokio::test]
+    #[serial]
+    async fn the_valve_seat_scrubs_a_server_owned_fallback() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+        let mut session_cfg = seat_test_config(home.path(), sessions.path(), "claude-test");
+        session_cfg.provider_chain.fallback_models = vec!["flux-router:flux-verified".into()];
+        let _home = WaylandHomeGuard::install(home.path());
+
+        let carrier = seat_test_config(home.path(), sessions.path(), "claude-test");
+        let provider = crate::bootstrap::create_provider_with_oauth(&carrier)
+            .expect("the carrier spawner must build");
+        let session_spawner = AgentSpawner::new(provider, carrier);
+
+        let seat = materialize_valve_seat(
+            &session_cfg,
+            wcore_egress::default_policy(),
+            &session_spawner,
+        )
+        .await
+        .expect("dropping a fallback must never break the valve");
+
+        assert!(
+            seat.notes.iter().any(|n| n.contains("server-side climb")),
+            "the valve seat must report the dropped fallback: {:?}",
+            seat.notes
         );
     }
 }
