@@ -1125,11 +1125,6 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::BudgetGrantResult { .. }
         | ProtocolEvent::CompactOffload { .. }
         | ProtocolEvent::HostSendMessageRequest { .. }
-        // #1098 `RenderArtifact` is a json-stream host surface. The in-process
-        // TUI never emits one — `RenderArtifactTool` is only registered under
-        // a `ProtocolSink` — so this arm is unreachable in practice and must
-        // stay a no-op rather than inventing a terminal rendering of it.
-        | ProtocolEvent::RenderArtifact { .. }
         // Node state is redundant with the correlated child relay for the TUI;
         // Desktop consumes this authoritative lifecycle event directly.
         | ProtocolEvent::WorkflowNodeEvent { .. }
@@ -1138,6 +1133,31 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::AnvilReceipt { .. }
         | ProtocolEvent::AnvilReceiptInvalidated { .. }
         | ProtocolEvent::Pong => {}
+        // ── #1138: the terminal render surface ───────────────────────
+        //
+        // This arm used to be folded into the no-op catch-all above, on the
+        // stated grounds that `RenderArtifactTool` is "only registered under a
+        // `ProtocolSink`". That was never true — `bootstrap.rs` registers it
+        // unconditionally — so a TUI user got a tool that was advertised to
+        // the model and could never deliver. The artifact is attached to the
+        // in-flight assistant turn in document order, exactly like a tool
+        // card, so it reads where the model produced it.
+        ProtocolEvent::RenderArtifact {
+            title,
+            mime,
+            content,
+            truncated,
+            ..
+        } => {
+            flush_streaming_into_in_flight_turn(app);
+            let idx = ensure_in_flight_assistant_turn(app);
+            app.session.turns[idx].elements.push(TurnElement::Artifact {
+                title,
+                mime,
+                content,
+                truncated,
+            });
+        }
         // ── F22-C1: durable Goals ────────────────────────────────────
         //
         // Before this arm the TUI had zero goal references, so a user driving
@@ -4271,6 +4291,92 @@ mod tests {
         match &app.session.turns[0].elements[..] {
             [TurnElement::ToolCard(id)] => assert_eq!(id, "call-1"),
             other => panic!("expected single ToolCard(call-1) element, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_artifact_lands_as_a_titled_element_on_the_in_flight_turn() {
+        // #1138: this arm was folded into the no-op catch-all, so a
+        // `render_artifact` call in a TUI session produced NOTHING. Assert the
+        // artifact reaches the transcript as its own titled element, carrying
+        // the title, the declared mime and the content verbatim.
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::RenderArtifact {
+                msg_id: String::new(),
+                call_id: "call-1".into(),
+                title: "Release notes".into(),
+                mime: wcore_protocol::events::RenderMime::Markdown,
+                content: "# v1\n\nshipped".into(),
+                truncated: false,
+                critical: wcore_protocol::events::NonCritical,
+            },
+        );
+        assert_eq!(app.session.turns.len(), 1, "one in-flight assistant turn");
+        assert_eq!(app.session.turns[0].role, TurnRole::Assistant);
+        match &app.session.turns[0].elements[..] {
+            [
+                TurnElement::Artifact {
+                    title,
+                    mime,
+                    content,
+                    truncated,
+                },
+            ] => {
+                assert_eq!(title, "Release notes");
+                assert_eq!(*mime, wcore_protocol::events::RenderMime::Markdown);
+                assert_eq!(content, "# v1\n\nshipped");
+                assert!(!truncated);
+            }
+            other => panic!("expected a single Artifact element, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_artifact_lands_after_the_text_that_introduced_it() {
+        // Document order: streamed text buffered before the render must be
+        // flushed as Markdown FIRST, so the artifact reads where the model
+        // produced it rather than jumping ahead of its own preamble.
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::StreamStart {
+                msg_id: "m1".into(),
+            },
+        );
+        apply_event(
+            &mut app,
+            ProtocolEvent::TextDelta {
+                text: "here it is:".into(),
+                msg_id: "m1".into(),
+            },
+        );
+        assert_eq!(app.session.streaming, "here it is:");
+        apply_event(
+            &mut app,
+            ProtocolEvent::RenderArtifact {
+                msg_id: "m1".into(),
+                call_id: "call-2".into(),
+                title: "Table".into(),
+                mime: wcore_protocol::events::RenderMime::Html,
+                content: "<b>hi</b>".into(),
+                truncated: true,
+                critical: wcore_protocol::events::NonCritical,
+            },
+        );
+        match &app.session.turns[0].elements[..] {
+            [
+                TurnElement::Markdown(body),
+                TurnElement::Artifact {
+                    title, truncated, ..
+                },
+            ] => {
+                assert_eq!(body, "here it is:");
+                assert_eq!(title, "Table");
+                assert!(truncated, "the truncation badge must survive the bridge");
+            }
+            other => panic!("expected [Markdown, Artifact], got {other:?}"),
         }
     }
 

@@ -1806,16 +1806,24 @@ mod tests {
         assert!(!caps.sub_agent_traces);
     }
 
-    /// #1098: only a json-stream connection is a render surface. The terminal
-    /// and null sinks must report false, or `RenderArtifactTool` would be
-    /// registered under a sink that discards the event and the model would
-    /// believe it had shown the user something.
+    /// #1098: a json-stream connection is a render surface; the terminal and
+    /// null sinks are not and must report false, or a render would be
+    /// discarded into a sink with nowhere to put it instead of failing loudly.
+    /// (#1138 added a second `true`: the in-process TUI's `ChannelSink`, which
+    /// is asserted in `wcore-cli`'s own tests — this crate cannot see it.)
     #[test]
     fn only_the_protocol_sink_reports_render_support() {
         let sink = ProtocolSink::new(Arc::new(ProtocolWriter::new()));
         assert!(OutputSink::render_artifact_supported(&sink));
         assert!(!OutputSink::render_artifact_supported(
             &crate::output::null_sink::NullSink
+        ));
+        // #1138 regression guard: the TUI's `ChannelSink` gained a `true`, and
+        // the non-interactive print path must NOT acquire one by copy-paste —
+        // `--print` has nowhere to put a titled, persistent surface, so a
+        // render there must keep failing loudly instead of being discarded.
+        assert!(!OutputSink::render_artifact_supported(
+            &crate::output::terminal::TerminalSink::new(false)
         ));
     }
 
