@@ -65,13 +65,52 @@ impl OutputSink for StreamingSink {
     }
 }
 
+/// How long the fixtures below lease Dangerous authority for.
+///
+/// This is NOT an assertion bound — every assertion in this file is stated
+/// relative to the resolver's own monotonic deadline, so this value cannot
+/// make a failing behaviour pass. It is the budget the FIXTURE has to get a
+/// real Bash (or Spawn) child running before the lease it is testing expires
+/// underneath it.
+///
+/// core#337: at 3s it did not fit. The resolver binds the deadline when the
+/// grant is created, which is before `AgentBootstrap::build()`, so bootstrap
+/// plus the first provider round-trip plus tool dispatch all spend lease. On
+/// hetzner-dsm (96 cores, ambient load 45-90) that setup was measured at
+/// 0.20s alone but up to 2.94s across 208 samples at 48-, 64- and 96-way
+/// parallelism -- 98% of a 3s lease. The tests were racing their own lease,
+/// and lost by killing Bash before it could publish its PID.
+///
+/// 10s is >3x the measured worst case. Re-derive it by timing `grant
+/// creation -> Bash tool dispatch` at the parallelism the suite actually
+/// runs at; raise it if that ever approaches this value.
+const FIXTURE_LEASE_TTL: Duration = Duration::from_secs(10);
+
+/// Anti-hang budget for waits whose CONTENT is the assertion.
+///
+/// Deliberately far larger than anything measured (worst observed
+/// cancellation-to-return was 2.5s at 64-way): these guards exist so a
+/// genuine deadlock fails the suite instead of wedging it, not to bound
+/// latency. Bounding latency here is what made core#337 flaky.
+const ANTI_HANG: Duration = Duration::from_secs(30);
+
 fn dangerous_grant(activation_id: &str) -> wcore_types::execution_policy::DangerousSessionGrant {
     resolve_dangerous_launch(
         &BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Default),
-        DangerousLaunchRequest::cli(3, activation_id),
+        DangerousLaunchRequest::cli(FIXTURE_LEASE_TTL.as_secs(), activation_id),
         0,
     )
     .expect("trusted local launch must resolve")
+}
+
+/// The wall-clock instant this grant's authority ends, on the same monotonic
+/// clock the runtime arms. Every timing assertion below is stated against
+/// this, never against how long fixture setup happened to take.
+fn deadline_of(grant: &wcore_types::execution_policy::DangerousSessionGrant) -> Instant {
+    Instant::now()
+        + grant
+            .remaining_ttl()
+            .expect("a freshly resolved grant must still be live")
 }
 
 /// One of four independent hand-rolled zombie checks this workspace grew, all
@@ -83,7 +122,7 @@ fn process_running(pid: u32) -> bool {
 }
 
 async fn read_pid(path: &std::path::Path) -> u32 {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(ANTI_HANG, async {
         loop {
             if let Ok(raw) = std::fs::read_to_string(path)
                 && let Ok(pid) = raw.trim().parse()
@@ -94,11 +133,15 @@ async fn read_pid(path: &std::path::Path) -> u32 {
         }
     })
     .await
-    .expect("Dangerous Bash must publish its PID before expiry")
+    .expect(
+        "Dangerous Bash never published its PID. Either the tool did not run \
+         at all, or the lease expired before it could -- check FIXTURE_LEASE_TTL \
+         against how long setup is taking under load.",
+    )
 }
 
 async fn wait_gone(pid: u32) {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(ANTI_HANG, async {
         while process_running(pid) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -126,10 +169,12 @@ async fn dangerous_expiry_cancels_production_streaming_bash_process_tree() {
     let sink: Arc<dyn OutputSink> = streaming_sink.clone();
     let mut config = bootstrap_config();
     configure_persisted_test_session(&mut config, workspace.path());
+    let bash_grant = dangerous_grant("lease-bash-e2e");
+    let deadline = deadline_of(&bash_grant);
     let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
         .provider(provider)
         .without_channels(true)
-        .with_dangerous_grant(dangerous_grant("lease-bash-e2e"))
+        .with_dangerous_grant(bash_grant)
         .build()
         .await
         .expect("Dangerous bootstrap must finish inside its one-shot lease");
@@ -143,7 +188,6 @@ async fn dangerous_expiry_cancels_production_streaming_bash_process_tree() {
         cancel_root,
         ..
     } = result;
-    let started = Instant::now();
     let run = tokio::spawn(async move {
         let outcome = engine.run("run the requested command", "").await;
         (engine, outcome)
@@ -152,10 +196,20 @@ async fn dangerous_expiry_cancels_production_streaming_bash_process_tree() {
     let child_pid = read_pid(&child_pid_file).await;
     assert!(process_running(shell_pid));
     assert!(process_running(child_pid));
+    // Fixture health, stated explicitly so losing this race reads as what it
+    // is instead of surfacing later as a confusing timeout: there is nothing
+    // to prove about expiry unless a live process tree exists while the lease
+    // is still granted.
+    assert!(
+        Instant::now() < deadline,
+        "fixture setup outran the {FIXTURE_LEASE_TTL:?} lease -- the process tree \
+         only became observable after the authority it was meant to outlive had \
+         already expired"
+    );
 
-    let (mut engine, outcome) = tokio::time::timeout(Duration::from_secs(4), run)
+    let (mut engine, outcome) = tokio::time::timeout(ANTI_HANG, run)
         .await
-        .expect("lease expiry must stop the production Bash dispatch promptly")
+        .expect("lease expiry must stop the production Bash dispatch")
         .expect("engine task must join");
     assert!(
         matches!(outcome, Err(AgentError::UserAborted)),
@@ -165,7 +219,14 @@ async fn dangerous_expiry_cancels_production_streaming_bash_process_tree() {
         engine.recovery_plan().unwrap().disposition,
         wcore_agent::recovery::RecoveryDisposition::ReconciliationRequired { .. }
     ));
-    assert!(started.elapsed() < Duration::from_secs(4));
+    // The other direction, which the old wall-clock bound could not check at
+    // all: authority must not be revoked EARLY. A resolver that bound the
+    // deadline to the wrong clock, or an arm that mis-computed the remaining
+    // TTL, would abort the turn before this instant.
+    assert!(
+        Instant::now() >= deadline,
+        "the Dangerous session aborted BEFORE its lease deadline"
+    );
     assert!(cancel_root.is_cancelled());
     assert!(
         streaming_sink.chunks.load(Ordering::Relaxed) > 0,
@@ -253,10 +314,12 @@ async fn dangerous_expiry_reaches_bootstrapped_spawn_child() {
     let sink: Arc<dyn OutputSink> = Arc::new(StreamingSink::default());
     let mut config = bootstrap_config();
     configure_persisted_test_session(&mut config, workspace.path());
+    let spawn_grant = dangerous_grant("lease-spawn-e2e");
+    let deadline = deadline_of(&spawn_grant);
     let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
         .provider(provider.clone())
         .without_channels(true)
-        .with_dangerous_grant(dangerous_grant("lease-spawn-e2e"))
+        .with_dangerous_grant(spawn_grant)
         .build()
         .await
         .expect("Dangerous bootstrap must finish inside its one-shot lease");
@@ -276,12 +339,18 @@ async fn dangerous_expiry_reaches_bootstrapped_spawn_child() {
         (engine, outcome)
     });
 
-    tokio::time::timeout(Duration::from_secs(2), provider.child_entered.notified())
+    tokio::time::timeout(ANTI_HANG, provider.child_entered.notified())
         .await
         .expect("production Spawn tool must start the child provider before expiry");
-    let (mut engine, outcome) = tokio::time::timeout(Duration::from_secs(4), run)
+    // Same fixture-health check as the Bash proof above.
+    assert!(
+        Instant::now() < deadline,
+        "fixture setup outran the {FIXTURE_LEASE_TTL:?} lease -- the child engine \
+         only started after the authority it was meant to outlive had expired"
+    );
+    let (mut engine, outcome) = tokio::time::timeout(ANTI_HANG, run)
         .await
-        .expect("lease expiry must stop the production child promptly")
+        .expect("lease expiry must stop the production child")
         .expect("engine task must join");
     assert!(
         matches!(outcome, Err(AgentError::UserAborted)),
@@ -291,6 +360,10 @@ async fn dangerous_expiry_reaches_bootstrapped_spawn_child() {
         engine.recovery_plan().unwrap().disposition,
         wcore_agent::recovery::RecoveryDisposition::ReconciliationRequired { .. }
     ));
+    assert!(
+        Instant::now() >= deadline,
+        "the Dangerous session aborted BEFORE its lease deadline"
+    );
     assert!(cancel_root.is_cancelled());
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
