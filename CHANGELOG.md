@@ -1,3 +1,82 @@
+## [0.13.9](https://github.com/FerroxLabs/wayland-core/compare/v0.13.8...v0.13.9) (2026-08-28)
+
+**Release highlights.** A cycle spent grading our own guards rather than writing
+new ones — including the ones that turned out to be passing without running. No
+breaking changes.
+
+**A command floor below approval and `--force`.** A catastrophic command is now
+refused before any shell is spawned, underneath approval and underneath
+`--force`. Three measured bypass shapes are closed plus a fourth found during
+review: a two-call symlink that reached `~/.config` with no protected component
+in either token stream. It reads the PATHS in a command — after expanding `~`,
+`$HOME` and `$WAYLAND_HOME` and after following symlinks already on disk — not a
+blocklist of command names, so `cd $HOME && cd .wayland && echo … >> config.toml`
+is refused for the same reason its absolute spelling is. Two limits are written
+into the docs rather than papered over: it cannot see a link made by the command
+it is reading, and it does not chase `eval` / `base64` / a variable holding the
+path. Those are the sandbox's job. (#693)
+
+**A red Windows leg now means something.** `retries = 2` reports a test that
+failed twice and passed once as PASSED in the run conclusion — the number
+release gates and humans read. The three tests whose Windows verdict churns are
+pinned at `retries = 0`, two of them were also stacking nextest retries on top of
+their own in-test `RACE_ATTEMPTS = 3` loop, and a checker keeps them that way.
+This makes some Windows legs go red where they used to read green with a buried
+`TRY` line. That is the intent. (#1146)
+
+**Money and failure report the truth.** A provider-reported per-call cost reaches
+the ledger, and an unpriced model says unpriced instead of `0.000000` — the
+product was printing a definite zero for a 112-round-trip session that spent real
+money (#1139). A failed fork reports the turns and tokens it actually burned and
+hands the parent the child's own diagnostic instead of a generic line naming
+three possible causes and committing to none (#1140). An explicitly-exported
+`XAI_API_KEY` outranks an ambient OAuth file (#1141).
+
+**Fixes you would have hit.** `--search` on a Flux tier alias no longer strips
+every agent tool — the array was overwritten rather than merged, measured 3/3
+broken with the flag and 2/3 correct without it (#1136). The OSV malware check
+scans the package you are actually running rather than the first token that
+looks positional (#1137). MCP servers start on Windows: engine-spawned children
+are launched with a cleared environment, and without `SYSTEMROOT`/`WINDIR` a
+child cannot initialise at all, which surfaced as an `EPERM` that reads like a
+permissions problem and is not one (#928). A Spawn fork on a tier alias no
+longer wedges on a smaller output budget than its parent (#862). Two Core
+processes on one Windows box name the process holding the AppContainer ACL lock
+instead of timing out with a dead-end message (#945). A macOS Contained TUI can
+surface a file again (#1138).
+
+**Your unsaved work.** The shell guard is bounded, can never outlast the
+caller's own timeout, and refuses on expiry instead of waving the command
+through. The old refusal told you to raise a timeout that could not help.
+(#1142)
+
+**Model limits.** `gpt-5.6` and its siblings, the whole `grok-4.x` family, and
+Google's current `gemini-3.x` text tiers had no entry, so each compacted at 200k
+against a real window of up to 1,050,000. Refreshed against models.dev vendor
+rows.
+
+**Also.** Desktop contract corpus drift no longer reddens every platform at once,
+and the remedy is safe to follow rather than a regenerate-blind trap (#1055).
+Anvil refuses to nest Flux's server-side ladder inside its own — at every seat,
+and now in the provider-chain fallbacks and the compaction path, which was
+returning contaminated mid-loop material that then replaced the entire
+conversation history (#893). A skill payload key may name its entry exactly one
+way (#694). Process-group sentinels stay parked through `EINTR` (#1054).
+
+**Known and open, filed rather than buried.** An Edit can still overwrite a save
+that lands between the guard's last check and its rename, at about 5%, and CI's
+`retries = 2` hides it — one candidate cause was tested and refuted by
+measurement (#1155). `acp serve` children get their own process group and no
+stdin, so a hard kill of the supervisor leaves them serving under PID 1 (#1156).
+`model_output_ceiling` caps DeepSeek output at 8,192 and MiniMax M3 at 128,000,
+and the arm itself is what removes the provider's own ceiling (#1157).
+
+> 0.13.7 and 0.13.8 shipped without an entry here. Their notes are on the GitHub
+> releases: [v0.13.7](https://github.com/FerroxLabs/wayland-core/releases/tag/v0.13.7)
+> (fourteen verified fixes, and the macOS transcript defect root-caused) and
+> [v0.13.8](https://github.com/FerroxLabs/wayland-core/releases/tag/v0.13.8)
+> (the browser and web search both work on a fresh install).
+
 # Changelog
 
 ## [0.13.6](https://github.com/FerroxLabs/wayland-core/compare/v0.13.5...v0.13.6) (2026-08-24)

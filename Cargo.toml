@@ -152,7 +152,7 @@ members = [
 exclude = ["templates/**", "examples/**"]
 
 [workspace.package]
-version = "0.13.8"
+version = "0.13.9"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
