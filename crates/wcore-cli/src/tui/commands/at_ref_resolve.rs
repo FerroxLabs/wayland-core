@@ -8,11 +8,12 @@
 //! `@symbol`, `@diff`) resolve to deferred placeholders whose real work
 //! happens behind the protocol bridge. Split out of `at_refs.rs` (W3-B).
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::at_ref_guard::{GitIgnore, canonical_root, is_secret_path, rel_to_root, resolve_target};
+use super::at_ref_guard::{AtGate, GitIgnore, Reach, Refusal, is_dir_following_links, rel_to_root};
 use super::at_ref_parse::{AtRef, AtRefError};
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -60,10 +61,22 @@ pub enum AtWarning {
         /// The estimated token cost of the full-contents tree.
         tokens: usize,
     },
-    /// One or more files in an `@dir` walk were skipped because they are
-    /// git-ignored or secret. Carries the count for an honest "N skipped".
+    /// One or more FILES in an `@dir` walk were skipped because they are
+    /// git-ignored, secret, unreadable, or resolve outside the workspace.
+    /// Carries the count for an honest "N skipped".
     SkippedFiles {
         /// How many files the walk skipped.
+        count: usize,
+    },
+    /// One or more DIRECTORIES in an `@dir` walk were not descended into,
+    /// for the same reasons.
+    ///
+    /// Counted apart from [`AtWarning::SkippedFiles`] because a directory is
+    /// not a file: reporting a skipped subtree as "1 file skipped" tells the
+    /// user a number they cannot reconcile with what is missing, which is
+    /// how a removed capability passed for a routine skip.
+    SkippedDirs {
+        /// How many directories the walk did not descend into.
         count: usize,
     },
     /// The `@dir` walk hit [`DIR_MAX_FILES`] and stopped early.
@@ -83,7 +96,16 @@ impl fmt::Display for AtWarning {
                 )
             }
             AtWarning::SkippedFiles { count } => {
-                write!(f, "{count} file(s) skipped (git-ignored or secret)")
+                write!(
+                    f,
+                    "{count} file(s) skipped (git-ignored, secret, or outside the workspace)"
+                )
+            }
+            AtWarning::SkippedDirs { count } => {
+                write!(
+                    f,
+                    "{count} director(y/ies) not walked (git-ignored, secret, or outside the workspace)"
+                )
             }
             AtWarning::Truncated { limit } => {
                 write!(f, "directory tree truncated at {limit} files")
@@ -184,40 +206,24 @@ pub fn resolve(at: &AtRef, root: &Path) -> Result<AtPayload, AtRefError> {
     }
 }
 
-/// Resolve `@file`: read one file, honoring the secret + gitignore guards.
+/// Resolve `@file`: read one named file through the shared admission gate.
 fn resolve_file(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     let full = resolve_under_root(path, root);
     let ignore = GitIgnore::load(root);
+    let gate = AtGate::new(root, &ignore);
 
-    // Lexical pass, on the name as typed. Cheap, and it keeps `@.env` a
-    // loud refusal even when no such file exists — a denylisted NAME is
-    // refused without the filesystem being touched at all.
-    if is_secret_path(&full) {
-        return Err(AtRefError::SecretBlocked(display(path)));
-    }
-    if let Some(rel) = rel_to_root(&full, root)
-        && ignore.is_ignored(&rel, false)
-    {
-        return Err(AtRefError::GitIgnored(display(path)));
-    }
-
-    // Identity pass. `full` is still only a name, and the read follows it.
-    // Resolve it once to the object that read will consume, then judge THAT
-    // object: a symlink to `~/.git-credentials` is refused here, a symlink
-    // to an ordinary file is not (core#339). Measuring the canonical path
-    // against the canonical root also gives an absolute or `..`-routed
-    // target the gitignore verdict the lexical pass could not compute,
-    // because `strip_prefix` could not put the two in the same form
-    // (core#335).
-    let target = resolve_target(&full).map_err(|e| target_error(&e, path))?;
-    if is_secret_path(target.canonical()) {
-        return Err(AtRefError::SecretBlocked(display(path)));
-    }
-    if let Some(rel) = rel_to_root(target.canonical(), &canonical_root(root))
-        && ignore.is_ignored(&rel, false)
-    {
-        return Err(AtRefError::GitIgnored(display(path)));
-    }
+    // Every rule — the secret denylist on both the typed and the canonical
+    // name, `.gitignore` on both, and regular-file identity taken from the
+    // handle the read will consume — lives in the gate. This function no
+    // longer decides any of them; it only says which reach applies.
+    //
+    // `Reach::Named` is the one deliberate difference between the consumers:
+    // the payload carries this file under the name the user typed, so a link
+    // that leaves the workspace is the capability repositories use rather
+    // than a substituted identity. See [`Reach`].
+    let target = gate
+        .admit_file(&full, Reach::Named)
+        .map_err(|r| refusal_error(r, path))?;
 
     let content = target.read_to_string().map_err(|e| AtRefError::Io {
         path: display(path),
@@ -235,49 +241,47 @@ fn resolve_file(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     })
 }
 
-/// Resolve `@dir`: walk a directory tree, reading file contents, skipping
-/// git-ignored and secret files. An oversized tree resolves with an
+/// Resolve `@dir`: walk a directory tree through the same gate every other
+/// consumer uses. An oversized tree resolves with an
 /// [`AtWarning::OversizedDir`] so the composer can offer names-only.
 fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     let full = resolve_under_root(path, root);
     if !full.is_dir() {
         return Err(AtRefError::NotFound(display(path)));
     }
-    // The walk ROOT has to be inside the workspace, and `full` is still
-    // only a name: `@link/`, where `link` is a symlink to a directory
-    // outside the root, satisfies `is_dir` and then hands `walk_dir` an
-    // out-of-tree tree whose every entry strips back to `link/…` — in-root
-    // -looking paths for files the workspace does not contain.
-    let croot = canonical_root(root);
-    match fs::canonicalize(&full) {
-        Ok(canonical) if canonical.starts_with(&croot) => {}
-        _ => return Err(AtRefError::NotFound(display(path))),
-    }
 
     let ignore = GitIgnore::load(root);
-    let mut files = Vec::new();
+    let gate = AtGate::new(root, &ignore);
+
+    // The walk ROOT goes through the gate exactly like every entry beneath
+    // it. `@link/`, where `link` resolves outside the workspace, otherwise
+    // hands the walk an out-of-tree tree whose every entry strips back to
+    // `link/…` — in-root-looking paths for files the workspace does not
+    // contain.
+    let canonical_dir = gate.admit_dir(&full).map_err(|r| refusal_error(r, path))?;
+
+    let mut walk = DirWalk::default();
+    walk.visited.insert(canonical_dir);
+    walk.run(&full, &gate)?;
+
     let mut warnings = Vec::new();
-    let mut skipped = 0usize;
-    let mut truncated = false;
-
-    walk_dir(
-        &full,
-        root,
-        &ignore,
-        &mut files,
-        &mut skipped,
-        &mut truncated,
-    )?;
-
-    if truncated {
+    if walk.truncated {
         warnings.push(AtWarning::Truncated {
             limit: DIR_MAX_FILES,
         });
     }
-    if skipped > 0 {
-        warnings.push(AtWarning::SkippedFiles { count: skipped });
+    if walk.skipped_files > 0 {
+        warnings.push(AtWarning::SkippedFiles {
+            count: walk.skipped_files,
+        });
+    }
+    if walk.skipped_dirs > 0 {
+        warnings.push(AtWarning::SkippedDirs {
+            count: walk.skipped_dirs,
+        });
     }
 
+    let files = walk.files;
     let total_bytes: usize = files.iter().map(|f| f.content.len()).sum();
     let tokens = total_bytes.div_ceil(CHARS_PER_TOKEN);
     let (kind, files) = if tokens > DIR_TOKEN_WARN_BUDGET {
@@ -304,104 +308,121 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     })
 }
 
-/// Depth-first directory walk for `@dir`, applying both guardrails.
-fn walk_dir(
-    dir: &Path,
-    root: &Path,
-    ignore: &GitIgnore,
-    out: &mut Vec<ResolvedFile>,
-    skipped: &mut usize,
-    truncated: &mut bool,
-) -> Result<(), AtRefError> {
-    if *truncated {
-        return Ok(());
-    }
-    let entries = fs::read_dir(dir).map_err(|e| AtRefError::Io {
-        path: display(dir),
-        message: e.to_string(),
-    })?;
+/// The mutable state of one `@dir` walk.
+///
+/// A struct rather than six `&mut` out-parameters, because the visited set
+/// is the fifth and the two skip counters have to stay distinguishable.
+#[derive(Default)]
+struct DirWalk {
+    /// Files admitted so far, labelled relative to the workspace root.
+    files: Vec<ResolvedFile>,
+    /// CANONICAL paths of directories already walked.
+    ///
+    /// Keyed on the canonical path, so one directory is walked once however
+    /// many names reach it. That is what makes following in-root directory
+    /// symlinks safe: `root/loop -> root` stops on the first repeat instead
+    /// of re-pushing the whole tree under an ever-longer prefix — the cycle
+    /// that `DIR_MAX_FILES` could bound only by truncating the payload.
+    visited: HashSet<PathBuf>,
+    /// Files the gate refused, or that could not be read as text.
+    skipped_files: usize,
+    /// Directories the gate refused. Kept apart from `skipped_files` so the
+    /// user-facing warning does not call a subtree a file.
+    skipped_dirs: usize,
+    /// True once `DIR_MAX_FILES` was hit.
+    truncated: bool,
+}
 
-    // Sort entries for a deterministic walk — the payload (and its tests)
-    // must not depend on filesystem iteration order.
-    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-    paths.sort();
-
-    for path in paths {
-        if out.len() >= DIR_MAX_FILES {
-            *truncated = true;
+impl DirWalk {
+    /// Depth-first walk of `dir`, admitting every candidate through `gate`.
+    fn run(&mut self, dir: &Path, gate: &AtGate) -> Result<(), AtRefError> {
+        if self.truncated {
             return Ok(());
         }
-        // `symlink_metadata`, NOT `Path::is_dir`, which follows symlinks:
-        // a symlink to a directory took the recurse branch below — the one
-        // branch with no identity guard on it — while `rel_to_root` kept
-        // answering `link/…` for every entry underneath. The walk left the
-        // workspace and every path it reported still looked in-root.
-        //
-        // A symlink therefore reports `is_dir == false` here and falls to
-        // the file branch, where `resolve_target` judges the object it
-        // opens and refuses anything that is not a regular file. That
-        // refuses a symlink to a DIRECTORY, deliberately: following one
-        // would need a containment test *and* cycle bookkeeping, because
-        // `root/loop -> root` is inside the root and the `DIR_MAX_FILES`
-        // budget cannot stop a cycle — each lap re-pushes the same files
-        // under a longer prefix. A symlink to a FILE is still followed,
-        // which is the capability repositories actually use, and the skip
-        // is reported in the payload's `SkippedFiles` count rather than
-        // being silent.
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            *skipped += 1;
-            continue;
-        };
-        let is_dir = meta.is_dir();
-        let rel = match rel_to_root(&path, root) {
-            Some(r) => r,
-            None => continue,
-        };
-        if ignore.is_ignored(&rel, is_dir) {
-            *skipped += 1;
-            continue;
-        }
-        if is_dir {
-            // `.git` is always skipped — it is never useful context and
-            // can be enormous.
-            if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
+        let entries = fs::read_dir(dir).map_err(|e| AtRefError::Io {
+            path: display(dir),
+            message: e.to_string(),
+        })?;
+
+        // Sort entries for a deterministic walk — the payload (and its
+        // tests) must not depend on filesystem iteration order, and with a
+        // visited set the order also decides which of two names for the
+        // same directory is the one the payload reports.
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+
+        for path in paths {
+            if self.files.len() >= DIR_MAX_FILES {
+                self.truncated = true;
+                return Ok(());
+            }
+
+            // Decide what the entry IS by following the link; let the gate
+            // decide whether it may be entered. Classifying with
+            // `symlink_metadata` (or `DirEntry::file_type`, the same stat)
+            // calls every directory link a non-directory, which is how
+            // `@alias/` resolved while `@./` silently dropped the same
+            // object and reported it as a skipped FILE.
+            if is_dir_following_links(&path) {
+                // `.git` is never useful context and can be enormous. Not a
+                // refusal, so it is not counted as one.
+                if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
+                    continue;
+                }
+                match gate.admit_dir(&path) {
+                    // Already reached under another name: the same object,
+                    // not a refusal, so it is de-duplicated silently rather
+                    // than reported as a skip.
+                    Ok(canonical) => {
+                        if self.visited.insert(canonical) {
+                            self.run(&path, gate)?;
+                        }
+                    }
+                    Err(_) => self.skipped_dirs += 1,
+                }
                 continue;
             }
-            walk_dir(&path, root, ignore, out, skipped, truncated)?;
-        } else {
-            // Lexical pass first: a denylisted NAME never needs opening.
-            if is_secret_path(&path) {
-                *skipped += 1;
-                continue;
-            }
-            // Then the identity pass. The second of the guard's three
-            // production call sites: without this the walk inlines whatever
-            // an entry points at, so a fix applied only to `resolve_file`
-            // would leave `@dir` wide open (core#339).
-            //
-            // A target that will not resolve — a dangling link, a device, a
-            // file that cannot be opened — is skipped, exactly as an
-            // unreadable file was before.
-            let Ok(target) = resolve_target(&path) else {
-                *skipped += 1;
+
+            // The label the payload will carry. A path that will not strip
+            // against the root cannot be labelled honestly, so it is not
+            // carried at all.
+            let Some(rel) = rel_to_root(&path, gate.root()) else {
                 continue;
             };
-            if is_secret_path(target.canonical()) {
-                *skipped += 1;
-                continue;
-            }
-            // Read text files only; a binary file is skipped silently
-            // rather than corrupting the payload with lossy bytes.
-            match target.read_to_string() {
-                Ok(content) => out.push(ResolvedFile {
-                    path: PathBuf::from(&rel),
-                    content,
-                }),
-                Err(_) => *skipped += 1,
+
+            // `Reach::Walked`: nobody named this file, and it is about to be
+            // labelled with an in-root relative path, so the object it
+            // resolves to has to be in the workspace too.
+            match gate.admit_file(&path, Reach::Walked) {
+                Ok(target) => match target.read_to_string() {
+                    Ok(content) => self.files.push(ResolvedFile {
+                        path: PathBuf::from(&rel),
+                        content,
+                    }),
+                    // A binary file is skipped rather than corrupting the
+                    // payload with lossy bytes.
+                    Err(_) => self.skipped_files += 1,
+                },
+                Err(_) => self.skipped_files += 1,
             }
         }
+        Ok(())
     }
-    Ok(())
+}
+
+/// Map a gate [`Refusal`] onto the resolver's error vocabulary.
+fn refusal_error(refusal: Refusal, path: &Path) -> AtRefError {
+    match refusal {
+        Refusal::Secret => AtRefError::SecretBlocked(display(path)),
+        Refusal::GitIgnored => AtRefError::GitIgnored(display(path)),
+        // "there is nothing here you may attach" — the same answer the
+        // previous `is_dir` / `is_file` pre-checks gave for a target that
+        // is not attachable, and what
+        // `an_at_dir_reference_to_a_symlinked_directory_outside_the_root_is_refused`
+        // pins.
+        Refusal::EscapesRoot => AtRefError::NotFound(display(path)),
+        Refusal::Unresolvable(e) => target_error(&e, path),
+    }
 }
 
 /// Resolve `@symbol`. The repomap symbol index lives behind a Wave-2
@@ -1021,6 +1042,183 @@ mod tests {
         );
     }
 
+    // ══ the gate: one policy, three consumers ════════════════════════════
+
+    /// THE structural test. Round 1's failure was not three oversights but
+    /// one duplication: `resolve_file`, the popup and `walk_dir` each held a
+    /// private copy of the same four rules, two were tightened and the third
+    /// drifted. A per-defect test cannot catch that — the next consumer to
+    /// drift has no test yet. This one asserts the PROPERTY instead: for the
+    /// same planted object, `@name` and `@./` reach the same verdict.
+    ///
+    /// One row disagrees ON PURPOSE, and says so: an in-root name pointing
+    /// at an ordinary file OUTSIDE the workspace resolves as `@name` (the
+    /// user named it; `a_symlink_to_an_ordinary_file_still_resolves` pins
+    /// that capability) and is refused by the walk (nobody named it, and the
+    /// walk would label its body with an in-root path). That is `Reach`, and
+    /// it is the only difference the gate permits.
+    #[cfg(unix)]
+    #[test]
+    fn the_walk_and_the_direct_reference_reach_the_same_verdict() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, outside) = workspace_and_outside(&tmp);
+        fs::write(root.join(".gitignore"), "artifact.txt\n").expect("gitignore");
+        fs::write(root.join("artifact.txt"), "IGNORED-BODY").expect("artifact");
+        fs::write(root.join("ordinary.txt"), "ordinary body").expect("ordinary");
+        fs::write(outside.join("shared.md"), "OUTSIDE-BODY").expect("shared");
+        std::os::unix::fs::symlink(outside.join("shared.md"), root.join("outside_link.txt"))
+            .expect("outside link");
+        std::os::unix::fs::symlink(root.join("artifact.txt"), root.join("ignored_link.txt"))
+            .expect("ignored link");
+        plant_credential_symlink(&root, &outside, "secret_link.txt", ".git-credentials");
+
+        // (name, direct `@name` resolves?, appears in the `@./` walk?)
+        let cases: &[(&str, bool, bool)] = &[
+            ("ordinary.txt", true, true),
+            ("artifact.txt", false, false),
+            ("ignored_link.txt", false, false),
+            ("secret_link.txt", false, false),
+            // The one named difference — see the doc comment above.
+            ("outside_link.txt", true, false),
+        ];
+
+        let walked = resolve(&AtRef::parse("@./").expect("parse"), &root).expect("walk");
+        let names: Vec<String> = walked
+            .files
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect();
+        // Control: the walk produced something, so a "not present" assertion
+        // below cannot pass by the walk having produced nothing at all.
+        assert!(
+            names.iter().any(|n| n == "ordinary.txt"),
+            "control missing, the walk produced {names:?}"
+        );
+
+        for (name, direct_ok, in_walk) in cases {
+            let direct = resolve(&AtRef::parse(&format!("@{name}")).expect("parse"), &root);
+            assert_eq!(
+                direct.is_ok(),
+                *direct_ok,
+                "@{name}: direct verdict wrong, got {direct:?}"
+            );
+            assert_eq!(
+                names.iter().any(|n| n == name),
+                *in_walk,
+                "@{name}: walk verdict wrong, walk produced {names:?}"
+            );
+        }
+
+        // And no body from outside the workspace reached the walk at all,
+        // by content rather than by name.
+        for f in &walked.files {
+            assert!(
+                !f.content.contains("OUTSIDE-BODY") && !f.content.contains("fake-token"),
+                "the walk inlined an out-of-workspace body as {:?}",
+                f.path
+            );
+        }
+    }
+
+    /// D3, the walk half. An in-root symlink to an in-root directory is
+    /// followed, and the visited set keyed on the canonical path means the
+    /// object is walked ONCE however many names reach it.
+    #[cfg(unix)]
+    #[test]
+    fn an_in_root_symlinked_directory_is_walked_exactly_once() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, _outside) = workspace_and_outside(&tmp);
+        fs::create_dir(root.join("real")).expect("mkdir real");
+        fs::write(root.join("real/inner.txt"), "inner body").expect("inner");
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).expect("alias");
+        fs::write(root.join("kept.txt"), "kept body").expect("kept");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), &root).expect("walk");
+        assert_eq!(
+            payload
+                .files
+                .iter()
+                .filter(|f| f.content == "inner body")
+                .count(),
+            1,
+            "the aliased directory was walked twice: {:?}",
+            payload.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        // De-duplication is not a refusal, so it raises no advisory at all.
+        assert!(
+            payload.warnings.is_empty(),
+            "de-duplicating one object reported as a skip: {:?}",
+            payload.warnings
+        );
+    }
+
+    /// D3, the honesty half. A directory the walk would not enter must be
+    /// reported as a DIRECTORY. Round 1 removed the ability to follow a
+    /// directory link and reported the loss as `SkippedFiles { count: 1 }` —
+    /// a number the user cannot reconcile with what is missing.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_the_walk_refuses_is_not_reported_as_a_skipped_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (root, outside) = workspace_and_outside(&tmp);
+        let private = outside.join("private");
+        fs::create_dir_all(&private).expect("mkdir private");
+        fs::write(private.join("leak.txt"), FAKE_CREDENTIAL_BODY).expect("leak");
+        std::os::unix::fs::symlink(&private, root.join("link")).expect("dir link");
+        fs::write(root.join("kept.txt"), "kept body").expect("kept");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), &root).expect("walk");
+        assert!(
+            payload.files.iter().any(|f| f.content == "kept body"),
+            "control missing"
+        );
+        assert!(
+            payload
+                .warnings
+                .contains(&AtWarning::SkippedDirs { count: 1 }),
+            "the refused directory was not reported as a directory: {:?}",
+            payload.warnings
+        );
+        assert!(
+            !payload
+                .warnings
+                .iter()
+                .any(|w| matches!(w, AtWarning::SkippedFiles { .. })),
+            "a refused DIRECTORY was counted as a skipped file: {:?}",
+            payload.warnings
+        );
+        assert!(
+            AtWarning::SkippedDirs { count: 1 }
+                .to_string()
+                .contains("director"),
+            "the rendered advisory does not say 'directory'"
+        );
+    }
+
+    /// A consistency the unified gate buys: `@build/` on a git-ignored
+    /// directory is now refused, exactly as `@build/artifact.txt` was and as
+    /// the completion popup already declined to offer it. Before the gate,
+    /// the walk root was the one candidate no `.gitignore` verdict reached,
+    /// so `@build/` inlined a whole ignored tree the popup would not name.
+    #[test]
+    fn an_at_dir_reference_to_a_gitignored_directory_is_refused() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join(".gitignore"), "build/\n").expect("gitignore");
+        fs::create_dir(root.join("build")).expect("mkdir build");
+        fs::write(root.join("build/artifact.txt"), "binary-ish").expect("artifact");
+        fs::create_dir(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/main.rs"), "fn main() {}").expect("main");
+
+        // Control: a non-ignored directory still resolves by the same route.
+        let ok = resolve(&AtRef::parse("@src/").expect("parse"), root).expect("control");
+        assert!(ok.files.iter().any(|f| f.content == "fn main() {}"));
+
+        let err = resolve(&AtRef::parse("@build/").expect("parse"), root)
+            .expect_err("a git-ignored directory must be refused");
+        assert!(matches!(err, AtRefError::GitIgnored(_)), "got {err:?}");
+    }
+
     // == REFUTATION PROBES (external auditor) =============================
 
     /// The @dir walk still leaves the workspace - through a symlink to a
@@ -1109,7 +1307,11 @@ mod tests {
                 .iter()
                 .any(|f| f.content.contains("fake-token")),
             "the credential symlink was inlined: {:?}",
-            payload.files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>()
+            payload
+                .files
+                .iter()
+                .map(|f| f.path.display().to_string())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1130,8 +1332,14 @@ mod tests {
             .iter()
             .map(|f| f.path.display().to_string())
             .collect();
-        eprintln!("REFUT in-root dir symlink: names={names:?} warnings={:?}", payload.warnings);
-        assert!(names.iter().any(|n| n.contains("kept.txt")), "control missing");
+        eprintln!(
+            "REFUT in-root dir symlink: names={names:?} warnings={:?}",
+            payload.warnings
+        );
+        assert!(
+            names.iter().any(|n| n.contains("kept.txt")),
+            "control missing"
+        );
         assert!(
             names.iter().any(|n| n.starts_with("alias")),
             "REFUTED-AS-REGRESSION: an in-root symlinked directory produced no entries: {names:?}"
@@ -1153,7 +1361,10 @@ mod tests {
         assert!(
             p.files.iter().any(|f| f.content == "inner body"),
             "@alias/ produced nothing: {:?}",
-            p.files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>()
+            p.files
+                .iter()
+                .map(|f| f.path.display().to_string())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1175,7 +1386,11 @@ mod tests {
                 .count(),
             1,
             "mutual loop mis-walked: {:?}",
-            payload.files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>()
+            payload
+                .files
+                .iter()
+                .map(|f| f.path.display().to_string())
+                .collect::<Vec<_>>()
         );
     }
 

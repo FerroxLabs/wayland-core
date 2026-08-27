@@ -32,6 +32,7 @@ use wcore_agent::tool_backends::http_fetch::HttpFetchBackend;
 use wcore_config::shell::shell_command_argv;
 use wcore_tools::web_fetch::{FetchOutcome, WEB_FETCH_DEFAULT_TIMEOUT_MS, WebFetchTool};
 
+use super::at_ref_guard::{AtGate, GitIgnore, Reach};
 use super::at_ref_parse::AtRef;
 use super::at_ref_resolve::{AtPayload, resolve};
 
@@ -354,6 +355,16 @@ fn render_symbol_blocking(name: &str, root: &Path) -> String {
         Err(e) => return format!("▌ {label} — repomap index failed: {e}"),
     };
 
+    // The symbol's source is read through the same gate every other
+    // `@`-reference read goes through. The repomap discovered these paths —
+    // nobody typed them — so the reach is `Walked`: the file has to be a
+    // regular file inside the workspace, off the secret denylist, and not
+    // git-ignored under either its indexed name or its canonical one. Before
+    // this, `read_def_snippet` was a bare `fs::read_to_string` with no guard
+    // of any kind on it.
+    let ignore = GitIgnore::load(root);
+    let gate = AtGate::new(root, &ignore);
+
     let mut blocks: Vec<String> = Vec::new();
     let mut total = 0usize;
     for f in &map.files {
@@ -367,7 +378,7 @@ fn render_symbol_blocking(name: &str, root: &Path) -> String {
             } else {
                 root.join(&f.path)
             };
-            let snippet = read_def_snippet(&full, s.line);
+            let snippet = read_def_snippet(&gate, &full, s.line);
             blocks.push(format!(
                 "▌ {label} › {}:{} ({:?})\n{snippet}",
                 f.path.display(),
@@ -392,8 +403,31 @@ fn render_symbol_blocking(name: &str, root: &Path) -> String {
 /// Read a fixed window of source starting at a symbol's 1-based start line.
 /// The repomap records only the start line, so this is a preview, not the
 /// exact definition span.
-fn read_def_snippet(path: &Path, start_line: usize) -> String {
-    let content = match std::fs::read_to_string(path) {
+///
+/// ## What routing this through the gate does and does not close
+///
+/// It closes the checks that were simply absent: this read had no secret
+/// denylist, no `.gitignore` verdict, no root containment, and no
+/// regular-file identity test, so an indexed path that had since become a
+/// link to a credential store would have been inlined verbatim.
+///
+/// It does NOT make the read atomic with the indexing. `wcore_repomap` skips
+/// every non-regular entry when it walks (`crates/wcore-repomap/src/lib.rs`,
+/// `if !file_type.is_file()`), so a FIFO or a symlink planted BEFORE the
+/// index is never indexed and the blocking-open class never reaches here.
+/// What remains is the window between that walk and this read: a file that
+/// was an ordinary regular file when indexed can be replaced before the
+/// snippet is taken. The gate judges the object it actually opens, so the
+/// substituted object is still measured — a swapped-in secret or out-of-tree
+/// target is refused — but the line numbers are the old file's, so a
+/// same-shape replacement yields a stale preview. That is a staleness
+/// residual, not a check-vs-use split, and it is not eliminated here.
+fn read_def_snippet(gate: &AtGate, path: &Path, start_line: usize) -> String {
+    let content = match gate
+        .admit_file(path, Reach::Walked)
+        .map_err(|r| format!("{r:?}"))
+        .and_then(|t| t.read_to_string().map_err(|e| e.to_string()))
+    {
         Ok(c) => c,
         Err(e) => return format!("(could not read definition: {e})"),
     };
@@ -603,6 +637,48 @@ mod tests {
         assert!(
             out.contains("not instructions"),
             "shell output must be labeled as data: {out}"
+        );
+    }
+
+    /// `read_def_snippet` was the fourth production read of an
+    /// `@`-reference path and the only one with NO guard on it at all — not
+    /// the secret denylist, not `.gitignore`, not containment, not the
+    /// regular-file check. It now goes through the same gate, so an indexed
+    /// path that resolves to a credential store outside the workspace is a
+    /// note rather than an inlined secret.
+    #[cfg(unix)]
+    #[test]
+    fn a_symbol_definition_is_read_through_the_same_gate_as_every_other_at_read() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("ws");
+        let outside = tmp.path().join("home");
+        fs::create_dir_all(&root).expect("mkdir ws");
+        fs::create_dir_all(&outside).expect("mkdir home");
+        fs::write(
+            outside.join(".git-credentials"),
+            "https://u:LEAKED@example.invalid\n",
+        )
+        .expect("credential");
+        fs::write(root.join("plain.rs"), "fn one() {}\nfn two() {}\n").expect("plain");
+        std::os::unix::fs::symlink(outside.join(".git-credentials"), root.join("notes.rs"))
+            .expect("symlink");
+
+        let ignore = GitIgnore::load(&root);
+        let gate = AtGate::new(&root, &ignore);
+
+        // Control: an ordinary in-root source file still previews, so the
+        // refusal below is the guard and not a broken fixture.
+        let ok = read_def_snippet(&gate, &root.join("plain.rs"), 1);
+        assert!(ok.contains("fn one()"), "control produced {ok:?}");
+
+        let refused = read_def_snippet(&gate, &root.join("notes.rs"), 1);
+        assert!(
+            !refused.contains("LEAKED"),
+            "an unguarded read inlined a credential store: {refused:?}"
+        );
+        assert!(
+            refused.starts_with("(could not read definition"),
+            "unexpected refusal rendering: {refused:?}"
         );
     }
 

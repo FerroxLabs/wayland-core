@@ -11,7 +11,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::at_ref_guard::{GitIgnore, canonical_root, is_secret_path, rel_to_root};
+use super::at_ref_guard::{AtGate, GitIgnore, is_dir_following_links};
 
 /// Max completion candidates returned for one partial token. The popup in
 /// the mockup shows a short list; more than this is noise.
@@ -88,7 +88,7 @@ fn complete_paths(body: &str, root: &Path) -> Vec<Completion> {
     };
 
     let ignore = GitIgnore::load(root);
-    let croot = canonical_root(root);
+    let gate = AtGate::new(root, &ignore);
     let mut out = Vec::new();
 
     for entry in entries.flatten() {
@@ -103,48 +103,24 @@ fn complete_paths(body: &str, root: &Path) -> Vec<Completion> {
             continue;
         }
         let path = entry.path();
-        // Lexical pass, on the name as listed.
-        if is_secret_path(&path) {
-            continue;
-        }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        // Follow the link to classify the row, with the same helper the walk
+        // uses: `DirEntry::file_type` calls a symlink-to-a-directory a file,
+        // which offered `@alias` for something `@alias/` is the only working
+        // reference to.
+        let is_dir = is_dir_following_links(&path);
         let rel = if dir_part.is_empty() {
             name.to_string()
         } else {
             format!("{dir_part}/{name}")
         };
-        // Identity pass — the third production call site of the guard.
+
+        // The popup's whole guard set, from the same gate the resolver uses.
         // Offering a row is the first half of attaching it: the user presses
         // Tab and `resolve_file` inlines whatever the name points at, so the
-        // popup has to judge the same object that read will (core#339).
-        //
-        // `canonicalize` rather than `resolve_target` because nothing is read
-        // here, so there is no handle to bind a name to; the authoritative,
-        // race-free guard is the one at resolution. A candidate whose target
-        // will not resolve keeps its lexical verdict — a broken link leaks
-        // nothing and still deserves to be listed.
-        let canonical = fs::canonicalize(&path).ok();
-        if let Some(canonical) = &canonical
-            && is_secret_path(canonical)
-        {
-            continue;
-        }
-        // Gitignore, judged on BOTH names — ADDITIVELY. A candidate has the
-        // relative path it is typed as and the one its target canonicalizes
-        // to, and either being ignored is a reason not to offer it.
-        //
-        // Substituting the canonical verdict for the lexical one instead
-        // *un-ignores* every lexically-ignored link: the popup offers the
-        // row, the user presses Tab, and `resolve_file`'s own lexical check
-        // refuses it as GitIgnored — the popup/resolver disagreement this
-        // pass exists to remove. A target outside the root has no gitignore
-        // jurisdiction and simply adds no second verdict.
-        if ignore.is_ignored(&rel, is_dir) {
-            continue;
-        }
-        if let Some(canonical_rel) = canonical.as_deref().and_then(|c| rel_to_root(c, &croot))
-            && ignore.is_ignored(&canonical_rel, is_dir)
-        {
+        // popup has to reach the same verdict the resolver will (core#339).
+        // `Reach::Named` for exactly that reason — a popup STRICTER than the
+        // resolver is the same disagreement with the sign flipped.
+        if gate.admit_offer(&path, is_dir).is_err() {
             continue;
         }
 
@@ -296,6 +272,28 @@ mod tests {
     #[test]
     fn completion_requires_a_leading_at() {
         assert!(complete("nope", Path::new(".")).is_empty());
+    }
+
+    /// The popup and the walk must classify an entry the same way.
+    /// `DirEntry::file_type` calls a symlink-to-a-directory a FILE, so the
+    /// popup offered `@alias` — a reference that resolves to nothing —
+    /// for an object whose only working reference is `@alias/`.
+    #[cfg(unix)]
+    #[test]
+    fn completion_offers_an_in_root_symlinked_directory_as_a_directory() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir(root.join("real")).expect("mkdir real");
+        fs::write(root.join("real/inner.txt"), "inner").expect("inner");
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).expect("alias");
+
+        let comps = complete("@al", root);
+        let row = comps
+            .iter()
+            .find(|c| c.insert.starts_with("@alias"))
+            .unwrap_or_else(|| panic!("alias was not offered at all: {comps:?}"));
+        assert_eq!(row.insert, "@alias/", "offered as a file: {row:?}");
+        assert!(row.is_dir, "not marked as a directory: {row:?}");
     }
 
     #[test]

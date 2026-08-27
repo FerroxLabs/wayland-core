@@ -167,10 +167,29 @@ impl ResolvedTarget {
 /// Unix answers that with `O_NONBLOCK`, which makes the open return for
 /// every file type and is a no-op for the regular files this function is
 /// actually after — POSIX gives `O_NONBLOCK` no effect on reads from a
-/// regular file, so the later `read_to_string` is unchanged. Windows has
-/// no equivalent flag and no equivalent exposure through a workspace path
-/// (a named pipe there is a `\\.\pipe\…` name, not a directory entry),
-/// so it keeps the plain open.
+/// regular file, so the later `read_to_string` is unchanged.
+///
+/// ## Windows
+///
+/// Windows has no equivalent flag. It is also a smaller exposure, but not
+/// the zero one it was previously described as: no directory entry can BE a
+/// pipe or a device, yet the `@`-surface accepts an absolute path, so a
+/// device-namespace name (`\\.\pipe\…`) is typeable straight into the
+/// composer. The cheap half of that is closed below by refusing the
+/// device namespace before the open — a real file is never reached through
+/// `\\.\`, so nothing a user owns can be refused by it.
+///
+/// What is deliberately NOT added is a reserved-name blocklist. On Windows
+/// 11 build 26200 only a bare `NUL` still behaves as a device; `CON`,
+/// `AUX`, `COM1` and `aux.txt` are ordinary files there, so the textbook
+/// list would refuse real user data. `NUL` itself opens instantly and is
+/// then refused by the handle's own type check, which returns
+/// `FILE_TYPE_CHAR` for a device and `FILE_TYPE_PIPE` for a named pipe —
+/// neither is `is_file()`.
+///
+/// NONE of this is measured. The `cfg(not(unix))` arm has been compiled and
+/// clippy-checked for `x86_64-pc-windows-gnu` and never executed; the
+/// residual risk is a `CreateFile` that blocks on a name this guard admits.
 ///
 /// Every open in this module goes through here — that is what keeps the
 /// "check the handle, not the name" ordering from costing a hang.
@@ -187,6 +206,21 @@ fn open_without_blocking(path: &Path) -> io::Result<File> {
 
 #[cfg(not(unix))]
 fn open_without_blocking(path: &Path) -> io::Result<File> {
+    use std::path::Prefix;
+
+    // The device namespace, refused before the open rather than after it.
+    // `Prefix::DeviceNS` is `\\.\…`; `Prefix::Verbatim` is a `\\?\` name
+    // that is neither a drive nor a UNC share. Both are ways to reach an
+    // object that is not a file at all, and neither can name a file the
+    // user actually has.
+    if let Some(Component::Prefix(p)) = path.components().next()
+        && matches!(p.kind(), Prefix::DeviceNS(_) | Prefix::Verbatim(_))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "an @-reference target must be a regular file, not a device name",
+        ));
+    }
     File::open(path)
 }
 
@@ -479,6 +513,200 @@ fn glob_inner(p: &[char], t: &[char]) -> bool {
             _ => false,
         },
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// The admission gate — the ONE place `@`-reference policy is decided
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Why [`AtGate`] refused a candidate.
+///
+/// A typed verdict rather than a bool: each consumer renders the refusal in
+/// its own vocabulary (the resolver into [`AtRefError`], the walk into a
+/// skip counter, the popup into "not offered"), and none of them may decide
+/// *whether* to refuse.
+#[derive(Debug)]
+pub(super) enum Refusal {
+    /// The typed name, or the object it resolves to, is on the secret
+    /// denylist.
+    Secret,
+    /// The typed name, or the canonical name, is git-ignored.
+    GitIgnored,
+    /// The candidate was DISCOVERED inside the workspace but the object it
+    /// resolves to lives outside it.
+    EscapesRoot,
+    /// The candidate could not be resolved to a readable regular file — a
+    /// dangling link, a device, a FIFO, a directory, a permission failure,
+    /// or an identity that moved mid-resolution.
+    Unresolvable(io::Error),
+}
+
+/// How a candidate reached the gate.
+///
+/// This is the ONLY policy difference between the `@`-reference consumers,
+/// and it exists so that difference is *named* rather than re-discovered as
+/// a missing check in whichever consumer was written last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Reach {
+    /// The user NAMED this object: `@file`, or the popup row that is about
+    /// to become one. Its label in the payload is the name the user typed,
+    /// so a link that leaves the workspace is not a substitution — it is the
+    /// capability repositories actually use (`docs/spec.md ->
+    /// ../shared/spec.md`), and `a_symlink_to_an_ordinary_file_still_resolves`
+    /// pins it. Every other rule still applies to the object it points at.
+    Named,
+    /// The `@dir` walk DISCOVERED this object; nobody named it. It is
+    /// reported under a root-relative label the walk synthesises, so an
+    /// out-of-tree body would arrive wearing an in-root name — precisely the
+    /// substitution the guard exists to stop (core#339). Containment is
+    /// therefore required here and only here.
+    Walked,
+}
+
+/// The single gate every `@`-reference consumer passes a candidate through.
+///
+/// Before this type existed, `resolve_file`, `walk_dir` and the completion
+/// popup each carried their own hand-assembled copy of the same four rules —
+/// containment, regular-file identity, the secret denylist, and `.gitignore`
+/// under both the lexical and the canonical name. Two of the three were
+/// updated when the rules were tightened and the third silently kept the
+/// weaker set: the walk applied only the lexical `.gitignore` verdict and no
+/// containment at all, so `@./` inlined an out-of-workspace body under an
+/// in-root path, and inlined a body `@notable.txt` was refusing by name.
+///
+/// The rules therefore live here, once. A consumer chooses only which
+/// *entry point* fits what it is about to do — read one object, walk one
+/// directory, or offer a row — and cannot choose which rules apply.
+pub(super) struct AtGate<'a> {
+    /// The workspace root as the caller gave it — the form the *typed* name
+    /// is relative to.
+    root: &'a Path,
+    /// The canonical workspace root — the form a *canonical* target must be
+    /// measured against. On macOS these two differ for every temp dir
+    /// (`/var/…` vs `/private/var/…`), which is why both are kept.
+    croot: PathBuf,
+    /// The `.gitignore` rule set loaded from `root`.
+    ignore: &'a GitIgnore,
+}
+
+impl<'a> AtGate<'a> {
+    /// Build a gate for one resolution against `root`.
+    pub(super) fn new(root: &'a Path, ignore: &'a GitIgnore) -> Self {
+        Self {
+            root,
+            croot: canonical_root(root),
+            ignore,
+        }
+    }
+
+    /// The workspace root as the caller gave it — the form a payload label
+    /// is built relative to.
+    pub(super) fn root(&self) -> &Path {
+        self.root
+    }
+
+    /// Admit a candidate that is about to be READ, returning the bound
+    /// target the read must consume.
+    ///
+    /// This is the only entry point that binds a handle, and it is the only
+    /// one that can: the canonical name the guards judge and the bytes the
+    /// caller reads are the same object by construction (see
+    /// [`resolve_target`]).
+    pub(super) fn admit_file(
+        &self,
+        lexical: &Path,
+        reach: Reach,
+    ) -> Result<ResolvedTarget, Refusal> {
+        self.judge_lexical(lexical, false)?;
+        let target = resolve_target(lexical).map_err(Refusal::Unresolvable)?;
+        self.judge_canonical(target.canonical(), false, reach)?;
+        Ok(target)
+    }
+
+    /// Admit a directory the `@dir` walk is about to descend into — the walk
+    /// root included. Returns the canonical directory path, which the caller
+    /// uses as the walk's visited-set key.
+    ///
+    /// Always [`Reach::Walked`]: every file the walk emits from underneath
+    /// this directory is labelled relative to the workspace root, so a
+    /// directory that resolves outside the workspace would launder its whole
+    /// subtree into in-root-looking names.
+    pub(super) fn admit_dir(&self, lexical: &Path) -> Result<PathBuf, Refusal> {
+        self.judge_lexical(lexical, true)?;
+        let canonical = fs::canonicalize(lexical).map_err(Refusal::Unresolvable)?;
+        self.judge_canonical(&canonical, true, Reach::Walked)?;
+        Ok(canonical)
+    }
+
+    /// Admit a candidate the completion popup is about to OFFER.
+    ///
+    /// Deliberately does not open anything: offering a row reads no bytes,
+    /// this runs inside the keystroke loop, and a candidate whose target
+    /// cannot be canonicalized (a broken link) leaks nothing and still
+    /// deserves to be listed. The authoritative, race-free verdict is the
+    /// one [`admit_file`](Self::admit_file) takes at resolution time; this
+    /// pass exists so the popup never offers a row the resolver will refuse.
+    /// It is [`Reach::Named`] for exactly that reason — a popup stricter
+    /// than the resolver is the same disagreement with the sign flipped.
+    pub(super) fn admit_offer(&self, lexical: &Path, is_dir: bool) -> Result<(), Refusal> {
+        self.judge_lexical(lexical, is_dir)?;
+        if let Ok(canonical) = fs::canonicalize(lexical) {
+            self.judge_canonical(&canonical, is_dir, Reach::Named)?;
+        }
+        Ok(())
+    }
+
+    /// The rules that need only the name as typed or listed. Purely lexical,
+    /// so it is cheap enough for the completion loop and keeps `@.env` a
+    /// refusal even when no such file exists.
+    fn judge_lexical(&self, lexical: &Path, is_dir: bool) -> Result<(), Refusal> {
+        if is_secret_path(lexical) {
+            return Err(Refusal::Secret);
+        }
+        if let Some(rel) = rel_to_root(lexical, self.root)
+            && self.ignore.is_ignored(&rel, is_dir)
+        {
+            return Err(Refusal::GitIgnored);
+        }
+        Ok(())
+    }
+
+    /// The rules that need the resolved identity of the object.
+    ///
+    /// The `.gitignore` verdict here is ADDITIVE, never substitutive: a
+    /// candidate has the relative path it was typed as *and* the one its
+    /// target canonicalizes to, and either being ignored is a refusal.
+    /// Substituting the canonical verdict for the lexical one un-ignores
+    /// every lexically-ignored link; dropping the canonical verdict — which
+    /// is what the walk did — lets a link launder an ignored file under an
+    /// innocent name.
+    fn judge_canonical(&self, canonical: &Path, is_dir: bool, reach: Reach) -> Result<(), Refusal> {
+        if reach == Reach::Walked && !canonical.starts_with(&self.croot) {
+            return Err(Refusal::EscapesRoot);
+        }
+        if is_secret_path(canonical) {
+            return Err(Refusal::Secret);
+        }
+        if let Some(rel) = rel_to_root(canonical, &self.croot)
+            && self.ignore.is_ignored(&rel, is_dir)
+        {
+            return Err(Refusal::GitIgnored);
+        }
+        Ok(())
+    }
+}
+
+/// True if `path` is a directory once symlinks are followed.
+///
+/// Shared by the walk and the completion popup so the two surfaces cannot
+/// disagree about what an entry IS. `fs::symlink_metadata` — and
+/// `DirEntry::file_type`, which is the same stat — call a symlink-to-a-
+/// directory a non-directory, which is how `@alias/` resolved while `@./`
+/// silently omitted the same object. `stat` does not open, so this is safe
+/// on a FIFO or a device; a dangling link answers `false` and falls to the
+/// file branch, where the identity check refuses it.
+pub(super) fn is_dir_following_links(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -794,6 +1022,101 @@ mod tests {
         assert!(verdict.is_err(), "a FIFO is not a regular file");
     }
 
+    // ── the admission gate ───────────────────────────────────────────────
+
+    /// `Reach` is the ONLY policy difference the gate permits between
+    /// consumers, so it gets a test that shows both sides of it at once on
+    /// the same object. If a future edit collapses the two reaches, one of
+    /// these two assertions goes red whichever way it collapses.
+    #[cfg(unix)]
+    #[test]
+    fn the_gate_splits_a_named_target_from_a_walked_one_only_on_containment() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path().join("ws");
+        let outside = tmp.path().join("home");
+        fs::create_dir_all(&root).expect("mkdir ws");
+        fs::create_dir_all(&outside).expect("mkdir home");
+        fs::write(outside.join("shared.md"), "shared body").expect("write");
+        let link = root.join("link.md");
+        std::os::unix::fs::symlink(outside.join("shared.md"), &link).expect("symlink");
+
+        let ignore = GitIgnore::default();
+        let gate = AtGate::new(&root, &ignore);
+
+        let named = gate
+            .admit_file(&link, Reach::Named)
+            .expect("a NAMED out-of-tree target is a capability, not a leak");
+        assert_eq!(named.read_to_string().expect("read"), "shared body");
+
+        let walked = gate
+            .admit_file(&link, Reach::Walked)
+            .expect_err("a WALKED target must not leave the workspace");
+        assert!(matches!(walked, Refusal::EscapesRoot), "got {walked:?}");
+    }
+
+    /// The canonical `.gitignore` verdict, at the gate rather than in one
+    /// consumer's copy of it. This is D2 reduced to the gate: `notable.txt`
+    /// is not ignored by name, its target is, and the gate refuses it under
+    /// BOTH reaches — there is no reach in which the canonical verdict is
+    /// optional.
+    #[cfg(unix)]
+    #[test]
+    fn the_gate_applies_the_gitignore_verdict_to_the_canonical_name_too() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("artifact.txt"), "ignored body").expect("artifact");
+        fs::write(root.join("plain.txt"), "plain body").expect("plain");
+        let link = root.join("notable.txt");
+        std::os::unix::fs::symlink(root.join("artifact.txt"), &link).expect("symlink");
+
+        let ignore = GitIgnore::parse("artifact.txt\n");
+        let gate = AtGate::new(root, &ignore);
+
+        // Control: an ordinary in-root file is admitted under both reaches,
+        // so the refusals below are the rule and not the fixture.
+        for reach in [Reach::Named, Reach::Walked] {
+            gate.admit_file(&root.join("plain.txt"), reach)
+                .unwrap_or_else(|e| panic!("control refused under {reach:?}: {e:?}"));
+        }
+        for reach in [Reach::Named, Reach::Walked] {
+            let err = gate
+                .admit_file(&link, reach)
+                .expect_err("a link to an ignored file must be refused");
+            assert!(
+                matches!(err, Refusal::GitIgnored),
+                "under {reach:?}: got {err:?}"
+            );
+        }
+    }
+
+    /// `is_dir_following_links` is what makes the two `@`-surfaces agree
+    /// about what an entry IS, so it is pinned directly: a symlink to a
+    /// directory is a directory, a symlink to a file is not, and neither a
+    /// dangling link nor a FIFO answers `true` (or blocks — `stat` does not
+    /// open).
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_is_classified_as_a_directory() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir(root.join("real")).expect("mkdir");
+        fs::write(root.join("file.txt"), "body").expect("write");
+        std::os::unix::fs::symlink(root.join("real"), root.join("dirlink")).expect("dirlink");
+        std::os::unix::fs::symlink(root.join("file.txt"), root.join("filelink")).expect("filelink");
+        std::os::unix::fs::symlink(root.join("nope"), root.join("dangling")).expect("dangling");
+        let fifo = root.join("pipe");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).expect("cstr");
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+
+        assert!(is_dir_following_links(&root.join("real")));
+        assert!(is_dir_following_links(&root.join("dirlink")));
+        assert!(!is_dir_following_links(&root.join("file.txt")));
+        assert!(!is_dir_following_links(&root.join("filelink")));
+        assert!(!is_dir_following_links(&root.join("dangling")));
+        assert!(!is_dir_following_links(&fifo));
+    }
+
     // ══ REFUTATION PROBES (external auditor) ═════════════════════════════
 
     /// A REAL blocking character device, not just a FIFO.
@@ -827,12 +1150,14 @@ mod tests {
         let control = tmp.path().join("plain.txt");
         fs::write(&control, "ordinary").expect("write control");
         assert!(
-            resolve_within(&control, 5).expect("the control blocked").is_ok(),
+            resolve_within(&control, 5)
+                .expect("the control blocked")
+                .is_ok(),
             "the control file must resolve"
         );
 
-        let verdict = resolve_within(&dev, 5)
-            .expect("REFUTED: resolve_target blocked on a character device");
+        let verdict =
+            resolve_within(&dev, 5).expect("REFUTED: resolve_target blocked on a character device");
         assert!(verdict.is_err(), "a character device is not a regular file");
     }
 
@@ -846,7 +1171,9 @@ mod tests {
         let body: String = "abcdefghijklmnopqrstuvwxyz0123456789\n".repeat(230_000);
         fs::write(&big, &body).expect("write big");
         let t = resolve_target(&big).expect("REFUTED: a large regular file was refused");
-        let got = t.read_to_string().expect("REFUTED: read failed under O_NONBLOCK");
+        let got = t
+            .read_to_string()
+            .expect("REFUTED: read failed under O_NONBLOCK");
         assert_eq!(got.len(), body.len(), "short read under O_NONBLOCK");
         assert_eq!(got, body, "corrupt read under O_NONBLOCK");
     }
@@ -863,14 +1190,19 @@ mod tests {
         let h = std::thread::spawn(move || {
             use std::io::Write;
             for i in 0..40 {
-                let mut f = fs::OpenOptions::new().append(true).open(&w).expect("append");
+                let mut f = fs::OpenOptions::new()
+                    .append(true)
+                    .open(&w)
+                    .expect("append");
                 writeln!(f, "line {i}").expect("write");
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         });
         std::thread::sleep(std::time::Duration::from_millis(20));
         let t = resolve_target(&slow).expect("REFUTED: a slow regular file was refused");
-        let got = t.read_to_string().expect("REFUTED: EAGAIN on a regular file");
+        let got = t
+            .read_to_string()
+            .expect("REFUTED: EAGAIN on a regular file");
         h.join().expect("writer");
         assert!(got.starts_with("seed"), "unexpected body: {got:?}");
     }
@@ -896,7 +1228,11 @@ mod tests {
             let tmpl = r2.join(".link.tmp");
             let mut on_a = true;
             while !s2.load(std::sync::atomic::Ordering::Relaxed) {
-                let target = if on_a { r2.join("b.txt") } else { r2.join("a.txt") };
+                let target = if on_a {
+                    r2.join("b.txt")
+                } else {
+                    r2.join("a.txt")
+                };
                 let _ = fs::remove_file(&tmpl);
                 if std::os::unix::fs::symlink(&target, &tmpl).is_ok() {
                     let _ = fs::rename(&tmpl, &link);
@@ -933,7 +1269,10 @@ mod tests {
         }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         flipper.join().expect("flipper");
-        eprintln!("REFUT toctou: ok={ok} refused={refused} violations={}", violations.len());
+        eprintln!(
+            "REFUT toctou: ok={ok} refused={refused} violations={}",
+            violations.len()
+        );
         assert!(ok > 0, "PRECONDITION: no resolution ever succeeded");
         assert!(
             violations.is_empty(),
