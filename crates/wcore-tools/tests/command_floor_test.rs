@@ -528,6 +528,16 @@ fn a_quoted_message_is_one_word_not_a_path() {
         );
     }
 
+    // The same class in the WRITE direction, where it is not merely cosmetic:
+    // a file whose NAME contains `.git/hooks` is not the hooks directory, and
+    // under the refuted tokenizer `rm` would have been handed `.git/hooks` as
+    // its own operand.
+    assert!(
+        wcore_tools::bash::check_command_floor(r#"rm -rf "old .git/hooks backup""#, Some(&root))
+            .is_none(),
+        "a quoted filename containing `.git/hooks` was split into path tokens"
+    );
+
     // Known-positive control in the same test: the same words UNQUOTED, in the
     // write position, are still refused — so the fix is a tokenizer fix and not
     // a deleted rule.
