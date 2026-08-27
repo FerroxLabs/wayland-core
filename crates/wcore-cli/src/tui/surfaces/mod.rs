@@ -3600,18 +3600,6 @@ mod tests {
         out
     }
 
-    /// RAII restore of the global panic hook, so a test that quiets the hook
-    /// for a deliberate panic puts the original hook back on drop.
-    type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send>;
-    struct RestoreHookOnDrop(Option<PanicHook>);
-    impl Drop for RestoreHookOnDrop {
-        fn drop(&mut self) {
-            if let Some(hook) = self.0.take() {
-                std::panic::set_hook(hook);
-            }
-        }
-    }
-
     /// A surface whose input handlers always panic — used to prove the D015
     /// `catch_unwind` containment in `Router::handle_key` / `handle_paste`.
     struct PanicSurface;
@@ -3636,11 +3624,12 @@ mod tests {
         use crate::tui::app::TurnRole;
         use std::sync::{Arc, Mutex};
 
-        // Silence the default panic hook's stderr noise for the simulated
-        // panic; restore it afterward. The panic is still raised + caught.
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let _restore = RestoreHookOnDrop(Some(prev));
+        // NOTE: this test deliberately panics inside a caught region. It does
+        // NOT install a quiet panic hook to suppress the resulting stderr line:
+        // std::panic::set_hook is process-global, and under plain cargo test one
+        // binary is one process, so a quiet hook installed here silences the panic
+        // message of every OTHER test running concurrently in this binary (issue
+        // #1134). libtest already captures this line and discards it on success.
 
         // Mirror the render/input loop: the App lives behind a Mutex the loop
         // locks while routing a key. A panic inside the surface handler must
@@ -3682,9 +3671,12 @@ mod tests {
     fn surface_paste_panic_is_contained_and_does_not_poison_the_app_mutex() {
         use std::sync::{Arc, Mutex};
 
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let _restore = RestoreHookOnDrop(Some(prev));
+        // NOTE: this test deliberately panics inside a caught region. It does
+        // NOT install a quiet panic hook to suppress the resulting stderr line:
+        // std::panic::set_hook is process-global, and under plain cargo test one
+        // binary is one process, so a quiet hook installed here silences the panic
+        // message of every OTHER test running concurrently in this binary (issue
+        // #1134). libtest already captures this line and discards it on success.
 
         let app = Arc::new(Mutex::new(App::new()));
         let mut router = Router::new(&app.lock().unwrap());

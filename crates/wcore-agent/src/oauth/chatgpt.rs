@@ -1377,9 +1377,18 @@ mod tests {
     }
 
     /// RED ARM for the floor, end to end through `get()`: a 429 on refresh
-    /// with only ~2 s of token life left must FAIL, and must name the rate
+    /// with a token below the dispatch floor must FAIL, and must name the rate
     /// limit rather than letting the turn die upstream with a status the
     /// engine cannot attribute. Before the floor this handed the bearer out.
+    ///
+    /// The seeded margin is 30 s, not the 2 s this once used. `get()` here
+    /// stands up a wiremock server and does a real refresh round-trip, and
+    /// `token_remaining_secs` is read against the wall clock AFTER that: on a
+    /// loaded box two seconds elapse inside the call, the token reads as hard
+    /// expired, and the `Some(0)` arm answers "has expired" with no margin in
+    /// it. Measured: 1 failure in 5 full-`wcore-agent --lib` runs. 30 s is
+    /// still well under RATE_LIMITED_REUSE_FLOOR_SECS (60), so the arm under
+    /// test is unchanged — only the room the clock has to move is.
     #[tokio::test]
     async fn a_rate_limited_refresh_refuses_a_token_below_the_dispatch_floor() {
         use wiremock::matchers::{method, path};
@@ -1404,7 +1413,7 @@ mod tests {
             .unwrap()
             .as_secs();
         mgr.storage
-            .store(PROVIDER, &token(&at, Some("rt"), Some(now + 2)))
+            .store(PROVIDER, &token(&at, Some("rt"), Some(now + 30)))
             .unwrap();
 
         let err = mgr

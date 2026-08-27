@@ -13,14 +13,6 @@ static CREDENTIAL_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static VAULT_PASSPHRASES: LazyLock<Mutex<std::collections::HashMap<PathBuf, String>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-/// Eval-only control that pins the retry budget of the evaluated child.
-///
-/// Named in the `WCORE_EVAL_*` namespace so it can never be confused with the
-/// product's `WAYLAND_MAX_STREAM_RETRIES`, and so an ambient value of the
-/// latter cannot reach a hermetic child. Set it with
-/// [`crate::tempenv::ScenarioRetryBudget`].
-pub const STREAM_RETRY_BUDGET_CONTROL: &str = "WCORE_EVAL_STREAM_RETRY_BUDGET";
-
 pub(crate) struct ChildEnvironment {
     variables: Vec<(OsString, OsString)>,
     credential_file: Option<PathBuf>,
@@ -56,6 +48,7 @@ impl ChildEnvironment {
         cwd: &Path,
         wayland_home: &Path,
         secret: Option<&str>,
+        stream_retry_budget: Option<u32>,
     ) -> std::io::Result<Self> {
         let env_root = wayland_home.join("eval-environment");
         let home = env_root.join("home");
@@ -108,13 +101,20 @@ impl ChildEnvironment {
         // default (10 retries on the shared backoff curve, 127.5 s) cannot be
         // exhausted inside a 12 s scenario cap.
         //
-        // The eval-namespaced spelling is deliberate. Copying the product's own
-        // `WAYLAND_MAX_STREAM_RETRIES` through would let a developer's shell
-        // change scenario results, which is precisely what the `env_clear` in
-        // `apply_tokio`/`apply_pty` exists to prevent; the translation keeps the
-        // control explicit and the child hermetic against ambient product env.
-        if let Some(budget) = std::env::var_os(STREAM_RETRY_BUDGET_CONTROL) {
-            variables.push(("WAYLAND_MAX_STREAM_RETRIES".into(), budget));
+        // It arrives as an explicit argument and is NEVER read out of the
+        // parent's environment. An env-carried control is process-global: under
+        // plain `cargo test` one test's pin is read by every other test sharing
+        // the binary, and `cargo nextest` — what CI runs — gives each test its
+        // own process, so CI can never see that contamination (#1134). The
+        // parameter makes the hazard impossible instead of policing it with
+        // `#[serial_test::serial]` on every spawning sibling. A developer's own
+        // `WAYLAND_MAX_STREAM_RETRIES` still cannot reach the child: `env_clear`
+        // in `apply_tokio`/`apply_pty` drops it and nothing copies it through.
+        if let Some(budget) = stream_retry_budget {
+            variables.push((
+                "WAYLAND_MAX_STREAM_RETRIES".into(),
+                budget.to_string().into(),
+            ));
         }
 
         let credential_file = secret
@@ -266,4 +266,83 @@ fn write_credential_file(root: &Path, secret: &str) -> std::io::Result<PathBuf> 
     file.write_all(secret.as_bytes())?;
     file.sync_all()?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The retired process-global control (#1134). Named here by SPELLING, not
+    /// by a constant, so re-introducing the constant cannot quietly re-point
+    /// this test at whatever the new name is.
+    const RETIRED_ENV_CONTROL: &str = "WCORE_EVAL_STREAM_RETRY_BUDGET";
+
+    /// Restores whatever the process had before, so the two tests below leave
+    /// no residue for anything else sharing this binary.
+    struct AmbientDecoys;
+
+    impl AmbientDecoys {
+        fn set() -> Self {
+            // SAFETY: both tests carry `#[serial_test::serial]`, so no other
+            // thread in this binary is reading or writing the environment.
+            unsafe {
+                std::env::set_var(RETIRED_ENV_CONTROL, "99");
+                std::env::set_var("WAYLAND_MAX_STREAM_RETRIES", "99");
+            }
+            Self
+        }
+    }
+
+    impl Drop for AmbientDecoys {
+        fn drop(&mut self) {
+            // SAFETY: as above.
+            unsafe {
+                std::env::remove_var(RETIRED_ENV_CONTROL);
+                std::env::remove_var("WAYLAND_MAX_STREAM_RETRIES");
+            }
+        }
+    }
+
+    fn retry_values(environment: &ChildEnvironment) -> Vec<String> {
+        environment
+            .variables
+            .iter()
+            .filter(|(key, _)| key == "WAYLAND_MAX_STREAM_RETRIES")
+            .map(|(_, value)| value.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    #[serial_test::serial(child_env_ambient_retry_budget)]
+    fn a_stated_retry_budget_ignores_the_ambient_environment() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let _decoys = AmbientDecoys::set();
+
+        let environment = ChildEnvironment::build(root.path(), root.path(), None, Some(2))
+            .expect("build child environment");
+
+        assert_eq!(
+            retry_values(&environment),
+            vec!["2".to_string()],
+            "the stated budget must be the only WAYLAND_MAX_STREAM_RETRIES the \
+             child receives; an ambient value must never be read or forwarded"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(child_env_ambient_retry_budget)]
+    fn no_stated_budget_leaves_the_child_on_its_shipped_default() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let _decoys = AmbientDecoys::set();
+
+        let environment = ChildEnvironment::build(root.path(), root.path(), None, None)
+            .expect("build child environment");
+
+        assert!(
+            retry_values(&environment).is_empty(),
+            "a scenario that states no budget must inherit the child's shipped \
+             default, not whatever another test left in this process: {:?}",
+            retry_values(&environment)
+        );
+    }
 }

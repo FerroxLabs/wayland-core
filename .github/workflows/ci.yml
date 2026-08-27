@@ -1299,6 +1299,24 @@ jobs:
           python3 scripts/check-no-personal-identifiers.py --self-test
           python3 scripts/check-no-personal-identifiers.py
 
+      # #1134 -- test code writing a process-global that production code in the
+      # SAME lib test binary reads. `cargo nextest`, which every other suite
+      # here runs, gives each test its own process, so this class can never
+      # fail under it: it is invisible at --retries 0, not merely flaky. The
+      # shared-process `--lib` leg in linux-containerized is where it SHOWS UP;
+      # this gate is what keeps it from coming back, and it runs here -- a pure
+      # text scan, no toolchain -- so a build failure cannot shadow it.
+      #
+      # It fails only on a write with NO serialization at all, which is a
+      # condition that can actually be met and is met today (zero). It is NOT
+      # the rule "every set_var must be #[serial]": that rule was measured
+      # against the four defects the shared-process leg found and would have
+      # flagged none of them while calling the binary compliant.
+      - name: No unserialized test writes to shared process globals
+        run: |
+          python3 scripts/check-test-env-globals.py --self-test
+          python3 scripts/check-test-env-globals.py
+
       - name: Free disk space (drop unused preinstalled toolchains)
         run: |
           set -e
@@ -1560,6 +1578,81 @@ jobs:
           }
           run_suite wcore-agent 14 --features voice --lib voice_mode
           run_suite wcore-tools 32 --lib voice_mode
+
+      # -- Shared-process lib suite (#1134) ------------------------------
+      # EVERY other test leg in this repo runs under `cargo nextest`, which
+      # gives each test its OWN PROCESS. Test code here writes process-global
+      # state -- environment variables, static hooks, the panic hook -- that
+      # production code reads on GENERIC paths: `profile_home()` on every
+      # config resolve, `resolve_max_stream_retries` on every engine run,
+      # the chown pause hooks on every ownership walk. Under nextest a global
+      # written by test A can never be observed by test B, so CI was
+      # structurally BLIND to the whole class. Not retry-masked: invisible at
+      # --retries 0.
+      #
+      # `cargo test --workspace --lib` is one process per LIB BINARY, and it is
+      # the only leg in this repository that runs tests in a shared process.
+      # Four live instances it caught on the commit that added it, all green
+      # under nextest every time:
+      #   * wcore-cli::lib -- an ambient WAYLAND_HOME reached `profile_home()`
+      #     and made a signed-in ChatGPT user read as not-configured (2 of 4
+      #     full-binary runs);
+      #   * wcore-cli::lib -- a no-op `std::panic::set_hook` left installed by
+      #     two containment tests silenced that failure's message entirely;
+      #   * wcore-eval-scenarios::lib -- two tests installing the same
+      #     process-global chown pause hook HUNG the binary outright
+      #     (rc=124 at a 420 s timeout; the test passes alone in 0.00s).
+      #   * wcore-cli::lib -- nine onboarding tests wrote a real config.toml
+      #     through the process-global WAYLAND_HOME, landing this module's
+      #     fixture in a concurrent config test's tempdir (and, unset, in the
+      #     developer's own home).
+      #
+      # BLOCKING on purpose. A non-blocking shared-process leg is a gate that
+      # cannot fail, which is exactly the state it replaces.
+      #
+      # COST, measured on hetzner-dsm at the commit that added this: 332 s of
+      # test execution across 58 lib binaries, 11,442 tests. The compile is
+      # served from the same target dir the nextest step above already warmed.
+      #
+      # ANTI-VACUITY: `cargo test` exits 0 having run ZERO tests -- see
+      # scripts/check-no-vacuous-cargo-test.py for the measurement -- so the
+      # executed count is summed across every lib binary and floored. The floor
+      # is 11000 against 11442 measured, not the exact count: this leg exists to
+      # catch a suite that COLLAPSED (a crate losing its lib target drops
+      # thousands), not to red-line on a test legitimately deleted. Raise it
+      # when the measured count moves materially.
+      #
+      # `--no-fail-fast` so the count is a TOTAL and not a lower bound -- the
+      # same drift that truncated the nextest leg above.
+      #
+      # One `test result: FAILED` line in this step's output is EXPECTED and is
+      # not this suite's. plugin::scaffold::tests::plugin_test_propagates_a_-
+      # failing_suite shells out to a fixture crate whose only test panics on
+      # purpose, and that nested cargo writes to the inherited fd rather than
+      # through libtest's capture. It doubles as the known-positive control
+      # that this step really executes and really reports failures. The sum
+      # below reads only 'test result: ok.' lines; the enclosing test's own
+      # verdict is what decides the step.
+      - name: Shared-process lib suite (cargo test, one process per binary)
+        run: |
+          set -euo pipefail
+          MIN=11000
+          # vacuity-checked: every 'test result: ok. N passed' line emitted by the
+          # invocation below is summed into $total and compared against $MIN, which
+          # exits 1 when it falls short. The exit status alone is not trusted.
+          if ! out="$($DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo test --workspace --lib --no-fail-fast 2>&1)"; then
+            printf '%s\n' "$out" | grep -E '^(failures:|test result:|thread .* panicked)' || true
+            printf '%s\n' "$out" | tail -60
+            echo "::error title=Shared-process lib suite::A lib test failed in a SHARED process. This leg exists because nextest gives every test its own process and can never see this class, so a failure here is usually a process-global -- an env var, a static hook, the panic hook -- written by one test and read by another in the same binary. Reproduce it locally with a plain (non-nextest) lib run of that one crate."
+            exit 1
+          fi
+          printf '%s\n' "$out" | grep -E '^test result:' || true
+          total="$(printf '%s\n' "$out" | sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' | awk '{s+=$1} END {print s+0}')"
+          echo "shared-process lib suite: executed $total tests (floor $MIN)"
+          if [ "$total" -lt "$MIN" ]; then
+            echo "::error title=Shared-process lib suite::Executed $total tests, expected at least $MIN. A suite that exits 0 having run nothing is not a suite -- a crate lost its lib target, a module got cfg'd out, or the invocation stopped collecting. Move the floor in this step together with whatever moved."
+            exit 1
+          fi
 
       # WCORE_SMOKE_REQUIRE_PREBUILT=1 (passed into the container): a missing
       # release artifact is a hard failure here, never a silent skip (#190).

@@ -2032,6 +2032,53 @@ mod tests {
     /// of the shell that runs the test suite. Most tests use this so the
     /// Connect-step layout and copy are fixed; the env-detection tests
     /// build their own surface via `with_env_keys`.
+    /// #1134. Onboarding's finish path WRITES a real `config.toml` through
+    /// `wcore_config::config::global_config_path()`, which resolves from the
+    /// process-global `WAYLAND_HOME`. Nine tests in this module reach that
+    /// write — enumerated mechanically by running each of the module's 68
+    /// tests alone under an empty `WAYLAND_HOME` and looking for the file, so
+    /// the list is measured rather than reasoned.
+    ///
+    /// Unsandboxed those nine write into the DEVELOPER'S OWN home on a
+    /// machine that has no config yet, and under plain `cargo test` (one
+    /// process per binary) they write into whatever tempdir a concurrent
+    /// `#[serial]` test elsewhere in `wcore-cli::lib` has installed. That is
+    /// how `expert_commit_renders_new_value_and_persists` and
+    /// `failover_toggle_and_fallback_chain_persist_to_provider_chain` read
+    /// back a config carrying THIS module's fixture (`user = "Sean"`,
+    /// `sk-ant-api03-abc`) instead of their own. Under `cargo nextest` — one
+    /// process per test — it can never happen, which is why CI never saw it.
+    ///
+    /// The guard owns the tempdir, so the redirect lasts exactly as long as
+    /// the test body; `#[serial]` on the same tests puts them in the one
+    /// exclusive group every other env-mutating test in this binary uses.
+    struct OnboardingHomeGuard {
+        _tmp: tempfile::TempDir,
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl OnboardingHomeGuard {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let prior = std::env::var_os("WAYLAND_HOME");
+            // SAFETY: every caller is #[serial]; restored on drop.
+            unsafe { std::env::set_var("WAYLAND_HOME", tmp.path()) };
+            Self { _tmp: tmp, prior }
+        }
+    }
+
+    impl Drop for OnboardingHomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialized; restore the prior value, or clear it.
+            unsafe {
+                match &self.prior {
+                    Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                    None => std::env::remove_var("WAYLAND_HOME"),
+                }
+            }
+        }
+    }
+
     fn fresh() -> OnboardingSurface {
         OnboardingSurface::with_env_keys(Vec::new())
     }
@@ -2263,7 +2310,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn pressing_a_digit_connects_the_matching_env_key() {
+        let _home = OnboardingHomeGuard::new();
         let mut surface = OnboardingSurface::with_env_keys(vec![env_key(
             "ANTHROPIC_API_KEY",
             Provider::Anthropic,
@@ -2289,7 +2338,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn connecting_an_env_key_lands_on_add_more_not_name() {
+        let _home = OnboardingHomeGuard::new();
         // Regression: an env-detected key that validates must land on the
         // AddMore step so the user can connect the OTHER env keys — it
         // must never skip straight to the Name prompt.
@@ -2309,7 +2360,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn pressing_a_adds_all_detected_keys_and_lands_on_name() {
+        let _home = OnboardingHomeGuard::new();
         // The one-press shortcut: with several keys exported, `a` brings them
         // ALL in (first = default) and goes straight to naming, skipping the
         // one-at-a-time validate/add-another loop.
@@ -2348,7 +2401,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn add_more_defaults_to_add_another_while_env_keys_remain() {
+        let _home = OnboardingHomeGuard::new();
         // With a second detected env key still unconnected the AddMore
         // cursor defaults to `AddAnother`, so a reflexive Enter connects
         // the next key instead of skipping it.
@@ -2564,7 +2619,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn name_step_accepts_text_and_finishing_persists_and_shows_ready() {
+        let _home = OnboardingHomeGuard::new();
         let mut surface = fresh();
         let mut app = App::new();
         connect_one_provider(
@@ -2593,7 +2650,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn completing_onboarding_never_emits_a_setup_command() {
+        let _home = OnboardingHomeGuard::new();
         // The /setup misfire regression guard: no step of the flow may
         // emit `SurfaceAction::Command` (an unregistered `/setup` line
         // surfaced as "Unknown command: /setup").
@@ -3110,7 +3169,9 @@ mod tests {
     /// The other shortcuts must survive too, or the fix has traded one broken
     /// surface for another.
     #[test]
+    #[serial]
     fn the_single_key_shortcuts_all_still_fire_when_pressed_first() {
+        let _home = OnboardingHomeGuard::new();
         let mut s = fresh();
         let mut app = App::new();
         s.handle_key(char('j'), &mut app);
@@ -3184,7 +3245,9 @@ mod tests {
     /// the one the live UAT measured (4, 20 and 37 characters destroyed, every
     /// loss ending at a word boundary), so it is the regression that matters.
     #[test]
+    #[serial]
     fn a_message_beginning_with_a_shortcut_letter_and_a_space_survives_intact() {
+        let _home = OnboardingHomeGuard::new();
         let mut surface = fresh();
         let mut app = App::new();
         type_str(&mut surface, &mut app, "s hello");
@@ -3249,7 +3312,9 @@ mod tests {
     /// UX changes than this lane's brief sanctions and want their own
     /// cross-audit. See the lane SUMMARY.
     #[test]
+    #[serial]
     fn a_connect_all_diverts_prose_into_the_name_field() {
+        let _home = OnboardingHomeGuard::new();
         let mut app = App::new();
         let mut surface = OnboardingSurface::with_env_keys(vec![
             env_key("ANTHROPIC_API_KEY", Provider::Anthropic, "sk-ant-1"),
