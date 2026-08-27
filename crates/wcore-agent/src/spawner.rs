@@ -4269,7 +4269,7 @@ mod production_durable_spawn_tests {
     use tokio::sync::{Notify, mpsc, oneshot};
     use wcore_config::config::Config;
     use wcore_providers::{LlmProvider, ProviderError};
-    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::llm::{ANVIL_LOOP_OWNER, FluxLoopIntent, LlmEvent, LlmRequest};
     use wcore_types::message::{FinishReason, StopReason, TokenUsage};
     use wcore_types::spawner::{
         CHILD_ELIGIBLE_TOOLS, ChildDesiredState, ChildOrigin, ChildRecoveryState,
@@ -4298,6 +4298,9 @@ mod production_durable_spawn_tests {
         /// test can assert what actually reached the wire rather than only
         /// what the durable record says about the child.
         seen_loop_intent: parking_lot::Mutex<Option<wcore_types::llm::FluxLoopIntent>>,
+        /// #863 F2/F3 — `(flux_loop_intent, flux_turn_nonce)` of every request
+        /// that actually reached the wire, in call order.
+        loop_provenance: parking_lot::Mutex<Vec<(Option<FluxLoopIntent>, Option<String>)>>,
     }
 
     impl ControlledProvider {
@@ -4308,6 +4311,7 @@ mod production_durable_spawn_tests {
                 release: Arc::new(Notify::new()),
                 wait_for_release: false,
                 seen_loop_intent: parking_lot::Mutex::new(None),
+                loop_provenance: parking_lot::Mutex::new(Vec::new()),
             })
         }
 
@@ -4318,6 +4322,7 @@ mod production_durable_spawn_tests {
                 release: Arc::new(Notify::new()),
                 wait_for_release: true,
                 seen_loop_intent: parking_lot::Mutex::new(None),
+                loop_provenance: parking_lot::Mutex::new(Vec::new()),
             })
         }
     }
@@ -4330,6 +4335,10 @@ mod production_durable_spawn_tests {
         ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             *self.seen_loop_intent.lock() = request.flux_loop_intent.clone();
+            self.loop_provenance.lock().push((
+                request.flux_loop_intent.clone(),
+                request.flux_turn_nonce.clone(),
+            ));
             if let Some(started) = self.started.lock().take() {
                 let _ = started.send(());
             }
@@ -5144,6 +5153,78 @@ mod production_durable_spawn_tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// Spawn one child of `origin` through the real durable-launch path and
+    /// return the loop-ownership provenance of the single request its engine
+    /// put on the wire.
+    async fn wire_loop_provenance(origin: ChildOrigin) -> (Option<FluxLoopIntent>, Option<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, _journal, _token) = canonical_binding(dir.path(), "f8630001", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = bound_spawner(provider_dyn, authority.clone(), dir.path());
+
+        let result = spawner
+            .spawn_one_with_origin(child("loop-provenance-probe"), origin)
+            .await;
+
+        assert!(!result.is_error, "{}", result.text);
+        let mut seen = provider.loop_provenance.lock().clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "expected exactly one wire turn for {origin:?}"
+        );
+        seen.pop().unwrap()
+    }
+
+    /// #863 F2 — grades the ONE production seam that turns the whole
+    /// loop-ownership handshake on for real traffic: the `ChildOrigin::Anvil`
+    /// arm at the durable-spawn site above.
+    ///
+    /// Every other flux-loop test hand-sets the intent on an engine it built
+    /// itself, so deleting that arm leaves all of them green while real Anvil
+    /// turns silently stop declaring ownership and the runtime collision
+    /// detector can never fire. This asserts on the `LlmRequest` the provider
+    /// ACTUALLY RECEIVED, not on an engine field, so it grades the wiring end
+    /// to end rather than the setter.
+    ///
+    /// The ordinary-origin arms are not decoration. Without them this test
+    /// also passes against code that marks EVERY child — a different and worse
+    /// bug, because `loop_owner` traffic is hard-off for Flux Elevation and
+    /// would suppress the server ladder on ordinary sub-agent turns.
+    #[tokio::test]
+    async fn only_anvil_origin_declares_loop_ownership_on_the_wire() {
+        let (intent, nonce) = wire_loop_provenance(ChildOrigin::Anvil).await;
+        assert_eq!(
+            intent,
+            Some(FluxLoopIntent::ClientOwned(ANVIL_LOOP_OWNER.to_string())),
+            "an Anvil-origin child reached the wire without declaring loop \
+             ownership — Flux cannot tell the turn is mid-loop material, so \
+             both ladders can run on it and the collision detector is dead"
+        );
+        assert!(
+            nonce.is_some_and(|n| !n.is_empty()),
+            "#863 F3 — loop-owned traffic must carry a per-turn nonce or the \
+             semantic cache starves the climb with identical completions"
+        );
+
+        for ordinary in [ChildOrigin::Spawn, ChildOrigin::Delegate] {
+            let (intent, nonce) = wire_loop_provenance(ordinary).await;
+            assert_eq!(
+                intent, None,
+                "a {ordinary:?}-origin child declared Anvil loop ownership — \
+                 ordinary sub-agent traffic is not mid-loop material and this \
+                 would suppress Flux Elevation across the board"
+            );
+            assert_eq!(
+                nonce, None,
+                "a {ordinary:?}-origin child sent a per-turn nonce, which \
+                 defeats the semantic cache on traffic that should hit it"
+            );
+        }
     }
 
     #[tokio::test]
