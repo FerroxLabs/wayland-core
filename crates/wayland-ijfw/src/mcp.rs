@@ -215,7 +215,6 @@ fn mcp_server_is_reachable(spec: &wcore_plugin_api::mcp_server_spec::McpServerSp
             // Everything else — `npx`, `uvx`, `pipx`, a local binary — is
             // NOT probed. Running it here would execute it outside the one
             // launch path the malware gate sits on; see the doc comment.
-            let _ = (command, args);
             true
         }
         // SSE / HTTP transports: we can't do a cheap local probe, so
