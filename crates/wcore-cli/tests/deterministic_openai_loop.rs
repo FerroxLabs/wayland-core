@@ -85,6 +85,7 @@ async fn run_script_with_approval(
 async fn run_script_with_timeout(
     name: &'static str,
     steps: impl IntoIterator<Item = OpenAiStep>,
+    stream_retry_budget: Option<u32>,
 ) -> (ScenarioResult, OpenAiFixtureObservation) {
     let fixture = OpenAiFixtureScript::new(steps)
         .start()
@@ -102,12 +103,15 @@ async fn run_script_with_timeout(
         },
     )
     .expect("build timeout environment");
-    let scenario = Scenario::new(name, Category::Hardening)
+    let mut scenario = Scenario::new(name, Category::Hardening)
         .max_total_time(Duration::from_secs(12))
         .approval(ApprovalPolicy::Yolo)
         .turn(
             Turn::new("Return the deterministic fixture answer.").max_time(Duration::from_secs(8)),
         );
+    if let Some(retries) = stream_retry_budget {
+        scenario = scenario.stream_retry_budget(retries);
+    }
 
     let result = run_with_binary_in_environment(
         &scenario,
@@ -215,6 +219,7 @@ async fn packaged_core_recovers_after_a_real_read_timeout() {
             OpenAiStep::stall_before_headers(250),
             OpenAiStep::text("recovered after timeout"),
         ],
+        None,
     )
     .await;
 
@@ -233,10 +238,14 @@ async fn packaged_core_exhausts_a_real_read_timeout() {
     // default of 10 retries cannot be exhausted inside the 12 s scenario cap,
     // so at the default the script ran out of stalls and a fourth request went
     // through. What is under test is timeout EXHAUSTION, not the budget size.
-    let _retry_budget = wcore_eval_scenarios::tempenv::ScenarioRetryBudget::pin(2);
+    //
+    // The budget rides on THIS scenario. It used to be a process-global env
+    // var, which under plain `cargo test` reached every other test in this
+    // binary — all of which spawn packaged children (#1134).
     let (result, observation) = run_script_with_timeout(
         "packaged_openai_timeout_exhausted",
         std::iter::repeat_with(|| OpenAiStep::stall_before_headers(250)).take(3),
+        Some(2),
     )
     .await;
 

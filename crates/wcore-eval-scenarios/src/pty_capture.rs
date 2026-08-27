@@ -247,7 +247,8 @@ impl PtyCapture {
             cmd.arg(arg);
         }
         let secret = provider.resolved_key();
-        let child_environment = ChildEnvironment::build(env.path(), env.path(), secret.as_deref())?;
+        let child_environment =
+            ChildEnvironment::build(env.path(), env.path(), secret.as_deref(), None)?;
         let vault_guard = child_environment.apply_pty(&mut cmd)?;
         for (name, value) in extra_env {
             cmd.env(*name, *value);

@@ -288,7 +288,10 @@ pub fn spawn_for_run(
         provider,
         yolo,
         wayland_home,
-        secret.as_deref(),
+        ChildInputs {
+            secret: secret.as_deref(),
+            stream_retry_budget: None,
+        },
         SpawnInstrumentation::default(),
     )
 }
@@ -299,17 +302,33 @@ struct SpawnInstrumentation<'a> {
     egress_capture: Option<&'a crate::egress_evidence::Capture>,
 }
 
+/// Everything `ChildEnvironment::build` needs beyond the two paths.
+///
+/// Grouped so the budget travels with the run that STATED it. It is
+/// deliberately not reachable from the parent's own environment: a
+/// process-global control is read by every other test sharing the binary under
+/// plain `cargo test`, and is invisible to `cargo nextest` (#1134).
+struct ChildInputs<'a> {
+    secret: Option<&'a str>,
+    stream_retry_budget: Option<u32>,
+}
+
 fn spawn_for_run_with_secret(
     bin: &std::path::Path,
     cwd: &std::path::Path,
     provider: &ProviderConfig,
     yolo: bool,
     wayland_home: Option<&std::path::Path>,
-    secret: Option<&str>,
+    child_inputs: ChildInputs<'_>,
     instrumentation: SpawnInstrumentation<'_>,
 ) -> Result<Child, SpawnError> {
     let isolated_home = wayland_home.unwrap_or(cwd);
-    let child_environment = ChildEnvironment::build(cwd, isolated_home, secret)?;
+    let child_environment = ChildEnvironment::build(
+        cwd,
+        isolated_home,
+        child_inputs.secret,
+        child_inputs.stream_retry_budget,
+    )?;
     let prepared_executable = instrumentation
         .process_tree
         .map(|process_tree| process_tree.prepare_executable(bin))
@@ -381,7 +400,7 @@ pub fn spawn_with_args(
     cwd: &std::path::Path,
 ) -> Result<Child, SpawnError> {
     let mut cmd = Command::new(bin);
-    let child_environment = ChildEnvironment::build(cwd, cwd, None)?;
+    let child_environment = ChildEnvironment::build(cwd, cwd, None, None)?;
     let vault_guard = child_environment.apply_tokio(&mut cmd)?;
     cmd.args(args)
         .current_dir(cwd)
@@ -645,7 +664,10 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         provider,
         scenario.approval == crate::scenario::ApprovalPolicy::Yolo,
         wayland_home,
-        secret,
+        ChildInputs {
+            secret,
+            stream_retry_budget: scenario.stream_retry_budget,
+        },
         SpawnInstrumentation {
             process_tree: Some(&process_tree),
             egress_capture: egress_capture.as_ref(),
