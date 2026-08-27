@@ -1209,6 +1209,24 @@ jobs:
           python3 scripts/check-no-personal-identifiers.py --self-test
           python3 scripts/check-no-personal-identifiers.py
 
+      # #1134 -- test code writing a process-global that production code in the
+      # SAME lib test binary reads. `cargo nextest`, which every other suite
+      # here runs, gives each test its own process, so this class can never
+      # fail under it: it is invisible at --retries 0, not merely flaky. The
+      # shared-process `--lib` leg in linux-containerized is where it SHOWS UP;
+      # this gate is what keeps it from coming back, and it runs here -- a pure
+      # text scan, no toolchain -- so a build failure cannot shadow it.
+      #
+      # It fails only on a write with NO serialization at all, which is a
+      # condition that can actually be met and is met today (zero). It is NOT
+      # the rule "every set_var must be #[serial]": that rule was measured
+      # against the four defects the shared-process leg found and would have
+      # flagged none of them while calling the binary compliant.
+      - name: No unserialized test writes to shared process globals
+        run: |
+          python3 scripts/check-test-env-globals.py --self-test
+          python3 scripts/check-test-env-globals.py
+
       - name: Free disk space (drop unused preinstalled toolchains)
         run: |
           set -e
