@@ -418,7 +418,18 @@ impl RecoveryRequestProtection for RecoveryRequestProtector {
         binding: &PreparedRequestBinding<'_>,
         sealed: &SealedPreparedRequest,
     ) -> Result<serde_json::Value, RecoveryConfidentialError> {
-        self.with_key(config, false, KEY_STORE_ACQUIRE_BUDGET, |key| {
+        // RECOVERY-side, so it spends the resume budget. `open` is only ever
+        // reached with a sealed request that ALREADY EXISTS on disk --
+        // `resume_interrupted_turn` is its single production caller
+        // (`engine.rs`), and its failure is mapped straight to a terminal
+        // `SessionAuthority` refusal of the resume. That makes it the same
+        // question `sealed_request_key_available_for_resume` asks, and it
+        // must not be answered by a budget sized for dead air mid-turn.
+        //
+        // The split here is by OPERATION, not by caller, and it is total:
+        // `preflight` and `seal` cannot happen except during a turn, `open`
+        // cannot happen except during recovery.
+        self.with_key(config, false, RESUME_KEY_WAIT_BUDGET, |key| {
             open_with_key(key, binding, sealed)
         })
     }
