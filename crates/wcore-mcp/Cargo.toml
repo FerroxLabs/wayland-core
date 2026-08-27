@@ -32,6 +32,12 @@ workspace-hack.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+# core#340 — `mcp_malware_gate_boundaries.rs` asserts the fail-open notice on
+# file descriptor 2 itself. A `tracing` level cannot answer "would a user with
+# RUST_LOG unset have seen this?", and dup2 is what can.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
+
 [features]
 test-utils = []
 

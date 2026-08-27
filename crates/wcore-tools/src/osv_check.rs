@@ -2,23 +2,58 @@
 //!
 //! Ported from the prior Wayland Python engine.
 //!
-//! Before launching an MCP server via `npx` / `uvx` (or any analogous
-//! package-runner shim), this helper queries the OSV API to check
-//! whether the requested package has any known **malware** advisories
-//! (`MAL-*` IDs). Regular CVEs are ignored — only confirmed malware
-//! blocks. The check is intentionally narrow because OSV produces a
-//! steady stream of low-severity informational CVEs that would
-//! otherwise create noise and pressure to override the gate.
+//! Before launching an MCP server via `npx` / `uvx` / `pipx`, this helper
+//! queries the OSV API to check whether the packages that invocation will
+//! FETCH have any known **malware** advisories (`MAL-*` IDs). Regular CVEs are
+//! ignored — only confirmed malware blocks. The check is intentionally narrow
+//! because OSV produces a steady stream of low-severity informational CVEs
+//! that would otherwise create noise and pressure to override the gate.
+//!
+//! # What this covers, exactly (core#340)
+//!
+//! The check reads the CONFIGURED `command` and its argv. It is a lookup
+//! against a malware feed, **not an execution boundary**. Specifically:
+//!
+//! * **Recognised runners:** `npx`, `uvx`, `pipx` (each also matched through a
+//!   path and a Windows `.cmd`/`.exe` launcher extension). For `pipx` only the
+//!   fetching subcommands (`run`, `install`) are checked; `pipx list` and
+//!   friends fetch nothing, so there is nothing to check.
+//! * **Every package the argv fetches**, not just the one it runs: the
+//!   positional, whatever `--package` / `--from` / `--spec` names, and every
+//!   `--with` / `--with-editable` extra. A `--with` extra is installed and
+//!   imported by the run, so checking only the primary clears the argv that
+//!   carries the malicious package.
+//! * **NOT covered — and this list is load-bearing, because an overstated
+//!   guarantee stops the next person looking:**
+//!   * Package runners this module does not recognise: `bunx`, `pnpm dlx`,
+//!     `yarn dlx`, `npm exec`, `uv tool run`, `deno run npm:…`. These return
+//!     [`MalwareCheckOutcome::NotApplicable`] and launch unchecked.
+//!   * **Indirect execution of any kind.** `sh -c "npx evil"`, `env npx evil`,
+//!     `node -e …`, or a wrapper script in the repo are all opaque here: the
+//!     command is not a recognised runner, so the outcome is `NotApplicable`
+//!     and the package is fetched and executed. Scanning a shell command line
+//!     for a runner token was considered and rejected — it is stepped over in
+//!     one character (`n''px`), so it would buy no security while creating
+//!     exactly the overstated guarantee this section exists to prevent.
+//!   * Anything the launched program does AFTER it starts. A cleared package
+//!     may fetch and execute whatever it likes.
+//!   * Transitive dependencies. Only the named packages are queried.
+//!   * Malware OSV has not yet published an advisory for.
 //!
 //! Wayland's engine MUST NOT initiate raw HTTP from inside
 //! `wcore-tools` (HTTP belongs to the host / `wcore-providers` /
 //! plugin layer), so the actual HTTP query is dispatched through a
 //! pluggable [`OsvBackend`] seam. Hosts wire a real backend at
 //! construction time; tests inject [`CapturingOsvBackend`] to drive
-//! deterministic responses. Without a backend bound, the helper
-//! **fails open** (returns `None`) — matching the Python original's
-//! defensive posture where network errors must never wedge the
-//! agent's ability to launch a tool.
+//! deterministic responses.
+//!
+//! A query that FAILS returns [`MalwareCheckOutcome::Unavailable`], not
+//! `Allowed`. This module does not decide whether an unperformed check is a
+//! pass — collapsing the two was how the fail-open became invisible, since the
+//! only trace of it was a `tracing::warn!` that never reaches a user with
+//! `RUST_LOG` unset. The policy now lives with the caller
+//! (`wcore_mcp::malware_gate`), which announces it and offers the operator a
+//! strict mode.
 //!
 //! The configured endpoint URL is validated through
 //! [`crate::url_safety::is_safe_url`] for SSRF defense-in-depth, so
@@ -178,16 +213,61 @@ impl OsvBackend for CapturingOsvBackend {
 /// aren't recognized package runners — the caller treats that as
 /// "skip the check".
 pub fn infer_ecosystem(command: &str) -> Option<Ecosystem> {
-    // Take the basename and lowercase — `/usr/local/bin/npx` and
-    // `NPX.CMD` both map to `npx`.
+    match runner_base(command).as_str() {
+        "npx" => Some(Ecosystem::Npm),
+        "uvx" | "pipx" => Some(Ecosystem::PyPI),
+        _ => None,
+    }
+}
+
+/// Basename of `command`, lowercased, with a Windows launcher extension
+/// removed — `/usr/local/bin/npx`, `NPX.CMD` and `npx.exe` are one runner, and
+/// enumerating every spelling in every match arm is how one gets missed.
+fn runner_base(command: &str) -> String {
     let base = std::path::Path::new(command)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(command)
         .to_ascii_lowercase();
-    match base.as_str() {
-        "npx" | "npx.cmd" => Some(Ecosystem::Npm),
-        "uvx" | "uvx.cmd" | "pipx" => Some(Ecosystem::PyPI),
+    for ext in [".cmd", ".exe", ".bat", ".ps1"] {
+        if let Some(stem) = base.strip_suffix(ext) {
+            return stem.to_string();
+        }
+    }
+    base
+}
+
+/// Leading subcommands that mean "this invocation fetches from a registry".
+///
+/// An empty table means the runner fetches unconditionally (`npx pkg`,
+/// `uvx pkg`). `pipx` is a package MANAGER, not a bare runner: `pipx run pkg`
+/// and `pipx install pkg` fetch, `pipx list` does not — and a
+/// subcommand-unaware scan reads the literal token `run` as the package name.
+/// `run` is a real PyPI project, so OSV answers CLEAN and the package actually
+/// being fetched is never queried. That is a WRONG answer, which is worse than
+/// no answer: it is the same failure the `value_taking_flags` table exists to
+/// prevent, one level up.
+fn fetching_subcommands(runner: &str) -> &'static [&'static str] {
+    match runner {
+        "pipx" => &["run", "install"],
+        _ => &[],
+    }
+}
+
+/// The argv remaining after a runner's fetching subcommand, or `None` when
+/// this invocation fetches nothing from a registry.
+fn fetching_args<'a>(command: &str, args: &'a [String]) -> Option<&'a [String]> {
+    let subcommands = fetching_subcommands(&runner_base(command));
+    if subcommands.is_empty() {
+        return Some(args);
+    }
+    // Global switches may precede the subcommand (`pipx --quiet run pkg`).
+    let mut i = 0;
+    while i < args.len() && args[i].starts_with('-') && args[i] != "-" && args[i] != "--" {
+        i += 1;
+    }
+    match args.get(i) {
+        Some(token) if subcommands.contains(&token.as_str()) => Some(&args[i + 1..]),
         _ => None,
     }
 }
@@ -249,6 +329,64 @@ fn package_naming_flags(ecosystem: Ecosystem) -> &'static [&'static str] {
         Ecosystem::Npm => &["--package", "-p"],
         Ecosystem::PyPI => &["--from", "--spec"],
     }
+}
+
+/// Flags whose value is an ADDITIONAL package the invocation installs
+/// alongside the primary one.
+///
+/// `uvx --with evil-helper mcp-server` installs BOTH and imports both into the
+/// run, so a gate that queries only `mcp-server` clears the argv that carries
+/// the malicious package — and `--with` is where that hides best, because the
+/// primary is a famous name nobody looks twice at.
+///
+/// `--with-requirements` is deliberately absent: its value is a file path, not
+/// a package name.
+fn extra_package_flags(ecosystem: Ecosystem) -> &'static [&'static str] {
+    match ecosystem {
+        // npm's runners have no analogue: `npx` installs exactly one package.
+        Ecosystem::Npm => &[],
+        Ecosystem::PyPI => &["--with", "--with-editable"],
+    }
+}
+
+/// Every ADDITIONAL package the argv installs, in argv order.
+pub fn parse_extra_packages(
+    args: &[String],
+    ecosystem: Ecosystem,
+) -> Vec<(String, Option<String>)> {
+    let flags = extra_package_flags(ecosystem);
+    if flags.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        // After `--` the tokens belong to the launched application, not the
+        // launcher, so a `--with` there installs nothing.
+        if arg == "--" {
+            break;
+        }
+        let value = if let Some((flag, attached)) = arg.split_once('=') {
+            flags.contains(&flag).then_some(attached)
+        } else if flags.contains(&arg) {
+            i += 1;
+            args.get(i).map(|s| s.as_str())
+        } else {
+            None
+        };
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            let (package, version) = match ecosystem {
+                Ecosystem::Npm => parse_npm_package(value),
+                Ecosystem::PyPI => parse_pypi_package(value),
+            };
+            if let Some(package) = package.filter(|p| !p.is_empty()) {
+                out.push((package, version));
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Resolve which package a launcher argv refers to.
@@ -435,23 +573,35 @@ pub enum MalwareCheckOutcome {
     /// helper could read. Nothing was queried. An argv the gate cannot read is
     /// an argv it cannot clear.
     Unidentified,
-    /// Either the query came back with no malware advisories, or the query
-    /// itself failed. A malware feed that cannot be reached must not wedge the
-    /// user's MCP servers, so a backend error fails OPEN — and ONLY a backend
-    /// error does.
+    /// The query ran and came back with no malware advisories.
     Allowed,
+    /// The query did NOT run — an unreachable feed, an HTTP error, an
+    /// unparseable response, or an endpoint that failed the SSRF gate.
+    ///
+    /// Deliberately NOT folded into [`Self::Allowed`]. "The check did not
+    /// happen" and "the check passed" are different facts, and a caller that
+    /// cannot tell them apart can neither announce the first nor offer an
+    /// operator the choice to refuse on it. `subject` names what went
+    /// unchecked; `reason` is the operator-facing cause. Neither carries argv,
+    /// so no credential passed in argv can reach a log through this path.
+    Unavailable { subject: String, reason: String },
     /// Known malware advisories, with the operator-facing message.
     Blocked(String),
 }
 
-/// Check whether the package referenced by `(command, args)` has any malware
+/// Check whether the packages `(command, args)` will FETCH have any malware
 /// advisories.
 ///
 /// `endpoint` is the OSV endpoint URL (typically [`DEFAULT_OSV_ENDPOINT`]).
-/// If the endpoint fails [`is_safe_url`] (SSRF gate), the check short-circuits
-/// to [`MalwareCheckOutcome::Allowed`] — there is no legitimate reason for the
-/// OSV endpoint to point at an internal address, and refusing every MCP server
-/// over one misconfigured URL is a worse failure than the check not running.
+/// If the endpoint fails [`is_safe_url`] (SSRF gate) nothing is sent and the
+/// result is [`MalwareCheckOutcome::Unavailable`] — there is no legitimate
+/// reason for the OSV endpoint to point at an internal address, and the caller
+/// decides what an unperformed check costs.
+///
+/// See the module docs for the exact coverage boundary. In particular this
+/// returns [`MalwareCheckOutcome::NotApplicable`] for every form of INDIRECT
+/// execution (`sh -c "npx evil"`, a wrapper script, an unrecognised runner) —
+/// it reads the configured command, it does not contain what runs.
 pub async fn check_package_for_malware(
     command: &str,
     args: &[String],
@@ -461,43 +611,63 @@ pub async fn check_package_for_malware(
     let Some(ecosystem) = infer_ecosystem(command) else {
         return MalwareCheckOutcome::NotApplicable;
     };
-    if !is_safe_url(endpoint) {
-        // Logged at WARN so operators see SSRF attempts at default log levels —
-        // an endpoint that fails the SSRF gate is always operator-visible
-        // misconfiguration or an active attack, never normal traffic.
-        tracing::warn!(target: "wcore::osv_check", endpoint, "refusing to query unsafe OSV endpoint (SSRF gate)");
-        return MalwareCheckOutcome::Allowed;
-    }
+    // `pipx list` is a package runner invocation that fetches nothing.
+    let Some(args) = fetching_args(command, args) else {
+        return MalwareCheckOutcome::NotApplicable;
+    };
     let PackageRef::Identified { package, version } = parse_package_from_args(args, ecosystem)
     else {
         return MalwareCheckOutcome::Unidentified;
     };
-    match backend
-        .query(endpoint, ecosystem, &package, version.as_deref())
-        .await
-    {
-        Ok(advisories) => {
-            let malware = filter_malware(advisories);
-            if malware.is_empty() {
-                MalwareCheckOutcome::Allowed
-            } else {
-                MalwareCheckOutcome::Blocked(format_block_message(&package, ecosystem, &malware))
-            }
-        }
-        Err(exc) => {
-            // Fail OPEN, and say so at WARN rather than DEBUG: `warn!` is the
-            // lowest level that reaches a user with no RUST_LOG set, and "the
-            // malware gate did not run" is exactly the thing they must be told.
-            tracing::warn!(
-                target: "wcore::osv_check",
-                error = %exc,
-                ecosystem = ecosystem.as_str(),
-                package = %package,
-                "OSV malware check could not be performed; allowing the launch",
-            );
-            MalwareCheckOutcome::Allowed
+
+    // Everything this argv installs, primary first. Duplicates are dropped so
+    // `uvx --with pkg pkg` costs one query, not two.
+    let mut targets = vec![(package, version)];
+    for (package, version) in parse_extra_packages(args, ecosystem) {
+        if !targets.iter().any(|(known, _)| *known == package) {
+            targets.push((package, version));
         }
     }
+    let subject = targets
+        .iter()
+        .map(|(package, _)| package.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if !is_safe_url(endpoint) {
+        return MalwareCheckOutcome::Unavailable {
+            subject,
+            reason: "the configured OSV endpoint failed the SSRF safety check, \
+                     so no query was sent"
+                .to_string(),
+        };
+    }
+
+    for (package, version) in &targets {
+        match backend
+            .query(endpoint, ecosystem, package, version.as_deref())
+            .await
+        {
+            Ok(advisories) => {
+                let malware = filter_malware(advisories);
+                if !malware.is_empty() {
+                    return MalwareCheckOutcome::Blocked(format_block_message(
+                        package, ecosystem, &malware,
+                    ));
+                }
+            }
+            // One failed query means the check as a whole did not complete;
+            // clearing the remaining packages would report a pass on strictly
+            // less evidence than the caller thinks it has.
+            Err(exc) => {
+                return MalwareCheckOutcome::Unavailable {
+                    subject,
+                    reason: exc.to_string(),
+                };
+            }
+        }
+    }
+    MalwareCheckOutcome::Allowed
 }
 
 #[cfg(test)]
@@ -744,10 +914,10 @@ mod tests {
             backend.as_ref(),
         )
         .await;
-        assert_eq!(
-            outcome,
-            MalwareCheckOutcome::Allowed,
-            "network errors must fail open"
+        assert!(
+            matches!(outcome, MalwareCheckOutcome::Unavailable { .. }),
+            "a failed query is not a pass; the caller owns the fail-open \
+             policy, got {outcome:?}"
         );
         assert_eq!(backend.calls.lock().len(), 1);
     }
@@ -766,7 +936,11 @@ mod tests {
             backend.as_ref(),
         )
         .await;
-        assert_eq!(outcome, MalwareCheckOutcome::Allowed);
+        assert!(
+            matches!(outcome, MalwareCheckOutcome::Unavailable { .. }),
+            "an endpoint that failed the SSRF gate means the check did NOT \
+             run, got {outcome:?}"
+        );
         // Backend MUST NOT be called when endpoint is unsafe.
         assert!(backend.calls.lock().is_empty());
     }

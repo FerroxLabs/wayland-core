@@ -87,22 +87,20 @@ fn command_available(program: &str, version_arg: &str) -> bool {
 /// 1. `npx --version` presence check (fast; PATHEXT-aware on Windows so it
 ///    recognises `npx.cmd` — issue #6).
 /// 2. If the transport is `Stdio { command: "node", args: [path, …] }`,
-///    check the script path exists with `std::fs::metadata`.  Otherwise,
-///    run the command with a 2-second timeout (`--help` or similar) to
-///    verify it starts rather than exiting immediately.
+///    check the script path exists with `std::fs::metadata`. Otherwise the
+///    spec is trusted and `wcore-mcp` surfaces any error at connect time —
+///    core#340: pre-executing a package runner here ran the registry package
+///    before the malware gate on the stdio launch path could see it.
 ///
 /// On any probe failure we log INFO and return `Ok(())` — the MCP server
 /// is optional infrastructure and must NOT block the engine.
 ///
-/// RANK-57 hardening: the reachability probe (`command_available` +
-/// `mcp_server_is_reachable`) spawns child processes and busy-polls with
-/// blocking `std::thread::sleep` for up to ~2s. Running that directly on a
-/// tokio worker starves the reactor (guaranteed cold-start latency, and on a
-/// single-threaded runtime it blocks every other task). We therefore make
-/// `register` async and run the blocking probe inside
+/// RANK-57 hardening: `command_available` spawns a child process. Running that
+/// directly on a tokio worker starves the reactor (guaranteed cold-start
+/// latency, and on a single-threaded runtime it blocks every other task). We
+/// therefore make `register` async and run the blocking probe inside
 /// `tokio::task::spawn_blocking`, awaiting the result so no async worker is
-/// ever blocked. The probe's semantics (same reachability decision, same 2s
-/// timeout budget) are unchanged — only the thread it runs on changes.
+/// ever blocked. Only the thread it runs on changes.
 pub async fn register(ctx: &mut PluginContext<'_>) -> PluginResult<()> {
     // Wave RB STABILITY MINOR #13: typed HostMisconfiguration error.
     let registry = ctx.mcp_servers.as_mut().ok_or_else(|| {
@@ -162,12 +160,32 @@ fn probe_reachability(spec: &wcore_plugin_api::mcp_server_spec::McpServerSpec) -
 /// For `Stdio { command: "node", args: [script, …] }`: checks the script
 /// file exists on disk (fast, no process spawn).
 ///
-/// For all other stdio commands (e.g. `npx @ijfw/memory-server`): spawns
-/// the server with a `--help` flag and waits up to 2 seconds. If the
-/// process exits with code 0 or the `--help` flag causes it to exit
-/// non-zero but the process at least *starts* (spawn succeeds), we treat
-/// the server as reachable. If the spawn fails (binary not found / exits
-/// immediately with error) we skip.
+/// For every other stdio command: `true` without probing.
+///
+/// # Why this stopped spawning the server (core#340)
+///
+/// This used to run the configured command with `--help` and a 2-second
+/// budget. For this plugin's own default spec that command is
+/// `npx -y @ijfw/memory-server`, and `npx -y` FETCHES the package from the
+/// public npm registry and executes its entry point — install scripts and
+/// all. That happened here, at plugin `initialize()`, which is long before
+/// `wcore_mcp`'s stdio transport (and therefore the OSV malware gate that
+/// sits in front of it) ever sees the spec.
+///
+/// So the gate could refuse the launch all it liked: the package had already
+/// run. A pre-exec probe of a package runner is not a cheap reachability
+/// check, it is the execution the gate exists to gate.
+///
+/// The plugin cannot call the gate itself — audit F2 forbids a `wcore-mcp` or
+/// `wcore-tools` dependency here, and the `wcore-plugin-api` build.rs lint
+/// enforces it. The fix is therefore to stop pre-executing and let the ONE
+/// gated launch path be the only one: registration now defers, exactly as the
+/// SSE/HTTP arm below already does, and `wcore-mcp` surfaces a connect error
+/// if the server does not start.
+///
+/// Stage 1 of `probe_reachability` is unchanged and still does the work this
+/// probe was for: `npx --version` answers "is Node installed at all?" without
+/// naming, fetching or running any registry package.
 fn mcp_server_is_reachable(spec: &wcore_plugin_api::mcp_server_spec::McpServerSpec) -> bool {
     use wcore_plugin_api::mcp_server_spec::McpTransport;
     match &spec.transport {
@@ -194,54 +212,11 @@ fn mcp_server_is_reachable(spec: &wcore_plugin_api::mcp_server_spec::McpServerSp
                 return true;
             }
 
-            // Smoke-test path: spawn the command with `--help` and give
-            // it 2 seconds to respond. We consider it reachable if the
-            // process starts at all (even if `--help` returns non-zero).
-            let mut probe_args: Vec<&str> = args.iter().map(String::as_str).collect();
-            probe_args.push("--help");
-
-            // PATHEXT-aware (issue #6): on Windows this becomes
-            // `cmd /C npx -y @ijfw/memory-server --help` so the `npx.cmd`
-            // shim resolves; on Unix it spawns `npx …` directly.
-            let mut cmd = shim_aware_command(command);
-            cmd.args(&probe_args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-
-            // Spawn and wait with a timeout implemented via `wait_timeout`
-            // from the standard library's thread::sleep approach. We avoid
-            // pulling in the `wait-timeout` crate to keep deps minimal.
-            match cmd.spawn() {
-                Err(_) => false,
-                Ok(mut child) => {
-                    // Poll for up to 2 seconds in 50ms increments.
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-                    loop {
-                        match child.try_wait() {
-                            Ok(Some(_)) => {
-                                // Process exited — it started, which is
-                                // enough to confirm the binary is present
-                                // and executable. `--help` may exit 1,
-                                // but that's fine.
-                                return true;
-                            }
-                            Ok(None) if std::time::Instant::now() < deadline => {
-                                std::thread::sleep(std::time::Duration::from_millis(50));
-                            }
-                            Ok(None) => {
-                                // Still running after 2 s — it's a real
-                                // server, treat as reachable.
-                                let _ = child.kill();
-                                return true;
-                            }
-                            Err(_) => {
-                                return false;
-                            }
-                        }
-                    }
-                }
-            }
+            // Everything else — `npx`, `uvx`, `pipx`, a local binary — is
+            // NOT probed. Running it here would execute it outside the one
+            // launch path the malware gate sits on; see the doc comment.
+            let _ = (command, args);
+            true
         }
         // SSE / HTTP transports: we can't do a cheap local probe, so
         // trust the registration and let wcore-mcp surface errors at
@@ -297,6 +272,68 @@ mod tests {
             "wayland-ijfw-definitely-absent-binary-xyz",
             "--version"
         ));
+    }
+
+    /// core#340 item 3 — the ONE arm that matters here.
+    ///
+    /// The reachability probe must not EXECUTE the configured command. For
+    /// this plugin's own default spec that command is `npx -y
+    /// @ijfw/memory-server`, which fetches the package from the public npm
+    /// registry and runs its entry point — and it happened at plugin
+    /// `initialize()`, before `wcore-mcp`'s stdio transport (and the OSV
+    /// malware gate in front of it) ever saw the spec.
+    ///
+    /// The instrument is a marker file written by the child itself, not a
+    /// return value: only the child can answer "did it run?".
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_does_not_execute_the_configured_package_runner() {
+        use std::os::unix::fs::PermissionsExt;
+        use wcore_plugin_api::mcp_server_spec::McpTransport;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("PROBE-EXECUTED-THE-RUNNER");
+        let runner = dir.path().join("npx");
+        std::fs::write(
+            &runner,
+            format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+        )
+        .expect("write fake runner");
+        let mut perms = std::fs::metadata(&runner).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&runner, perms).expect("chmod");
+
+        let spec = McpServerSpec {
+            name: "probe-test".to_string(),
+            transport: McpTransport::Stdio {
+                command: runner.to_str().expect("utf-8 path").to_string(),
+                args: vec!["-y".to_string(), "@ijfw/memory-server".to_string()],
+            },
+            env: HashMap::new(),
+        };
+
+        // KNOWN-POSITIVE CONTROL: the script IS executable and DOES write the
+        // marker, so an empty marker below means "was not run", not "could not
+        // run". Without this the assertion is satisfied by a broken fixture.
+        let status = std::process::Command::new(&runner)
+            .status()
+            .expect("the fixture runner must be executable");
+        assert!(status.success() && marker.exists(), "fixture is inert");
+        std::fs::remove_file(&marker).expect("reset marker");
+
+        let reachable = mcp_server_is_reachable(&spec);
+
+        assert!(
+            !marker.exists(),
+            "the reachability probe EXECUTED the package runner — a registry \
+             package ran before the OSV malware gate on the stdio launch path \
+             could see it"
+        );
+        assert!(
+            reachable,
+            "with no probe, the spec is trusted and wcore-mcp reports connect \
+             failures instead"
+        );
     }
 
     // RANK-57: the reachability probe must not run on the async worker.

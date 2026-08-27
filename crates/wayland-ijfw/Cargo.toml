@@ -31,3 +31,6 @@ workspace-hack.workspace = true
 [dev-dependencies]
 tokio  = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true, features = ["serde"] }
+# core#340 — the probe-ordering test plants an executable fixture named `npx`
+# and asserts the reachability probe never runs it.
+tempfile.workspace = true
