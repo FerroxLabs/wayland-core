@@ -265,6 +265,39 @@ jobs:
         # it to the full test+lint+audit pipeline.
 
     steps:
+      # ── Which Windows executor served this job (gh#1146) ─────────────────
+      # The Windows pool is two runner SERVICES on one host (`ferrox-win-msvc`
+      # and `SEANDESKTOP`, both `NT AUTHORITY\NetworkService`) plus the hosted
+      # pool, and the failure set churns between them on the same tree — the
+      # matrix note in ci.yml says so and closes with "Still open". #1146
+      # measured four runs across three executors where not one job said which
+      # box served it, so neither the red nor the green could be attributed to
+      # a tree.
+      #
+      # Written to GITHUB_STEP_SUMMARY, not only to the log, so an A/B pair is
+      # readable from `gh run view` without downloading two log archives.
+      #
+      # Fails closed on purpose: a job that cannot name its executor reports
+      # nothing rather than reporting anonymously. Enforced by
+      # `scripts/check-windows-attribution.py`.
+      - name: Record which Windows executor served this job
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_NAME:-}" ]; then
+            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
+            exit 1
+          fi
+          echo "runner_name=${RUNNER_NAME}"
+          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
+          {
+            echo "### Windows executor"
+            echo "- runner_name: \`${RUNNER_NAME}\`"
+            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
+            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v6
 
       # ── Python, for the account CI actually runs as ───────────────────────
@@ -766,6 +799,27 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_INCREMENTAL: "0"
     steps:
+      # Which Windows executor served this job (gh#1146). Fails closed: a job
+      # that cannot name the box that served it reports nothing rather than
+      # reporting anonymously. Why, and what enforces it:
+      # `scripts/check-windows-attribution.py`.
+      - name: Record which Windows executor served this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_NAME:-}" ]; then
+            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
+            exit 1
+          fi
+          echo "runner_name=${RUNNER_NAME}"
+          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
+          {
+            echo "### Windows executor"
+            echo "- runner_name: \`${RUNNER_NAME}\`"
+            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
+            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v6
 
       # The Linux jobs already do this (see "Free disk space" in `ci-linux`);
@@ -1209,6 +1263,34 @@ jobs:
           python3 scripts/check-no-personal-identifiers.py --self-test
           python3 scripts/check-no-personal-identifiers.py
 
+      # ── Windows-attribution gate (#1146) ──────────────────────────────
+      # Same placement reasoning as the two steps above: AFTER checkout (it
+      # reads the workflow YAML and .config/nextest.toml out of the working
+      # tree) and EARLY, because it is a pure text scan with no toolchain and
+      # must not be shadowed by a build failure.
+      #
+      # It asserts the two conditions under which a Windows red can be
+      # attributed to a tree at all: every Windows job in the Windows test
+      # workflows records which executor served it and fails closed when it
+      # cannot, and the three tests #1146 measured churning are not laundered
+      # back to green by `[profile.ci] retries = 2`.
+      #
+      # Runs on the Linux `ci-linux` job on purpose — it is a text scan about
+      # Windows, not a Windows job, so it costs nothing on the leg that is
+      # already the critical path and it cannot be skipped by a Windows leg
+      # being skipped, which is exactly how #1146's green was recorded.
+      #
+      # `--self-test` runs first and proves the checker fires AND stays silent
+      # on the fixtures, so a checker that has stopped matching fails loudly.
+      - name: Windows CI failures stay attributable
+        run: |
+          python3 scripts/check-windows-attribution.py --self-test
+          python3 scripts/check-windows-attribution.py
+          # The red arm #1146 asks for runs through the flake ledger, and a
+          # misparsed target there selects zero tests and grades NOTRUN rather
+          # than failing, so its parser is checked here too.
+          python3 scripts/flake-ledger.py --self-test
+
       - name: Free disk space (drop unused preinstalled toolchains)
         run: |
           set -e
@@ -1642,6 +1724,28 @@ jobs:
       matrix: ${{ fromJSON((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"},{"os":"macos-latest","target":"x86_64-apple-darwin"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]}' || '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"}]}') }}
 
     steps:
+      # Which Windows executor served this job (gh#1146). Fails closed: a job
+      # that cannot name the box that served it reports nothing rather than
+      # reporting anonymously. Why, and what enforces it:
+      # `scripts/check-windows-attribution.py`.
+      - name: Record which Windows executor served this job
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_NAME:-}" ]; then
+            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
+            exit 1
+          fi
+          echo "runner_name=${RUNNER_NAME}"
+          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
+          {
+            echo "### Windows executor"
+            echo "- runner_name: \`${RUNNER_NAME}\`"
+            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
+            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v6
 
       # Linux: same disk + linker setup as the ci: job.
