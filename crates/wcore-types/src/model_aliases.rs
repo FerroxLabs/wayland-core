@@ -24,8 +24,28 @@
 
 #![allow(dead_code)]
 
+/// An env override, or the pinned default.
+///
+/// An EMPTY value counts as absent, and that distinction is load-bearing
+/// rather than defensive. `std::env::var` returns `Ok("")` for a variable
+/// that is set-but-empty, so a bare `unwrap_or_else` accepts `""` as a
+/// deliberate override and hands back an empty model id.
+///
+/// This is not hypothetical. GitHub Actions expands an UNSET repository
+/// variable to the empty string rather than omitting the binding, so
+/// `E2E_OPENAI_GPT4O_MINI: ${{ vars.E2E_OPENAI_GPT4O_MINI }}` with no
+/// variable configured sets the env var to "". Measured on 2026-08-27: both
+/// `openai::test_openai_*` e2e tests failed against the live API with
+///
+///     400 invalid_request_error: "you must provide a model parameter"
+///
+/// because the request carried `model: ""`. The empty override silently
+/// replaced a perfectly good pinned default.
 fn from_env_or(default: &'static str, env_var: &str) -> String {
-    std::env::var(env_var).unwrap_or_else(|_| default.to_string())
+    std::env::var(env_var)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 // ── Anthropic ──────────────────────────────────────────────────────────────
@@ -583,5 +603,50 @@ mod tests {
         assert_eq!(expand_short_form("claude-sonnet-4-6"), None);
         // Plugin-style prefix is reserved for plugin routing.
         assert_eq!(expand_short_form("ollama:llama-4"), None);
+    }
+}
+
+#[cfg(test)]
+mod env_override_tests {
+    use super::*;
+
+    /// A set-but-EMPTY override must not replace the pinned default.
+    ///
+    /// Serialised because it mutates process-wide env: `cargo test` runs
+    /// these on threads sharing one environment, so two tests touching the
+    /// same variable concurrently read each other's writes.
+    #[test]
+    fn an_empty_override_is_treated_as_absent() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let var = "WCORE_TEST_EMPTY_OVERRIDE";
+
+        // Positive control FIRST: prove the mechanism works at all, so a
+        // pass below cannot come from the override being ignored entirely.
+        unsafe { std::env::set_var(var, "real-value") };
+        assert_eq!(
+            from_env_or("pinned-default", var),
+            "real-value",
+            "control: a non-empty override must actually be honoured"
+        );
+
+        for empty in ["", "   ", "\t"] {
+            unsafe { std::env::set_var(var, empty) };
+            assert_eq!(
+                from_env_or("pinned-default", var),
+                "pinned-default",
+                "a set-but-empty override ({empty:?}) must fall back to the pinned \
+                 default -- GitHub Actions expands an unset `vars.X` to \"\", and an \
+                 empty model id reaches the provider as `model: \"\"` and is \
+                 rejected 400"
+            );
+        }
+
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(
+            from_env_or("pinned-default", var),
+            "pinned-default",
+            "an absent override must fall back too"
+        );
     }
 }
