@@ -207,9 +207,15 @@ const AUTHORITY_REFUSAL: &str = "Refused by the command floor: this command refe
 /// `cwd` is the directory the command will run in, used to resolve relative
 /// tokens. `None` falls back to the process working directory.
 pub fn floor_refusal(command: &str, cwd: Option<&Path>) -> Option<String> {
+    // Normalized here so that every comparison below is between paths built
+    // the same way. A token resolves through `lexical_normalize`, which
+    // rebuilds the path from its components and therefore emits the platform
+    // separator; a launch directory or a protected base handed in with the
+    // other separator would then never compare equal.
     let cwd = cwd
         .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok());
+        .or_else(|| std::env::current_dir().ok())
+        .map(|c| lexical_normalize(&c));
     let protected = protected_paths(cwd.as_deref());
     // Rule 2c yields where rule 2b yields, keyed off the same launch directory
     // — which no in-shell `cd` can move.
@@ -419,6 +425,8 @@ fn protected_paths(cwd: Option<&Path>) -> Protected {
     ]
     .into_iter()
     .flatten()
+    // Same normalization as the resolved token it will be compared against.
+    .map(|p| lexical_normalize(&p))
     // A base that is a filesystem root would refuse every command on the
     // machine.
     .filter(|p| p.parent().is_some())
