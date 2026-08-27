@@ -1,8 +1,15 @@
-//! v0.8.1 U11 — originally a building block reserved for a future wave. It is
-//! wired now: `wcore_agent::bootstrap::load_learned_policy` constructs a
-//! `LearnedPolicy` and `node_executor::dispatch_once` runs its `evaluate()` as
-//! the sub-agent ACL pre-filter, and [`crate::grants`] uses the same store to
-//! make an interactive always-allow grant survive a restart.
+//! v0.8.1 U11 — originally a building block reserved for the future sub-agent
+//! ACL pre-filter wave. That reservation is stale, and this note said so for
+//! longer than it was true: the module is wired in production on both halves.
+//! `wcore_agent::orchestration` calls `evaluate()` in the dispatch path
+//! (`orchestration/mod.rs:546`), and #693 made the store durable —
+//! [`crate::grants`] backs it, `wcore_cli::tui::engine_bridge::persist_always_allow`
+//! writes it when the user grants "always allow", and `wcore_cli::main` replays
+//! it at startup through `restore_always_allows`, so an interactive
+//! always-allow grant survives a restart. Because that file IS the agent's
+//! standing authority, `wcore_config::command_floor` refuses any shell command
+//! that names it. See node_executor::dispatch_once for the removed pre-filter
+//! site the original note referred to.
 //!
 //! ## Original v0.7.0 Task 3.C.3 spec
 //!
