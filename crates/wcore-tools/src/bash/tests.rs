@@ -2451,6 +2451,7 @@ fn grade_manifest_attribution(
     content: &str,
     root: &std::path::Path,
     allowance: Duration,
+    timeout: Duration,
     context: &str,
     last_attempt: bool,
 ) -> bool {
@@ -2468,9 +2469,32 @@ fn grade_manifest_attribution(
     }
 
     let floor = walk_floor(root, 3);
-    // `floor > allowance * 1.25`, in integer arithmetic so there is no float
-    // rounding between the two measured quantities.
-    if floor * 4 > allowance * 5 {
+    // The deadline does NOT fire at `timeout`: a timer wait returns on the
+    // host's next tick, so the earliest honest estimate of when it fired is
+    // `timeout + allowance`. Comparing the walk against `allowance` ALONE
+    // omits the timeout entirely and declares the premise established in a
+    // regime where it cannot hold. Measured on the Windows runner
+    // (`CI (Array)`, wayland-core#341): a 2 ms timeout, a 15.8 ms allowance
+    // and a 27.3 ms walk floor cleared `floor > allowance * 1.25` and then
+    // panicked -- the real deadline landed near 17.8 ms, the build won the
+    // race honestly, and the CHILD-timeout message it returned was correct.
+    //
+    // `* 2` is the margin that false red buys: the walk has to DOMINATE the
+    // deadline, not merely exceed it, before a message that does not name the
+    // manifest can be called a product defect rather than a lost race. The
+    // arithmetic stays integer, so there is no float rounding between two
+    // measured quantities.
+    //
+    // On Linux and macOS the tick is ~1 ms, so a `CALIBRATED_WALK` tree clears
+    // this on every run and the attribution is graded exactly as before. On
+    // Windows the tick is ~15.6 ms, and the header on `timer_allowance`
+    // records that NEITHER a bigger tree (a 70 ms target does not finish
+    // growing inside nextest's slow-timeout) NOR a longer timeout (it stops
+    // cutting the walk, so the test grades nothing) can close that gap -- so
+    // this half skips there, loudly, instead of reporting the host's timer
+    // quantum as a product defect. The LATENCY half above is unaffected and
+    // still grades on every attempt, on every platform.
+    if floor > (timeout + allowance) * 2 {
         panic!(
             "the manifest build was still walking when the deadline fired — the walk \
              this tree costs floors at {floor:?}, decisively above this host's \
@@ -2675,6 +2699,7 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
             &result.content,
             &root,
             allowance,
+            Duration::from_millis(timeout_ms),
             &format!(
                 "attempt {attempt}, a {timeout_ms}ms timeout against a walk measured at {walk:?}"
             ),
@@ -2786,6 +2811,7 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
             &result.content,
             &root,
             allowance,
+            Duration::from_millis(timeout_ms),
             &format!(
                 "attempt {attempt}, a {timeout_ms}ms timeout against a walk measured at {walk:?}"
             ),
