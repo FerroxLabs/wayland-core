@@ -17,11 +17,14 @@ mod tests;
 
 use self::mutation_lock::MutationLock;
 use self::sha256::sha256_hex;
-#[cfg(test)]
-use self::storage::{TEST_LEASE_ROOT_ENV, private_lease_directory, test_lease_root};
 use self::storage::{
-    lease_directory, lease_is_zero_length, quarantine_lease, read_validated_lease,
+    HolderSidecar, lease_directory, lease_is_zero_length, quarantine_lease, read_validated_lease,
     recover_rewrite_temps, remove_validated_lease, rewrite_synced_lease, write_new_synced_lease,
+};
+#[cfg(test)]
+use self::storage::{
+    TEST_LEASE_ROOT_ENV, lock_holder_directory, private_lease_directory,
+    private_lock_holder_directory, test_lease_root,
 };
 
 use crate::error::{Result, SandboxError};
@@ -62,6 +65,20 @@ use windows_sys::Win32::System::Threading::{
 
 const LEASE_VERSION: u32 = 1;
 const LEASE_DIRECTORY_COMPONENTS: [&str; 4] = ["Wayland", "Core", "AppContainerLeases", "v1"];
+/// Where the mutation lock publishes its holder sidecar — a SIBLING of the
+/// lease directory, deliberately NOT a file inside it.
+///
+/// Same reasoning, and the same shape, as
+/// `windows_impl::shared_verdict::record_path`. `recover_dead_leases_locked`
+/// treats every entry in the lease directory it does not recognise as a hard
+/// error that aborts recovery, and it runs two lines after
+/// `MutationLock::acquire` in `start_with_apply` — so a sidecar written in
+/// there fails every sandboxed command, not just a contended one. Allow-listing
+/// a second name in the sweep would fix this build and wedge any older build
+/// that met the file, which on a machine running a Desktop app and a CLI at
+/// different versions is the configuration the lock exists to serve.
+const LOCK_HOLDER_DIRECTORY_COMPONENTS: [&str; 4] =
+    ["Wayland", "Core", "AppContainerAclLock", "v1"];
 /// Sub-directory of the lease directory holding leases that were reclaimed
 /// because they can never reconcile against their own AppContainer profile.
 ///

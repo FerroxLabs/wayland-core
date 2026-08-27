@@ -1,5 +1,5 @@
 use super::*;
-use std::time::Duration;
+use crate::backends::appcontainer::acl_lock_policy as policy;
 use windows_sys::Win32::Foundation::WAIT_ABANDONED;
 use windows_sys::Win32::Security::Authorization::{
     EXPLICIT_ACCESS_W, GRANT_ACCESS, GetSecurityInfo, SE_KERNEL_OBJECT, SetEntriesInAclW,
@@ -16,7 +16,6 @@ use windows_sys::Win32::System::Threading::{
     CreateMutexW, MUTEX_ALL_ACCESS, OpenProcessToken, ReleaseMutex, WaitForSingleObject,
 };
 
-const MUTATION_LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 const LOCAL_SYSTEM_RID: u32 = 18;
 
@@ -56,10 +55,18 @@ const LOCAL_SYSTEM_RID: u32 = 18;
 /// and 240 ms. The driver is `SUB_CONTAINERS_AND_OBJECTS_INHERIT` propagation,
 /// ~100 µs per file under every granted directory, paid once on grant and again
 /// on revoke — so hold time is O(files in the workspace), and a large checkout
-/// is what pushes one execution past the 15 s timeout below and makes a second
-/// agent fail. Shortening the hold means not re-granting a whole tree per
-/// execution, not trimming the intent list.
-pub(super) struct MutationLock(OwnedHandle);
+/// is what pushes one execution past the acquisition budget below (default 15 s,
+/// see `acl_lock_policy`) and makes a second agent fail. Shortening the hold
+/// means not re-granting a whole tree per execution, not trimming the intent
+/// list; raising `WAYLAND_SANDBOX_ACL_LOCK_TIMEOUT_SECS` only buys patience.
+pub(super) struct MutationLock {
+    handle: OwnedHandle,
+    /// Where this process published itself as the lock's holder, so a
+    /// contender's timeout can name it. A SIBLING of the lease directory, never
+    /// inside it — see [`HolderSidecar`], which is a type precisely so this
+    /// field cannot be handed the lease directory by mistake.
+    holder: HolderSidecar,
+}
 
 impl MutationLock {
     pub(super) fn acquire() -> Result<Self> {
@@ -119,16 +126,44 @@ impl MutationLock {
         }
         let handle = OwnedHandle(handle);
         validate_mutex_security(handle.0, token_user.sid(), system_sid.sid())?;
-        let wait =
-            unsafe { WaitForSingleObject(handle.0, MUTATION_LOCK_TIMEOUT.as_millis() as u32) };
-        if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
-            return Err(if wait == WAIT_TIMEOUT {
-                exec_error("timed out acquiring AppContainer ACL mutation lock".into())
-            } else {
-                last_error("WaitForSingleObject(AppContainer ACL mutation lock)")
-            });
+
+        let timeout =
+            policy::timeout_from(std::env::var(policy::ACL_LOCK_TIMEOUT_ENV).ok().as_deref());
+        // Resolved BEFORE the wait because every expired slice samples it.
+        // `HolderSidecar` owns the directory choice, and owns it as a type this
+        // site cannot substitute: `recover_dead_leases_locked` sweeps the lease
+        // directory two lines after this call returns and rejects every entry
+        // it does not recognise, so publishing there fails every sandboxed
+        // command instead of only a contended one.
+        let holder = HolderSidecar::resolve();
+        let self_pid = std::process::id();
+        let outcome = policy::wait_with_retry(
+            timeout,
+            |slice| match unsafe { WaitForSingleObject(handle.0, slice.as_millis() as u32) } {
+                WAIT_OBJECT_0 | WAIT_ABANDONED => policy::WaitVerdict::Acquired,
+                WAIT_TIMEOUT => policy::WaitVerdict::Timeout,
+                _ => policy::WaitVerdict::Failed,
+            },
+            || holder.sample(self_pid),
+        );
+        match outcome.verdict {
+            policy::WaitVerdict::Acquired => {}
+            policy::WaitVerdict::Failed => {
+                return Err(last_error(
+                    "WaitForSingleObject(AppContainer ACL mutation lock)",
+                ));
+            }
+            policy::WaitVerdict::Timeout => {
+                return Err(exec_error(policy::timeout_message(&outcome)));
+            }
         }
-        Ok(Self(handle))
+        holder.publish(
+            self_pid,
+            &std::env::current_exe()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        );
+        Ok(Self { handle, holder })
     }
 }
 
@@ -242,7 +277,8 @@ fn mutex_name(token_user: &CurrentUserSid) -> String {
 
 impl Drop for MutationLock {
     fn drop(&mut self) {
-        if unsafe { ReleaseMutex(self.0.0) } == 0 {
+        self.holder.clear();
+        if unsafe { ReleaseMutex(self.handle.0) } == 0 {
             tracing::error!(
                 target: "wcore_sandbox",
                 error = %last_error("ReleaseMutex(AppContainer ACL mutation lock)"),
@@ -353,7 +389,7 @@ impl Drop for SystemSid {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     /// Helper-process entry: acquire the machine-wide mutation mutex and hold
     /// it, so a sibling process can be observed contending for it.
@@ -421,5 +457,66 @@ mod tests {
         );
         drop(lock);
         assert!(child.wait().unwrap().success());
+    }
+
+    /// Live proof that a contended acquisition names the process holding it.
+    ///
+    /// This runs on ANY Windows box, with or without a working AppContainer
+    /// profile: `MutationLock::acquire` calls OpenProcessToken,
+    /// SetEntriesInAclW, CreateMutexW and WaitForSingleObject and no
+    /// AppContainer API at all, so it is reachable where the real-spawn probe
+    /// is not. The helper publishes its own holder sidecar, so the assertion is
+    /// on a pid this test never told the message about.
+    #[test]
+    #[ignore = "explicit native Windows AppContainer acceptance"]
+    fn a_contended_acquisition_names_the_holding_process() {
+        assert_eq!(
+            std::env::var_os("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
+            Some(OsStr::new("1"))
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("locked");
+        let release = temp.path().join("release");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("mutation_lock_helper_entry")
+            .arg("--nocapture")
+            .env("WCORE_MUTEX_HELPER_MARKER", &marker)
+            .env("WCORE_MUTEX_HELPER_RELEASE", &release)
+            // Share this process's lease root, or the helper publishes its
+            // holder sidecar somewhere this process never looks.
+            .env(TEST_LEASE_ROOT_ENV, test_lease_root().unwrap())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(marker.exists(), "helper never acquired the global mutex");
+
+        let message = MutationLock::acquire()
+            .err()
+            .expect("the helper still holds the lock, so acquisition must time out")
+            .to_string();
+        fs::write(&release, b"go").unwrap();
+        assert!(child.wait().unwrap().success());
+
+        assert!(
+            message.contains(&format!("pid {}", child.id())),
+            "the timeout must name the contending process: {message:?}"
+        );
+        assert!(
+            message.contains(policy::ACL_LOCK_TIMEOUT_ENV),
+            "the timeout must offer a remedy: {message:?}"
+        );
+        // The sampling, against a real cross-process holder rather than a
+        // closure. One helper holds the mutex for the whole budget, so every
+        // expired slice must have read the SAME pid out of the sidecar — which
+        // is only observable at all because the budget is split. If this reads
+        // "different processes" the samples are not landing where the holder
+        // publishes; if the clause is absent, no slice sampled anything.
+        assert!(
+            message.contains("never changed hands"),
+            "one holder across every sample must be reported as such: {message:?}"
+        );
     }
 }
