@@ -1272,6 +1272,14 @@ fn default_allow_list() -> Vec<String> {
         "Read".into(),
         "Grep".into(),
         "Glob".into(),
+        // #946 A-10: the office/PDF extractors are the `Read` of a binary
+        // document -- `ToolCategory::Info`, no mutation of the file, no macro
+        // or formula evaluation. Leaving them out made .pdf/.docx/.xlsx/.pptx
+        // unreachable on a stock install: `Read` answers "(binary file, N
+        // bytes)", the extractor prompts, and in a headless run a prompt is a
+        // denial, so no route to the content survived.
+        "pdf_extract".into(),
+        "doc_extract".into(),
         "web".into(),
         "WebFetch".into(),
         "vision_analyze".into(),
@@ -8924,6 +8932,44 @@ command = "local-mcp"
             Some(false),
             "a project may tighten allow_no_sandbox from a permissive global"
         );
+    }
+
+    /// #946 A-10 (re-graded 2026-08-27): the office/PDF extractors must be
+    /// auto-approved out of the box, exactly like `Read`.
+    ///
+    /// RED ARM: `default_allow_list()` held neither name, so a stock install
+    /// could not read a `.pdf`/`.docx`/`.xlsx`/`.pptx` at all -- the extractor
+    /// needed approval, `Read` returned only "(binary file, N bytes)", and
+    /// every fallback (`Bash`, `execute`) needed approval too. Headless that
+    /// means denial, so the content was unreachable by any route.
+    ///
+    /// #946 claimed this had already shipped as `fix/media-readonly-allowlist`.
+    /// No such branch exists on the remote (checked with `git ls-remote`, with
+    /// `refs/heads/main` as the known-positive control) and neither name was in
+    /// the list.
+    ///
+    /// Both tools are `ToolCategory::Info`, never modify the document and never
+    /// run macros or formulas (`DocExtractTool`/`PdfExtractTool::category`).
+    /// `doc_extract`'s only write is the content-addressed artifact under
+    /// `std::env::temp_dir()` -- not user data, and not a path the model picks.
+    #[test]
+    fn media_extractors_are_auto_approved_out_of_the_box() {
+        let defaults = default_allow_list();
+        for tool in ["pdf_extract", "doc_extract"] {
+            assert!(
+                defaults.contains(&tool.to_string()),
+                "{tool} is a read-only Info extractor and must be auto-approved \
+                 like Read/Grep/Glob; without it .pdf/.docx/.xlsx/.pptx are \
+                 unreadable on a stock install (#946 A-10)"
+            );
+        }
+        // The list stays read-only: nothing that writes, executes or sends.
+        for tool in ["Bash", "Write", "Edit", "send_message"] {
+            assert!(
+                !defaults.contains(&tool.to_string()),
+                "{tool} mutates and must keep gating on the approval flow"
+            );
+        }
     }
 
     #[test]
