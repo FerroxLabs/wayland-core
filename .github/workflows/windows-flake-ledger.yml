@@ -170,6 +170,30 @@ jobs:
         with:
           tool: cargo-nextest
 
+      # `Setup vx` and `Install cargo-nextest` both succeed on this box, and the
+      # next step still died with `exit 127` (command not found) on 2026-08-27,
+      # runs 33067416504 and 33067458683: cargo is installed for the runner's
+      # service account but is not on a `shell: bash` step's PATH. Resolve it in
+      # pwsh -- which does find it -- and publish the directory through
+      # GITHUB_PATH so the bash steps below inherit it. Same shim as
+      # live-uat-windows.yml, which is proven on this runner.
+      - name: Put the runner's cargo on PATH for the bash steps
+        shell: pwsh
+        run: |
+          $candidates = @(
+            $(if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME 'bin' }),
+            $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.cargo\bin' }),
+            'C:\WINDOWS\ServiceProfiles\NetworkService\.cargo\bin'
+          ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'cargo.exe')) }
+          if (-not $candidates) {
+            throw "no cargo.exe found; searched CARGO_HOME, USERPROFILE\.cargo\bin and the NetworkService profile"
+          }
+          $bin = @($candidates)[0]
+          Write-Host "cargo bin dir = $bin"
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          $env:PATH = "$bin;$env:PATH"
+          & (Join-Path $bin 'cargo.exe') -V
+
       # Compile the three test binaries BEFORE measuring, so the first
       # repetition of the first test is not the one that pays for the build and
       # blows its own wall-clock budget.
