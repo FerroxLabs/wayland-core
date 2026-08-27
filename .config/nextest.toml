@@ -582,9 +582,18 @@ retries = 0
 # The exact-match spellings differ because the binary does: the two bash tests
 # are unit tests inside the `wcore-tools` lib binary, so their nextest test
 # name carries the module path; the third is a top-level fn in an integration
-# binary. Both spellings are pinned by `cargo nextest list` and enforced by
-# `scripts/check-windows-attribution.py`, which fails if this block stops
-# covering all three.
+# binary. THE MODULE PATH IS LOAD-BEARING —
+# `test(=the_bash_timeout_bounds_the_secret_deny_walk)` is a valid filterset
+# that selects zero tests, so dropping it would leave this block here and the
+# two tests back at `retries = 2` with nothing to show for it.
+#
+# `scripts/check-windows-attribution.py` fails if any of the three stops being
+# a literal operand of a `test(...)` predicate in a `retries = 0` override —
+# spelling included, comments not counted. It cannot resolve a filterset, so it
+# cannot see a rename: `just check-windows-attribution-live` runs the same
+# check with `cargo nextest list` as the oracle, and also proves no override
+# ABOVE this one sets `retries` for these tests first. Run it if you rename or
+# move any of the three.
 [[profile.ci.overrides]]
 filter = 'test(=bash::tests::the_bash_timeout_bounds_the_secret_deny_walk) + test(=bash::tests::the_streaming_bash_timeout_bounds_the_secret_deny_walk) + test(=matching_assistant_dials_scoped_deferred_server)'
 retries = 0

@@ -367,6 +367,15 @@ check-no-personal-identifiers:
 check-windows-attribution:
     python3 scripts/check-windows-attribution.py --self-test
     python3 scripts/check-windows-attribution.py
+
+# Needs a built workspace, which is why it is not in `check-all` or the CI lint
+# job, and why it is a separate recipe: it resolves every
+# `[[profile.ci.overrides]]` filterset with `cargo nextest list` and checks the
+# three #1146 tests really land at retries=0, with no earlier override winning
+# first. Run it after renaming or moving any of the three.
+# Run: `just check-windows-attribution-live` — proves the quarantine is not vacuous
+check-windows-attribution-live:
+    python3 scripts/check-windows-attribution.py --with-nextest
     # The #1146 red arm runs through this harness, and a misparsed target
     # selects zero tests and grades NOTRUN rather than failing, so its parser
     # is checked here too.
