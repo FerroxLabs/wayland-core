@@ -342,3 +342,81 @@ fn malformed_manifest_is_an_error_not_a_silent_empty_install() {
         "got {err:?}"
     );
 }
+
+#[test]
+fn declared_apps_are_reported_even_when_the_document_yields_no_connectors() {
+    // `report_hooks` reports the moment hooks are DECLARED, parseable or not,
+    // because the operator-facing fact is "this will not run here". Apps are
+    // the same fact -- Wayland has no connector runtime -- so a declared apps
+    // document that cannot be parsed must not read as full parity. Two shapes:
+    // a malformed document, and one with no `apps` key at all.
+    for (label, doc) in [
+        ("malformed", "{not json"),
+        ("no-apps-key", r#"{"connectors":{"linear":{"id":"c"}}}"#),
+    ] {
+        let d = tempdir().unwrap();
+        let root = d.path();
+        write(
+            &root.join(".codex-plugin/plugin.json"),
+            r#"{"name":"p","apps":"./.app.json"}"#,
+        );
+        write(&root.join("skills/a/SKILL.md"), "---\nname: a\n---\nx");
+        write(&root.join(".app.json"), doc);
+
+        let draft = CodexAdapter.lower("m", &entry("p"), root).unwrap();
+        let detail = ignored_detail(&draft, "apps");
+        assert!(
+            !detail.is_empty(),
+            "{label}: a declared apps document produced no ignore line; \
+             the plan would claim parity Wayland does not have"
+        );
+    }
+}
+
+#[test]
+fn a_plugin_that_declares_no_apps_gets_no_apps_line() {
+    // Polarity control for the test above: the report must be driven by an
+    // apps DECLARATION, not pushed unconditionally. Without this, a fix that
+    // always emits the line would pass the test above and lie the other way.
+    let d = tempdir().unwrap();
+    let root = d.path();
+    write(
+        &root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"p","version":"1.0.0"}"#,
+    );
+    write(&root.join("skills/a/SKILL.md"), "---\nname: a\n---\nx");
+
+    let draft = CodexAdapter.lower("m", &entry("p"), root).unwrap();
+    assert_eq!(
+        ignored_detail(&draft, "apps"),
+        "",
+        "no apps were declared, so nothing may be reported as an ignored app"
+    );
+}
+
+#[test]
+fn an_apps_document_reachable_by_both_routes_is_reported_once() {
+    // `.app.json` is BOTH the default discovery path and a legal value for the
+    // manifest's `apps` field -- the shape the existing coverage already used.
+    // Read through both routes, every connector was listed twice, so the
+    // consent surface overstated what the plugin ships.
+    let d = tempdir().unwrap();
+    let root = d.path();
+    write(
+        &root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"p","apps":"./.app.json"}"#,
+    );
+    write(&root.join("skills/a/SKILL.md"), "---\nname: a\n---\nx");
+    write(
+        &root.join(".app.json"),
+        r#"{"apps":{"linear":{"id":"connector_linear"}}}"#,
+    );
+
+    let draft = CodexAdapter.lower("m", &entry("p"), root).unwrap();
+    let detail = ignored_detail(&draft, "apps");
+    assert_eq!(
+        detail.matches("connector_linear").count(),
+        1,
+        "connector listed more than once: {detail}"
+    );
+}

@@ -556,20 +556,33 @@ fn hook_events_from_value(v: &Value) -> Vec<String> {
 /// Wayland has no connector runtime, so every one is reported.
 fn report_apps(root: &Path, manifest: &CodexPluginJson, draft: &mut CanonicalDraft) -> Result<()> {
     let mut docs: Vec<String> = Vec::new();
-    if root.join(DEFAULT_APP_FILE).is_file() {
-        docs.push(fs::read_to_string(root.join(DEFAULT_APP_FILE))?);
+    // Declared, not parsed: like `report_hooks`, the operator-facing fact is
+    // "this will not run here", and that is true of a document Wayland cannot
+    // read as much as of one it can.
+    let mut declared = false;
+    let default_doc = root.join(DEFAULT_APP_FILE);
+    if default_doc.is_file() {
+        declared = true;
+        docs.push(fs::read_to_string(&default_doc)?);
     }
     match manifest.apps.as_ref() {
         Some(Value::String(rel)) => {
+            declared = true;
             let abs = resolve_within(root, rel)?;
-            if abs.is_file() {
+            // `.app.json` is both the default discovery path and a legal value
+            // for this field. Reading it through both routes would list every
+            // connector twice.
+            if abs.is_file() && abs != default_doc {
                 docs.push(fs::read_to_string(&abs)?);
             }
         }
-        Some(other) => draft.ignored.push(IgnoredFeature {
-            kind: "apps".to_string(),
-            detail: format!("apps is a {}, expected a path string", json_type(other)),
-        }),
+        Some(other) => {
+            draft.ignored.push(IgnoredFeature {
+                kind: "apps".to_string(),
+                detail: format!("apps is a {}, expected a path string", json_type(other)),
+            });
+            return Ok(());
+        }
         None => {}
     }
 
@@ -592,12 +605,20 @@ fn report_apps(root: &Path, manifest: &CodexPluginJson, draft: &mut CanonicalDra
     }
     if !connectors.is_empty() {
         connectors.sort();
+        connectors.dedup();
         draft.ignored.push(IgnoredFeature {
             kind: "apps".to_string(),
             detail: format!(
                 "app connectors have no Wayland runtime: {}",
                 connectors.join(", ")
             ),
+        });
+    } else if declared {
+        draft.ignored.push(IgnoredFeature {
+            kind: "apps".to_string(),
+            detail: "plugin declares apps, which have no Wayland connector runtime \
+                     (the declaration could not be read as connectors)"
+                .to_string(),
         });
     }
     Ok(())
