@@ -693,4 +693,155 @@ mod tests {
         );
         assert!(rel_to_root(Path::new("/elsewhere/x.rs"), root).is_none());
     }
+
+    // ── identity, not name: symlinked targets (core#339) ─────────────────
+    //
+    // The guard matches the LEXICAL path. These tests name a benign file and
+    // point it at a credential store, so a name-only guard permits the
+    // attach and the consumer reads THROUGH the link. Fixtures are
+    // obviously fake (`example.invalid`, `fake-token`) — never a real
+    // credential.
+
+    /// Symlinks need a privileged/developer mode on Windows, so the
+    /// identity red arm is Unix-only. The property it pins (guard the
+    /// object read, not the name typed) is platform-independent and the
+    /// fix is not `cfg`-gated.
+    #[cfg(unix)]
+    const FAKE_CREDENTIALS: &str = "https://fake-user:fake-token@example.invalid\n";
+
+    /// core#339, call site 1 of 3 — `at_ref_resolve.rs:203`.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_file_refuses_a_symlink_whose_target_is_a_secret() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let outside = TempDir::new().expect("outside");
+        let secret = outside.path().join(".git-credentials");
+        fs::write(&secret, FAKE_CREDENTIALS).expect("write fixture");
+        std::os::unix::fs::symlink(&secret, root.join("notes.txt")).expect("symlink");
+
+        let at = AtRef::parse("@notes.txt").expect("parse");
+        let err = resolve(&at, root)
+            .map(|p| p.files[0].content.clone())
+            .expect_err("a symlink to a credential store must be refused");
+        assert!(
+            matches!(err, AtRefError::SecretBlocked(_)),
+            "expected SecretBlocked, got {err:?}"
+        );
+    }
+
+    /// Control for the test above: an ordinary symlink to an ordinary file
+    /// must STILL resolve. Without this, a blanket "refuse all symlinks"
+    /// would score green while removing a capability real repos rely on.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_file_still_follows_a_symlink_to_an_ordinary_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("real.rs"), "fn main() {}").expect("write");
+        std::os::unix::fs::symlink(root.join("real.rs"), root.join("link.rs")).expect("symlink");
+
+        let at = AtRef::parse("@link.rs").expect("parse");
+        let payload = resolve(&at, root).expect("an ordinary symlink must still attach");
+        assert_eq!(payload.files[0].content, "fn main() {}");
+    }
+
+    /// core#339, call site 2 of 3 — `at_ref_resolve.rs:328`, the `@dir`
+    /// walk. Worse than call site 1: the user never names the link.
+    #[cfg(unix)]
+    #[test]
+    fn an_at_dir_walk_refuses_a_symlink_whose_target_is_a_secret() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let outside = TempDir::new().expect("outside");
+        let secret = outside.path().join(".git-credentials");
+        fs::write(&secret, FAKE_CREDENTIALS).expect("write fixture");
+        fs::write(root.join("ok.txt"), "safe").expect("write ok");
+        std::os::unix::fs::symlink(&secret, root.join("notes.txt")).expect("symlink");
+
+        let at = AtRef::parse("@./").expect("parse");
+        let payload = resolve(&at, root).expect("resolve dir");
+        // Control: the walk produced output, so the refutation below cannot
+        // pass by returning nothing.
+        let bodies: Vec<&str> = payload.files.iter().map(|f| f.content.as_str()).collect();
+        assert!(bodies.contains(&"safe"), "walk produced nothing: {bodies:?}");
+        assert!(
+            !bodies.iter().any(|b| b.contains("fake-token")),
+            "the @dir walk inlined a credential store through a symlink"
+        );
+    }
+
+    /// A directory symlink escaping the workspace pulls in a whole tree the
+    /// user never named — the same identity defect at directory grain.
+    #[cfg(unix)]
+    #[test]
+    fn an_at_dir_walk_does_not_descend_a_symlink_out_of_the_workspace() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let outside = TempDir::new().expect("outside");
+        fs::write(outside.path().join("private.txt"), "PRIVATE-OUTSIDE").expect("write");
+        fs::write(root.join("ok.txt"), "safe").expect("write ok");
+        std::os::unix::fs::symlink(outside.path(), root.join("escape")).expect("symlink");
+
+        let at = AtRef::parse("@./").expect("parse");
+        let payload = resolve(&at, root).expect("resolve dir");
+        let bodies: Vec<&str> = payload.files.iter().map(|f| f.content.as_str()).collect();
+        assert!(bodies.contains(&"safe"), "walk produced nothing: {bodies:?}");
+        assert!(
+            !bodies.iter().any(|b| b.contains("PRIVATE-OUTSIDE")),
+            "the @dir walk escaped the workspace through a directory symlink"
+        );
+    }
+
+    // ── scope: a path that lands inside the root, spelled otherwise (core#335)
+
+    /// core#335. `resolve_under_root` takes the path as given, so a spelling
+    /// carrying `..` makes `strip_prefix` yield a `ParentDir` component,
+    /// `rel_to_root` return `None`, and the gitignore check be SKIPPED — on
+    /// a file that is plainly inside the workspace.
+    #[test]
+    fn a_gitignored_file_stays_ignored_when_spelled_through_a_parent_hop() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("repo");
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        fs::write(root.join(".gitignore"), "secret-notes.txt\n").expect("write gi");
+        fs::write(root.join("secret-notes.txt"), "ignored body").expect("write");
+
+        // Control: the plain spelling IS refused, so the assertion below
+        // cannot pass because the gitignore failed to load.
+        let plain = AtRef::parse("@secret-notes.txt").expect("parse");
+        assert!(
+            matches!(
+                resolve(&plain, &root),
+                Err(AtRefError::GitIgnored(_))
+            ),
+            "control failed: the plain spelling was not git-ignored"
+        );
+
+        let hopped = AtRef::parse("@sub/../secret-notes.txt").expect("parse");
+        let got = resolve(&hopped, &root);
+        assert!(
+            matches!(got, Err(AtRefError::GitIgnored(_))),
+            "a parent-hop spelling skipped the gitignore check: {got:?}"
+        );
+    }
+
+    /// The capability core#335 says must NOT be removed: an absolute path
+    /// outside the workspace still attaches. A `.gitignore` in this repo has
+    /// no jurisdiction over an unrelated directory, so it is not applied
+    /// there — but the file is not refused either.
+    #[test]
+    fn an_absolute_path_outside_the_workspace_still_attaches() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("repo");
+        fs::create_dir_all(&root).expect("mkdir");
+        fs::write(root.join(".gitignore"), "notes.txt\n").expect("write gi");
+        let outside = TempDir::new().expect("outside");
+        let target = outside.path().join("notes.txt");
+        fs::write(&target, "outside body").expect("write");
+
+        let at = AtRef::parse(&format!("@{}", target.display())).expect("parse");
+        let payload = resolve(&at, &root).expect("an absolute path outside the root must attach");
+        assert_eq!(payload.files[0].content, "outside body");
+    }
 }

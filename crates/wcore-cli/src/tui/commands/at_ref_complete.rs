@@ -271,4 +271,49 @@ mod tests {
         assert_eq!(human_size(2048), "2 KB");
         assert_eq!(human_size(3 * 1024 * 1024), "3.0 MB");
     }
+
+    /// core#339, call site 3 of 3 — `at_ref_complete.rs:105`. The popup does
+    /// not read the file, but offering the link is the whole leak: the user
+    /// presses Tab and `resolve_file` inlines it.
+    #[cfg(unix)]
+    #[test]
+    fn completion_never_offers_a_symlink_whose_target_is_a_secret() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let outside = TempDir::new().expect("outside");
+        let secret = outside.path().join(".git-credentials");
+        fs::write(&secret, "https://fake-user:fake-token@example.invalid\n").expect("write fixture");
+        fs::write(root.join("notes-real.txt"), "ok").expect("write control");
+        std::os::unix::fs::symlink(&secret, root.join("notes.txt")).expect("symlink");
+
+        let comps = complete("@notes", root);
+        let inserts: Vec<&str> = comps.iter().map(|c| c.insert.as_str()).collect();
+        // Control: an ordinary file with the same leaf IS offered, so the
+        // refutation cannot pass by listing nothing.
+        assert!(
+            inserts.contains(&"@notes-real.txt"),
+            "control failed, popup listed nothing: {inserts:?}"
+        );
+        assert!(
+            !inserts.contains(&"@notes.txt"),
+            "the popup offered a symlink to a credential store: {inserts:?}"
+        );
+    }
+
+    /// Control against a blanket symlink refusal in the popup: an ordinary
+    /// symlink to an ordinary file must still be offered.
+    #[cfg(unix)]
+    #[test]
+    fn completion_still_offers_a_symlink_to_an_ordinary_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("real.rs"), "fn main() {}").expect("write");
+        std::os::unix::fs::symlink(root.join("real.rs"), root.join("link.rs")).expect("symlink");
+
+        let inserts: Vec<String> = complete("@link", root)
+            .into_iter()
+            .map(|c| c.insert)
+            .collect();
+        assert!(inserts.iter().any(|i| i == "@link.rs"), "{inserts:?}");
+    }
 }
