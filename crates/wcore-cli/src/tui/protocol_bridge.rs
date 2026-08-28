@@ -1122,6 +1122,10 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::CuaEvent { .. }
         | ProtocolEvent::Suspend { .. }
         | ProtocolEvent::ApprovalResume { .. }
+        // wayland#1088: the refusal can only be produced for a WIRE peer. The
+        // in-process TUI sets its mode through the local /mode path, which is
+        // not gated on the wire opt-in, so there is nothing here to render.
+        | ProtocolEvent::SetModeRefused { .. }
         // Budget grant commands are accepted only by the JSON-stream host
         // loop; the in-process TUI cannot originate one. Keep the event
         // exhaustively accepted without synthesizing local grant authority.

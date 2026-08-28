@@ -1026,6 +1026,19 @@ Change the agent's approval mode for the session.
 | `"auto_edit"` | `info` and `edit` auto-approved; `exec` and `mcp` need approval |
 | `"yolo"` | All tools auto-approved |
 
+**The two auto-approving modes need a LOCAL opt-in.** `auto_edit` and `force`
+(`yolo`) are refused when they arrive over the wire unless the process was
+launched with `--force` or `WAYLAND_ALLOW_WIRE_FORCE=1` (GHSA-8r7g: a wire peer
+that could set `auto_edit` would get write-without-consent, and a write is a
+write-to-RCE through a git hook / `.bashrc` / `authorized_keys`). A refused
+request changes nothing — the session stays on the mode it already had.
+
+The refusal is announced as a typed [`set_mode_refused`](#set_mode_refused)
+event. **Branch on that event, not on the `info` frame beside it.** A host that
+assumes its `set_mode` landed keeps rendering `force` while the session is
+actually still on `default`, where every category gates — the resulting
+`exec` + `info` + restricted-tool prompts look like an engine fault.
+
 ### 2.7 `set_config`
 
 Update model, thinking, or effort configuration at runtime.
@@ -1998,6 +2011,40 @@ case the session will stall indefinitely on any HITL-eligible operation
 (no resume command will ever arrive). Hosts opting in MUST surface the
 approval modal AND wire a corresponding `approval_resume` command path
 (§2.10).
+
+### 1.N+4a set_mode_refused (#1088)
+
+<a id="set_mode_refused"></a>
+
+A wire [`set_mode`](#26-set_mode) asking for an auto-approving mode was refused
+because the local operator has not opted in. The session is UNCHANGED — it is
+still on the mode named by `effective`.
+
+```json
+{
+  "type": "set_mode_refused",
+  "requested": "force",
+  "effective": "default",
+  "reason": "local_opt_in_required"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `requested` | string | The mode the host asked for, in the canonical spelling (`default` / `auto_edit` / `force`). |
+| `effective` | string | The mode still in force. |
+| `reason` | string | Typed refusal cause. `local_opt_in_required` is the only value today. |
+
+Always emitted; no capability flag gates it. A host that does not know the type
+drops the line per the Host Decoder Contract — but it then has no way to learn
+its request was turned down, because the only other signal is an `info` frame of
+English prose. **Branch on `reason`, not on that prose.**
+
+Why the refusal exists at all: `force` auto-approves every tool and `auto_edit`
+auto-approves the built-in Write/Edit tools, so a wire peer that could set
+either would get write-without-consent — and a write is a write-to-RCE through a
+git hook, `.bashrc` or `authorized_keys` (GHSA-8r7g). The opt-in is `--force` or
+`WAYLAND_ALLOW_WIRE_FORCE=1` on the Core process, set by the local operator.
 
 ### 1.N+5 provider_circuit_event (W7)
 

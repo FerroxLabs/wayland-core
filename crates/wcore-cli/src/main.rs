@@ -2733,7 +2733,14 @@ fn approval_policy_to_session(policy: ApprovalPolicy) -> wcore_protocol::command
 }
 
 enum WireModeChange {
-    Rejected,
+    /// wayland#1088 — the local-opt-in gate turned the request down. Carries
+    /// the mode that is STILL in force, because that is the half a host cannot
+    /// derive: the refusal leaves the session where it was, and a host that
+    /// assumed its request landed attributes the resulting all-categories gate
+    /// storm to the engine.
+    Rejected {
+        effective: wcore_protocol::commands::SessionMode,
+    },
     Unchanged,
     Changed(ExecutionPolicySnapshot),
 }
@@ -2748,7 +2755,9 @@ fn apply_wire_mode_change(
     effective_at_unix_ms: u64,
 ) -> Result<WireModeChange, ExecutionPolicySequenceError> {
     if !approval_manager.set_mode_from_wire(mode) {
-        return Ok(WireModeChange::Rejected);
+        return Ok(WireModeChange::Rejected {
+            effective: approval_manager.session_mode(),
+        });
     }
     let policy = sequence
         .current()
@@ -6049,7 +6058,15 @@ async fn run_json_stream_mode(
                                                     message: format!("mode unchanged: {}", approval_manager.current_mode()),
                                                 });
                                             }
-                                            WireModeChange::Rejected => {
+                                            WireModeChange::Rejected { effective } => {
+                                                // The typed nack FIRST: a host branches on this.
+                                                // The `info` below stays for hosts that only
+                                                // render prose (wayland#1088).
+                                                let _ = writer.emit(&ProtocolEvent::SetModeRefused {
+                                                    requested: mode,
+                                                    effective,
+                                                    reason: wcore_protocol::events::SetModeRefusalReason::LocalOptInRequired,
+                                                });
                                                 let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
                                                     msg_id: String::new(),
                                                     message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
@@ -6475,7 +6492,16 @@ async fn run_json_stream_mode(
                     mode,
                     audit_unix_time_millis()?,
                 )? {
-                    WireModeChange::Rejected => {
+                    WireModeChange::Rejected { effective } => {
+                        // The typed nack FIRST: a host branches on this. The
+                        // `info` below stays for hosts that only render prose
+                        // (wayland#1088).
+                        let _ = writer.emit(&ProtocolEvent::SetModeRefused {
+                            requested: mode,
+                            effective,
+                            reason:
+                                wcore_protocol::events::SetModeRefusalReason::LocalOptInRequired,
+                        });
                         let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
                             msg_id: String::new(),
                             message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
@@ -10130,7 +10156,9 @@ mod tests {
 
         assert!(matches!(
             apply_wire_mode_change(&manager, &mut sequence, SessionMode::Force, 11).unwrap(),
-            WireModeChange::Rejected
+            WireModeChange::Rejected {
+                effective: SessionMode::Default
+            }
         ));
         assert_eq!(sequence.current().revision, 0);
         assert_eq!(
