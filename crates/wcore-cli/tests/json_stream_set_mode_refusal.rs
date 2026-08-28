@@ -137,23 +137,73 @@ fn a_refused_wire_auto_edit_is_reported_as_a_typed_frame() {
     assert_eq!(refusal["effective"], "default");
 }
 
-/// The control: with the local opt-in present the SAME request is applied, and
+/// The control: with the local opt-in present the SAME request is APPLIED, and
 /// no refusal frame appears. Without this arm the assertions above would pass
 /// against a build that refuses unconditionally.
+///
+/// # Why "an execution_policy frame exists" was not the control
+///
+/// Every session emits an `execution_policy` frame at launch — `revision: 0`,
+/// `reason: "launch"`, `approvals: "prompt"` — so "some policy frame arrived"
+/// is true before the `set_mode` is even read. **Measured:** with
+/// `apply_wire_mode_change` mutated to consume an accepted change, leave the
+/// manager on `default`, and return `Unchanged` — the exact silent no-op
+/// wayland#1088 is about, only now on the ACCEPTING side — all three tests in
+/// this file passed.
+///
+/// So the control names the applied state: the frame must be the MODE CHANGE
+/// (not the launch frame), it must advance the revision, and its policy must
+/// actually say approvals moved to `bypass`. The launch frame is asserted
+/// alongside it as the known-positive, so "no policy frames at all" cannot
+/// satisfy this either.
 #[test]
 fn the_opted_in_force_is_applied_and_emits_no_refusal() {
     let frames = frames_for_set_mode("force", true);
+    let rendered = serde_json::to_string(&frames).unwrap_or_default();
+
     assert!(
         !frames
             .iter()
             .any(|frame| frame["type"] == "set_mode_refused"),
-        "with WAYLAND_ALLOW_WIRE_FORCE=1 the request is honoured; frames: {}",
-        serde_json::to_string(&frames).unwrap_or_default()
+        "with WAYLAND_ALLOW_WIRE_FORCE=1 the request is honoured; frames: {rendered}"
+    );
+
+    let policies: Vec<&serde_json::Value> = frames
+        .iter()
+        .filter(|frame| frame["type"] == "execution_policy")
+        .collect();
+
+    // Known-positive: the launch frame is present, and it is NOT the applied
+    // change. Without this the assertion below could be satisfied by a harness
+    // that stopped capturing policy frames entirely.
+    assert!(
+        policies.iter().any(|frame| {
+            frame["reason"] == "launch"
+                && frame["revision"] == 0
+                && frame["policy"]["approvals"] == "prompt"
+        }),
+        "the launch policy frame (revision 0, approvals=prompt) is missing, so this test is \
+         not reading the stream it thinks it is; frames: {rendered}"
+    );
+
+    let applied = policies
+        .iter()
+        .find(|frame| frame["reason"] == "mode_change")
+        .unwrap_or_else(|| {
+            panic!(
+                "the opted-in set_mode published no mode_change policy frame: the command was \
+                 accepted, refused nothing, and changed nothing - a silent no-op is exactly \
+                 what wayland#1088 is about, on the accepting side; frames: {rendered}"
+            )
+        });
+    assert_eq!(
+        applied["policy"]["approvals"], "bypass",
+        "`force` is the auto-approving mode: the published policy must SAY approvals moved to \
+         bypass, or the host is told a mode was applied that was not; frame: {applied}"
     );
     assert!(
-        frames
-            .iter()
-            .any(|frame| frame["type"] == "execution_policy"),
-        "an applied mode change publishes the new execution policy"
+        applied["revision"].as_u64().is_some_and(|r| r >= 1),
+        "an applied change must consume a revision - a refusal deliberately does not, so a \
+         revision that never advances means nothing was applied; frame: {applied}"
     );
 }
