@@ -226,6 +226,146 @@ async fn a_later_turn_cannot_silently_change_the_selection() {
     );
 }
 
+/// A string that can only appear in a tool RESULT if `Bash` actually ran.
+const RAN_MARKER: &str = "WHARDEN-RAN-9Z";
+
+/// Every `tool_result` block the conversation carried back to the provider, as
+/// `(is_error, content)`. This is where "was the tool dispatched" is
+/// observable: the outbound `tools[]` array only says what the model was
+/// OFFERED, and a model is free to call a tool it was never offered.
+async fn tool_results_on_the_wire(server: &wiremock::MockServer) -> Vec<(bool, String)> {
+    let mut out = Vec::new();
+    for request in received_requests(server).await {
+        let Some(messages) = request.body.get("messages").and_then(|m| m.as_array()) else {
+            continue;
+        };
+        for message in messages {
+            let Some(blocks) = message.get("content").and_then(|c| c.as_array()) else {
+                continue;
+            };
+            for block in blocks {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                    out.push((
+                        block
+                            .get("is_error")
+                            .and_then(|e| e.as_bool())
+                            .unwrap_or(false),
+                        block
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Drive one turn whose model hallucinates a `Bash` call, under `selection`,
+/// and return the `tool_result` blocks that came back.
+async fn hallucinated_bash_under(
+    selection: Vec<ToolDefinition>,
+    session_id: &str,
+) -> Vec<(bool, String)> {
+    let mock = MockLlm::new()
+        .tool_use(
+            "Bash",
+            serde_json::json!({ "command": format!("echo {RAN_MARKER}") }),
+        )
+        .text("ok");
+    let server = mock.start().await;
+    let provider = provider_against(&server.uri());
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let engine = EngineTurnEngine::with_provider(test_config(), cwd, provider);
+
+    let stream = engine
+        .run_turn(TurnRequest {
+            session_id: session_id.to_string(),
+            text: "hi".to_string(),
+            tools: selection,
+            agent: None,
+        })
+        .await
+        .expect("run_turn establishes a stream");
+    let _: Vec<_> = stream.collect().await;
+
+    tool_results_on_the_wire(&server).await
+}
+
+/// THE AUTHORITY ASSERTION. A deselected tool must be UNDISPATCHABLE, not
+/// merely unadvertised.
+///
+/// # Why the offered-list tests above are not enough
+///
+/// They read `tools[]` off the outbound request, which is what the model was
+/// OFFERED. A model is free to emit a call for a tool it was never offered —
+/// that is what a hallucinated call IS — and the operator's switch has to
+/// survive one. **Measured:** with `ToolRegistry::retain` changed to hide the
+/// dropped tools from `to_tool_defs()` while leaving them registered, so the
+/// selection filtered only the outgoing schema, every one of the cases above
+/// passed and the hallucinated `Bash` below executed and returned its output.
+///
+/// So this drives a real turn in which the model calls `Bash` under a
+/// selection of `["Read"]`, and grades the `tool_result` that comes back.
+#[tokio::test]
+async fn a_deselected_tool_refuses_a_hallucinated_call() {
+    let results = hallucinated_bash_under(
+        vec![tool_def("Read")],
+        "99999999-1111-2222-3333-dddddddddddd",
+    )
+    .await;
+
+    let (is_error, content) = results.first().expect(
+        "the hallucinated call must be ANSWERED - no tool_result means the turn never \
+                 got as far as dispatch and nothing below is being measured",
+    );
+    assert!(
+        is_error,
+        "a call to a deselected tool must come back as an ERROR result; got: {content:?}"
+    );
+    assert!(
+        content.contains("Unknown tool"),
+        "the refusal must be dispatch not finding the tool at all (it was dropped from the \
+         registry), not some later failure that a re-widened registry could stop producing; \
+         got: {content:?}"
+    );
+    assert!(
+        !content.contains(RAN_MARKER),
+        "the deselected tool RAN: the selection filtered only what the model was offered, so \
+         the operator's switch is a control that lies. Result was: {content:?}"
+    );
+}
+
+/// THE KNOWN-POSITIVE for the refusal above. The same hallucinated call, with
+/// no selection declared, must NOT be refused as unknown — the tool is in the
+/// registry and dispatch reaches it.
+///
+/// Without this, `is_error && "Unknown tool"` is equally well explained by a
+/// harness whose mock never produced a reachable call at all, or by an engine
+/// that refuses every tool.
+///
+/// The assertion is deliberately about the REFUSAL, not about Bash succeeding:
+/// whether a shell command completes depends on the host's sandbox and shell,
+/// but "Unknown tool" is the registry's answer and is the same everywhere.
+#[tokio::test]
+async fn the_same_call_is_dispatched_when_nothing_is_deselected() {
+    let results = hallucinated_bash_under(Vec::new(), "99999999-1111-2222-3333-eeeeeeeeeeee").await;
+
+    let (_, content) = results
+        .first()
+        .expect("the call must be answered here too, or the control proves nothing");
+    assert!(
+        !content.contains("Unknown tool"),
+        "with no selection declared, Bash is in the registry and dispatch must REACH it - if \
+         it is unknown here, the refusal in the test above is not caused by the selection; \
+         got: {content:?}"
+    );
+}
 // ── The pure composition rules, exercised directly ───────────────────────
 
 #[test]

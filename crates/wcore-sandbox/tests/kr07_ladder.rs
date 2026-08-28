@@ -1,3 +1,9 @@
+//! DIAGNOSTIC LADDER - NOT AN ACCEPTANCE GATE. Nothing in this file certifies
+//! anything about the product. A green run here means the ladder executed and
+//! its numbers are readable; it does NOT mean `F-KR-07` is closed, and a
+//! verification pass that counts these rungs as passing gates is counting the
+//! wrong thing. See "What every rung asserts, and why it is not a fix" below.
+//!
 //! `F-KR-07` denial ladder — attribute the deterministic `SandboxError::Timeout`
 //! of `live_cmd_runs_when_allowlist_has_missing_path` to ONE property.
 //!

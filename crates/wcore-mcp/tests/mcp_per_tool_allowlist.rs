@@ -306,6 +306,107 @@ fn an_empty_allowlist_disables_every_tool() {
     assert!(registry.get("payroll_wipe").is_none());
 }
 
+/// (4b) THE REFRESH SEAM, under "Disable all". The empty-list tests above stop
+/// at `register_mcp_tools`; the refresh test above uses a NON-empty list. So
+/// `Some([])` never crossed `register_single_server_tools` — the seam a
+/// `list_changed` notification actually re-registers through — and an
+/// implementation that folded "empty" back into "unrestricted" *there* would
+/// let a server resurrect its ENTIRE tool set by announcing a change. That is
+/// a privilege escalation from zero to everything, driven by the untrusted
+/// side of the connection.
+///
+/// This asserts registry state directly after the refresh, so the enforcement
+/// point must exist in the refresh path itself and not merely at boot.
+#[tokio::test]
+async fn an_empty_allowlist_survives_a_list_changed_refresh() {
+    let (warehouse, manager, configs) = fixture(Some(Vec::new()));
+    let defer_cold = wcore_config::tools::DeferColdConfig::default();
+
+    let mut registry = wcore_tools::registry::ToolRegistry::new();
+    wcore_mcp::tool_proxy::register_mcp_tools(&mut registry, &manager, &[], &configs, &defer_cold);
+    assert!(registry.get("inventory_reserve").is_none());
+    assert!(registry.get("payroll_wipe").is_none());
+
+    let refresh =
+        wcore_mcp::tool_proxy::McpCatalogRefresh::new(vec![manager.clone()], Vec::new(), configs);
+
+    // The server announces a change and adds a tool. "Disable all" must hold.
+    warehouse.register_and_announce("payroll_export");
+    let refreshed = refresh.apply(&mut registry, &defer_cold).await;
+    assert_eq!(refreshed, vec!["warehouse".to_string()]);
+
+    for name in ["inventory_reserve", "payroll_wipe", "payroll_export"] {
+        assert!(
+            registry.get(name).is_none(),
+            "{name}: an EMPTY allow-list is 'disable every tool'; a \
+             list_changed re-registration must not reinstate ANY of them"
+        );
+    }
+    assert!(
+        !registry
+            .to_tool_defs()
+            .iter()
+            .any(|d| d.server.as_deref() == Some("warehouse")),
+        "and the refreshed server must contribute nothing to the outbound \
+         tool definitions either"
+    );
+
+    // A bare re-announcement (nothing added) must also stay at zero.
+    warehouse.announce_only();
+    refresh.apply(&mut registry, &defer_cold).await;
+    assert!(registry.get("inventory_reserve").is_none());
+}
+
+/// The single-server seam, called DIRECTLY with each of the three selection
+/// states. `register_single_server_tools` is its own public entry point — the
+/// TUI `/mcp add` and the JSON `AddMcpServer` command reach it without going
+/// through `register_mcp_tools` at all — so its predicate is asserted here
+/// rather than inferred from the bulk path.
+#[test]
+fn the_single_server_seam_honours_all_three_selection_states() {
+    let defer_cold = wcore_config::tools::DeferColdConfig::default();
+
+    let registered_under = |allowed: Option<Vec<String>>| -> Vec<String> {
+        let (_t, manager, _) = fixture(None);
+        let mut registry = wcore_tools::registry::ToolRegistry::new();
+        wcore_mcp::tool_proxy::register_single_server_tools(
+            &mut registry,
+            &manager,
+            "warehouse",
+            &[],
+            false,
+            allowed.as_deref(),
+            &defer_cold,
+        );
+        let mut names: Vec<String> = registry
+            .to_tool_defs()
+            .into_iter()
+            .filter(|t| t.server.as_deref() == Some("warehouse"))
+            .map(|t| t.name)
+            .collect();
+        names.sort();
+        names
+    };
+
+    assert_eq!(
+        registered_under(None),
+        vec!["inventory_reserve".to_string(), "payroll_wipe".to_string()],
+        "absent => allow all"
+    );
+    assert_eq!(
+        registered_under(Some(vec!["inventory_reserve".to_string()])),
+        vec!["inventory_reserve".to_string()],
+        "a declared list denies by silence"
+    );
+    assert_eq!(
+        registered_under(Some(Vec::new())),
+        Vec::<String>::new(),
+        "an EMPTY list disables every tool on the single-server seam too - \
+         folding it into 'unrestricted' here would let one list_changed \
+         notification restore the whole catalogue"
+    );
+}
+
 /// The predicate itself, over the three states, stated separately from the
 /// registration paths so a future refactor of either cannot quietly redefine
 /// what an operator meant. The empty case is the one that inverts: folding it
