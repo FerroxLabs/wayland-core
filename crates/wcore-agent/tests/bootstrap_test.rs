@@ -983,6 +983,7 @@ mod resilience_wrap {
                 client_context_tokens: None,
                 temperature: None,
                 omit_max_tokens: false,
+                routed_model_hint: None,
             };
             let _ = result.provider.stream(&req).await;
         }
@@ -1037,6 +1038,7 @@ mod resilience_wrap {
                 client_context_tokens: None,
                 temperature: None,
                 omit_max_tokens: false,
+                routed_model_hint: None,
             };
             let _ = result.provider.stream(&req).await;
         }

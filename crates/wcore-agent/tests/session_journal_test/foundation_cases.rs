@@ -113,12 +113,22 @@ fn prepared_provider_request_snapshot_round_trips_every_request_field() {
         client_context_tokens: Some(12_345),
         temperature: Some(0.25),
         omit_max_tokens: true,
+        routed_model_hint: Some("deepseek-reasoner".into()),
     };
 
     let snapshot = prepared_provider_request_snapshot(&request).unwrap();
     let restored = decode_prepared_provider_request_snapshot(&snapshot).unwrap();
     let restored_snapshot = prepared_provider_request_snapshot(&restored).unwrap();
 
+    // The snapshot-vs-restored-snapshot comparison below cannot catch a field
+    // the snapshot struct never carried: it would decode to `None` and
+    // re-encode identically. Assert the VALUE survived, not just the shape.
+    assert_eq!(
+        restored.routed_model_hint.as_deref(),
+        Some("deepseek-reasoner"),
+        "#434: a recovered turn must be rebuilt for the model contract it was \
+         prepared under"
+    );
     assert_eq!(snapshot, restored_snapshot);
     assert_eq!(
         provider_request_digest(&request).unwrap(),

@@ -1956,6 +1956,12 @@ struct PreparedProviderRequestV1 {
     /// reason: it is part of the exact request that was sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     flux_turn_nonce: Option<String>,
+    /// #434 — the router-served model this turn was SHAPED for. Journaled for
+    /// the same reason as the two fields above: it is part of the exact request
+    /// that was sent, and a recovered turn that lost it would be rebuilt for a
+    /// different model contract than the one it was digested under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    routed_model_hint: Option<String>,
 }
 
 /// #863 F2 — journal form of [`wcore_types::llm::FluxLoopIntent`]. Kept as an
@@ -2162,6 +2168,7 @@ impl From<&wcore_types::llm::LlmRequest> for PreparedProviderRequestV1 {
                     }
                 }),
             flux_turn_nonce: request.flux_turn_nonce.clone(),
+            routed_model_hint: request.routed_model_hint.clone(),
         }
     }
 }
@@ -2221,6 +2228,7 @@ impl From<PreparedProviderRequestV1> for wcore_types::llm::LlmRequest {
                 }
             }),
             flux_turn_nonce: request.flux_turn_nonce,
+            routed_model_hint: request.routed_model_hint,
         }
     }
 }

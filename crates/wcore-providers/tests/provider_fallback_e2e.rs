@@ -68,6 +68,7 @@ fn dummy_request() -> LlmRequest {
         client_context_tokens: None,
         temperature: None,
         omit_max_tokens: false,
+        routed_model_hint: None,
     }
 }
 

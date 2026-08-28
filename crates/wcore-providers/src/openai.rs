@@ -230,17 +230,25 @@ impl OpenAIProvider {
         }
     }
 
-    /// #417 — resolve the per-request message compat from the target model. The
-    /// strict-reasoner "must replay reasoning_content" contract is a per-MODEL
-    /// requirement, but a router provider's static compat has the flag off, so a
-    /// DeepSeek/Kimi turn routed through Flux/OpenRouter would drop the history's
-    /// reasoning_content and 400 (wayland#417). When the target model requires
-    /// replay, force the flag on for this request only; otherwise return the base
-    /// compat unchanged, so a non-strict model (e.g. claude-via-Flux) never
-    /// replays an unsigned thinking block. Direct DeepSeek/Kimi already set the
-    /// flag, so this is a no-op clone for them.
-    fn message_compat(compat: &ProviderCompat, model: &str) -> ProviderCompat {
-        if openai_compat::requires_reasoning_content_replay(model)
+    /// #417 / #434 — resolve the per-request message compat from the model this
+    /// request will actually be served by. The strict-reasoner "must replay
+    /// reasoning_content" contract is a per-MODEL requirement, but a router
+    /// provider's static compat has the flag off, so a DeepSeek/Kimi turn routed
+    /// through Flux/OpenRouter would drop the history's reasoning_content and
+    /// 400 (wayland#417) — and through a TIER ALIAS the model id names nothing,
+    /// so keying on it alone never fired at all (wayland#434). `routed_model` is
+    /// the router's own `x-flux-routed-model` answer from an earlier turn,
+    /// carried here by the engine. When either says strict reasoner, force the
+    /// flag on for this request only; otherwise return the base compat unchanged,
+    /// so a non-strict model (e.g. claude-via-Flux) never replays an unsigned
+    /// thinking block. Direct DeepSeek/Kimi already set the flag, so this is a
+    /// no-op clone for them.
+    fn message_compat(
+        compat: &ProviderCompat,
+        model: &str,
+        routed_model: Option<&str>,
+    ) -> ProviderCompat {
+        if openai_compat::requires_reasoning_content_replay(model, routed_model)
             && !compat.replays_thinking_in_history()
         {
             let mut c = compat.clone();
@@ -778,7 +786,11 @@ impl OpenAIProvider {
         // model, so a router (Flux/OpenRouter) replays reasoning_content when it
         // routes to a strict reasoner (DeepSeek/Kimi) without 400ing, while a
         // non-strict model keeps replay off. See `message_compat`.
-        let msg_compat = Self::message_compat(&self.compat, &request.model);
+        let msg_compat = Self::message_compat(
+            &self.compat,
+            &request.model,
+            request.routed_model_hint.as_deref(),
+        );
         let mut body = json!({
             "model": request.model,
             "messages": Self::build_messages(&request.messages, &request.system, &msg_compat),
@@ -3981,7 +3993,7 @@ mod tests {
             !flux.replays_thinking_in_history(),
             "precondition: router compat has replay off"
         );
-        let resolved = OpenAIProvider::message_compat(&flux, "deepseek-v4-pro");
+        let resolved = OpenAIProvider::message_compat(&flux, "deepseek-v4-pro", None);
         assert!(
             resolved.replays_thinking_in_history(),
             "DeepSeek via Flux must replay reasoning_content"
@@ -3994,9 +4006,12 @@ mod tests {
         // thinking block. Ordinary OpenAI models stay off too.
         let flux = ProviderCompat::flux_router_defaults();
         assert!(
-            !OpenAIProvider::message_compat(&flux, "claude-opus-4-7").replays_thinking_in_history()
+            !OpenAIProvider::message_compat(&flux, "claude-opus-4-7", None)
+                .replays_thinking_in_history()
         );
-        assert!(!OpenAIProvider::message_compat(&flux, "gpt-4o").replays_thinking_in_history());
+        assert!(
+            !OpenAIProvider::message_compat(&flux, "gpt-4o", None).replays_thinking_in_history()
+        );
     }
 
     #[test]
@@ -4005,8 +4020,115 @@ mod tests {
         let ds = ProviderCompat::deepseek_defaults();
         assert!(ds.replays_thinking_in_history());
         assert!(
-            OpenAIProvider::message_compat(&ds, "deepseek-v4-pro").replays_thinking_in_history()
+            OpenAIProvider::message_compat(&ds, "deepseek-v4-pro", None)
+                .replays_thinking_in_history()
         );
+    }
+
+    // --- #434: a tier alias resolves its model contract from the ROUTE ------
+
+    /// The conversation history a strict reasoner must get `reasoning_content`
+    /// back for: one assistant turn that produced thinking, then a user turn.
+    fn history_with_thinking() -> Vec<Message> {
+        vec![
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::Thinking {
+                        thinking: "chain of thought".into(),
+                        extra: None,
+                    },
+                    ContentBlock::Text {
+                        text: "an answer".into(),
+                    },
+                ],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "and now?".into(),
+                }],
+            ),
+        ]
+    }
+
+    fn flux_provider() -> OpenAIProvider {
+        OpenAIProvider::new(
+            "key",
+            "http://localhost",
+            ProviderCompat::flux_router_defaults(),
+            DebugConfig::default(),
+        )
+    }
+
+    fn replays_reasoning(body: &serde_json::Value) -> bool {
+        body["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .any(|message| message.get("reasoning_content").is_some())
+    }
+
+    /// #434 — the bug. Through Flux the model string is the tier alias
+    /// `flux-auto`, which matches no strict-reasoner name, so a conversation
+    /// Flux is routing to DeepSeek/Kimi dropped its historical
+    /// `reasoning_content` and the endpoint 400d. The routed model is knowable
+    /// (`x-flux-routed-model`); the request must be shaped for IT.
+    #[test]
+    fn flux_alias_routed_to_a_strict_reasoner_replays_reasoning_content() {
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.routed_model_hint = Some("deepseek-v4-pro".into());
+        req.messages = history_with_thinking();
+        let body = flux_provider().build_request_body(&req);
+        assert!(
+            replays_reasoning(&body),
+            "a tier alias routed to DeepSeek must replay reasoning_content; body: {body}"
+        );
+    }
+
+    /// The other half of the #417 contract survives: a route to a NON-strict
+    /// model must not replay, or Anthropic 400s on the unsigned thinking block.
+    #[test]
+    fn flux_alias_routed_to_claude_still_does_not_replay() {
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.routed_model_hint = Some("claude-opus-4-7".into());
+        req.messages = history_with_thinking();
+        let body = flux_provider().build_request_body(&req);
+        assert!(
+            !replays_reasoning(&body),
+            "claude-via-Flux must never replay an unsigned thinking block; body: {body}"
+        );
+    }
+
+    /// The documented LIMIT, pinned so nobody reads the fix as complete: with
+    /// no routed-model signal yet (turn 1, a resumed session, or a deployment
+    /// that sends no header) the alias still resolves to nothing and the replay
+    /// does not happen. Closing this needs router-side cover, not client code.
+    #[test]
+    fn flux_alias_without_a_routed_model_signal_cannot_replay() {
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.routed_model_hint = None;
+        req.messages = history_with_thinking();
+        let body = flux_provider().build_request_body(&req);
+        assert!(
+            !replays_reasoning(&body),
+            "with no route signal there is nothing to key the per-model contract off"
+        );
+    }
+
+    /// A hint must never override an explicit concrete model: if the caller
+    /// named the model, that is the contract.
+    #[test]
+    fn a_concrete_strict_reasoner_replays_regardless_of_any_hint() {
+        let mut req = stop_req();
+        req.model = "deepseek-reasoner".into();
+        req.routed_model_hint = None;
+        req.messages = history_with_thinking();
+        let body = flux_provider().build_request_body(&req);
+        assert!(replays_reasoning(&body));
     }
 
     // --- max_tokens_field ---
@@ -4037,6 +4159,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -4135,6 +4258,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         }
     }
 
@@ -4687,6 +4811,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 2048);
@@ -4728,6 +4853,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 1024);
@@ -4765,6 +4891,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -4800,6 +4927,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         };
         let body = provider.build_request_body(&req);
         assert!(
@@ -4835,6 +4963,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["reasoning_effort"], "medium");
