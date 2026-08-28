@@ -270,6 +270,12 @@ pub fn invalidation_cause_of(cause: &CacheBreakCause) -> InvalidationCause {
     match cause {
         CacheBreakCause::SystemPromptChanged => InvalidationCause::SystemPromptDrift,
         CacheBreakCause::ToolsChanged => InvalidationCause::ToolDefinitionsChanged,
+        CacheBreakCause::ModelChanged => InvalidationCause::ModelChanged,
+        // The index is dropped here on purpose: `InvalidationCause` is the
+        // published, aggregate vocabulary. The index survives on the
+        // engine-side `CacheBreakCause`, which is what the `cache_health_warn`
+        // log line renders.
+        CacheBreakCause::MessagesChanged { .. } => InvalidationCause::HistoryRewritten,
         CacheBreakCause::TtlExpiry => InvalidationCause::Expired,
         CacheBreakCause::FirstRequest => InvalidationCause::NoMarker,
     }

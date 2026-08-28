@@ -12495,9 +12495,6 @@ impl AgentEngine {
                     // / no pick / hidden skill) leaves both system and tail untouched.
                     let skill_hint = self.skill_router_hint();
 
-                    // Record prompt state for cache diagnostics
-                    self.cache_detector.record_request(&system, &tools);
-
                     // W8 v0.6.3 — pick the Anthropic prompt-cache tier for this
                     // request. The agent turn loop reuses the same system prompt +
                     // tools across every turn, so the prefix is stable far longer
@@ -13084,6 +13081,23 @@ impl AgentEngine {
                             wcore_types::llm::ThinkingConfig::Disabled
                         });
                     }
+                    // #1166 — record prompt state for cache diagnostics LAST,
+                    // not back at prompt-assembly time. The snapshot has to be
+                    // of the request actually DISPATCHED, and everything above
+                    // rewrites it: the smart-routing tier swap replaces
+                    // `request.model`, the transient tail injections
+                    // (skill-router hint, PrePrompt hook contribution) and the
+                    // #255 overflow shedding rewrite `request.messages`.
+                    // Snapshotted earlier, all of them were invisible to
+                    // attribution — and the #559 prefix mutation lived in
+                    // exactly one of those tail injections.
+                    self.cache_detector.record_request(
+                        &request.model,
+                        &request.system,
+                        &request.tools,
+                        &request.messages,
+                    );
+
                     (
                         request,
                         effective_model,
@@ -15281,6 +15295,8 @@ impl AgentEngine {
                     routed_model: last_routed_model
                         .clone()
                         .unwrap_or_else(|| effective_model.clone()),
+                    // #1166 — the detecting path now explains itself.
+                    cause: crate::cache_ledger::invalidation_cause_of(&alert.cause),
                 };
                 tracing::warn!(
                     target: "cache_health",
@@ -15290,13 +15306,18 @@ impl AgentEngine {
                     cache_read_tokens = warn.cache_read_tokens,
                     ratio = warn.ratio,
                     routed_model = %warn.routed_model,
+                    cause = warn.cause.as_str(),
+                    // The engine-side cause carries the divergent message index
+                    // that the published vocabulary aggregates away.
+                    detail = ?alert.cause,
                     "cache_health_warn: warm-session cache hit-ratio {:.3} below {} \
-                     (input={}, cache_read={}, model={})",
+                     (input={}, cache_read={}, model={}, cause={:?})",
                     warn.ratio,
                     crate::cache_diagnostics::CACHE_HEALTH_WARN_RATIO,
                     warn.input_tokens,
                     warn.cache_read_tokens,
                     warn.routed_model,
+                    alert.cause,
                 );
             }
 
