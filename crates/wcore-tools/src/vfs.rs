@@ -494,14 +494,30 @@ impl VirtualFs for RealFs {
         // swallowed — that path opens the same object and reports any real
         // failure itself — but the #1155 race is NOT closed for a symlinked
         // leaf, and saying so here is the point of the branch.
-        let Ok(observed) = self.observe_file(path).await else {
-            return Err(VfsError::Io(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "compare-exchange needs an observable leaf, and {} could not be observed",
-                    path.display()
-                ),
-            )));
+        //
+        // Which is exactly why the symlink condition is TESTED rather than
+        // inferred from the error. Degrading on ANY observation failure would
+        // be fail-open on a data-loss guard: a transient EMFILE under load
+        // would silently put an atomic publish back on the race this fix
+        // exists to close, and nothing would report it. Anything that is not
+        // a symlink fails loudly instead.
+        let observed = match self.observe_file(path).await {
+            Ok(observed) => observed,
+            Err(error) => {
+                let symlinked = tokio::fs::symlink_metadata(path)
+                    .await
+                    .is_ok_and(|meta| meta.file_type().is_symlink());
+                if !symlinked {
+                    return Err(error);
+                }
+                return Err(VfsError::Io(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "compare-exchange needs an unlinked leaf, and {} is a symlink",
+                        path.display()
+                    ),
+                )));
+            }
         };
         let current = observed.observation;
 
