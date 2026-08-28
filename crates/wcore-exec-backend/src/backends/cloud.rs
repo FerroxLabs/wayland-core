@@ -122,20 +122,34 @@ struct CloudCredential {
 
 impl CloudCredential {
     fn from_env() -> std::result::Result<Self, ExecError> {
-        let token = std::env::var(TOKEN_ENV)
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .ok_or_else(|| ExecError::CredentialAbsent {
-                backend_id: BACKEND_ID.into(),
-                env: TOKEN_ENV.into(),
-            })?;
-        let app = std::env::var(ORG_ENV)
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .ok_or_else(|| ExecError::CredentialAbsent {
-                backend_id: BACKEND_ID.into(),
-                env: ORG_ENV.into(),
-            })?;
+        Self::from_values(std::env::var(TOKEN_ENV).ok(), std::env::var(ORG_ENV).ok())
+    }
+
+    /// The resolution rule itself, over STATED values.
+    ///
+    /// Separated from [`Self::from_env`] so the absent-credential behaviour can
+    /// be driven without touching the process environment. `TOKEN_ENV` and
+    /// `ORG_ENV` are process-global and this crate's production code reads them
+    /// on the `availability` path, so a test that removes them removes them for
+    /// every sibling in the same lib binary too -- under plain `cargo test` one
+    /// binary is one process (#1134).
+    fn from_values(
+        token: Option<String>,
+        app: Option<String>,
+    ) -> std::result::Result<Self, ExecError> {
+        let token =
+            token
+                .filter(|v| !v.trim().is_empty())
+                .ok_or_else(|| ExecError::CredentialAbsent {
+                    backend_id: BACKEND_ID.into(),
+                    env: TOKEN_ENV.into(),
+                })?;
+        let app =
+            app.filter(|v| !v.trim().is_empty())
+                .ok_or_else(|| ExecError::CredentialAbsent {
+                    backend_id: BACKEND_ID.into(),
+                    env: ORG_ENV.into(),
+                })?;
         Ok(Self { token, app })
     }
 }
@@ -601,14 +615,18 @@ fn redact(text: &str, token: &str) -> String {
     text.replace(token, "<redacted>")
 }
 
-#[async_trait]
-impl ExecutionBackend for CloudBackend {
-    fn capabilities(&self) -> &BackendCapabilities {
-        &self.capabilities
-    }
-
-    async fn availability(&self) -> Availability {
-        let credential = match CloudCredential::from_env() {
+impl CloudBackend {
+    /// [`ExecutionBackend::availability`] over an ALREADY-RESOLVED
+    /// credential.
+    ///
+    /// The verdict logic lives here so a test can exercise it -- including
+    /// the fail-closed arm -- by STATING the credential instead of removing
+    /// `TOKEN_ENV`/`ORG_ENV` from the process the whole lib binary shares.
+    async fn availability_of(
+        &self,
+        credential: std::result::Result<CloudCredential, ExecError>,
+    ) -> Availability {
+        let credential = match credential {
             Ok(credential) => credential,
             Err(err) => {
                 // FAIL CLOSED and say exactly why. This is the verdict
@@ -631,6 +649,17 @@ impl ExecutionBackend for CloudBackend {
             ),
             Err(detail) => Availability::down(ProbeBasis::VendorApiCall, detail),
         }
+    }
+}
+
+#[async_trait]
+impl ExecutionBackend for CloudBackend {
+    fn capabilities(&self) -> &BackendCapabilities {
+        &self.capabilities
+    }
+
+    async fn availability(&self) -> Availability {
+        self.availability_of(CloudCredential::from_env()).await
     }
 
     fn effective_policy(&self, task: &ExecutionTask) -> Result<EffectivePolicy> {
@@ -1002,14 +1031,74 @@ mod tests {
         assert!(!redact(leaked, "fo1_super_secret_value").contains("fo1_super_secret_value"));
     }
 
+    /// The fail-closed rule, over stated values, in both directions.
+    ///
+    /// `availability` reports `CredentialAbsent` on the strength of this
+    /// resolver, so every way of being absent must reach it -- including the
+    /// two that are NOT `None`: an empty value and a whitespace-only one, which
+    /// is what an unset variable in a CI file (`WAYLAND_F25_CLOUD_TOKEN=`)
+    /// actually produces. Neither had coverage. The positive direction is
+    /// asserted too, so a resolver that refused everything could not pass.
+    #[test]
+    fn the_cloud_credential_resolver_fails_closed_on_every_absent_shape() {
+        let present = |c: std::result::Result<CloudCredential, ExecError>| {
+            c.expect("a complete credential must resolve")
+        };
+        let absent_var = |c: std::result::Result<CloudCredential, ExecError>| match c {
+            Err(ExecError::CredentialAbsent { env, .. }) => env,
+            Err(other) => panic!("expected CredentialAbsent, got {other:?}"),
+            Ok(_) => panic!("an incomplete credential must not resolve"),
+        };
+
+        // Positive control: both present resolves, and carries the values.
+        let ok = present(CloudCredential::from_values(
+            Some("fo1-fixture-token".into()),
+            Some("fixture-app".into()),
+        ));
+        assert_eq!(ok.app, "fixture-app");
+
+        // Every absent shape of the TOKEN, each naming the token variable.
+        for token in [None, Some(String::new()), Some("   ".into())] {
+            assert_eq!(
+                absent_var(CloudCredential::from_values(
+                    token.clone(),
+                    Some("fixture-app".into())
+                )),
+                TOKEN_ENV,
+                "an absent token ({token:?}) must fail closed naming {TOKEN_ENV}"
+            );
+        }
+
+        // Every absent shape of the ORG, each naming the org variable. The
+        // token is present here, so a resolver that always blamed the token
+        // would fail this half.
+        for app in [None, Some(String::new()), Some("   ".into())] {
+            assert_eq!(
+                absent_var(CloudCredential::from_values(
+                    Some("fo1-fixture-token".into()),
+                    app.clone()
+                )),
+                ORG_ENV,
+                "an absent org ({app:?}) must fail closed naming {ORG_ENV}"
+            );
+        }
+    }
+
+    /// The credential is STATED absent rather than removed from the process.
+    ///
+    /// This test used to `remove_var(TOKEN_ENV)` and `remove_var(ORG_ENV)` and
+    /// never put them back, from a plain `#[tokio::test]` with no
+    /// serialization. Under `cargo nextest` that is invisible -- every test
+    /// gets its own process -- but under plain `cargo test` this lib binary is
+    /// ONE process, production `CloudCredential::from_env` reads both vars on
+    /// the `availability` path, and the removal outlived this test for every
+    /// sibling that ran after it (#1134).
     #[tokio::test]
     async fn an_absent_credential_fails_closed_rather_than_falling_back() {
-        unsafe {
-            std::env::remove_var(TOKEN_ENV);
-            std::env::remove_var(ORG_ENV);
-        }
         let backend = CloudBackend::new(ResourceBudget::new(1, 1, 1, 1).unwrap()).unwrap();
-        let availability = backend.availability().await;
+        let availability = backend
+            .availability_of(CloudCredential::from_values(None, None))
+            .await;
         assert!(!availability.available);
         assert_eq!(availability.probe, ProbeBasis::CredentialAbsent);
         assert!(

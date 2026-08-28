@@ -9,7 +9,7 @@ use wcore_protocol::child::{
 use wcore_protocol::commands::ProtocolCommand;
 use wcore_protocol::contract::{
     COMMAND_SPECS, CONTRACT_MAJOR, CONTRACT_MINOR, CONTRACT_ROOT, ContractCriticality, EVENT_SPECS,
-    GENERATOR_VERSION, canonical_json, check_contract, generated_artifacts,
+    GENERATOR_VERSION, canonical_json, generated_artifacts,
 };
 use wcore_protocol::events::{BudgetGrantOutcome, BudgetGrantRefusalReason, BudgetGrantResult};
 
@@ -198,9 +198,30 @@ fn decode_budget_grant_result(event: &Value) -> serde_json::Result<BudgetGrantRe
     serde_json::from_value(result)
 }
 
+// gh#1055 ask 2 - the ONE test in this binary that compares the checked-in
+// corpus against a fresh generation, and therefore the only one a source-hash
+// rebase can redden. Editing any SOURCE_INPUTS file moves
+// source_inputs_digest, fixture_digest follows, and this fails - on every
+// matrix leg at once, which reads as "this PR broke something fundamental"
+// when it means "a source file's hash changed".
+//
+// macOS is dropped because it is the redundant leg, not because the check is
+// weak: the comparison is pure byte equality over in-memory generation, and
+// the one genuinely platform-sensitive line in the generator is the path
+// separator normalization in `all_relative_files`, which only Windows
+// exercises. Linux (containerized) and Windows both keep this test. The
+// exclusion is scoped to this single function on purpose - every other
+// assertion in this file still runs on macOS, so the binary never becomes
+// vacuous there.
+//
+// crates/wcore-protocol/tests/contract_gate_topology.rs asserts this attribute
+// is still here, because deleting it would silently restore the old blast
+// radius rather than failing.
 #[test]
+#[cfg(not(target_os = "macos"))]
 fn checked_corpus_matches_real_serializers_byte_for_byte() {
-    check_contract().expect("checked-in Desktop contract corpus must match the generator");
+    wcore_protocol::contract::check_contract()
+        .expect("checked-in Desktop contract corpus must match the generator");
 
     let artifacts = generated_artifacts().unwrap();
     for (relative, expected) in artifacts {
@@ -345,9 +366,9 @@ fn every_command_fixture_round_trips_to_the_variant_it_names() {
 // widening of the producer surface to be a decision someone typed, next to the
 // CONTRACT_MINOR bump it requires, rather than a number that drifts.
 #[test]
-fn inventory_is_exactly_twenty_nine_commands_and_sixty_six_events() {
+fn inventory_is_exactly_twenty_nine_commands_and_sixty_seven_events() {
     assert_eq!(COMMAND_SPECS.len(), 29);
-    assert_eq!(EVENT_SPECS.len(), 66);
+    assert_eq!(EVENT_SPECS.len(), 67);
     assert_eq!(
         COMMAND_SPECS
             .iter()
@@ -362,7 +383,7 @@ fn inventory_is_exactly_twenty_nine_commands_and_sixty_six_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        66
+        67
     );
 }
 
@@ -447,13 +468,13 @@ fn manifest_pins_generator_and_all_three_digests() {
     }
     assert_eq!(manifest["contract"]["major"], CONTRACT_MAJOR);
     assert_eq!(manifest["contract"]["minor"], CONTRACT_MINOR);
-    // 26 -> 29 / 61 -> 66: wayland#896's three quiescence commands and five
-    // receipts. Additive; see the CONTRACT_MINOR 1.19 -> 1.20 note in
-    // `generate.rs`.
+    // 26 -> 29 / 61 -> 67: wayland#896's three quiescence commands and five
+    // receipts, plus wayland#372's dispatched-route event. Additive; see the
+    // CONTRACT_MINOR 1.19 -> 1.21 note in `generate.rs`.
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 29);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 66);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 67);
     assert_eq!(manifest["counts"]["commands"], 29);
-    assert_eq!(manifest["counts"]["events"], 66);
+    assert_eq!(manifest["counts"]["events"], 67);
     assert_eq!(manifest["counts"]["child_types"], 3);
     assert_eq!(
         manifest["child_types"],
@@ -543,8 +564,8 @@ fn manifest_publishes_a_wire_shape_for_every_command_and_event() {
     );
     assert_eq!(
         shapes.len(),
-        29 + 66 + 1,
-        "29 commands, 66 events, and the legacy sub-agent compatibility branch"
+        29 + 67 + 1,
+        "29 commands, 67 events, and the legacy sub-agent compatibility branch"
     );
     // The correlation anchors every later tool frame is matched against. A
     // rename here is the exact break regeneration used to bless.

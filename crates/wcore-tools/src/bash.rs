@@ -591,6 +591,17 @@ impl Tool for BashTool {
 
         // Wave SA — credential exfiltration denylist. Refuse before
         // spawning a shell at all.
+        // #693 — the non-bypassable command floor. FIRST, before every other
+        // guard: it answers below approval mode, --force, sandbox selection and
+        // every escape-hatch environment variable, so nothing above it can
+        // decide not to ask.
+        if let Some(refusal) = wcore_config::command_floor::floor_refusal(command, None) {
+            return ToolResult {
+                content: refusal,
+                is_error: true,
+            };
+        }
+
         if let Some(reason) = check_denylist(command) {
             return ToolResult {
                 content: reason.to_string(),
@@ -664,6 +675,17 @@ impl Tool for BashTool {
         };
 
         // Wave SA — credential exfiltration denylist (streaming path).
+        // #693 — the non-bypassable command floor. FIRST, before every other
+        // guard: it answers below approval mode, --force, sandbox selection and
+        // every escape-hatch environment variable, so nothing above it can
+        // decide not to ask.
+        if let Some(refusal) = wcore_config::command_floor::floor_refusal(command, None) {
+            return ToolResult {
+                content: refusal,
+                is_error: true,
+            };
+        }
+
         if let Some(reason) = check_denylist(command) {
             return ToolResult {
                 content: reason.to_string(),
@@ -783,6 +805,20 @@ impl Tool for BashTool {
                 is_error: true,
             };
         };
+        // #693 — the non-bypassable command floor. FIRST, before every other
+        // guard: it answers below approval mode, --force, sandbox selection and
+        // every escape-hatch environment variable, so nothing above it can
+        // decide not to ask.
+        if let Some(refusal) = wcore_config::command_floor::floor_refusal(
+            command,
+            ctx.workspace.as_deref().map(|p| p.root()),
+        ) {
+            return ToolResult {
+                content: refusal,
+                is_error: true,
+            };
+        }
+
         if let Some(reason) = check_denylist(command) {
             return ToolResult {
                 content: reason.to_string(),
@@ -947,6 +983,20 @@ impl Tool for BashTool {
                 is_error: true,
             };
         };
+
+        // #693 — the non-bypassable command floor. FIRST, before every other
+        // guard: it answers below approval mode, --force, sandbox selection and
+        // every escape-hatch environment variable, so nothing above it can
+        // decide not to ask.
+        if let Some(refusal) = wcore_config::command_floor::floor_refusal(
+            command,
+            ctx.workspace.as_deref().map(|p| p.root()),
+        ) {
+            return ToolResult {
+                content: refusal,
+                is_error: true,
+            };
+        }
 
         if let Some(reason) = check_denylist(command) {
             return ToolResult {

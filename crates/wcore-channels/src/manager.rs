@@ -24,6 +24,57 @@ use crate::health::{ChannelHealth, HealthState};
 use crate::outgoing::OutgoingMessage;
 use crate::probe::ProbeReport;
 
+/// What one registered adapter answers about carrying an idempotency key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutboundIdempotencyFacts {
+    supports: bool,
+    max_message_len: Option<usize>,
+}
+
+/// The outbound-idempotency oracle, frozen so a synchronous caller can read it.
+///
+/// Produced by [`ChannelManager::outbound_idempotency_snapshot`]. Every answer
+/// is deliberately conservative: an unknown channel, an unknown platform, and
+/// an over-cap body all answer `false`, because the question being asked is
+/// always "is a replay safe here".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutboundIdempotencySnapshot {
+    channels: std::collections::BTreeMap<String, OutboundIdempotencyFacts>,
+    platforms: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl OutboundIdempotencySnapshot {
+    /// Every registered channel name, alphabetically — the same list
+    /// [`ChannelManager::list_names`] returned when the snapshot was taken.
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        self.channels.keys().cloned().collect()
+    }
+
+    /// The channels that reported `platform`, alphabetically. Mirrors
+    /// [`ChannelManager::names_for_platform`].
+    #[must_use]
+    pub fn names_for_platform(&self, platform: &str) -> Vec<String> {
+        self.platforms.get(platform).cloned().unwrap_or_default()
+    }
+
+    /// Whether an idempotency key will actually ride **this body** to `name`.
+    ///
+    /// The cap decision runs through [`ChannelManager::chunks_for`] — the same
+    /// function the send itself uses — so a snapshot cannot disagree with the
+    /// send about where the chunk boundary falls. Only the adapter facts are
+    /// frozen; the split is live.
+    #[must_use]
+    pub fn honours_key_for(&self, name: &str, text: &str) -> bool {
+        match self.channels.get(name) {
+            Some(facts) => {
+                facts.supports && ChannelManager::chunks_for(facts.max_message_len, text).len() <= 1
+            }
+            None => false,
+        }
+    }
+}
+
 /// Shared per-adapter health map. A `std::sync::Mutex` on purpose: every
 /// critical section is a map write with no `await` inside it, so an async mutex
 /// would buy nothing and would make the poll task's hot path yield.
@@ -800,6 +851,49 @@ impl ChannelManager {
         }
     }
 
+    /// A synchronously readable copy of the two facts
+    /// [`supports_outbound_idempotency_for`](Self::supports_outbound_idempotency_for)
+    /// consults, captured at one instant.
+    ///
+    /// `Tool::effect_contract` is SYNC and runs on the dispatch path, so a tool
+    /// that wants to declare its crash-recovery contract from this oracle
+    /// cannot await the per-channel mutex. This is the same question asked
+    /// ahead of time: the adapter's own declaration plus its message cap, which
+    /// is everything [`send_to_keyed`](Self::send_to_keyed) reads before it
+    /// decides whether a key rides the wire.
+    ///
+    /// A snapshot is a PAST fact, and it is only safe in one direction: a
+    /// `true` that has since become false would license a caller to replay a
+    /// send that now duplicates. Every consumer must therefore re-ask this
+    /// oracle before acting on a stored answer, and must read a missing entry
+    /// as `false`.
+    pub async fn outbound_idempotency_snapshot(&self) -> OutboundIdempotencySnapshot {
+        let mut channels = std::collections::BTreeMap::new();
+        let mut platforms: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for name in self.list_names() {
+            let Some(slot) = self.channels.get(&name) else {
+                continue;
+            };
+            let guard = slot.lock().await;
+            channels.insert(
+                name.clone(),
+                OutboundIdempotencyFacts {
+                    supports: guard.supports_outbound_idempotency(),
+                    max_message_len: guard.max_message_len(),
+                },
+            );
+            platforms
+                .entry(guard.platform().to_string())
+                .or_default()
+                .push(name);
+        }
+        OutboundIdempotencySnapshot {
+            channels,
+            platforms,
+        }
+    }
+
     /// The chunk split [`send_to_keyed`](Self::send_to_keyed) will perform for
     /// `text` under `max`.
     ///
@@ -807,7 +901,7 @@ impl ChannelManager {
     /// [`supports_outbound_idempotency_for`](Self::supports_outbound_idempotency_for)
     /// share one decision. `None`, or a zero cap, means the connector declares
     /// no limit and the body goes as one message.
-    fn chunks_for(max: Option<usize>, text: &str) -> Vec<String> {
+    pub fn chunks_for(max: Option<usize>, text: &str) -> Vec<String> {
         match max {
             Some(max) if max > 0 => crate::chunk::chunk_message(text, max),
             _ => vec![text.to_string()],

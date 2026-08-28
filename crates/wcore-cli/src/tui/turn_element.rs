@@ -28,6 +28,10 @@
 //!   *persisted* thinking the renderer can scroll back to.
 //! - `Sources(Vec<String>)` — a list of citation URLs / file paths the
 //!   assistant referenced for this turn. Rendered as a footer block.
+//! - `Artifact { title, mime, content, truncated }` — #1138: a
+//!   `render_artifact` surface rendered in the terminal. Before this the
+//!   in-process TUI had no render surface at all, so the tool was advertised
+//!   to the model in every TUI session and could never deliver.
 
 /// One typed element of a conversation turn. See module docs for shape
 /// rationale.
@@ -60,6 +64,18 @@ pub enum TurnElement {
     /// heading → tool, etc.) instead of piling up at the end of the
     /// transcript.
     ToolCard(String),
+    /// #1138: a `render_artifact` surface. The tool's whole point is a
+    /// titled, persistent view the model does not have to pay context to
+    /// inline, so it is its own element rather than more `Markdown`.
+    /// `content` arrives already redacted and already capped by the emitting
+    /// sink (`ChannelSink::emit_render_artifact`); `truncated` says whether
+    /// the in-band cut marker is present so the header can badge it.
+    Artifact {
+        title: String,
+        mime: wcore_protocol::events::RenderMime,
+        content: String,
+        truncated: bool,
+    },
 }
 
 #[cfg(test)]

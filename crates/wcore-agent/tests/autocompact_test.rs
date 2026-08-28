@@ -206,7 +206,15 @@ async fn tc_2_4_07_circuit_breaker_blocks_autocompact() {
     state.record_failure();
     state.record_failure();
 
-    let result = autocompact(&provider, &messages, "test-model", &config, &mut state).await;
+    let result = autocompact(
+        &provider,
+        &messages,
+        "test-model",
+        &config,
+        &mut state,
+        &Default::default(),
+    )
+    .await;
     assert!(matches!(result, Err(CompactError::CircuitBroken { .. })));
 }
 
@@ -256,9 +264,16 @@ async fn tc_2_4_12_post_compact_message_structure() {
     let mut state = CompactState::new();
     state.last_input_tokens = 170_000;
 
-    let result = autocompact(&provider, &messages, "test-model", &config, &mut state)
-        .await
-        .expect("autocompact should succeed");
+    let result = autocompact(
+        &provider,
+        &messages,
+        "test-model",
+        &config,
+        &mut state,
+        &Default::default(),
+    )
+    .await
+    .expect("autocompact should succeed");
 
     // Should have 2 messages: boundary + summary
     assert_eq!(result.messages.len(), 2);
@@ -289,9 +304,16 @@ async fn tc_2_4_13_boundary_metadata() {
     let mut state = CompactState::new();
     state.last_input_tokens = 170_000;
 
-    let result = autocompact(&provider, &messages, "test-model", &config, &mut state)
-        .await
-        .expect("autocompact should succeed");
+    let result = autocompact(
+        &provider,
+        &messages,
+        "test-model",
+        &config,
+        &mut state,
+        &Default::default(),
+    )
+    .await
+    .expect("autocompact should succeed");
 
     let metadata = extract_compact_metadata(&result.messages[0]).expect("should have metadata");
     assert_eq!(metadata.trigger, CompactTrigger::Auto);
@@ -415,9 +437,16 @@ async fn tc_2_4_16_success_resets_failure_counter() {
     state.consecutive_failures = 2;
     state.last_input_tokens = 170_000;
 
-    autocompact(&provider, &messages, "test-model", &config, &mut state)
-        .await
-        .expect("autocompact should succeed");
+    autocompact(
+        &provider,
+        &messages,
+        "test-model",
+        &config,
+        &mut state,
+        &Default::default(),
+    )
+    .await
+    .expect("autocompact should succeed");
 
     assert_eq!(state.consecutive_failures, 0);
 }
@@ -434,7 +463,15 @@ async fn tc_2_4_17_failure_increments_counter() {
     let config = default_config();
     let mut state = CompactState::new();
 
-    let result = autocompact(&provider, &messages, "test-model", &config, &mut state).await;
+    let result = autocompact(
+        &provider,
+        &messages,
+        "test-model",
+        &config,
+        &mut state,
+        &Default::default(),
+    )
+    .await;
     assert!(result.is_err());
     assert_eq!(state.consecutive_failures, 1);
 }
@@ -466,9 +503,16 @@ async fn tc_2_4_18_ptl_retry_succeeds() {
     let mut state = CompactState::new();
     state.last_input_tokens = 170_000;
 
-    let result = autocompact(&provider, &messages, "test-model", &config, &mut state)
-        .await
-        .expect("autocompact should succeed after retry");
+    let result = autocompact(
+        &provider,
+        &messages,
+        "test-model",
+        &config,
+        &mut state,
+        &Default::default(),
+    )
+    .await
+    .expect("autocompact should succeed after retry");
 
     assert_eq!(result.messages.len(), 2);
     assert_eq!(state.consecutive_failures, 0);
@@ -496,7 +540,15 @@ async fn tc_2_4_19_ptl_retry_exhausted() {
     let config = default_config();
     let mut state = CompactState::new();
 
-    let result = autocompact(&provider, &messages, "test-model", &config, &mut state).await;
+    let result = autocompact(
+        &provider,
+        &messages,
+        "test-model",
+        &config,
+        &mut state,
+        &Default::default(),
+    )
+    .await;
     assert!(matches!(result, Err(CompactError::PromptTooLong { .. })));
     assert_eq!(state.consecutive_failures, 1);
 }
@@ -565,9 +617,16 @@ async fn tc_2_4_20_ptl_retry_truncates_messages() {
     let mut state = CompactState::new();
     state.last_input_tokens = 170_000;
 
-    autocompact(&provider, &messages, "test-model", &config, &mut state)
-        .await
-        .expect("should succeed after retry");
+    autocompact(
+        &provider,
+        &messages,
+        "test-model",
+        &config,
+        &mut state,
+        &Default::default(),
+    )
+    .await
+    .expect("should succeed after retry");
 
     let counts = request_counts.lock().unwrap();
     assert_eq!(counts.len(), 2, "should have 2 attempts");
@@ -595,7 +654,15 @@ async fn empty_response_fails() {
     let config = default_config();
     let mut state = CompactState::new();
 
-    let result = autocompact(&provider, &messages, "test-model", &config, &mut state).await;
+    let result = autocompact(
+        &provider,
+        &messages,
+        "test-model",
+        &config,
+        &mut state,
+        &Default::default(),
+    )
+    .await;
     assert!(matches!(result, Err(CompactError::EmptyResponse)));
     assert_eq!(state.consecutive_failures, 1);
 }
@@ -611,7 +678,15 @@ async fn stream_error_fails() {
     let config = default_config();
     let mut state = CompactState::new();
 
-    let result = autocompact(&provider, &messages, "test-model", &config, &mut state).await;
+    let result = autocompact(
+        &provider,
+        &messages,
+        "test-model",
+        &config,
+        &mut state,
+        &Default::default(),
+    )
+    .await;
     assert!(matches!(result, Err(CompactError::StreamError(_))));
     assert_eq!(state.consecutive_failures, 1);
 }

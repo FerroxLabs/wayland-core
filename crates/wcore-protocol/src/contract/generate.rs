@@ -80,6 +80,27 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // host reads, so the version moves once and all three capabilities name
 // themselves.
 //
+// 19 -> 20: `route_info_v1` (#372). A new always-on event carrying the route a
+// turn dispatched against — provider, model, the scrubbed endpoint, and a
+// derived local-vs-cloud flag. The reporter ran the same task against a local
+// Ollama server and a cloud OpenRouter gateway; both are driven as
+// `provider = "openai"`, so every route-bearing field already published read
+// identically for the two runs and the endpoint was absent from the protocol
+// entirely. A host cannot feature-detect a new event type by sending anything —
+// it either sees the frame or it does not — so the version is the only way a
+// pinned host learns the route is now answerable.
+//
+// 20 -> 21: `provider_retry_count_v1` (#372). `provider_attempt` gains
+// `attempt` and `provider_retry` gains `retry`, each the 1-based ordinal within
+// the turn. Two already-published shapes move, so the wire-shape gate refuses
+// the regeneration under a standing 1.20 and forces this bump — which is that
+// gate deciding the version question it exists to force. `major` holds at 1:
+// both events already published `additionalProperties: true`, so a host that
+// has never heard of the fields validates and renders exactly as before. The
+// ticket asks for a retry count by name, and counting frames cannot supply one:
+// these events are additive, so a host pinned below the minor that introduced
+// them drops them, and a host attaching mid-run never saw the earlier ones.
+//
 // ON THE GAP BETWEEN 16 AND 19. The last TAGGED contract is 1.16 — v0.13.5,
 // v0.13.6 and `main` all publish it. 17 and 18 were assembled on this branch
 // and never reached a tag, so no host has ever pinned them. The entries above
@@ -87,12 +108,13 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // gap: each records why a specific widening needed a signal, and rewriting them
 // to look consecutive would destroy that reasoning to tidy a sequence no host
 // reads. A pinned host moves 1.16 -> 1.19 and finds every capability named.
-// 19 -> 20: wayland#896 quiesced snapshot lease. Three commands and five
-// events are added and nothing existing changes shape, so this is a MINOR
-// move: a host pinned to 1.19 keeps working, and the bump is the only way it
-// can learn the capability exists to ask for.
-pub const CONTRACT_MINOR: u64 = 20;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/20";
+// 19 -> 21: wayland#896's quiesced snapshot lease (three commands, five
+// events) and wayland#372's dispatched-route receipt (one event). Both are
+// additive and nothing existing changes shape, so this whole integration is a
+// single MINOR move: a host pinned to 1.19 keeps working, and the bump is the
+// only way it can learn the new capabilities exist to ask for.
+pub const CONTRACT_MINOR: u64 = 21;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/21";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -1728,6 +1750,32 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
             "runtime_mcp_lifecycle_v1".into(),
             ContractCapabilityStatus::Available,
         ),
+        // wayland#605 -- the feature-detect for `mcp_ready.already_connected`:
+        // an `add_mcp_server` that names an already-connected server is skipped
+        // and acknowledged with `already_connected: true`, so a host can tell a
+        // no-op re-add from a real reconnect.
+        //
+        // Separate from `runtime_mcp_lifecycle_v1` rather than folded into it,
+        // for the reason `session_persistence_v2` is separate from v1: a host
+        // that feature-detected on the lifecycle capability minted its handling
+        // when every `mcp_ready` was a connect, and widening that capability's
+        // meaning in place gives such a host no way to ask which producer it is
+        // talking to.
+        //
+        // The flag is omitted when false, so its ABSENCE is exactly what a host
+        // cannot read without this: on a Core that predates the annotation it is
+        // absent on skips too. Declared => absent means a real connect.
+        // Undeclared => absent means nothing in particular, and a host must keep
+        // treating a duplicate `mcp_ready` as ambiguous.
+        //
+        // Available, not ShapeOnly: the producer sets it on the skip path in the
+        // same change that publishes the field -- `crates/wcore-cli/src/main.rs`
+        // on the `McpLifecycleState::Ready` arm -- and every real-connect site
+        // sets it false.
+        (
+            "mcp_ready_skip_annotation_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
         (
             "workflow_lifecycle_v1".into(),
             ContractCapabilityStatus::Available,
@@ -2893,5 +2941,92 @@ mod tests {
             fixtures_digest(&artifacts).unwrap(),
             expected.fixture_digest
         );
+    }
+
+    /// wayland#605. `mcp_ready.already_connected` is omitted when false, so a
+    /// host cannot feature-detect it by watching the wire: on a producer that
+    /// predates it the field is absent on every frame, and on this one it is
+    /// absent on every real connect. The named capability is the only thing
+    /// that separates those two worlds, so publishing the field without
+    /// declaring it ships an annotation no pinned host may trust.
+    ///
+    /// The coupling is asserted in that direction on purpose: the fixture
+    /// premise is checked first, so if the field ever leaves the wire this
+    /// test says so instead of demanding a capability for a promise the
+    /// producer no longer keeps.
+    #[test]
+    fn the_mcp_ready_skip_annotation_is_named_in_the_manifest() {
+        let artifacts = generated_artifacts().unwrap();
+        let fixture: Value =
+            serde_json::from_slice(artifacts.get("events/mcp_ready.json").unwrap()).unwrap();
+        assert!(
+            fixture.get("already_connected").is_some(),
+            "the mcp_ready fixture no longer publishes `already_connected`; the capability \
+             assertion below would be declaring a promise this producer does not keep: {fixture}"
+        );
+
+        let manifest: Value =
+            serde_json::from_slice(artifacts.get("manifest.json").unwrap()).unwrap();
+        assert_eq!(
+            manifest["capabilities"]["mcp_ready_skip_annotation_v1"],
+            Value::String("available".into()),
+            "`mcp_ready` publishes `already_connected` but the manifest does not name a \
+             capability for it, so a pinned host has no way to learn that an ABSENT flag now \
+             means a real connect rather than an older Core"
+        );
+    }
+
+    /// The comment block directly above [`CONTRACT_MINOR`] is this contract's
+    /// decision log, and `contract_capabilities`' own doctrine is that the
+    /// version moves once and every capability names itself. Nothing enforced
+    /// that: wayland#605's first pass moved the constant 19 -> 20 with no entry
+    /// and no capability, and the corpus check plus 378 protocol tests all
+    /// passed. This is that enforcement.
+    #[test]
+    fn the_decision_log_explains_the_contract_minor_it_sits_above() {
+        let log = decision_log_above_contract_minor(include_str!("generate.rs"));
+        assert!(
+            log.contains(&format!("-> {CONTRACT_MINOR}")),
+            "CONTRACT_MINOR is {CONTRACT_MINOR} but the decision log above it never explains a \
+             move to {CONTRACT_MINOR}: a pinned host is asked to re-pin with no recorded reason. \
+             Log tail:\n{}",
+            log.lines().rev().take(12).collect::<Vec<_>>().join("\n")
+        );
+        // Negative control in the same run: the log must not already claim a
+        // version this producer has not shipped, which also proves the
+        // assertion above can fail rather than matching anything.
+        let unshipped = CONTRACT_MINOR + 1;
+        assert!(
+            !log.contains(&format!("-> {unshipped}")),
+            "the decision log records a move to {unshipped} while CONTRACT_MINOR is still \
+             {CONTRACT_MINOR}"
+        );
+    }
+
+    /// The trailing run of `//` lines immediately above the `CONTRACT_MINOR`
+    /// declaration. Panics rather than returning empty if the declaration is
+    /// not found exactly once, so a rename reddens instead of passing on an
+    /// empty string.
+    fn decision_log_above_contract_minor(src: &str) -> String {
+        // Assembled at runtime so this test's own source text cannot be
+        // mistaken for the declaration it is looking for.
+        let marker = format!("pub const {}: u64 =", "CONTRACT_MINOR");
+        assert_eq!(
+            src.matches(marker.as_str()).count(),
+            1,
+            "expected exactly one `{marker}` in generate.rs"
+        );
+        let head = &src[..src.find(marker.as_str()).unwrap()];
+        let mut lines: Vec<&str> = head
+            .lines()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("//"))
+            .collect();
+        lines.reverse();
+        assert!(
+            !lines.is_empty(),
+            "there is no comment block above CONTRACT_MINOR at all"
+        );
+        lines.join("\n")
     }
 }

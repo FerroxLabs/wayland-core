@@ -103,6 +103,12 @@ pub mod mcp_lifecycle;
 pub mod orchestration;
 pub mod output;
 mod output_redaction;
+// #1138: the in-process TUI `ChannelSink` is a second `RenderArtifact`
+// producer, and it lives in `wcore-cli`. It must scrub on exactly the same
+// terms as `ProtocolSink::emit_render_artifact` rather than becoming an
+// unscrubbed second path, so the scrub — and only the scrub — is published.
+// The token registry, the PII pass and the streaming buffer stay private.
+pub use output_redaction::redact_active_tokens;
 pub mod plan;
 pub mod plugins;
 pub mod provider_recovery;

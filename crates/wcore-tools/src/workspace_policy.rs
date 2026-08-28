@@ -63,12 +63,20 @@ const SECRET_DIR_SEGMENTS: &[&str] = &["/.ssh/", "/.gnupg/", "/.aws/", "/.azure/
 /// selects those filters per path. Enumerating the reachable keys is a losing
 /// game against a format git keeps extending, so the directory is the unit.
 ///
-/// This is a FILE-TOOL deny only, and deliberately so: `Bash` still writes
-/// `.git` freely, because `git commit`, `git add` and every other porcelain
-/// verb are ordinary session work and confining them would break committing
-/// outright. The asymmetry is the point — `Bash` is an explicit request to run
-/// a program, while `Write`/`Edit` are the low-friction surface a prompt
-/// injection reaches for.
+/// This is a FILE-TOOL deny, and `Bash` is deliberately not held to the same
+/// line: `git commit`, `git add` and every other porcelain verb write `.git`
+/// freely, because confining them would break committing outright. The
+/// asymmetry is the point — `Bash` is an explicit request to run a program,
+/// while `Write`/`Edit` are the low-friction surface a prompt injection reaches
+/// for.
+///
+/// #693 narrowed that asymmetry without removing it. The command floor
+/// (`wcore_config::command_floor`, called first on all four `BashTool` entry
+/// points) refuses a shell command that NAMES `.git/hooks` or `.git/config` —
+/// the two execute-on-next-command surfaces — while every porcelain write to
+/// `.git` stays allowed. It matches path tokens in the command, so it is NOT
+/// the sandbox-expressed write-deny that `SandboxManifest` cannot carry; it is
+/// a floor underneath the sandbox, not a substitute for one.
 const REPO_CONTROL_DIRS: &[&str] = &[".git", ".wayland-core"];
 
 const SECRET_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "tfstate"];

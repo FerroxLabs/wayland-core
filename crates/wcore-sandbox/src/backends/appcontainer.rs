@@ -517,6 +517,13 @@ mod hard_containment_identity_tests {
     }
 }
 
+// Compiled on every platform for the same reason `windows_cmdline` is: the
+// ACL mutation lock's timeout, retry and contention message are pure logic, and
+// they are the difference between a mystery hang and a failure an operator can
+// act on. Only the `cfg(windows)` `acl_lease` module below calls it.
+#[path = "appcontainer/acl_lock_policy.rs"]
+pub(crate) mod acl_lock_policy;
+
 #[cfg(windows)]
 #[path = "appcontainer/acl_lease.rs"]
 mod appcontainer_acl_lease;

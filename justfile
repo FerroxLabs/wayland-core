@@ -223,7 +223,7 @@ _auto-commit-fixes:
 # muting it is TRUE against the real graph. See the recipe above.
 # `check-no-personal-identifiers` added 2026-08-02 (lane identifier-scrub): a
 # ~3s pure text scan, no toolchain, so it runs first and costs nothing.
-check-all: check-no-personal-identifiers check-model-limits fmt-check lint test-ci hakari-verify audit deny verify-suppressions
+check-all: check-no-personal-identifiers check-model-limits check-windows-attribution fmt-check lint test-ci hakari-verify audit deny verify-suppressions
 
 # ── User-flow harness (CLI + TUI + failure injection) ────────────────────
 # Drives the COMPILED wayland-core binary the way a user does:
@@ -379,6 +379,35 @@ check-model-limits:
 check-model-limits-freshness:
     python3 scripts/check-model-limits-freshness.py --self-test
     python3 scripts/check-model-limits-freshness.py
+# ── Windows-attribution gate (#1146) ──────────────────────────────────────
+# A Windows verdict is worth nothing if it cannot be attributed to a tree. The
+# Windows pool is two runner SERVICES on one host plus the hosted pool, the
+# failure set churns between them on the same tree, and until this gate landed
+# not one Windows job recorded which executor served it — so #1146's four runs
+# across three executors could neither confirm a red nor earn a green.
+# Two rules, both pure text scans: every Windows job in the Windows test
+# workflows records its executor and fails closed when it cannot, and the three
+# tests whose verdict churns are not laundered by `[profile.ci] retries = 2`.
+# `--self-test` proves both directions (and the Windows/not-Windows classifier)
+# before it scans, so a checker that has quietly stopped matching fails loudly
+# instead of passing everything.
+# Run: `just check-windows-attribution`
+check-windows-attribution:
+    python3 scripts/check-windows-attribution.py --self-test
+    python3 scripts/check-windows-attribution.py
+
+# Needs a built workspace, which is why it is not in `check-all` or the CI lint
+# job, and why it is a separate recipe: it resolves every
+# `[[profile.ci.overrides]]` filterset with `cargo nextest list` and checks the
+# three #1146 tests really land at retries=0, with no earlier override winning
+# first. Run it after renaming or moving any of the three.
+# Run: `just check-windows-attribution-live` — proves the quarantine is not vacuous
+check-windows-attribution-live:
+    python3 scripts/check-windows-attribution.py --with-nextest
+    # The #1146 red arm runs through this harness, and a misparsed target
+    # selects zero tests and grades NOTRUN rather than failing, so its parser
+    # is checked here too.
+    python3 scripts/flake-ledger.py --self-test
 
 # ── P0 smoke gate (pre-release) ───────────────────────────────────────────
 # Runs the live P0 smoke suite (crates/wcore-cli/tests/smoke_p0.rs) via

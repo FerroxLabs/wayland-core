@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+dunce                         = "1"
 wcore-types.workspace   = true
 wcore-compact.workspace = true
 # M5.3: BudgetConfig moved into wcore-budget; this crate re-exports it.

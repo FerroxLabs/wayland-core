@@ -7,9 +7,9 @@
 
 use tokio::sync::mpsc;
 use wcore_config::compact::CompactConfig;
-use wcore_providers::{LlmProvider, ProviderError};
+use wcore_providers::{LlmProvider, ProviderError, flux_loop};
 use wcore_types::compact::{CompactMetadata, CompactTrigger};
-use wcore_types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
+use wcore_types::llm::{FluxLoopIntent, LlmEvent, LlmRequest, ThinkingConfig};
 use wcore_types::message::{ContentBlock, Message, Role, TokenUsage};
 
 use super::prompt::{
@@ -20,6 +20,29 @@ use super::state::CompactState;
 
 /// Maximum number of prompt-too-long retries.
 const MAX_PTL_RETRIES: u32 = 2;
+
+/// #863 F2/F3 - the loop-ownership provenance a compaction turn carries.
+///
+/// Compaction is a real provider turn on the SAME task the surrounding loop is
+/// climbing, so it must be marked the way that loop's ordinary turns are. Sent
+/// unmarked it reaches a Flux router as anonymous traffic: cacheable across
+/// builders, and eligible for the router's OWN server-side Elevation ladder on
+/// mid-loop material - exactly the two-ladder collision #863 exists to
+/// prevent. The engine therefore threads the live session's intent down here
+/// instead of the request field being hardcoded `None`.
+///
+/// `Default` is the unmarked case: an ordinary session, or any caller that owns
+/// no loop. It keeps the request byte-identical to the pre-#863 shape, so a
+/// non-Flux endpoint is unaffected.
+#[derive(Debug, Clone, Default)]
+pub struct CompactLoopProvenance {
+    /// Who owns the outer loop for this turn - `ClientOwned("anvil")` on an
+    /// Anvil builder fork. `None` leaves the compaction request unmarked.
+    pub intent: Option<FluxLoopIntent>,
+    /// F3 per-turn cache variance. Rides only alongside `intent`; the provider
+    /// drops a nonce on unmarked traffic.
+    pub nonce: Option<String>,
+}
 
 /// Content prefix for the compact boundary marker message.
 pub const BOUNDARY_PREFIX: &str = "[Conversation compacted]";
@@ -51,6 +74,12 @@ pub enum CompactError {
     StreamError(String),
     #[error("Circuit breaker tripped after {failures} consecutive failures")]
     CircuitBroken { failures: u32 },
+    /// #863 F2 — the router ran its OWN server-side Elevation ladder on a turn
+    /// this session declared it owns. Both ladders climbed the same task, so
+    /// the summary that came back is contaminated mid-loop material. Carries
+    /// the shared `flux_loop::collision_message` text verbatim.
+    #[error("{0}")]
+    LoopCollision(String),
 }
 
 // ── Trigger check ───────────────────────────────────────────────────────────
@@ -192,6 +221,7 @@ pub async fn autocompact(
     model: &str,
     config: &CompactConfig,
     state: &mut CompactState,
+    provenance: &CompactLoopProvenance,
 ) -> Result<CompactResult, CompactError> {
     // Circuit breaker check
     if state.is_circuit_broken(config) {
@@ -229,8 +259,8 @@ pub async fn autocompact(
 
     let summary_text = loop {
         let request = LlmRequest {
-            flux_loop_intent: None,
-            flux_turn_nonce: None,
+            flux_loop_intent: provenance.intent.clone(),
+            flux_turn_nonce: provenance.nonce.clone(),
             model: compact_model.to_string(),
             system: COMPACT_SYSTEM_PROMPT.to_string(),
             messages: conv_messages.clone(),
@@ -249,13 +279,17 @@ pub async fn autocompact(
         };
 
         match provider.stream(&request).await {
-            Ok(rx) => match collect_stream_text(rx).await {
-                Ok((text, _usage)) => break text,
-                Err(e) => {
-                    state.record_failure();
-                    return Err(e);
+            Ok(rx) => {
+                match collect_stream_text(rx, provenance.intent.as_ref().and_then(|i| i.owner()))
+                    .await
+                {
+                    Ok((text, _usage)) => break text,
+                    Err(e) => {
+                        state.record_failure();
+                        return Err(e);
+                    }
                 }
-            },
+            }
             Err(ProviderError::PromptTooLong(_)) if ptl_attempts < MAX_PTL_RETRIES => {
                 ptl_attempts += 1;
                 // Remove the summary prompt (last msg), truncate, re-add prompt
@@ -341,8 +375,22 @@ pub async fn autocompact(
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Collect all text from a streaming LLM response.
+///
+/// `loop_owner` is the owner this compaction turn DECLARED (`None` when the
+/// session owns no loop, which is the ordinary case).
+///
+/// #863 F2 — the RUNTIME half of the anti-collision handshake, which until now
+/// existed only on the ordinary turn path (`engine.rs`, the `ProviderMeta` arm
+/// of the turn loop, which returns `AgentError::ApiError`). Declaring
+/// `loop_owner` asks the router not to elevate; `x-flux-loop-engaged:
+/// elevation` is it saying it did anyway. Both ladders then climbed the same
+/// task and the text that came back is contaminated mid-loop material. On an
+/// ordinary turn accepting it costs one answer; on a COMPACTION it replaces
+/// the entire conversation history and nothing can restore it — so this is the
+/// one path where dropping the signal is irreversible, and it must fault.
 async fn collect_stream_text(
     mut rx: mpsc::Receiver<LlmEvent>,
+    loop_owner: Option<&str>,
 ) -> Result<(String, TokenUsage), CompactError> {
     let mut text = String::new();
 
@@ -351,6 +399,24 @@ async fn collect_stream_text(
             LlmEvent::TextDelta(delta) => text.push_str(&delta),
             LlmEvent::Done { usage, .. } => return Ok((text, usage)),
             LlmEvent::Error(e) => return Err(CompactError::StreamError(e)),
+            LlmEvent::ProviderMeta { loop_engaged, .. } => {
+                // Same predicate and same wording as the ordinary turn path, so
+                // the two cannot drift apart. Deliberately narrow: `cascade` is
+                // not a collision (F1 permits Cascade's single-tier
+                // climb-on-failure) and a missing header is not one either — a
+                // non-Flux endpoint never sends one, and every Anthropic
+                // compaction in the workspace would fault if silence counted.
+                if let Some(owner) = loop_owner
+                    && flux_loop::collides(Some(owner), loop_engaged.as_deref())
+                {
+                    let engaged = loop_engaged
+                        .as_deref()
+                        .unwrap_or(flux_loop::LOOP_ENGAGED_ELEVATION);
+                    return Err(CompactError::LoopCollision(flux_loop::collision_message(
+                        owner, engaged,
+                    )));
+                }
+            }
             // Ignore thinking deltas and tool calls (shouldn't happen in compact)
             _ => {}
         }
@@ -665,6 +731,7 @@ mod tests {
             "premium-model",
             &config,
             &mut state,
+            &Default::default(),
         )
         .await
         .expect("autocompact should succeed");
@@ -694,6 +761,7 @@ mod tests {
             "premium-model",
             &config,
             &mut state,
+            &Default::default(),
         )
         .await
         .expect("autocompact should succeed");
