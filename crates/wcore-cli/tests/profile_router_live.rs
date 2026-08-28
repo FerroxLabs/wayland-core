@@ -377,3 +377,97 @@ async fn unknown_profile_fails_closed_and_spawns_no_child() {
     let _ = sup.kill();
     let _ = sup.wait();
 }
+
+/// Is `pid` still a live process? A zombie is NOT live for this test's purpose:
+/// the supervisor is `wait`ed before the assertion, and an orphaned child
+/// reparents to init, which reaps it. Unix only.
+#[cfg(unix)]
+fn is_running(pid: u32) -> bool {
+    // SAFETY: signal 0 performs the permission + existence check only; it takes
+    // no pointers and delivers nothing.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// FerroxLabs/wayland#1156 — a SIGKILLed supervisor must not leave its profile
+/// children running.
+///
+/// # Why SIGKILL specifically
+///
+/// Every reaping path the router owns — the signal handler, `Drop`, the
+/// per-session reap — needs the supervisor to still be executing. SIGKILL is
+/// the class of death that gives it none of them, and it stands in for the
+/// panic and the OOM kill that reach the child the same way. Measured before
+/// the fix on Linux: the child survived with `PPID 1` and its own PGID, still
+/// bound to its loopback port, and nine such orphans had accumulated on one
+/// host with the oldest 24 hours old.
+///
+/// The child must therefore hold something the KERNEL closes when we die. It
+/// does: the read end of a pipe delivered as its stdin, whose write end the
+/// supervisor holds for the child's registered lifetime
+/// (`wcore_cli::parent_channel`). This test fails if that stdin ever goes back
+/// to `Stdio::null()`, or if the child stops parking on it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sigkilled_supervisor_does_not_leave_an_orphaned_profile_child() {
+    let profiles_root = TempDir::new().expect("profiles root");
+    let sup_home = TempDir::new().expect("supervisor home");
+
+    // The child never takes a turn here — it only has to boot and pass the
+    // supervisor's health check — but both homes still need a resolvable
+    // provider config, and it must point at the mock rather than a real one.
+    let mock = MockLlm::new().text("unused");
+    let server = mock.start().await;
+    seed_profile(profiles_root.path(), "orphantest", &server.uri());
+    std::fs::write(
+        sup_home.path().join("config.toml"),
+        config_toml(&server.uri()),
+    )
+    .expect("write supervisor config");
+
+    let key = "supervisor-live-test-key-3";
+    let port = free_port();
+    let mut sup = spawn_supervisor(port, sup_home.path(), profiles_root.path(), key);
+    let client = AcpClient::new(format!("http://127.0.0.1:{port}"))
+        .expect("acp client")
+        .with_api_key(key);
+    await_supervisor(&client).await;
+
+    // Open a profile session so a dedicated child spawns and health-checks.
+    client
+        .create_session(SessionCreateRequest {
+            model: None,
+            tools: Vec::new(),
+            system_prompt: None,
+            agent: Some("profile:orphantest".to_string()),
+        })
+        .await
+        .expect("open profile session (child must spawn + become healthy)");
+
+    let children = child_pids(sup.id());
+    assert_eq!(
+        children.len(),
+        1,
+        "expected exactly one profile child before killing the supervisor, saw {children:?}"
+    );
+    let child = children[0];
+
+    // SIGKILL: no handler, no unwinding, no Drop — the supervisor gets no
+    // chance to reap anything.
+    let _ = sup.kill();
+    let _ = sup.wait();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while is_running(child) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if is_running(child) {
+        // Do not leave the orphan behind just because the assertion failed —
+        // that would be this very defect, planted by its own regression test.
+        // SAFETY: a plain SIGKILL to a pid this test spawned.
+        unsafe { libc::kill(child as libc::pid_t, libc::SIGKILL) };
+        panic!(
+            "profile child {child} outlived its SIGKILLed supervisor — it has been reparented to \
+             init and holds this profile's credentials forever (FerroxLabs/wayland#1156)"
+        );
+    }
+}

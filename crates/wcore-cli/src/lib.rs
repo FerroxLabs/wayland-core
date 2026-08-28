@@ -41,6 +41,12 @@ pub mod acp_roster;
 // per-profile spawn/health-check/route/reap lifecycle lives here.
 pub mod profile_router;
 
+// FerroxLabs/wayland#1156: the parent-death channel a supervisor wires into
+// each `acp serve --profile` child. Lives beside the router (its only
+// producer) and `acp` (its only consumer), in the lib so its park loop is
+// unit-tested without spawning a supervisor.
+pub mod parent_channel;
+
 // v0.7.0 Task 3.B.2: `agent` subcommand — five flag-driven CRUD ops
 // (create / list / show / edit / delete) wrapping the
 // `wcore_agents_pack::factory` user-agent surface. Lives in the lib so
