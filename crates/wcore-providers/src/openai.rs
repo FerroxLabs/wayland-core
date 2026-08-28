@@ -308,6 +308,46 @@ impl OpenAIProvider {
                                 }));
                             }
                         }
+
+                        // #559: a tool-results turn can ALSO carry transient
+                        // product text. `AgentEngine::attach_transient_block`
+                        // attaches the per-turn skill hint (`Skill hint: …`),
+                        // the current-date line (`Current date: …`) and
+                        // PrePrompt plugin contributions to this same message.
+                        // Emitting only the `tool` rows dropped every one of
+                        // them at the wire, so on the OpenAI family all three
+                        // features reached the model on turn 1 and never again
+                        // — the Anthropic adapter carries them
+                        // (`anthropic_shared::build_messages` maps Text
+                        // alongside `tool_result` in one message), so this was
+                        // an adapter parity hole, not a wire constraint.
+                        //
+                        // Re-emitted as a TRAILING user turn: after the tool
+                        // rows, where the engine intends this content to sit,
+                        // so it stays out of the cached prefix instead of
+                        // shifting it. Only the request tail ever carries these
+                        // blocks (`request.messages` is a per-turn clone and
+                        // history never receives them), so this adds at most
+                        // one trailing message per request.
+                        let transient: String = msg
+                            .content
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Text { text } = b {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let transient = strip_patterns_from_text(&transient, compat);
+                        if !transient.is_empty() {
+                            result.push(json!({
+                                "role": "user",
+                                "content": transient
+                            }));
+                        }
                     } else {
                         let text: String = msg
                             .content
