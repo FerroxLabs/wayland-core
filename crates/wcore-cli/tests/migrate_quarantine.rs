@@ -165,6 +165,7 @@ fn mcp(command: Option<&str>) -> McpServerConfig {
         deferred: None,
         allow_local: false,
         only_for_assistant: None,
+        allowed_tools: None,
     }
 }
 

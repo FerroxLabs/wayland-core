@@ -853,6 +853,7 @@ fn mcp_config_from_target(target: &str) -> Result<wcore_config::config::McpServe
             deferred: Some(false),
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         });
     }
     let mut parts = target.split_whitespace();
@@ -872,6 +873,7 @@ fn mcp_config_from_target(target: &str) -> Result<wcore_config::config::McpServe
         deferred: Some(false),
         allow_local: false,
         only_for_assistant: None,
+        allowed_tools: None,
     })
 }
 
@@ -3027,6 +3029,7 @@ impl TuiEngine {
                     &name,
                     &builtin_names,
                     config.deferred.unwrap_or(true),
+                    config.allowed_tools.as_deref(),
                     &defer_cold,
                 );
                 let mut tool_names: Vec<String> = reg

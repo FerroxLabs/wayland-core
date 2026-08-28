@@ -69,6 +69,7 @@ fn config_with_a_server_that_never_speaks(pid_file: &std::path::Path) -> Config 
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         },
     )]);
     config

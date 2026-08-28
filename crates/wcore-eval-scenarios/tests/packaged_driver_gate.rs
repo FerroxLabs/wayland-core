@@ -217,6 +217,7 @@ async fn write_fixture_binding(
             deferred: Some(false),
             allow_local: true,
             only_for_assistant: None,
+            allowed_tools: None,
         },
     );
     let manager = McpManager::connect_all(&configs)

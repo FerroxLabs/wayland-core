@@ -22,6 +22,7 @@ async fn assert_http_round_trip(mode: McpHttpMode, transport: TransportType) {
             deferred: Some(false),
             allow_local: true,
             only_for_assistant: None,
+            allowed_tools: None,
         },
     );
 
@@ -94,6 +95,7 @@ async fn stdio_round_trip_uses_portable_fixture_binary() {
             deferred: Some(false),
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         },
     );
 

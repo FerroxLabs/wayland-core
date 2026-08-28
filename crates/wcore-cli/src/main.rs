@@ -3977,6 +3977,7 @@ fn to_mcp_server_config(
     url: Option<String>,
     headers: Option<HashMap<String, String>>,
     allow_local: bool,
+    allowed_tools: Option<Vec<String>>,
 ) -> Result<McpServerConfig, String> {
     let transport_type = match transport {
         "stdio" => TransportType::Stdio,
@@ -3994,6 +3995,7 @@ fn to_mcp_server_config(
         deferred: Some(false),
         allow_local,
         only_for_assistant: None,
+        allowed_tools,
     })
 }
 
@@ -5445,6 +5447,7 @@ async fn run_json_stream_mode(
                 url,
                 headers,
                 allow_local,
+                allowed_tools,
             } => {
                 if let Some(reason) = mcp_add_request_rejection(
                     &name,
@@ -5482,6 +5485,7 @@ async fn run_json_stream_mode(
                     url,
                     headers,
                     allow_local,
+                    allowed_tools,
                 ) {
                     Ok(c) => c,
                     Err(e) => {
@@ -5639,6 +5643,7 @@ async fn run_json_stream_mode(
                                     &name,
                                     &builtin_names,
                                     config.deferred.unwrap_or(true),
+                                    config.allowed_tools.as_deref(),
                                     &defer_cold,
                                 );
                             }
@@ -6979,6 +6984,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .expect("valid MCP config");
 
@@ -8975,6 +8981,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .expect("valid test server config"),
         )]);
@@ -9118,6 +9125,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .expect("valid test server config"),
         )]);
@@ -9208,6 +9216,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .expect("valid test server config"),
         )]);
@@ -9387,6 +9396,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .expect("valid test server config"),
         )]);
@@ -9487,6 +9497,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .expect("valid test server config"),
         )]);

@@ -235,6 +235,17 @@ pub fn register_mcp_tools(
     for (server_name, tool_def) in &all_tools {
         let original_name = &tool_def.name;
 
+        // #998 - the operator's per-tool selection for this server. A server
+        // with no config entry (plugin- or host-owned) and a config that
+        // declares no selection both mean "no restriction"; only a DECLARED
+        // list denies, and within one it denies by silence.
+        if !server_configs
+            .get(server_name)
+            .is_none_or(|config| config.allows_tool(original_name))
+        {
+            continue;
+        }
+
         // Check collision with built-in tools
         let collides_builtin = builtin_names.iter().any(|n| n == original_name);
 
@@ -301,6 +312,7 @@ pub fn register_single_server_tools(
     server_name: &str,
     builtin_names: &[String],
     deferred: bool,
+    allowed_tools: Option<&[String]>,
     defer_cold: &wcore_config::tools::DeferColdConfig,
 ) {
     let all_tools = manager.all_tools();
@@ -311,6 +323,12 @@ pub fn register_single_server_tools(
 
     for (_, tool_def) in &server_tools {
         let original_name = &tool_def.name;
+        // #998 - same predicate as the boot seam, via the same helper, so a
+        // `list_changed` re-registration cannot resurrect a tool the operator
+        // switched off (this function drops and re-adds the server WHOLESALE).
+        if !wcore_config::config::tool_allows(allowed_tools, original_name) {
+            continue;
+        }
         let collides_builtin = builtin_names.iter().any(|n| n == original_name);
         let cross_server_collision = manager.tool_name_count(original_name) > 1;
 
@@ -421,10 +439,12 @@ pub async fn refresh_changed_mcp_tools(
     let mut refreshed = Vec::new();
     for manager in managers {
         for server_name in manager.refresh_signalled_tools().await {
-            let deferred = server_configs
-                .get(&server_name)
-                .and_then(|config| config.deferred)
-                .unwrap_or(true);
+            let config = server_configs.get(&server_name);
+            let deferred = config.and_then(|config| config.deferred).unwrap_or(true);
+            // #998 - carried across the refresh from the same snapshot the boot
+            // registration used, so the tool set a `list_changed` produces is
+            // the one the operator authorized, not the one the server offers.
+            let allowed_tools = config.and_then(|config| config.allowed_tools.as_deref());
             registry.remove_mcp_server(&server_name);
             register_single_server_tools(
                 registry,
@@ -432,6 +452,7 @@ pub async fn refresh_changed_mcp_tools(
                 &server_name,
                 builtin_names,
                 deferred,
+                allowed_tools,
                 defer_cold,
             );
             refreshed.push(server_name);
@@ -517,6 +538,7 @@ mod tests {
             deferred,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         }
     }
 
@@ -915,7 +937,15 @@ mod tests {
         let mut registry = wcore_tools::registry::ToolRegistry::new();
         registry.refresh_tool_search_catalog(&defer_cold);
 
-        register_single_server_tools(&mut registry, &manager, "dynamic", &[], false, &defer_cold);
+        register_single_server_tools(
+            &mut registry,
+            &manager,
+            "dynamic",
+            &[],
+            false,
+            None,
+            &defer_cold,
+        );
 
         let result = registry
             .get("ToolSearch")

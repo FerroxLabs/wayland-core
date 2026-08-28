@@ -313,5 +313,6 @@ fn stdio_config(deferred: bool) -> wcore_config::config::McpServerConfig {
         deferred: Some(deferred),
         allow_local: false,
         only_for_assistant: None,
+        allowed_tools: None,
     }
 }

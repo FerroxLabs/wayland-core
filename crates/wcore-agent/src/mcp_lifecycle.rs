@@ -65,6 +65,7 @@ impl McpConfigIdentity {
             deferred: &'a Option<bool>,
             allow_local: bool,
             only_for_assistant: &'a Option<Vec<String>>,
+            allowed_tools: &'a Option<Vec<String>>,
         }
 
         fn sorted_entries(map: &Option<HashMap<String, String>>) -> Vec<(&String, &String)> {
@@ -87,6 +88,7 @@ impl McpConfigIdentity {
             deferred: &config.deferred,
             allow_local: config.allow_local,
             only_for_assistant: &config.only_for_assistant,
+            allowed_tools: &config.allowed_tools,
         };
         let bytes = serde_json::to_vec(&canonical)
             .expect("MCP configuration contains only infallibly serializable values");
@@ -459,6 +461,7 @@ mod tests {
             deferred: Some(true),
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         }
     }
 
