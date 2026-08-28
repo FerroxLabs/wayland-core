@@ -641,6 +641,58 @@ mod tests {
         );
     }
 
+    // --- #1166 red arm: a cache that never worked ---
+
+    /// The #559 leader session, verbatim: `cache_read` is pinned flat at 192
+    /// while `input_tokens` climbs, for a 3% hit ratio. A totally broken cache
+    /// is perfectly STABLE turn over turn, so the turn-over-turn delta test is
+    /// structurally blind to it. The detector must not call this Healthy.
+    #[test]
+    fn flat_cache_read_on_warm_session_is_not_healthy() {
+        let mut detector = CacheBreakDetector::new();
+        let trace = [(3225u64, 192u64), (6028, 192), (6256, 192), (7001, 192)];
+        let mut last = None;
+        for (input_tokens, cache_read_tokens) in trace {
+            detector.record_request("prompt", &make_tools());
+            last = detector.check_response(CacheStats {
+                input_tokens,
+                cache_read_tokens,
+                cache_creation_tokens: 0,
+            });
+        }
+        let diag = last.expect("detector must produce a diagnostic");
+        assert!(
+            !matches!(diag, CacheDiagnostic::Healthy { .. }),
+            "a 3% hit ratio held flat for four turns is not Healthy, got {diag:?}"
+        );
+    }
+
+    /// Control for the red arm above: a detector that always screams is as
+    /// useless as one that never does. A genuinely healthy trace — high hit
+    /// ratio, stable prefix — must stay Healthy for every turn, and must never
+    /// fire a health alert.
+    #[test]
+    fn genuinely_healthy_trace_stays_healthy() {
+        let mut detector = CacheBreakDetector::new();
+        for turn in 1..=6u64 {
+            detector.record_request("prompt", &make_tools());
+            let stats = CacheStats {
+                input_tokens: 400 + turn * 50,
+                cache_read_tokens: 40_000,
+                cache_creation_tokens: 0,
+            };
+            let diag = detector.check_response(stats.clone()).unwrap();
+            assert!(
+                matches!(diag, CacheDiagnostic::Healthy { .. }),
+                "turn {turn} of a healthy trace must stay Healthy, got {diag:?}"
+            );
+            assert!(
+                detector.check_cache_health(&stats).is_none(),
+                "turn {turn} of a healthy trace must not fire a health alert"
+            );
+        }
+    }
+
     #[test]
     fn no_diagnostic_without_record_request() {
         let mut detector = CacheBreakDetector::new();
