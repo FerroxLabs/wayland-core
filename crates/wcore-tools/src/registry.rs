@@ -554,6 +554,24 @@ pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
     }
 }
 
+/// Layer D1 follow-up (hydrated-tool admission): un-defer every def whose name
+/// the model has hydrated via `ToolSearch` this session, so the full schema
+/// ships and the tool is genuinely callable (providers validate tool calls
+/// against the CURRENT `tools[]` array).
+///
+/// `hydrated` is in FIRST-HYDRATION order.
+pub fn admit_hydrated_tools(defs: &mut Vec<ToolDef>, hydrated: &[String]) {
+    if hydrated.is_empty() {
+        return;
+    }
+    let wanted: std::collections::HashSet<&str> = hydrated.iter().map(String::as_str).collect();
+    for def in defs.iter_mut() {
+        if def.deferred && wanted.contains(def.name.as_str()) {
+            def.deferred = false;
+        }
+    }
+}
+
 /// Layer D3 (token-opt): fold every deferred def OUT of the
 /// tools[] array entirely, replacing the per-tool name-only stubs with ONE
 /// compact catalog line appended to ToolSearch's description. Measured on

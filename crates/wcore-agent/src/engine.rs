@@ -19455,18 +19455,7 @@ impl AgentEngine {
         if defer_cfg.enabled {
             wcore_tools::registry::apply_cold_deferral(&mut tools, &defer_cfg.hot_allowlist);
         }
-        if !self.hydrated_tool_names.is_empty() {
-            let hydrated: std::collections::HashSet<&str> = self
-                .hydrated_tool_names
-                .iter()
-                .map(String::as_str)
-                .collect();
-            for def in tools.iter_mut() {
-                if def.deferred && hydrated.contains(def.name.as_str()) {
-                    def.deferred = false;
-                }
-            }
-        }
+        wcore_tools::registry::admit_hydrated_tools(&mut tools, &self.hydrated_tool_names);
         if defer_cfg.enabled && defer_cfg.catalog {
             tools = wcore_tools::registry::fold_deferred_into_catalog(
                 tools,
