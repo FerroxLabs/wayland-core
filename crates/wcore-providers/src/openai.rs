@@ -589,25 +589,24 @@ impl OpenAIProvider {
     }
 
     fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
-        // Layer E1 (token-opt): serialize in a deterministic order — sorted
-        // by tool name — so the tools[] array is byte-identical across
-        // round-trips of one conversation regardless of registration /
-        // curation order. The array is part of the cached prompt prefix; a
-        // reordered array changes the prefix bytes and silently busts prompt
-        // caching. Schema / description / deferred are the DUPLICATE-NAME
-        // tiebreak: the registry does not forbid duplicate registration, and
-        // a name-only (stable) sort would keep input order for equal names —
-        // byte-unstable again.
-        let mut ordered: Vec<&ToolDef> = tools.iter().collect();
-        ordered.sort_by_cached_key(|t| {
-            (
-                t.name.clone(),
-                serde_json::to_string(&t.input_schema).unwrap_or_default(),
-                t.description.clone(),
-                t.deferred,
-            )
-        });
-        ordered
+        // Layer E1 (token-opt): serialize the tools[] array in the
+        // CALLER's order. It is part of the cached prompt prefix, so the
+        // engine builds it APPEND-ONLY — a tool admitted mid-session
+        // (a ToolSearch hydration, or MCP curation/cap union growth) is
+        // pushed at the TAIL and every earlier entry keeps its slot,
+        // leaving the cached prefix byte-identical.
+        //
+        // Do NOT re-sort here (FerroxLabs/wayland#1171). A name sort makes
+        // the array a pure function of its contents, but it converts every
+        // one of those appends into a mid-array INSERT: measured on a real
+        // leader session, three tools hydrated by one ToolSearch call landed
+        // at indices 1, 7 and 9, shifting the whole array and re-billing
+        // ~6,000 cached tokens. Input-order determinism is the caller's
+        // job and the engine already guarantees it (registration is a fixed
+        // statement sequence; the curation and cap keep-sets are
+        // inventory-keyed append-only unions that reset only when the
+        // inventory itself moves).
+        tools
             .iter()
             .map(|t| {
                 if t.deferred {
@@ -4623,8 +4622,9 @@ mod tests {
             .collect();
         assert_eq!(
             fn_names,
-            vec!["Bash", "Read"],
-            "every function tool must survive alongside grounding (sorted by name)"
+            vec!["Read", "Bash"],
+            "every function tool must survive alongside grounding, in the \
+             caller's order (#1171: the encoder does not re-sort)"
         );
     }
 
@@ -5906,10 +5906,17 @@ mod tests {
     }
 
     /// Layer E1 regression guard: the serialized tools[] array must be
-    /// byte-identical across two consecutive round-trips of one conversation
-    /// — even when the input ToolDef order differs (registration vs curation
-    /// order). The array is part of the cached prompt prefix; any byte drift
-    /// silently busts prompt caching.
+    /// byte-identical across two consecutive round-trips of one conversation,
+    /// and — FerroxLabs/wayland#1171 — a tool ADMITTED on a later turn (a
+    /// ToolSearch hydration, or MCP curation/cap union growth) must leave the
+    /// earlier array as an exact serialized PREFIX. The array is part of the
+    /// cached prompt prefix; any byte drift ahead of the growth point silently
+    /// busts prompt caching and re-bills the whole prompt.
+    ///
+    /// The encoder therefore preserves the CALLER's order. It deliberately
+    /// does NOT re-sort by name: a name sort is invariant to input order, but
+    /// that invariance is bought by turning every append into a mid-array
+    /// insert, which is the defect #1171 records.
     #[test]
     fn tools_array_byte_stable_across_roundtrips() {
         let read = ToolDef {
@@ -5940,42 +5947,36 @@ mod tests {
         let turn2 = serde_json::to_string(&OpenAIProvider::build_tools(&defs)).unwrap();
         assert_eq!(turn1, turn2, "same input must serialize byte-identically");
 
-        // A build from a reordered input (e.g. a curation pass shuffled the
-        // registry order mid-conversation) must STILL be byte-identical.
-        let reordered =
-            serde_json::to_string(&OpenAIProvider::build_tools(&[spawn, bash, read])).unwrap();
+        // #1171: the caller's order is preserved verbatim. A name sort would
+        // emit Bash first here and, on the engine's append-only tool list,
+        // scatter every later admission into the middle of the array.
+        let wire = OpenAIProvider::build_tools(&defs);
+        let names: Vec<&str> = wire
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
         assert_eq!(
-            turn1, reordered,
-            "reordered input must serialize byte-identically (deterministic name sort)"
+            names,
+            ["Read", "Bash", "SpawnTool"],
+            "the encoder must serialize in the caller's order, not name order"
         );
 
-        // DUPLICATE names must not reintroduce input-order dependence: the
-        // registry does not forbid duplicate registration, and a stable
-        // name-only sort keeps input order for equal names. The
-        // schema/description tiebreak makes duplicates order-independent too.
-        let dup_a = ToolDef {
-            name: "Read".into(),
-            description: "Read a file (duplicate registration)".into(),
-            input_schema: serde_json::json!({"type": "object", "properties": {"offset": {"type": "integer"}}}),
+        // #1171: a tool ADMITTED on a later turn (ToolSearch hydration, or
+        // curation/cap union growth) is appended at the tail by the engine.
+        // The earlier turn's array must survive as an exact serialized prefix.
+        let mut grown = defs.clone();
+        grown.push(ToolDef {
+            name: "Delegate".into(),
+            description: "Delegate to a sub-agent".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"task": {"type": "string"}}}),
             deferred: false,
             server: None,
-        };
-        let dup_b = ToolDef {
-            name: "Read".into(),
-            description: "Read a file".into(),
-            input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
-            deferred: false,
-            server: None,
-        };
-        let one = serde_json::to_string(&OpenAIProvider::build_tools(&[
-            dup_a.clone(),
-            dup_b.clone(),
-        ]))
-        .unwrap();
-        let other = serde_json::to_string(&OpenAIProvider::build_tools(&[dup_b, dup_a])).unwrap();
+        });
+        let after = OpenAIProvider::build_tools(&grown);
         assert_eq!(
-            one, other,
-            "duplicate names must serialize byte-identically regardless of input order"
+            serde_json::to_string(&after[..defs.len()]).unwrap(),
+            turn1,
+            "an appended tool must not rewrite the cached tools[] prefix"
         );
     }
 

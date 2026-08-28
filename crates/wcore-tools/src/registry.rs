@@ -559,17 +559,42 @@ pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
 /// ships and the tool is genuinely callable (providers validate tool calls
 /// against the CURRENT `tools[]` array).
 ///
+/// Cache stability (FerroxLabs/wayland#1171): an admitted tool is APPENDED at
+/// the tail, in `hydrated`'s FIRST-HYDRATION order — it is NOT reinstated at
+/// the registry position it held while deferred. The `tools[]` array sits in
+/// the cached prompt prefix, so a mid-array reinstatement rewrites every byte
+/// after it and re-bills the whole prompt uncached; appending keeps the prefix
+/// byte-identical and makes each hydration cost exactly its own new entries.
+/// A hydrated name that was never deferred is already in the stable base and
+/// is left where it is.
+///
 /// `hydrated` is in FIRST-HYDRATION order.
 pub fn admit_hydrated_tools(defs: &mut Vec<ToolDef>, hydrated: &[String]) {
     if hydrated.is_empty() {
         return;
     }
     let wanted: std::collections::HashSet<&str> = hydrated.iter().map(String::as_str).collect();
-    for def in defs.iter_mut() {
-        if def.deferred && wanted.contains(def.name.as_str()) {
+    let mut admitted: Vec<ToolDef> = Vec::new();
+    let mut index = 0;
+    while index < defs.len() {
+        if defs[index].deferred && wanted.contains(defs[index].name.as_str()) {
+            let mut def = defs.remove(index);
             def.deferred = false;
+            admitted.push(def);
+        } else {
+            index += 1;
         }
     }
+    // First-hydration order: an already-admitted tool holds its tail slot and
+    // a newly hydrated one appends after it, so a second hydration is another
+    // append rather than an insert between the first one's entries.
+    admitted.sort_by_key(|def| {
+        hydrated
+            .iter()
+            .position(|name| name == &def.name)
+            .unwrap_or(usize::MAX)
+    });
+    defs.extend(admitted);
 }
 
 /// Layer D3 (token-opt): fold every deferred def OUT of the
@@ -597,9 +622,6 @@ pub fn fold_deferred_into_catalog(
     mut defs: Vec<ToolDef>,
     catalog_max_chars: usize,
 ) -> Vec<ToolDef> {
-    if !defs.iter().any(|d| d.deferred) {
-        return defs;
-    }
     if !defs.iter().any(|d| !d.deferred && d.name == "ToolSearch") {
         return defs;
     }
@@ -609,12 +631,22 @@ pub fn fold_deferred_into_catalog(
         .map(|d| d.name.clone())
         .collect();
     defs.retain(|d| !d.deferred);
-    let catalog = render_deferred_catalog(&names, catalog_max_chars);
-    for def in defs.iter_mut() {
-        if def.name == "ToolSearch" {
-            def.description = format!("{} {}", def.description.trim_end(), catalog);
-            break;
+    // Cache stability (FerroxLabs/wayland#1171): the catalog line is the ONE
+    // part of a hydrating session's tools[] that legitimately changes — the
+    // hydrated names leave the deferred list. Carried mid-array it would
+    // rewrite every byte from its slot onward on the turn after any
+    // hydration, which is the same whole-prefix invalidation a mid-array
+    // admission causes. The carrier therefore moves to the TAIL: everything
+    // ahead of it stays byte-identical for the life of the conversation.
+    // `defs` is already free of deferred entries, so this finds the live
+    // ToolSearch the guard above proved is present.
+    if let Some(index) = defs.iter().position(|d| d.name == "ToolSearch") {
+        let mut carrier = defs.remove(index);
+        if !names.is_empty() {
+            let catalog = render_deferred_catalog(&names, catalog_max_chars);
+            carrier.description = format!("{} {}", carrier.description.trim_end(), catalog);
         }
+        defs.push(carrier);
     }
     defs
 }
