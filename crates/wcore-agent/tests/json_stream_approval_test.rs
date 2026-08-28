@@ -29,11 +29,105 @@ fn token_usage(input: u64, output: u64) -> TokenUsage {
     }
 }
 
+/// An exec-category tool that COUNTS its executions.
+///
+/// `ExecMockTool` cannot say whether it ran, which is why the two gate tests
+/// below could not tell an approved run from an ungated one. The count is the
+/// only thing that distinguishes "the engine parked, was answered, and then
+/// dispatched" from "the engine never gated at all" — the canned second
+/// provider turn is identical either way.
+struct CountingExecTool {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl CountingExecTool {
+    fn new() -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            Self {
+                calls: calls.clone(),
+            },
+            calls,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl wcore_tools::Tool for CountingExecTool {
+    fn name(&self) -> &str {
+        "exec_tool"
+    }
+    fn description(&self) -> &str {
+        "Counting mock exec tool"
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+    fn category(&self) -> wcore_protocol::events::ToolCategory {
+        wcore_protocol::events::ToolCategory::Exec
+    }
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        false
+    }
+    async fn execute(&self, _input: serde_json::Value) -> wcore_types::tool::ToolResult {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        wcore_types::tool::ToolResult {
+            content: "tool output".to_string(),
+            is_error: false,
+        }
+    }
+}
+
+/// Wait for the engine to REGISTER a pending approval for `call_id`, then
+/// answer it. Returns the tool name the manager had parked under that id, or
+/// `None` if nothing was ever pending.
+///
+/// This replaces a resolver that computed `let has_pending = { true };` and
+/// then resolved unconditionally: a `resolve` for an id that is not pending is
+/// a no-op, so that loop answered nothing and proved nothing. `pending_tool_name`
+/// is the manager's own view of its pending map, so `Some(..)` here is the
+/// engine having actually parked the turn on the gate.
+fn answer_when_parked(
+    manager: Arc<ToolApprovalManager>,
+    call_id: &'static str,
+    result: ToolApprovalResult,
+) -> tokio::task::JoinHandle<Option<String>> {
+    tokio::spawn(async move {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(name) = manager.pending_tool_name(call_id) {
+                manager.resolve(call_id, result);
+                return Some(name);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // test: tool approval approve flow
 //
 // LLM requests exec_tool → engine pauses at approval_manager.request_approval
-// → background task resolves with Approved → tool executes → LLM continues
+// → background task observes the PENDING request and resolves it Approved →
+// tool executes → LLM continues.
+//
+// # What this used to assert, and why it was not enough
+//
+// The resolver computed `let has_pending = { true };` and the test graded only
+// the canned second provider turn (`result.text == "Done"`) and `turns == 2`.
+// Both of those are produced by the mock regardless of whether an approval
+// gate exists, so neither could see the gate. **Measured:** with
+// `needs_approval` forced to `false` in `orchestration/mod.rs` — the whole HITL
+// gate removed, every exec tool dispatching unasked — this test and the deny
+// test below both passed.
+//
+// The two additions are the two facts the claim rests on: the engine PARKED
+// (the manager really held a pending entry under this call id), and the tool
+// really RAN after the approval.
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_tool_approval_approve_flow() {
@@ -67,8 +161,9 @@ async fn test_tool_approval_approve_flow() {
     let mut config = test_config();
     config.tools.auto_approve = false;
 
+    let (tool, calls) = CountingExecTool::new();
     let mut registry = ToolRegistry::new();
-    registry.register(Box::new(ExecMockTool::new("exec_tool", "tool output")));
+    registry.register(Box::new(tool));
 
     let output = silent_output();
     let approval_manager = Arc::new(ToolApprovalManager::new());
@@ -78,28 +173,29 @@ async fn test_tool_approval_approve_flow() {
     engine.set_approval_manager(approval_manager.clone());
     engine.set_protocol_writer(writer);
 
-    // Spawn a task that approves the tool call after a short delay
-    let am = approval_manager.clone();
-    tokio::spawn(async move {
-        // Wait until the approval request appears
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            let has_pending = {
-                // Check if there's a pending request by trying to resolve a known id
-                // We know the call_id is "call-1" from the mock
-                true
-            };
-            if has_pending {
-                am.resolve("call-1", ToolApprovalResult::Approved { answer: None });
-                break;
-            }
-        }
-    });
+    let resolver = answer_when_parked(
+        approval_manager.clone(),
+        "call-1",
+        ToolApprovalResult::Approved { answer: None },
+    );
 
     let result = engine
         .run("Use the tool", "msg-1")
         .await
         .expect("should succeed");
+    let parked = resolver.await.expect("resolver task must not panic");
+
+    assert_eq!(
+        parked.as_deref(),
+        Some("exec_tool"),
+        "the engine never registered a pending approval for call-1, so the turn did not park \
+         on the gate and the approval below answered nothing"
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "an APPROVED tool must actually be dispatched exactly once"
+    );
     assert_eq!(result.text, "Done");
     assert_eq!(result.turns, 2);
 }
@@ -107,8 +203,12 @@ async fn test_tool_approval_approve_flow() {
 // ---------------------------------------------------------------------------
 // test: tool approval deny flow
 //
-// LLM requests exec_tool → engine pauses → background resolves with Denied
-// → tool_cancelled → denial fed back to LLM → LLM responds with text
+// LLM requests exec_tool → engine pauses → background observes the pending
+// request and resolves it Denied → tool is NOT executed → the denial is fed
+// back to the LLM → LLM responds with text.
+//
+// The tool-call count is the assertion that makes "denied" mean anything: the
+// canned second turn says "Cannot run tool" whether or not the tool ran.
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_tool_approval_deny_flow() {
@@ -142,8 +242,9 @@ async fn test_tool_approval_deny_flow() {
     let mut config = test_config();
     config.tools.auto_approve = false;
 
+    let (tool, calls) = CountingExecTool::new();
     let mut registry = ToolRegistry::new();
-    registry.register(Box::new(ExecMockTool::new("exec_tool", "tool output")));
+    registry.register(Box::new(tool));
 
     let output = silent_output();
     let approval_manager = Arc::new(ToolApprovalManager::new());
@@ -153,21 +254,32 @@ async fn test_tool_approval_deny_flow() {
     engine.set_approval_manager(approval_manager.clone());
     engine.set_protocol_writer(writer);
 
-    let am = approval_manager.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        am.resolve(
-            "call-2",
-            ToolApprovalResult::Denied {
-                reason: "policy violation".into(),
-            },
-        );
-    });
+    let resolver = answer_when_parked(
+        approval_manager.clone(),
+        "call-2",
+        ToolApprovalResult::Denied {
+            reason: "policy violation".into(),
+        },
+    );
 
     let result = engine
         .run("Use the tool", "msg-2")
         .await
         .expect("should succeed");
+    let parked = resolver.await.expect("resolver task must not panic");
+
+    assert_eq!(
+        parked.as_deref(),
+        Some("exec_tool"),
+        "the engine never registered a pending approval for call-2: nothing was denied, the \
+         tool simply was not gated"
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a DENIED tool must never be dispatched - this is the whole of what the denial buys, \
+         and the canned reply text below is identical either way"
+    );
     assert_eq!(result.text, "Cannot run tool");
     assert_eq!(result.turns, 2);
 }
