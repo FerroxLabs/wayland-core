@@ -70,8 +70,7 @@ impl wcore_tools::Tool for CountingExecTool {
         false
     }
     async fn execute(&self, _input: serde_json::Value) -> wcore_types::tool::ToolResult {
-        self.calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         wcore_types::tool::ToolResult {
             content: "tool output".to_string(),
             is_error: false,

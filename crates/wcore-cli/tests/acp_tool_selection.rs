@@ -314,14 +314,16 @@ async fn hallucinated_bash_under(
 /// selection of `["Read"]`, and grades the `tool_result` that comes back.
 #[tokio::test]
 async fn a_deselected_tool_refuses_a_hallucinated_call() {
-    let results =
-        hallucinated_bash_under(vec![tool_def("Read")], "99999999-1111-2222-3333-dddddddddddd")
-            .await;
+    let results = hallucinated_bash_under(
+        vec![tool_def("Read")],
+        "99999999-1111-2222-3333-dddddddddddd",
+    )
+    .await;
 
-    let (is_error, content) = results
-        .first()
-        .expect("the hallucinated call must be ANSWERED - no tool_result means the turn never \
-                 got as far as dispatch and nothing below is being measured");
+    let (is_error, content) = results.first().expect(
+        "the hallucinated call must be ANSWERED - no tool_result means the turn never \
+                 got as far as dispatch and nothing below is being measured",
+    );
     assert!(
         is_error,
         "a call to a deselected tool must come back as an ERROR result; got: {content:?}"
@@ -352,8 +354,7 @@ async fn a_deselected_tool_refuses_a_hallucinated_call() {
 /// but "Unknown tool" is the registry's answer and is the same everywhere.
 #[tokio::test]
 async fn the_same_call_is_dispatched_when_nothing_is_deselected() {
-    let results =
-        hallucinated_bash_under(Vec::new(), "99999999-1111-2222-3333-eeeeeeeeeeee").await;
+    let results = hallucinated_bash_under(Vec::new(), "99999999-1111-2222-3333-eeeeeeeeeeee").await;
 
     let (_, content) = results
         .first()
