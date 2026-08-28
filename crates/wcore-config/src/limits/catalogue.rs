@@ -95,7 +95,7 @@ pub(super) const CATALOGUE_CEILINGS: &[(&str, u32, u32)] = &[
     // 128,000 for the same ids, so 128,000 is the floor across vendors.
     // Context: 5.3/5.2 are the 1M generation; 5.1/5/4.7 report 200,000-204,800
     // depending on tenant, so 200,000.
-    ("glm-5.3", 128_000, 1_000_000),
+    ("glm-5.3", 131_072, 1_000_000),
     ("glm-5.2", 128_000, 1_000_000),
     ("glm-5.1", 128_000, 200_000),
     // Bare `glm-5` LAST in the 5.x group -- it is a substring of every id
@@ -113,11 +113,14 @@ pub(super) const CATALOGUE_CEILINGS: &[(&str, u32, u32)] = &[
     // 3.8-flash was MISSING and the release-time freshness gate refused the
     // v0.13.9 cut over it: served first-party by `alibaba-token-plan` at
     // 1,000,000 / 131,072, it matched no arm, fell to the `CompactConfig`
-    // default and was silently mis-sized. It carries the same 128,000 as its
-    // -max sibling rather than the vendor's 131,072 -- the same deliberate
-    // few-percent under-claim, which the gate accepts by design.
-    ("qwen3.8-max", 128_000, 1_000_000),
-    ("qwen3.8-flash", 128_000, 1_000_000),
+    // default and was silently mis-sized.
+    //
+    // Both 3.8 arms now carry the vendor's 131,072 rather than a rounded-down
+    // 128,000. Rounding down is only free while a model has NO arm; once an arm
+    // exists it is the ENFORCED cap, so 128,000 was quietly removing 3,072
+    // tokens of output that every vendor row grants.
+    ("qwen3.8-max", 131_072, 1_000_000),
+    ("qwen3.8-flash", 131_072, 1_000_000),
     ("qwen3.7-max", 64_000, 1_000_000),
     ("qwen3.7-plus", 64_000, 1_000_000),
     ("qwen3.7-flash", 64_000, 1_000_000),
@@ -139,7 +142,7 @@ pub(super) const CATALOGUE_CEILINGS: &[(&str, u32, u32)] = &[
     // (8 rows for k2.5, 4 for k2.7-code), not the lone 16,384 outlier -- see
     // the omitted-max-tokens note above for why the lowest row is the wrong
     // floor here.
-    ("kimi-k3", 128_000, 1_000_000),
+    ("kimi-k3", 131_072, 1_048_576),
     ("kimi-k2.7", 32_768, 256_000),
     ("kimi-k2.6", 32_768, 256_000),
     ("kimi-k2.5", 32_768, 256_000),
@@ -241,7 +244,7 @@ mod tests {
         // real windows.
         assert_eq!(
             model_output_ceiling("z-ai", "glm-5.3"),
-            Some((128_000, 1_000_000)),
+            Some((131_072, 1_000_000)),
             "glm-5.3 must NOT inherit the bare glm-5 200k window"
         );
         assert_eq!(
@@ -300,13 +303,13 @@ mod tests {
         // rather than only if its numbers change.
         assert_eq!(
             model_output_ceiling("alibaba", "qwen3.8-flash"),
-            Some((128_000, 1_000_000)),
+            Some((131_072, 1_000_000)),
             "qwen3.8-flash must not inherit the CompactConfig default"
         );
         assert_ne!(
             model_output_ceiling("alibaba", "qwen3.8-flash"),
             model_output_ceiling("alibaba", "qwen3.7-flash"),
-            "3.8-flash is a 128k-output tier; 3.7-flash is 64k"
+            "3.8-flash is a 131,072-output tier; 3.7-flash is 64,000"
         );
     }
 
@@ -315,13 +318,21 @@ mod tests {
         // Vendor rows (`zhipuai`, `zai`, both coding-plan tenants) at the
         // 2026-08-27 snapshot. 5.3/5.2 are the 1M generation; 5.1/5/4.7 are
         // 200k-204,800 depending on tenant, so 200,000.
-        for id in ["glm-5.3", "glm-5.3-flash", "glm-5.3-highspeed", "glm-5.2"] {
+        // 5.3 and 5.2 part company on OUTPUT: both vendor rows for 5.3 say
+        // 131,072, while 5.2 is split 128,000/131,072 across its vendors and so
+        // keeps the lower figure. Same 1M window either way.
+        for id in ["glm-5.3", "glm-5.3-flash", "glm-5.3-highspeed"] {
             assert_eq!(
                 model_output_ceiling("z-ai", id),
-                Some((128_000, 1_000_000)),
+                Some((131_072, 1_000_000)),
                 "{id} must report the GLM 1M-generation limits"
             );
         }
+        assert_eq!(
+            model_output_ceiling("z-ai", "glm-5.2"),
+            Some((128_000, 1_000_000)),
+            "glm-5.2 keeps the lower output its vendors disagree over"
+        );
         for id in ["glm-5.1", "glm-5", "glm-5-turbo", "glm-5v-turbo", "glm-4.7"] {
             assert_eq!(
                 model_output_ceiling("zhipuai", id),
@@ -338,7 +349,7 @@ mod tests {
         // Case-insensitive, consistent with the rest of the lookup.
         assert_eq!(
             model_output_ceiling("z-ai", "GLM-5.3"),
-            Some((128_000, 1_000_000))
+            Some((131_072, 1_000_000))
         );
     }
 
@@ -346,11 +357,11 @@ mod tests {
     fn qwen_api_tiers_resolve_to_alibaba_consensus() {
         assert_eq!(
             model_output_ceiling("alibaba", "qwen3.8-max"),
-            Some((128_000, 1_000_000))
+            Some((131_072, 1_000_000))
         );
         assert_eq!(
             model_output_ceiling("alibaba", "qwen3.8-max-preview"),
-            Some((128_000, 1_000_000))
+            Some((131_072, 1_000_000))
         );
         for id in [
             "qwen3.7-max",
@@ -374,7 +385,7 @@ mod tests {
         for id in ["kimi-k3", "kimi-k3-fast", "kimi-k3-eco", "kimi-k3@eu"] {
             assert_eq!(
                 model_output_ceiling("moonshotai", id),
-                Some((128_000, 1_000_000)),
+                Some((131_072, 1_048_576)),
                 "{id} must report the K3 1M window"
             );
         }
@@ -389,7 +400,7 @@ mod tests {
         }
         assert_eq!(
             model_output_ceiling("moonshotai", "Kimi-K3"),
-            Some((128_000, 1_000_000))
+            Some((131_072, 1_048_576))
         );
     }
 

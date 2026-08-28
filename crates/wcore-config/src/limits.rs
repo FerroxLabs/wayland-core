@@ -245,10 +245,12 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     // arm-revokes-omission mistake as DeepSeek above, costing 4x. `minimax` is
     // the only vendor-operated provider serving it and reports
     // 1,048,576 / 512,000 (models.dev, 2026-08-28). The context stays at the
-    // slightly conservative 1,000,000: 4.7% under a real window only compacts
-    // marginally early, whereas output is a hard cap on what the user gets.
+    // Both numbers are the vendor's, exactly. The context was 1,000,000 against
+    // a published 1,048,576 — only 4.7%, but there is no reason to round DOWN a
+    // figure the vendor states unanimously, and rounding it down is what makes a
+    // 1M model start compacting before it has to.
     if m.contains("minimax-m3") {
-        return Some((512_000, 1_000_000));
+        return Some((512_000, 1_048_576));
     }
     if m.contains("minimax-m2.1") || m.contains("minimax-m2.5") || m.contains("minimax-m2.7") {
         return Some((128_000, 204_800));
@@ -459,7 +461,7 @@ mod tests {
         // MiniMax platform docs + models.dev, 2026-07-04).
         assert_eq!(
             model_output_ceiling("minimax", "MiniMax-M3"),
-            Some((512_000, 1_000_000))
+            Some((512_000, 1_048_576))
         );
         // The point releases are 204,800...
         for id in ["MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2.7"] {
@@ -727,7 +729,7 @@ mod tests {
         );
         assert_eq!(
             model_output_ceiling("minimax", "MiniMax-M3"),
-            Some((512_000, 1_000_000))
+            Some((512_000, 1_048_576))
         );
     }
 
