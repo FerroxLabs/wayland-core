@@ -4379,7 +4379,9 @@ pub struct AgentEngine {
     /// routing. Minted ONCE at construction with a v4 UUID and threaded onto
     /// every `LlmRequest` as `conversation_id`; the Flux provider emits it as
     /// the `x-wl-conversation-id` request header on tier-alias turns. Survives
-    /// `/clear` and `/resume` so a continued session keeps routing affinity.
+    /// `/clear` and `/resume` so a continued session keeps routing affinity —
+    /// #1161: persisted on the session record (`Session::conversation_id`) and
+    /// restored by every resume surface, not only the crash-recovery ones.
     conversation_id: String,
     /// #863 F2 — loop-ownership provenance stamped onto every `LlmRequest` this
     /// engine builds. `Some(ClientOwned("anvil"))` on an Anvil builder fork, so
@@ -4855,6 +4857,12 @@ impl AgentEngine {
         // `new_with_provider` for the rationale).
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
+        // #1161 — read the persisted conversation id BEFORE `session` is moved
+        // into `current_session` below.
+        let resumed_conversation_id = session
+            .conversation_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
         let confirmer = ToolConfirmer::with_policy(
             config.smart_approval_policy(),
@@ -5064,9 +5072,17 @@ impl AgentEngine {
             web_search: false,
             pending_hook_actions: Vec::new(),
             pending_hook_phase_consumptions: Vec::new(),
-            // #282: mint the stable Flux conversation id once per engine. A
-            // resumed session gets a fresh id (sticky routing is best-effort).
-            conversation_id: uuid::Uuid::new_v4().to_string(),
+            // #282 / #1161: RESTORE the persisted conversation id rather than
+            // minting a new one. This is the ordinary `--resume` / `--continue`
+            // path, and it was the only resume surface that did not carry the
+            // id forward — the three crash-recovery paths already restore it
+            // from the checkpoint. A fresh id here silently dropped the Flux
+            // sticky-routing affinity and started a SECOND cache-ledger record
+            // for a session the operator sees as one.
+            //
+            // `None` means the session predates the field, so there is no id to
+            // restore and a fresh one is the only honest answer.
+            conversation_id: resumed_conversation_id,
             flux_loop_collisions: 0,
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
@@ -5396,6 +5412,10 @@ impl AgentEngine {
         // releases the old session's lease only after B is fully available.
         session.messages = canonical_messages.clone();
         let session_id = session.id.clone();
+        let switched_conversation_id = session
+            .conversation_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let session_usage = session.total_usage.clone();
         self.messages = canonical_messages;
         self.total_usage = session_usage.clone();
@@ -5435,7 +5455,14 @@ impl AgentEngine {
         self.session_start_injected_len = 0;
         self.pending_hook_actions.clear();
         self.pending_hook_phase_consumptions.clear();
-        self.conversation_id = uuid::Uuid::new_v4().to_string();
+        // #1161 — this is the live TUI `/resume`: its only caller loads an
+        // EXISTING persisted session (`SessionManager::load_for_run`) and moves
+        // this engine onto it. That is the same user-visible operation as
+        // `--resume`, so it takes the same rule — adopt the session's own
+        // conversation id, and mint only when there is none to adopt. The
+        // ledger for the session being LEFT was already sealed by
+        // `cache_ledger.rotate()` above, so nothing bleeds between the two.
+        self.conversation_id = switched_conversation_id;
         self.flux_served_window = None;
         self.flux_context_pressure = None;
         self.smart_compact_armed = true;
@@ -11984,6 +12011,7 @@ impl AgentEngine {
         //      yet (F-034 deferred write).  Call persist_first_message which
         //      does the initial session + index write AND the WAL append.
         //   b) Subsequent messages: session file exists; just append WAL.
+        let conversation_id = self.conversation_id.clone();
         if !resume_from_checkpoint
             && let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session)
         {
@@ -11991,6 +12019,9 @@ impl AgentEngine {
             if is_first_message {
                 session.messages = self.messages.clone();
                 session.updated_at = chrono::Utc::now();
+                // #1161 — the first persist is what makes the id durable, so a
+                // later `--resume` has something to restore.
+                session.conversation_id = Some(conversation_id);
                 if let Err(e) = mgr.persist_first_message(session) {
                     self.output
                         .emit_error(&format!("Failed to persist first message: {}", e), false);
@@ -17037,7 +17068,9 @@ impl AgentEngine {
     /// 1. **The uncached counterfactual is priced through the same catalog**
     ///    as the real cost, with every cached token moved back into the plain
     ///    input bucket. A "saving" derived from a different price source than
-    ///    the spend it is subtracted from is not a measurement.
+    ///    the spend it is subtracted from is not a measurement — and when the
+    ///    catalog cannot price it at all, neither is a saving derived from a
+    ///    zero (#1163). It is recorded as `None` in that case, not as `0.0`.
     /// 2. **`priced` is carried, not discarded.** `resolve_turn_cost` already
     ///    knows whether the catalog could price this provider×model;
     ///    forgetting that turns "we cannot price this" into "$0.00 spent".
@@ -17102,6 +17135,13 @@ impl AgentEngine {
         };
         // The counterfactual: the same work with no prompt cache at all, so
         // every cached token is billed as ordinary input.
+        //
+        // #1163 — kept ONLY when it is a price. `resolve_turn_cost` also
+        // returns a provider-family preset ceiling (`priced = false`), and
+        // subtracting a real billed figure from a ceiling is not a measurement.
+        // Recording it as `0.0` when nothing could price it made `saving_usd`
+        // come out as exactly `-cost`, reported with full confidence, on a
+        // session the same report graded 98% warm-cached.
         let uncached_input = turn_usage
             .input_tokens
             .saturating_add(turn_usage.cache_read_tokens)
@@ -17115,7 +17155,14 @@ impl AgentEngine {
             0,
             &self.compat,
         );
+        let uncached_equivalent_usd = uncached.priced.then_some(uncached.usd);
 
+        // #1161 — arm BEFORE reading the round-trip index, so a resumed session
+        // continues the numbering it left off at rather than restarting at 1.
+        // The `round_trip == 1` no-marker attribution below depends on it too:
+        // a resumed turn is not the session's cold open and must not be
+        // attributed as one.
+        self.cache_ledger.arm(&self.conversation_id);
         let round_trip = self.cache_ledger.next_round_trip();
         let mut cause = diagnostic.as_ref().and_then(cause_of_diagnostic);
         if turn_usage.cache_read_tokens == 0
@@ -17157,7 +17204,7 @@ impl AgentEngine {
             invalidation_cause: cause,
             cost_usd: resolved.usd,
             cost_source,
-            uncached_equivalent_usd: uncached.usd,
+            uncached_equivalent_usd,
             watermark_tokens: self.compact_state.last_real_input_tokens,
             conservative_watermark_tokens: self.compact_state.last_input_tokens,
             autocompact_threshold_tokens: self.autocompact_threshold_tokens(),
@@ -17182,6 +17229,8 @@ impl AgentEngine {
         }
         // Compaction runs at the TOP of a turn, before the next request, so
         // "round-trips already recorded" is exactly "after round-trip N".
+        // Armed first for the same reason as `record_cache_ledger_turn`.
+        self.cache_ledger.arm(&self.conversation_id);
         let after_round_trip = self.cache_ledger.next_round_trip().saturating_sub(1);
         let event = crate::cache_ledger::CompactionEvent {
             after_round_trip,
@@ -19503,10 +19552,15 @@ impl AgentEngine {
     /// Write the compatibility snapshot without mutating conversation state.
     /// Durable execution paths call `prepare_durable_conversation` first.
     fn save_session_mirror(&mut self) {
+        let conversation_id = self.conversation_id.clone();
         if let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session) {
             session.messages = self.messages.clone();
             session.total_usage = self.total_usage.clone();
             session.updated_at = chrono::Utc::now();
+            // #1161 — re-stamped on every save so a session created by an older
+            // build acquires the id on its next turn instead of staying
+            // unrestorable forever.
+            session.conversation_id = Some(conversation_id);
             if let Err(e) = mgr.save_and_clear_wal(session) {
                 self.output
                     .emit_error(&format!("Failed to save session: {}", e), false);
@@ -34177,6 +34231,7 @@ mod audit_2026_05_22_tests {
             cwd: String::new(),
             total_usage: usage(1_000, 500),
             messages: Vec::new(),
+            conversation_id: None,
             extra: serde_json::Map::new(),
         };
         let provider = Arc::new(ScriptedProvider::new(vec![vec![

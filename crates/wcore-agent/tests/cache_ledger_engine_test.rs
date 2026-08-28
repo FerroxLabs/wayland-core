@@ -40,13 +40,23 @@ fn silent_output() -> Arc<dyn OutputSink> {
 /// Mock provider replaying a fixed script of per-round-trip events.
 struct ScriptedProvider {
     turns: Mutex<VecDeque<Vec<LlmEvent>>>,
+    /// Real HTTP boundary the persisted-session tests route through, so the
+    /// journal receives an authoritative physical-attempt identity before the
+    /// scripted stream becomes visible. `None` for the in-memory tests.
+    physical_url: Option<String>,
 }
 
 impl ScriptedProvider {
     fn new(turns: Vec<Vec<LlmEvent>>) -> Self {
         Self {
             turns: Mutex::new(VecDeque::from(turns)),
+            physical_url: None,
         }
+    }
+
+    fn with_physical_url(mut self, url: impl Into<String>) -> Self {
+        self.physical_url = Some(url.into());
+        self
     }
 }
 
@@ -56,6 +66,21 @@ impl LlmProvider for ScriptedProvider {
         &self,
         _request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        if let Some(url) = self.physical_url.as_deref() {
+            let client = wcore_egress::EgressClient::new()
+                .with_policy(Arc::new(wcore_egress::AllowAllPolicy));
+            let response = wcore_providers::retry::scope_max_retries(
+                0,
+                wcore_providers::retry::builder_send_with_retry(client.get(url)),
+            )
+            .await?;
+            if !response.status().is_success() {
+                return Err(ProviderError::Api {
+                    status: response.status().as_u16(),
+                    message: "fixture response".into(),
+                });
+            }
+        }
         let events = self.turns.lock().unwrap().pop_front().unwrap_or_else(|| {
             vec![LlmEvent::Done {
                 stop_reason: StopReason::EndTurn,
@@ -280,7 +305,11 @@ async fn recorded_cost_varies_with_the_tokens_and_beats_the_uncached_counterfact
         engine.run("go", "m").await.expect("run should succeed");
         let s = read_only_ledger(dir).summarize();
         assert_eq!(s.round_trips, 3, "the script must run to completion");
-        (s.cost_usd, s.uncached_equivalent_usd)
+        (
+            s.cost_usd,
+            s.uncached_equivalent_usd
+                .expect("claude-opus-4-7 is catalogued, so the counterfactual is priced"),
+        )
     }
 
     let small_dir = tempfile::tempdir().unwrap();
@@ -321,9 +350,9 @@ async fn recorded_cost_varies_with_the_tokens_and_beats_the_uncached_counterfact
     engine.run("go", "m").await.expect("run should succeed");
     let loss = read_only_ledger(loss_dir.path()).summarize();
     assert!(
-        loss.cache_saving_usd() < 0.0,
+        loss.cache_saving_usd().is_some_and(|saving| saving < 0.0),
         "a session that writes 100k of cache and reads none must report a \
-         NEGATIVE saving, got {} (billed {}, uncached {})",
+         NEGATIVE saving, got {:?} (billed {}, uncached {:?})",
         loss.cache_saving_usd(),
         loss.cost_usd,
         loss.uncached_equivalent_usd
@@ -594,5 +623,251 @@ async fn the_kill_switch_stops_the_ledger_being_written_at_all() {
     assert!(
         files.is_empty(),
         "the kill switch left files behind: {files:?}"
+    );
+}
+
+// ── #1161: resume must not fragment the ledger ──────────────────────────────
+
+/// #1161 — an ordinary `--resume` must keep the session's `conversation_id`,
+/// so the ledger APPENDS to the record the first launch wrote.
+///
+/// The oracle is the ledger FILE COUNT in one hermetic directory. It is not
+/// vacuous: the ledger is keyed by `conversation_id` (`ledger_path`), so a
+/// re-minted id necessarily produces a second file, and a preserved one
+/// necessarily produces a single file with both round-trips in it. Neither
+/// outcome can be reached by any other route.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: put
+/// `conversation_id: uuid::Uuid::new_v4().to_string()` back into
+/// `AgentEngine::resume_with_provider_parts` — the resumed run writes a second
+/// ledger under a fresh uuid and the count assertion breaks.
+#[tokio::test]
+#[serial_test::serial(wayland_cache_ledger_env)]
+async fn resuming_a_session_appends_to_its_ledger_rather_than_starting_a_new_one() {
+    use wcore_agent::session::SessionManager;
+
+    let server = common::physical_attempt_server().await;
+    let ledger_dir = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+
+    let mut config = test_config();
+    config.model = "claude-opus-4-7".to_string();
+    config.compact.enabled = false;
+    common::configure_persisted_test_session(&mut config, root.path());
+    let session_dir = std::path::PathBuf::from(&config.session.directory);
+    let workspace = root.path().to_string_lossy().into_owned();
+
+    // Launch 1 — a fresh session with the id the USER chose.
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![text_turn("one", usage(20_000, 300, 0, 20_000))])
+            .with_physical_url(server.uri()),
+    );
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config.clone(),
+        ToolRegistry::new(),
+        silent_output(),
+    );
+    engine.set_cache_ledger_dir(ledger_dir.path());
+    engine
+        .init_session("test-provider", &workspace, Some("aa55aa55-0002"))
+        .expect("init_session");
+    engine.use_recovery_test_key(&common::RECOVERY_TEST_KEY);
+    engine.run("go", "m1").await.expect("first run");
+    drop(engine);
+
+    let first: Vec<_> = ledger_files(ledger_dir.path());
+    assert_eq!(first.len(), 1, "launch 1 must write exactly one ledger");
+
+    // Launch 2 — the ordinary `--resume` path: load the persisted session and
+    // hand it straight to the resume constructor, exactly as `main.rs` does.
+    let manager = SessionManager::new(session_dir, 10);
+    let active = manager
+        .load_for_run("aa55aa55-0002")
+        .expect("the session must be resumable");
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![text_turn("two", usage(500, 300, 20_000, 0))])
+            .with_physical_url(server.uri()),
+    );
+    let mut engine = AgentEngine::resume_active_with_provider(
+        provider,
+        config,
+        ToolRegistry::new(),
+        silent_output(),
+        active,
+    );
+    engine.set_cache_ledger_dir(ledger_dir.path());
+    engine.use_recovery_test_key(&common::RECOVERY_TEST_KEY);
+    engine.run("again", "m2").await.expect("resumed run");
+    drop(engine);
+
+    let after = ledger_files(ledger_dir.path());
+    assert_eq!(
+        after.len(),
+        1,
+        "resuming minted a new conversation id and fragmented the ledger: {after:?}"
+    );
+    assert_eq!(
+        after[0], first[0],
+        "the resumed run must append to the SAME ledger file"
+    );
+    let ledger = read_only_ledger(ledger_dir.path());
+    assert_eq!(
+        ledger.turns.len(),
+        2,
+        "both round-trips must land in one record: {:#?}",
+        ledger.turns
+    );
+}
+
+/// Every `.json` in `dir`, sorted, as bare file names.
+fn ledger_files(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// #1161 back-compat: every session saved by an EARLIER build has no
+/// `conversation_id` on disk. Resuming one must mint a fresh id and run, not
+/// crash and not reuse another session's key.
+///
+/// This is the state every existing user's saved sessions are in, so it is the
+/// case the fix is most likely to break.
+#[tokio::test]
+#[serial_test::serial(wayland_cache_ledger_env)]
+async fn a_session_saved_before_the_field_existed_still_resumes() {
+    use wcore_agent::session::SessionManager;
+
+    let server = common::physical_attempt_server().await;
+    let ledger_dir = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+
+    let mut config = test_config();
+    config.model = "claude-opus-4-7".to_string();
+    config.compact.enabled = false;
+    common::configure_persisted_test_session(&mut config, root.path());
+    let session_dir = std::path::PathBuf::from(&config.session.directory);
+    let workspace = root.path().to_string_lossy().into_owned();
+
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![text_turn("one", usage(1_000, 100, 0, 0))])
+            .with_physical_url(server.uri()),
+    );
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config.clone(),
+        ToolRegistry::new(),
+        silent_output(),
+    );
+    engine.set_cache_ledger_dir(ledger_dir.path());
+    engine
+        .init_session("test-provider", &workspace, Some("aa55aa55-0001"))
+        .expect("init_session");
+    engine.use_recovery_test_key(&common::RECOVERY_TEST_KEY);
+    engine.run("go", "m1").await.expect("first run");
+    drop(engine);
+
+    // Rewrite the snapshot the way an older build left it: no such field.
+    let manager = SessionManager::new(session_dir, 10);
+    let path = manager.session_file_path("aa55aa55-0001");
+    let raw = std::fs::read_to_string(&path).expect("session snapshot");
+    let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    value
+        .as_object_mut()
+        .expect("session is an object")
+        .remove("conversation_id");
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+    let active = manager
+        .load_for_run("aa55aa55-0001")
+        .expect("a pre-field session must still load");
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![text_turn("two", usage(500, 100, 400, 0))])
+            .with_physical_url(server.uri()),
+    );
+    let mut engine = AgentEngine::resume_active_with_provider(
+        provider,
+        config,
+        ToolRegistry::new(),
+        silent_output(),
+        active,
+    );
+    engine.set_cache_ledger_dir(ledger_dir.path());
+    engine.use_recovery_test_key(&common::RECOVERY_TEST_KEY);
+    engine
+        .run("again", "m2")
+        .await
+        .expect("a pre-field session must still resume and run");
+
+    // Two ledgers, because the first launch's id is genuinely unrecoverable.
+    // The point is that the resume WORKS and does not reuse the wrong key.
+    let files = ledger_files(ledger_dir.path());
+    assert_eq!(
+        files.len(),
+        2,
+        "a legacy session has no id to restore, so a fresh one is minted: {files:?}"
+    );
+}
+
+/// #1163 — a model the catalog cannot price must NOT record its uncached
+/// counterfactual as `0.0`. Asserted on the raw JSON the engine wrote, so the
+/// assertion holds across the type change rather than restating it.
+///
+/// The billed figure here comes from the PROVIDER, so this reproduces the
+/// measured contradiction exactly: a real, trustworthy spend beside a
+/// counterfactual nothing could compute.
+#[tokio::test]
+#[serial_test::serial(wayland_cache_ledger_env)]
+async fn an_unpriceable_counterfactual_is_not_recorded_as_a_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut billed = usage(7_000, 500, 0, 0);
+    billed.reported_cost_usd = Some(0.061389);
+    let provider = Arc::new(ScriptedProvider::new(vec![text_turn("done", billed)]));
+
+    let mut config = test_config();
+    // An uncatalogued model, priced by the provider itself — `flux-reasoning`
+    // in the live measurement.
+    config.model = "flux-reasoning".to_string();
+
+    let mut engine =
+        AgentEngine::new_with_provider(provider, config, ToolRegistry::new(), silent_output());
+    engine.set_cache_ledger_dir(dir.path());
+    engine.run("go", "m").await.expect("run should succeed");
+
+    let files: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+        .collect();
+    assert_eq!(files.len(), 1);
+    let raw: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+    let turn = &raw["turns"][0];
+    assert_eq!(
+        turn["cost_source"], "provider_reported",
+        "the provider billed this call, so the spend figure is a fact: {turn}"
+    );
+    assert!(
+        turn["cost_usd"].as_f64().unwrap_or(0.0) > 0.0,
+        "the billed figure must survive: {turn}"
+    );
+    // `flux-reasoning` has no catalog row, and the only figure left is the
+    // provider-FAMILY preset rate — which the resolver itself grades
+    // `priced = false`. Subtracting a real provider-reported spend from a
+    // preset ceiling is not a measurement, so the counterfactual is unknown.
+    assert_eq!(
+        turn["uncached_equivalent_usd"],
+        serde_json::Value::Null,
+        "no price exists for this model, so the counterfactual is unknown; \
+         recording a number makes the saving read as -cost: {turn}"
     );
 }
