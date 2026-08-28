@@ -42,3 +42,8 @@ wcore-egress = { workspace = true }
 hmac = "0.12"
 sha2 = { workspace = true }
 hex = "0.4"
+# tests/matrix_live_room.rs — the two live legs both build a production matrix
+# adapter whose /sync cursor lives under `$WAYLAND_HOME`, and one of them
+# repoints that process-global. `cargo test` runs them as threads of one
+# process, so they take the same lock instead of racing.
+serial_test = { workspace = true }

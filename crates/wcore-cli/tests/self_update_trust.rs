@@ -26,10 +26,12 @@
 //!    catches a regression back to a placeholder.
 //!
 //! 3. **Hermetic by construction.** The persisted freeze state is addressed by
-//!    an explicit path in every test but one, so no test can pollute another
-//!    or the developer's real installation. The single exception
-//!    (`the_persisted_state_path_honours_wayland_home`) exists precisely to
-//!    prove the production path resolves through `WAYLAND_HOME`.
+//!    an explicit path in EVERY test here, so no test can pollute another or
+//!    the developer's real installation. The one assertion that has to write
+//!    `WAYLAND_HOME` to make its point lives in its own binary,
+//!    `tests/self_update_state_path.rs` — a process global written beside
+//!    twenty-one siblings running as threads of the same `cargo test` process
+//!    is not hermetic, whatever the test itself asserts.
 
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -476,31 +478,6 @@ fn the_high_water_mark_advances_only_after_a_successful_install() {
     // but it is a first run that still enforces the maximum-age rule.
     std::fs::write(&path, b"{ this is not json").unwrap();
     assert!(FreezeState::load_from(&path).is_first_run());
-}
-
-#[test]
-fn the_persisted_state_path_honours_wayland_home() {
-    // The one test in this file that touches the environment, and it exists
-    // precisely to prove the production path resolves through the
-    // WAYLAND_HOME-honouring resolver rather than a hand-rolled home path.
-    // Under nextest each test is its own process; under `cargo test` this is
-    // the only test here that reads or writes the environment.
-    let temp = TempDir::new().unwrap();
-    let previous = std::env::var("WAYLAND_HOME").ok();
-    unsafe { std::env::set_var("WAYLAND_HOME", temp.path()) };
-
-    let resolved = FreezeState::default_path();
-
-    match previous {
-        Some(value) => unsafe { std::env::set_var("WAYLAND_HOME", value) },
-        None => unsafe { std::env::remove_var("WAYLAND_HOME") },
-    }
-
-    assert!(
-        resolved.starts_with(temp.path()),
-        "the freeze state must live under WAYLAND_HOME, got {}",
-        resolved.display()
-    );
 }
 
 // ---------------------------------------------------------------------------
