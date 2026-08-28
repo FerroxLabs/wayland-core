@@ -252,8 +252,14 @@ async fn the_bootstrap_prompt_uses_the_real_window_derived_skill_budget() {
         tight.len(),
         roomy.len()
     );
-    assert!(
-        !tight.contains("ISSUE_1150_DESCRIPTION_MARKER"),
-        "80 characters cannot fit this description, so minimal mode must have dropped it"
-    );
+
+    // Deliberately NOT asserted here: that the tight listing dropped the
+    // description specifically. `format_skills_within_budget` picks between
+    // truncated and name-only degradation from the BUNDLED/non-bundled split of
+    // whatever is in the catalogue, and it has a C-5 escape hatch that returns
+    // full entries when every skill is bundled. That composition differs between
+    // a developer box with skills installed and a clean CI container, and the
+    // assertion duly passed on the build host and failed in CI. The length
+    // comparison above is the portable form of the same claim, and it is the one
+    // the defect actually breaks.
 }

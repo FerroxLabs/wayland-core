@@ -10,7 +10,7 @@
 //!
 //! These tests pin the ARGUMENT, not the kernel: the kernel was always right.
 
-use wcore_config::compact::CompactConfig;
+use wcore_config::compact::{CompactConfig, UNVERIFIED_CONTEXT_WINDOW};
 use wcore_config::context_window::ContextWindow;
 
 /// The reporter's model: a 32k local model served over an OpenAI-compatible
@@ -132,14 +132,18 @@ fn known_context_window_prefers_the_operator_setting() {
     );
 }
 
-/// `effective_context_window` keeps its documented 200,000 FALLBACK for the
-/// static autocompact/emergency thresholds — it returns `usize`, promises no
-/// `None`, and the ledger/protocol surface reports it as a plain integer. This
-/// pins that the delegation refactor did not change any of those numbers.
+/// `effective_context_window` still returns `usize` and still promises no
+/// `None` — the ledger/protocol surface reports it as a plain integer — but
+/// its unknown-model FALLBACK is now the conservative
+/// `UNVERIFIED_CONTEXT_WINDOW` rather than 200,000, and every KNOWN window is
+/// untouched.
 #[test]
-fn effective_context_window_keeps_its_declared_fallback() {
+fn effective_context_window_falls_back_conservatively() {
     let cfg = CompactConfig::default();
-    assert_eq!(cfg.effective_context_window("openai", UNLISTED), 200_000);
+    assert_eq!(
+        cfg.effective_context_window("openai", UNLISTED),
+        UNVERIFIED_CONTEXT_WINDOW
+    );
     assert_eq!(cfg.effective_context_window("openai", "gpt-4o"), 128_000);
     assert_eq!(
         cfg.effective_context_window("openai", "flux-auto"),

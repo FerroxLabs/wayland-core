@@ -8,11 +8,23 @@ use wcore_agent::compact::emergency::{
 };
 use wcore_config::compact::CompactConfig;
 
-/// A provider/model pair the `wcore_config::limits` registry does NOT know, so
-/// the effective window is the configured fallback. The TC-2.5-* cases below
-/// specify the buffer ARITHMETIC, which is model-independent.
+/// A provider/model pair the `wcore_config::limits` registry does NOT know. The
+/// TC-2.5-* cases below specify the buffer ARITHMETIC, which is
+/// model-independent.
 const UNKNOWN_PROVIDER: &str = "test-provider";
 const UNKNOWN_MODEL: &str = "test-model";
+
+/// #1150: the window is PINNED. These cases used to get 200,000 by accident,
+/// from the unlisted-model fallback; that fallback is now the conservative
+/// `UNVERIFIED_CONTEXT_WINDOW`. Without the pin `tc_2_5_02`/`tc_2_5_03` would
+/// still pass — 198,000 clears a 29,768 limit trivially — while their comments
+/// claimed a 197,000 boundary they were no longer testing.
+fn arithmetic_config() -> CompactConfig {
+    CompactConfig {
+        context_window: Some(200_000),
+        ..CompactConfig::default()
+    }
+}
 
 // ── TC-2.5-01: Below emergency threshold ───────────────────────────────────
 
@@ -21,7 +33,7 @@ fn tc_2_5_01_below_emergency_threshold() {
     // context_window=200_000 (fallback), emergency_buffer=3_000
     // emergency_limit = 200k - 3k = 197k
     // 190k < 197k → false
-    let config = CompactConfig::default();
+    let config = arithmetic_config();
     assert!(
         !is_at_emergency_limit(190_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "190k tokens should be below the 197k emergency limit"
@@ -33,7 +45,7 @@ fn tc_2_5_01_below_emergency_threshold() {
 #[test]
 fn tc_2_5_02_above_emergency_threshold() {
     // 198k >= 197k → true
-    let config = CompactConfig::default();
+    let config = arithmetic_config();
     assert!(
         is_at_emergency_limit(198_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "198k tokens should exceed the 197k emergency limit"
@@ -45,7 +57,7 @@ fn tc_2_5_02_above_emergency_threshold() {
 #[test]
 fn tc_2_5_03_at_exact_emergency_threshold() {
     // 197k >= 197k → true
-    let config = CompactConfig::default();
+    let config = arithmetic_config();
     assert!(
         is_at_emergency_limit(197_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "197k tokens should trigger at exactly the emergency limit"
@@ -104,7 +116,7 @@ fn autocompact_fires_before_emergency() {
     // so autocompact gets a chance to run before the safety net kicks in.
     use wcore_agent::compact::auto::should_autocompact;
 
-    let config = CompactConfig::default();
+    let config = arithmetic_config();
 
     // Pick a token count that triggers autocompact but not emergency
     let token_count: u64 = 170_000;
@@ -125,7 +137,7 @@ fn both_trigger_near_limit() {
     // When very close to the limit, both autocompact and emergency should fire
     use wcore_agent::compact::auto::should_autocompact;
 
-    let config = CompactConfig::default();
+    let config = arithmetic_config();
     let token_count: u64 = 198_000;
 
     assert!(should_autocompact(
@@ -154,6 +166,9 @@ fn both_trigger_near_limit() {
 /// 197_000 and the first assertion fires.
 #[test]
 fn gh635_large_window_model_is_not_stopped_at_the_200k_default() {
+    // #1150: deliberately UNPINNED — this case is about the registry window
+    // beating the fallback, and an operator `context_window` outranks the
+    // registry.
     let config = CompactConfig::default();
     assert!(
         !is_at_emergency_limit(197_000, &config, "openai-chatgpt", "gpt-5.4"),

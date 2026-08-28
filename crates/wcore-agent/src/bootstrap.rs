@@ -2331,11 +2331,12 @@ impl AgentBootstrap {
                 "The context window for model `{}` is unknown - it is not in the built-in \
                  model table and `[compact] context_window` is not set. The context gauge \
                  and the pre-flight overflow guard are disabled for this session, and \
-                 compaction is sized against an assumed {} tokens, which may be far larger \
-                 than this model's real window. Set `[compact] context_window = <tokens>` \
-                 in your config to size them correctly.",
+                 compaction falls back to a conservative {}-token assumption - so a long \
+                 session may compact earlier than this model actually needs. Set \
+                 `[compact] context_window = <tokens>` in your config to size them \
+                 correctly.",
                 self.config.model,
-                wcore_config::compact::DEFAULT_CONTEXT_WINDOW,
+                wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW,
             ));
         }
         let mut prompt_cache = crate::context::SystemPromptCache::new();

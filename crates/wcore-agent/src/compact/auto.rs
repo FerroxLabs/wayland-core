@@ -6,7 +6,7 @@
 //! summary.  A circuit breaker prevents runaway retries.
 
 use tokio::sync::mpsc;
-use wcore_config::compact::CompactConfig;
+use wcore_config::compact::{CompactConfig, MIN_AUTOCOMPACT_WINDOW_FRACTION};
 use wcore_providers::{LlmProvider, ProviderError, flux_loop};
 use wcore_types::compact::{CompactMetadata, CompactTrigger};
 use wcore_types::llm::{FluxLoopIntent, LlmEvent, LlmRequest, ThinkingConfig};
@@ -122,11 +122,40 @@ pub fn should_autocompact(
 ///
 /// Note this ignores `config.enabled`: it is the threshold's VALUE, and a
 /// disabled compactor still has one worth showing next to the watermark.
+///
+/// #1150 — when the subtraction SATURATES TO ZERO the threshold falls back to
+/// [`MIN_AUTOCOMPACT_WINDOW_FRACTION`] of the window instead.
+///
+/// `output_reserve` + `autocompact_buffer` is 33,000 tokens by default, tuned
+/// when the only window in play was 200,000. It is 16.5% of a 200k window and
+/// 100.7% of a 32,768-token one, so below ~33k the subtraction saturates — and
+/// zero does not mean "no threshold" on this path, it means ALWAYS FIRE:
+/// [`should_autocompact`] tests `tokens >= threshold`, so an empty context on
+/// turn one qualifies, and `micro::ContextPressure::admits_trigger` treats a
+/// zero threshold as explicitly ungated. A 32,768-token window produced exactly
+/// that — an LLM summarization at the top of every turn — which is why the
+/// unknown-window notice's remedy ("set `[compact] context_window`") could not
+/// stand on its own.
+///
+/// The fallback is gated on `after_reserves == 0` rather than applied as a
+/// general floor, deliberately. A floor of the same fraction would also have
+/// RAISED the threshold for windows between ~33,000 and ~110,000 (a pinned
+/// 60,000-token window would have moved from 27,000 to 42,000, past its own
+/// pre-flight shed ceiling of 37,000). Nothing in #1150 is evidence about that
+/// band, so it is left exactly as it was: every window above 33,000 tokens —
+/// which is every model in the `limits` catalogue, the smallest being 128,000 —
+/// is byte-for-byte unchanged.
 pub fn autocompact_threshold(config: &CompactConfig, provider: &str, model: &str) -> usize {
-    config
-        .effective_context_window(provider, model)
+    let window = config.effective_context_window(provider, model);
+    let after_reserves = window
         .saturating_sub(config.output_reserve)
-        .saturating_sub(config.autocompact_buffer)
+        .saturating_sub(config.autocompact_buffer);
+    if after_reserves > 0 {
+        return after_reserves;
+    }
+    // Degenerate only: the absolute reserves consumed the entire window, and a
+    // zero threshold is ALWAYS FIRE on this path, not "no threshold".
+    (window as f64 * MIN_AUTOCOMPACT_WINDOW_FRACTION) as usize
 }
 
 // ── Request sanitation ──────────────────────────────────────────────────────
@@ -515,8 +544,16 @@ mod tests {
     use wcore_types::compact::CompactTrigger;
     use wcore_types::message::{FinishReason, StopReason};
 
+    /// #1150 note: the window is PINNED here. These cases specify the buffer
+    /// ARITHMETIC, and they used to get 200,000 by accident, from the
+    /// unlisted-model fallback. That fallback is now the conservative
+    /// `UNVERIFIED_CONTEXT_WINDOW`, so the pin states out loud the window the
+    /// numbers below were written against.
     fn default_config() -> CompactConfig {
-        CompactConfig::default()
+        CompactConfig {
+            context_window: Some(200_000),
+            ..CompactConfig::default()
+        }
     }
 
     // ── C4L-F1: unanswered tool calls must not reach the compact request ────
@@ -877,7 +914,10 @@ mod tests {
     /// threshold collapses to 167_000 and the 177k assertion below fires.
     #[test]
     fn large_window_model_does_not_compact_at_the_200k_threshold() {
-        let config = default_config();
+        // #1150: deliberately UNPINNED — this case is about the registry
+        // window beating the fallback, and an operator `context_window`
+        // outranks the registry.
+        let config = CompactConfig::default();
         assert_eq!(
             autocompact_threshold(&config, "openai-chatgpt", "gpt-5.4"),
             1_017_000
@@ -908,7 +948,10 @@ mod tests {
     /// session sails past its real 105k ceiling.
     #[test]
     fn small_window_model_compacts_earlier_than_the_default() {
-        let config = default_config();
+        // #1150: deliberately UNPINNED — this case is about the registry
+        // window beating the fallback, and an operator `context_window`
+        // outranks the registry.
+        let config = CompactConfig::default();
         // 128_000 − 20_000 − 13_000
         assert_eq!(autocompact_threshold(&config, "openai", "gpt-4o"), 95_000);
         assert!(should_autocompact(100_000, &config, "openai", "gpt-4o"));

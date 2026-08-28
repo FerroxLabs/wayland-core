@@ -22980,7 +22980,12 @@ mod compact_tests {
 
     #[tokio::test]
     async fn emergency_silent_below_limit() {
-        let config = CompactConfig::default();
+        // #1150: pinned, like `emergency_fires_when_at_limit` above — this
+        // case is about the 197k boundary, not the unlisted-model fallback.
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            ..Default::default()
+        };
         let mut state = CompactState::new();
         state.last_input_tokens = 190_000; // below 197k
 
@@ -23169,6 +23174,8 @@ mod compact_tests {
     async fn microcompact_leaves_results_alone_under_low_pressure() {
         let config = CompactConfig {
             micro_keep_recent: 3,
+            // #1150: the comment below says "in a 200k window"; pin it.
+            context_window: Some(200_000),
             ..Default::default()
         };
         let mut state = CompactState::new();
@@ -23216,6 +23223,8 @@ mod compact_tests {
     async fn microcompact_leaves_results_alone_after_an_idle_gap_at_low_pressure() {
         let config = CompactConfig {
             micro_keep_recent: 3,
+            // #1150: the comment below says "in a 200k window"; pin it.
+            context_window: Some(200_000),
             ..Default::default()
         };
         let mut state = CompactState::new();
