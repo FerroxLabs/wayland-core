@@ -27,7 +27,7 @@ use wcore_agent::session_journal::{
 use wcore_agent::session_journal::canonical_journal_root;
 use wcore_budget::{BudgetCap, BudgetTracker, ExecutionBudget};
 use wcore_types::cache_tier::CacheTier;
-use wcore_types::llm::{LlmRequest, RoutingHint, ThinkingConfig};
+use wcore_types::llm::{FluxLoopIntent, LlmRequest, RoutingHint, ThinkingConfig};
 use wcore_types::message::{ContentBlock, Message, MessageCacheHint, Role};
 use wcore_types::tool::{ToolDef, ToolEffectContract};
 
