@@ -70,6 +70,7 @@ pub fn build_forge_mcp_server_config(url: &str, cred_key: &str) -> McpServerConf
         deferred: None,
         allow_local: true,
         only_for_assistant: None,
+        allowed_tools: None,
     }
 }
 
@@ -317,6 +318,7 @@ mod tests {
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         }
     }
 
@@ -333,6 +335,7 @@ mod tests {
             deferred: None,
             allow_local: true,
             only_for_assistant: None,
+            allowed_tools: None,
         }
     }
 

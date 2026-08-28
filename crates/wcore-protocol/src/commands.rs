@@ -402,6 +402,24 @@ pub enum ProtocolCommand {
         /// non-public address classes remain blocked by the MCP egress guard.
         #[serde(default)]
         allow_local: bool,
+        /// #998 — the host's per-tool selection for this server (the Desktop
+        /// MCP Library's per-tool switches). Absent ⇒ no selection ⇒ every
+        /// advertised tool is registered, byte-identical to the pre-#998 wire.
+        /// Present ⇒ ONLY the named tools are registered; an advertised tool the
+        /// list omits is denied, and `[]` disables the server's tools entirely.
+        /// Names are the tool names the SERVER advertises.
+        ///
+        /// `allowed_tools` is canonical (every other key on this wire is
+        /// snake_case); Desktop's model spells it `allowedTools`, which is
+        /// accepted as an alias so the host may send either. Absent is
+        /// `skip_serializing_if`-elided, so a command that carries no selection
+        /// is byte-identical to the pre-#998 wire.
+        #[serde(
+            default,
+            alias = "allowedTools",
+            skip_serializing_if = "Option::is_none"
+        )]
+        allowed_tools: Option<Vec<String>>,
     },
     /// Remove a server previously introduced by [`ProtocolCommand::AddMcpServer`]
     /// in this process. Configured and plugin-owned servers remain authoritative.
@@ -886,6 +904,7 @@ mod tests {
                 url,
                 headers,
                 allow_local,
+                allowed_tools,
             } => {
                 assert_eq!(name, "team-tools");
                 assert_eq!(transport, "stdio");
@@ -895,9 +914,59 @@ mod tests {
                 assert!(url.is_none());
                 assert!(headers.is_none());
                 assert!(!allow_local);
+                // #998 back-compat control: a host that sends no per-tool
+                // selection must decode to `None` (= allow every advertised
+                // tool), never to an empty list (= disable them all).
+                assert!(
+                    allowed_tools.is_none(),
+                    "an absent allowed_tools must mean NO selection, not an empty one"
+                );
             }
             _ => panic!("expected AddMcpServer"),
         }
+    }
+
+    /// #998 — the three states of the per-tool selection must stay
+    /// DISTINGUISHABLE on the wire, in both spellings a host may send.
+    ///
+    /// The empty array is the trap: it means "the operator disabled every tool
+    /// on this server", and any decoding that folds it together with "absent"
+    /// enables everything at exactly the moment the operator asked for nothing.
+    #[test]
+    fn add_mcp_server_allowed_tools_distinguishes_absent_empty_and_named() {
+        fn allowed_tools_of(json: &str) -> Option<Vec<String>> {
+            match serde_json::from_str::<ProtocolCommand>(json).unwrap() {
+                ProtocolCommand::AddMcpServer { allowed_tools, .. } => allowed_tools,
+                _ => panic!("expected AddMcpServer"),
+            }
+        }
+        let base = r#""type":"add_mcp_server","name":"t","transport":"stdio""#;
+
+        assert_eq!(
+            allowed_tools_of(&format!("{{{base}}}")),
+            None,
+            "absent means NO selection: every advertised tool stays enabled"
+        );
+        assert_eq!(
+            allowed_tools_of(&format!(r#"{{{base},"allowed_tools":[]}}"#)),
+            Some(Vec::new()),
+            "an empty array is a real selection naming nothing, NOT an absent one"
+        );
+        assert_eq!(
+            allowed_tools_of(&format!(r#"{{{base},"allowed_tools":["a","b"]}}"#)),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+
+        // Desktop's own spelling must decode identically.
+        assert_eq!(
+            allowed_tools_of(&format!(r#"{{{base},"allowedTools":[]}}"#)),
+            Some(Vec::new()),
+            "the camelCase spelling Desktop's model uses must not be silently dropped"
+        );
+        assert_eq!(
+            allowed_tools_of(&format!(r#"{{{base},"allowedTools":["a"]}}"#)),
+            Some(vec!["a".to_string()])
+        );
     }
 
     #[test]

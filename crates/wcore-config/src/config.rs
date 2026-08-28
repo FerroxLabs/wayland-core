@@ -203,9 +203,44 @@ pub struct McpServerConfig {
     /// [`McpServerConfig::is_visible_to_assistant`]).
     #[serde(default)]
     pub only_for_assistant: Option<Vec<String>>,
+    /// #998 — per-tool allow-list for this server. The Desktop MCP Library
+    /// exposes a switch per advertised tool; this is the field that carries
+    /// that selection into core so a tool switched OFF is genuinely not
+    /// registered and therefore not callable.
+    ///
+    /// Semantics are the Desktop model's (`IMcpServer.allowedTools`) verbatim:
+    ///
+    /// - `None` (field absent) ⇒ NO selection was made ⇒ every advertised tool
+    ///   registers. This is the pre-#998 behaviour and the default, so an
+    ///   existing config is unaffected.
+    /// - `Some(list)` ⇒ a selection WAS made ⇒ ONLY the named tools register.
+    ///   A tool the server advertises but the list omits is denied. Within a
+    ///   declared list the policy is FAIL-CLOSED: silence means "off", because
+    ///   a server that starts advertising a new tool mid-session must not
+    ///   acquire authority the operator never granted it.
+    /// - `Some([])` ⇒ "Disable all": the server contributes no tools at all.
+    ///
+    /// Names are matched against the tool name the SERVER advertises, not the
+    /// possibly collision-prefixed `mcp__{server}__{tool}` display name — that
+    /// is the name the Desktop inventory holds and the only one stable across
+    /// a collision appearing or disappearing.
+    ///
+    /// WIRE SPELLING: `allowed_tools` is canonical here, matching every other
+    /// key in this file and in `config.toml`. Desktop's own model spells it
+    /// `allowedTools` (`IMcpServer.allowedTools`), so that spelling is accepted
+    /// as an alias — a host may send either and neither is lossy. Do not remove
+    /// the alias: the Desktop MCP Library is the surface this field exists for.
+    #[serde(default, alias = "allowedTools")]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 impl McpServerConfig {
+    /// #998 — may this server contribute `tool_name` to the live registry?
+    /// See [`McpServerConfig::allowed_tools`] for the semantics.
+    pub fn allows_tool(&self, tool_name: &str) -> bool {
+        tool_allows(self.allowed_tools.as_deref(), tool_name)
+    }
+
     /// Bind a transient or persisted declaration to the immutable assistant
     /// identity that created it. `None` remains global for bare CLI sessions.
     pub fn scoped_to_assistant(mut self, active: Option<&str>) -> Self {
@@ -227,6 +262,19 @@ impl McpServerConfig {
             None | Some([]) => true,
             Some(list) => active.is_some_and(|a| list.iter().any(|name| name == a)),
         }
+    }
+}
+
+/// #998 — the ONE per-tool allow-list predicate. Both MCP registration seams
+/// (boot-time `register_mcp_tools` and the per-server re-registration that a
+/// `notifications/tools/list_changed` drives) call this, so the two cannot
+/// drift into disagreeing about what an operator switched off.
+///
+/// `None` ⇒ no selection ⇒ allow. `Some(list)` ⇒ allow only what is named.
+pub fn tool_allows(allowed: Option<&[String]>, tool_name: &str) -> bool {
+    match allowed {
+        None => true,
+        Some(list) => list.iter().any(|name| name == tool_name),
     }
 }
 
@@ -6929,6 +6977,7 @@ mod tests {
             deferred: None,
             allow_local: false,
             only_for_assistant: only_for,
+            allowed_tools: None,
         }
     }
 

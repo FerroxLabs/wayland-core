@@ -289,6 +289,7 @@ fn map_mcp(s: &GrokMcpServer) -> McpServerConfig {
         deferred: None,
         allow_local: false,
         only_for_assistant: None,
+        allowed_tools: None,
     }
 }
 

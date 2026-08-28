@@ -1249,6 +1249,7 @@ Dynamically inject an MCP server before the conversation starts. This command is
 | `env` | object | no | Environment variables for the subprocess |
 | `url` | string | sse/http only | Server URL |
 | `headers` | object | no | HTTP headers (for sse/http) |
+| `allowed_tools` | string[] | no | Per-tool allow-list. **Omit for the previous behaviour** (every advertised tool registered). When present, ONLY the named tools are registered — an advertised tool the list omits is denied, and `[]` disables the server's tools entirely. Names are the tool names the server advertises. The camelCase spelling `allowedTools` (the Wayland desktop model's own) is accepted as an alias. Added in 0.13.10 (#998). |
 
 **Lifecycle:**
 

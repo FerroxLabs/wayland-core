@@ -1548,6 +1548,7 @@ mod tests {
                 deferred: None,
                 allow_local: false,
                 only_for_assistant: None,
+                allowed_tools: None,
             },
         );
         assert!(!plan.is_empty(false));

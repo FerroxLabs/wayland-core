@@ -124,6 +124,45 @@ system prompt small — omitting the key gives you the cheap behaviour
 `deferred = false` only for a small server whose tools the model should be able to
 call without a ToolSearch round-trip first.
 
+## Per-Tool Allow-List
+
+A server's tools can be enabled individually with `allowed_tools`. This is what
+the Wayland desktop MCP Library's per-tool switches write; before v0.13.10 core
+had no tool dimension at all, so a tool switched off in the Library stayed
+callable (#998).
+
+```toml
+[mcp.servers.warehouse]
+transport = "stdio"
+command = "npx"
+args = ["-y", "warehouse-mcp"]
+allowed_tools = ["inventory_reserve", "inventory_lookup"]
+```
+
+| `allowed_tools` | Behavior |
+|-----------------|----------|
+| omitted (**the default**) | No selection made — every tool the server advertises is registered |
+| `["a", "b"]` | ONLY `a` and `b` are registered; every other advertised tool is denied |
+| `[]` | "Disable all" — the server contributes no tools |
+
+Two properties are worth stating explicitly:
+
+* **Within a declared list, silence means off.** A tool the server starts
+  advertising later — including one it announces mid-session with
+  `notifications/tools/list_changed` — is NOT registered unless the list names
+  it. A server must not be able to grant itself authority the operator never
+  gave it.
+* **A denied tool is undispatchable, not merely hidden.** It is never entered
+  into the tool registry, so a hallucinated call cannot reach it either.
+
+Names are the tool names the **server** advertises, not the collision-prefixed
+`mcp__{server}__{tool}` display name, so a grant survives a name collision
+appearing or disappearing.
+
+`allowed_tools` is the canonical spelling; the Wayland desktop model spells the
+same field `allowedTools`, which is accepted as an alias wherever this field is
+read (config file and the `add_mcp_server` command alike).
+
 ## Smart Tool Curation
 
 A single large MCP server (e.g. Google Workspace) can advertise dozens or

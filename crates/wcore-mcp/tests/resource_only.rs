@@ -70,6 +70,7 @@ async fn resource_only_server_connects_without_tools_list_or_duplicate_dial() {
         deferred: Some(true),
         allow_local: true,
         only_for_assistant: None,
+        allowed_tools: None,
     };
     let mut manager = McpManager::connect_all(&HashMap::new())
         .await
