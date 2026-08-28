@@ -388,30 +388,32 @@ impl Tool for WriteTool {
             }
         }
 
-        // Write atomically: write to temp file, then rename.
-        let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
-        if let Err(e) = std::fs::write(&tmp_path, content) {
-            return ToolResult {
-                content: format!("Failed to write file: {}", e),
-                is_error: true,
+        // ADV-7 / #1155: the assessment took a measured 13.5 ms, and a save
+        // that landed inside it was destroyed uncopied while the note claimed
+        // the prior contents were preserved. Re-reading the path immediately
+        // before the rename only NARROWED that window — measured at 13 losses
+        // in 200 with the re-check in place — because the read and the rename
+        // are still two operations. `atomic_write_checked` publishes by an
+        // atomic exchange, so the pre-image it judges IS the one it displaced.
+        let unpublishable =
+            match wcore_config::atomic_write_checked(path, content.as_bytes(), |observed| {
+                crate::unsaved_work::pre_image_matches(observed, judged.as_deref())
+            }) {
+                Ok(Ok(())) => None,
+                Ok(Err(why)) => {
+                    return ToolResult {
+                        content: crate::unsaved_work::changed_under_write(file_path, &why),
+                        is_error: true,
+                    };
+                }
+                Err(e) => Some(e),
             };
-        }
 
-        // ADV-7: the assessment took a measured 13.5 ms, and a save that
-        // landed inside it was destroyed uncopied while the note claimed the
-        // prior contents were preserved. Nothing older than this read is ever
-        // acted on.
-        if let Err(why) = crate::unsaved_work::pre_image_unchanged(path, judged.as_deref()) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return ToolResult {
-                content: crate::unsaved_work::changed_under_write(file_path, &why),
-                is_error: true,
-            };
-        }
-
-        if let Err(e) = std::fs::rename(&tmp_path, path) {
-            // Fallback: direct write if rename fails (cross-device)
-            let _ = std::fs::remove_file(&tmp_path);
+        if let Some(e) = unpublishable {
+            // Fallback: direct write if the tempfile round trip fails at all
+            // (a cross-device rename, or a directory that will not hold a
+            // sibling). The guard above did not run, so this is the one path
+            // that publishes unchecked — unchanged from before this fix.
             if let Err(e) = std::fs::write(path, content) {
                 return ToolResult {
                     content: format!("Failed to write file: {}", e),
@@ -433,7 +435,7 @@ impl Tool for WriteTool {
 
             return ToolResult {
                 content: format!(
-                    "Updated {} (rename failed: {}, used direct write){}",
+                    "Updated {} (atomic write failed: {}, used direct write){}",
                     file_path, e, unsaved_note
                 ),
                 is_error: false,

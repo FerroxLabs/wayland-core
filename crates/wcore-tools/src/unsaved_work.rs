@@ -1493,21 +1493,36 @@ fn recorded_raw(root: &Path, commit: &str, rel: &str) -> Result<Option<Vec<u8>>,
 /// same save made *before* the call was protected 12 times out of 12, so that
 /// measured the product and not the harness.
 ///
-/// The caller runs this immediately before the write lands and refuses if it
-/// fails. That narrows the window to the gap between this read and the
-/// rename; it does not close it, and nothing at this altitude can — closing it
-/// needs a lock the user's editor would have to take as well. What it does
-/// guarantee is that no assessment older than one syscall is ever acted on.
+/// Running this immediately before the write NARROWS that window to the gap
+/// between this read and the rename. It does not close it — a read and a
+/// rename are two operations — and #1155 measured what was left at ~6.5%. The
+/// tools now publish through [`pre_image_matches`] and an atomic exchange
+/// instead, which has no second observation to be stale; this remains as the
+/// path-reading form of the same verdict, for a caller with no exchange to
+/// make.
 pub fn pre_image_unchanged(path: &Path, judged: Option<&[u8]>) -> Result<(), String> {
-    match (std::fs::read(path), judged) {
-        (Ok(now), Some(before)) if now == before => Ok(()),
-        (Ok(_), Some(_)) => Err("its contents changed on disk".to_owned()),
-        (Ok(_), None) => Err("something else created it".to_owned()),
-        (Err(e), None) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        (Err(e), Some(_)) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err("it was deleted".to_owned())
-        }
-        (Err(e), _) => Err(format!("it could no longer be read ({e})")),
+    match std::fs::read(path) {
+        Ok(now) => pre_image_matches(Some(&now), judged),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => pre_image_matches(None, judged),
+        Err(e) => Err(format!("it could no longer be read ({e})")),
+    }
+}
+
+/// [`pre_image_unchanged`], for a pre-image that was OBSERVED rather than read
+/// back: `observed` is what the destination held at the instant the new bytes
+/// were published, `None` if it held nothing.
+///
+/// Reading the path back cannot answer this question, because the read and the
+/// write are two operations and a save between them is lost (#1155). An atomic
+/// exchange hands the displaced bytes to the caller instead, and this is the
+/// same verdict taken over those bytes.
+pub fn pre_image_matches(observed: Option<&[u8]>, judged: Option<&[u8]>) -> Result<(), String> {
+    match (observed, judged) {
+        (Some(now), Some(before)) if now == before => Ok(()),
+        (Some(_), Some(_)) => Err("its contents changed on disk".to_owned()),
+        (Some(_), None) => Err("something else created it".to_owned()),
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err("it was deleted".to_owned()),
     }
 }
 

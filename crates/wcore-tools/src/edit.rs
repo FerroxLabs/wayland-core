@@ -469,11 +469,14 @@ impl Tool for EditTool {
             }
         }
 
-        // ADV-7: the assessment above spends real time in `git`, and Edit's
-        // own read is older still. A save that landed in between would be
-        // overwritten by a replacement computed against bytes that are gone.
-        match wcore_config::atomic_write_checked(path, new_content.as_bytes(), || {
-            crate::unsaved_work::pre_image_unchanged(path, Some(content.as_bytes()))
+        // ADV-7 / #1155: the assessment above spends real time in `git`, and
+        // Edit's own read is older still. A save that landed in between would
+        // be overwritten by a replacement computed against bytes that are
+        // gone. Re-reading the path first only narrowed that — the read and
+        // the rename are still two operations — so the publish is an atomic
+        // exchange and `observed` is the pre-image it actually displaced.
+        match wcore_config::atomic_write_checked(path, new_content.as_bytes(), |observed| {
+            crate::unsaved_work::pre_image_matches(observed, Some(content.as_bytes()))
         }) {
             Ok(Ok(())) => {}
             Ok(Err(why)) => {
