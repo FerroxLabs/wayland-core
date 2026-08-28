@@ -2680,6 +2680,35 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
         let allowance = allowance_before.max(allowance_after);
         let bounded = elapsed.saturating_sub(allowance);
 
+        // GRADEABILITY, decided by measurement rather than assumed — the same
+        // discipline `grade_manifest_attribution` already applies to the
+        // message assertion, applied here to the BOUND assertion.
+        //
+        // `timeout_ms` is derived from the walk (`walk / 10`), so a host whose
+        // walk calibrates low asks for a bound BELOW its own cost for a single
+        // timer wait. In that regime this instrument cannot separate "bounded"
+        // from "unbounded": the allowance it must subtract is larger than the
+        // bound under test, so the verdict would be decided by host speed
+        // rather than by the product. MEASURED on hosted macOS (CI run
+        // 33128638552): a 7ms bound against a 10.952583ms allowance, derived
+        // from a walk that calibrated at 72.607459ms.
+        //
+        // Grow the tree and race again — the remedy `RACE_ATTEMPTS` already
+        // exists for. If NO attempt is ever gradeable this FAILS rather than
+        // returning, so the guard cannot turn a gate that could fail into one
+        // that cannot.
+        if allowance >= Duration::from_millis(timeout_ms) {
+            assert!(
+                !last_attempt,
+                "no attempt could grade the bound: this host's {allowance:?} \
+                 allowance for one timer wait is not smaller than the \
+                 {timeout_ms}ms bound derived from a {walk:?} walk, so a pass \
+                 and a failure are indistinguishable here"
+            );
+            grow_workspace(&root, attempt);
+            continue;
+        }
+
         // Graded on EVERY attempt and never retried: this is the half a product
         // regression breaks, and re-racing past a failure here would hide
         // exactly the defect #1111 exists to catch.
@@ -2791,6 +2820,35 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
         let allowance_after = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
         let allowance = allowance_before.max(allowance_after);
         let bounded = elapsed.saturating_sub(allowance);
+
+        // GRADEABILITY, decided by measurement rather than assumed — the same
+        // discipline `grade_manifest_attribution` already applies to the
+        // message assertion, applied here to the BOUND assertion.
+        //
+        // `timeout_ms` is derived from the walk (`walk / 10`), so a host whose
+        // walk calibrates low asks for a bound BELOW its own cost for a single
+        // timer wait. In that regime this instrument cannot separate "bounded"
+        // from "unbounded": the allowance it must subtract is larger than the
+        // bound under test, so the verdict would be decided by host speed
+        // rather than by the product. MEASURED on hosted macOS (CI run
+        // 33128638552): a 7ms bound against a 10.952583ms allowance, derived
+        // from a walk that calibrated at 72.607459ms.
+        //
+        // Grow the tree and race again — the remedy `RACE_ATTEMPTS` already
+        // exists for. If NO attempt is ever gradeable this FAILS rather than
+        // returning, so the guard cannot turn a gate that could fail into one
+        // that cannot.
+        if allowance >= Duration::from_millis(timeout_ms) {
+            assert!(
+                !last_attempt,
+                "no attempt could grade the bound: this host's {allowance:?} \
+                 allowance for one timer wait is not smaller than the \
+                 {timeout_ms}ms bound derived from a {walk:?} walk, so a pass \
+                 and a failure are indistinguishable here"
+            );
+            grow_workspace(&root, attempt);
+            continue;
+        }
 
         // Graded on EVERY attempt and never retried: this is the half a product
         // regression breaks, and re-racing past a failure here would hide

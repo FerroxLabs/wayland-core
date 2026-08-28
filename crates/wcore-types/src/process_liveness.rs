@@ -1151,10 +1151,29 @@ mod tests {
             }
             std::fs::read_to_string(format!("/proc/{pid}/stat"))
         };
-        assert_eq!(
-            group_census_with(mine, vanishing),
-            ProcessGroupCensus::Live(baseline),
-            "an unrelated pid exiting mid-scan must not defeat the census"
+        // The baseline is BRACKETED around the measurement rather than taken
+        // once before it. #1134's shared-process lib suite runs every test in
+        // this binary inside ONE process, so sibling tests spawn and reap
+        // children in this very process group between two scans of /proc — and
+        // an equality against a single earlier baseline then grades process
+        // group STABILITY, which this test does not own, instead of ESRCH
+        // absorption, which it does. Measured under that leg: baseline 3,
+        // census 2, with nothing wrong in the code under test.
+        //
+        // The count is still pinned — a census outside the bracket fails, and
+        // the paired `EACCES` control below still requires a refusal — so this
+        // narrows what the assertion claims without weakening what it catches.
+        let measured = group_census_with(mine, vanishing);
+        let after = match group_census_with(mine, real_group) {
+            ProcessGroupCensus::Live(n) if n >= 1 => n,
+            other => panic!("control: our own group must census as Live(>=1), got {other:?}"),
+        };
+        let (lo, hi) = (baseline.min(after), baseline.max(after));
+        assert!(
+            matches!(measured, ProcessGroupCensus::Live(n) if (lo..=hi).contains(&n)),
+            "an unrelated pid exiting mid-scan must not defeat the census: got \
+             {measured:?}, expected Live(n) with n in {lo}..={hi} (the group's \
+             own size measured on either side of the call)"
         );
 
         // The paired negative control: an entry that could not be LOOKED at
