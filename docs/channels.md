@@ -501,7 +501,7 @@ a pending follow-up.)
   operator through the three steps in order.
 - Outbound idempotency **on the nine adapters whose platform will not honour a
   token**. Matrix is the only exactly-once adapter, and only for a body that
-  fits in one platform message (32,768 chars) — above that cap the body is
+  fits in one platform message (16,384 chars) — above that cap the body is
   chunked and sent unkeyed, which is at-least-once. Slack and Discord *do*
   transmit a token (`Idempotency-Key`, `nonce`), but each was driven at its
   real API and a replayed key produced **two** messages, so both now declare

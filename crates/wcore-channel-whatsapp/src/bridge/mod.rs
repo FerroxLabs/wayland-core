@@ -575,7 +575,24 @@ impl Channel for WhatsappBridgeChannel {
         include_str!("../../schemas/whatsapp-bridge.json")
     }
 
-    /// WhatsApp caps a single text body at 4096 characters on every backend.
+    /// 4096 characters, carried over from the Cloud API adapter — and for THIS
+    /// surface the number is **UNVERIFIED**.
+    ///
+    /// Meta's 4096 is documented for the Cloud API `text.body` field
+    /// (<https://developers.facebook.com/docs/whatsapp/cloud-api/messages/text-messages>).
+    /// This channel does not talk to the Cloud API: it drives `baileys` or
+    /// `whatsapp-web.js` over the bridge's `sendText` RPC, and neither project
+    /// nor WhatsApp publishes a documented body limit for the Web/multi-device
+    /// protocol. So the citation above does not govern this code path, and no
+    /// other citation exists (wayland#934, 2026-08-28).
+    ///
+    /// It is kept rather than removed because dropping to `None` would disable
+    /// chunking entirely and send an unbounded body at a limit nobody knows,
+    /// which is the reject-and-drop direction. It carries no row in
+    /// `docs/delivery-semantics.md` §4.2 for the same reason it carries none in
+    /// §2 — the declaration test enumerates platforms the registry constructs
+    /// from a platform string, and the bridge adds none — so nothing outside
+    /// this file checks it.
     fn max_message_len(&self) -> Option<usize> {
         Some(4096)
     }
@@ -630,6 +647,53 @@ mod tests {
     use std::str::FromStr;
 
     // -- selector: both directions -----------------------------------------
+
+    /// The bridge's cap is the boundary the chunker splits on.
+    ///
+    /// wayland#934: this adapter had NO cap test of any kind. It is the eighth
+    /// `max_message_len` in the product and the only one no test and no document
+    /// touched — the declaration harness in `wcore-channels-registry` enumerates
+    /// platforms the registry constructs from a platform string, and the bridge
+    /// is reached through `whatsapp` + a `backend` key, so it adds none.
+    ///
+    /// This cannot check the NUMBER, and says so rather than implying otherwise:
+    /// 4096 is carried over from Meta's Cloud API documentation, which does not
+    /// govern the `baileys` / `whatsapp-web.js` backends this channel actually
+    /// drives, and no vendor documents a body limit for those. What it checks is
+    /// that the number is load-bearing — that a body over it splits into pieces
+    /// each of which is within it, losslessly. A chunk wider than the cap is the
+    /// HIGH-6 reject-and-drop bug regardless of where the cap came from.
+    #[test]
+    fn a_body_over_the_bridge_cap_splits_into_pieces_within_it() {
+        let ch =
+            WhatsappBridgeChannel::new("wa", cfg(WhatsappBackend::Baileys, PathBuf::from("/nope")));
+        let cap = ch.max_message_len().expect(
+            "the bridge must declare a finite cap; None sends an unbounded body at a limit \
+             nobody has documented",
+        );
+
+        let at_cap = "x".repeat(cap);
+        assert_eq!(
+            wcore_channels::manager::ChannelManager::chunks_for(Some(cap), &at_cap).len(),
+            1,
+            "a body of exactly {cap} chars must go as ONE message"
+        );
+
+        let over = format!("{at_cap}y");
+        let chunks = wcore_channels::manager::ChannelManager::chunks_for(Some(cap), &over);
+        assert_eq!(
+            chunks.len(),
+            2,
+            "an unbroken run of {} chars at cap {cap} must split into exactly 2 pieces",
+            over.chars().count()
+        );
+        let widest = chunks.iter().map(|c| c.chars().count()).max().unwrap_or(0);
+        assert!(
+            widest <= cap,
+            "a chunk of {widest} chars exceeds the {cap}-char cap the bridge declares"
+        );
+        assert_eq!(chunks.concat(), over, "the split must be lossless");
+    }
 
     #[test]
     fn backend_default_is_meta_business_not_baileys() {

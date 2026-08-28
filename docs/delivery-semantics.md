@@ -43,7 +43,7 @@ relying on it, because that scope is narrower than "one message".
 | Adapter | Platform primitive | Guarantee | Outcome-unknown delivery is… | On restart, expect | Replay measured at a real destination? |
 |---|---|---|---|---|---|
 | **Slack** | none that Slack honours — the adapter sends an `Idempotency-Key` header and **`slack.com` ignores it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Slack | **Yes** — a replayed key produced **two** messages; see the correction note below |
-| **Matrix** | `PUT …/send/m.room.message/{txnId}` — the txn id *is* the idempotency slot | **exactly-once, up to 32,768 chars; at-least-once above it** — see [§4.1](#41-exactly-once-stops-at-the-message-cap) | **retried** with the same key, below the cap | one message below the cap; the homeserver returns the original `event_id` | **BELOW the cap: Yes** — by the PRODUCT, against matrix.org, across a real `kill -9`; see [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30). **ABOVE the cap: NOT MEASURED at a real destination** — the harness exists and has never completed a run; see [§4.1](#41-exactly-once-stops-at-the-message-cap) |
+| **Matrix** | `PUT …/send/m.room.message/{txnId}` — the txn id *is* the idempotency slot | **exactly-once, up to 16,384 chars; at-least-once above it** — see [§4.1](#41-exactly-once-stops-at-the-message-cap) | **retried** with the same key, below the cap | one message below the cap; the homeserver returns the original `event_id` | **BELOW the cap: Yes** — by the PRODUCT, against matrix.org, across a real `kill -9`; see [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30). **ABOVE the cap: NOT MEASURED at a real destination** — the harness exists and has never completed a run; see [§4.1](#41-exactly-once-stops-at-the-message-cap) |
 | **Discord** | `nonce` field on message create — **transmitted, but Discord does not dedupe on it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Discord | **Yes** — a replayed key produced **two** messages; see [§8](#8-discord-was-wrong-and-how-it-was-found) |
 | **Telegram** | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Telegram | **NOT MEASURED at a real destination** — see the correction below |
 | **Twilio SMS** | none that Twilio honours — the adapter sends an `Idempotency-Key` header and the `Messages` resource documents no dedup slot to read it | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Twilio | **NOT MEASURED at a real destination** — see the correction below |
@@ -273,7 +273,7 @@ and the one this programme initially mis-filed as a Windows duplication defect.
 **The Matrix row has a precondition, and until 2026-07-31 this document did not state it.**
 
 Every adapter declares a single-message length cap through `Channel::max_message_len()`;
-Matrix's is **32,768 characters** (`max_message_len()` in `crates/wcore-channel-matrix/src/lib.rs`; every cap is tabulated in [§4.2](#42-the-message-cap-per-adapter--declared-by-us-measured-by-nobody)). When a body
+Matrix's is **16,384 characters** (`max_message_len()` in `crates/wcore-channel-matrix/src/lib.rs`; every cap is tabulated in [§4.2](#42-the-message-cap-per-adapter--declared-by-us-measured-by-nobody)). When a body
 exceeds it, `ChannelManager::send_to_keyed`
 (`crates/wcore-channels/src/manager.rs:776-812`) splits it and sends the pieces **with no
 idempotency key at all**.
@@ -287,8 +287,8 @@ But it means the guarantee inverts above the cap:
 
 | Body | Key on the wire | Guarantee | A retry produces |
 |---|---|---|---|
-| ≤ 32,768 chars | yes — the txn id | **exactly-once** | one message; the homeserver returns the original `event_id` |
-| > 32,768 chars | **none** | **at-least-once** | **a second full copy of every chunk** |
+| ≤ 16,384 chars | yes — the txn id | **exactly-once** | one message; the homeserver returns the original `event_id` |
+| > 16,384 chars | **none** | **at-least-once** | **a second full copy of every chunk** |
 
 **So a retry above the cap duplicates, on Matrix, today.** The spine is what decides whether to
 retry, and it used to ask a per-**adapter** question — `supports_outbound_idempotency()`, which
@@ -335,7 +335,7 @@ a Sean-only input, so this is blocked on a credential and not on engineering.
 What that run DID establish, because it happens before the first network write:
 
 ```text
-MCR_CAP=32768
+MCR_CAP=16384
 MCR_BODY   ctrl_chars=51 ctrl_chunks=1   subj_chars=36814 subj_chunks=2
 MCR_PREDICTED ctrl=true  subj=false
 ```
@@ -348,7 +348,7 @@ evidence about arrival counts, and it is not counted as any.
 The run wrote nothing to the room — it failed on the baseline read, which precedes the first
 send, and neither `MCR_CTRL_RECEIPTS` nor `MCR_SUBJ_RECEIPTS` was ever printed.
 
-### 4.2 The message cap, per adapter — two measured, five still declared by us alone
+### 4.2 The message cap, per adapter — two measured live, every one now sourced
 
 **Generalised 2026-08-26, [FerroxLabs/wayland#934](https://github.com/FerroxLabs/wayland/issues/934).**
 Until then exactly one cap in the product was bound to anything outside its own function.
@@ -369,23 +369,61 @@ Every cap now has a row here and in the machine-readable block, and
 against the adapter **the production factory builds**. `.cap` no longer means "the boundary
 of a conditional guarantee"; it means "this adapter's `max_message_len()`".
 
-| Adapter | Declared cap (chars) | Declared at | Measured at the real platform? |
+| Adapter | Declared cap (chars) | What the vendor documents | Measured at the real platform? |
 |---|---|---|---|
-| **Slack** | 4,000 | `crates/wcore-channel-slack/src/lib.rs` | **MEASURED 2026-08-27** — 4,040 is the largest single message; at 4,041 the API splits into 4,000-char messages. Was declared 39,000: the manager chunks on this value, so one 39,000-char send arrived as ten messages while `chunks_for(..).len() <= 1` marked it single-delivery. |
-| **Matrix** | 32,768 | `crates/wcore-channel-matrix/src/lib.rs` | **NOT MEASURED** |
-| **Discord** | 2,000 | `crates/wcore-channel-discord/src/lib.rs` | **MEASURED 2026-08-27** — 2,000 accepted; 2,001 refused by the platform with HTTP 400 `50035 Invalid Form Body`. |
-| **Telegram** | 4,096 | `crates/wcore-channel-telegram/src/lib.rs` | **NOT MEASURED** |
-| **Twilio SMS** | 1,600 | `crates/wcore-channel-sms/src/lib.rs` | **NOT MEASURED** |
-| **WhatsApp** | 4,096 | `crates/wcore-channel-whatsapp/src/lib.rs` | **NOT MEASURED** |
-| **MS Teams** | 28,000 | `crates/wcore-channel-msteams/src/lib.rs` | **NOT MEASURED** |
-| **Email** | none | inherits the trait default in `crates/wcore-channels/src/lib.rs` | n/a — no cap to be wrong about |
-| **Signal** | none | inherits the trait default | n/a — no cap to be wrong about |
-| **iMessage** | none | inherits the trait default | n/a — no cap to be wrong about |
+| **Slack** | 4,000 | **Quoted.** [`chat.postMessage`](https://docs.slack.dev/reference/methods/chat.postMessage), "Truncating content": *"For best results, limit the number of characters in the `text` field to 4,000 characters"*, and separately *"Slack will truncate messages containing more than 40,000 characters"*. 4,000 is advisory and is also the split point; 40,000 is silent truncation, not a catchable rejection. | **MEASURED 2026-08-27** — 4,040 is the largest single message; at 4,041 the API splits into 4,000-char messages. Was declared 39,000: the manager chunks on this value, so one 39,000-char send arrived as ten messages while `chunks_for(..).len() <= 1` marked it single-delivery. |
+| **Matrix** | 16,384 | **Derived — the platform limit is BYTES.** [Client-Server API, Size limits](https://spec.matrix.org/latest/client-server-api/#size-limits): *"The complete event MUST NOT be larger than 65536 bytes … encoded as Canonical JSON."* Synapse enforces exactly that (`MAX_PDU_SIZE = 65536`); nothing documents a limit on `body` itself. `65536 / 4` is the largest scalar count whose UTF-8 encoding cannot exceed it. | **NOT MEASURED** |
+| **Discord** | 2,000 | **Quoted.** [Create Message](https://docs.discord.com/developers/resources/message): *"content?* — string — Message contents (up to 2000 characters)"*. The 25 MiB on the same page is the whole request. | **MEASURED 2026-08-27** — 2,000 accepted; 2,001 refused by the platform with HTTP 400 `50035 Invalid Form Body`. |
+| **Telegram** | 4,096 | **Quoted.** [`sendMessage`](https://core.telegram.org/bots/api#sendmessage): *"text — String — Yes — Text of the message to be sent, 1-4096 characters after entities parsing"*. Unit unstated; `MessageEntity` on the same page indexes in UTF-16 code units. | **NOT MEASURED** |
+| **Twilio SMS** | 1,600 | **Quoted.** [Message resource](https://www.twilio.com/docs/messaging/api/message-resource): *"The text content of the outgoing message. Can be up to 1,600 characters in length."* The GSM-7/UCS-2 split in the same sentence governs segmentation and billing, not the maximum. | **NOT MEASURED** |
+| **WhatsApp** | 4,096 | **Quoted.** [Cloud API text messages](https://developers.facebook.com/docs/whatsapp/cloud-api/messages/text-messages): *"Body text. … Maximum 4096 characters."* Unit unstated. | **NOT MEASURED** |
+| **MS Teams** | 20,480 | **Derived — the platform limit is a UTF-16 PAYLOAD budget, and no character limit is documented at all.** [Format your bot messages](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages): *"The agent message size limit is 100 KB … it's recommended to ensure that the size of the message itself is within 80 KB … the agent receives a `413` status code (`RequestEntityTooLarge`) … `MessageSizeTooBig`."* `81920 / 4` (a scalar costs at most two UTF-16 code units). | **NOT MEASURED** |
+| **Email** | none | n/a | n/a — no cap to be wrong about |
+| **Signal** | none | n/a | n/a — no cap to be wrong about |
+| **iMessage** | none | n/a | n/a — no cap to be wrong about |
+
+Every row's source is also in the machine-readable block as `<platform>.cap_source`, and
+`crates/wcore-channels-registry/tests/delivery_semantics_declaration.rs` fails the build if a
+cap row has no source beside it. That does not make the number right — a citation can be
+misread, and two of them just were — but it makes the number ACCOUNTABLE: a reader can open the
+page and check, which is not true of a number that appears nowhere but in the function that
+returns it. `Declared at` was dropped from this table because it duplicated the
+`§4.2 → adapter` binding the declaration test already enforces; the file paths are unchanged
+and are named in the machine-readable block's own prose.
+
+#### Two of the seven were WRONG, found by reading the vendor documentation (2026-08-28, wayland#934)
+
+**MS Teams was 28,000 and is now 20,480 — wrong three ways at once.** 28 KB is the **Incoming
+Webhook** limit
+([source](https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook)),
+a different surface from the Bot Framework one this adapter uses. The bot limit was never 28 KB:
+it is 100 KB, and was 40 KB until 2025-09-16. And KB is not characters — the budget is the whole
+payload "encoded as UTF-16", so reading "28 KB" as "28,000 characters" doubled even the wrong
+number. Microsoft documents no character limit for a bot message's `text`, so 20,480 is derived
+from the 80 KB figure Microsoft itself recommends, at four bytes per scalar worst case.
+
+**Matrix was 32,768 and is now 16,384 — an arithmetic error with a live failure mode.** 32,768
+is `65536 / 2`: it assumed two UTF-8 bytes per scalar. UTF-8 uses up to four. A 32,768-scalar CJK
+body (3 bytes each) is 98,304 bytes, the homeserver rejects the event, and the message is
+dropped — HIGH-6 reinstated for any non-Latin reply longer than about 21,800 characters. This
+narrows the reach of the product's only exactly-once guarantee, and that is the correct trade:
+a rejected event is a lost message, a chunked one merely loses its key.
+
+**Neither correction is a measurement**, and both remain `cap_measured = no`. Each is still an
+upper bound on the BODY, and each platform's real limit is on something the client cannot
+compute: Matrix's is the complete signed PDU the homeserver assembles after the `PUT`; Teams's
+is the serialized Activity including @-mentions and attachment JSON.
 
 The **WhatsApp bridge** declares `Some(4096)` in
 `crates/wcore-channel-whatsapp/src/bridge/mod.rs` and has no row above, for the same reason it
 has no row in §2: the declaration test enumerates platforms the registry constructs from a
-platform string, and the bridge adds none. Its cap is checked by nothing.
+platform string, and the bridge adds none. **Its number is UNVERIFIED and cannot be sourced.**
+Meta's 4096 is documented for the Cloud API `text.body`; this channel drives `baileys` or
+`whatsapp-web.js` over the bridge's `sendText` RPC, and neither project nor WhatsApp publishes a
+body limit for the Web/multi-device protocol. The value is kept because `None` would disable
+chunking entirely and send an unbounded body at a limit nobody knows. It gained its first test of
+any kind on 2026-08-28 (`a_body_over_the_bridge_cap_splits_into_pieces_within_it`), which checks
+that the number is load-bearing and explicitly does not check that it is right.
 
 #### What "NOT MEASURED" costs, and it is not symmetric
 
@@ -594,7 +632,13 @@ A declaration that drifts from the code is worse than no declaration. This one i
 7. asserts every cap row carries a `<platform>.cap_measured` verdict, and that the verdict
    agrees with §4.2's table. Without it an `assert_eq!` against a number implies the number was
    verified; the verdict makes the difference between "checked against our adapter" and
-   "checked against the platform" a thing the file has to state rather than imply.
+   "checked against the platform" a thing the file has to state rather than imply;
+8. asserts every cap row carries a `<platform>.cap_source` naming the vendor documentation the
+   number came from, and that it is a URL rather than an assurance. Added 2026-08-28
+   (wayland#934) after reading those pages found two of the seven caps wrong — Teams's had been
+   taken from a different product surface's documentation and misread from KB into characters,
+   and Matrix's assumed two UTF-8 bytes per character where UTF-8 uses four. Neither is a
+   drift a `cap`-vs-adapter comparison could ever have caught, because both numbers agreed.
 
 If you change an adapter's capability **or its `max_message_len`**, this file is part of the
 change.
@@ -753,29 +797,43 @@ that `n`; an adapter returning `None` carries no cap row.
 `no` means the number has never been checked against the PLATFORM — only against our own
 adapter, which is a drift check and not a measurement. `live` may be written only for a
 platform whose boundary probe (a send at the cap, and a send one char over it) has actually
-run against a real destination. Every row is `no` today; §4.2 names what each is waiting for.
+run against a real destination. §4.2 names what each `no` row is waiting for.
+
+`<platform>.cap_source` is REQUIRED beside every cap row too, and must be a URL. It names the
+vendor page the number is derived from, so the number is checkable by a reader rather than
+being an assertion about itself. Added 2026-08-28 (wayland#934); reading these pages is what
+found `msteams.cap` taken from the Incoming Webhook surface and misread from KB into
+characters, and `matrix.cap` computed at two UTF-8 bytes per character instead of four. The
+adapter caps are declared in `crates/wcore-channel-<platform>/src/lib.rs` in every case.
 slack = at-most-once
 slack.cap = 4000
 slack.cap_measured = live
+slack.cap_source = https://docs.slack.dev/reference/methods/chat.postMessage
 matrix = exactly-once-below-cap
-matrix.cap = 32768
+matrix.cap = 16384
 matrix.cap_measured = no
+matrix.cap_source = https://spec.matrix.org/latest/client-server-api/#size-limits
 discord = at-most-once
 discord.cap = 2000
 discord.cap_measured = live
+discord.cap_source = https://docs.discord.com/developers/resources/message
 telegram = at-most-once
 telegram.cap = 4096
 telegram.cap_measured = no
+telegram.cap_source = https://core.telegram.org/bots/api#sendmessage
 sms = at-most-once
 sms.cap = 1600
 sms.cap_measured = no
+sms.cap_source = https://www.twilio.com/docs/messaging/api/message-resource
 whatsapp = at-most-once
 whatsapp.cap = 4096
 whatsapp.cap_measured = no
+whatsapp.cap_source = https://developers.facebook.com/docs/whatsapp/cloud-api/messages/text-messages
 email = at-most-once
 signal = at-most-once
 imessage = at-most-once
 msteams = at-most-once
-msteams.cap = 28000
+msteams.cap = 20480
 msteams.cap_measured = no
+msteams.cap_source = https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages
 -->

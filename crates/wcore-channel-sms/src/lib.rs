@@ -343,7 +343,12 @@ impl Channel for SmsChannel {
         include_str!("schemas/sms.json")
     }
 
-    /// Twilio concatenated SMS caps a single message at 1600 characters.
+    /// Twilio caps a single message body at 1600 characters. Documented at
+    /// <https://www.twilio.com/docs/messaging/api/message-resource> — "The text
+    /// content of the outgoing message. Can be up to 1,600 characters in
+    /// length." The GSM-7/UCS-2 split in the same sentence governs SEGMENTATION
+    /// and billing (160 / 70 per segment), not the maximum; Twilio documents no
+    /// smaller cap for UCS-2.
     fn max_message_len(&self) -> Option<usize> {
         Some(1600)
     }
@@ -496,17 +501,68 @@ mod tests {
         ])
     }
 
+    /// The cap is load-bearing: it is the boundary the chunker splits on.
+    ///
+    /// # Why this is not `assert_eq!(max_message_len(), Some(1600))`
+    ///
+    /// wayland#934. Until 2026-08-28 this test compared the function's return
+    /// value against the literal that function returns a few lines above. That
+    /// restates the code. Measured the same day: with `chunk_message` mutated to
+    /// emit pieces 1000 chars OVER the cap — HIGH-6, the reject-and-drop bug the
+    /// cap exists to prevent — six of the seven adapter cap tests still passed.
+    ///
+    /// So this drives the boundary instead, through the same
+    /// `ChannelManager::chunks_for` decision `send_to_keyed` itself reads:
+    /// a body AT the cap is one message (which is what lets the idempotency key
+    /// ride, `docs/delivery-semantics.md` §4.1); one char OVER splits; no piece
+    /// of the split may exceed the cap; and the split is lossless.
+    ///
+    /// The NUMBER is bound elsewhere, deliberately. No unit test in this crate
+    /// can check a number against a platform. What binds it is
+    /// `wcore-channels-registry/tests/delivery_semantics_declaration.rs`, which
+    /// reads this method through the PRODUCTION factory and compares it against
+    /// the `sms.cap` row of `docs/delivery-semantics.md` — a row that
+    /// now also carries `sms.cap_source`, the vendor documentation the
+    /// number is derived from, and `sms.cap_measured`, which states
+    /// whether it has ever been checked at the real platform.
     #[test]
-    fn max_message_len_is_sms_cap() {
-        // wayland#934: this asserts the literal the function returns one line above, so it
-        // restates the code rather than testing it. It is retained as a change-detector, but
-        // the check that can actually catch a wrong cap is
-        // `wcore-channels-registry/tests/delivery_semantics_declaration.rs`, which binds this
-        // number to `sms.cap` in `docs/delivery-semantics.md` through the PRODUCTION
-        // factory. Whether either number equals the PLATFORM's real limit is still
-        // unmeasured -- see `cap_measured` and §4.2 of that document.
+    fn a_body_over_the_cap_splits_into_pieces_the_platform_will_accept() {
         let ch = SmsChannel::new("test", cfg_for("https://unused.example"), store_for_test());
-        assert_eq!(ch.max_message_len(), Some(1600));
+        let cap = ch
+            .max_message_len()
+            .expect("sms must declare a finite cap; None disables chunking and reinstates HIGH-6");
+
+        // AT the cap: one message. One char earlier and the conditional
+        // guarantee of §4.1 would stop short of where the document says it does.
+        let at_cap = "x".repeat(cap);
+        assert_eq!(
+            wcore_channels::manager::ChannelManager::chunks_for(Some(cap), &at_cap).len(),
+            1,
+            "a body of exactly {cap} chars must still go as ONE message"
+        );
+
+        // ONE CHAR OVER: splits, and — the assertion the old test could not make
+        // — every piece is itself within the cap. A piece over the platform
+        // limit is rejected and dropped in turn, which is the whole of HIGH-6.
+        let over = format!("{at_cap}y");
+        let chunks = wcore_channels::manager::ChannelManager::chunks_for(Some(cap), &over);
+        assert_eq!(
+            chunks.len(),
+            2,
+            "an unbroken run of {} chars at cap {cap} must split into exactly 2 pieces",
+            over.chars().count()
+        );
+        let widest = chunks.iter().map(|c| c.chars().count()).max().unwrap_or(0);
+        assert!(
+            widest <= cap,
+            "a chunk of {widest} chars exceeds the {cap}-char cap — the platform rejects it and \
+             the body is dropped, which is the HIGH-6 bug the cap exists to prevent"
+        );
+        assert_eq!(
+            chunks.concat(),
+            over,
+            "the split must be lossless: the destination gets the whole body or the chunker ate it"
+        );
     }
 
     // -----------------------------------------------------------------
