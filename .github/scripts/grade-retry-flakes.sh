@@ -148,7 +148,7 @@ FLAKES=$(
 # line is an allowlist that allows everything on the day someone fat-fingers a
 # date, and it would fail in the safe-looking direction (green) — the exact
 # class of defect this gate exists to close.
-ALLOW_KEYS=""
+ALLOWED_TEST_IDS=""
 BAD_ENTRIES=0
 EXPIRED_ENTRIES=0
 
@@ -190,7 +190,7 @@ else
       EXPIRED_ENTRIES=$((EXPIRED_ENTRIES + 1)); continue
     fi
 
-    ALLOW_KEYS="${ALLOW_KEYS}${key}"$'\n'
+    ALLOWED_TEST_IDS="${ALLOWED_TEST_IDS}${key}"$'\n'
   done < "$ALLOWLIST"
 fi
 
@@ -205,7 +205,7 @@ if [ -n "$FLAKES" ]; then
   while IFS=$'\t' read -r key attempts; do
     if [ -z "$key" ]; then continue; fi
     TOTAL_ATTEMPTS=$((TOTAL_ATTEMPTS + attempts))
-    if printf '%s' "$ALLOW_KEYS" | grep -qxF -- "$key"; then
+    if printf '%s' "$ALLOWED_TEST_IDS" | grep -qxF -- "$key"; then
       LISTED=$((LISTED + 1))
       printf "  ALLOWED  %-3s failed attempt(s)  %s\n" "$attempts" "$key"
       echo "::warning title=Known-flaky test retried::${key} needed ${attempts} retry attempt(s). It is on ${ALLOWLIST} with an expiry, so it does not fail this run - but it is still a failing test, and the entry is debt with a date on it."

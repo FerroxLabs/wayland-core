@@ -1,0 +1,34 @@
+# gitleaks configuration.
+#
+# The default ruleset is EXTENDED, never replaced: this file exists to record
+# reviewed false positives, not to widen what may be committed. The entry below
+# names the exact literal it suppresses and why, so a real credential cannot
+# hide behind a broad path or rule exclusion.
+#
+# The pre-push hook (.git/hooks/pre-push) runs `gitleaks detect` over the pushed
+# commit range, so a false positive in a commit that is already written blocks
+# every later push of any range containing it. That is why suppression is
+# recorded here rather than by rewriting history or by using the break-glass
+# escape -- a secret gate that people routinely bypass has stopped being a gate.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Reviewed false positives. Content-scoped literals only; no path or rule excluded wholesale."
+regexTarget = "match"
+regexes = [
+  # .github/scripts/grade-retry-flakes.sh accumulates the ALLOWLISTED TEST IDS
+  # read out of .config/flaky-allowlist.txt -- test names such as
+  # wcore-agent::crucible_council::slow_proposer_hits_per_proposer_deadline.
+  # The original variable was ALLOW_KEYS, which the generic-api-key rule matched
+  # on the NAME alone. It has since been renamed ALLOWED_TEST_IDS, but the old
+  # name remains in commit 9b50e891 and therefore in every range containing it.
+  # Reviewed 2026-08-29: the assignment is an empty string. There is no
+  # credential here and there never was.
+  # The rule matched ACROSS the newline -- it read `ALLOW_KEYS=""` as a key
+  # assignment and took the NEXT line's counter, `BAD_ENTRIES=0`, as the value.
+  # Both halves are pinned here so this suppresses that exact two-line shape and
+  # nothing else.
+  'ALLOW_KEYS=""\nBAD_ENTRIES=0',
+]
