@@ -54,6 +54,11 @@ pub enum InvalidationCause {
     ToolDefinitionsChanged,
     /// Message history was rewritten (e.g. compaction).
     HistoryRewritten,
+    /// #1166 — the request was dispatched to a different model than the turn
+    /// that wrote the cache (e.g. the smart-routing tier swap), so the lookup
+    /// went to a different cache pool. Previously laundered into `Expired`,
+    /// which blames the server for a client-side decision.
+    ModelChanged,
     /// Cache TTL expired before next call.
     Expired,
     /// Provider rejected the cache control marker (e.g. token count too low).
@@ -70,6 +75,7 @@ impl InvalidationCause {
             Self::SystemPromptDrift => "system_prompt_drift",
             Self::ToolDefinitionsChanged => "tool_definitions_changed",
             Self::HistoryRewritten => "history_rewritten",
+            Self::ModelChanged => "model_changed",
             Self::Expired => "expired",
             Self::ProviderRejected => "provider_rejected",
             Self::NoMarker => "no_marker",
@@ -158,6 +164,10 @@ pub struct CacheHealthWarn {
     /// Model that served the turn (Flux `ProviderMeta.routed_model` when
     /// signaled back, else the dispatched model id).
     pub routed_model: String,
+    /// #1166 — why the prefix was not read back. Detection without attribution
+    /// is what let the product log "hit ratio 0.030, this is bad" on the same
+    /// turn it recorded `Healthy, 0 causes`.
+    pub cause: InvalidationCause,
 }
 
 #[cfg(test)]
@@ -258,6 +268,7 @@ mod tests {
             cache_read_tokens: 128,
             ratio: 128.0 / 15_000.0,
             routed_model: "gpt-5.4".into(),
+            cause: InvalidationCause::HistoryRewritten,
         };
         let j = serde_json::to_string(&warn).unwrap();
         let back: CacheHealthWarn = serde_json::from_str(&j).unwrap();
