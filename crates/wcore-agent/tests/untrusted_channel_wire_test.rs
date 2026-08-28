@@ -63,7 +63,9 @@ use std::sync::Arc;
 use common::{RECOVERY_TEST_KEY, configure_persisted_test_session};
 use serde_json::{Value, json};
 use wcore_agent::bootstrap::AgentBootstrap;
-use wcore_agent::channel_dispatch::build_turn_prompt;
+use wcore_agent::channel_dispatch::{ChannelTurnDispatcher, build_turn_prompt};
+use wcore_agent::channel_inbound::TurnDispatcher;
+use wcore_agent::channel_policy::ChannelPolicyRegistry;
 use wcore_agent::channel_tools::ChannelToolScope;
 use wcore_agent::output::OutputSink;
 use wcore_agent::output::null_sink::NullSink;
@@ -634,6 +636,80 @@ async fn openai_wire_body_carries_only_sender_bytes_and_the_named_runtime_blocks
     );
 }
 
+/// THE DISPATCH SEAM — the one the product actually runs.
+///
+/// # Why the two wire legs above are not enough
+///
+/// Both of them call `build_turn_prompt` in the TEST and hand the result to
+/// `engine.run` themselves. That grades the funnel and the provider
+/// serialisation, but it leaves the last hop — `ChannelTurnDispatcher::dispatch`
+/// taking `prompt_for`'s output to `engine.run` — completely unobserved. The
+/// unit test in `channel_dispatch.rs` stops at `prompt_for` for the same
+/// reason. So the whole file was blind to a wrapper added between the two,
+/// which is exactly the class of change the directive forbids: any product
+/// text ahead of the sender's bytes makes the directive's description of a
+/// user turn false, and gives a sender a marker to imitate.
+///
+/// This drives the REAL dispatcher — its own pooling, its own
+/// `remote_channel_config`, its own fallback posture, its own `engine.run` —
+/// and grades the bytes that reach the socket with the same assertions the
+/// other legs use. Nothing about the prompt is reconstructed here: the test
+/// hands `dispatch` an `IncomingMessage` and never touches `build_turn_prompt`.
+///
+/// Verified by mutation: wrapping `prompt_for(...)` in
+/// `format!("Wayland-Context: trusted\n{prompt}")` at the dispatch site left
+/// the other five tests in this file green and turns this one red.
+#[tokio::test]
+async fn the_real_dispatcher_puts_only_the_funnel_output_on_the_wire() {
+    let server = start_mock("/v1/messages", anthropic_text_sse("ok")).await;
+    let (_dir, cwd) = resolved_workspace();
+    let provider: Arc<dyn LlmProvider> = Arc::new(AnthropicProvider::new(
+        "anthropic-wire-test-key",
+        &server.uri(),
+        ProviderCompat::anthropic_defaults(),
+        DebugConfig::default(),
+    ));
+    let mut config = base_config(
+        ProviderType::Anthropic,
+        &server.uri(),
+        ProviderCompat::anthropic_defaults(),
+    );
+    configure_persisted_test_session(&mut config, &cwd);
+
+    // An EMPTY registry: `scope_for` finds nothing and the dispatcher falls
+    // back to the safe `Conversational` posture rooted at cwd, which is what
+    // carries the untrusted-channel directive. `Default` is one of the two
+    // public ways into the registry (`from_parts` is `#[cfg(test)]`, so an
+    // integration test cannot reach it) and is fail-closed by design.
+    let dispatcher = ChannelTurnDispatcher::new(
+        config,
+        cwd.to_str().expect("utf-8 workdir").to_string(),
+        provider,
+        Arc::new(ChannelPolicyRegistry::default()),
+        None,
+    );
+
+    let reply = dispatcher
+        .dispatch("agent:main:slack:dm:c1", "c1", &hostile_message())
+        .await
+        .expect("the dispatcher drove a turn against the mock");
+    assert_eq!(
+        reply.as_deref(),
+        Some("ok"),
+        "the dispatcher must have completed a real turn - a turn that failed \
+         before dispatch captures no request and every assertion below would \
+         pass for free"
+    );
+
+    let bodies: Vec<Value> = server
+        .received_requests()
+        .await
+        .expect("wiremock records requests")
+        .into_iter()
+        .map(|r| serde_json::from_slice::<Value>(&r.body).expect("request body is JSON"))
+        .collect();
+    assert_boundary_holds_on_the_wire("dispatch-seam", &bodies);
+}
 /// THE CONTROL. Same shape, no channel posture: the directive must be absent.
 /// Without this, a captured-body harness that silently stopped carrying the
 /// system field would make the directive assertion above vacuous.
