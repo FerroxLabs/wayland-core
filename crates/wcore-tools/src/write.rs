@@ -16,6 +16,10 @@ use crate::effects::{
 use crate::file_cache::{FileStateCache, update_cache_after_write};
 use crate::path_validation::validate_user_path;
 use crate::unsaved_work::{Mode, UnsavedWorkGuard, Verdict};
+use crate::vfs::{
+    FileContentIdentity, FileMutationOutcome, FileObservation, FilePrecondition,
+    IntendedFileMutation,
+};
 
 pub struct WriteTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
@@ -180,36 +184,85 @@ impl WriteTool {
             n.note_self_originated_write(path).await;
         }
 
-        // ADV-7, vfs side: same re-check, through the same vfs the write
-        // goes to.
-        let still = match ctx.vfs.read(path).await {
-            Ok(now) => match judged.as_deref() {
-                Some(before) if now == before => Ok(()),
-                Some(_) => Err("its contents changed on disk".to_owned()),
-                None => Err("something else created it".to_owned()),
-            },
-            Err(e) if judged.is_none() => match ctx.vfs.exists(path).await {
-                Ok(false) => Ok(()),
-                _ => Err(format!("it could no longer be read ({e})")),
-            },
-            Err(e) => Err(format!("it could no longer be read ({e})")),
+        // ADV-7 / #1155, vfs side. The re-check and the write are two
+        // operations through the same vfs, which is the window #1155 measured
+        // at 140 of 200 on the Edit tool. The pre-image travels WITH the write
+        // instead — see `RealFs::compare_exchange_file`.
+        let precondition = match judged.as_deref() {
+            Some(before) => FilePrecondition::Present(FileContentIdentity::from_bytes(before)),
+            None => FilePrecondition::Absent,
         };
-        if let Err(why) = still {
-            return ToolResult {
-                content: crate::unsaved_work::changed_under_write(file_path, &why),
-                is_error: true,
-            };
-        }
+        let mutation = IntendedFileMutation::new(precondition, content.as_bytes().to_vec());
 
         // F13: everything above this line left the target untouched, and
-        // everything below it may not have. The filesystem cannot be asked
-        // afterwards which side a failure fell on.
+        // everything below it may not have. A `Conflict` is the exception the
+        // backend can answer for: nothing was published.
         *attempt = FilesystemWriteAttempt::Attempted;
-        if let Err(e) = ctx.vfs.write(path, content.as_bytes()).await {
-            return ToolResult {
-                content: format!("Failed to write file: {e}"),
-                is_error: true,
-            };
+        match ctx.vfs.compare_exchange_file(path, &mutation).await {
+            Ok(FileMutationOutcome::Applied { .. }) => {}
+            Ok(FileMutationOutcome::AlreadyApplied { .. }) => {
+                // Byte-identical to what is already there. A compare-exchange
+                // declines to touch the inode; the shipped write rewrites it, and
+                // F889 receipt reconciliation is calibrated against that
+                // (f889_write_edit_reconcile_test, the byte-identical-write arm).
+                // Changing WHEN a no-op rewrite happens is not this fix's business,
+                // and it costs nothing here: `AlreadyApplied` means the destination
+                // still holds the pre-image, so no save was displaced and there is
+                // no race to lose.
+                if let Err(e) = ctx.vfs.write(path, content.as_bytes()).await {
+                    return ToolResult {
+                        content: format!("Failed to write file: {e}"),
+                        is_error: true,
+                    };
+                }
+            }
+            Ok(FileMutationOutcome::Conflict { current }) => {
+                *attempt = FilesystemWriteAttempt::NotAttempted;
+                let why = match (current, judged.is_some()) {
+                    (FileObservation::Absent, true) => "it was deleted",
+                    (FileObservation::Present(_), false) => "something else created it",
+                    _ => "its contents changed on disk",
+                };
+                return ToolResult {
+                    content: crate::unsaved_work::changed_under_write(file_path, why),
+                    is_error: true,
+                };
+            }
+            // A backend with no compare-exchange keeps exactly the behaviour
+            // it had: re-read, then write. Racy, and unchanged by this fix.
+            Err(e) if crate::vfs::is_compare_exchange_unsupported(&e) => {
+                let still = match ctx.vfs.read(path).await {
+                    Ok(now) => match judged.as_deref() {
+                        Some(before) if now == before => Ok(()),
+                        Some(_) => Err("its contents changed on disk".to_owned()),
+                        None => Err("something else created it".to_owned()),
+                    },
+                    Err(e) if judged.is_none() => match ctx.vfs.exists(path).await {
+                        Ok(false) => Ok(()),
+                        _ => Err(format!("it could no longer be read ({e})")),
+                    },
+                    Err(e) => Err(format!("it could no longer be read ({e})")),
+                };
+                if let Err(why) = still {
+                    *attempt = FilesystemWriteAttempt::NotAttempted;
+                    return ToolResult {
+                        content: crate::unsaved_work::changed_under_write(file_path, &why),
+                        is_error: true,
+                    };
+                }
+                if let Err(e) = ctx.vfs.write(path, content.as_bytes()).await {
+                    return ToolResult {
+                        content: format!("Failed to write file: {e}"),
+                        is_error: true,
+                    };
+                }
+            }
+            Err(e) => {
+                return ToolResult {
+                    content: format!("Failed to write file: {e}"),
+                    is_error: true,
+                };
+            }
         }
         *attempt = FilesystemWriteAttempt::Completed;
 
@@ -388,30 +441,32 @@ impl Tool for WriteTool {
             }
         }
 
-        // Write atomically: write to temp file, then rename.
-        let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
-        if let Err(e) = std::fs::write(&tmp_path, content) {
-            return ToolResult {
-                content: format!("Failed to write file: {}", e),
-                is_error: true,
+        // ADV-7 / #1155: the assessment took a measured 13.5 ms, and a save
+        // that landed inside it was destroyed uncopied while the note claimed
+        // the prior contents were preserved. Re-reading the path immediately
+        // before the rename only NARROWED that window — measured at 13 losses
+        // in 200 with the re-check in place — because the read and the rename
+        // are still two operations. `atomic_write_checked` publishes by an
+        // atomic exchange, so the pre-image it judges IS the one it displaced.
+        let unpublishable =
+            match wcore_config::atomic_write_checked(path, content.as_bytes(), |observed| {
+                crate::unsaved_work::pre_image_matches(observed, judged.as_deref())
+            }) {
+                Ok(Ok(())) => None,
+                Ok(Err(why)) => {
+                    return ToolResult {
+                        content: crate::unsaved_work::changed_under_write(file_path, &why),
+                        is_error: true,
+                    };
+                }
+                Err(e) => Some(e),
             };
-        }
 
-        // ADV-7: the assessment took a measured 13.5 ms, and a save that
-        // landed inside it was destroyed uncopied while the note claimed the
-        // prior contents were preserved. Nothing older than this read is ever
-        // acted on.
-        if let Err(why) = crate::unsaved_work::pre_image_unchanged(path, judged.as_deref()) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return ToolResult {
-                content: crate::unsaved_work::changed_under_write(file_path, &why),
-                is_error: true,
-            };
-        }
-
-        if let Err(e) = std::fs::rename(&tmp_path, path) {
-            // Fallback: direct write if rename fails (cross-device)
-            let _ = std::fs::remove_file(&tmp_path);
+        if let Some(e) = unpublishable {
+            // Fallback: direct write if the tempfile round trip fails at all
+            // (a cross-device rename, or a directory that will not hold a
+            // sibling). The guard above did not run, so this is the one path
+            // that publishes unchecked — unchanged from before this fix.
             if let Err(e) = std::fs::write(path, content) {
                 return ToolResult {
                     content: format!("Failed to write file: {}", e),
@@ -433,7 +488,7 @@ impl Tool for WriteTool {
 
             return ToolResult {
                 content: format!(
-                    "Updated {} (rename failed: {}, used direct write){}",
+                    "Updated {} (atomic write failed: {}, used direct write){}",
                     file_path, e, unsaved_note
                 ),
                 is_error: false,

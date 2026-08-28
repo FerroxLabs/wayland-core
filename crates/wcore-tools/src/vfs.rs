@@ -452,20 +452,146 @@ impl VirtualFs for RealFs {
             .await
             .map_err(|error| VfsError::Io(io::Error::other(error)))?
     }
+    /// #1155. Ordinary host paths CAN be compare-exchanged after all.
+    ///
+    /// This returned `Unsupported`, on the reasoning that a host filesystem
+    /// "cannot protect a pathname from non-cooperating concurrent writers".
+    /// That was true of every primitive this crate had, and it is what left
+    /// the production Edit/Write path losing a save that landed inside the
+    /// guard: measured at 140 of 200 interleaved saves destroyed.
+    ///
+    /// `wcore_config::atomic_write_checked` publishes with an atomic exchange
+    /// (`renameat2(RENAME_EXCHANGE)` / `renamex_np(RENAME_SWAP)`) and hands
+    /// back the bytes it displaced. Those bytes ARE the destination at the
+    /// instant of publication, so comparing them to the precondition is a
+    /// genuine content compare-and-swap against a writer that never agreed to
+    /// cooperate.
+    ///
+    /// Two boundaries, stated rather than implied:
+    ///
+    /// * Only the CONTENT precondition is enforced atomically.
+    ///   `expected_object` names one kernel object, which an exchange does not
+    ///   compare; it is checked against a prior observation here, exactly as
+    ///   `SandboxedFs` already checks it, and is documented on
+    ///   [`IntendedFileMutation::from_observation`] as fixture-backend only.
+    /// * A `FilePrecondition::Absent` create has nothing to exchange with, so
+    ///   it degrades to observe-then-rename. #1155 is the overwrite race; the
+    ///   create-vs-create race is narrower and is not closed here.
     async fn compare_exchange_file(
         &self,
         path: &Path,
         mutation: &IntendedFileMutation,
     ) -> Result<FileMutationOutcome, VfsError> {
-        let _ = mutation;
-        Err(VfsError::Io(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "authoritative compare-exchange for ordinary host files is unavailable for {}",
-                path.display()
-            ),
-        )))
+        // A leaf this backend cannot OBSERVE cannot be compare-exchanged
+        // either. The commonest case is a symlinked leaf: `observe_file` opens
+        // it `O_NOFOLLOW` and fails with ELOOP, deliberately, because a symlink
+        // has no stable object identity to bind a receipt to (see
+        // `prepared_file_effects::a_symlinked_target_stays_opaque_and_still_writes`,
+        // which also fixes that a write through the link must still succeed).
+        //
+        // Answering `Unsupported` puts the caller back on read-then-write,
+        // which is precisely what such a path did before #1155. Nothing is
+        // swallowed — that path opens the same object and reports any real
+        // failure itself — but the #1155 race is NOT closed for a symlinked
+        // leaf, and saying so here is the point of the branch.
+        //
+        // Which is exactly why the symlink condition is TESTED rather than
+        // inferred from the error. Degrading on ANY observation failure would
+        // be fail-open on a data-loss guard: a transient EMFILE under load
+        // would silently put an atomic publish back on the race this fix
+        // exists to close, and nothing would report it. Anything that is not
+        // a symlink fails loudly instead.
+        let observed = match self.observe_file(path).await {
+            Ok(observed) => observed,
+            Err(error) => {
+                let symlinked = tokio::fs::symlink_metadata(path)
+                    .await
+                    .is_ok_and(|meta| meta.file_type().is_symlink());
+                if !symlinked {
+                    return Err(error);
+                }
+                return Err(VfsError::Io(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "compare-exchange needs an unlinked leaf, and {} is a symlink",
+                        path.display()
+                    ),
+                )));
+            }
+        };
+        let current = observed.observation;
+
+        // The non-atomic classification, in the order `InMemoryFs` uses, so
+        // the two backends answer the same question the same way. Only the
+        // content precondition is re-enforced atomically below; these decide
+        // WHICH outcome a caller is told about, and refuse early.
+        if !mutation.postcondition_authority_matches(&observed) {
+            return Ok(FileMutationOutcome::Conflict { current });
+        }
+        if mutation.already_applied_matches(&observed) {
+            return Ok(FileMutationOutcome::AlreadyApplied {
+                current: mutation.intended,
+            });
+        }
+        if current == FileObservation::Present(mutation.intended)
+            || !mutation.precondition_matches(&observed)
+        {
+            return Ok(FileMutationOutcome::Conflict { current });
+        }
+
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let precondition = mutation.precondition;
+        let intended = mutation.intended;
+        let path_owned = path.to_path_buf();
+        let data = mutation.contents().to_vec();
+        let published = tokio::task::spawn_blocking(move || {
+            wcore_config::atomic_write_checked(&path_owned, &data, |displaced| {
+                if precondition.matches(observation_of(displaced)) {
+                    Ok(())
+                } else {
+                    Err("the precondition no longer holds".to_owned())
+                }
+            })
+        })
+        .await
+        .map_err(|error| VfsError::Io(io::Error::other(error)))??;
+
+        match published {
+            Ok(()) => Ok(FileMutationOutcome::Applied {
+                previous: current,
+                current: intended,
+            }),
+            // The publish was retracted: the destination held bytes the
+            // precondition does not name. Report what is there NOW, not the
+            // stale observation from before the exchange.
+            Err(_) => Ok(FileMutationOutcome::Conflict {
+                current: self.observe_file(path).await?.observation,
+            }),
+        }
     }
+}
+
+/// The observation a run of bytes represents, `None` meaning nothing was there.
+fn observation_of(bytes: Option<&[u8]>) -> FileObservation {
+    bytes.map_or(FileObservation::Absent, |bytes| {
+        FileObservation::Present(FileContentIdentity::from_bytes(bytes))
+    })
+}
+
+/// Does this error mean the backend has no compare-exchange, as opposed to a
+/// compare-exchange that failed? Callers fall back to read-then-write on the
+/// former and surface the latter.
+///
+/// One predicate rather than a `kind()` test repeated at each call site: the
+/// default [`VirtualFs::compare_exchange_file`] is the only thing that defines
+/// what "unsupported" looks like, and a caller that spelled it differently
+/// would silently turn a real failure into a racy fallback.
+#[must_use]
+pub fn is_compare_exchange_unsupported(error: &VfsError) -> bool {
+    matches!(error, VfsError::Io(io) if io.kind() == io::ErrorKind::Unsupported)
 }
 
 fn observe_real_file(path: &Path) -> Result<IdentifiedFileObservation, VfsError> {

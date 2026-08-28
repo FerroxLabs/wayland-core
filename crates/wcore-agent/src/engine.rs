@@ -19,6 +19,7 @@ use wcore_providers::{LlmProvider, ProviderError, create_provider};
 use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason, TokenUsage};
+use wcore_types::reasoning_filter::ReasoningFilter;
 use wcore_types::skill_types::{ContextModifier, PlanModeTransition, effort_to_string};
 
 use crate::approval::ApprovalBridge;
@@ -4378,7 +4379,9 @@ pub struct AgentEngine {
     /// routing. Minted ONCE at construction with a v4 UUID and threaded onto
     /// every `LlmRequest` as `conversation_id`; the Flux provider emits it as
     /// the `x-wl-conversation-id` request header on tier-alias turns. Survives
-    /// `/clear` and `/resume` so a continued session keeps routing affinity.
+    /// `/clear` and `/resume` so a continued session keeps routing affinity —
+    /// #1161: persisted on the session record (`Session::conversation_id`) and
+    /// restored by every resume surface, not only the crash-recovery ones.
     conversation_id: String,
     /// #863 F2 — loop-ownership provenance stamped onto every `LlmRequest` this
     /// engine builds. `Some(ClientOwned("anvil"))` on an Anvil builder fork, so
@@ -4402,6 +4405,18 @@ pub struct AgentEngine {
     /// Used to reconcile the #255 pre-flight overflow guard against the actual
     /// served-model window instead of the pre-route guess.
     flux_served_window: Option<u64>,
+    /// #434 — the concrete model the router reported serving this conversation,
+    /// carried across turns exactly as `flux_served_window` above is. A tier
+    /// alias hides the served model from every request-BUILD-time per-model
+    /// decision (strict-reasoner `reasoning_content` replay, #417), and the
+    /// router only answers on the way back — so the answer must outlive the
+    /// turn that received it.
+    ///
+    /// LIMIT: this can only inform turn N+1. Turn 1, the first turn after a
+    /// resume (in-memory, not journaled), a deployment that sends no
+    /// routed-model header, and a mid-conversation re-route are all uncovered
+    /// here and need router-side cover.
+    flux_routed_model: Option<String>,
     /// #282 contract V1: the LAST-seen Flux context pressure
     /// (`x-flux-context-pressure`, `0.0..=1.0` = required / window). Captured
     /// for #280 pressure-driven scheduling (see `smart_compact_fraction`).
@@ -4782,6 +4797,7 @@ impl AgentEngine {
             flux_loop_collisions: 0,
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             // #280: smart auto-compaction starts armed; latches seeded clear.
             smart_compact_armed: true,
@@ -4854,6 +4870,12 @@ impl AgentEngine {
         // `new_with_provider` for the rationale).
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
+        // #1161 — read the persisted conversation id BEFORE `session` is moved
+        // into `current_session` below.
+        let resumed_conversation_id = session
+            .conversation_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
         let confirmer = ToolConfirmer::with_policy(
             config.smart_approval_policy(),
@@ -5063,12 +5085,21 @@ impl AgentEngine {
             web_search: false,
             pending_hook_actions: Vec::new(),
             pending_hook_phase_consumptions: Vec::new(),
-            // #282: mint the stable Flux conversation id once per engine. A
-            // resumed session gets a fresh id (sticky routing is best-effort).
-            conversation_id: uuid::Uuid::new_v4().to_string(),
+            // #282 / #1161: RESTORE the persisted conversation id rather than
+            // minting a new one. This is the ordinary `--resume` / `--continue`
+            // path, and it was the only resume surface that did not carry the
+            // id forward — the three crash-recovery paths already restore it
+            // from the checkpoint. A fresh id here silently dropped the Flux
+            // sticky-routing affinity and started a SECOND cache-ledger record
+            // for a session the operator sees as one.
+            //
+            // `None` means the session predates the field, so there is no id to
+            // restore and a fresh one is the only honest answer.
+            conversation_id: resumed_conversation_id,
             flux_loop_collisions: 0,
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             // #280: smart auto-compaction starts armed; latches seeded clear.
             smart_compact_armed: true,
@@ -5395,6 +5426,10 @@ impl AgentEngine {
         // releases the old session's lease only after B is fully available.
         session.messages = canonical_messages.clone();
         let session_id = session.id.clone();
+        let switched_conversation_id = session
+            .conversation_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let session_usage = session.total_usage.clone();
         self.messages = canonical_messages;
         self.total_usage = session_usage.clone();
@@ -5434,8 +5469,16 @@ impl AgentEngine {
         self.session_start_injected_len = 0;
         self.pending_hook_actions.clear();
         self.pending_hook_phase_consumptions.clear();
-        self.conversation_id = uuid::Uuid::new_v4().to_string();
+        // #1161 — this is the live TUI `/resume`: its only caller loads an
+        // EXISTING persisted session (`SessionManager::load_for_run`) and moves
+        // this engine onto it. That is the same user-visible operation as
+        // `--resume`, so it takes the same rule — adopt the session's own
+        // conversation id, and mint only when there is none to adopt. The
+        // ledger for the session being LEFT was already sealed by
+        // `cache_ledger.rotate()` above, so nothing bleeds between the two.
+        self.conversation_id = switched_conversation_id;
         self.flux_served_window = None;
+        self.flux_routed_model = None;
         self.flux_context_pressure = None;
         self.smart_compact_armed = true;
         self.smart_compact_last_turn = None;
@@ -5722,6 +5765,36 @@ impl AgentEngine {
             .clone()
             .or_else(|| self.current_session_id())
             .unwrap_or_else(|| "session-unknown".to_string())
+    }
+
+    /// #388 — whether an actual provider CAP (token or monetary) governs this
+    /// session, and therefore whether the wire max-tokens field must bind.
+    ///
+    /// This asks the LEDGER what it enforces, not whether a ledger exists.
+    /// `bootstrap.rs` installs a durable budget authority on every session —
+    /// capped or not — so `budget_authority.is_some()` is unconditionally true
+    /// in production. Reading presence as governance retired the whole #112 /
+    /// #456 / #462 omit-when-unsized contract there: every unsized turn shipped
+    /// the conservative 8,192 floor as a HARD wire cap and long answers were
+    /// cut at 8k. An internal accounting ledger is not the user asking for a
+    /// cap.
+    ///
+    /// When a cap IS configured the wire field still binds, because it is the
+    /// only PRE-flight bound on output: `max_tokens` feeds the admission
+    /// reservation (`reserved_output`), and omitting it would let the served
+    /// model's natural ceiling overrun a reservation the cap was sized against.
+    fn provider_cap_binds_wire_max_tokens(&self) -> Result<bool, AgentError> {
+        let session_id = self.budget_session_id();
+        if let Some(authority) = self.budget_authority.as_ref() {
+            return authority
+                .lock()
+                .inspect(|tracker, _| tracker.has_provider_cap(&session_id))
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()));
+        }
+        Ok(self
+            .budget_tracker
+            .as_ref()
+            .is_some_and(|tracker| tracker.lock().has_provider_cap(&session_id)))
     }
 
     /// Read access to the legacy in-memory `BudgetTracker` used by direct
@@ -6341,6 +6414,18 @@ impl AgentEngine {
     /// The active model identifier (used by the TUI status bar + tests).
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// The ACTIVE model's context window in tokens, or `None` when it is
+    /// genuinely unknown (#1150).
+    ///
+    /// Exposed for the late-MCP skill listing, which must size its prompt
+    /// block against the same window bootstrap sized the boot listing against.
+    /// Both used to pass a hardcoded `None`, which is why the real budget
+    /// formula was reachable only from tests.
+    pub fn known_context_window(&self) -> Option<usize> {
+        self.compact_config
+            .known_context_window(self.compat.provider_type(), &self.model)
     }
 
     /// D001 / D007 / D016 keystone: atomically swap the live provider,
@@ -7445,7 +7530,10 @@ impl AgentEngine {
     /// genuine product text in a single indistinguishable blob.
     ///
     /// Measured on the wire before this existed: a channel turn arrived as
-    /// `…attacker bytes\nSkill hint: …\nCurrent date: 2026-08-10`.
+    /// `…attacker bytes\nSkill hint: …\nCurrent date: 2026-08-10`. (That date
+    /// line has since moved to the system prefix — #559 — so it is no longer
+    /// one of the strings a sender shares a turn with; the measurement is kept
+    /// because it is why the placement rule below exists.)
     ///
     /// This is hygiene, not the boundary. The boundary is role separation:
     /// `UNTRUSTED_CHANNEL_SESSION_DIRECTIVE` in the SYSTEM prompt tells the
@@ -7461,12 +7549,18 @@ impl AgentEngine {
     /// tool-results tail — Anthropic requires `tool_result` blocks first, so
     /// a text block must never be inserted ahead of them.
     ///
-    /// Callers: the per-turn skill hint (`Skill hint: …`), the current-date
-    /// line (`Current date: …`), and PrePrompt plugin contributions (their
-    /// own `<plugin-context … trust="untrusted">` envelope). All three are
-    /// named in the system directive; adding a FOURTH caller without adding
-    /// it there makes that directive false — `untrusted_channel_wire_test`
-    /// grades the composition of the turn on the wire and will go red.
+    /// Callers: the per-turn skill hint (`Skill hint: …`) and PrePrompt plugin
+    /// contributions (their own `<plugin-context … trust="untrusted">`
+    /// envelope). BOTH are named in the system directive; adding a THIRD
+    /// caller without adding it there makes that directive false —
+    /// `untrusted_channel_wire_test` grades the composition of the turn on the
+    /// wire and will go red.
+    ///
+    /// #559 removed a third caller, the current-date line, by moving it into
+    /// the cached system prefix. Both remaining callers are CONDITIONAL (the
+    /// router must match; a PrePrompt hook must be installed), so a default
+    /// channel session now puts no product string at all ahead of the
+    /// sender's bytes.
     fn attach_transient_block(message: &mut Message, text: String) {
         let block = ContentBlock::Text { text };
         match message.content.last() {
@@ -8043,13 +8137,27 @@ impl AgentEngine {
 
     fn active_window_percent_now(&self, effective_model: &str, used_tokens: u64) -> Option<u32> {
         use wcore_config::context_window::ContextWindow;
-        ContextWindow::resolve(
+        let mut ctx = ContextWindow::resolve(
             used_tokens,
             self.compat.provider_type(),
             effective_model,
-            self.compact_config.fallback_context_window() as u64,
-        )
-        .percent()
+            self.compact_config.kernel_config_window(),
+        );
+        // #1172 — a window this endpoint has been OBSERVED to serve outranks
+        // every other source, because it is not a claim about the endpoint: it
+        // is what the endpoint DID with a prompt we actually sent. It is
+        // applied in one direction only (`min`), so it can narrow the gauge but
+        // never widen it, and it fills the gauge in for an unlisted model that
+        // had no denominator at all — the #1172 case, where a turn sitting at
+        // ~2.5x the served slot reported `active_window_percent: 6`.
+        //
+        // `None` from the tracker means "no truncation has been observed",
+        // never "the window is fine", so the kernel's answer stands unchanged
+        // on every route that has never dropped a prompt.
+        if let Some(served) = self.compact_state.served_window.served_window() {
+            ctx.window = Some(ctx.window.map_or(served, |w| w.min(served)));
+        }
+        ctx.percent()
     }
 
     /// #280 — the SINGLE chokepoint for smart auto-compaction. Returns the
@@ -8092,7 +8200,7 @@ impl AgentEngine {
                 used_tokens,
                 self.compat.provider_type(),
                 &self.model,
-                self.compact_config.fallback_context_window() as u64,
+                self.compact_config.kernel_config_window(),
             )
             .fraction()
         };
@@ -11331,9 +11439,7 @@ impl AgentEngine {
         let request = checkpoint
             .validate_opened_prepared_request_conversation(&prepared, &state.conversation)
             .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
-        if (self.budget_authority.is_some() || self.budget_tracker.is_some())
-            && request.omit_max_tokens
-        {
+        if self.provider_cap_binds_wire_max_tokens()? && request.omit_max_tokens {
             return Err(AgentError::SessionAuthority(
                 "recovery request omits its provider output cap under active budget governance"
                     .to_string(),
@@ -11971,6 +12077,7 @@ impl AgentEngine {
         //      yet (F-034 deferred write).  Call persist_first_message which
         //      does the initial session + index write AND the WAL append.
         //   b) Subsequent messages: session file exists; just append WAL.
+        let conversation_id = self.conversation_id.clone();
         if !resume_from_checkpoint
             && let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session)
         {
@@ -11978,6 +12085,9 @@ impl AgentEngine {
             if is_first_message {
                 session.messages = self.messages.clone();
                 session.updated_at = chrono::Utc::now();
+                // #1161 — the first persist is what makes the id durable, so a
+                // later `--resume` has something to restore.
+                session.conversation_id = Some(conversation_id);
                 if let Err(e) = mgr.persist_first_message(session) {
                     self.output
                         .emit_error(&format!("Failed to persist first message: {}", e), false);
@@ -12399,9 +12509,6 @@ impl AgentEngine {
                     // / no pick / hidden skill) leaves both system and tail untouched.
                     let skill_hint = self.skill_router_hint();
 
-                    // Record prompt state for cache diagnostics
-                    self.cache_detector.record_request(&system, &tools);
-
                     // W8 v0.6.3 — pick the Anthropic prompt-cache tier for this
                     // request. The agent turn loop reuses the same system prompt +
                     // tools across every turn, so the prefix is stable far longer
@@ -12531,6 +12638,7 @@ impl AgentEngine {
                         // #112: decided below at the sizing site, AFTER the smart-
                         // routing tier swap, so the omit decision sees the final model.
                         omit_max_tokens: false,
+                        routed_model_hint: None,
                     };
 
                     // Cache-stability (token-opt): inject the per-turn skill-router
@@ -12548,22 +12656,13 @@ impl AgentEngine {
                         Self::attach_transient_block(last, hint);
                     }
 
-                    // Cache-stability (token-opt, finding #174): inject the current date
-                    // as a transient text block on the request's last user-role message
-                    // instead of the cached system prefix. The date value changes daily /
-                    // across cross-midnight restarts; keeping it out of the prefix lets
-                    // the cached system+tools prefix stay byte-stable, so Anthropic prompt
-                    // caching survives cold starts. `request.messages` is a clone, so this
-                    // never persists into history. Skipped unless the tail is user-role
-                    // (never orphans a tool_use or creates adjacent user messages).
-                    if let Some(last) = request.messages.last_mut()
-                        && matches!(last.role, Role::User)
-                    {
-                        Self::attach_transient_block(
-                            last,
-                            crate::context::current_date_block(&crate::context::today_string()),
-                        );
-                    }
+                    // #559: the current date is NOT injected here any more. It
+                    // now lives in the cached system prefix, frozen per session
+                    // (`context::build_system_prompt`). Injecting it on the tail
+                    // put it at `messages[1]` on turn 1 — the tail user message
+                    // and the head user message are the same message on turn 1 —
+                    // and it then vanished on turn 2, so turn 1's prompt-cache
+                    // write was unreadable by every later turn.
 
                     // C1 / Task A3: fire PrePrompt plugin hooks once per turn and apply
                     // their contributions to the request's last user-role message. Done
@@ -12692,7 +12791,7 @@ impl AgentEngine {
                             input_token_estimate as u64,
                             self.compat.provider_type(),
                             &request.model,
-                            self.compact_config.fallback_context_window() as u64,
+                            self.compact_config.kernel_config_window(),
                         );
                         // #282 contract V1: once Flux has SIGNALLED-BACK the real served
                         // window (`x-flux-model-window`) on a prior turn of THIS Flux
@@ -12931,12 +13030,37 @@ impl AgentEngine {
                         self.max_tokens_explicit,
                         self.compat.omit_max_tokens_when_unsized(),
                     );
-                    // A finite provider ledger can reserve only a wire-bounded output.
-                    // Keep omit-safe behavior for legacy/unmetered sessions, but force
-                    // the sized cap onto every governed provider call.
-                    if self.budget_authority.is_some() || self.budget_tracker.is_some() {
+                    // #388 — a CAPPED provider ledger can reserve only a wire-bounded
+                    // output, so force the sized cap onto a governed call. An UNCAPPED
+                    // ledger (the production default — bootstrap installs one on every
+                    // session) enforces nothing and must leave the #112 omit contract
+                    // intact, or every unsized turn ships the 8,192 floor as a hard cap.
+                    if self.provider_cap_binds_wire_max_tokens()? {
                         request.omit_max_tokens = false;
                     }
+
+                    // #434 — hand the provider the model the router reported
+                    // serving this conversation, so per-MODEL request shaping
+                    // (strict-reasoner `reasoning_content` replay, #417) is
+                    // decided against a real model instead of the tier alias
+                    // `flux-auto`, which matches no model contract at all.
+                    // Placed AFTER the tier swap so it reads the FINAL model:
+                    // a turn swapped onto a concrete model carries no hint.
+                    //
+                    // This can only ever inform turn N+1 — the router answers
+                    // on the way back. Turn 1, the first turn after a resume,
+                    // a deployment that sends no routed-model header, and a
+                    // mid-conversation re-route all still need router-side
+                    // cover. In the #417 shape the practical exposure is
+                    // narrower than "turn 1": replay only matters once the
+                    // history HOLDS reasoning, which needs a prior assistant
+                    // turn — by which point the header has normally arrived.
+                    request.routed_model_hint =
+                        if wcore_providers::is_flux_tier_alias(&request.model) {
+                            self.flux_routed_model.clone()
+                        } else {
+                            None
+                        };
 
                     // #426 / wayland#422 — separate the reasoning budget from the output
                     // budget so extended thinking can never starve the visible answer.
@@ -12971,6 +13095,23 @@ impl AgentEngine {
                             wcore_types::llm::ThinkingConfig::Disabled
                         });
                     }
+                    // #1166 — record prompt state for cache diagnostics LAST,
+                    // not back at prompt-assembly time. The snapshot has to be
+                    // of the request actually DISPATCHED, and everything above
+                    // rewrites it: the smart-routing tier swap replaces
+                    // `request.model`, the transient tail injections
+                    // (skill-router hint, PrePrompt hook contribution) and the
+                    // #255 overflow shedding rewrite `request.messages`.
+                    // Snapshotted earlier, all of them were invisible to
+                    // attribution — and the #559 prefix mutation lived in
+                    // exactly one of those tail injections.
+                    self.cache_detector.record_request(
+                        &request.model,
+                        &request.system,
+                        &request.tools,
+                        &request.messages,
+                    );
+
                     (
                         request,
                         effective_model,
@@ -13010,6 +13151,19 @@ impl AgentEngine {
                  finish: write large files in several smaller calls rather than one big \
                  one, and put no more than is necessary in each tool argument.";
             let mut assistant_text = String::new();
+            // #908 — `assistant_text` is the DURABLE copy of the turn: it
+            // becomes the assistant `ContentBlock::Text`, the session mirror
+            // and the journal entry, and it is replayed to the provider on the
+            // next request. Every sink already strips inline `<think>`-class
+            // reasoning out of the streamed copy, but the raw delta was pushed
+            // here — so a resumed session re-rendered reasoning the live stream
+            // had hidden, and the tags went back upstream. This filter is the
+            // history-side twin of the sinks': it is deliberately SEPARATE
+            // from any sink's, because a sink may be absent, may be one of
+            // several, and drains its own capture buffer on its own schedule.
+            // Stateful across deltas, because a tag straddles chunk
+            // boundaries; reset per attempt alongside `assistant_text`.
+            let mut assistant_reasoning = ReasoningFilter::new();
             let mut thinking_text = String::new();
             // C-4b — an opaque provider signature covering this turn's
             // reasoning (Gemini `thoughtSignature` on a thought part). Kept
@@ -13044,6 +13198,7 @@ impl AgentEngine {
                 // Reset per-attempt accumulators so a retry never
                 // double-commits text/tool-calls from a failed attempt.
                 assistant_text.clear();
+                assistant_reasoning.reset();
                 thinking_text.clear();
                 let _ = thinking_signature.take();
                 tool_calls.clear();
@@ -13214,8 +13369,12 @@ impl AgentEngine {
                     }
                     self.flux_context_pressure = round.provider_metadata.context_pressure;
                     self.flux_served_window = round.provider_metadata.model_window;
-                    if round.provider_metadata.routed_model.is_some() {
-                        last_routed_model = round.provider_metadata.routed_model;
+                    if let Some(routed) = round.provider_metadata.routed_model.clone() {
+                        // #434 — the served model outlives this turn: it is the
+                        // only thing that tells the NEXT request which model
+                        // contract a tier alias actually resolves to.
+                        self.flux_routed_model = Some(routed.clone());
+                        last_routed_model = Some(routed);
                     }
                     self.length_wedge_fingerprint = None;
                     stop_reason = round.stop_reason;
@@ -14092,8 +14251,12 @@ impl AgentEngine {
                     let Some(event) = event else { break };
                     match event {
                         LlmEvent::TextDelta(text) => {
+                            // The sink keeps receiving the RAW delta: the TUI
+                            // does not delete reasoning, it captures it and
+                            // renders a collapsed `Thought:` block. Only the
+                            // durable copy is filtered (#908).
                             self.output.emit_text_delta(&text, &self.current_msg_id);
-                            assistant_text.push_str(&text);
+                            assistant_text.push_str(&assistant_reasoning.process(&text));
                         }
                         LlmEvent::ToolUse {
                             id,
@@ -14254,9 +14417,12 @@ impl AgentEngine {
                             self.flux_context_pressure = context_pressure;
                             self.flux_served_window = model_window;
                             // Layer E1 — remember the served model for the
-                            // cache_health_warn attribution below.
+                            // cache_health_warn attribution below. #434 — and
+                            // on the SESSION, so the next request can be shaped
+                            // for the model a tier alias actually resolves to.
                             if routed_model.is_some() {
                                 last_routed_model = routed_model.clone();
+                                self.flux_routed_model = routed_model.clone();
                             }
                             if let Some(window) = model_window {
                                 // Reconcile the #255 gauge through the kernel:
@@ -14396,7 +14562,7 @@ impl AgentEngine {
                             input_token_estimate as u64,
                             self.compat.provider_type(),
                             &request.model,
-                            self.compact_config.fallback_context_window() as u64,
+                            self.compact_config.kernel_config_window(),
                         );
                         if wcore_providers::is_flux_tier_alias(&request.model)
                             && let Some(window) = self.flux_served_window
@@ -14546,26 +14712,67 @@ impl AgentEngine {
                     // produced nothing usable and committing it would end the
                     // run as though the model had finished — the exact silent
                     // failure this gate exists to stop.
-                    if !attempt_truncated_tool_calls.is_empty() {
-                        let cut = attempt_truncated_tool_calls
-                            .iter()
-                            .map(|(name, bytes)| {
-                                let name = if name.is_empty() {
-                                    "<unnamed tool>"
-                                } else {
-                                    name.as_str()
-                                };
-                                format!("{name} ({bytes} bytes of arguments received)")
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                    //
+                    // #388(b) — arm on the CUT, not only on a call severed
+                    // mid-argument. A `finish_reason=length` response whose
+                    // calls all happened to close before the cut is no more
+                    // trustworthy: the model was still writing, so the calls
+                    // that did arrive are the PREFIX of a plan whose remainder
+                    // was discarded. Running that prefix and then treating the
+                    // turn as finished is the same silent failure, one byte to
+                    // the left. A length cut with NO tool calls is an ordinary
+                    // truncated prose answer and still commits.
+                    let severed_mid_argument = !attempt_truncated_tool_calls.is_empty();
+                    let severed_after_complete_calls =
+                        attempt_finish_reason == FinishReason::Length && !tool_calls.is_empty();
+                    if severed_mid_argument || severed_after_complete_calls {
+                        let cut = if severed_mid_argument {
+                            attempt_truncated_tool_calls
+                                .iter()
+                                .map(|(name, bytes)| {
+                                    let name = if name.is_empty() {
+                                        "<unnamed tool>"
+                                    } else {
+                                        name.as_str()
+                                    };
+                                    format!("{name} ({bytes} bytes of arguments received)")
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        } else {
+                            tool_calls
+                                .iter()
+                                .filter_map(|block| match block {
+                                    ContentBlock::ToolUse { name, .. } if name.is_empty() => {
+                                        Some("<unnamed tool>".to_string())
+                                    }
+                                    ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        // The calls are dropped either way: a severed response
+                        // is not a decision the engine may act on.
+                        tool_calls.clear();
                         if !output_truncation_retried {
                             output_truncation_retried = true;
-                            self.output.emit_info(&format!(
-                                "The model hit the output token limit while writing a tool \
-                                 call ({cut}) — the call was cut off mid-argument and cannot \
-                                 be run. Retrying this turn once, asking for a smaller write."
-                            ));
+                            self.output.emit_info(&if severed_mid_argument {
+                                format!(
+                                    "The model hit the output token limit while writing a tool \
+                                     call ({cut}) — the call was cut off mid-argument and \
+                                     cannot be run. Retrying this turn once, asking for a \
+                                     smaller write."
+                                )
+                            } else {
+                                format!(
+                                    "The model hit the output token limit right after \
+                                     requesting {cut} — the response was severed, so those \
+                                     calls are the start of a plan whose rest never arrived \
+                                     and they were NOT run. Retrying this turn once, asking \
+                                     for smaller steps."
+                                )
+                            });
                             // Retry-scoped nudge on the OUTBOUND copy only,
                             // the same discipline
                             // `stub_failed_tool_results_for_retry` uses below:
@@ -14586,13 +14793,24 @@ impl AgentEngine {
                             continue 'stream;
                         }
                         self.emit_error(
-                            &format!(
-                                "Run stopped: the model hit the output token limit while \
-                                 writing a tool call ({cut}), and again on the retry. The \
-                                 call was cut off mid-argument, so it was NOT run and \
-                                 nothing it would have written exists. Raise this model's \
-                                 max_tokens, or ask for the work in smaller pieces."
-                            ),
+                            &if severed_mid_argument {
+                                format!(
+                                    "Run stopped: the model hit the output token limit while \
+                                     writing a tool call ({cut}), and again on the retry. The \
+                                     call was cut off mid-argument, so it was NOT run and \
+                                     nothing it would have written exists. Raise this model's \
+                                     max_tokens, or ask for the work in smaller pieces."
+                                )
+                            } else {
+                                format!(
+                                    "Run stopped: the model hit the output token limit right \
+                                     after requesting {cut}, and again on the retry. The \
+                                     response was severed mid-plan, so those calls were NOT \
+                                     run and nothing they would have written exists. Raise \
+                                     this model's max_tokens, or ask for the work in smaller \
+                                     pieces."
+                                )
+                            },
                             false,
                         );
                         return self.finish_run_output_truncated(user_input, turn).await;
@@ -14984,6 +15202,53 @@ impl AgentEngine {
             let provider_input = turn_usage.total_input_tokens();
             let effective_watermark = provider_input.max(local_estimate);
 
+            // #1172 — learn this endpoint's SERVED context window from the
+            // usage it just returned, and tell the user when it turns out the
+            // endpoint threw part of the prompt away.
+            //
+            // NOT a probe. Two earlier attempts asked the endpoint directly
+            // (Ollama's `/api/ps`, the only surface that reports the loaded
+            // slot) and both had to be backed out, because deciding WHICH
+            // endpoints to ask cannot be done from the address: every mock
+            // server in this workspace binds `127.0.0.1`, so "loopback" does
+            // not separate a real self-hosted server from a test fixture. The
+            // answer is already in the response — `usage` against what we sent
+            // — so there is no extra I/O and nothing to gate on.
+            //
+            // `total_input_tokens()` (not `input_tokens`) is the count that
+            // matters: it sums the three disjoint input classes, so a prompt
+            // cache cannot look like a shortfall.
+            let served_route = format!("{}/{}", self.compat.provider_type(), effective_model);
+            let truncation = self.compact_state.served_window.observe(
+                &served_route,
+                input_token_estimate as u64,
+                provider_input,
+            );
+            if let Some(evidence) = truncation {
+                // On the user's surface, never through `warn!`: with `RUST_LOG`
+                // unset only ERROR reaches stderr, so a log line here reaches
+                // nobody (#1130). This is SILENT data loss — the model answers
+                // fluently from a context it no longer has, which is why #372
+                // read as a retry loop — so a log-only announcement would be
+                // indistinguishable from saying nothing at all.
+                self.output.emit_info(&format!(
+                    "Context truncated by the endpoint: it processed only {reported} of \
+                     the ~{sent} prompt tokens this turn sent to `{model}`, and discarded \
+                     the rest. Servers drop the HEAD of the conversation first, so the \
+                     system prompt and your task are what went - the reply was written \
+                     from a context that no longer contained them. Core is now sizing \
+                     this session against the {served}-token window this endpoint has \
+                     actually demonstrated. Raise the server's context length (on \
+                     llama.cpp-based servers, including Ollama, that is `num_ctx` / \
+                     `OLLAMA_CONTEXT_LENGTH`), or set `[compact] context_window` to the \
+                     figure it really serves.",
+                    reported = evidence.reported_input,
+                    sent = evidence.sent_estimate,
+                    model = effective_model,
+                    served = evidence.served_window,
+                ));
+            }
+
             // AUTO-trigger watermark (finding #174): track REAL token
             // pressure so auto-compaction doesn't fire prematurely. The
             // local estimate over-counts vs real billing because it prices
@@ -15091,6 +15356,8 @@ impl AgentEngine {
                     routed_model: last_routed_model
                         .clone()
                         .unwrap_or_else(|| effective_model.clone()),
+                    // #1166 — the detecting path now explains itself.
+                    cause: crate::cache_ledger::invalidation_cause_of(&alert.cause),
                 };
                 tracing::warn!(
                     target: "cache_health",
@@ -15100,13 +15367,18 @@ impl AgentEngine {
                     cache_read_tokens = warn.cache_read_tokens,
                     ratio = warn.ratio,
                     routed_model = %warn.routed_model,
+                    cause = warn.cause.as_str(),
+                    // The engine-side cause carries the divergent message index
+                    // that the published vocabulary aggregates away.
+                    detail = ?alert.cause,
                     "cache_health_warn: warm-session cache hit-ratio {:.3} below {} \
-                     (input={}, cache_read={}, model={})",
+                     (input={}, cache_read={}, model={}, cause={:?})",
                     warn.ratio,
                     crate::cache_diagnostics::CACHE_HEALTH_WARN_RATIO,
                     warn.input_tokens,
                     warn.cache_read_tokens,
                     warn.routed_model,
+                    alert.cause,
                 );
             }
 
@@ -17006,7 +17278,9 @@ impl AgentEngine {
     /// 1. **The uncached counterfactual is priced through the same catalog**
     ///    as the real cost, with every cached token moved back into the plain
     ///    input bucket. A "saving" derived from a different price source than
-    ///    the spend it is subtracted from is not a measurement.
+    ///    the spend it is subtracted from is not a measurement — and when the
+    ///    catalog cannot price it at all, neither is a saving derived from a
+    ///    zero (#1163). It is recorded as `None` in that case, not as `0.0`.
     /// 2. **`priced` is carried, not discarded.** `resolve_turn_cost` already
     ///    knows whether the catalog could price this provider×model;
     ///    forgetting that turns "we cannot price this" into "$0.00 spent".
@@ -17071,6 +17345,13 @@ impl AgentEngine {
         };
         // The counterfactual: the same work with no prompt cache at all, so
         // every cached token is billed as ordinary input.
+        //
+        // #1163 — kept ONLY when it is a price. `resolve_turn_cost` also
+        // returns a provider-family preset ceiling (`priced = false`), and
+        // subtracting a real billed figure from a ceiling is not a measurement.
+        // Recording it as `0.0` when nothing could price it made `saving_usd`
+        // come out as exactly `-cost`, reported with full confidence, on a
+        // session the same report graded 98% warm-cached.
         let uncached_input = turn_usage
             .input_tokens
             .saturating_add(turn_usage.cache_read_tokens)
@@ -17084,7 +17365,14 @@ impl AgentEngine {
             0,
             &self.compat,
         );
+        let uncached_equivalent_usd = uncached.priced.then_some(uncached.usd);
 
+        // #1161 — arm BEFORE reading the round-trip index, so a resumed session
+        // continues the numbering it left off at rather than restarting at 1.
+        // The `round_trip == 1` no-marker attribution below depends on it too:
+        // a resumed turn is not the session's cold open and must not be
+        // attributed as one.
+        self.cache_ledger.arm(&self.conversation_id);
         let round_trip = self.cache_ledger.next_round_trip();
         let mut cause = diagnostic.as_ref().and_then(cause_of_diagnostic);
         if turn_usage.cache_read_tokens == 0
@@ -17126,7 +17414,7 @@ impl AgentEngine {
             invalidation_cause: cause,
             cost_usd: resolved.usd,
             cost_source,
-            uncached_equivalent_usd: uncached.usd,
+            uncached_equivalent_usd,
             watermark_tokens: self.compact_state.last_real_input_tokens,
             conservative_watermark_tokens: self.compact_state.last_input_tokens,
             autocompact_threshold_tokens: self.autocompact_threshold_tokens(),
@@ -17151,6 +17439,8 @@ impl AgentEngine {
         }
         // Compaction runs at the TOP of a turn, before the next request, so
         // "round-trips already recorded" is exactly "after round-trip N".
+        // Armed first for the same reason as `record_cache_ledger_turn`.
+        self.cache_ledger.arm(&self.conversation_id);
         let after_round_trip = self.cache_ledger.next_round_trip().saturating_sub(1);
         let event = crate::cache_ledger::CompactionEvent {
             after_round_trip,
@@ -19247,18 +19537,7 @@ impl AgentEngine {
         if defer_cfg.enabled {
             wcore_tools::registry::apply_cold_deferral(&mut tools, &defer_cfg.hot_allowlist);
         }
-        if !self.hydrated_tool_names.is_empty() {
-            let hydrated: std::collections::HashSet<&str> = self
-                .hydrated_tool_names
-                .iter()
-                .map(String::as_str)
-                .collect();
-            for def in tools.iter_mut() {
-                if def.deferred && hydrated.contains(def.name.as_str()) {
-                    def.deferred = false;
-                }
-            }
-        }
+        wcore_tools::registry::admit_hydrated_tools(&mut tools, &self.hydrated_tool_names);
         if defer_cfg.enabled && defer_cfg.catalog {
             tools = wcore_tools::registry::fold_deferred_into_catalog(
                 tools,
@@ -19472,10 +19751,15 @@ impl AgentEngine {
     /// Write the compatibility snapshot without mutating conversation state.
     /// Durable execution paths call `prepare_durable_conversation` first.
     fn save_session_mirror(&mut self) {
+        let conversation_id = self.conversation_id.clone();
         if let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session) {
             session.messages = self.messages.clone();
             session.total_usage = self.total_usage.clone();
             session.updated_at = chrono::Utc::now();
+            // #1161 — re-stamped on every save so a session created by an older
+            // build acquires the id on its next turn instead of staying
+            // unrestorable forever.
+            session.conversation_id = Some(conversation_id);
             if let Err(e) = mgr.save_and_clear_wal(session) {
                 self.output
                     .emit_error(&format!("Failed to save session: {}", e), false);
@@ -20289,6 +20573,7 @@ mod set_config_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -22167,6 +22452,7 @@ mod phase6_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -22495,6 +22781,7 @@ mod compact_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -22968,7 +23255,12 @@ mod compact_tests {
 
     #[tokio::test]
     async fn emergency_silent_below_limit() {
-        let config = CompactConfig::default();
+        // #1150: pinned, like `emergency_fires_when_at_limit` above — this
+        // case is about the 197k boundary, not the unlisted-model fallback.
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            ..Default::default()
+        };
         let mut state = CompactState::new();
         state.last_input_tokens = 190_000; // below 197k
 
@@ -23157,6 +23449,8 @@ mod compact_tests {
     async fn microcompact_leaves_results_alone_under_low_pressure() {
         let config = CompactConfig {
             micro_keep_recent: 3,
+            // #1150: the comment below says "in a 200k window"; pin it.
+            context_window: Some(200_000),
             ..Default::default()
         };
         let mut state = CompactState::new();
@@ -23204,6 +23498,8 @@ mod compact_tests {
     async fn microcompact_leaves_results_alone_after_an_idle_gap_at_low_pressure() {
         let config = CompactConfig {
             micro_keep_recent: 3,
+            // #1150: the comment below says "in a 200k window"; pin it.
+            context_window: Some(200_000),
             ..Default::default()
         };
         let mut state = CompactState::new();
@@ -24553,6 +24849,7 @@ mod plan_mode_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -25014,6 +25311,7 @@ mod hook_integration_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -26186,6 +26484,7 @@ mod approval_bridge_engine_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -27251,6 +27550,7 @@ mod user_model_writeback_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -34137,6 +34437,7 @@ mod audit_2026_05_22_tests {
             cwd: String::new(),
             total_usage: usage(1_000, 500),
             messages: Vec::new(),
+            conversation_id: None,
             extra: serde_json::Map::new(),
         };
         let provider = Arc::new(ScriptedProvider::new(vec![vec![
@@ -37950,6 +38251,334 @@ mod stream_retry_budget_tests {
             "two 1200 ms server hints cost {elapsed:?} of REAL time; on a \
              paused clock every other test in this module would still pass, \
              which is exactly what this one is here to catch"
+        );
+    }
+}
+
+/// #388(a) — a budget LEDGER is not a user-requested output cap.
+///
+/// Production bootstrap installs a durable budget authority on EVERY session
+/// (`bootstrap.rs::install_budget_authority`, unconditional), so keying the
+/// wire max-tokens decision on "a ledger exists" retires the whole #112 /
+/// #456 / #462 omit-when-unsized contract in production: every unsized turn
+/// ships the conservative 8,192 floor as a hard wire cap and every long answer
+/// is cut at 8k. The decision must key on whether a CAP was actually
+/// configured.
+#[cfg(test)]
+mod issue_388_wire_cap_tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    /// Captures the exact `LlmRequest` the engine handed the provider, so the
+    /// wire-serialization flag can be asserted end to end rather than inferred.
+    struct RequestCapturingProvider {
+        seen: Arc<Mutex<Vec<LlmRequest>>>,
+    }
+
+    impl RequestCapturingProvider {
+        fn new() -> (Arc<Self>, Arc<Mutex<Vec<LlmRequest>>>) {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            (
+                Arc::new(Self {
+                    seen: Arc::clone(&seen),
+                }),
+                seen,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for RequestCapturingProvider {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.seen
+                .lock()
+                .expect("captured requests")
+                .push(request.clone());
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta("ok".to_string())).await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        finish_reason: FinishReason::Stop,
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    fn engine_with(provider: Arc<dyn LlmProvider>) -> super::AgentEngine {
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(crate::output::null_sink::NullSink),
+        );
+        engine.max_turns = Some(2);
+        engine
+    }
+
+    /// An omit-safe route: flux-router compat, a model the limits registry
+    /// does not know, and no explicit `--max-tokens`. All three #112
+    /// conditions hold, so this turn is exactly the one the contract is for.
+    fn omit_safe_engine(provider: Arc<dyn LlmProvider>) -> super::AgentEngine {
+        let mut engine = engine_with(provider);
+        engine.compat = wcore_config::compat::ProviderCompat::flux_router_defaults();
+        engine.model = "wl-388-unknown-model".to_string();
+        engine.max_tokens_explicit = false;
+        engine
+    }
+
+    fn tracker(
+        cap: wcore_budget::BudgetCap,
+    ) -> Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>> {
+        Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            cap,
+        )))
+    }
+
+    #[test]
+    fn a_ledger_without_caps_does_not_bind_the_wire_max_tokens() {
+        let (provider, _seen) = RequestCapturingProvider::new();
+        let mut engine = engine_with(provider);
+        // The production default: accounting is on, no ceiling configured.
+        engine.set_budget_tracker(tracker(wcore_budget::BudgetCap::builder().build()));
+        assert!(
+            !engine
+                .provider_cap_binds_wire_max_tokens()
+                .expect("predicate reads the ledger"),
+            "an uncapped ledger governs nothing, so it must not bind the wire output cap"
+        );
+    }
+
+    #[test]
+    fn a_configured_output_token_cap_binds_the_wire_max_tokens() {
+        let (provider, _seen) = RequestCapturingProvider::new();
+        let mut engine = engine_with(provider);
+        engine.set_budget_tracker(tracker(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(4_096)
+                .build(),
+        ));
+        assert!(
+            engine
+                .provider_cap_binds_wire_max_tokens()
+                .expect("predicate reads the ledger"),
+            "a real output-token ceiling must still bind the wire cap"
+        );
+    }
+
+    #[test]
+    fn a_configured_usd_cap_binds_the_wire_max_tokens() {
+        let (provider, _seen) = RequestCapturingProvider::new();
+        let mut engine = engine_with(provider);
+        engine.set_budget_tracker(tracker(
+            wcore_budget::BudgetCap::builder()
+                .per_session_usd(1.0)
+                .build(),
+        ));
+        assert!(
+            engine
+                .provider_cap_binds_wire_max_tokens()
+                .expect("predicate reads the ledger"),
+            "a real monetary ceiling must still bind the wire cap"
+        );
+    }
+
+    #[test]
+    fn no_ledger_at_all_never_binds() {
+        let (provider, _seen) = RequestCapturingProvider::new();
+        let engine = engine_with(provider);
+        assert!(
+            !engine
+                .provider_cap_binds_wire_max_tokens()
+                .expect("predicate reads the ledger"),
+            "no ledger, nothing to protect"
+        );
+    }
+
+    /// End-to-end: the flag that actually reaches the provider.
+    #[tokio::test]
+    async fn uncapped_budgeted_session_still_omits_the_wire_max_tokens() {
+        let (provider, seen) = RequestCapturingProvider::new();
+        let mut engine = omit_safe_engine(provider);
+        engine.set_budget_tracker(tracker(wcore_budget::BudgetCap::builder().build()));
+
+        engine.run("hello", "").await.expect("run completes");
+
+        let seen = seen.lock().expect("captured requests");
+        let request = seen.first().expect("the engine dispatched one request");
+        assert!(
+            request.omit_max_tokens,
+            "an unsized, omit-safe turn under an UNCAPPED ledger must still omit the wire \
+             max-tokens field; forcing it ships the {} floor as a hard cap",
+            request.max_tokens
+        );
+    }
+
+    /// The other side of the same seam: a real ceiling still binds the wire.
+    #[tokio::test]
+    async fn capped_session_binds_the_wire_max_tokens() {
+        let (provider, seen) = RequestCapturingProvider::new();
+        let mut engine = omit_safe_engine(provider);
+        engine.set_budget_tracker(tracker(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(1_000_000)
+                .build(),
+        ));
+
+        engine.run("hello", "").await.expect("run completes");
+
+        let seen = seen.lock().expect("captured requests");
+        let request = seen.first().expect("the engine dispatched one request");
+        assert!(
+            !request.omit_max_tokens,
+            "a session with a configured output ceiling must send a wire-bounded cap"
+        );
+    }
+}
+
+/// #434 — a router tier alias hides the served model, and the router only names
+/// it on the way BACK. The engine must therefore carry `x-flux-routed-model`
+/// across the turn boundary, exactly as it already carries the served window.
+#[cfg(test)]
+mod issue_434_routed_model_tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    /// A Flux-shaped stream: `ProviderMeta` first (it is built from the response
+    /// headers), then the answer.
+    struct RoutedModelProvider {
+        routed_model: Option<String>,
+        seen: Arc<Mutex<Vec<LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RoutedModelProvider {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.seen
+                .lock()
+                .expect("captured requests")
+                .push(request.clone());
+            let routed_model = self.routed_model.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(LlmEvent::ProviderMeta {
+                        routed_model,
+                        model_window: Some(128_000),
+                        context_pressure: Some(0.1),
+                        tokens_counted: Some(100),
+                        loop_engaged: None,
+                    })
+                    .await;
+                let _ = tx.send(LlmEvent::TextDelta("ok".to_string())).await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        finish_reason: FinishReason::Stop,
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    fn engine_for(
+        model: &str,
+        routed_model: Option<&str>,
+    ) -> (super::AgentEngine, Arc<Mutex<Vec<LlmRequest>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(RoutedModelProvider {
+            routed_model: routed_model.map(str::to_string),
+            seen: Arc::clone(&seen),
+        });
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(crate::output::null_sink::NullSink),
+        );
+        engine.max_turns = Some(2);
+        engine.compat = wcore_config::compat::ProviderCompat::flux_router_defaults();
+        engine.model = model.to_string();
+        (engine, seen)
+    }
+
+    #[tokio::test]
+    async fn the_served_model_from_turn_one_shapes_turn_two() {
+        let (mut engine, seen) = engine_for("flux-auto", Some("deepseek-v4-pro"));
+
+        engine.run("first", "").await.expect("first run completes");
+        engine
+            .run("second", "")
+            .await
+            .expect("second run completes");
+
+        let seen = seen.lock().expect("captured requests");
+        assert!(
+            seen[0].routed_model_hint.is_none(),
+            "turn 1 has no route signal yet — the LIMIT, asserted not assumed"
+        );
+        assert_eq!(
+            seen[1].routed_model_hint.as_deref(),
+            Some("deepseek-v4-pro"),
+            "the x-flux-routed-model answer must outlive the turn that received it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_router_that_names_no_model_leaves_the_hint_empty() {
+        let (mut engine, seen) = engine_for("flux-auto", None);
+
+        engine.run("first", "").await.expect("first run completes");
+        engine
+            .run("second", "")
+            .await
+            .expect("second run completes");
+
+        let seen = seen.lock().expect("captured requests");
+        assert!(
+            seen[1].routed_model_hint.is_none(),
+            "no header, no hint — a deployment that stays silent gets no guess"
+        );
+    }
+
+    /// A concrete model id is its own contract: a stale route from an earlier
+    /// alias turn must never reshape it.
+    #[tokio::test]
+    async fn a_concrete_model_carries_no_routed_hint() {
+        let (mut engine, seen) = engine_for("flux-auto", Some("deepseek-v4-pro"));
+        engine.run("first", "").await.expect("first run completes");
+        engine.model = "gpt-4o".to_string();
+        engine
+            .run("second", "")
+            .await
+            .expect("second run completes");
+
+        let seen = seen.lock().expect("captured requests");
+        assert!(
+            seen[1].routed_model_hint.is_none(),
+            "the hint only resolves a tier alias; a named model decides for itself"
         );
     }
 }

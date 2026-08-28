@@ -1258,6 +1258,7 @@ mod tests {
             deferred: Some(true),
             allow_local: true,
             only_for_assistant: None,
+            allowed_tools: None,
         };
         let configs = HashMap::from([("deferred".to_string(), config)]);
         let allow: wcore_egress::SharedPolicy = Arc::new(wcore_egress::AllowAllPolicy);
@@ -1554,6 +1555,7 @@ mod tests {
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         };
         let mut configs = HashMap::new();
         configs.insert("hung-server".to_string(), hung);
@@ -1593,6 +1595,7 @@ mod tests {
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         };
         // A real MCP handshake fixture with no listable capabilities.
         let healthy_script = r#"
@@ -1612,6 +1615,7 @@ mod tests {
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         };
         let mut configs = HashMap::new();
         configs.insert("hung".to_string(), hung);
@@ -1686,6 +1690,7 @@ mod tests {
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         }
     }
 
@@ -1752,6 +1757,7 @@ mod tests {
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         };
         let mut configs = HashMap::new();
         configs.insert("hung".to_string(), hung);
@@ -1799,6 +1805,7 @@ mod tests {
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         };
         let mut configs = HashMap::new();
         configs.insert("broken".to_string(), broken);
@@ -1849,6 +1856,7 @@ mod tests {
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         };
         let hung = McpServerConfig {
             transport: TransportType::Stdio,
@@ -1860,6 +1868,7 @@ mod tests {
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         };
         let mut configs = HashMap::new();
         configs.insert("healthy".to_string(), healthy);

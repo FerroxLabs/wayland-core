@@ -58,8 +58,16 @@ pub fn emergency_limit(config: &CompactConfig, provider: &str, model: &str) -> u
 mod tests {
     use super::*;
 
+    /// #1150 note: the window is PINNED here. These cases specify the buffer
+    /// ARITHMETIC, and they used to get 200,000 by accident, from the
+    /// unlisted-model fallback. That fallback is now the conservative
+    /// `UNVERIFIED_CONTEXT_WINDOW`, so the pin states out loud the window the
+    /// numbers below were written against.
     fn default_config() -> CompactConfig {
-        CompactConfig::default()
+        CompactConfig {
+            context_window: Some(200_000),
+            ..CompactConfig::default()
+        }
     }
 
     /// A provider/model pair the `wcore_config::limits` registry does NOT
@@ -211,7 +219,10 @@ mod tests {
     /// a session with 850k tokens of headroom left.
     #[test]
     fn large_window_model_does_not_hard_stop_at_197k() {
-        let config = default_config();
+        // #1150: deliberately UNPINNED — this case is about the registry
+        // window beating the fallback, and an operator `context_window`
+        // outranks the registry.
+        let config = CompactConfig::default();
         assert_eq!(
             emergency_limit(&config, "openai-chatgpt", "gpt-5.4"),
             1_047_000
@@ -239,7 +250,10 @@ mod tests {
     /// waved through to a provider 400.
     #[test]
     fn small_window_model_hard_stops_earlier_than_the_default() {
-        let config = default_config();
+        // #1150: deliberately UNPINNED — this case is about the registry
+        // window beating the fallback, and an operator `context_window`
+        // outranks the registry.
+        let config = CompactConfig::default();
         // 128_000 − 3_000
         assert_eq!(emergency_limit(&config, "openai", "gpt-4o"), 125_000);
         assert!(is_at_emergency_limit(126_000, &config, "openai", "gpt-4o"));

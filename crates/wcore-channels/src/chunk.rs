@@ -1,7 +1,8 @@
 //! Outbound message chunking.
 //!
 //! Every chat platform caps a single message's length (Discord 2000,
-//! Telegram/WhatsApp 4096, Slack ~40k, MS Teams ~28k, SMS 1600 …). An agent
+//! Telegram/WhatsApp 4096, Slack 4000, MS Teams 20480, Matrix 16384, SMS 1600
+//! — `docs/delivery-semantics.md` §4.2 has every cap and its source). An agent
 //! reply that exceeds the cap was previously **rejected by the platform and
 //! silently dropped** (HIGH-6). [`chunk_message`] splits an over-long body
 //! into platform-sized pieces the sender delivers in order.

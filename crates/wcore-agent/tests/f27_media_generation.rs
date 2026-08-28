@@ -678,6 +678,7 @@ fn mcp_config(fixture: &MediaFixture) -> HashMap<String, McpServerConfig> {
             // the case this flag exists for.
             allow_local: true,
             only_for_assistant: None,
+            allowed_tools: None,
         },
     );
     servers

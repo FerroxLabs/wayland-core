@@ -12,9 +12,10 @@ use wcore_config::config::ConfigFile;
 fn tc_2_2_01_compact_config_defaults() {
     let cfg = CompactConfig::default();
     // GH#635: "not configured" is its own state, distinct from "configured to
-    // 200k"; the fallback NUMBER is unchanged.
+    // 200k". #1150: and it reaches the ContextWindow kernel as 0 — "there is no
+    // fallback, do not fabricate one" — rather than as a flat 200k.
     assert_eq!(cfg.context_window, None);
-    assert_eq!(cfg.fallback_context_window(), 200_000);
+    assert_eq!(cfg.kernel_config_window(), 0);
     assert_eq!(cfg.output_reserve, 20_000);
     assert_eq!(cfg.autocompact_buffer, 13_000);
     assert_eq!(cfg.emergency_buffer, 3_000);

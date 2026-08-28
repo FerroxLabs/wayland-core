@@ -3197,3 +3197,80 @@ fn an_unverifiable_path_gets_a_conditional_banner_not_an_assertion() {
         established.content
     );
 }
+
+// ── #1151: the description must name the shell the tool actually spawns ──
+
+#[test]
+fn bash_description_names_the_host_os() {
+    let description = BashTool.description();
+    assert!(
+        description.contains(std::env::consts::OS),
+        "the model cannot know it is driving a {} host unless the description says so:\n{description}",
+        std::env::consts::OS
+    );
+}
+
+#[test]
+fn bash_description_names_the_interpreter_actually_used() {
+    let prefix = wcore_config::shell::bash_shell_argv_prefix().join(" ");
+    let description = BashTool.description();
+    assert!(
+        description.contains(&format!("`{prefix}`")),
+        "description must name the interpreter it really spawns (`{prefix}`):\n{description}"
+    );
+}
+
+// The Windows wording is what the model needs and what no Linux/macOS CI job
+// would otherwise exercise, so it is graded through the pure builder rather
+// than through the host's own description.
+#[test]
+fn shell_disclosure_warns_that_windows_is_cmd_not_bash() {
+    let disclosure = shell_disclosure(
+        &wcore_config::shell::windows_cmd_payload_prefix(),
+        "windows",
+    );
+    assert!(disclosure.contains("windows"), "{disclosure}");
+    assert!(disclosure.contains("`cmd /S /C`"), "{disclosure}");
+    assert!(disclosure.contains("cmd.exe, NOT bash"), "{disclosure}");
+    // The reported symptom itself: bash statement separation is a silent no-op.
+    assert!(
+        disclosure.contains("`echo A; echo B` prints `A; echo B`"),
+        "the silent-wrong-answer case must be spelled out:\n{disclosure}"
+    );
+    assert!(disclosure.contains("%VAR%"), "{disclosure}");
+}
+
+#[test]
+fn shell_disclosure_names_posix_shell_and_its_dash_caveat() {
+    let prefix = vec!["sh".to_string(), "-c".to_string()];
+    let disclosure = shell_disclosure(&prefix, "linux");
+    assert!(disclosure.contains("linux"), "{disclosure}");
+    assert!(disclosure.contains("`sh -c`"), "{disclosure}");
+    assert!(
+        disclosure.contains("`dash`"),
+        "sh is not necessarily bash, and the model must know:\n{disclosure}"
+    );
+}
+
+#[test]
+fn shell_disclosure_follows_the_powershell_override() {
+    let prefix = vec![
+        "powershell".to_string(),
+        "-NoProfile".to_string(),
+        "-Command".to_string(),
+    ];
+    let disclosure = shell_disclosure(&prefix, "windows");
+    assert!(disclosure.contains("PowerShell, NOT bash"), "{disclosure}");
+    assert!(disclosure.contains("$env:VAR"), "{disclosure}");
+    assert!(
+        !disclosure.contains("cmd.exe"),
+        "must not advertise cmd when powershell is selected:\n{disclosure}"
+    );
+}
+
+#[test]
+fn shell_disclosure_still_disclaims_bash_for_an_unrecognized_shell() {
+    let prefix = vec!["zsh".to_string(), "-c".to_string()];
+    let disclosure = shell_disclosure(&prefix, "macos");
+    assert!(disclosure.contains("`zsh`, NOT bash"), "{disclosure}");
+}

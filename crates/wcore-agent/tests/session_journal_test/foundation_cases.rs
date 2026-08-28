@@ -52,12 +52,52 @@ fn provider_request_digest_changes_when_wire_relevant_input_changes() {
     assert_ne!(original, provider_request_digest(&changed_limit).unwrap());
 }
 
-#[test]
-fn prepared_provider_request_snapshot_round_trips_every_request_field() {
+/// #1170: assert one `LlmRequest` field survived the journal snapshot with the
+/// value it was prepared with, AND that the expected value is distinguishable
+/// from `Default` -- an expectation equal to the default cannot fail, because a
+/// field the snapshot never carried decodes to exactly that default.
+///
+/// Compares `Debug` renderings: not every `LlmRequest` field type implements
+/// `PartialEq`, but `Debug` is derived on all of them and is value-faithful.
+macro_rules! assert_journaled_field {
+    ($name:literal, $actual:expr, $expected:expr, $default:expr) => {{
+        let expected = format!("{:?}", $expected);
+        let default = format!("{:?}", $default);
+        assert_ne!(
+            expected,
+            default,
+            concat!(
+                "#1170: fixture field `",
+                $name,
+                "` holds its Default value, so the round-trip assertion on it \
+                 cannot fail. Give it a distinguishable value."
+            )
+        );
+        assert_eq!(
+            format!("{:?}", $actual),
+            expected,
+            concat!(
+                "#1170: `LlmRequest::",
+                $name,
+                "` did not survive the journal snapshot round-trip -- a \
+                 recovered turn would be dispatched without it."
+            )
+        );
+    }};
+}
+
+/// A fully-populated `LlmRequest`: every field, and every field of every nested
+/// type, holds a non-default, distinguishable value.
+///
+/// This is half of the #1170 completeness gate; the other half is the exhaustive
+/// destructuring in
+/// `prepared_provider_request_snapshot_round_trips_every_request_field`. Every
+/// construction site here is a struct literal with NO `..Default::default()`, so
+/// a new field on `LlmRequest` (or on `Message` / `ToolDef` / a `ContentBlock`
+/// variant) is a compile error until someone populates it.
+fn fully_populated_llm_request() -> LlmRequest {
     let timestamp = "2026-07-16T01:02:03Z".parse().unwrap();
-    let request = LlmRequest {
-        flux_loop_intent: None,
-        flux_turn_nonce: None,
+    LlmRequest {
         model: "model-a".into(),
         system: "system prompt".into(),
         messages: vec![Message {
@@ -79,7 +119,9 @@ fn prepared_provider_request_snapshot_round_trips_every_request_field() {
                 },
                 ContentBlock::Thinking {
                     thinking: "reasoning".into(),
-                    extra: None,
+                    // #1170: this was `None` until the journal actually carried
+                    // it, which is precisely why the drop went unseen.
+                    extra: Some(json!({"thought_signature":"reasoning-opaque"})),
                 },
                 ContentBlock::Image {
                     mime: "image/png".into(),
@@ -113,19 +155,172 @@ fn prepared_provider_request_snapshot_round_trips_every_request_field() {
         client_context_tokens: Some(12_345),
         temperature: Some(0.25),
         omit_max_tokens: true,
-    };
+        flux_loop_intent: Some(FluxLoopIntent::ClientOwned("anvil".into())),
+        flux_turn_nonce: Some("nonce-1".into()),
+        routed_model_hint: Some("deepseek-reasoner".into()),
+    }
+}
+
+#[test]
+fn prepared_provider_request_snapshot_round_trips_every_request_field() {
+    let request = fully_populated_llm_request();
+    let expected = fully_populated_llm_request();
+    let defaults = LlmRequest::default();
 
     let snapshot = prepared_provider_request_snapshot(&request).unwrap();
     let restored = decode_prepared_provider_request_snapshot(&snapshot).unwrap();
     let restored_snapshot = prepared_provider_request_snapshot(&restored).unwrap();
+    let restored_digest = provider_request_digest(&restored).unwrap();
 
+    // Shape-level agreement between the encoder and the decoder. This pair is
+    // NOT the gate: a field the snapshot struct never carried decodes to its
+    // default and re-encodes identically, so the round-trip stays symmetric and
+    // both assertions still pass. #1170 was exactly that hole -- four separate
+    // fields were dropped on the journal path with this test still green.
     assert_eq!(snapshot, restored_snapshot);
-    assert_eq!(
-        provider_request_digest(&request).unwrap(),
-        provider_request_digest(&restored).unwrap()
+    assert_eq!(provider_request_digest(&request).unwrap(), restored_digest);
+
+    // THE GATE. An exhaustive destructuring -- note there is NO `..` -- so a
+    // field added to `LlmRequest` is a COMPILE ERROR here until someone binds
+    // it, and an unused binding then fails `clippy -D warnings` until someone
+    // asserts it. The per-field assertion is what catches an unthreaded field:
+    // the fixture value is non-default, so a field the journal drops comes back
+    // as its default and the comparison fails.
+    let LlmRequest {
+        model,
+        system,
+        messages,
+        tools,
+        max_tokens,
+        thinking,
+        reasoning_effort,
+        cache_tier,
+        routing_hint,
+        stop_sequences,
+        web_search,
+        conversation_id,
+        client_context_tokens,
+        temperature,
+        omit_max_tokens,
+        flux_loop_intent,
+        flux_turn_nonce,
+        routed_model_hint,
+    } = restored;
+
+    assert_journaled_field!("model", model, expected.model, defaults.model);
+    assert_journaled_field!("system", system, expected.system, defaults.system);
+    // Covers every nested `Message` / `ContentBlock` field too, including the
+    // `Thinking.extra` thought signature the journal used to drop.
+    assert_journaled_field!("messages", messages, expected.messages, defaults.messages);
+    assert_journaled_field!("tools", tools, expected.tools, defaults.tools);
+    assert_journaled_field!(
+        "max_tokens",
+        max_tokens,
+        expected.max_tokens,
+        defaults.max_tokens
+    );
+    assert_journaled_field!("thinking", thinking, expected.thinking, defaults.thinking);
+    assert_journaled_field!(
+        "reasoning_effort",
+        reasoning_effort,
+        expected.reasoning_effort,
+        defaults.reasoning_effort
+    );
+    assert_journaled_field!(
+        "cache_tier",
+        cache_tier,
+        expected.cache_tier,
+        defaults.cache_tier
+    );
+    assert_journaled_field!(
+        "routing_hint",
+        routing_hint,
+        expected.routing_hint,
+        defaults.routing_hint
+    );
+    assert_journaled_field!(
+        "stop_sequences",
+        stop_sequences,
+        expected.stop_sequences,
+        defaults.stop_sequences
+    );
+    assert_journaled_field!(
+        "web_search",
+        web_search,
+        expected.web_search,
+        defaults.web_search
+    );
+    assert_journaled_field!(
+        "conversation_id",
+        conversation_id,
+        expected.conversation_id,
+        defaults.conversation_id
+    );
+    assert_journaled_field!(
+        "client_context_tokens",
+        client_context_tokens,
+        expected.client_context_tokens,
+        defaults.client_context_tokens
+    );
+    assert_journaled_field!(
+        "temperature",
+        temperature,
+        expected.temperature,
+        defaults.temperature
+    );
+    assert_journaled_field!(
+        "omit_max_tokens",
+        omit_max_tokens,
+        expected.omit_max_tokens,
+        defaults.omit_max_tokens
+    );
+    assert_journaled_field!(
+        "flux_loop_intent",
+        flux_loop_intent,
+        expected.flux_loop_intent,
+        defaults.flux_loop_intent
+    );
+    assert_journaled_field!(
+        "flux_turn_nonce",
+        flux_turn_nonce,
+        expected.flux_turn_nonce,
+        defaults.flux_turn_nonce
+    );
+    assert_journaled_field!(
+        "routed_model_hint",
+        routed_model_hint,
+        expected.routed_model_hint,
+        defaults.routed_model_hint
     );
 }
 
+/// #1170: journals written before `Thinking.extra` was carried must still
+/// decode, and must still be canonical. The fix is only safe because it left the
+/// encoding of a reasoning block WITHOUT metadata byte-identical -- otherwise
+/// every already-written journal digest would change under recovery's
+/// canonicality re-check.
+#[test]
+fn prepared_provider_request_snapshot_keeps_a_thinking_block_without_extra_byte_identical() {
+    let mut request = fully_populated_llm_request();
+    request.messages[0].content = vec![ContentBlock::Thinking {
+        thinking: "reasoning".into(),
+        extra: None,
+    }];
+
+    let snapshot = prepared_provider_request_snapshot(&request).unwrap();
+    let encoded = serde_json::to_string(&snapshot).unwrap();
+    assert!(
+        !encoded.contains("extra"),
+        "a reasoning block with no provider metadata must encode exactly as it \
+         did before #1170: {encoded}"
+    );
+
+    let restored = decode_prepared_provider_request_snapshot(&snapshot).unwrap();
+    assert_eq!(
+        format!("{:?}", restored.messages),
+        format!("{:?}", request.messages)
+    );
+}
 #[test]
 fn prepared_provider_request_snapshot_rejects_unknown_structural_fields() {
     let request = LlmRequest {

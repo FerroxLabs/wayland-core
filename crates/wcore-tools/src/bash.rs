@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -509,6 +510,78 @@ fn spawn_manifest_build(
     })
 }
 
+/// The part of the Bash tool description that is the same on every host.
+/// The platform-dependent tail is appended by [`shell_disclosure`].
+const BASE_DESCRIPTION: &str = "Executes a shell command and returns its output.\n\n\
+         IMPORTANT: Do NOT use Bash when a dedicated tool is available:\n\
+         - File search: use Glob (not find or ls)\n\
+         - Content search: use Grep (not grep or rg)\n\
+         - Read files: use Read (not cat, head, or tail)\n\
+         - Edit files: use Edit (not sed or awk)\n\
+         - Write files: use Write (not echo or cat with heredoc)\n\
+         - Web access: the Bash sandbox has NO NETWORK — curl/wget/git-fetch \
+         and other network commands fail (empty output). To read a URL use the \
+         WebFetch tool; to search the web use the `web` tool with operation \
+         \"search\". Do NOT retry with curl/wget.\n\n\
+         # Instructions\n\
+         - Use absolute paths to avoid working directory confusion.\n\
+         - When issuing multiple independent commands, make parallel tool calls \
+         instead of chaining them. Use `&&` only when commands depend on each other.\n\
+         - You may specify an optional timeout in milliseconds (default 120000, max 600000).\n\n\
+         # Git safety\n\
+         - Never force push, reset --hard, or use --no-verify unless explicitly asked.\n\
+         - Prefer creating new commits over amending existing ones.";
+
+/// Tell the model which interpreter its command string will actually reach.
+///
+/// The tool is called `Bash`, but the interpreter is chosen at runtime by
+/// [`bash_shell_argv_prefix`] and on Windows it is `cmd.exe`. A model that
+/// assumes bash there gets a SILENT wrong answer rather than an error:
+/// `echo A; echo B` prints `A; echo B` and exits 0, so the tool reports
+/// success for a command that never ran as written. This description is the
+/// only channel that reaches the model. The system prompt carries the model
+/// name and working directory but no OS (`crates/wcore-agent/src/context.rs`),
+/// and `docs/tools.md` is read by operators, not by the model.
+///
+/// Built from the SAME prefix the spawn path uses, so the advertised shell
+/// and the spawned shell cannot drift. Pure, so every platform wording is
+/// unit-testable from any host.
+fn shell_disclosure(prefix: &[String], os: &str) -> String {
+    let invocation = prefix.join(" ");
+    let program = prefix
+        .first()
+        .map(|p| p.trim_end_matches(".exe").to_ascii_lowercase())
+        .unwrap_or_default();
+    let syntax = match program.as_str() {
+        "sh" | "bash" => "POSIX shell syntax applies: `;` separates commands, `$VAR` \
+             expands, and pipes, redirection and globbing work as usual. `sh` may be \
+             `dash` rather than `bash`, so avoid bash-only constructs (`[[ ]]`, arrays, \
+             `source`, `<<<`) unless you invoke `bash -c` yourself."
+            .to_string(),
+        "powershell" | "pwsh" => "This is PowerShell, NOT bash. Use `$env:VAR` for \
+             environment variables and `;` to separate commands. Single quotes do not \
+             interpolate, `$(...)` is a PowerShell subexpression rather than a POSIX \
+             command substitution, and heredocs do not exist."
+            .to_string(),
+        "cmd" => "This is cmd.exe, NOT bash. bash syntax here usually does the wrong \
+             thing AND still exits 0, so you get a silent wrong answer: `;` does not \
+             separate commands (`echo A; echo B` prints `A; echo B`), `$VAR` does not \
+             expand (use `%VAR%`), and `$(...)`, backticks, single-quoted strings, \
+             heredocs and `~` are not supported. Separate commands with `&` (or `&&` \
+             when they depend on each other). Unix utilities are NOT present: use \
+             `dir`, `type`, `findstr`, `del`, `where` instead of `ls`, `cat`, `grep`, \
+             `rm`, `which`. Path separator is a backslash."
+            .to_string(),
+        other => format!("The interpreter is `{other}`, NOT bash - do not assume bash syntax."),
+    };
+    format!(
+        "\n\n# Shell environment\n\
+         - Host OS: {os}. Your command string is handed to `{invocation}`, and THAT \
+         interpreter, not bash, decides what it means.\n\
+         - {syntax}"
+    )
+}
+
 pub struct BashTool;
 
 #[async_trait]
@@ -530,25 +603,13 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Executes a shell command and returns its output.\n\n\
-         IMPORTANT: Do NOT use Bash when a dedicated tool is available:\n\
-         - File search: use Glob (not find or ls)\n\
-         - Content search: use Grep (not grep or rg)\n\
-         - Read files: use Read (not cat, head, or tail)\n\
-         - Edit files: use Edit (not sed or awk)\n\
-         - Write files: use Write (not echo or cat with heredoc)\n\
-         - Web access: the Bash sandbox has NO NETWORK — curl/wget/git-fetch \
-         and other network commands fail (empty output). To read a URL use the \
-         WebFetch tool; to search the web use the `web` tool with operation \
-         \"search\". Do NOT retry with curl/wget.\n\n\
-         # Instructions\n\
-         - Use absolute paths to avoid working directory confusion.\n\
-         - When issuing multiple independent commands, make parallel tool calls \
-         instead of chaining them. Use `&&` only when commands depend on each other.\n\
-         - You may specify an optional timeout in milliseconds (default 120000, max 600000).\n\n\
-         # Git safety\n\
-         - Never force push, reset --hard, or use --no-verify unless explicitly asked.\n\
-         - Prefer creating new commits over amending existing ones."
+        static DESCRIPTION: OnceLock<String> = OnceLock::new();
+        DESCRIPTION.get_or_init(|| {
+            format!(
+                "{BASE_DESCRIPTION}{}",
+                shell_disclosure(&bash_shell_argv_prefix(), std::env::consts::OS)
+            )
+        })
     }
 
     fn input_schema(&self) -> JsonSchema {

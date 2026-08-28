@@ -67,12 +67,12 @@ const CHANNEL: &str = "mxcap";
 /// `max_message_len`).
 ///
 /// Not a free-floating literal: `docs/delivery-semantics.md` carries
-/// `matrix.cap = 32768` in its machine-readable block, and
+/// `matrix.cap = 16384` in its machine-readable block, and
 /// `delivery_semantics_declaration.rs` asserts that number against the adapter
 /// the production factory builds. So if the adapter's cap changes and this
 /// constant is not updated, that test fails first — this one cannot quietly
 /// start sending the wrong sizes and calling the result a measurement.
-const CAP: usize = 32_768;
+const CAP: usize = 16_384;
 
 struct EnvCreds;
 

@@ -190,6 +190,25 @@ fn parse_declaration(doc: &str) -> Declaration {
             continue;
         }
 
+        // `.cap_source` before `.cap` for the same reason `.cap_measured` is
+        // first: neither ends in `.cap`, so an unhandled one falls through to
+        // the guarantee arm and panics on an unknown guarantee word.
+        if let Some(platform) = k.strip_suffix(".cap_source") {
+            assert!(
+                v.starts_with("https://"),
+                "{k:?} must be a URL a reader can open, got {v:?}. A prose assurance here \
+                 would be the same defect the source column exists to close: a number \
+                 vouching for itself"
+            );
+            assert!(
+                out.cap_source
+                    .insert(platform.to_string(), v.clone())
+                    .is_none(),
+                "{k:?} is declared twice"
+            );
+            continue;
+        }
+
         if let Some(platform) = k.strip_suffix(".cap") {
             let n: usize = v.parse().unwrap_or_else(|_| {
                 panic!("{k:?} must be a plain char count in decimal, got {v:?}")
@@ -244,6 +263,16 @@ struct Declaration {
     /// a number implies the number was verified, and until a boundary probe runs, nothing
     /// has verified it against anything but our own adapter.
     cap_measured: BTreeMap<String, bool>,
+    /// `platform -> the vendor page the cap is derived from`. Required beside every cap row.
+    ///
+    /// Added 2026-08-28 (wayland#934). `cap_measured` says whether the number was checked
+    /// against the PLATFORM; this says what the number was READ FROM in the first place, which
+    /// is a different question and the one that was never asked. Reading these pages found two
+    /// of the seven caps wrong — `msteams` taken from the Incoming Webhook surface and misread
+    /// from KB into characters, `matrix` computed at two UTF-8 bytes per character where UTF-8
+    /// uses four — and neither is drift a cap-vs-adapter comparison could see, because in both
+    /// cases the document and the adapter agreed with each other perfectly.
+    cap_source: BTreeMap<String, String>,
 }
 
 /// What an adapter, as the production factory builds it, actually reports.
@@ -378,6 +407,16 @@ fn disagreements(declared: &Declaration, measured: &BTreeMap<String, Measured>) 
                  platform confirmed it, and no platform has"
             ));
         }
+        // And a number nobody can trace to a vendor page is a number vouching
+        // for itself, which is the whole of wayland#934.
+        if !declared.cap_source.contains_key(platform) {
+            out.push(format!(
+                "{platform}: has a {platform}.cap row but no {platform}.cap_source. A cap with \
+                 no citation cannot be checked by a reader, only agreed with by our own code — \
+                 which is how {platform}'s peers msteams and matrix each carried a wrong number \
+                 through a green build"
+            ));
+        }
     }
 
     // The converse: a verdict about a cap that is not declared.
@@ -386,6 +425,16 @@ fn disagreements(declared: &Declaration, measured: &BTreeMap<String, Measured>) 
             out.push(format!(
                 "{platform}: has a {platform}.cap_measured verdict but no {platform}.cap row, so \
                  the verdict is about a number the block does not carry"
+            ));
+        }
+    }
+
+    // The same converse for the citation.
+    for platform in declared.cap_source.keys() {
+        if !declared.caps.contains_key(platform) {
+            out.push(format!(
+                "{platform}: has a {platform}.cap_source but no {platform}.cap row, so the \
+                 citation is about a number the block does not carry"
             ));
         }
     }
@@ -445,6 +494,13 @@ fn declaration_matches_every_adapter() {
          msteams -- email, signal and iMessage report None). Found {}: {:?}",
         declared.caps.len(),
         declared.caps
+    );
+    assert_eq!(
+        declared.cap_source.len(),
+        declared.caps.len(),
+        "every cap row needs a cap_source beside it; got {} caps and {} sources",
+        declared.caps.len(),
+        declared.cap_source.len()
     );
     assert_eq!(
         declared.cap_measured.len(),
@@ -565,7 +621,7 @@ fn comparator_rejects_a_downgraded_row() {
     // then, because a leftover `matrix.cap` row under an unconditional
     // guarantee was itself drift. Under the generalised meaning a cap row is a
     // fact about the adapter, so it is *correct* to keep carrying it here —
-    // Matrix really does cap at 32,768 whatever guarantee the row claims. The
+    // Matrix really does cap at 16,384 whatever guarantee the row claims. The
     // count is pinned so this reduction is a deliberate consequence of the
     // wayland#934 change rather than a rule quietly ceasing to fire.
     let problems = disagreements(&declared, &measured);
@@ -588,6 +644,7 @@ fn comparator_rejects_a_missing_row() {
     declared.guarantees.remove("matrix");
     declared.caps.remove("matrix");
     declared.cap_measured.remove("matrix");
+    declared.cap_source.remove("matrix");
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(problems.len(), 1, "got: {problems:?}");
@@ -712,12 +769,12 @@ fn comparator_rejects_a_cap_that_does_not_match_the_adapter() {
         "the unmutated comparison must be green for this test to mean anything"
     );
 
-    declared.caps.insert("matrix".into(), 32_767);
+    declared.caps.insert("matrix".into(), 16_383);
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(problems.len(), 1, "got: {problems:?}");
     assert!(
-        problems[0].contains("32767") && problems[0].contains("32768"),
+        problems[0].contains("16383") && problems[0].contains("16384"),
         "the disagreement must name both the documented and the real cap: {problems:?}"
     );
 }
@@ -730,6 +787,7 @@ fn comparator_rejects_a_conditional_row_with_no_cap() {
 
     declared.caps.remove("matrix");
     declared.cap_measured.remove("matrix");
+    declared.cap_source.remove("matrix");
 
     // Two since 2026-08-26, and both are real: the guarantee has lost the condition it
     // depends on, AND a capped adapter has lost its cap row. Pinning the count means a rule
@@ -743,7 +801,7 @@ fn comparator_rejects_a_conditional_row_with_no_cap() {
     assert!(
         problems
             .iter()
-            .any(|p| p.contains("caps a single message at 32768 chars but the block carries no")),
+            .any(|p| p.contains("caps a single message at 16384 chars but the block carries no")),
         "the missing cap row must be reported in its own right: {problems:?}"
     );
 }
@@ -766,6 +824,7 @@ fn comparator_rejects_bare_exactly_once_over_a_capped_adapter() {
         .insert("matrix".into(), "exactly-once".into());
     declared.caps.remove("matrix");
     declared.cap_measured.remove("matrix");
+    declared.cap_source.remove("matrix");
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(
@@ -776,7 +835,7 @@ fn comparator_rejects_bare_exactly_once_over_a_capped_adapter() {
     assert!(
         problems
             .iter()
-            .any(|p| p.contains("declared bare exactly-once") && p.contains("32768")),
+            .any(|p| p.contains("declared bare exactly-once") && p.contains("16384")),
         "the disagreement must say why the unconditional claim is false and name the cap: \
          {problems:?}"
     );
@@ -808,6 +867,9 @@ fn comparator_rejects_a_cap_row_for_an_uncapped_adapter() {
     // Email inherits the trait default and reports None.
     declared.caps.insert("email".into(), 1000);
     declared.cap_measured.insert("email".into(), false);
+    declared
+        .cap_source
+        .insert("email".into(), "https://example.invalid/rfc5321".into());
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(problems.len(), 1, "got: {problems:?}");
@@ -828,6 +890,7 @@ fn comparator_rejects_a_capped_adapter_with_no_cap_row() {
 
     declared.caps.remove("slack");
     declared.cap_measured.remove("slack");
+    declared.cap_source.remove("slack");
 
     let problems = disagreements(&declared, &measured);
     assert_eq!(problems.len(), 1, "got: {problems:?}");
@@ -852,6 +915,64 @@ fn comparator_rejects_a_cap_row_with_no_measured_verdict() {
         problems[0].contains("no slack.cap_measured verdict"),
         "got: {problems:?}"
     );
+}
+
+/// Can it fail, 8 — **the rule wayland#934 added on 2026-08-28.** A cap with no citation.
+///
+/// The state every row was in until that date: a number agreed on by our document and our
+/// adapter and traceable to nothing outside the programme. Two of the seven were wrong, and
+/// both passed every check in this file, because both halves of every comparison were ours.
+#[test]
+fn comparator_rejects_a_cap_row_with_no_source() {
+    let mut declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+    assert!(
+        disagreements(&declared, &measured).is_empty(),
+        "the unmutated comparison must be green for this test to mean anything"
+    );
+
+    declared.cap_source.remove("msteams");
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert!(
+        problems[0].contains("no msteams.cap_source"),
+        "the missing citation must be named: {problems:?}"
+    );
+}
+
+/// Can it fail, 9: a citation about a cap the block does not carry.
+#[test]
+fn comparator_rejects_a_source_with_no_cap_row() {
+    let mut declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+
+    declared
+        .cap_source
+        .insert("signal".into(), "https://example.invalid/signal-cli".into());
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(problems.len(), 1, "got: {problems:?}");
+    assert!(
+        problems[0].contains("no signal.cap row"),
+        "got: {problems:?}"
+    );
+}
+
+/// Every cap citation must be a URL, and a bare assurance must be refused.
+///
+/// The parser enforces this, so the check is on the parser: feed it a block whose source is a
+/// sentence rather than a link and require the panic. Without this arm the `https://` rule
+/// would be an unexercised branch, and an unexercised rule is indistinguishable from an
+/// absent one.
+#[test]
+#[should_panic(expected = "must be a URL a reader can open")]
+fn the_parser_refuses_a_cap_source_that_is_not_a_link() {
+    let doc = format!(
+        "{BEGIN}\nslack = at-most-once\nslack.cap = 4000\nslack.cap_measured = live\n\
+         slack.cap_source = we checked with the team\n{END}"
+    );
+    let _ = parse_declaration(&doc);
 }
 
 /// Can it fail, 7: a verdict about a cap the block does not carry.

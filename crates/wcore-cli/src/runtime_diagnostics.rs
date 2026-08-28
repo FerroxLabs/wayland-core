@@ -666,6 +666,7 @@ mod tests {
             deferred: Some(false),
             allow_local: false,
             only_for_assistant: scope,
+            allowed_tools: None,
         }
     }
 
@@ -683,6 +684,7 @@ mod tests {
             deferred: Some(true),
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         }
     }
 

@@ -2310,6 +2310,35 @@ impl AgentBootstrap {
             skill_refs.sort_by_key(|r| rank.get(r.name.as_str()).copied().unwrap_or(usize::MAX));
         }
 
+        // #1150 — the ACTIVE model's window, `None` only when it is genuinely
+        // unknown. This argument was hardcoded `None` at both production call
+        // sites (here and `late_mcp::bind`), so `get_char_budget`'s real
+        // 1%-of-window formula was reachable from tests alone and every real
+        // session listed skills against the flat 8,000-character default: a 32k
+        // model spent 6x its fair share of the window on the listing, a 1M
+        // model a fraction of it.
+        let skills_context_window = self
+            .config
+            .compact
+            .known_context_window(self.config.compat.provider_type(), &self.config.model);
+        if skills_context_window.is_none() {
+            // On the user's surface, not through `warn!`: with `RUST_LOG` unset
+            // only ERROR reaches stderr, so a log line here reaches nobody
+            // (#1130). This is the ONLY moment the session can say that every
+            // context boundary below is a guess, and the remedy is one config
+            // key the user can set.
+            self.output.emit_info(&format!(
+                "The context window for model `{}` is unknown - it is not in the built-in \
+                 model table and `[compact] context_window` is not set. The context gauge \
+                 and the pre-flight overflow guard are disabled for this session, and \
+                 compaction falls back to a conservative {}-token assumption - so a long \
+                 session may compact earlier than this model actually needs. Set \
+                 `[compact] context_window = <tokens>` in your config to size them \
+                 correctly.",
+                self.config.model,
+                wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW,
+            ));
+        }
         let mut prompt_cache = crate::context::SystemPromptCache::new();
         let system_prompt = crate::context::build_system_prompt(
             &mut prompt_cache,
@@ -2317,7 +2346,7 @@ impl AgentBootstrap {
             cwd,
             &self.config.model,
             &skill_refs,
-            None,
+            skills_context_window,
             memory_dir.as_deref(),
             false,
             self.config.compact.toon,

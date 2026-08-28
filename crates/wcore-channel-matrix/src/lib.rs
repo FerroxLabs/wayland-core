@@ -210,12 +210,34 @@ impl Channel for MatrixChannel {
         self.poll_handle.as_ref()
     }
 
-    /// Conservative per-message body cap. A Matrix event must serialize under
-    /// the spec's 65536-byte hard limit (including all envelope fields), so a
-    /// homeserver rejects an over-long `body`. Declaring the cap makes the
-    /// channel manager chunk long replies instead of sending one rejected event.
+    /// Per-message body cap, in Unicode scalar values.
+    ///
+    /// The platform limit is a BYTE budget, not a character count:
+    /// <https://spec.matrix.org/latest/client-server-api/#size-limits> — "The
+    /// complete event MUST NOT be larger than 65536 bytes, when formatted with
+    /// the federation event format, including any signatures, and encoded as
+    /// Canonical JSON." Synapse enforces exactly that value (`MAX_PDU_SIZE =
+    /// 65536` in `synapse/api/constants.py`, checked in `event_auth.py`); it is
+    /// not tunable, and matrix.org publishes no separate figure.
+    ///
+    /// **Corrected 2026-08-28 from 32,768 (wayland#934).** That value was
+    /// `65536 / 2`, i.e. it assumed two UTF-8 bytes per scalar. UTF-8 uses up to
+    /// FOUR. A 32,768-scalar body of CJK (3 bytes each) is 98,304 bytes and the
+    /// homeserver rejects the event — which is HIGH-6, the reject-and-drop bug
+    /// `max_message_len` exists to prevent, reinstated for any non-Latin reply
+    /// longer than ~21,800 characters. `65536 / 4` is the largest scalar count
+    /// whose UTF-8 encoding cannot exceed the ceiling.
+    ///
+    /// It is an upper bound and not a proof: the homeserver adds `auth_events`,
+    /// `prev_events`, `hashes` and `signatures` AFTER the `PUT`, so the client
+    /// cannot compute the encoded size of the thing that is actually measured,
+    /// and Canonical-JSON escaping inflates control characters six-fold. That
+    /// residual is why `matrix.cap_measured` stays `no` in
+    /// `docs/delivery-semantics.md` §4.2; the only thing that settles it is the
+    /// boundary probe named there. A byte-denominated cap is the real fix and is
+    /// a change to the `Channel` trait, not to this number.
     fn max_message_len(&self) -> Option<usize> {
-        Some(32_768)
+        Some(16_384)
     }
 
     async fn start(&mut self) -> Result<(), ChannelError> {
@@ -633,24 +655,45 @@ user_id = "@bot:matrix.example.org"
             "Matrix must declare a finite cap: an adapter with no cap would make the \
                      conditional guarantee in docs/delivery-semantics.md §4.1 describe nothing",
         );
-        assert_eq!(cap, 32_768);
 
-        // The pair that makes the condition real: one char under the cap is a
-        // single message (key rides, exactly-once); one char over is chunked
-        // (no key, at-least-once). Driving the same chunker the manager drives
-        // rather than asserting the arithmetic.
-        let under = "x".repeat(cap);
-        let over = "x".repeat(cap + 1);
+        // The pair that makes the condition real: at the cap is a single
+        // message (key rides, exactly-once); one char over is chunked (no key,
+        // at-least-once). Driving the same chunker the manager drives rather
+        // than asserting the arithmetic.
+        //
+        // The `assert_eq!(cap, 32_768)` that used to stand here was removed on
+        // 2026-08-28 (wayland#934): it restated the literal the function returns
+        // and was the one line of this test that could not fail for a reason a
+        // reader cares about. The number is bound to `matrix.cap` in
+        // docs/delivery-semantics.md by the registry declaration test.
+        let at_cap = "x".repeat(cap);
+        let over = format!("{at_cap}y");
         assert_eq!(
-            wcore_channels::chunk::chunk_message(&under, cap).len(),
+            wcore_channels::chunk::chunk_message(&at_cap, cap).len(),
             1,
             "a body exactly at the cap must still be one message, or the guarantee stops one \
              char earlier than the document says"
         );
-        assert!(
-            wcore_channels::chunk::chunk_message(&over, cap).len() > 1,
+        let chunks = wcore_channels::chunk::chunk_message(&over, cap);
+        assert_eq!(
+            chunks.len(),
+            2,
             "a body one char over the cap must split — that split is what drops the \
              idempotency key"
+        );
+        // The half the old test omitted. A chunk WIDER than the cap is rejected
+        // by the homeserver in its own right, so the body is dropped rather
+        // than merely losing its key: HIGH-6 on top of the §4.1 downgrade.
+        let widest = chunks.iter().map(|c| c.chars().count()).max().unwrap_or(0);
+        assert!(
+            widest <= cap,
+            "a chunk of {widest} chars exceeds the {cap}-char cap and the homeserver rejects it"
+        );
+        assert_eq!(
+            chunks.concat(),
+            over,
+            "the split must be lossless, or the room gets a truncated message under a delivery \
+             the ledger recorded as complete"
         );
     }
 

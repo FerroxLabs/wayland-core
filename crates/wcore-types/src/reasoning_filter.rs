@@ -33,6 +33,11 @@
 //!   (case-insensitive)
 //!   and their corresponding closing tags. Other tags (e.g. `<b>`) pass
 //!   through untouched — this is a reasoning filter, not an HTML sanitiser.
+//! - A recognised CLOSING tag with no matching open (`</thought>` on its
+//!   own) is dropped too, not printed. Providers do split a reasoning block
+//!   across two responses, and some consume the opener before we see it;
+//!   before #908 that bare close was flushed as plain text and the user read
+//!   `</thought>` at the end of the answer.
 //! - Handles nested same-name blocks via a depth counter.
 //! - Accepts attributes inside the opening tag (`<thinking attr="x">`).
 //! - Self-closing form (`<think/>`) is stripped with no content drop.
@@ -197,6 +202,13 @@ impl ReasoningFilter {
                             self.state = FilterState::InThinking { depth: 1 };
                         }
                     }
+                    OpenClass::StrayClose => {
+                        // A close with no matching open. Drop the tag and
+                        // stay in Text — there is no body to capture and no
+                        // depth to decrement.
+                        self.pending.clear();
+                        self.state = FilterState::Text;
+                    }
                     OpenClass::Prefix => {
                         // Keep accumulating, unless we've hit the cap (a
                         // pathological run of "<thinkingxxxxxx..." that
@@ -339,6 +351,11 @@ enum OpenClass {
     /// The buffer is still a viable prefix of a recognised opening tag;
     /// keep accumulating.
     Prefix,
+    /// `</think>` etc. with no block open — a STRAY closing reasoning tag.
+    /// Dropped, not flushed: a provider that swallowed the opener (or split
+    /// the block across two responses) otherwise puts the literal tag in the
+    /// user's answer (#908).
+    StrayClose,
     /// The buffer is definitively NOT a recognised opening tag — flush as
     /// plain text.
     NotATag,
@@ -367,11 +384,20 @@ fn classify_open(buf: &str) -> OpenClass {
     if body.is_empty() {
         return OpenClass::Prefix;
     }
-    // `</...` is a close tag, never an open — reject early. (We can only
-    // get here from FilterState::Text where no block is open, so a stray
-    // `</think>` is just plain text.)
-    if body.starts_with('/') {
-        return OpenClass::NotATag;
+    // `</...` is a close tag, never an open. We can only get here from
+    // FilterState::Text, so there is no block for it to close — but it is
+    // still reasoning punctuation, not prose. #908: flushing it as plain text
+    // put a literal `</thought>` in the answer whenever the opener never
+    // reached us (the provider stripped it, or the block straddled two
+    // responses). Recognised names are dropped; anything else (`</b>`) is
+    // still ordinary text, because this is a reasoning filter and not an HTML
+    // sanitiser.
+    if let Some(close_body) = body.strip_prefix('/') {
+        return match classify_tag_body(close_body, /* expect_close = */ true) {
+            Some(TagClass::Prefix) => OpenClass::Prefix,
+            Some(TagClass::Complete { .. }) => OpenClass::StrayClose,
+            None => OpenClass::NotATag,
+        };
     }
 
     classify_tag_body(body, /* expect_close = */ false).map_or(OpenClass::NotATag, |class| {
@@ -733,11 +759,21 @@ mod tests {
     }
 
     #[test]
-    fn close_tag_outside_block_is_plain_text() {
-        // `</think>` appearing in plain text (no open) — pass through. We
-        // treat it as plain text because it isn't a recognised opening
-        // tag and we are not in a reasoning block.
-        assert_eq!(run(&["plain </think> text"]), "plain </think> text");
+    fn stray_close_tag_outside_block_is_dropped() {
+        // #908 — INVERTED. This test previously asserted that `</think>`
+        // passed through as plain text, which is exactly the leak: a provider
+        // that consumed the opener leaves the sink holding a bare close, and
+        // the user reads `</thought>` in the answer. A recognised reasoning
+        // close is reasoning punctuation in every state, so it is dropped.
+        assert_eq!(run(&["plain </think> text"]), "plain  text");
+        assert_eq!(run(&["done</thought>"]), "done");
+    }
+
+    #[test]
+    fn unrecognised_close_tag_outside_block_is_still_plain_text() {
+        // The counterpart the inversion must NOT break: only the four tracked
+        // names are reasoning; `</b>` is the user's own text.
+        assert_eq!(run(&["a</b>c"]), "a</b>c");
     }
 
     #[test]

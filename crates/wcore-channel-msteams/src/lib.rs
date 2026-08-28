@@ -554,9 +554,39 @@ impl Channel for MsTeamsChannel {
         include_str!("schemas/msteams.json")
     }
 
-    /// Microsoft Teams caps a single message at roughly 28000 characters.
+    /// Per-message body cap, in Unicode scalar values.
+    ///
+    /// **Corrected 2026-08-28 from 28,000 (wayland#934), which was wrong three
+    /// ways at once.**
+    ///
+    /// 1. 28 KB is the **Incoming Webhook** limit, a different surface from the
+    ///    one this adapter uses:
+    ///    <https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook>
+    ///    — "The message size limit is 28 KB."
+    /// 2. The Bot Framework limit was never 28 KB. It is **100 KB**, and was
+    ///    40 KB before 2025-09-16:
+    ///    <https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages>
+    ///    — "The agent message size limit is 100 KB … it's recommended to ensure
+    ///    that the size of the message itself is within 80 KB to guarantee
+    ///    successful message delivery. If the agent message exceeds the size
+    ///    limit, the agent receives a `413` status code
+    ///    (`RequestEntityTooLarge`) … `MessageSizeTooBig`."
+    /// 3. KB is not characters. The same page states the budget is the whole
+    ///    payload "encoded as UTF-16", so reading "28 KB" as "28,000 characters"
+    ///    was a further ~2x overstatement of what 28 KB would even have allowed.
+    ///
+    /// Microsoft documents **no** character limit for a bot message's `text`, so
+    /// this is derived rather than quoted: 80 KB (Microsoft's own recommended
+    /// ceiling) = 81,920 bytes; a scalar costs at most two UTF-16 code units =
+    /// four bytes; `81920 / 4 = 20480`.
+    ///
+    /// Upper bound, not proof — it does not subtract the Activity envelope,
+    /// @-mentions or attachment JSON, which share the same budget. `413
+    /// MessageSizeTooBig` is the rejection this direction has to stay clear of;
+    /// over-chunking costs readability and nothing else, because MS Teams is
+    /// `at-most-once` at every length. `msteams.cap_measured` stays `no`.
     fn max_message_len(&self) -> Option<usize> {
-        Some(28_000)
+        Some(20_480)
     }
 }
 
@@ -691,17 +721,68 @@ service_url = "https://smba.trafficmanager.net/emea/"
         assert_eq!(ch.platform(), "msteams");
     }
 
+    /// The cap is load-bearing: it is the boundary the chunker splits on.
+    ///
+    /// # Why this is not `assert_eq!(max_message_len(), Some(20_480))`
+    ///
+    /// wayland#934. Until 2026-08-28 this test compared the function's return
+    /// value against the literal that function returns a few lines above. That
+    /// restates the code. Measured the same day: with `chunk_message` mutated to
+    /// emit pieces 1000 chars OVER the cap — HIGH-6, the reject-and-drop bug the
+    /// cap exists to prevent — six of the seven adapter cap tests still passed.
+    ///
+    /// So this drives the boundary instead, through the same
+    /// `ChannelManager::chunks_for` decision `send_to_keyed` itself reads:
+    /// a body AT the cap is one message (which is what lets the idempotency key
+    /// ride, `docs/delivery-semantics.md` §4.1); one char OVER splits; no piece
+    /// of the split may exceed the cap; and the split is lossless.
+    ///
+    /// The NUMBER is bound elsewhere, deliberately. No unit test in this crate
+    /// can check a number against a platform. What binds it is
+    /// `wcore-channels-registry/tests/delivery_semantics_declaration.rs`, which
+    /// reads this method through the PRODUCTION factory and compares it against
+    /// the `msteams.cap` row of `docs/delivery-semantics.md` — a row that
+    /// now also carries `msteams.cap_source`, the vendor documentation the
+    /// number is derived from, and `msteams.cap_measured`, which states
+    /// whether it has ever been checked at the real platform.
     #[test]
-    fn max_message_len_is_msteams_cap() {
-        // wayland#934: this asserts the literal the function returns one line above, so it
-        // restates the code rather than testing it. It is retained as a change-detector, but
-        // the check that can actually catch a wrong cap is
-        // `wcore-channels-registry/tests/delivery_semantics_declaration.rs`, which binds this
-        // number to `msteams.cap` in `docs/delivery-semantics.md` through the PRODUCTION
-        // factory. Whether either number equals the PLATFORM's real limit is still
-        // unmeasured -- see `cap_measured` and §4.2 of that document.
+    fn a_body_over_the_cap_splits_into_pieces_the_platform_will_accept() {
         let ch = MsTeamsChannel::new("test", cfg(), MemCreds::empty());
-        assert_eq!(ch.max_message_len(), Some(28_000));
+        let cap = ch.max_message_len().expect(
+            "msteams must declare a finite cap; None disables chunking and reinstates HIGH-6",
+        );
+
+        // AT the cap: one message. One char earlier and the conditional
+        // guarantee of §4.1 would stop short of where the document says it does.
+        let at_cap = "x".repeat(cap);
+        assert_eq!(
+            wcore_channels::manager::ChannelManager::chunks_for(Some(cap), &at_cap).len(),
+            1,
+            "a body of exactly {cap} chars must still go as ONE message"
+        );
+
+        // ONE CHAR OVER: splits, and — the assertion the old test could not make
+        // — every piece is itself within the cap. A piece over the platform
+        // limit is rejected and dropped in turn, which is the whole of HIGH-6.
+        let over = format!("{at_cap}y");
+        let chunks = wcore_channels::manager::ChannelManager::chunks_for(Some(cap), &over);
+        assert_eq!(
+            chunks.len(),
+            2,
+            "an unbroken run of {} chars at cap {cap} must split into exactly 2 pieces",
+            over.chars().count()
+        );
+        let widest = chunks.iter().map(|c| c.chars().count()).max().unwrap_or(0);
+        assert!(
+            widest <= cap,
+            "a chunk of {widest} chars exceeds the {cap}-char cap — the platform rejects it and \
+             the body is dropped, which is the HIGH-6 bug the cap exists to prevent"
+        );
+        assert_eq!(
+            chunks.concat(),
+            over,
+            "the split must be lossless: the destination gets the whole body or the chunker ate it"
+        );
     }
 
     // 3. send_message before start surfaces NotStarted.

@@ -1,13 +1,93 @@
 use serde::{Deserialize, Serialize};
 
-/// Context window assumed when the operator configured none AND the active
-/// model is unknown to [`crate::limits::model_output_ceiling`].
+/// The historical 200,000-token assumption.
 ///
-/// Deliberately conservative: under-estimating the window compacts early
-/// (annoying but recoverable), over-estimating it 400s the provider and drops
-/// context (data loss). Never raise this on guesswork — teach the registry
-/// about the model instead.
+/// Retained for ONE job: the ceiling a Flux router tier alias floor is clamped
+/// against in [`CompactConfig::known_context_window`], where it means "a guess
+/// about a pool may never RAISE the boundary above what we used to assume".
+///
+/// It is no longer the unknown-model fallback — see
+/// [`UNVERIFIED_CONTEXT_WINDOW`] for why 200,000 was the wrong value for that
+/// job.
 pub const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
+
+/// Context window ASSUMED for compaction boundaries when the operator
+/// configured none AND the active model is unknown to
+/// [`crate::limits::model_output_ceiling`] (FerroxLabs/wayland#1150).
+///
+/// # Why this is not 200,000
+///
+/// The constant this replaces claimed in its own doc comment to be
+/// "deliberately conservative" on the stated ground that "under-estimating the
+/// window compacts early (annoying but recoverable), over-estimating it 400s
+/// the provider and drops context (data loss)" — and then carried 200,000, the
+/// TOP of the plausible range rather than the bottom. The reasoning was right
+/// and the value contradicted it.
+///
+/// Measured consequence, from the #1150 report: a 32k local model served over
+/// an OpenAI-compatible endpoint got microcompact at 83,500, autocompact at
+/// 167,000 and an emergency stop at 197,000 — three boundaries the session can
+/// never reach, because the endpoint truncates or 400s first. The reporter sat
+/// at 83,208 input tokens with nothing firing. The default burned.
+///
+/// # Why 32,768
+///
+/// It is the bottom of the modern served range, and it is the same policy
+/// [`crate::limits`] already applies to an unknown model's OUTPUT ceiling —
+/// `UNKNOWN_CAP` is 8,192, not the largest ceiling in the table. That module's
+/// header states the rule this constant now follows: "erring toward `None`/low
+/// is safe (an undersize truncates, which is user-visible but recoverable); a
+/// too-high entry would 400". The asymmetry is the whole argument: an
+/// over-estimate fails SILENTLY (the endpoint drops the head of the
+/// conversation and the model answers from a context it no longer has), while
+/// an under-estimate fails LOUDLY (an extra `Autocompact: summarized …` line
+/// the user can see, plus the unknown-window notice naming
+/// `[compact] context_window`).
+///
+/// # The cost, stated plainly
+///
+/// A model that is unlisted because it is NEWER than the catalogue — a fresh
+/// frontier release with a 1M window — now compacts at ~22.9k instead of 167k
+/// until the release-time `model_output_ceiling` refresh catches up. That is a
+/// real regression for that case, and it is the deliberate trade: it is
+/// visible, recoverable in one config line, and bounded by a release process
+/// that already exists, whereas the silent-truncation case is none of those.
+pub const UNVERIFIED_CONTEXT_WINDOW: usize = 32_768;
+
+/// Autocompact threshold, as a fraction of the window, for the ONE degenerate
+/// case: `window - output_reserve - autocompact_buffer` saturating to zero.
+///
+/// Those buffers are ABSOLUTE and were tuned for a 200k window — 33,000 tokens
+/// of headroom, 16.5% there but 100.7% of a 32,768-token window. Zero is not
+/// "no threshold" anywhere in the trigger path, it is "always fire":
+/// `should_autocompact` tests `tokens >= threshold`
+/// (`wcore_agent::compact::auto`) and `ContextPressure::admits_trigger`
+/// short-circuits to `true` on a zero threshold by name
+/// (`wcore_agent::compact::micro`). An operator who took the unknown-window
+/// notice at its word and set `context_window = 32768` would have got an LLM
+/// summarization at the top of every single turn.
+///
+/// It is a REPLACEMENT for the saturated value, not a floor applied to every
+/// window: `wcore_agent::compact::auto::autocompact_threshold` reaches for it
+/// only when the subtraction already collapsed. A general floor at this
+/// fraction would also have moved windows between ~33,000 and ~110,000, and
+/// #1150 is no evidence about that band. Every window above 33,000 tokens —
+/// which is every model in the `limits` catalogue, the smallest being
+/// 128,000 — keeps exactly the threshold it had.
+pub const MIN_AUTOCOMPACT_WINDOW_FRACTION: f64 = 0.70;
+
+/// #1150's whole claim, enforced by the compiler rather than by a runtime
+/// assertion that could never fail: the window assumed for a model we cannot
+/// verify must be the CONSERVATIVE end of the range. Raising
+/// `UNVERIFIED_CONTEXT_WINDOW` back to (or above) the historical 200,000 breaks
+/// the build here rather than silently restoring the runaway.
+const _: () = assert!(UNVERIFIED_CONTEXT_WINDOW < DEFAULT_CONTEXT_WINDOW);
+
+/// The floor must stay a floor: a fraction at or above 1.0 would put the
+/// autocompact threshold at or past the window itself, and a non-positive one
+/// would re-open the zero-threshold "always fire" cliff.
+const _: () =
+    assert!(MIN_AUTOCOMPACT_WINDOW_FRACTION > 0.0 && MIN_AUTOCOMPACT_WINDOW_FRACTION < 1.0);
 
 /// Configuration for the multi-level context compaction system.
 ///
@@ -247,15 +327,47 @@ impl Default for ToolCallArgsConfig {
 }
 
 impl CompactConfig {
-    /// The window to divide by when the active model's real window is unknown:
-    /// the operator's `context_window` if they set one, else
-    /// [`DEFAULT_CONTEXT_WINDOW`].
+    /// The active model's context window in tokens, or `None` when it is
+    /// genuinely unknown (FerroxLabs/wayland#1150).
     ///
-    /// This is the "fail open, never fabricate a bigger number" value. Callers
-    /// that KNOW the active provider/model must use
-    /// [`Self::effective_context_window`] instead.
-    pub fn fallback_context_window(&self) -> usize {
-        self.context_window.unwrap_or(DEFAULT_CONTEXT_WINDOW)
+    /// Same precedence as [`Self::effective_context_window`] — operator
+    /// setting, then registry, then Flux tier floor — but it stops there
+    /// instead of substituting [`DEFAULT_CONTEXT_WINDOW`]. Every caller that
+    /// must not act on a guess uses this one: the
+    /// [`crate::context_window::ContextWindow`] kernel (via
+    /// [`Self::kernel_config_window`]), the skills prompt budget, and the
+    /// status-bar gauge.
+    pub fn known_context_window(&self, provider: &str, model: &str) -> Option<usize> {
+        if let Some(configured) = self.context_window {
+            return Some(configured);
+        }
+        if let Some((_out_ceiling, window)) = crate::limits::model_output_ceiling(provider, model) {
+            return Some(window as usize);
+        }
+        if let Some(floor) = crate::limits::flux_tier_context_window(model) {
+            // Router alias: conservative floor only, never a raise.
+            return Some((floor as usize).min(DEFAULT_CONTEXT_WINDOW));
+        }
+        None
+    }
+
+    /// The `config_window` argument for
+    /// [`crate::context_window::ContextWindow::resolve`]: the operator's
+    /// EXPLICIT `[compact] context_window`, or `0` meaning "there is no
+    /// fallback — do not fabricate one".
+    ///
+    /// This exists because the predecessor (`fallback_context_window`, deleted
+    /// with #1150) folded [`DEFAULT_CONTEXT_WINDOW`] into that argument, so
+    /// the kernel's documented "unknown model ⇒ `None`, no fabricated
+    /// denominator" arm was unreachable from production: `resolve` returned
+    /// `Some(200_000)` for every unlisted model. A user on a 32k local model
+    /// got a `% full` gauge divided by 200,000 and a pre-flight shed ceiling of
+    /// 177,000 tokens — a guard that could never fire before the provider 400d.
+    /// Returning `0` here is what lets `resolve` say "I do not know", which is
+    /// the truth and which every downstream consumer already handles by failing
+    /// open.
+    pub fn kernel_config_window(&self) -> u64 {
+        self.context_window.unwrap_or(0) as u64
     }
 
     /// **THE single definition of the divisor every compaction boundary uses**
@@ -284,24 +396,24 @@ impl CompactConfig {
     ///    kernel here is the point: the pre-flight guard already divides by
     ///    this floor, and leaving autocompact on a larger window is the
     ///    CORE-4 wedge where compaction never fires.
-    /// 4. **[`DEFAULT_CONTEXT_WINDOW`].** An unknown, unlisted or otherwise
-    ///    unroutable model keeps exactly the pre-GH#635 fallback.
+    /// 4. **[`UNVERIFIED_CONTEXT_WINDOW`].** An unknown, unlisted or otherwise
+    ///    unroutable model is assumed to be at the BOTTOM of the served range,
+    ///    not the top (#1150). 200,000 here is what let a 32k model grow to
+    ///    83,208 input tokens with every boundary out of reach.
+    ///
+    /// Step 4 is a declared FALLBACK, not knowledge: this returns `usize` and
+    /// promises no `None`, because its two consumers — the static autocompact
+    /// threshold and the emergency hard stop — are plain integers on the
+    /// cache-ledger/protocol surface. A caller that must not act on a guess
+    /// uses [`Self::known_context_window`] instead, and the session tells the
+    /// operator when this step is reached so they can set the real number.
     ///
     /// `provider` / `model` must be the POST-swap effective pair — the same
     /// values fed to `size_output_cap` and
     /// [`crate::context_window::ContextWindow::resolve`].
     pub fn effective_context_window(&self, provider: &str, model: &str) -> usize {
-        if let Some(configured) = self.context_window {
-            return configured;
-        }
-        if let Some((_out_ceiling, window)) = crate::limits::model_output_ceiling(provider, model) {
-            return window as usize;
-        }
-        if let Some(floor) = crate::limits::flux_tier_context_window(model) {
-            // Router alias: conservative floor only, never a raise.
-            return (floor as usize).min(DEFAULT_CONTEXT_WINDOW);
-        }
-        DEFAULT_CONTEXT_WINDOW
+        self.known_context_window(provider, model)
+            .unwrap_or(UNVERIFIED_CONTEXT_WINDOW)
     }
 }
 
@@ -404,9 +516,10 @@ mod tests {
     fn default_values_match_spec() {
         let cfg = CompactConfig::default();
         // GH#635: the default is "not configured", which is a DIFFERENT state
-        // from "configured to 200k" — the fallback number is unchanged.
+        // from "configured to 200k". #1150: and "not configured" reaches the
+        // kernel as 0 — no fabricated denominator — not as 200k.
         assert_eq!(cfg.context_window, None);
-        assert_eq!(cfg.fallback_context_window(), 200_000);
+        assert_eq!(cfg.kernel_config_window(), 0);
         assert_eq!(cfg.output_reserve, 20_000);
         assert_eq!(cfg.autocompact_buffer, 13_000);
         assert_eq!(cfg.emergency_buffer, 3_000);
@@ -692,23 +805,26 @@ epoch_turns = 6
         );
     }
 
-    /// An unknown model keeps the pre-GH#635 fallback exactly.
+    /// #1150 — an unknown model is sized from the BOTTOM of the served
+    /// range, not the top. 200,000 here is what let a 32k model grow to
+    /// 83,208 input tokens with every compaction boundary out of reach.
     ///
     /// HOW THIS FAILS IF THE DEFECT RETURNS: change the final
-    /// `DEFAULT_CONTEXT_WINDOW` arm of `CompactConfig::effective_context_window`
-    /// (compact.rs) to fabricate any other number.
+    /// `UNVERIFIED_CONTEXT_WINDOW` arm of
+    /// `CompactConfig::effective_context_window` (compact.rs) back to
+    /// `DEFAULT_CONTEXT_WINDOW`.
     #[test]
-    fn unknown_model_keeps_the_conservative_fallback() {
+    fn unknown_model_falls_back_to_the_unverified_window() {
         let cfg = CompactConfig::default();
         assert_eq!(
             cfg.effective_context_window("some-provider", "mystery-model"),
-            200_000
+            UNVERIFIED_CONTEXT_WINDOW
         );
         // claude-3-opus is deliberately absent from the registry (4096 output)
         // — it must NOT inherit a 4.x window.
         assert_eq!(
             cfg.effective_context_window("anthropic", "claude-3-opus"),
-            200_000
+            UNVERIFIED_CONTEXT_WINDOW
         );
     }
 
@@ -750,6 +866,6 @@ epoch_turns = 6
         );
         let back: CompactConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.context_window, None);
-        assert_eq!(back.fallback_context_window(), 200_000);
+        assert_eq!(back.kernel_config_window(), 0);
     }
 }

@@ -22,6 +22,7 @@ use crate::{
 };
 use wcore_config::compat::ProviderCompat;
 use wcore_config::debug::DebugConfig;
+use wcore_config::self_hosted::is_self_hosted_base_url;
 
 /// An async source of a fresh bearer token, resolved once per request. Returns
 /// the raw token string to place in `Authorization: Bearer …`. Used by OAuth
@@ -230,17 +231,25 @@ impl OpenAIProvider {
         }
     }
 
-    /// #417 — resolve the per-request message compat from the target model. The
-    /// strict-reasoner "must replay reasoning_content" contract is a per-MODEL
-    /// requirement, but a router provider's static compat has the flag off, so a
-    /// DeepSeek/Kimi turn routed through Flux/OpenRouter would drop the history's
-    /// reasoning_content and 400 (wayland#417). When the target model requires
-    /// replay, force the flag on for this request only; otherwise return the base
-    /// compat unchanged, so a non-strict model (e.g. claude-via-Flux) never
-    /// replays an unsigned thinking block. Direct DeepSeek/Kimi already set the
-    /// flag, so this is a no-op clone for them.
-    fn message_compat(compat: &ProviderCompat, model: &str) -> ProviderCompat {
-        if openai_compat::requires_reasoning_content_replay(model)
+    /// #417 / #434 — resolve the per-request message compat from the model this
+    /// request will actually be served by. The strict-reasoner "must replay
+    /// reasoning_content" contract is a per-MODEL requirement, but a router
+    /// provider's static compat has the flag off, so a DeepSeek/Kimi turn routed
+    /// through Flux/OpenRouter would drop the history's reasoning_content and
+    /// 400 (wayland#417) — and through a TIER ALIAS the model id names nothing,
+    /// so keying on it alone never fired at all (wayland#434). `routed_model` is
+    /// the router's own `x-flux-routed-model` answer from an earlier turn,
+    /// carried here by the engine. When either says strict reasoner, force the
+    /// flag on for this request only; otherwise return the base compat unchanged,
+    /// so a non-strict model (e.g. claude-via-Flux) never replays an unsigned
+    /// thinking block. Direct DeepSeek/Kimi already set the flag, so this is a
+    /// no-op clone for them.
+    fn message_compat(
+        compat: &ProviderCompat,
+        model: &str,
+        routed_model: Option<&str>,
+    ) -> ProviderCompat {
+        if openai_compat::requires_reasoning_content_replay(model, routed_model)
             && !compat.replays_thinking_in_history()
         {
             let mut c = compat.clone();
@@ -307,6 +316,46 @@ impl OpenAIProvider {
                                     "content": content
                                 }));
                             }
+                        }
+
+                        // #559: a tool-results turn can ALSO carry transient
+                        // product text. `AgentEngine::attach_transient_block`
+                        // attaches the per-turn skill hint (`Skill hint: …`),
+                        // the current-date line (`Current date: …`) and
+                        // PrePrompt plugin contributions to this same message.
+                        // Emitting only the `tool` rows dropped every one of
+                        // them at the wire, so on the OpenAI family all three
+                        // features reached the model on turn 1 and never again
+                        // — the Anthropic adapter carries them
+                        // (`anthropic_shared::build_messages` maps Text
+                        // alongside `tool_result` in one message), so this was
+                        // an adapter parity hole, not a wire constraint.
+                        //
+                        // Re-emitted as a TRAILING user turn: after the tool
+                        // rows, where the engine intends this content to sit,
+                        // so it stays out of the cached prefix instead of
+                        // shifting it. Only the request tail ever carries these
+                        // blocks (`request.messages` is a per-turn clone and
+                        // history never receives them), so this adds at most
+                        // one trailing message per request.
+                        let transient: String = msg
+                            .content
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Text { text } = b {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let transient = strip_patterns_from_text(&transient, compat);
+                        if !transient.is_empty() {
+                            result.push(json!({
+                                "role": "user",
+                                "content": transient
+                            }));
                         }
                     } else {
                         let text: String = msg
@@ -541,25 +590,24 @@ impl OpenAIProvider {
     }
 
     fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
-        // Layer E1 (token-opt): serialize in a deterministic order — sorted
-        // by tool name — so the tools[] array is byte-identical across
-        // round-trips of one conversation regardless of registration /
-        // curation order. The array is part of the cached prompt prefix; a
-        // reordered array changes the prefix bytes and silently busts prompt
-        // caching. Schema / description / deferred are the DUPLICATE-NAME
-        // tiebreak: the registry does not forbid duplicate registration, and
-        // a name-only (stable) sort would keep input order for equal names —
-        // byte-unstable again.
-        let mut ordered: Vec<&ToolDef> = tools.iter().collect();
-        ordered.sort_by_cached_key(|t| {
-            (
-                t.name.clone(),
-                serde_json::to_string(&t.input_schema).unwrap_or_default(),
-                t.description.clone(),
-                t.deferred,
-            )
-        });
-        ordered
+        // Layer E1 (token-opt): serialize the tools[] array in the
+        // CALLER's order. It is part of the cached prompt prefix, so the
+        // engine builds it APPEND-ONLY — a tool admitted mid-session
+        // (a ToolSearch hydration, or MCP curation/cap union growth) is
+        // pushed at the TAIL and every earlier entry keeps its slot,
+        // leaving the cached prefix byte-identical.
+        //
+        // Do NOT re-sort here (FerroxLabs/wayland#1171). A name sort makes
+        // the array a pure function of its contents, but it converts every
+        // one of those appends into a mid-array INSERT: measured on a real
+        // leader session, three tools hydrated by one ToolSearch call landed
+        // at indices 1, 7 and 9, shifting the whole array and re-billing
+        // ~6,000 cached tokens. Input-order determinism is the caller's
+        // job and the engine already guarantees it (registration is a fixed
+        // statement sequence; the curation and cap keep-sets are
+        // inventory-keyed append-only unions that reset only when the
+        // inventory itself moves).
+        tools
             .iter()
             .map(|t| {
                 if t.deferred {
@@ -778,7 +826,11 @@ impl OpenAIProvider {
         // model, so a router (Flux/OpenRouter) replays reasoning_content when it
         // routes to a strict reasoner (DeepSeek/Kimi) without 400ing, while a
         // non-strict model keeps replay off. See `message_compat`.
-        let msg_compat = Self::message_compat(&self.compat, &request.model);
+        let msg_compat = Self::message_compat(
+            &self.compat,
+            &request.model,
+            request.routed_model_hint.as_deref(),
+        );
         let mut body = json!({
             "model": request.model,
             "messages": Self::build_messages(&request.messages, &request.system, &msg_compat),
@@ -925,60 +977,6 @@ impl OpenAIProvider {
 /// keyless local connection succeed instead of failing the turn with
 /// `MissingApiKey` (surfaced in the UI as "OpenAI API key is required").
 const SELF_HOSTED_PLACEHOLDER_KEY: &str = "wayland-local";
-
-/// True when `base_url`'s host is a self-hosted address that is plausibly
-/// keyless: loopback (`localhost`, `127.0.0.0/8`, `::1`), unspecified
-/// (`0.0.0.0`/`::`), Docker (`host.docker.internal`), mDNS (`*.local`), an
-/// RFC1918 private LAN range (`10/8`, `172.16/12`, `192.168/16`), or the
-/// Tailscale / CGNAT range (`100.64.0.0/10`). Public hosts return `false`, so a
-/// real cloud provider with a missing key still surfaces a clear `MissingApiKey`
-/// rather than silently sending a bogus bearer and getting a 401.
-fn is_self_hosted_base_url(base_url: &str) -> bool {
-    // Host = strip scheme, take up to the first '/', drop any `user@`, strip the
-    // `:port`. IPv6 literals are bracketed (`[::1]:11434`).
-    let after_scheme = base_url
-        .split_once("://")
-        .map(|(_, r)| r)
-        .unwrap_or(base_url);
-    let authority = after_scheme.split('/').next().unwrap_or("");
-    let host_port = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if let Some(rest) = host_port.strip_prefix('[') {
-        rest.split(']').next().unwrap_or(rest)
-    } else {
-        host_port.split(':').next().unwrap_or(host_port)
-    }
-    .trim()
-    .to_ascii_lowercase();
-
-    if host.is_empty() {
-        return false;
-    }
-    if host == "localhost"
-        || host.ends_with(".localhost")
-        || host == "host.docker.internal"
-        || host.ends_with(".local")
-        || host == "0.0.0.0"
-        || host == "::1"
-        || host == "::"
-    {
-        return true;
-    }
-    // IPv4 loopback / private / CGNAT ranges. Every dotted segment must parse as
-    // a u8, so a hostname like `api.openai.com` (a non-numeric segment) yields an
-    // empty vec and falls through to `false`.
-    let octets: Vec<u8> = host
-        .split('.')
-        .map(|o| o.parse::<u8>())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_default();
-    if octets.len() == 4 {
-        return matches!(
-            (octets[0], octets[1]),
-            (127, _) | (10, _) | (192, 168) | (172, 16..=31) | (100, 64..=127)
-        );
-    }
-    false
-}
 
 /// True when a provider HTTP error means "this model does not support tool
 /// calling" — the request was otherwise valid and would succeed if the `tools`
@@ -3981,7 +3979,7 @@ mod tests {
             !flux.replays_thinking_in_history(),
             "precondition: router compat has replay off"
         );
-        let resolved = OpenAIProvider::message_compat(&flux, "deepseek-v4-pro");
+        let resolved = OpenAIProvider::message_compat(&flux, "deepseek-v4-pro", None);
         assert!(
             resolved.replays_thinking_in_history(),
             "DeepSeek via Flux must replay reasoning_content"
@@ -3994,9 +3992,12 @@ mod tests {
         // thinking block. Ordinary OpenAI models stay off too.
         let flux = ProviderCompat::flux_router_defaults();
         assert!(
-            !OpenAIProvider::message_compat(&flux, "claude-opus-4-7").replays_thinking_in_history()
+            !OpenAIProvider::message_compat(&flux, "claude-opus-4-7", None)
+                .replays_thinking_in_history()
         );
-        assert!(!OpenAIProvider::message_compat(&flux, "gpt-4o").replays_thinking_in_history());
+        assert!(
+            !OpenAIProvider::message_compat(&flux, "gpt-4o", None).replays_thinking_in_history()
+        );
     }
 
     #[test]
@@ -4005,8 +4006,115 @@ mod tests {
         let ds = ProviderCompat::deepseek_defaults();
         assert!(ds.replays_thinking_in_history());
         assert!(
-            OpenAIProvider::message_compat(&ds, "deepseek-v4-pro").replays_thinking_in_history()
+            OpenAIProvider::message_compat(&ds, "deepseek-v4-pro", None)
+                .replays_thinking_in_history()
         );
+    }
+
+    // --- #434: a tier alias resolves its model contract from the ROUTE ------
+
+    /// The conversation history a strict reasoner must get `reasoning_content`
+    /// back for: one assistant turn that produced thinking, then a user turn.
+    fn history_with_thinking() -> Vec<Message> {
+        vec![
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::Thinking {
+                        thinking: "chain of thought".into(),
+                        extra: None,
+                    },
+                    ContentBlock::Text {
+                        text: "an answer".into(),
+                    },
+                ],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "and now?".into(),
+                }],
+            ),
+        ]
+    }
+
+    fn flux_provider() -> OpenAIProvider {
+        OpenAIProvider::new(
+            "key",
+            "http://localhost",
+            ProviderCompat::flux_router_defaults(),
+            DebugConfig::default(),
+        )
+    }
+
+    fn replays_reasoning(body: &serde_json::Value) -> bool {
+        body["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .any(|message| message.get("reasoning_content").is_some())
+    }
+
+    /// #434 — the bug. Through Flux the model string is the tier alias
+    /// `flux-auto`, which matches no strict-reasoner name, so a conversation
+    /// Flux is routing to DeepSeek/Kimi dropped its historical
+    /// `reasoning_content` and the endpoint 400d. The routed model is knowable
+    /// (`x-flux-routed-model`); the request must be shaped for IT.
+    #[test]
+    fn flux_alias_routed_to_a_strict_reasoner_replays_reasoning_content() {
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.routed_model_hint = Some("deepseek-v4-pro".into());
+        req.messages = history_with_thinking();
+        let body = flux_provider().build_request_body(&req);
+        assert!(
+            replays_reasoning(&body),
+            "a tier alias routed to DeepSeek must replay reasoning_content; body: {body}"
+        );
+    }
+
+    /// The other half of the #417 contract survives: a route to a NON-strict
+    /// model must not replay, or Anthropic 400s on the unsigned thinking block.
+    #[test]
+    fn flux_alias_routed_to_claude_still_does_not_replay() {
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.routed_model_hint = Some("claude-opus-4-7".into());
+        req.messages = history_with_thinking();
+        let body = flux_provider().build_request_body(&req);
+        assert!(
+            !replays_reasoning(&body),
+            "claude-via-Flux must never replay an unsigned thinking block; body: {body}"
+        );
+    }
+
+    /// The documented LIMIT, pinned so nobody reads the fix as complete: with
+    /// no routed-model signal yet (turn 1, a resumed session, or a deployment
+    /// that sends no header) the alias still resolves to nothing and the replay
+    /// does not happen. Closing this needs router-side cover, not client code.
+    #[test]
+    fn flux_alias_without_a_routed_model_signal_cannot_replay() {
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.routed_model_hint = None;
+        req.messages = history_with_thinking();
+        let body = flux_provider().build_request_body(&req);
+        assert!(
+            !replays_reasoning(&body),
+            "with no route signal there is nothing to key the per-model contract off"
+        );
+    }
+
+    /// A hint must never override an explicit concrete model: if the caller
+    /// named the model, that is the contract.
+    #[test]
+    fn a_concrete_strict_reasoner_replays_regardless_of_any_hint() {
+        let mut req = stop_req();
+        req.model = "deepseek-reasoner".into();
+        req.routed_model_hint = None;
+        req.messages = history_with_thinking();
+        let body = flux_provider().build_request_body(&req);
+        assert!(replays_reasoning(&body));
     }
 
     // --- max_tokens_field ---
@@ -4037,6 +4145,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -4135,6 +4244,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         }
     }
 
@@ -4459,8 +4569,9 @@ mod tests {
             .collect();
         assert_eq!(
             fn_names,
-            vec!["Bash", "Read"],
-            "every function tool must survive alongside grounding (sorted by name)"
+            vec!["Read", "Bash"],
+            "every function tool must survive alongside grounding, in the \
+             caller's order (#1171: the encoder does not re-sort)"
         );
     }
 
@@ -4687,6 +4798,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 2048);
@@ -4728,6 +4840,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 1024);
@@ -4765,6 +4878,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -4800,6 +4914,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         };
         let body = provider.build_request_body(&req);
         assert!(
@@ -4835,6 +4950,7 @@ mod tests {
             client_context_tokens: None,
             temperature: None,
             omit_max_tokens: false,
+            routed_model_hint: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["reasoning_effort"], "medium");
@@ -4923,6 +5039,82 @@ mod tests {
         let result = OpenAIProvider::build_messages(&messages, "", &openai_compat());
         let user = result.iter().find(|m| m["role"] == "user").unwrap();
         assert_eq!(user["content"], "hi");
+    }
+
+    /// #559 — a tool-results user turn can ALSO carry transient product text.
+    /// `AgentEngine::attach_transient_block` attaches the per-turn skill hint
+    /// (`Skill hint: …`), the current-date line (`Current date: …`) and
+    /// PrePrompt plugin contributions to that exact message. The Anthropic
+    /// adapter carries them through; this adapter used to emit only the `tool`
+    /// rows and silently drop every other block, so on the OpenAI family all
+    /// three features reached the model on turn 1 and never again.
+    ///
+    /// Graded as an ASYMMETRY between the two adapters over the SAME neutral
+    /// message: the Anthropic arm is the control, so a regression in the
+    /// harness itself cannot make this pass vacuously.
+    #[test]
+    fn tool_result_turn_keeps_transient_text_on_both_wires() {
+        const TRANSIENT: &str = "Current date: 2026-08-28";
+        // Faithful shape: the parent assistant `tool_calls` turn must be
+        // present, or `clean_orphaned_tool_results` strips the tool row and
+        // the wire is empty for reasons unrelated to this defect.
+        let turn = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call-1".into(),
+                    name: "Read".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call-1".into(),
+                        content: "file contents".into(),
+                        is_error: false,
+                    },
+                    ContentBlock::Text {
+                        text: TRANSIENT.into(),
+                    },
+                ],
+            ),
+        ];
+
+        // Control arm: Anthropic maps Text alongside tool_result in the same
+        // message, so the block is on the wire there.
+        let anthropic =
+            crate::anthropic_shared::build_messages(&turn, &ProviderCompat::anthropic_defaults());
+        let anthropic_wire = serde_json::to_string(&anthropic).unwrap();
+        assert!(
+            anthropic_wire.contains(TRANSIENT),
+            "control arm is broken — the Anthropic adapter must carry transient \
+             text alongside a tool_result, so this test cannot prove anything \
+             about the OpenAI arm. Wire: {anthropic_wire}"
+        );
+
+        // Subject arm: the same neutral message must not lose the block.
+        let openai = OpenAIProvider::build_messages(&turn, "", &openai_compat());
+        let openai_wire = serde_json::to_string(&openai).unwrap();
+        assert!(
+            openai_wire.contains(TRANSIENT),
+            "#559: the OpenAI adapter dropped the transient text block that \
+             accompanied a tool result, so the skill hint, current date and \
+             PrePrompt contributions never reach the model on a tool-result \
+             turn. Wire: {openai_wire}"
+        );
+
+        // It must trail the tool rows. Emitting it ahead of them would put
+        // volatile per-turn text inside the cached prefix — the #559 defect
+        // in a new place — and would break the `tool_call_id` pairing.
+        let roles: Vec<&str> = openai.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["assistant", "tool", "user"],
+            "transient text must be a trailing user turn after the tool rows"
+        );
     }
 
     #[test]
@@ -5661,10 +5853,17 @@ mod tests {
     }
 
     /// Layer E1 regression guard: the serialized tools[] array must be
-    /// byte-identical across two consecutive round-trips of one conversation
-    /// — even when the input ToolDef order differs (registration vs curation
-    /// order). The array is part of the cached prompt prefix; any byte drift
-    /// silently busts prompt caching.
+    /// byte-identical across two consecutive round-trips of one conversation,
+    /// and — FerroxLabs/wayland#1171 — a tool ADMITTED on a later turn (a
+    /// ToolSearch hydration, or MCP curation/cap union growth) must leave the
+    /// earlier array as an exact serialized PREFIX. The array is part of the
+    /// cached prompt prefix; any byte drift ahead of the growth point silently
+    /// busts prompt caching and re-bills the whole prompt.
+    ///
+    /// The encoder therefore preserves the CALLER's order. It deliberately
+    /// does NOT re-sort by name: a name sort is invariant to input order, but
+    /// that invariance is bought by turning every append into a mid-array
+    /// insert, which is the defect #1171 records.
     #[test]
     fn tools_array_byte_stable_across_roundtrips() {
         let read = ToolDef {
@@ -5695,42 +5894,36 @@ mod tests {
         let turn2 = serde_json::to_string(&OpenAIProvider::build_tools(&defs)).unwrap();
         assert_eq!(turn1, turn2, "same input must serialize byte-identically");
 
-        // A build from a reordered input (e.g. a curation pass shuffled the
-        // registry order mid-conversation) must STILL be byte-identical.
-        let reordered =
-            serde_json::to_string(&OpenAIProvider::build_tools(&[spawn, bash, read])).unwrap();
+        // #1171: the caller's order is preserved verbatim. A name sort would
+        // emit Bash first here and, on the engine's append-only tool list,
+        // scatter every later admission into the middle of the array.
+        let wire = OpenAIProvider::build_tools(&defs);
+        let names: Vec<&str> = wire
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
         assert_eq!(
-            turn1, reordered,
-            "reordered input must serialize byte-identically (deterministic name sort)"
+            names,
+            ["Read", "Bash", "SpawnTool"],
+            "the encoder must serialize in the caller's order, not name order"
         );
 
-        // DUPLICATE names must not reintroduce input-order dependence: the
-        // registry does not forbid duplicate registration, and a stable
-        // name-only sort keeps input order for equal names. The
-        // schema/description tiebreak makes duplicates order-independent too.
-        let dup_a = ToolDef {
-            name: "Read".into(),
-            description: "Read a file (duplicate registration)".into(),
-            input_schema: serde_json::json!({"type": "object", "properties": {"offset": {"type": "integer"}}}),
+        // #1171: a tool ADMITTED on a later turn (ToolSearch hydration, or
+        // curation/cap union growth) is appended at the tail by the engine.
+        // The earlier turn's array must survive as an exact serialized prefix.
+        let mut grown = defs.clone();
+        grown.push(ToolDef {
+            name: "Delegate".into(),
+            description: "Delegate to a sub-agent".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"task": {"type": "string"}}}),
             deferred: false,
             server: None,
-        };
-        let dup_b = ToolDef {
-            name: "Read".into(),
-            description: "Read a file".into(),
-            input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
-            deferred: false,
-            server: None,
-        };
-        let one = serde_json::to_string(&OpenAIProvider::build_tools(&[
-            dup_a.clone(),
-            dup_b.clone(),
-        ]))
-        .unwrap();
-        let other = serde_json::to_string(&OpenAIProvider::build_tools(&[dup_b, dup_a])).unwrap();
+        });
+        let after = OpenAIProvider::build_tools(&grown);
         assert_eq!(
-            one, other,
-            "duplicate names must serialize byte-identically regardless of input order"
+            serde_json::to_string(&after[..defs.len()]).unwrap(),
+            turn1,
+            "an appended tool must not rewrite the cached tools[] prefix"
         );
     }
 

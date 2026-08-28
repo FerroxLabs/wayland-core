@@ -1956,6 +1956,12 @@ struct PreparedProviderRequestV1 {
     /// reason: it is part of the exact request that was sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     flux_turn_nonce: Option<String>,
+    /// #434 — the router-served model this turn was SHAPED for. Journaled for
+    /// the same reason as the two fields above: it is part of the exact request
+    /// that was sent, and a recovered turn that lost it would be rebuilt for a
+    /// different model contract than the one it was digested under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    routed_model_hint: Option<String>,
 }
 
 /// #863 F2 — journal form of [`wcore_types::llm::FluxLoopIntent`]. Kept as an
@@ -1998,7 +2004,21 @@ enum PreparedContentBlockV1 {
         is_error: bool,
     },
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking {
+        thinking: String,
+        /// #1170 -- the opaque provider metadata attached to a reasoning block
+        /// (e.g. a Gemini `thought_signature`). Journaled for the same reason
+        /// as `ToolUse.extra`: a RECOVERED turn that lost it is replayed as a
+        /// different request than the one that was sent, and the provider that
+        /// minted the signature rejects or silently re-reasons the turn.
+        ///
+        /// `default` + `skip_serializing_if` keep the encoding byte-identical
+        /// for every block without metadata, so journals written before this
+        /// field existed still decode under `deny_unknown_fields` and no
+        /// already-written digest changes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extra: Option<serde_json::Value>,
+    },
     #[serde(rename = "image")]
     Image { mime: String, data: String },
 }
@@ -2056,8 +2076,9 @@ impl From<&wcore_types::message::ContentBlock> for PreparedContentBlockV1 {
                 content: content.clone(),
                 is_error: *is_error,
             },
-            ContentBlock::Thinking { thinking, .. } => Self::Thinking {
+            ContentBlock::Thinking { thinking, extra } => Self::Thinking {
                 thinking: thinking.clone(),
+                extra: extra.clone(),
             },
             ContentBlock::Image { mime, data } => Self::Image {
                 mime: mime.clone(),
@@ -2091,10 +2112,9 @@ impl From<PreparedContentBlockV1> for wcore_types::message::ContentBlock {
                 content,
                 is_error,
             },
-            PreparedContentBlockV1::Thinking { thinking } => Self::Thinking {
-                thinking,
-                extra: None,
-            },
+            PreparedContentBlockV1::Thinking { thinking, extra } => {
+                Self::Thinking { thinking, extra }
+            }
             PreparedContentBlockV1::Image { mime, data } => Self::Image { mime, data },
         }
     }
@@ -2162,6 +2182,7 @@ impl From<&wcore_types::llm::LlmRequest> for PreparedProviderRequestV1 {
                     }
                 }),
             flux_turn_nonce: request.flux_turn_nonce.clone(),
+            routed_model_hint: request.routed_model_hint.clone(),
         }
     }
 }
@@ -2221,6 +2242,7 @@ impl From<PreparedProviderRequestV1> for wcore_types::llm::LlmRequest {
                 }
             }),
             flux_turn_nonce: request.flux_turn_nonce,
+            routed_model_hint: request.routed_model_hint,
         }
     }
 }

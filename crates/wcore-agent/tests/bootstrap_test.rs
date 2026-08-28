@@ -691,6 +691,7 @@ async fn bootstrap_defer_config_mcp_skips_connect() {
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         },
     );
     let workdir = tempfile::TempDir::new().expect("workdir");
@@ -753,6 +754,7 @@ async fn bootstrap_scopes_marked_mcp_server_to_matching_assistant() {
                 deferred: None,
                 allow_local: false,
                 only_for_assistant: Some(vec!["concierge".into()]),
+                allowed_tools: None,
             },
         );
         config
@@ -983,6 +985,7 @@ mod resilience_wrap {
                 client_context_tokens: None,
                 temperature: None,
                 omit_max_tokens: false,
+                routed_model_hint: None,
             };
             let _ = result.provider.stream(&req).await;
         }
@@ -1037,6 +1040,7 @@ mod resilience_wrap {
                 client_context_tokens: None,
                 temperature: None,
                 omit_max_tokens: false,
+                routed_model_hint: None,
             };
             let _ = result.provider.stream(&req).await;
         }

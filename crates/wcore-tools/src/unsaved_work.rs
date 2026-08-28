@@ -1483,8 +1483,10 @@ fn recorded_raw(root: &Path, commit: &str, rel: &str) -> Result<Option<Vec<u8>>,
     Ok(Some(blob.stdout))
 }
 
-/// Is the file at `path` still byte-for-byte the pre-image that was judged?
-/// `judged` is `None` when the assessment saw no file there at all.
+/// Is the pre-image that was judged still the one being replaced? `observed`
+/// is what the destination held at the instant the new bytes were published,
+/// `judged` is what the assessment saw; `None` on either side means nothing
+/// was there.
 ///
 /// ADV-7: the assessment between the pre-image read and the write runs about
 /// five `git` processes, a window measured at **13.5 ms**. With the user's
@@ -1493,21 +1495,19 @@ fn recorded_raw(root: &Path, commit: &str, rel: &str) -> Result<Option<Vec<u8>>,
 /// same save made *before* the call was protected 12 times out of 12, so that
 /// measured the product and not the harness.
 ///
-/// The caller runs this immediately before the write lands and refuses if it
-/// fails. That narrows the window to the gap between this read and the
-/// rename; it does not close it, and nothing at this altitude can — closing it
-/// needs a lock the user's editor would have to take as well. What it does
-/// guarantee is that no assessment older than one syscall is ever acted on.
-pub fn pre_image_unchanged(path: &Path, judged: Option<&[u8]>) -> Result<(), String> {
-    match (std::fs::read(path), judged) {
-        (Ok(now), Some(before)) if now == before => Ok(()),
-        (Ok(_), Some(_)) => Err("its contents changed on disk".to_owned()),
-        (Ok(_), None) => Err("something else created it".to_owned()),
-        (Err(e), None) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        (Err(e), Some(_)) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err("it was deleted".to_owned())
-        }
-        (Err(e), _) => Err(format!("it could no longer be read ({e})")),
+/// This used to be spelled `pre_image_unchanged(path, judged)`, which READ the
+/// path back and compared. That can only narrow the window, never close it: a
+/// read and a write are two operations, and #1155 measured what was left at
+/// ~6.5% on the filesystem path and 70% on the vfs path the dispatcher
+/// actually takes. The bytes are now handed in by an atomic exchange that
+/// displaced them, so there is no second observation to be stale.
+pub fn pre_image_matches(observed: Option<&[u8]>, judged: Option<&[u8]>) -> Result<(), String> {
+    match (observed, judged) {
+        (Some(now), Some(before)) if now == before => Ok(()),
+        (Some(_), Some(_)) => Err("its contents changed on disk".to_owned()),
+        (Some(_), None) => Err("something else created it".to_owned()),
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err("it was deleted".to_owned()),
     }
 }
 

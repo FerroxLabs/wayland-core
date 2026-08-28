@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use wcore_types::message::FinishReason;
+use wcore_types::reasoning_filter::ReasoningFilter;
 
 /// Spec §3.2 — 10-frame Braille spinner @ 10 fps, DarkGrey, " Thinking…".
 const THINKING_FRAMES_UNICODE: &[&str] = &[
@@ -72,6 +73,18 @@ pub struct TerminalSink {
     /// The last error text this sink printed, for the restatement guard in
     /// [`OutputSink::emit_error`].
     last_error: Mutex<Option<String>>,
+    /// #908 — inline-reasoning split for this sink's visible text lane.
+    ///
+    /// `ProtocolSink` and `ChannelSink` both strip `<think>`-class tags out of
+    /// `text_delta` and re-emit the body on the thinking lane. This sink did
+    /// not, so the plain terminal (`--no-tui`, one-shot, REPL) printed a
+    /// literal `<think>…</think>` — and a stray `</thought>` — straight to
+    /// stdout. Its own filter, not a shared one: a filter's pending buffer is
+    /// per-consumer state and two sinks may be attached to one engine.
+    ///
+    /// Stateful across chunks by design (a tag straddles `<thi` | `nk>`);
+    /// reset on `emit_stream_start`, drained after every chunk.
+    reasoning: Mutex<ReasoningFilter>,
 }
 
 struct SpinnerHandle {
@@ -98,6 +111,7 @@ impl TerminalSink {
             last_byte_newline: AtomicBool::new(false),
             durability_degrade_announced: AtomicBool::new(false),
             last_error: Mutex::new(None),
+            reasoning: Mutex::new(ReasoningFilter::new()),
         }
     }
 
@@ -201,11 +215,48 @@ impl Drop for TerminalSink {
 #[allow(dead_code)]
 const _ASCII_SPINNER_REFERENCE: &[&str] = THINKING_FRAMES_ASCII;
 
+impl TerminalSink {
+    /// #908 — run one chunk through this sink's reasoning filter and return
+    /// `(visible text, reasoning drained by this chunk)`.
+    ///
+    /// Split out of [`OutputSink::emit_text_delta`] so the filtering is
+    /// assertable: the emit path writes to the process's real stdout, which a
+    /// unit test cannot capture, but this is where the decision is made.
+    fn split_reasoning(&self, text: &str) -> (String, String) {
+        match self.reasoning.lock() {
+            Ok(mut filter) => {
+                let visible = filter.process(text);
+                (visible, filter.take_captured_delta())
+            }
+            // A poisoned filter mutex means another thread panicked mid-chunk.
+            // Showing the raw chunk is the honest fallback: hiding output on a
+            // lock fault would be a worse failure than an unfiltered tag.
+            Err(_) => (text.to_string(), String::new()),
+        }
+    }
+}
+
 impl OutputSink for TerminalSink {
     fn emit_text_delta(&self, text: &str, _msg_id: &str) {
         if text.is_empty() {
             return;
         }
+        // #908 — split inline reasoning out of the visible lane before any of
+        // the marker/spinner bookkeeping below, which is keyed on "the user
+        // saw assistant text". The withheld body is rendered as thinking
+        // rather than deleted, so the local reader loses nothing.
+        let (visible, captured) = self.split_reasoning(text);
+        if !captured.is_empty() {
+            self.formatter.thinking(&captured);
+        }
+        // A chunk the filter consumed WHOLE (pure reasoning, or the leading
+        // half of a tag straddling the boundary) is not assistant text: it
+        // must not fire the turn marker or set `wrote_text`, or a
+        // reasoning-only turn would gain a phantom `⏺ ` and a stray newline.
+        if visible.is_empty() {
+            return;
+        }
+        let text = visible.as_str();
         // First delta of the turn: tear down spinner + emit assistant marker.
         if self.first_delta_pending.swap(false, Ordering::AcqRel) {
             self.stop_thinking_spinner();
@@ -269,6 +320,11 @@ impl OutputSink for TerminalSink {
         // blocks from running together now that the marker is suppressed.
         self.wrote_text.store(false, Ordering::Release);
         self.last_byte_newline.store(false, Ordering::Release);
+        // #908 — a leftover pending tag prefix from a cancelled turn must not
+        // eat the first characters of this one.
+        if let Ok(mut filter) = self.reasoning.lock() {
+            filter.reset();
+        }
         self.start_thinking_spinner();
     }
 
@@ -398,6 +454,46 @@ impl OutputSink for TerminalSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #908 — the plain terminal (`--no-tui`, one-shot, REPL) printed inline
+    /// reasoning verbatim: `ProtocolSink` and `ChannelSink` both filtered
+    /// `text_delta`, this sink did not.
+    ///
+    /// Asserted on the seam rather than on captured output because the
+    /// formatter writes to the process's real stdout; `split_reasoning` is
+    /// where the visible/withheld decision is actually made.
+    #[test]
+    fn inline_reasoning_is_split_out_of_the_visible_terminal_lane() {
+        let sink = TerminalSink::new(true);
+
+        // Straddles the chunk boundary, so a stateless filter would miss it.
+        let (v1, c1) = sink.split_reasoning("a<thi");
+        let (v2, c2) = sink.split_reasoning("nk>hidden</think>b");
+        assert_eq!(format!("{v1}{v2}"), "ab", "reasoning leaked to stdout");
+        assert_eq!(
+            format!("{c1}{c2}"),
+            "hidden",
+            "the withheld body must be rendered as thinking, not deleted"
+        );
+    }
+
+    #[test]
+    fn a_stray_reasoning_close_never_reaches_the_terminal() {
+        let sink = TerminalSink::new(true);
+        let (visible, captured) = sink.split_reasoning("The answer is 42.</thought>");
+        assert_eq!(visible, "The answer is 42.");
+        assert_eq!(captured, "", "a close with no opener has no body");
+    }
+
+    #[test]
+    fn the_reasoning_filter_is_reset_between_turns() {
+        // An unclosed block eats to end of stream by design; without the
+        // per-turn reset it would go on eating the NEXT turn's answer.
+        let sink = TerminalSink::new(true);
+        assert_eq!(sink.split_reasoning("<think>runaway").0, "");
+        sink.emit_stream_start("m2");
+        assert_eq!(sink.split_reasoning("fresh answer").0, "fresh answer");
+    }
 
     #[test]
     fn test_terminal_sink_construct_no_color() {

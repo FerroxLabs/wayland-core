@@ -30,7 +30,7 @@
 //! [`ChannelSink`]/[`ChannelEmitter`] per-event mapping verbatim — no
 //! duplicate `ProtocolEvent` construction.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -43,7 +43,9 @@ use tokio_util::sync::CancellationToken;
 
 use wcore_acp::AcpError;
 use wcore_acp::a2a::{A2aCapabilities, A2aError, A2aHandler, A2aHandshake, A2aMessage};
-use wcore_acp::protocol::{ErrorCode, JsonRpcError, MessageEvent, ToolCall, ToolResult};
+use wcore_acp::protocol::{
+    ErrorCode, JsonRpcError, MessageEvent, ToolCall, ToolDefinition, ToolResult,
+};
 use wcore_acp::turn::{TurnEngine, TurnRequest};
 
 use wcore_agent::bootstrap::AgentBootstrap;
@@ -54,6 +56,7 @@ use wcore_protocol::ToolApprovalManager;
 use wcore_protocol::events::{FinishReason, ProtocolEvent, ToolStatus};
 use wcore_protocol::writer::ProtocolEmitter;
 use wcore_types::execution_policy::{ApprovalPolicy, PolicySource};
+use wcore_types::reasoning_filter::ReasoningFilter;
 
 use crate::tui::{ChannelEmitter, ChannelSink};
 
@@ -435,6 +438,25 @@ struct ProtocolToMessageStream {
     /// dedup. Without this stash that (common, retryable-provider-error)
     /// terminal would ship `turn_id = ""` and collapse the dedup key.
     turn_id: String,
+    /// #908 — inline-reasoning split for the ACP text lane.
+    ///
+    /// The relay's sink (`crate::tui::ChannelSink`) forwards the engine's RAW
+    /// text deltas — unlike `ProtocolSink`/`wcore_agent`'s `ChannelSink`, it
+    /// runs no filter — so this projection is the last point before an ACP
+    /// host renders them. Without it an R1/Qwen-class model puts a literal
+    /// `<think>…</think>` (or a bare `</thought>` whose opener the provider
+    /// swallowed) into the host's assistant bubble.
+    ///
+    /// Stateful across frames by design: a tag straddles a delta boundary
+    /// (`<thi` | `nk>`). Per-turn by construction — one stream per `run_turn`.
+    reasoning: ReasoningFilter,
+    /// Frames produced by [`Self::project`] beyond the one it returns.
+    ///
+    /// One `TextDelta` can yield both a `Thinking` frame (the reasoning the
+    /// filter withheld) and a `TextDelta` (what is left), but `project`
+    /// returns at most one. `poll_next` drains this first, so ordering and the
+    /// terminal frame are both preserved.
+    pending: VecDeque<MessageEvent>,
 }
 
 impl ProtocolToMessageStream {
@@ -444,6 +466,8 @@ impl ProtocolToMessageStream {
             done: false,
             pending_calls: HashMap::new(),
             turn_id: String::new(),
+            reasoning: ReasoningFilter::new(),
+            pending: VecDeque::new(),
         }
     }
 
@@ -470,7 +494,25 @@ impl ProtocolToMessageStream {
             }
             ProtocolEvent::TextDelta { text, msg_id } => {
                 self.stash_turn_id(&msg_id);
-                Some(MessageEvent::TextDelta { text })
+                // #908 — split inline reasoning out of the visible lane. The
+                // withheld body rides the typed `Thinking` frame rather than
+                // being deleted, so an ACP host renders a model's reasoning
+                // collapsed exactly as it does a provider-native thought.
+                let visible = self.reasoning.process(&text);
+                let captured = self.reasoning.take_captured_delta();
+                if !captured.is_empty() {
+                    self.pending
+                        .push_back(MessageEvent::Thinking { text: captured });
+                }
+                // A frame the filter consumed WHOLE (pure reasoning, or the
+                // leading half of a straddling tag) must not become an empty
+                // `TextDelta`: a host that counts deltas to decide "the model
+                // answered" would read a reasoning-only turn as an answer.
+                if !visible.is_empty() {
+                    self.pending
+                        .push_back(MessageEvent::TextDelta { text: visible });
+                }
+                self.pending.pop_front()
             }
             ProtocolEvent::Thinking { text, msg_id, .. } => {
                 self.stash_turn_id(&msg_id);
@@ -600,10 +642,16 @@ impl Stream for ProtocolToMessageStream {
     type Item = MessageEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.done {
-            return Poll::Ready(None);
-        }
         loop {
+            // #908 — `project` can produce two frames from one `TextDelta`
+            // (withheld reasoning + what is left). Drain before receiving, so
+            // ordering holds and nothing is stranded behind the terminal.
+            if let Some(queued) = self.pending.pop_front() {
+                return Poll::Ready(Some(queued));
+            }
+            if self.done {
+                return Poll::Ready(None);
+            }
             match self.rx.poll_recv(cx) {
                 Poll::Ready(Some(ev)) => {
                     if let Some(out) = self.project(ev) {
@@ -642,6 +690,12 @@ pub struct EngineSession {
     /// Tool names the engine registered, captured at build time for the A2A
     /// capability catalog.
     tool_names: Vec<String>,
+    /// #998 — the tool selection this session's engine was BUILT with (the
+    /// `tools` of the turn that created it), normalized. Empty = no selection,
+    /// so the engine carries its full registry. A session's toolset is fixed
+    /// for its lifetime (the engine and its history are pooled per session id),
+    /// so this is what a later turn's selection is checked against.
+    bound_tools: Vec<String>,
 }
 
 impl EngineSession {
@@ -653,6 +707,7 @@ impl EngineSession {
         engine: AgentEngine,
         approval_manager: Arc<ToolApprovalManager>,
         relay: RelayHandle,
+        bound_tools: Vec<String>,
     ) -> Self {
         let tool_names = engine.tools().tool_names();
         let approval_bridge = engine.approval_bridge().clone();
@@ -662,7 +717,34 @@ impl EngineSession {
             approval_bridge,
             relay,
             tool_names,
+            bound_tools,
         }
+    }
+
+    /// #998 — reject a turn whose tool selection this session cannot honour.
+    ///
+    /// The engine (and the conversation history it holds) is pooled per ACP
+    /// session id and its registry is narrowed ONCE, at build time — `retain`
+    /// is a one-way door, so a later turn can neither re-widen the registry nor
+    /// narrow it again without discarding the session. An empty `requested` is
+    /// "no per-call override" and always passes. A non-empty one must name the
+    /// SAME set the session was built with; anything else is refused rather
+    /// than silently ignored, which is the exact failure this issue is about.
+    fn check_tool_selection(&self, requested: &[String]) -> Result<(), AcpError> {
+        if requested.is_empty() || requested == self.bound_tools.as_slice() {
+            return Ok(());
+        }
+        Err(AcpError::Session(format!(
+            "session tool selection is fixed for the session's lifetime: this session \
+             was created with tools [{}] and this turn requested [{}]. Open a new \
+             session to use a different tool selection.",
+            if self.bound_tools.is_empty() {
+                "<all>".to_string()
+            } else {
+                self.bound_tools.join(", ")
+            },
+            requested.join(", ")
+        )))
     }
 
     /// The shared approval manager (so a future host permission channel can
@@ -768,6 +850,54 @@ impl EngineSession {
             }
         }
         Ok(reply)
+    }
+}
+
+/// #998 - the tool names a request selected, normalized once so every later
+/// comparison is against the same shape.
+///
+/// Sorted and deduplicated: a host that reorders the array, or repeats a name,
+/// is expressing the same selection, and a session must not be refused a turn
+/// over the ordering of a set.
+pub fn requested_tool_names(tools: &[ToolDefinition]) -> Vec<String> {
+    let mut names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// #998 - compose the persona allowlist with the request selection.
+///
+/// Both are NARROWING and neither may widen the other, so the composition is
+/// the intersection - with "empty means no restriction declared" preserved on
+/// each side independently (that is what `AgentBootstrap::tool_allowlist`
+/// already means by an empty list, and re-deriving it differently here is how
+/// a persona restriction would get silently dropped by an unrelated request).
+///
+/// A selection naming ONLY tools the persona forbids therefore yields an empty
+/// list, which `tool_allowlist` reads as "no restriction". That is why the
+/// intersection is only taken when both sides are non-empty, and why a request
+/// can never hand back authority the persona took away.
+pub fn narrow_tool_allowlist(persona: Vec<String>, requested: &[String]) -> Vec<String> {
+    if requested.is_empty() {
+        return persona;
+    }
+    if persona.is_empty() {
+        return requested.to_vec();
+    }
+    let intersection: Vec<String> = requested
+        .iter()
+        .filter(|name| persona.contains(name))
+        .cloned()
+        .collect();
+    // An empty intersection would read as "no restriction" downstream, which
+    // is the opposite of what both inputs asked for. Fall back to the persona
+    // allowlist: it is the authority the operator configured, and the request
+    // has already been shown to add nothing it may have.
+    if intersection.is_empty() {
+        persona
+    } else {
+        intersection
     }
 }
 
@@ -921,6 +1051,7 @@ impl EngineTurnEngine {
         &self,
         session_id: &str,
         agent: Option<&str>,
+        requested_tools: &[String],
     ) -> Result<Arc<EngineSession>, AcpError> {
         {
             let pool = self.sessions.lock().await;
@@ -979,7 +1110,7 @@ impl EngineTurnEngine {
         let mut bootstrap = AgentBootstrap::new(session_config.clone(), self.cwd.clone(), output)
             .with_execution_policy(execution_policy)
             .with_approval_manager(approval_manager.clone())
-            .tool_allowlist(persona_tools);
+            .tool_allowlist(narrow_tool_allowlist(persona_tools, requested_tools));
         if let Some(provider) = &self.provider {
             bootstrap = bootstrap.provider(provider.clone());
         }
@@ -1001,7 +1132,12 @@ impl EngineTurnEngine {
         let bridge = engine.approval_bridge().clone();
         engine.set_protocol_writer(Arc::new(RelayEmitter::new(relay.clone(), Some(bridge))));
 
-        let session = Arc::new(EngineSession::new(engine, approval_manager, relay));
+        let session = Arc::new(EngineSession::new(
+            engine,
+            approval_manager,
+            relay,
+            requested_tools.to_vec(),
+        ));
 
         let mut pool = self.sessions.lock().await;
         // Another turn may have built the session concurrently; keep the
@@ -1019,14 +1155,22 @@ impl TurnEngine for EngineTurnEngine {
         &self,
         req: TurnRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = MessageEvent> + Send>>, AcpError> {
-        // Per-session `tools` override is stored on the ACP server but not
-        // applied to the engine build in this MVP (documented follow-up); the
-        // engine's full registry is the faithful default.
-        let _ = &req.tools;
+        // #998 - the request's tool selection is a REAL constraint. The ACP
+        // server already resolves it (per-call `tools` when present, else the
+        // list stored at `session/create`) and used to hand it here only to be
+        // dropped on the floor, so a host that switched a tool off got a
+        // control that lied: the engine still offered and still dispatched it.
+        // It is bound into the engine build below, where `tool_allowlist`
+        // RETAINS the registry down to the selection - making a deselected tool
+        // undispatchable, not merely absent from the outbound schema.
+        let requested_tools = requested_tool_names(&req.tools);
         // persona-profiles PR-4': bind THIS session's authorized persona (None = none).
         let session = self
-            .session_for(&req.session_id, req.agent.as_deref())
+            .session_for(&req.session_id, req.agent.as_deref(), &requested_tools)
             .await?;
+        // A session already in the pool was built with its own selection and
+        // cannot be re-narrowed; refuse loudly rather than ignore silently.
+        session.check_tool_selection(&requested_tools)?;
         let msg_id = uuid::Uuid::new_v4().to_string();
         Ok(session.run_turn(req.text, msg_id).await)
     }
@@ -1194,7 +1338,7 @@ impl EngineA2aHandler {
     /// registered tools.
     async fn tool_catalog(&self) -> Vec<String> {
         // A2A federation carries no ACP persona selector — no overlay.
-        match self.inner.session_for(&self.agent_id, None).await {
+        match self.inner.session_for(&self.agent_id, None, &[]).await {
             Ok(session) => session.tool_names(),
             Err(_) => Vec::new(),
         }
@@ -1243,7 +1387,7 @@ impl A2aHandler for EngineA2aHandler {
         };
         let session = self
             .inner
-            .session_for(&session_id, None)
+            .session_for(&session_id, None, &[])
             .await
             .map_err(|e| A2aError::HandlerError(e.to_string()))?;
         let msg_id = uuid::Uuid::new_v4().to_string();
@@ -1294,6 +1438,64 @@ mod tests {
             description: "desc".to_string(),
             escalation: None,
         }
+    }
+
+    /// #908 — the ACP relay's sink (`crate::tui::ChannelSink`) forwards the
+    /// engine's RAW text deltas, so this projection is the last place before
+    /// an ACP host renders them. Without a filter here an R1/Qwen-class model
+    /// puts `<think>…</think>` — and a bare `</thought>` whose opener the
+    /// provider swallowed — straight into the host's assistant bubble.
+    #[tokio::test]
+    async fn projection_strips_inline_reasoning_and_routes_it_to_thinking() {
+        let events = vec![
+            ProtocolEvent::StreamStart { msg_id: "m".into() },
+            ProtocolEvent::TextDelta {
+                text: "<think>hid".into(),
+                msg_id: "m".into(),
+            },
+            // The tag straddles the delta boundary — a per-frame filter misses
+            // it, so the projection's filter has to be stateful across frames.
+            ProtocolEvent::TextDelta {
+                text: "den</thi".into(),
+                msg_id: "m".into(),
+            },
+            ProtocolEvent::TextDelta {
+                text: "nk>visible</thought>".into(),
+                msg_id: "m".into(),
+            },
+            ProtocolEvent::StreamEnd {
+                msg_id: "m".into(),
+                finish_reason: FinishReason::Stop,
+                usage: None,
+                usage_delta: None,
+                agent_run_id: None,
+            },
+        ];
+        let out = project_all(events).await;
+
+        let visible: String = out
+            .iter()
+            .filter_map(|e| match e {
+                MessageEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            visible, "visible",
+            "reasoning leaked into the ACP text lane"
+        );
+
+        let thinking: String = out
+            .iter()
+            .filter_map(|e| match e {
+                MessageEvent::Thinking { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            thinking, "hidden",
+            "the withheld reasoning must be re-emitted, not deleted"
+        );
     }
 
     #[tokio::test]
@@ -1815,7 +2017,12 @@ mod tests {
         let approval_manager = Arc::new(ToolApprovalManager::new());
         let output: Arc<dyn OutputSink> = Arc::new(RelaySink::new(relay.clone()));
         let engine = AgentEngine::new(placeholder_config(), ToolRegistry::new(), output);
-        Arc::new(EngineSession::new(engine, approval_manager, relay))
+        Arc::new(EngineSession::new(
+            engine,
+            approval_manager,
+            relay,
+            Vec::new(),
+        ))
     }
 
     /// A plain "approve once" decision (manager path — no bridge secret).

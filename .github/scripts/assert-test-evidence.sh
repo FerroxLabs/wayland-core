@@ -65,3 +65,27 @@ if [ "$TESTS" -lt "$MIN_TESTS" ]; then
   echo "::error title=NO TEST SIGNAL ($LABEL)::${LABEL} produced ${COUNT} JUnit report(s) holding ${TESTS} test case(s), fewer than the ${MIN_TESTS} expected. The files exist and certify NOTHING: nextest writes a junit.xml with tests=0 for a run whose filter matched no test at all (an unset cargo feature, a renamed test, a typo in -E), so an artifact proves the command ran, never that a test did. The upstream job result was '${UPSTREAM_RESULT}'. ${HINT}"
   exit 1
 fi
+
+# ── A RETRIED FAILURE IS A SIGNAL, NOT SILENCE (wayland#1169) ───────────────
+#
+# The gate above proves the suite RAN. It says nothing about a test that ran,
+# FAILED, and was retried into a pass — which `[profile.ci] retries = 2`
+# converts into a green run conclusion with the evidence buried in a log nobody
+# reads. Measured cost: the #1155 data-loss race failed 6.5 % of runs at
+# `--retries 0` and would have been reported roughly once in 3,600 CI runs.
+#
+# Delegated rather than inlined so each file keeps one responsibility, and
+# invoked from HERE rather than from a new workflow step so it inherits the
+# wiring both `report` jobs already have — the shared-single-implementation
+# discipline this file was written for in the first place. In e2e.yml it is a
+# no-op by construction (`[profile.e2e] retries = 0` cannot emit a flake).
+#
+# FAIL-CLOSED ON ITS OWN ABSENCE. A gate that can be silently deleted is worth
+# as little as one that cannot fail, and this one is invoked by path.
+GRADER="$(cd "$(dirname "$0")" && pwd)/grade-retry-flakes.sh"
+if [ ! -f "$GRADER" ]; then
+  echo "::error title=Retry-flake gate missing::${GRADER} is not present, so no run on this repository is grading retried failures (wayland#1169). Restore it rather than removing this call."
+  exit 1
+fi
+echo ""
+bash "$GRADER"

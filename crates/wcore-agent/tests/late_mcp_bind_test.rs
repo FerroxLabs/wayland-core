@@ -93,6 +93,13 @@ fn tool(name: &str) -> McpToolDef {
 const SKILL_BODY: &str =
     "---\nname: remote-helper\ndescription: RESOURCE_SERVED_SKILL\n---\n\nbody\n";
 
+/// #1150: a description long enough that an 80-character skills budget must
+/// visibly shorten the rendered block, while a 40,000-character one keeps it.
+const LONG_SKILL_BODY: &str = "---\nname: remote-helper\ndescription: \
+LATE_BOUND_DESCRIPTION_MARKER a deliberately long description whose only job is \
+to be far wider than the eighty characters a two-thousand token context window \
+buys, so the two budget arms cannot render the same bytes\n---\n\nbody\n";
+
 fn local_ref(name: &str) -> SkillRef {
     SkillRef {
         name: name.to_string(),
@@ -344,5 +351,65 @@ async fn late_config_mcp_unbinds_a_newly_ambiguous_hook() {
     assert!(
         !engine.hook_engine().expect("HookEngine").has_dispatcher(),
         "the newly ambiguous binding must be REMOVED, not left on the boot-time answer"
+    );
+}
+
+/// #1150 — the late-bind listing must be sized against the ACTIVE model's
+/// window, exactly like the boot listing bootstrap renders.
+///
+/// `get_char_budget` is 1% of the window in characters, so a 2,000-token window
+/// buys 80 characters of listing and a 1,000,000-token window buys 40,000. Two
+/// otherwise-identical sessions differing only in that number must therefore
+/// append different blocks. Under the defect this call site passed a hardcoded
+/// `None` — matching the bootstrap call site, which also passed `None` — so
+/// both sessions got the flat 8,000-character `DEFAULT_CHAR_BUDGET` and the two
+/// blocks came out identical.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: put `None` back in
+/// `late_mcp.rs`'s `format_skills_section` call. It compiles clean and this is
+/// the only test that goes red.
+#[tokio::test]
+async fn late_bound_listing_is_sized_by_the_active_models_window() {
+    async fn block_for(context_window: usize) -> String {
+        let catalog = Arc::new(SkillCatalog::from_refs(Vec::new()));
+        let mut config = wcore_config::config::Config::default();
+        config.compact.context_window = Some(context_window);
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine.set_skill_catalog(Arc::clone(&catalog));
+        let before = engine.system_prompt().len();
+
+        let mut binder = LateMcpBinder::new(Arc::clone(&catalog), &[], Vec::new(), true);
+        let mgr = Arc::new(McpManager::new_for_test(vec![(
+            "late-srv",
+            true,
+            Box::new(ScriptedTransport::serving_skill(
+                "skill://remote-helper",
+                LONG_SKILL_BODY,
+            )) as Box<dyn McpTransport>,
+        )]));
+        let refs = LateMcpBinder::skill_refs_for(&mgr).await;
+        let report = binder.bind(&mut engine, mgr, refs);
+        assert!(
+            report.prompt_updated,
+            "precondition: the late skill must reach the prompt for its budget to matter"
+        );
+        engine.system_prompt()[before..].to_string()
+    }
+
+    let roomy = block_for(1_000_000).await;
+    let tight = block_for(2_000).await;
+
+    assert!(
+        roomy.contains("LATE_BOUND_DESCRIPTION_MARKER"),
+        "precondition: a 40,000-char budget must keep the description in full: {roomy}"
+    );
+    assert!(
+        tight.len() < roomy.len(),
+        "an 80-char budget must render a SHORTER block than a 40,000-char one; equal \
+         lengths mean this call site is still passing `None` (tight = {} bytes, roomy = \
+         {} bytes)",
+        tight.len(),
+        roomy.len()
     );
 }

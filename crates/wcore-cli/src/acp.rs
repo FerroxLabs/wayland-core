@@ -541,6 +541,14 @@ async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
         ));
     }
 
+    // A supervisor-spawned child is given a parent-death channel as its stdin;
+    // park on it now so this process cannot outlive the supervisor that owns
+    // its credentials (FerroxLabs/wayland#1156). No-op when unsupervised, so a
+    // hand-run `acp serve` keeps ordinary stdin semantics. Placed after the
+    // profile guard so a REFUSED profile still has zero side effects, and
+    // before the server binds anything so an orphaning during startup is caught.
+    crate::parent_channel::watch_for_orphaning();
+
     let addr: SocketAddr = args
         .bind
         .parse()

@@ -1,3 +1,9 @@
+//! DIAGNOSTIC LADDER - NOT AN ACCEPTANCE GATE. Nothing in this file certifies
+//! anything about the product. A green run here means the ladder executed and
+//! its numbers are readable; it does NOT mean `F-KR-07` is closed, and a
+//! verification pass that counts these rungs as passing gates is counting the
+//! wrong thing. See "What every rung asserts, and why it is not a fix" below.
+//!
 //! `F-KR-07` denial ladder — attribute the deterministic `SandboxError::Timeout`
 //! of `live_cmd_runs_when_allowlist_has_missing_path` to ONE property.
 //!
@@ -33,6 +39,28 @@
 //!
 //! Run serially — `--test-threads=1` is a correctness requirement for live
 //! AppContainer suites (`F-KR-08`), not a preference.
+//!
+//! # What every rung asserts, and why it is not a fix (wayland#934, 2026-08-28)
+//!
+//! Rungs 2, 4, 6 and 7 called `observe()`, printed, and asserted NOTHING — they
+//! bound the outcome to `_ok` and `_label` and discarded both, so they returned
+//! green against a sandbox that launches nothing at all. That is not a defensible
+//! shape even for a diagnostic: a rung that cannot fail cannot distinguish "the
+//! ladder ran and the mechanism is X" from "the ladder ran and the harness is
+//! broken", which is the only thing a reader uses these numbers for.
+//!
+//! They now assert the one thing that is true independently of whether the defect
+//! under investigation is fixed: **the backend's own documented bound**.
+//! `windows_impl::process` caps the whole blocking call at `manifest.timeout + 15s`
+//! (the inner `WaitForSingleObject` bounds only the child's run; the outer ceiling
+//! bounds setup too). An `execute()` that returns outside that window has broken
+//! the contract the elapsed-time attribution in this file is entirely built on, so
+//! every rung reading a number would be reading a meaningless one.
+//!
+//! Asserting `ok` on rungs 2, 4, 6 and 7 remains FORBIDDEN — that would be
+//! asserting the finding is closed, which is what a diagnostic ladder must not do.
+//! Rungs 1, 3 and 5 assert `ok` because each is a control or an isolated property
+//! whose red is itself the finding.
 
 #![cfg(windows)]
 
@@ -153,7 +181,18 @@ async fn rung2_exact_failing_shape_tempdir_plus_absent() {
         "precondition: allowlist path must be absent"
     );
     let (_ok, _label, ms) = observe("2_EXACT_SHAPE", vec![std::env::temp_dir(), missing], 10).await;
-    println!("KR07_RUNG_2_MECHANISM={}", mechanism_from_elapsed(ms));
+    let mechanism = mechanism_from_elapsed(ms);
+    println!("KR07_RUNG_2_MECHANISM={mechanism}");
+    assert_within_documented_ceiling("2", 10, ms);
+    // The outcome is deliberately NOT asserted — this is the shape under
+    // investigation. What IS asserted is that the reading is interpretable:
+    // `UNEXPECTED_beyond_both_bounds` means the elapsed time fits neither bound
+    // this file reasons with, so the mechanism attribution below it is void.
+    assert_ne!(
+        mechanism, "UNEXPECTED_beyond_both_bounds",
+        "rung 2 took {ms}ms, which sits outside both documented bounds, so no mechanism can be \
+         attributed from it"
+    );
 }
 
 /// RUNG 3 — THE NAMED PROPERTY, ISOLATED. Allowlist contains ONLY the absent
@@ -187,7 +226,14 @@ async fn rung3_absent_path_only() {
 async fn rung4_real_tempdir_only() {
     require_live_windows();
     let (_ok, _label, ms) = observe("4_TEMPDIR_ONLY", vec![std::env::temp_dir()], 10).await;
-    println!("KR07_RUNG_4_MECHANISM={}", mechanism_from_elapsed(ms));
+    let mechanism = mechanism_from_elapsed(ms);
+    println!("KR07_RUNG_4_MECHANISM={mechanism}");
+    assert_within_documented_ceiling("4", 10, ms);
+    assert_ne!(
+        mechanism, "UNEXPECTED_beyond_both_bounds",
+        "rung 4 took {ms}ms, outside both documented bounds, so its comparison against rung 3 \
+         cannot separate the real path from the absent one"
+    );
 }
 
 /// RUNG 5 — grant over a SMALL real directory, plus the absent path. Same two
@@ -240,20 +286,79 @@ async fn rung6_exact_shape_with_diagnostic_ceiling() {
         }
     );
     println!("KR07_RUNG_6_TRUE_COST_MS={ms} label={label}");
+    // `ok` is NOT asserted: a green here does not close the finding, and a red
+    // here is the finding. The ceiling is, because the whole value of this rung is
+    // that {ms} is a TRUE COST — a number produced outside the bound is not a cost
+    // measurement, it is an unbounded call, and "slow vs stuck" is then unanswered
+    // rather than answered "slow".
+    assert_within_documented_ceiling("6", 600, ms);
 }
 
-/// RUNG 7 — is the cost paid once or every run? Immediately repeats rung 6's
-/// shape. Windows does not re-propagate an ACE that is already present on every
-/// child, so a much cheaper second run means the cost is first-touch
-/// propagation over the subtree; an equally expensive second run means the cost
-/// is paid per execution, which is materially worse in the field.
+/// RUNG 7 — is the cost paid once or every run? Windows does not re-propagate an
+/// ACE that is already present on every child, so a much cheaper second run means
+/// the cost is first-touch propagation over the subtree; an equally expensive
+/// second run means the cost is paid per execution, which is materially worse in
+/// the field.
+///
+/// **This rung runs the shape TWICE itself (wayland#934, 2026-08-28).** It used to
+/// take one observation and print `KR07_RUNG_7_SECOND_RUN_MS`, calling it the
+/// second run because rung 6 had happened earlier — in a different test, whose
+/// number this test cannot see. It could therefore neither assert nor even compute
+/// the ratio it exists to report, and a reader comparing the two printed numbers
+/// was comparing across an ordering nextest does not guarantee. Both runs are now
+/// in one process, in order, and the comparison is made here.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "explicit native Windows AppContainer acceptance"]
 async fn rung7_repeat_cost_is_paid_once_or_every_run() {
     require_live_windows();
     let missing = std::path::PathBuf::from(ABSENT);
-    let (_ok, _label, ms) = observe("7_REPEAT", vec![std::env::temp_dir(), missing], 600).await;
-    println!("KR07_RUNG_7_SECOND_RUN_MS={ms}");
+    let allow = vec![std::env::temp_dir(), missing];
+
+    let (ok_first, label_first, first_ms) = observe("7_FIRST", allow.clone(), 600).await;
+    let (ok_second, label_second, second_ms) = observe("7_REPEAT", allow, 600).await;
+    println!("KR07_RUNG_7_FIRST_RUN_MS={first_ms}");
+    println!("KR07_RUNG_7_SECOND_RUN_MS={second_ms}");
+    println!(
+        "KR07_RUNG_7_VERDICT={}",
+        if second_ms * 2 < first_ms.max(1) {
+            "FIRST_TOUCH_ONLY_second_run_less_than_half"
+        } else {
+            "PAID_EVERY_RUN_second_run_not_materially_cheaper"
+        }
+    );
+
+    assert_within_documented_ceiling("7_FIRST", 600, first_ms);
+    assert_within_documented_ceiling("7_REPEAT", 600, second_ms);
+    // The outcome is not asserted; its REPRODUCIBILITY is. Two identical
+    // invocations back to back that classify differently mean the shape is
+    // non-deterministic, and every single-observation rung above — including the
+    // 12/12 determinism the whole finding rests on — is then reading noise.
+    assert_eq!(
+        ok_first, ok_second,
+        "two back-to-back runs of the identical shape disagreed ({label_first} then \
+         {label_second}), so this shape is non-deterministic and no rung in this ladder is \
+         measuring a stable property"
+    );
+}
+
+/// The outer bound `windows_impl::process` guarantees for the WHOLE blocking call:
+/// the manifest timeout plus the 15s setup grace, plus a small allowance for
+/// scheduling on a loaded host.
+///
+/// This is the assertion available to a rung that must not assert its own outcome.
+/// It cannot be satisfied by the defect being fixed and cannot be broken by the
+/// defect being present; it is broken only by the backend violating the contract
+/// that makes `mechanism_from_elapsed` mean anything.
+fn assert_within_documented_ceiling(rung: &str, timeout_secs: u64, ms: u128) {
+    let ceiling_ms = u128::from(timeout_secs + 15) * 1000 + 5_000;
+    assert!(
+        ms <= ceiling_ms,
+        "rung {rung}: execute() returned after {ms}ms, outside the {ceiling_ms}ms ceiling \
+         windows_impl::process documents for a {timeout_secs}s manifest (timeout + 15s setup \
+         grace + 5s scheduling allowance). Every elapsed-time attribution in this file rests \
+         on that bound, so a number outside it is not evidence about the allowlist — it is \
+         evidence the bound is not enforced."
+    );
 }
 
 /// The elapsed time names the mechanism, because the two bounds are 15s apart:

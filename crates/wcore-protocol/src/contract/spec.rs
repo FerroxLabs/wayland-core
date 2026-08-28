@@ -852,12 +852,19 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "session",
         "available"
     ),
+    // The correlation key is `call_id`, NOT `resume_token` (wayland#1088).
+    // `resume_token` is the bridge SECRET and is the EMPTY STRING on an
+    // ordinary tool gate, which is the overwhelmingly common case: declaring it
+    // as the correlation key told a host to key its reply on a field that is
+    // usually empty, and answering an ordinary gate with `approval_resume`
+    // resolves nothing, so the tool hangs until its TTL. `correlation_id`
+    // always equals `call_id` (see `ProtocolEvent::ApprovalRequired`).
     wire!(
         "approval_required",
         "events/approval_required.json",
         ["call_id", "resume_token", "reason", "context"],
         Safety,
-        "resume_token",
+        "call_id",
         "hitl_suspend"
     ),
     wire!(
@@ -875,6 +882,16 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         Safety,
         "resume_token",
         "hitl_suspend"
+    ),
+    // wayland#1088. Always-emitted forward-additive variant (same footing as
+    // `budget_exceeded`), so `available` rather than a dedicated capability.
+    wire!(
+        "set_mode_refused",
+        "events/set_mode_refused.json",
+        ["requested", "effective", "reason"],
+        Safety,
+        "session",
+        "available"
     ),
     wire!(
         "budget_exceeded",
@@ -1266,6 +1283,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "approval_required",
     "suspend",
     "approval_resume",
+    "set_mode_refused",
     "budget_exceeded",
     "budget_grant_result",
     "tool_panicked",
@@ -1935,10 +1953,16 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
     BTreeMap::from([
         (
             "events/approval_required.json".into(),
+            // An ORDINARY tool gate (a Bash exec), which is what a host sees
+            // on nearly every session: no bridge entry, so `resume_token` is
+            // the empty string and the frame is answered with `tool_approve` /
+            // `tool_deny` keyed by `call_id`. `correlation_id` always equals
+            // `call_id`. Publishing a non-empty token here (wayland#1088) told
+            // hosts the opposite of the documented behaviour.
             ProtocolEvent::ApprovalRequired {
                 call_id: "call-tool-001".into(),
-                resume_token: "resume-001".into(),
-                correlation_id: "resume-001".into(),
+                resume_token: String::new(),
+                correlation_id: "call-tool-001".into(),
                 reason: "Execution requires approval".into(),
                 context: "Bash: cargo test".into(),
                 plan: None,
@@ -1949,6 +1973,14 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             ProtocolEvent::ApprovalResume {
                 resume_token: "resume-001".into(),
                 approved: true,
+            },
+        ),
+        (
+            "events/set_mode_refused.json".into(),
+            ProtocolEvent::SetModeRefused {
+                requested: crate::commands::SessionMode::Force,
+                effective: crate::commands::SessionMode::Default,
+                reason: crate::events::SetModeRefusalReason::LocalOptInRequired,
             },
         ),
         (

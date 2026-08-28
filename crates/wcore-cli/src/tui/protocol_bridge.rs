@@ -28,6 +28,7 @@ use crate::tui::app::{
     App, DiffModel, StreamingPhase, SubAgentStatus, SubAgentView, ToolCardModel, ToolCardStatus,
     TurnRole, TurnView, WorkflowNodeView, WorkflowView,
 };
+use crate::tui::render::ReasoningFilter;
 use crate::tui::render::markdown::render_markdown;
 use crate::tui::theme::Theme;
 use crate::tui::tool_formatters::formatter_for;
@@ -1122,6 +1123,10 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::CuaEvent { .. }
         | ProtocolEvent::Suspend { .. }
         | ProtocolEvent::ApprovalResume { .. }
+        // wayland#1088: the refusal can only be produced for a WIRE peer. The
+        // in-process TUI sets its mode through the local /mode path, which is
+        // not gated on the wire opt-in, so there is nothing here to render.
+        | ProtocolEvent::SetModeRefused { .. }
         // Budget grant commands are accepted only by the JSON-stream host
         // loop; the in-process TUI cannot originate one. Keep the event
         // exhaustively accepted without synthesizing local grant authority.
@@ -1910,7 +1915,26 @@ pub fn hydrate_history(messages: &[Message]) -> (Vec<TurnView>, Vec<ToolCardMode
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text } => {
-                            turn.elements.push(TurnElement::Markdown(text.clone()));
+                            // #908 — sessions written before the engine
+                            // filtered its durable copy still carry inline
+                            // `<think>`-class tags in stored assistant text,
+                            // so replaying them verbatim reprints the leak on
+                            // every resume. Same treatment the live stream
+                            // gets at the `TextDelta` arm above: the body
+                            // becomes a collapsed thought, not prose.
+                            let mut filter = ReasoningFilter::new();
+                            let visible = filter.process(text);
+                            let captured = filter.take_captured();
+                            if !captured.is_empty() {
+                                turn.elements.push(TurnElement::Thinking {
+                                    body: captured,
+                                    secs: 0,
+                                    tokens: 0,
+                                });
+                            }
+                            if !visible.is_empty() {
+                                turn.elements.push(TurnElement::Markdown(visible));
+                            }
                         }
                         ContentBlock::Thinking { thinking, .. } => {
                             turn.elements.push(TurnElement::Thinking {
@@ -2583,6 +2607,43 @@ mod tests {
             Role::Assistant,
             vec![ContentBlock::Text { text: text.into() }],
         )
+    }
+
+    /// #908 — resume repaint. Sessions already on disk were written before
+    /// the engine filtered its durable copy, so their stored assistant text
+    /// still carries the tags; rehydrating them verbatim reprints the leak on
+    /// every `--resume`. The live stream is filtered at the `TextDelta` arm
+    /// above; this is the same guarantee for replayed history.
+    #[test]
+    fn hydrate_strips_inline_reasoning_from_stored_assistant_text() {
+        let msgs = vec![
+            user_text("question"),
+            assistant_text("<think>hidden</think>visible</thought>"),
+        ];
+        let (turns, _) = hydrate_history(&msgs);
+
+        assert_eq!(turns.len(), 2);
+        let rendered = turns[1].text();
+        assert!(
+            !rendered.contains("<think>") && !rendered.contains("</thought>"),
+            "reasoning tags survived the resume repaint: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("hidden"),
+            "reasoning body must not render as assistant prose: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("visible"),
+            "the answer itself must survive: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn hydrate_leaves_unrecognised_markup_alone() {
+        // The filter is not an HTML sanitiser — a user's own `</b>` is text.
+        let msgs = vec![assistant_text("a</b>c")];
+        let (turns, _) = hydrate_history(&msgs);
+        assert!(turns[0].text().contains("a</b>c"));
     }
 
     #[test]

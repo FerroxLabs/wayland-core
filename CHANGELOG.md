@@ -1,3 +1,150 @@
+## [0.13.10](https://github.com/FerroxLabs/wayland-core/compare/v0.13.9...v0.13.10) (2026-08-29)
+
+**Release highlights.** A cycle that went looking for the defects our own tests were
+structurally incapable of reporting — and found that the worst of them was costing users
+their unsaved work at a measured 29% per run while CI reported the suite green. No
+breaking changes.
+
+**An Edit can no longer overwrite a save that lands while the guard is checking it.**
+The guard read the file, decided, and then wrote — and anything that arrived in between was
+lost. Guarded writes now publish through an atomic compare-and-exchange rather than a
+re-check, so a write whose pre-image moved is refused instead of silently winning. Measured
+on the path the dispatcher actually takes: **123 losses in 200 runs before, 0 after**, and the
+pre-existing suite test that had been quietly flaking on this race went from **14 failures in
+48 runs to 0 in 48** on a more loaded machine than the baseline. The first version of this fix
+was rejected in review for verifying the wrong path — it fixed `execute` while production
+takes `execute_with_ctx` — which is the same mistake the retry policy had been hiding. (#1155)
+
+**A 29% data-loss race was invisible to CI, and that is now a defect in its own right.**
+`retries = 2` reports a test that fails then passes as a flake inside a green run. At a 6.5%
+failure rate that is roughly one visible report in 3,600 runs. Retried failures are now
+surfaced and attributable. (#1169)
+
+**Prompt caching actually caches.** A transient injected at the top of turn one — 26 bytes of
+`Current date: ` at offset 0 of `messages[1]` — moved the prefix on every subsequent turn and
+discarded the cache behind it. It now lives in the cached system prefix. Measured hit ratio
+went from **0.0358 to 0.6526**, monotonic, with no late collapse. On an OpenAI-shaped
+tool-result turn the adapter was also dropping accompanying text outright, which silently
+voided the date, the skill-router hint and every PrePrompt hook contribution on any turn that
+carried a tool result. (#559, #1168)
+
+**Your session id is the one you set.** `--resume` minted a fresh conversation id, which broke
+Flux sticky routing and split the cache ledger in two; `cache report --session` then rejected
+the very id the user had chosen because the ledger was keyed by an internal UUID. Both now
+agree on the id you gave. The ledger also stops inventing a counterfactual: an unpriceable
+model reports its saving as unknown instead of manufacturing a zero baseline and then
+reporting a negative saving against it. (#1161, #1162, #1163)
+
+**Per-tool MCP switches are no longer inert.** Turning a tool off in the MCP Library did
+nothing on Core and ACP backends — every tool was registered regardless. The operator's
+selection is now honoured at boot, on a live add, and across a `list_changed` refresh, so a
+server cannot grant itself authority that was never given by re-advertising its catalogue. An
+absent selection still means "allow all" for back-compatibility; an empty one means none.
+(#998)
+
+**Absurd input token sizes.** An unlisted model was assigned a fabricated 200,000-token window,
+so compaction sized itself against a number nobody had verified. Unlisted models now size from
+the bottom of the range. (#1150)
+
+**Orphaned processes.** `acp serve` survived its parent and reparented to PID 1 — nine orphans
+were found on one box, the oldest 24 hours old, together pinning 160GB. Profile children are
+now bound to a parent-death channel. (#1156)
+
+**Fixes you would have hit.** The Bash tool tells the model which shell it really runs, instead
+of letting it assume (#1151). Reasoning tags stop leaking into answers, history and hosts
+(#908). Output caps and reasoner replay are decided from what is actually known rather than
+from the alias the request happened to name (#388, #434).
+
+**Gates that could not fail now discriminate.** Five of them, plus two channel caps that were
+asserted against themselves. Process-global writes in tests are invisible to `cargo test` but
+isolated by nextest, so the gate that catches them was widened to integration tests — the same
+sweep that found a bare `API_KEY` being honoured as a provider credential, which is a live
+exfiltration path and not merely untidy. (#934, #1088, #1134)
+
+**Limits of the write-race fix, stated rather than implied.** The atomic exchange closes the
+race on Linux and macOS via `renameat2(RENAME_EXCHANGE)` / `renamex_np(RENAME_SWAP)`. Three
+cases still take the older re-check path and are narrower but not closed: **Windows**, which has
+no exchange primitive; a **symlinked leaf**, which cannot be observed without following the link
+and so is left opaque; and a **byte-identical write**, which is published unconditionally to
+keep F889 receipt reconciliation calibrated. Related and long-standing: because a write publishes
+by swapping a temp file over the *name*, writing through a symlink replaces the link with a
+regular file and leaves the link target stale — deliberate, pinned by a test since v0.12.26-rc.1,
+and worth knowing if you point the agent at a dotfile that is a symlink into a repo.
+
+**Crash recovery stops corrupting the turn it recovers.** The session journal silently dropped
+`ContentBlock::Thinking.extra` — the provider's reasoning signature. It was encoded as
+`Thinking { thinking, .. }` and decoded as `extra: None`, so the field simply did not exist in
+the persisted shape. Because recovery re-dispatches the decoded request, a crash-recovered
+Gemini turn went back on the wire with its signature stripped, which is exactly what makes the
+server reject a replayed turn — so recovery did not resume the turn, it failed it. A block
+carrying no metadata still encodes byte-identically, so no existing session's journal digest
+moves. The round-trip test that should have caught this asserted one of
+eighteen fields by value; it now destructures with no `..`, so a new field on the request is a
+compile error rather than a silent coverage gap. (#1170)
+
+**A retried failure is no longer a silent one.** `retries = 2` reported a test that failed and
+then passed as a flake inside a green run — the number release gates and humans read. Retried
+failures are now graded in the required aggregate check, against an allowlist where every entry
+carries an owning issue, a justification and an expiry, so the list shrinks or is renewed
+deliberately. An allowlisted flake still warns; the allowlist buys a green run, not a quiet one.
+Two known load-dependent tests are seeded with their measured evidence; the write race that
+prompted all this is deliberately not, because allowlisting the defect a gate exists to catch
+would defeat the gate. (#1169)
+
+**The cache health check can now tell you what broke the cache.** It reported *Healthy with zero
+causes* on a 3% hit ratio: a cache pinned flat was measured only turn-over-turn, so it satisfied
+neither the full-miss nor the 5%-drop branch and fell through to Healthy. There is now an
+absolute floor as well as a delta, and the detector hashes the model and each message rather than
+only the system prompt and tools — so a break is attributed to a model swap or to the index of the
+first divergent message instead of defaulting to "TTL expiry". Appends and tail truncations are
+not breaks, and the moving cache breakpoint is excluded from the hash, so it does not cry wolf.
+The engine's snapshot also moved to after the tier swap and transient injections, so it describes
+the request actually dispatched rather than one that never went on the wire. (#1166)
+
+**Point it at your own model and it starts.** A local inference server that needs no
+authentication — Ollama, llama.cpp, vLLM, LM Studio — was refused at startup for a missing
+credential, even though the OpenAI wire already had a self-hosted placeholder path it could
+never reach. It now starts when three things all hold: you declared the endpoint yourself, the
+endpoint is genuinely self-hosted, and the provider's wire has a keyless path. This relaxes the
+*requirement* for a key; it does not widen what counts as one. A public endpoint with no
+credential is still refused at startup, and `keyless_self_hosted = false` puts the requirement
+back. Use the bare root — `http://127.0.0.1:11434`, not `.../v1`. (#1173)
+
+**When a self-hosted endpoint quietly throws your prompt away, you are told.** A stock Ollama
+serving a 4,096-token slot silently discarded the system prompt and the task from a ~10,500-token
+send — and core reported the context as 6% full, because the model advertises 40,960 and an
+unlisted model fell back further still. Core now learns the window an endpoint actually serves
+from the token counts already in its responses, names the shortfall, says that the head of the
+prompt is what was lost, and gives you the two remedies. No probing and no address sniffing: the
+signal was already in the bytes we receive. Two things it deliberately does not do — a marginal
+first overflow is inside estimator noise and is caught on the following turn instead, and the
+learned figure is not fed to compaction, because at a 4,096 slot the fixed buffers saturate to
+zero and would abort every run rather than save one. At that size the real remedy is raising the
+server's context length, which is what the notice tells you. (#1172, and the true cause of #372,
+which was reported as a planning loop and is not one.)
+
+**The tool list stops moving under the prompt cache.** Loading a deferred tool re-sorted
+`tools[]` by name, so an append became a mid-array insert and every cached token after that point
+was discarded and re-billed on the next turn. Three separate faults did it: all four wire encoders
+sorted, a hydrated tool was un-deferred in place, and the deferred-tool catalogue rode on a
+description that sits mid-array. The wire order is now stable base, then hydrated tools in first-
+hydration order, then `ToolSearch`. One deliberate trade: the encoders no longer guarantee
+invariance to input reordering, because that guarantee and append-only prefix stability are
+mutually exclusive — the sort bought the former by making every append an insert. Ordering is now
+the caller's responsibility, which the engine already guarantees. Honest limit: this pays directly
+on implicit-prefix wires; on Anthropic a single `cache_control` breakpoint sits on the last tool,
+so any change to the array rewrites that zone wherever it lands. (#1171)
+
+**Tests that could not fail, made to discriminate.** A four-way cross-audit aimed at exactly this
+class found seven more, each with a named mutation. All seven were coverage gaps rather than live
+bugs — the production code was right and the tests simply could not have noticed if it were not.
+Now they can: an empty MCP allow-list is graded on the refresh seam as well as at boot; the
+untrusted-channel control is anchored to the real dispatch-to-engine seam rather than stopping one
+call short; the approval tests observe a genuinely parked turn and count whether the tool actually
+ran, instead of asserting a canned reply; the compaction test reads the conversation rather than an
+informational log line; and the ACP selection test now sends a tool the model was never offered and
+requires dispatch to refuse it — proving authority, not merely visibility. Under mutation that last
+one showed a deselected `Bash` executing while the old assertion stayed green. (#934, and the audit)
 ## [0.13.9](https://github.com/FerroxLabs/wayland-core/compare/v0.13.8...v0.13.9) (2026-08-28)
 
 **Release highlights.** A cycle spent grading our own guards rather than writing

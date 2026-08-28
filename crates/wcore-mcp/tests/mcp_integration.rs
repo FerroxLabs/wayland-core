@@ -198,6 +198,7 @@ async fn handshake_success_discovers_tools() {
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         },
     );
 
@@ -249,6 +250,7 @@ async fn handshake_init_transport_error_propagates() {
             deferred: None,
             allow_local: false,
             only_for_assistant: None,
+            allowed_tools: None,
         },
     );
 

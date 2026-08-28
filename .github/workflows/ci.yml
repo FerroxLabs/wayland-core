@@ -1372,12 +1372,21 @@ jobs:
           python3 scripts/check-no-personal-identifiers.py
 
       # #1134 -- test code writing a process-global that production code in the
-      # SAME lib test binary reads. `cargo nextest`, which every other suite
-      # here runs, gives each test its own process, so this class can never
-      # fail under it: it is invisible at --retries 0, not merely flaky. The
-      # shared-process `--lib` leg in linux-containerized is where it SHOWS UP;
-      # this gate is what keeps it from coming back, and it runs here -- a pure
-      # text scan, no toolchain -- so a build failure cannot shadow it.
+      # SAME test binary reads. `cargo nextest`, which every other suite here
+      # runs, gives each test its own process, so this class can never fail
+      # under it: it is invisible at --retries 0, not merely flaky. The two
+      # shared-process legs in linux-containerized are where it SHOWS UP; this
+      # gate is what keeps it from coming back, and it runs here -- a pure text
+      # scan, no toolchain -- so a build failure cannot shadow it.
+      #
+      # It covers `<crate>/src` AND `<crate>/tests`. It walked `src` only until
+      # 2026-08-28, while the shared-process CI leg ran `--lib` only, so every
+      # integration test in the repository was unexamined by BOTH instruments
+      # at once -- and `crates/*/tests` turned out to hold 46 of the 52
+      # unserialized write sites and 65 of the 131 hazard pairs. The scanner's
+      # own `--self-test` proves the `tests/` direction fires and stays quiet,
+      # and the gate asserts it actually reached integration binaries rather
+      # than trusting that it did.
       #
       # It fails only on a write with NO serialization at all, which is a
       # condition that can actually be met and is met today (zero). It is NOT
@@ -1813,6 +1822,93 @@ jobs:
             echo "::error title=Shared-process lib suite::Executed $total tests, expected at least $MIN. A suite that exits 0 having run nothing is not a suite -- a crate lost its lib target, a module got cfg'd out, or the invocation stopped collecting. Move the floor in this step together with whatever moved."
             exit 1
           fi
+
+      # -- Shared-process INTEGRATION suite (#1134, the other half) -------
+      # The leg above and the scanner it pairs with were scoped to `src/` in
+      # the SAME way: `cargo test --workspace --lib` builds no `tests/` target,
+      # and scripts/check-test-env-globals.py walked `<crate>/src` only. So
+      # every integration test in this repository was unexamined by BOTH
+      # instruments at once -- and `crates/*/tests` is where most of this
+      # repo's process-global writing actually lives (46 of 52 unserialized
+      # write sites; 65 of 131 hazard pairs). Widening the scanner alone would
+      # have left the class detectable but still never EXERCISED.
+      #
+      # SCOPE, and why this is not `--workspace --tests`. That puts all 698
+      # integration binaries through a shared process, the overwhelming
+      # majority of which touch no process global at all: hours of wall clock
+      # for no signal, and a gate nobody can afford to run is a gate that
+      # cannot fail. The scanner emits the targets where the class can
+      # actually manifest -- an integration binary with at least two tests (a
+      # sole test in a process has no sibling to contaminate) whose test code
+      # touches process-global state. That selector is deliberately BROADER
+      # than the scanner's own env-var analysis -- it also matches the panic
+      # hook and file-level `static`s -- because of the four defects the lib
+      # leg caught on the day it was added, only two were env vars; the others
+      # were a leaked panic hook and a static chown hook. The list is DERIVED,
+      # so a new hazardous test file joins this leg by existing rather than by
+      # somebody remembering to add it.
+      #
+      # BLOCKING, like the lib leg. A non-blocking shared-process leg is a gate
+      # that cannot fail, which is the state it replaces.
+      #
+      # ANTI-VACUITY on BOTH axes, because `cargo test` exits 0 having run zero
+      # tests (see scripts/check-no-vacuous-cargo-test.py): the number of
+      # TARGETS is floored, so a selector that quietly stopped emitting cannot
+      # pass this step having run nothing at all, and the summed executed count
+      # is floored too. Floors sit BELOW the counts measured on hetzner-dsm at
+      # the commit that added this step (70 targets, 591 tests), not at them:
+      # this catches a COLLAPSE, it does not red-line on a test legitimately
+      # deleted. Move them together with whatever moves.
+      #
+      # The third column of the scanner's output is the tests to `--skip`, each
+      # carrying a stated reason in SHARED_PROCESS_SKIPS. One test is excluded
+      # today: it drives the real binary through a bounded agent turn and fails
+      # the same way ALONE in its own process, so process sharing is not its
+      # variable and this leg cannot grade it. The scanner refuses an entry with
+      # no reason, and refuses one naming a target it no longer selects, so that
+      # list cannot rot into a standing excuse.
+      - name: Shared-process integration suite (cargo test, one process per target)
+        run: |
+          set -euo pipefail
+          MIN_TARGETS=60
+          MIN_TESTS=500
+          targets=0
+          total=0
+          failed=""
+          while read -r crate target skips; do
+            targets=$((targets + 1))
+            args=""
+            for s in $(printf '%s' "${skips:-}" | tr ',' ' '); do
+              args="$args --skip $s"
+            done
+            echo "=== $crate --test $target ${skips:+(excluded: $skips)} ==="
+            # vacuity-checked: the `test result: ok. N passed` count from every
+            # invocation in this loop is summed into $total and compared against
+            # $MIN_TESTS below, which exits 1 when the total falls short. Exit
+            # status alone is not trusted -- an empty run reports it as success.
+            if ! out="$($DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo test -p "$crate" --test "$target" --no-fail-fast -- $args 2>&1)"; then
+              printf '%s\n' "$out" | grep -E '^(failures:|test result:|thread .* panicked)' || true
+              printf '%s\n' "$out" | tail -40
+              failed="$failed $crate::$target"
+            fi
+            printf '%s\n' "$out" | grep -E '^test result:' || true
+            n="$(printf '%s\n' "$out" | sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' | awk '{s+=$1} END {print s+0}')"
+            total=$((total + n))
+          done < <(python3 scripts/check-test-env-globals.py --shared-process-targets)
+          echo "shared-process integration suite: executed $total tests across $targets targets (floors $MIN_TESTS / $MIN_TARGETS)"
+          if [ "$targets" -lt "$MIN_TARGETS" ]; then
+            echo "::error title=Shared-process integration suite::The scanner emitted $targets targets, expected at least $MIN_TARGETS. A selector that emits nothing turns this whole step into a no-op that exits 0, so the count is checked as well as the tests. Move the floor together with whatever moved."
+            exit 1
+          fi
+          if [ -n "$failed" ]; then
+            echo "::error title=Shared-process integration suite::Integration test(s) failed in a SHARED process:$failed. nextest gives every test its own process and can never see this class, so a failure here is usually a process global -- an env var, a static, the panic hook -- written by one test and read by another in the same binary. Reproduce it locally with a plain (non-nextest) run of that one target, the same way the lib leg above is reproduced."
+            exit 1
+          fi
+          if [ "$total" -lt "$MIN_TESTS" ]; then
+            echo "::error title=Shared-process integration suite::Executed $total tests, expected at least $MIN_TESTS. A suite that exits 0 having run nothing is not a suite -- a target lost its cases, a file-level cfg excluded them, or the invocation stopped collecting. Move the floor in this step together with whatever moved."
+            exit 1
+          fi
+
       # gh#1055 ask 2 — MOVED here from the `ci` matrix job, where it ran once
       # per native platform for a fact that has no platform component. See the
       # note at its old site for the full reasoning; the command, its strictness

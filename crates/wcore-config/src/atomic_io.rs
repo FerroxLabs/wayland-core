@@ -53,43 +53,204 @@ use std::path::Path;
 /// (`\\?\`) form before the round trip, which lifts the limit at the
 /// Win32 layer regardless of the machine's `LongPathsEnabled` setting.
 pub fn atomic_write<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result<()> {
-    atomic_write_checked(path, contents, || Ok(())).map(|_| ())
+    let path = path.as_ref();
+    let dest = long_path_safe_dest(path)?;
+    let dest = dest.as_ref();
+    let tmp = staged_temp_file(dest, contents)?;
+    tmp.persist(dest).map_err(|e| e.error)
 }
 
-/// [`atomic_write`], with a last-moment check that runs **after** the tempfile
-/// is written and durable and **immediately before** the rename. `Ok(Err(why))`
-/// means the check refused: the rename did not happen and `path` is untouched.
+/// [`atomic_write`], for a caller that may only publish over a destination
+/// whose current contents it has already judged.
 ///
-/// The placement is the entire point. INV-2 has to establish that the file on
-/// disk is still the one it judged before replacing it, and doing that before
-/// `atomic_write` leaves the tempfile write and its `sync_all()` inside the
-/// window — measured, 2 of 24 interleaved saves were still destroyed that way,
-/// because an fsync is milliseconds and a rename is microseconds. Checking
-/// here leaves only the rename.
+/// `accept` is handed the bytes the destination held **at the instant the new
+/// bytes were published** — `None` if it held nothing — and returning
+/// `Err(why)` retracts the publish. `Ok(Err(why))` therefore means the
+/// destination is exactly as it was and `why` says what was found instead.
+///
+/// # Why an exchange and not a re-check
+///
+/// The obvious shape is to re-read the destination and then rename over it,
+/// and that is what this did. It cannot work: the re-read and the rename are
+/// two operations, and an editor saving between them is overwritten. Narrowing
+/// the gap only lowers the rate — measured at ~6.5% with the check moved as
+/// late as it can go, immediately before the rename (#1155).
+///
+/// [`exchange`] closes it instead of narrowing it. `RENAME_EXCHANGE` swaps the
+/// two names in one atomic step, so the bytes that arrive in the temp file
+/// *are* the bytes the destination held at the moment of publication — there
+/// is no second observation to be stale. A save that lost the race is then
+/// detected with certainty and put back by a second exchange.
+///
+/// The cost is a bounded window, between the exchange and the verdict, in
+/// which a crash would leave the new contents published where a re-check would
+/// have refused. The destination is never torn — it holds either the old bytes
+/// or the new ones at every instant — and the window is the same read the
+/// re-check performed anyway, so this is a change of which whole state
+/// survives a crash, not of whether a whole state does.
+///
+/// Where no exchange primitive exists (see [`exchange`]) this falls back to the
+/// re-check, which is racy but no worse than what it replaced.
 pub fn atomic_write_checked<P: AsRef<Path>>(
     path: P,
     contents: &[u8],
-    before_rename: impl FnOnce() -> Result<(), String>,
+    accept: impl FnOnce(Option<&[u8]>) -> Result<(), String>,
 ) -> std::io::Result<Result<(), String>> {
     let path = path.as_ref();
     let dest = long_path_safe_dest(path)?;
     let dest = dest.as_ref();
-    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = staged_temp_file(dest, contents)?;
 
+    match exchange(&tmp, dest)? {
+        Swap::Exchanged => {
+            // `tmp` now names what `dest` held; `dest` names `contents`.
+            let verdict = match std::fs::read(&tmp) {
+                Ok(observed) => accept(Some(&observed)),
+                Err(e) => Err(format!("it could no longer be read ({e})")),
+            };
+            if let Err(why) = verdict {
+                // Retract, by the same atomic step that published.
+                if let Err(e) = exchange(&tmp, dest) {
+                    // The publish stands and the temp file is the only copy of
+                    // what was displaced, so it must not be unlinked on drop.
+                    let kept = tmp.keep()?;
+                    return Err(std::io::Error::other(format!(
+                        "{why}, and the original could not be put back ({e}); \
+                         it is preserved at {}",
+                        kept.display()
+                    )));
+                }
+                return Ok(Err(why));
+            }
+            Ok(Ok(()))
+        }
+        // No exchange to make, or none available. Both fall back to reading the
+        // destination and then renaming over it, which is racy — see above.
+        Swap::Vacant | Swap::Unsupported => {
+            let observed = match std::fs::read(dest) {
+                Ok(bytes) => Some(bytes),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            };
+            if let Err(why) = accept(observed.as_deref()) {
+                return Ok(Err(why));
+            }
+            tmp.persist(dest).map(Ok).map_err(|e| e.error)
+        }
+    }
+}
+
+/// A sibling temp file holding `contents`, fsynced, and already wearing the
+/// destination's permission bits so that publishing it never redefines them.
+fn staged_temp_file(dest: &Path, contents: &[u8]) -> std::io::Result<tempfile::TempPath> {
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(contents)?;
     tmp.as_file().sync_all()?;
-    if let Err(why) = before_rename() {
-        return Ok(Err(why));
-    }
-    // B6 — carry the destination's own mode onto the temp file BEFORE the
-    // rename, so the name is never published with the tempfile's 0600.
+    // B6 — carry the destination's own mode onto the temp file BEFORE it is
+    // published, so the name is never republished with the tempfile's 0600.
     carry_destination_mode(&tmp, dest);
+    Ok(tmp.into_temp_path())
+}
 
-    // `persist()` does the atomic rename. `PersistError` wraps both
-    // the underlying io::Error and the un-renamed temp file; we only
-    // care about the io::Error for callers using `?`.
-    tmp.persist(dest).map(|_| Ok(())).map_err(|e| e.error)
+/// What an attempt to exchange two names did.
+///
+/// Where there is no exchange primitive, [`exchange`] can only ever answer
+/// `Unsupported` and the other two are unconstructible. They are still the
+/// right shape for the outcome, so the enum is kept whole rather than split
+/// into a second, platform-specific one.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+enum Swap {
+    /// The two names were exchanged, atomically.
+    Exchanged,
+    /// The destination does not exist, so there was nothing to exchange with.
+    Vacant,
+    /// This platform, kernel or filesystem has no exchange primitive.
+    Unsupported,
+}
+
+/// Atomically swap the names `a` and `b`, so that each afterwards refers to
+/// what the other referred to. The one place the platform difference lives.
+///
+/// - **Linux** — `renameat2(RENAME_EXCHANGE)`, since 3.15. Invoked as a raw
+///   syscall rather than through the glibc wrapper, which arrived in 2.28 and
+///   does not exist on musl at all.
+/// - **macOS** — `renamex_np(RENAME_SWAP)`, since 10.12. APFS and HFS+ only.
+/// - **Windows and everything else** — [`Swap::Unsupported`]. Win32 has no
+///   exchange: `MoveFileEx` replaces and `ReplaceFile` does not publish the
+///   displaced file under a name the caller chooses, so neither yields the
+///   bytes that were overwritten. The caller falls back to re-check-then-rename,
+///   which is what every platform did before and is therefore not a regression
+///   there — but the race #1155 describes remains open on Windows.
+///
+/// A filesystem that does not implement the flag (overlayfs, several network
+/// filesystems) reports [`Swap::Unsupported`] rather than failing the write.
+#[cfg(target_os = "linux")]
+fn exchange(a: &Path, b: &Path) -> std::io::Result<Swap> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    fn c(p: &Path) -> std::io::Result<CString> {
+        CString::new(p.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+    }
+    let (ca, cb) = (c(a)?, c(b)?);
+
+    // SAFETY: both pointers are NUL-terminated C strings owned by locals that
+    // outlive the call, and AT_FDCWD is the documented "resolve relative to the
+    // working directory" sentinel for the *at family.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2 as libc::c_long,
+            libc::AT_FDCWD,
+            ca.as_ptr(),
+            libc::AT_FDCWD,
+            cb.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if rc == 0 {
+        return Ok(Swap::Exchanged);
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::ENOENT) => Ok(Swap::Vacant),
+        // ENOSYS: kernel older than 3.15. EINVAL / EOPNOTSUPP: the filesystem
+        // does not implement the flag.
+        Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP) => Ok(Swap::Unsupported),
+        _ => Err(err),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn exchange(a: &Path, b: &Path) -> std::io::Result<Swap> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    fn c(p: &Path) -> std::io::Result<CString> {
+        CString::new(p.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+    }
+    let (ca, cb) = (c(a)?, c(b)?);
+
+    // SAFETY: as above — both pointers are NUL-terminated C strings owned by
+    // locals that outlive the call.
+    let rc = unsafe { libc::renamex_np(ca.as_ptr(), cb.as_ptr(), libc::RENAME_SWAP) };
+    if rc == 0 {
+        return Ok(Swap::Exchanged);
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::ENOENT) => Ok(Swap::Vacant),
+        // A volume without VOL_CAP_INT_RENAME_SWAP: FAT, SMB, and others.
+        Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) | Some(libc::EINVAL) => Ok(Swap::Unsupported),
+        _ => Err(err),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn exchange(_a: &Path, _b: &Path) -> std::io::Result<Swap> {
+    Ok(Swap::Unsupported)
 }
 
 /// Copy an EXISTING destination's permission bits onto the temp file that is
@@ -304,6 +465,108 @@ mod tests {
             atomic_write(&deep, b"atomic-2").unwrap();
             assert_eq!(std::fs::read(&deep).unwrap(), b"atomic-2");
         }
+    }
+
+    /// #1155. The pre-image handed to the check is the one the publish
+    /// DISPLACED, not one read back from the path afterwards, and the
+    /// difference is observable: by the time the check runs, the destination
+    /// already holds the new bytes.
+    ///
+    /// This is the whole mechanism, so it is asserted directly rather than
+    /// only through the concurrent arm in `wcore-tools`, which can only ever
+    /// sample the race.
+    #[test]
+    fn the_check_is_handed_the_bytes_the_publish_displaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, b"old").unwrap();
+
+        let mut seen: Option<Vec<u8>> = None;
+        let mut on_disk_during = Vec::new();
+        let r = atomic_write_checked(&p, b"new", |observed| {
+            seen = observed.map(<[u8]>::to_vec);
+            on_disk_during = std::fs::read(&p).unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(r.is_ok());
+        assert_eq!(seen.as_deref(), Some(&b"old"[..]), "displaced bytes");
+        // Where an exchange primitive exists the publish has ALREADY happened
+        // when the check runs, so the destination reads as the new bytes and a
+        // refusal is a rollback. Windows has none (`Swap::Unsupported`), so the
+        // publish degrades to re-check-then-rename and the destination still
+        // reads as the old bytes at check time. That is the #1155 race staying
+        // open on Windows -- documented in `Swap` and stated here rather than
+        // asserted away, because a test that claimed the exchange held on
+        // Windows would be claiming the race was closed there.
+        #[cfg(not(windows))]
+        assert_eq!(
+            on_disk_during, b"new",
+            "the publish precedes the check, so the check is handed what it displaced"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            on_disk_during, b"old",
+            "Windows has no exchange primitive, so the check is a re-read taken \
+             BEFORE the publish -- the race this closes elsewhere is open here"
+        );
+        assert_eq!(std::fs::read(&p).unwrap(), b"new");
+    }
+
+    /// A refused publish leaves the destination byte-identical. The publish has
+    /// already happened when the check runs, so this exercises the rollback,
+    /// not a skipped write.
+    #[test]
+    fn a_refused_publish_puts_the_destination_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, b"theirs").unwrap();
+        let before = std::fs::metadata(&p).unwrap();
+
+        let r = atomic_write_checked(&p, b"ours", |_| Err("changed".to_owned())).unwrap();
+
+        assert_eq!(r, Err("changed".to_owned()));
+        assert_eq!(std::fs::read(&p).unwrap(), b"theirs");
+        // The rolled-back destination is the ORIGINAL file, not a copy of it:
+        // an editor holding it open must not find itself writing to an inode
+        // nothing points at any more.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(&p).unwrap().ino(),
+                before.ino(),
+                "the rollback published a different inode at the destination"
+            );
+        }
+        let _ = before;
+        // And no temp file is left behind.
+        let strays: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "f.txt")
+            .collect();
+        assert!(strays.is_empty(), "left behind {strays:?}");
+    }
+
+    /// An absent destination has nothing to exchange with, so the check is told
+    /// `None` rather than being skipped.
+    #[test]
+    fn an_absent_destination_is_reported_as_no_pre_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("new.txt");
+
+        let mut seen = Some(vec![0u8]);
+        let r = atomic_write_checked(&p, b"body", |observed| {
+            seen = observed.map(<[u8]>::to_vec);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(r.is_ok());
+        assert_eq!(seen, None);
+        assert_eq!(std::fs::read(&p).unwrap(), b"body");
     }
 
     #[test]

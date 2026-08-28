@@ -2733,7 +2733,14 @@ fn approval_policy_to_session(policy: ApprovalPolicy) -> wcore_protocol::command
 }
 
 enum WireModeChange {
-    Rejected,
+    /// wayland#1088 — the local-opt-in gate turned the request down. Carries
+    /// the mode that is STILL in force, because that is the half a host cannot
+    /// derive: the refusal leaves the session where it was, and a host that
+    /// assumed its request landed attributes the resulting all-categories gate
+    /// storm to the engine.
+    Rejected {
+        effective: wcore_protocol::commands::SessionMode,
+    },
     Unchanged,
     Changed(ExecutionPolicySnapshot),
 }
@@ -2748,7 +2755,9 @@ fn apply_wire_mode_change(
     effective_at_unix_ms: u64,
 ) -> Result<WireModeChange, ExecutionPolicySequenceError> {
     if !approval_manager.set_mode_from_wire(mode) {
-        return Ok(WireModeChange::Rejected);
+        return Ok(WireModeChange::Rejected {
+            effective: approval_manager.session_mode(),
+        });
     }
     let policy = sequence
         .current()
@@ -3969,6 +3978,10 @@ async fn settle_deferred_mcp_before_message(
     pending_deferred_mcp.is_none()
 }
 
+// One explicit argument per `add_mcp_server` wire field, so a field the host
+// sends cannot be dropped on the way into the config without this signature
+// changing. Collapsing them into a struct would hide exactly that.
+#[allow(clippy::too_many_arguments)]
 fn to_mcp_server_config(
     transport: &str,
     command: Option<String>,
@@ -3977,6 +3990,7 @@ fn to_mcp_server_config(
     url: Option<String>,
     headers: Option<HashMap<String, String>>,
     allow_local: bool,
+    allowed_tools: Option<Vec<String>>,
 ) -> Result<McpServerConfig, String> {
     let transport_type = match transport {
         "stdio" => TransportType::Stdio,
@@ -3994,6 +4008,7 @@ fn to_mcp_server_config(
         deferred: Some(false),
         allow_local,
         only_for_assistant: None,
+        allowed_tools,
     })
 }
 
@@ -5445,6 +5460,7 @@ async fn run_json_stream_mode(
                 url,
                 headers,
                 allow_local,
+                allowed_tools,
             } => {
                 if let Some(reason) = mcp_add_request_rejection(
                     &name,
@@ -5482,6 +5498,7 @@ async fn run_json_stream_mode(
                     url,
                     headers,
                     allow_local,
+                    allowed_tools,
                 ) {
                     Ok(c) => c,
                     Err(e) => {
@@ -5639,6 +5656,7 @@ async fn run_json_stream_mode(
                                     &name,
                                     &builtin_names,
                                     config.deferred.unwrap_or(true),
+                                    config.allowed_tools.as_deref(),
                                     &defer_cold,
                                 );
                             }
@@ -6049,7 +6067,15 @@ async fn run_json_stream_mode(
                                                     message: format!("mode unchanged: {}", approval_manager.current_mode()),
                                                 });
                                             }
-                                            WireModeChange::Rejected => {
+                                            WireModeChange::Rejected { effective } => {
+                                                // The typed nack FIRST: a host branches on this.
+                                                // The `info` below stays for hosts that only
+                                                // render prose (wayland#1088).
+                                                let _ = writer.emit(&ProtocolEvent::SetModeRefused {
+                                                    requested: mode,
+                                                    effective,
+                                                    reason: wcore_protocol::events::SetModeRefusalReason::LocalOptInRequired,
+                                                });
                                                 let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
                                                     msg_id: String::new(),
                                                     message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
@@ -6475,7 +6501,16 @@ async fn run_json_stream_mode(
                     mode,
                     audit_unix_time_millis()?,
                 )? {
-                    WireModeChange::Rejected => {
+                    WireModeChange::Rejected { effective } => {
+                        // The typed nack FIRST: a host branches on this. The
+                        // `info` below stays for hosts that only render prose
+                        // (wayland#1088).
+                        let _ = writer.emit(&ProtocolEvent::SetModeRefused {
+                            requested: mode,
+                            effective,
+                            reason:
+                                wcore_protocol::events::SetModeRefusalReason::LocalOptInRequired,
+                        });
                         let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
                             msg_id: String::new(),
                             message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
@@ -6979,6 +7014,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .expect("valid MCP config");
 
@@ -8975,6 +9011,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .expect("valid test server config"),
         )]);
@@ -9118,6 +9155,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .expect("valid test server config"),
         )]);
@@ -9208,6 +9246,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .expect("valid test server config"),
         )]);
@@ -9387,6 +9426,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .expect("valid test server config"),
         )]);
@@ -9487,6 +9527,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .expect("valid test server config"),
         )]);
@@ -10130,7 +10171,9 @@ mod tests {
 
         assert!(matches!(
             apply_wire_mode_change(&manager, &mut sequence, SessionMode::Force, 11).unwrap(),
-            WireModeChange::Rejected
+            WireModeChange::Rejected {
+                effective: SessionMode::Default
+            }
         ));
         assert_eq!(sequence.current().revision, 0);
         assert_eq!(

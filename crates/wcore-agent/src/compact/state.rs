@@ -19,6 +19,15 @@ pub struct CompactState {
     /// pressure here — rather than the inflated `max()` — stops auto
     /// compaction from firing prematurely.
     pub last_real_input_tokens: u64,
+    /// FerroxLabs/wayland#1172 — this route's SERVED context window, learned
+    /// from the `usage` the provider already returns.
+    ///
+    /// A self-hosted endpoint's ADVERTISED window is not the number that
+    /// binds: measured against a real `qwen3:8b` on stock Ollama, the model
+    /// advertised 40,960 while the loaded slot was 4,096 and the server
+    /// silently discarded the head of every oversized prompt down to it. Only
+    /// what came BACK reveals that, and it costs no extra request.
+    pub served_window: wcore_config::context_window::ServedWindowTracker,
     /// B7 — the user's ORIGINAL instruction, captured once and re-folded
     /// verbatim into every compaction.
     ///
@@ -39,6 +48,7 @@ impl CompactState {
             consecutive_failures: 0,
             last_input_tokens: 0,
             last_real_input_tokens: 0,
+            served_window: Default::default(),
             pinned_instruction: None,
         }
     }

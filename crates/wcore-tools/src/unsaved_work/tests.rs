@@ -1800,36 +1800,35 @@ fn the_recovered_copy_is_the_prior_file_byte_for_byte() {
     );
 }
 
-/// R22. The pre-write re-read compares bytes, not lengths. A save that
+/// R22. The pre-image verdict compares bytes, not lengths. A save that
 /// replaces a line with one of the same length is exactly the shape a length
 /// check would wave through, and no end-to-end arm can produce it reliably:
 /// the interleaving one measures a save that adds a line.
+///
+/// Asserted against the displaced bytes directly since #1155 — the predicate
+/// no longer reads the path, because a read-back cannot answer this without a
+/// race.
 #[test]
-fn the_pre_write_re_read_compares_bytes_and_not_lengths() {
-    let f = repo();
+fn the_pre_image_verdict_compares_bytes_and_not_lengths() {
     let judged = "TOKEN=aaaaaaaa\n";
     let same_length = "TOKEN=bbbbbbbb\n";
     assert_eq!(judged.len(), same_length.len());
-    let p = f.write("x.env", judged);
 
-    assert!(pre_image_unchanged(&p, Some(judged.as_bytes())).is_ok());
+    assert!(pre_image_matches(Some(judged.as_bytes()), Some(judged.as_bytes())).is_ok());
 
-    f.write("x.env", same_length);
-    let moved = pre_image_unchanged(&p, Some(judged.as_bytes()))
+    let moved = pre_image_matches(Some(same_length.as_bytes()), Some(judged.as_bytes()))
         .expect_err("a same-length change is still a change");
     assert!(moved.contains("changed on disk"), "{moved}");
 
     // Deleted, and created underneath a create, are both changes too.
-    std::fs::remove_file(&p).unwrap();
     assert!(
-        pre_image_unchanged(&p, Some(judged.as_bytes()))
+        pre_image_matches(None, Some(judged.as_bytes()))
             .expect_err("deleted")
             .contains("deleted")
     );
-    assert!(pre_image_unchanged(&p, None).is_ok());
-    f.write("x.env", judged);
+    assert!(pre_image_matches(None, None).is_ok());
     assert!(
-        pre_image_unchanged(&p, None)
+        pre_image_matches(Some(judged.as_bytes()), None)
             .expect_err("created underneath")
             .contains("created")
     );
