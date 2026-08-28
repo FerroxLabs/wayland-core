@@ -152,20 +152,41 @@ fn a_marginal_first_overflow_is_not_yet_distinguishable() {
     );
 }
 
-/// A turn the provider reported no usage for is evidence in NEITHER direction,
-/// and must not be recorded — treating a zero as a real count manufactures a
-/// regression on the following turn.
+/// A turn the provider reported no usage for is evidence in NEITHER direction.
+///
+/// It must not manufacture a regression on the following turn - and, the half
+/// this test was missing until a mutation run caught it surviving, it must not
+/// ERASE the baseline either. A zero recorded as though it were a real count
+/// blinds the regression arm to the very next truncated turn, which is the one
+/// case the arm exists for.
 #[test]
-fn an_unreported_turn_does_not_manufacture_a_regression() {
+fn an_unreported_turn_neither_fakes_a_regression_nor_erases_the_baseline() {
+    // Half one: the zero must not become something to regress FROM.
     let mut tracker = ServedWindowTracker::default();
     assert_eq!(tracker.observe(ROUTE, 4489, 4050), None);
-    assert_eq!(tracker.observe(ROUTE, 4500, 0), None);
+    assert_eq!(
+        tracker.observe(ROUTE, 4500, 0),
+        None,
+        "a zero is not a count"
+    );
     assert_eq!(
         tracker.observe(ROUTE, 4617, 4100),
         None,
         "4,100 is MORE than the 4,050 two turns back; a zero in between must not have \
-         become the baseline"
+         become the baseline it regressed from"
     );
+
+    // Half two: the same gap, but the turn after it is the MEASURED
+    // truncation. The 4,050 baseline has to have survived the unreported turn
+    // for the regression arm to still see it.
+    let mut tracker = ServedWindowTracker::default();
+    assert_eq!(tracker.observe(ROUTE, 4489, 4050), None);
+    assert_eq!(tracker.observe(ROUTE, 4500, 0), None);
+    let evidence = tracker
+        .observe(ROUTE, 4617, 3910)
+        .expect("an unreported turn must not blind the detector to the next truncated one");
+    assert_eq!(evidence.signal, TruncationSignal::Regression);
+    assert_eq!(evidence.served_window, 4050);
 }
 
 /// Observations are per-route. A different provider or model tokenizes
