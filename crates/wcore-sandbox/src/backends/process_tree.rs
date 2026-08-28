@@ -245,11 +245,12 @@ fn terminate_process_tree(
 ///
 /// Deliberately NOT gated on a single target. The parked loops that consume
 /// it are per-platform, but the RULE is the whole defect, so it is compiled
-/// and tested on every Unix host rather than only on the leg that fails.
-#[cfg(unix)]
+/// and tested on every host rather than only on the leg that fails. Since
+/// FerroxLabs/wayland#1156 that includes Windows: the `acp serve` child parks
+/// on its inherited parent-death channel through [`sentinel_park_decision_io`]
+/// on every platform, so the enum can no longer be Unix-gated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // per-target: consumed by the Linux and macOS sentinels.
-enum SentinelPark {
+pub enum SentinelPark {
     /// Stay in the group and keep pinning this process-group generation.
     KeepParked,
     /// The channel is really gone: leave the group and exit.
@@ -287,8 +288,7 @@ enum SentinelPark {
 ///
 /// Staying parked is therefore the fail-CLOSED direction.
 #[cfg(unix)]
-#[allow(dead_code)] // per-target: called by the Linux and macOS sentinels.
-fn sentinel_park_decision(read: isize, errno: libc::c_int) -> SentinelPark {
+pub fn sentinel_park_decision(read: isize, errno: libc::c_int) -> SentinelPark {
     // A byte arrived. Nobody writes to this channel in production, but a
     // wakeup carrying data is still not the channel closing.
     if read > 0 {
@@ -302,6 +302,55 @@ fn sentinel_park_decision(read: isize, errno: libc::c_int) -> SentinelPark {
     // `read == 0` is a genuine EOF (the parent dropped the channel); any
     // other errno is a genuine failure. Both mean the pin is over.
     SentinelPark::Release
+}
+
+/// The same rule, applied to one [`std::io::Read::read`] return.
+///
+/// The sentinels above park on a raw `libc::read` and call
+/// [`sentinel_park_decision`] directly. A process that inherits its parent
+/// channel as an ordinary handle rather than forking into a group — the
+/// `acp serve --profile` child the profile supervisor spawns
+/// (FerroxLabs/wayland#1156) — parks on `Read::read` instead, and must NOT
+/// re-derive the rule: an interrupted read there would shut a healthy server
+/// down as if its supervisor had died.
+///
+/// On Unix this delegates, so there is literally one decision. Elsewhere it
+/// states the identical rule in `ErrorKind` terms, which is what `EINTR` maps
+/// to.
+#[cfg(unix)]
+pub fn sentinel_park_decision_io(read: &std::io::Result<usize>) -> SentinelPark {
+    match read {
+        // A read return cannot exceed `isize::MAX`; the saturating conversion
+        // exists so this cannot wrap into the `read < 0` arm.
+        Ok(n) => sentinel_park_decision(isize::try_from(*n).unwrap_or(isize::MAX), 0),
+        Err(e) => {
+            // A syscall error carries its errno. A `Read` decorator can report
+            // the SAME interruption as a kind-only `Interrupted` with no errno
+            // at all, and the two spellings must not disagree: taking
+            // `raw_os_error` alone would release an interrupted park here while
+            // the non-Unix arm below kept it, which is the #1054 defect
+            // reintroduced on one platform. Anything else with no errno is a
+            // channel we can no longer read, and still releases.
+            let errno = e.raw_os_error().unwrap_or({
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    libc::EINTR
+                } else {
+                    0
+                }
+            });
+            sentinel_park_decision(-1, errno)
+        }
+    }
+}
+
+/// See the Unix arm above — same rule, no errno to consult.
+#[cfg(not(unix))]
+pub fn sentinel_park_decision_io(read: &std::io::Result<usize>) -> SentinelPark {
+    match read {
+        Ok(n) if *n > 0 => SentinelPark::KeepParked,
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => SentinelPark::KeepParked,
+        _ => SentinelPark::Release,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -801,6 +850,61 @@ mod sentinel_park_tests {
     fn a_byte_on_the_channel_keeps_the_sentinel_parked() {
         assert_eq!(
             sentinel_park_decision(1, 0),
+            SentinelPark::KeepParked,
+            "a wakeup carrying data is not the channel closing"
+        );
+    }
+}
+
+/// The adapter carries the #1054 rule onto every platform, so its tests are
+/// NOT Unix-gated: the `acp serve` parent-death channel consumes it on Windows
+/// too, where a released park is the server exiting under a live supervisor.
+#[cfg(test)]
+mod sentinel_park_io_tests {
+    use super::{SentinelPark, sentinel_park_decision_io};
+
+    #[test]
+    fn an_interrupted_read_never_releases_the_park() {
+        let interrupted = Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+        assert_eq!(
+            sentinel_park_decision_io(&interrupted),
+            SentinelPark::KeepParked,
+            "EINTR is this process failing to stay asleep, not the parent dropping the channel"
+        );
+    }
+
+    /// The other spelling of the same report: what a real `read` syscall hands
+    /// back. Both must decide identically — see the Unix arm of the adapter.
+    #[cfg(unix)]
+    #[test]
+    fn a_raw_eintr_never_releases_the_park() {
+        let interrupted = Err(std::io::Error::from_raw_os_error(libc::EINTR));
+        assert_eq!(
+            sentinel_park_decision_io(&interrupted),
+            SentinelPark::KeepParked,
+            "a raw EINTR must decide exactly as the kind-only spelling does"
+        );
+    }
+
+    #[test]
+    fn eof_or_a_real_error_releases_the_park() {
+        assert_eq!(
+            sentinel_park_decision_io(&Ok(0)),
+            SentinelPark::Release,
+            "a zero-length read is the parent dropping the channel"
+        );
+        let broken = Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        assert_eq!(
+            sentinel_park_decision_io(&broken),
+            SentinelPark::Release,
+            "a non-interruption error means the channel can no longer be read"
+        );
+    }
+
+    #[test]
+    fn a_byte_on_the_channel_keeps_the_park() {
+        assert_eq!(
+            sentinel_park_decision_io(&Ok(1)),
             SentinelPark::KeepParked,
             "a wakeup carrying data is not the channel closing"
         );

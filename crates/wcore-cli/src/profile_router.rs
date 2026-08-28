@@ -27,6 +27,12 @@
 //!   * **Signal-safe reaping.** Live children are held in a process-global
 //!     registry so the signal handler (which `std::process::exit`s, bypassing
 //!     `Drop`) can reap every child — no orphaned credential-bearing processes.
+//!   * **No child outlives the supervisor, observed exit or not.** Every reaping
+//!     path above needs the supervisor to still be running. A SIGKILL, a panic
+//!     or the OOM killer gives it no such chance, so each child also holds the
+//!     read end of a pipe whose write end this process keeps: the kernel closes
+//!     it on our death however we die, and the child exits on that EOF. See
+//!     [`crate::parent_channel`] (FerroxLabs/wayland#1156).
 //!   * **Bounded.** Concurrent children are capped.
 
 use std::collections::HashMap;
@@ -149,7 +155,21 @@ const ENV_PASSTHROUGH: &[&str] = &[
 /// bypasses every `Drop`; without a sync-reachable registry, a SIGTERM/SIGINT/
 /// SIGHUP would orphan every credential-bearing child. A plain `std::sync::Mutex`
 /// (not the tokio one) so it is lockable from the non-async signal path.
-static LIVE_CHILDREN: StdMutex<Option<HashMap<u32, ProcChild>>> = StdMutex::new(None);
+static LIVE_CHILDREN: StdMutex<Option<HashMap<u32, LiveChild>>> = StdMutex::new(None);
+
+/// One live per-profile child: the OS handle, plus the supervisor's end of its
+/// parent-death channel.
+///
+/// The channel end is held for EXACTLY the child's registered lifetime and is
+/// never written to. Its whole job is to be closed — by `reap_child` here, or
+/// by the kernel when this supervisor dies by any means at all. That second
+/// case is the one no cleanup path below can cover, and is why a SIGKILLed
+/// supervisor used to leave a child running on PPID 1 forever
+/// (FerroxLabs/wayland#1156). See [`crate::parent_channel`].
+struct LiveChild {
+    proc: ProcChild,
+    channel: std::io::PipeWriter,
+}
 
 /// Set once a shutdown reap has begun. Checked by `register_child` UNDER the
 /// `LIVE_CHILDREN` lock so a child spawned in the narrow window between
@@ -163,15 +183,23 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 /// instead of registered (it would otherwise outlive the exiting supervisor).
 /// The returned pid then refers to a dead process, so the caller's health-check
 /// fails and `open()` fails closed — no orphan, no half-up child.
-fn register_child(mut child: ProcChild) -> u32 {
+fn register_child(mut child: ProcChild, channel: std::io::PipeWriter) -> u32 {
     let pid = child.id();
     let mut g = LIVE_CHILDREN.lock().unwrap_or_else(|e| e.into_inner());
     if SHUTTING_DOWN.load(Ordering::SeqCst) {
         let _ = child.kill();
         let _ = child.wait();
+        // `channel` drops here too, so even a child that somehow survived the
+        // kill sees its parent channel close and exits.
         return pid;
     }
-    g.get_or_insert_with(HashMap::new).insert(pid, child);
+    g.get_or_insert_with(HashMap::new).insert(
+        pid,
+        LiveChild {
+            proc: child,
+            channel,
+        },
+    );
     pid
 }
 
@@ -180,7 +208,7 @@ fn register_child(mut child: ProcChild) -> u32 {
 fn child_exited(pid: u32) -> bool {
     let mut g = LIVE_CHILDREN.lock().unwrap_or_else(|e| e.into_inner());
     match g.as_mut().and_then(|m| m.get_mut(&pid)) {
-        Some(child) => matches!(child.try_wait(), Ok(Some(_))),
+        Some(child) => matches!(child.proc.try_wait(), Ok(Some(_))),
         None => true,
     }
 }
@@ -192,8 +220,11 @@ fn reap_child(pid: u32) {
     if let Some(map) = g.as_mut()
         && let Some(mut child) = map.remove(&pid)
     {
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = child.proc.kill();
+        let _ = child.proc.wait();
+        // Closing the parent channel is the second, independent line: it is
+        // what stops a child that outran the kill.
+        drop(child.channel);
     }
 }
 
@@ -210,8 +241,9 @@ pub fn reap_all_children_blocking() {
     let mut g = LIVE_CHILDREN.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(map) = g.as_mut() {
         for (_pid, mut child) in map.drain() {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = child.proc.kill();
+            let _ = child.proc.wait();
+            drop(child.channel);
         }
     }
 }
@@ -339,9 +371,20 @@ impl CliProfileRouter {
         cmd.args(["acp", "serve", "--profile", name, "--bind", &bind])
             .env("WAYLAND_ACP_SERVER_KEY", &key)
             .env("WAYLAND_HOME", dir)
-            .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log2));
+        // The child's ONLY link to our liveness, and it REPLACES the
+        // `Stdio::null()` stdin that used to sit here. Do not put that back:
+        // `process_group(0)` below detaches the child from every signal our
+        // group receives, so with a null stdin it held no handle that closes
+        // when we die. A supervisor that is SIGKILLed, panics or is OOM-killed
+        // then left it running forever on PPID 1, still bound to its port and
+        // still holding this profile's credentials (FerroxLabs/wayland#1156).
+        let channel = crate::parent_channel::attach(&mut cmd).map_err(|e| {
+            AcpError::Transport(format!(
+                "open parent channel for profile child {name:?}: {e}"
+            ))
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt as _;
@@ -355,7 +398,7 @@ impl CliProfileRouter {
 
         let base = format!("http://127.0.0.1:{port}");
         let client = AcpClient::new(base)?.with_api_key(key);
-        let pid = register_child(proc);
+        let pid = register_child(proc, channel);
         Ok(ChildMeta {
             pid,
             client,

@@ -287,6 +287,14 @@ rand.workspace = true
 # We need Win32_Foundation (BOOL, HANDLE) + Win32_System_Threading
 # (OpenProcess, GetExitCodeProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 # STILL_ACTIVE) + Win32_Security (no-op, pulled in by Foundation).
+[target.'cfg(unix)'.dependencies]
+# FerroxLabs/wayland#1156: `parent_channel::exit_orphaned` signals this
+# process's own process group when its supervisor dies, so an orphaned
+# `acp serve --profile` child takes the tree it started down with it. There is
+# no std equivalent, and `libc` is already in this crate's build graph (and its
+# dev-dependencies) — this compiles nothing new.
+libc.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
@@ -301,6 +309,9 @@ windows-sys = { version = "0.59", features = [
 # (wcore-agent does), so `cargo nextest run -p wcore-cli` alone fails to build
 # while a whole-workspace run passes. Declare it where it is used.
 tokio = { workspace = true, features = ["test-util"] }
+# Unconditional here (not `cfg(unix)` as in [dependencies]): the Windows test
+# builds compile these test files too, and their cfg-gated arms still need the
+# crate in scope to resolve.
 libc.workspace = true
 # P2: `p2_open_admission_entry_points` asserts the refusal carries a real
 # admission-shape token. It pins the CURRENT encoding via
