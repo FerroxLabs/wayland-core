@@ -19,6 +19,7 @@ use wcore_providers::{LlmProvider, ProviderError, create_provider};
 use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason, TokenUsage};
+use wcore_types::reasoning_filter::ReasoningFilter;
 use wcore_types::skill_types::{ContextModifier, PlanModeTransition, effort_to_string};
 
 use crate::approval::ApprovalBridge;
@@ -13010,6 +13011,19 @@ impl AgentEngine {
                  finish: write large files in several smaller calls rather than one big \
                  one, and put no more than is necessary in each tool argument.";
             let mut assistant_text = String::new();
+            // #908 — `assistant_text` is the DURABLE copy of the turn: it
+            // becomes the assistant `ContentBlock::Text`, the session mirror
+            // and the journal entry, and it is replayed to the provider on the
+            // next request. Every sink already strips inline `<think>`-class
+            // reasoning out of the streamed copy, but the raw delta was pushed
+            // here — so a resumed session re-rendered reasoning the live stream
+            // had hidden, and the tags went back upstream. This filter is the
+            // history-side twin of the sinks': it is deliberately SEPARATE
+            // from any sink's, because a sink may be absent, may be one of
+            // several, and drains its own capture buffer on its own schedule.
+            // Stateful across deltas, because a tag straddles chunk
+            // boundaries; reset per attempt alongside `assistant_text`.
+            let mut assistant_reasoning = ReasoningFilter::new();
             let mut thinking_text = String::new();
             // C-4b — an opaque provider signature covering this turn's
             // reasoning (Gemini `thoughtSignature` on a thought part). Kept
@@ -13044,6 +13058,7 @@ impl AgentEngine {
                 // Reset per-attempt accumulators so a retry never
                 // double-commits text/tool-calls from a failed attempt.
                 assistant_text.clear();
+                assistant_reasoning.reset();
                 thinking_text.clear();
                 let _ = thinking_signature.take();
                 tool_calls.clear();
@@ -14092,8 +14107,12 @@ impl AgentEngine {
                     let Some(event) = event else { break };
                     match event {
                         LlmEvent::TextDelta(text) => {
+                            // The sink keeps receiving the RAW delta: the TUI
+                            // does not delete reasoning, it captures it and
+                            // renders a collapsed `Thought:` block. Only the
+                            // durable copy is filtered (#908).
                             self.output.emit_text_delta(&text, &self.current_msg_id);
-                            assistant_text.push_str(&text);
+                            assistant_text.push_str(&assistant_reasoning.process(&text));
                         }
                         LlmEvent::ToolUse {
                             id,

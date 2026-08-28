@@ -30,7 +30,7 @@
 //! [`ChannelSink`]/[`ChannelEmitter`] per-event mapping verbatim — no
 //! duplicate `ProtocolEvent` construction.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -54,6 +54,7 @@ use wcore_protocol::ToolApprovalManager;
 use wcore_protocol::events::{FinishReason, ProtocolEvent, ToolStatus};
 use wcore_protocol::writer::ProtocolEmitter;
 use wcore_types::execution_policy::{ApprovalPolicy, PolicySource};
+use wcore_types::reasoning_filter::ReasoningFilter;
 
 use crate::tui::{ChannelEmitter, ChannelSink};
 
@@ -435,6 +436,25 @@ struct ProtocolToMessageStream {
     /// dedup. Without this stash that (common, retryable-provider-error)
     /// terminal would ship `turn_id = ""` and collapse the dedup key.
     turn_id: String,
+    /// #908 — inline-reasoning split for the ACP text lane.
+    ///
+    /// The relay's sink (`crate::tui::ChannelSink`) forwards the engine's RAW
+    /// text deltas — unlike `ProtocolSink`/`wcore_agent`'s `ChannelSink`, it
+    /// runs no filter — so this projection is the last point before an ACP
+    /// host renders them. Without it an R1/Qwen-class model puts a literal
+    /// `<think>…</think>` (or a bare `</thought>` whose opener the provider
+    /// swallowed) into the host's assistant bubble.
+    ///
+    /// Stateful across frames by design: a tag straddles a delta boundary
+    /// (`<thi` | `nk>`). Per-turn by construction — one stream per `run_turn`.
+    reasoning: ReasoningFilter,
+    /// Frames produced by [`Self::project`] beyond the one it returns.
+    ///
+    /// One `TextDelta` can yield both a `Thinking` frame (the reasoning the
+    /// filter withheld) and a `TextDelta` (what is left), but `project`
+    /// returns at most one. `poll_next` drains this first, so ordering and the
+    /// terminal frame are both preserved.
+    pending: VecDeque<MessageEvent>,
 }
 
 impl ProtocolToMessageStream {
@@ -444,6 +464,8 @@ impl ProtocolToMessageStream {
             done: false,
             pending_calls: HashMap::new(),
             turn_id: String::new(),
+            reasoning: ReasoningFilter::new(),
+            pending: VecDeque::new(),
         }
     }
 
@@ -470,7 +492,25 @@ impl ProtocolToMessageStream {
             }
             ProtocolEvent::TextDelta { text, msg_id } => {
                 self.stash_turn_id(&msg_id);
-                Some(MessageEvent::TextDelta { text })
+                // #908 — split inline reasoning out of the visible lane. The
+                // withheld body rides the typed `Thinking` frame rather than
+                // being deleted, so an ACP host renders a model's reasoning
+                // collapsed exactly as it does a provider-native thought.
+                let visible = self.reasoning.process(&text);
+                let captured = self.reasoning.take_captured_delta();
+                if !captured.is_empty() {
+                    self.pending
+                        .push_back(MessageEvent::Thinking { text: captured });
+                }
+                // A frame the filter consumed WHOLE (pure reasoning, or the
+                // leading half of a straddling tag) must not become an empty
+                // `TextDelta`: a host that counts deltas to decide "the model
+                // answered" would read a reasoning-only turn as an answer.
+                if !visible.is_empty() {
+                    self.pending
+                        .push_back(MessageEvent::TextDelta { text: visible });
+                }
+                self.pending.pop_front()
             }
             ProtocolEvent::Thinking { text, msg_id, .. } => {
                 self.stash_turn_id(&msg_id);
@@ -600,10 +640,16 @@ impl Stream for ProtocolToMessageStream {
     type Item = MessageEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.done {
-            return Poll::Ready(None);
-        }
         loop {
+            // #908 — `project` can produce two frames from one `TextDelta`
+            // (withheld reasoning + what is left). Drain before receiving, so
+            // ordering holds and nothing is stranded behind the terminal.
+            if let Some(queued) = self.pending.pop_front() {
+                return Poll::Ready(Some(queued));
+            }
+            if self.done {
+                return Poll::Ready(None);
+            }
             match self.rx.poll_recv(cx) {
                 Poll::Ready(Some(ev)) => {
                     if let Some(out) = self.project(ev) {
@@ -1294,6 +1340,64 @@ mod tests {
             description: "desc".to_string(),
             escalation: None,
         }
+    }
+
+    /// #908 — the ACP relay's sink (`crate::tui::ChannelSink`) forwards the
+    /// engine's RAW text deltas, so this projection is the last place before
+    /// an ACP host renders them. Without a filter here an R1/Qwen-class model
+    /// puts `<think>…</think>` — and a bare `</thought>` whose opener the
+    /// provider swallowed — straight into the host's assistant bubble.
+    #[tokio::test]
+    async fn projection_strips_inline_reasoning_and_routes_it_to_thinking() {
+        let events = vec![
+            ProtocolEvent::StreamStart { msg_id: "m".into() },
+            ProtocolEvent::TextDelta {
+                text: "<think>hid".into(),
+                msg_id: "m".into(),
+            },
+            // The tag straddles the delta boundary — a per-frame filter misses
+            // it, so the projection's filter has to be stateful across frames.
+            ProtocolEvent::TextDelta {
+                text: "den</thi".into(),
+                msg_id: "m".into(),
+            },
+            ProtocolEvent::TextDelta {
+                text: "nk>visible</thought>".into(),
+                msg_id: "m".into(),
+            },
+            ProtocolEvent::StreamEnd {
+                msg_id: "m".into(),
+                finish_reason: FinishReason::Stop,
+                usage: None,
+                usage_delta: None,
+                agent_run_id: None,
+            },
+        ];
+        let out = project_all(events).await;
+
+        let visible: String = out
+            .iter()
+            .filter_map(|e| match e {
+                MessageEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            visible, "visible",
+            "reasoning leaked into the ACP text lane"
+        );
+
+        let thinking: String = out
+            .iter()
+            .filter_map(|e| match e {
+                MessageEvent::Thinking { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            thinking, "hidden",
+            "the withheld reasoning must be re-emitted, not deleted"
+        );
     }
 
     #[tokio::test]
