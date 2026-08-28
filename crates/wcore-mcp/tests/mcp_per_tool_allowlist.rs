@@ -119,12 +119,35 @@ fn tool_def(name: &str) -> McpToolDef {
 }
 
 fn config_with(allowed: Option<Vec<String>>) -> wcore_config::config::McpServerConfig {
+    config_for(wcore_config::config::TransportType::Stdio, allowed)
+}
+
+/// The same declaration under an explicit transport.
+///
+/// This matters for more than coverage. On the Wayland desktop, a **stdio**
+/// connector's per-tool selection is ALSO enforced outside core, by a spawn
+/// shim that re-exports only the allowed tools, so a stdio test can pass with
+/// core doing nothing at all. **Hosted http/sse has no spawn to wrap**, so core
+/// is the only enforcement that exists on those transports — and the config
+/// file path is core's alone on every transport.
+///
+/// Nothing here spawns a process: the fixture transport below is an in-process
+/// `McpTransport` impl, so no shim can be interposed and no pass can be
+/// attributed to one. The transport is nonetheless varied explicitly, because
+/// "the registration seam does not branch on transport" is a property worth
+/// asserting rather than assuming.
+fn config_for(
+    transport: wcore_config::config::TransportType,
+    allowed: Option<Vec<String>>,
+) -> wcore_config::config::McpServerConfig {
+    use wcore_config::config::TransportType;
+    let hosted = !matches!(transport, TransportType::Stdio);
     wcore_config::config::McpServerConfig {
-        transport: wcore_config::config::TransportType::Stdio,
-        command: Some("warehouse".to_string()),
+        command: (!hosted).then(|| "warehouse".to_string()),
+        url: hosted.then(|| "https://warehouse.example/mcp".to_string()),
+        transport,
         args: None,
         env: None,
-        url: None,
         headers: None,
         deferred: Some(false),
         allow_local: false,
@@ -335,4 +358,110 @@ fn the_allowlist_matches_the_advertised_name_under_a_collision_prefix() {
         registry.get("mcp__warehouse__payroll_wipe").is_none(),
         "and so must the denial"
     );
+}
+
+/// CORRECTION 2/3 — the transport that has no other enforcement.
+///
+/// A hosted `streamable-http` (or `sse`) MCP server is never spawned, so the
+/// desktop's stdio spawn shim cannot filter it. Whatever core registers is what
+/// the model can call. This is the case where core's half of #998 is the ONLY
+/// thing standing between a switched-off tool and a live dispatch, so it is
+/// asserted directly rather than inferred from the stdio case.
+#[test]
+fn a_denied_tool_is_not_registered_on_a_hosted_http_server() {
+    use wcore_config::config::TransportType;
+
+    for transport in [TransportType::StreamableHttp, TransportType::Sse] {
+        let (_t, manager, _) = fixture(None);
+        let mut configs = HashMap::new();
+        configs.insert(
+            "warehouse".to_string(),
+            config_for(
+                transport.clone(),
+                Some(vec!["inventory_reserve".to_string()]),
+            ),
+        );
+        let defer_cold = wcore_config::tools::DeferColdConfig::default();
+
+        let mut registry = wcore_tools::registry::ToolRegistry::new();
+        wcore_mcp::tool_proxy::register_mcp_tools(
+            &mut registry,
+            &manager,
+            &[],
+            &configs,
+            &defer_cold,
+        );
+
+        assert!(
+            registry.get("inventory_reserve").is_some(),
+            "{transport:?}: the allowed tool must still register"
+        );
+        assert!(
+            registry.get("payroll_wipe").is_none(),
+            "{transport:?}: core is the ONLY enforcement on a hosted transport - \
+             there is no spawn to interpose a filter on"
+        );
+    }
+}
+
+/// "Disable all" on a hosted transport, which is the state that reaches core
+/// through the config file. Nothing else can withhold these tools.
+#[test]
+fn an_empty_allowlist_disables_every_tool_on_a_hosted_http_server() {
+    let (_t, manager, _) = fixture(None);
+    let mut configs = HashMap::new();
+    configs.insert(
+        "warehouse".to_string(),
+        config_for(
+            wcore_config::config::TransportType::StreamableHttp,
+            Some(Vec::new()),
+        ),
+    );
+    let defer_cold = wcore_config::tools::DeferColdConfig::default();
+
+    let mut registry = wcore_tools::registry::ToolRegistry::new();
+    wcore_mcp::tool_proxy::register_mcp_tools(&mut registry, &manager, &[], &configs, &defer_cold);
+
+    assert!(registry.get("inventory_reserve").is_none());
+    assert!(registry.get("payroll_wipe").is_none());
+}
+
+/// The registration decision must not depend on the transport at all. Asserted
+/// rather than assumed: if a future change ever made enforcement conditional on
+/// a spawn being available, hosted servers would silently lose their only
+/// filter and this is the test that would say so.
+#[test]
+fn the_decision_is_identical_across_every_transport() {
+    use wcore_config::config::TransportType;
+
+    let registered_under = |transport: TransportType| -> Vec<String> {
+        let (_t, manager, _) = fixture(None);
+        let mut configs = HashMap::new();
+        configs.insert(
+            "warehouse".to_string(),
+            config_for(transport, Some(vec!["inventory_reserve".to_string()])),
+        );
+        let defer_cold = wcore_config::tools::DeferColdConfig::default();
+        let mut registry = wcore_tools::registry::ToolRegistry::new();
+        wcore_mcp::tool_proxy::register_mcp_tools(
+            &mut registry,
+            &manager,
+            &[],
+            &configs,
+            &defer_cold,
+        );
+        let mut names: Vec<String> = registry
+            .to_tool_defs()
+            .into_iter()
+            .filter(|t| t.server.as_deref() == Some("warehouse"))
+            .map(|t| t.name)
+            .collect();
+        names.sort();
+        names
+    };
+
+    let stdio = registered_under(TransportType::Stdio);
+    assert_eq!(stdio, vec!["inventory_reserve".to_string()]);
+    assert_eq!(registered_under(TransportType::StreamableHttp), stdio);
+    assert_eq!(registered_under(TransportType::Sse), stdio);
 }

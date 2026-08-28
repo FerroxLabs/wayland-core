@@ -735,7 +735,9 @@ impl EngineSession {
             return Ok(());
         }
         Err(AcpError::Session(format!(
-            "session tool selection is fixed for the session's lifetime: this session was              created with tools [{}] and this turn requested [{}]. Open a new session to use              a different tool selection.",
+            "session tool selection is fixed for the session's lifetime: this session \
+             was created with tools [{}] and this turn requested [{}]. Open a new \
+             session to use a different tool selection.",
             if self.bound_tools.is_empty() {
                 "<all>".to_string()
             } else {
