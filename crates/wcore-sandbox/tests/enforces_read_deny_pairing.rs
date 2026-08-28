@@ -127,9 +127,10 @@ async fn every_enforcing_backend_reports_it_and_every_relaxed_one_does_not() {
             "sandbox_exec claims to enforce fs_read_deny"
         );
         let (unix_secret, unix_manifest) = denied_secret_unix_literals();
-        let profile =
-            wcore_sandbox::backends::sandbox_exec::SandboxExecBackend::build_profile(&unix_manifest)
-                .expect("the profile must build for a manifest with an ordinary path");
+        let profile = wcore_sandbox::backends::sandbox_exec::SandboxExecBackend::build_profile(
+            &unix_manifest,
+        )
+        .expect("the profile must build for a manifest with an ordinary path");
         let rule = format!(
             "(deny file-read* (subpath \"{}\"))",
             unix_secret.to_string_lossy()
@@ -143,7 +144,10 @@ async fn every_enforcing_backend_reports_it_and_every_relaxed_one_does_not() {
         // enclosing root is inert. The ordering is part of the enforcement.
         let allow_root = format!(
             "(subpath \"{}\")",
-            unix_secret.parent().expect("literal has a parent").to_string_lossy()
+            unix_secret
+                .parent()
+                .expect("literal has a parent")
+                .to_string_lossy()
         );
         if let Some(a) = profile.find(&allow_root) {
             assert!(
