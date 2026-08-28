@@ -37,7 +37,8 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     let m = model.to_ascii_lowercase();
 
     // --- Anthropic Claude (4.x/5 era; older 3.x deliberately excluded) ---
-    // The 1M-context generation (Opus 4.6/4.7/4.8, Sonnet 4.6, Sonnet 5, Fable 5)
+    // The 1M-context generation (Opus 4.6/4.7/4.8, Opus 5, Sonnet 4.6, Sonnet 5,
+    // Fable 5)
     // serves the full 1,000,000-token window and 128k output BY DEFAULT — no
     // beta header, no long-context premium (verified against docs.anthropic.com,
     // 2026-07-04: "Opus 4.8 serves the full 1M context window by default with no
@@ -45,7 +46,21 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     // 4.x (Opus 4.0/4.1/4.5, Sonnet 4.0/4.5, Haiku 4.5) stay at 200k. Cross-
     // checked against models.dev (2026-07-04). Match newest-first so a 4.8 id
     // never falls through to the 200k arm.
-    if m.contains("opus-4-6") || m.contains("opus-4-7") || m.contains("opus-4-8") {
+    // `opus-5` joins the 1M arm (models.dev, 2026-08-28). It had NO arm, and a
+    // missing arm is NOT the 200k default: `known_context_window` returns None,
+    // compaction substitutes `UNVERIFIED_CONTEXT_WINDOW` (32,768) and the
+    // non-omit-safe `anthropic_defaults()` preset clamps output to `UNKNOWN_CAP`
+    // (8,192) — a 30x undersize on Anthropic's current flagship. The three
+    // vendor-operated providers agree exactly: `anthropic` claude-opus-5,
+    // `google-vertex` claude-opus-5@default and `amazon-bedrock`
+    // anthropic.claude-opus-5 all report 1,000,000 / 128,000. The `opus-5`
+    // fragment also covers `claude-opus-5-fast`, which every provider that
+    // serves it lists at the same figures.
+    if m.contains("opus-4-6")
+        || m.contains("opus-4-7")
+        || m.contains("opus-4-8")
+        || m.contains("opus-5")
+    {
         return Some((128_000, 1_000_000));
     }
     if m.contains("opus-4-5") {
@@ -81,6 +96,18 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     // "gpt-4.1" never falls through to the 4o branch.
     if m.contains("gpt-4.1") {
         return Some((32_768, 1_000_000));
+    }
+    // The MAY-2024 gpt-4o snapshot is the one dated id that is NOT 16,384: its
+    // real output cap is 4,096 (models.dev 2026-08-28 — vendor row `openai`
+    // gpt-4o-2024-05-13 out=4096, plus kilo / merge-gateway / openrouter /
+    // orcarouter, all 4,096). This is the only OVER-claim in this table that
+    // bites at default settings: `size_output_cap` sends
+    // min(config_max 64_000, ceiling, room), so the generic arm put 16,384 on
+    // the wire against a 4,096 cap — a hard 400 mid-run, not a truncation. Must
+    // be matched BEFORE the generic arm. The sibling snapshots `-2024-08-06`
+    // and `-2024-11-20` are genuinely 16,384 and do not contain this fragment.
+    if m.contains("gpt-4o-2024-05-13") {
+        return Some((4_096, 128_000));
     }
     if m.contains("gpt-4o") {
         return Some((16_384, 128_000));
@@ -142,13 +169,19 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     // Added 2026-08-28. With no arm the whole 4.x family fell to the
     // `CompactConfig` default and compacted a 1M-window model at 200k.
     //
-    // The OUTPUT figures here are the vendor's own, NOT the conservative
-    // under-claim this table uses elsewhere, and that is deliberate: adding an
-    // arm REVOKES `should_omit_max_tokens`, so until now these ids sent no
-    // max_tokens at all and got xAI's natural ceiling. An arm that "errs low"
-    // would not be free here — it would be the first thing ever to cut their
-    // output. Vendor rows (models.dev provider `xai`, 2026-08-28) are the only
-    // source for these ids; no reseller serves them.
+    // OUTPUT CAVEAT (4.5 / 4.6): the 500,000 output figure below is UNSOURCED.
+    // The only vendor-operated row for these ids (models.dev provider `xai`,
+    // re-pulled 2026-08-28) is DEGENERATE — out == ctx == 500,000 — which by
+    // this file's own rule means the vendor published "unknown", never a
+    // ceiling. `amazon-bedrock` (xai.grok-4.6) repeats the same degenerate pair,
+    // so it is not an independent source. No vendor-operated, non-degenerate
+    // output figure exists for grok-4.5/4.6, and the reseller rows disagree
+    // wildly (github-copilot 128,000; kilo / openrouter 450,000; ofox 65,536;
+    // abacus 32,768), so no defensible replacement is available and none has
+    // been invented. The value is left as-is deliberately: an arm REVOKES
+    // `should_omit_max_tokens`, so lowering it to a guess would be the first
+    // thing ever to cut xAI's natural ceiling. The CONTEXT 500,000 is
+    // well-supported (every non-junk row agrees) and is not in doubt.
     //
     // The split is real: 4.20/4.3 are 1M-window / 30k-output; 4.5 and 4.6 are
     // 500k both ways. Longest-match first so `grok-4.5` never falls into the
@@ -203,6 +236,21 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
         return Some((65_536, 1_048_576));
     }
 
+    // --- Google Gemini rolling `-latest` aliases ---
+    // Added 2026-08-28. `gemini-flash-latest` / `gemini-flash-lite-latest` carry
+    // no version fragment, so they matched neither the 2.5 nor the 3.x arm and
+    // had no entry at all — 32,768 substituted for a 1,048,576 window, a 32x
+    // undersize. Both Google-operated providers agree exactly (`google` and
+    // `google-vertex`, models.dev 2026-08-28): 1,048,576 context / 65,536 output.
+    //
+    // Adding the arm REVOKES `should_omit_max_tokens` on the omit-safe gemini
+    // preset, so 65,536 becomes an enforced cap — but it IS the vendor ceiling,
+    // so nothing truncates. Matched on the full alias (not a bare `-latest`) so
+    // no other rolling id is caught.
+    if m.contains("gemini-flash-latest") || m.contains("gemini-flash-lite-latest") {
+        return Some((65_536, 1_048_576));
+    }
+
     // --- DeepSeek V4-Flash family (1,000,000-token context) ---
     // Fixes #255: with no entry, deepseek-v4-flash fell to the unknown-model
     // floor (8_192 output) and its 1M context window was never consulted.
@@ -236,11 +284,15 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     // #165 audit: the canonical MiniMax ids (MiniMax-M2 / M2.5 / M3) had no entry
     // and fell to the 200k default, undersizing M3's 1M window. Verified against
     // models.dev raw (2026-07-04): M3 = 1,000,000; the M2.x point releases
-    // (M2.1 / M2.5 / M2.7) = 204,800; but the BASE MiniMax-M2 = 196,608 — a
-    // distinct, SMALLER window (cross-audit Defect 1: claiming 204,800 for the
-    // base M2 would 400 a request between 196,609 and 204,800). Match order is
-    // longest-substring-first so a point release never falls through to the base
-    // arm. Output held conservatively (err LOW per the header).
+    // (M2.1 / M2.5 / M2.7) = 204,800. The base-M2 arm below still returns
+    // 196,608, but its ORIGINAL premise is stale: re-pulled 2026-08-28, the
+    // vendor (`minimax`, and its `minimax-cn` / `minimax-coding-plan` tenants)
+    // reports 204,800 for the BASE MiniMax-M2 as well, and 196,608 now survives
+    // only on `alibaba-coding-plan` / `alibaba-token-plan` rows for a DIFFERENT
+    // model (M2.5). So the "distinct, smaller window" claim is wrong — the entry
+    // is a harmless 4% UNDER-claim, not the 400-avoidance it was documented as.
+    // Match order is longest-substring-first so a point release never falls
+    // through to the base arm. Output held conservatively (err LOW per header).
     // M3's output was 128_000 against a published 512_000 — the same
     // arm-revokes-omission mistake as DeepSeek above, costing 4x. `minimax` is
     // the only vendor-operated provider serving it and reports
