@@ -8137,13 +8137,27 @@ impl AgentEngine {
 
     fn active_window_percent_now(&self, effective_model: &str, used_tokens: u64) -> Option<u32> {
         use wcore_config::context_window::ContextWindow;
-        ContextWindow::resolve(
+        let mut ctx = ContextWindow::resolve(
             used_tokens,
             self.compat.provider_type(),
             effective_model,
             self.compact_config.kernel_config_window(),
-        )
-        .percent()
+        );
+        // #1172 — a window this endpoint has been OBSERVED to serve outranks
+        // every other source, because it is not a claim about the endpoint: it
+        // is what the endpoint DID with a prompt we actually sent. It is
+        // applied in one direction only (`min`), so it can narrow the gauge but
+        // never widen it, and it fills the gauge in for an unlisted model that
+        // had no denominator at all — the #1172 case, where a turn sitting at
+        // ~2.5x the served slot reported `active_window_percent: 6`.
+        //
+        // `None` from the tracker means "no truncation has been observed",
+        // never "the window is fine", so the kernel's answer stands unchanged
+        // on every route that has never dropped a prompt.
+        if let Some(served) = self.compact_state.served_window.served_window() {
+            ctx.window = Some(ctx.window.map_or(served, |w| w.min(served)));
+        }
+        ctx.percent()
     }
 
     /// #280 — the SINGLE chokepoint for smart auto-compaction. Returns the
@@ -15173,6 +15187,53 @@ impl AgentEngine {
             let local_estimate = estimate::estimate_tokens_from_messages(&self.messages);
             let provider_input = turn_usage.total_input_tokens();
             let effective_watermark = provider_input.max(local_estimate);
+
+            // #1172 — learn this endpoint's SERVED context window from the
+            // usage it just returned, and tell the user when it turns out the
+            // endpoint threw part of the prompt away.
+            //
+            // NOT a probe. Two earlier attempts asked the endpoint directly
+            // (Ollama's `/api/ps`, the only surface that reports the loaded
+            // slot) and both had to be backed out, because deciding WHICH
+            // endpoints to ask cannot be done from the address: every mock
+            // server in this workspace binds `127.0.0.1`, so "loopback" does
+            // not separate a real self-hosted server from a test fixture. The
+            // answer is already in the response — `usage` against what we sent
+            // — so there is no extra I/O and nothing to gate on.
+            //
+            // `total_input_tokens()` (not `input_tokens`) is the count that
+            // matters: it sums the three disjoint input classes, so a prompt
+            // cache cannot look like a shortfall.
+            let served_route = format!("{}/{}", self.compat.provider_type(), effective_model);
+            let truncation = self.compact_state.served_window.observe(
+                &served_route,
+                input_token_estimate as u64,
+                provider_input,
+            );
+            if let Some(evidence) = truncation {
+                // On the user's surface, never through `warn!`: with `RUST_LOG`
+                // unset only ERROR reaches stderr, so a log line here reaches
+                // nobody (#1130). This is SILENT data loss — the model answers
+                // fluently from a context it no longer has, which is why #372
+                // read as a retry loop — so a log-only announcement would be
+                // indistinguishable from saying nothing at all.
+                self.output.emit_info(&format!(
+                    "Context truncated by the endpoint: it processed only {reported} of \
+                     the ~{sent} prompt tokens this turn sent to `{model}`, and discarded \
+                     the rest. Servers drop the HEAD of the conversation first, so the \
+                     system prompt and your task are what went - the reply was written \
+                     from a context that no longer contained them. Core is now sizing \
+                     this session against the {served}-token window this endpoint has \
+                     actually demonstrated. Raise the server's context length (on \
+                     llama.cpp-based servers, including Ollama, that is `num_ctx` / \
+                     `OLLAMA_CONTEXT_LENGTH`), or set `[compact] context_window` to the \
+                     figure it really serves.",
+                    reported = evidence.reported_input,
+                    sent = evidence.sent_estimate,
+                    model = effective_model,
+                    served = evidence.served_window,
+                ));
+            }
 
             // AUTO-trigger watermark (finding #174): track REAL token
             // pressure so auto-compaction doesn't fire prematurely. The
