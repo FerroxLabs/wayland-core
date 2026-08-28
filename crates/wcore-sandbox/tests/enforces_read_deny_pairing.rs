@@ -20,37 +20,165 @@
 //! cache is process-global, and a sibling test that probed first would settle
 //! the verdict this one needs to observe UNSETTLED.
 
+use std::path::PathBuf;
+
 use wcore_sandbox::backends::SandboxBackend;
+use wcore_sandbox::{SandboxCommand, SandboxManifest};
 
-#[test]
-fn every_enforcing_backend_reports_it_and_every_relaxed_one_does_not() {
-    // Enforcing: hardcoded `true`, and they really do apply the field —
-    // bwrap by mounting over each path, sandbox_exec by an SBPL deny rule.
-    assert!(
-        wcore_sandbox::backends::bwrap::BubblewrapBackend::new().enforces_read_deny(),
-        "bwrap enforces fs_read_deny by mounting over every denied path"
-    );
-    assert!(
-        wcore_sandbox::backends::sandbox_exec::SandboxExecBackend::new().enforces_read_deny(),
-        "sandbox_exec enforces fs_read_deny via SBPL"
-    );
+/// A workspace with one secret in it, plus the manifest that denies reading it.
+///
+/// Returned rather than inlined so every leg below is asked the SAME question
+/// about the SAME field: a backend that claims to enforce `fs_read_deny` has to
+/// do something observable with THIS path.
+fn denied_secret() -> (tempfile::TempDir, PathBuf, SandboxManifest) {
+    let root = tempfile::tempdir().expect("tempdir");
+    let secret = root.path().join(".env");
+    std::fs::write(&secret, "SECRET=wcore-pairing-canary").expect("write secret");
+    let manifest = SandboxManifest {
+        fs_read_allow: vec![root.path().to_path_buf()],
+        fs_read_deny: vec![secret.clone()],
+        ..Default::default()
+    };
+    (root, secret, manifest)
+}
 
-    // Relaxed: the trait default. `windows_job_object` is the shipped Windows
-    // session default and delegates execution to `NoSandboxBackend`, which
-    // takes no filesystem action at all — so `false` here is a statement of
-    // fact, and it is exactly what makes #922's walk pure waste.
-    assert!(
-        !wcore_sandbox::backends::windows_job_object::WindowsJobObjectBackend::new()
-            .enforces_read_deny(),
-        "windows_job_object must keep the trait default — R1's whole premise"
-    );
-    assert!(
-        !wcore_sandbox::backends::no_sandbox::NoSandboxBackend::new().enforces_read_deny(),
-        "no_sandbox enforces nothing"
-    );
+fn cat(secret: &std::path::Path) -> SandboxCommand {
+    SandboxCommand {
+        argv: vec!["cat".into(), secret.to_string_lossy().into()],
+        cwd: None,
+    }
+}
+
+/// Every `enforces_read_deny()` answer must be PAID FOR by what the backend does
+/// with `manifest.fs_read_deny` — not merely declared.
+///
+/// # Why the old shape was not a test (wayland#934, 2026-08-28)
+///
+/// This asserted `assert!(BubblewrapBackend::new().enforces_read_deny())` and four
+/// siblings: five hardcoded booleans compared against the five hardcoded booleans
+/// the functions return. **Measured:** with bwrap's `deny_mounts` forced empty AND
+/// `SandboxExecBackend::build_profile` emitting no `(deny file-read* …)` rule at
+/// all — two backends that claim enforcement and apply nothing, which is precisely
+/// the stale-NEGATIVE that makes R1's skip unsafe — this test passed.
+///
+/// So each leg now observes the field. The enforcing backends are asked to act on
+/// it; the relaxed ones are asked to prove they do not, because `false` being a
+/// STATEMENT OF FACT rather than modesty is what makes #922's skip observationally
+/// free rather than a leak.
+#[tokio::test]
+async fn every_enforcing_backend_reports_it_and_every_relaxed_one_does_not() {
+    let (_root, secret, manifest) = denied_secret();
+
+    // -- ENFORCING, leg 1: bwrap, live. Linux only, and the one backend whose
+    //    enforcement can be exercised end to end on the host this suite runs on.
+    #[cfg(target_os = "linux")]
+    {
+        let bwrap = wcore_sandbox::backends::bwrap::BubblewrapBackend::new();
+        assert!(
+            bwrap.enforces_read_deny(),
+            "bwrap claims to enforce fs_read_deny"
+        );
+        assert!(
+            bwrap.is_available(),
+            "bwrap is not installed, so the one leg of this pairing that can be driven live \
+             cannot run. Refusing to report green: a claim checked by nothing is the defect \
+             this test exists to catch. Install bubblewrap, or run this suite on a host with it."
+        );
+        let out = bwrap
+            .execute(&manifest, cat(&secret))
+            .await
+            .expect("bwrap must spawn");
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("wcore-pairing-canary"),
+            "bwrap answers enforces_read_deny() == true but the denied bytes came back: {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    // -- ENFORCING, leg 2: sandbox_exec. Its enforcement is an SBPL rule and
+    //    `build_profile` is a pure function, so the claim is checkable off macOS
+    //    even though the sandbox itself is not.
+    {
+        let se = wcore_sandbox::backends::sandbox_exec::SandboxExecBackend::new();
+        assert!(
+            se.enforces_read_deny(),
+            "sandbox_exec claims to enforce fs_read_deny"
+        );
+        let profile =
+            wcore_sandbox::backends::sandbox_exec::SandboxExecBackend::build_profile(&manifest)
+                .expect("the profile must build for a manifest with an ordinary path");
+        let rule = format!(
+            "(deny file-read* (subpath \"{}\"))",
+            secret.to_string_lossy()
+        );
+        assert!(
+            profile.contains(&rule),
+            "sandbox_exec answers enforces_read_deny() == true but its profile carries no rule \
+             for the denied path. Expected {rule:?} in:\n{profile}"
+        );
+        // SBPL is last-match-wins, so a deny emitted BEFORE the allow of the
+        // enclosing root is inert. The ordering is part of the enforcement.
+        let allow_root = format!("(subpath \"{}\")", _root.path().to_string_lossy());
+        if let Some(a) = profile.find(&allow_root) {
+            assert!(
+                profile.find(&rule).is_some_and(|d| d > a),
+                "the deny rule precedes the allow of its enclosing root, so SBPL's \
+                 last-match-wins semantics make it inert"
+            );
+        }
+    }
+
+    // -- RELAXED. `false` here is load-bearing for #922 R1, which SKIPS building
+    //    the deny list when a backend reports it. That skip is free only while
+    //    `false` really does mean "this field is discarded", so prove it is.
+    {
+        let no_sandbox = wcore_sandbox::backends::no_sandbox::NoSandboxBackend::new();
+        assert!(
+            !no_sandbox.enforces_read_deny(),
+            "no_sandbox enforces nothing"
+        );
+        let out = no_sandbox
+            .execute(&manifest, cat(&secret))
+            .await
+            .expect("no_sandbox must spawn");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("wcore-pairing-canary"),
+            "no_sandbox reports enforces_read_deny() == false but the denied path was NOT \
+             readable — either it grew an enforcement it does not declare (R1 would then skip \
+             a backend that enforces: the stale-NEGATIVE leak direction) or this probe is \
+             broken. stdout={:?} stderr={:?}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // `windows_job_object` is the shipped Windows session default and delegates
+    // execution to `NoSandboxBackend`. The delegation is the whole claim, so it is
+    // exercised rather than assumed: the same manifest, the same secret, the same
+    // readable result.
+    {
+        let jo = wcore_sandbox::backends::windows_job_object::WindowsJobObjectBackend::new();
+        assert!(
+            !jo.enforces_read_deny(),
+            "windows_job_object must keep the trait default — R1's whole premise"
+        );
+        let out = jo
+            .execute(&manifest, cat(&secret))
+            .await
+            .expect("windows_job_object must spawn");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("wcore-pairing-canary"),
+            "windows_job_object reports false but took some filesystem action on fs_read_deny; \
+             its `false` is only honest while it delegates to NoSandboxBackend unchanged"
+        );
+    }
 
     // Docker without the `live-docker` feature cannot enforce anything and
     // must keep the trait default. With the feature it hardcodes `true`.
+    //
+    // Both arms are DECLARATION-ONLY and that is stated rather than hidden: this
+    // suite has no daemon to drive, so the live arm's claim is checked by
+    // `crates/wcore-sandbox/tests/` docker suites under that feature, not here.
     #[cfg(not(feature = "live-docker"))]
     assert!(
         !wcore_sandbox::backends::docker::DockerBackend::new().enforces_read_deny(),

@@ -88,7 +88,7 @@ const NOT_MEASURED: &str = "NOT MEASURED";
 /// Added 2026-07-31 for the Matrix row, and the reason it is an explicit
 /// literal rather than a cleverer parse matters. `NOT MEASURED` used to be a
 /// sound binary test because every cell was wholly one thing or the other.
-/// Matrix is now genuinely both — driven at matrix.org below its 32,768-char
+/// Matrix is now genuinely both — driven at matrix.org below its 16,384-char
 /// cap, never driven above it — so its cell contains `Yes` *and* `NOT
 /// MEASURED`, and a substring check for either one alone silently returns the
 /// wrong answer.
