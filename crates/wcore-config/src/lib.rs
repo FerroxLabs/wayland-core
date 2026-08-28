@@ -66,6 +66,10 @@ pub mod profile;
 // enumerate completely — and it must stay reachable from every producer surface.
 pub mod quiesce;
 pub mod resolution_provenance;
+// #1173: shared by `wcore-providers` (which sends the keyless placeholder
+// bearer) and this crate's credential resolution (which must stop refusing to
+// start before that path is reached). One predicate, two layers, no drift.
+pub mod self_hosted;
 pub mod shell;
 // Filesystem-aware SQLite journal-mode selection. WAL corrupts databases on
 // network filesystems (measured); every SQLite call site selects through here.

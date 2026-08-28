@@ -129,6 +129,23 @@ pub struct ProviderCompat {
     /// version prefix in the base URL itself.
     pub api_path: Option<String>,
 
+    /// Whether this provider's wire can talk to a SELF-HOSTED endpoint that
+    /// requires no credential at all (#1173).
+    ///
+    /// `true` only says the provider has somewhere to go when no key is
+    /// configured: the OpenAI-wire family sends a benign placeholder bearer
+    /// that local inference servers (Ollama, llama.cpp, LM Studio, vLLM)
+    /// ignore. It does NOT say a key is optional — the endpoint must ALSO be
+    /// one the user explicitly pointed us at AND be self-hosted
+    /// (`wcore_config::self_hosted::is_self_hosted_base_url`) before the
+    /// requirement is relaxed. Anthropic-family providers leave it unset: they
+    /// have no such path, so a keyless start there would only trade a clear
+    /// startup refusal for an opaque 401 mid-turn.
+    ///
+    /// Set `false` explicitly under `[providers.<name>.compat]` to demand a
+    /// real credential even on a local endpoint.
+    pub keyless_self_hosted: Option<bool>,
+
     /// Whether this provider supports extended thinking (Anthropic-style).
     /// Default: true for anthropic/bedrock/vertex, false for openai.
     pub supports_thinking: Option<bool>,
@@ -601,6 +618,12 @@ impl ProviderCompat {
             supports_thinking: Some(false),
             supports_effort: Some(true),
             effort_levels: Some(vec!["low".into(), "medium".into(), "high".into()]),
+            // #1173: `OpenAIProvider::select_key` falls back to
+            // `SELF_HOSTED_PLACEHOLDER_KEY` for a self-hosted base URL, so this
+            // wire has a keyless path. Inherited by every openai-compat preset
+            // (`openai_compat_provider` spreads `..Self::openai_defaults()`),
+            // which is correct: they are all backed by `OpenAIProvider`.
+            keyless_self_hosted: Some(true),
             provider_type: Some("openai".into()),
             // Fix(pricing-audit-2026-05-24): was $8/$32 (GPT-5-class), which caused silent
             // 53x overcharge for every common OpenAI model not in the catalog (e.g. gpt-4o-mini).
@@ -1007,6 +1030,7 @@ impl ProviderCompat {
             strip_patterns: user.strip_patterns.or(defaults.strip_patterns),
             auto_tool_id: user.auto_tool_id.or(defaults.auto_tool_id),
             api_path: user.api_path.or(defaults.api_path),
+            keyless_self_hosted: user.keyless_self_hosted.or(defaults.keyless_self_hosted),
             supports_thinking: user.supports_thinking.or(defaults.supports_thinking),
             supports_effort: user.supports_effort.or(defaults.supports_effort),
             effort_levels: user.effort_levels.or(defaults.effort_levels),
@@ -1138,6 +1162,13 @@ impl ProviderCompat {
     /// presets set `true`.
     pub fn omit_max_tokens_when_unsized(&self) -> bool {
         self.omit_max_tokens_when_unsized.unwrap_or(false)
+    }
+
+    /// #1173: whether this provider can serve a keyless SELF-HOSTED endpoint.
+    /// Defaults to `false` — a provider must opt in, so adding a provider never
+    /// silently relaxes its credential requirement.
+    pub fn keyless_self_hosted(&self) -> bool {
+        self.keyless_self_hosted.unwrap_or(false)
     }
 
     /// #863 F2 — whether this endpoint speaks the Flux loop-ownership

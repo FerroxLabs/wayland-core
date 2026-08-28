@@ -2502,116 +2502,6 @@ impl Config {
             .clone()
             .or(merged.default.system_prompt.clone());
 
-        // 6. Resolve API key: CLI > config file > store > env var.
-        //    Wave SD: the credentials store (plaintext-with-0o600 or
-        //    keyring) is consulted between the inline config field and
-        //    the env-var fallback, closing SECURITY MAJOR #16's
-        //    "plaintext in config.toml only" pathway.
-        // A catalog provider resolves to ProviderType::OpenAI, which is unknown
-        // to `resolve_api_key` -- it only tries OPENAI_API_KEY (and the bare
-        // API_KEY, when opted in per #685). A user
-        // who set the provider's OWN documented env var (e.g. NOVITA_API_KEY)
-        // must have it honored as a fallback HERE, in BOTH cases: when the
-        // standard chain errors (no OPENAI_API_KEY -> MissingApiKey) and when it
-        // resolves to an empty key. Resolve it once up front so it covers both
-        // paths -- previously the Err case short-circuited on the `?` BEFORE
-        // this fallback ran, so a valid catalog credential in the entry's env
-        // var produced a spurious "No API key found".
-        let catalog_env_key = (cli.api_key.is_none() && provider_config.api_key.is_none())
-            .then(|| {
-                catalog_entry
-                    .as_ref()
-                    .and_then(|e| std::env::var(&e.env_var).ok())
-            })
-            .flatten();
-        let catalog_env_source = || {
-            catalog_entry
-                .as_ref()
-                .map(|e| CredentialSource::CatalogEnvVar(e.env_var.clone()))
-                .unwrap_or(CredentialSource::OutOfBand)
-        };
-        let (mut api_key, mut credential_source) = match resolve_api_key_with_source(
-            cli.api_key.as_deref(),
-            account_id.as_deref(),
-            provider_config.api_key.as_deref(),
-            provider,
-            &merged.storage.credentials,
-        ) {
-            Ok(pair) => pair,
-            // The standard chain found nothing; honor the catalog entry's own
-            // env var before surfacing MissingApiKey.
-            Err(e) => match catalog_env_key.clone() {
-                Some(key) => (key, catalog_env_source()),
-                // 27-C2: a LOCAL model has no remote credential, so demanding
-                // one here is wrong. This is not a new affordance -- it is the
-                // one the engine already advertises. On `MissingApiKey` the CLI
-                // prints, verbatim: "To use a LOCAL model with Ollama, select a
-                // model id prefixed with `ollama:` ... no API key is needed."
-                // That route is built, wired and enabled by default
-                // (`make_plugin_provider_router` in `wcore-cli` claims any
-                // `ollama:`-prefixed model), but it was unreachable, because
-                // this function returned `MissingApiKey` before the model
-                // string was consulted at all. Measured on the shipped v0.12.25
-                // artifact natively on macOS, Linux and Windows: following the
-                // printed instruction verbatim reproduced the identical
-                // `MissingApiKey` the instruction claims to resolve.
-                //
-                // The key resolves to the empty string, exactly as it already
-                // may for a catalog provider. Nothing downstream is loosened:
-                // if no plugin claims the local route, `AgentBootstrap` refuses
-                // to fall through to a remote provider with an empty
-                // credential and fails loudly instead.
-                None if wcore_types::model_aliases::is_local_model(&model) => {
-                    (String::new(), CredentialSource::OutOfBand)
-                }
-                None => return Err(e),
-            },
-        };
-        // The chain resolved to an empty key but a catalog env var is
-        // also present -- the explicit catalog credential wins.
-        if api_key.is_empty()
-            && let Some(key) = catalog_env_key
-        {
-            api_key = key;
-            credential_source = catalog_env_source();
-        }
-
-        // #685 — say which AMBIENT source answered. The billing complaint this
-        // closes is not that the wrong key was used, it is that the user had no
-        // way to learn WHERE the key that kept spending was coming from.
-        if let Some(notice) = ambient_credential_notice(&provider_label, &credential_source) {
-            emit_credential_notice_once(&notice);
-        }
-
-        // 7. Apply auto_approve from CLI
-        let mut tools = merged.tools;
-        if cli.auto_approve {
-            tools.auto_approve = true;
-        }
-
-        let requested_approvals = if tools.auto_approve {
-            wcore_types::execution_policy::ApprovalPolicy::Bypass
-        } else {
-            match approval_mode {
-                ApprovalMode::Default => wcore_types::execution_policy::ApprovalPolicy::Prompt,
-                ApprovalMode::AutoEdit => wcore_types::execution_policy::ApprovalPolicy::AutoEdit,
-                ApprovalMode::Force => wcore_types::execution_policy::ApprovalPolicy::Bypass,
-            }
-        };
-        let execution_policy = merged.execution.baseline_policy(requested_approvals);
-
-        // Resolve prompt_caching: default true for Anthropic
-        let prompt_caching = provider_config
-            .prompt_caching
-            .as_ref()
-            .and_then(PromptCachingConfig::enabled)
-            .unwrap_or(matches!(provider, ProviderType::Anthropic));
-        let prompt_caching_min_prefix_tokens = provider_config
-            .prompt_caching
-            .as_ref()
-            .and_then(PromptCachingConfig::min_prefix_tokens)
-            .unwrap_or(DEFAULT_CACHE_MIN_PREFIX_TOKENS);
-
         // Resolve compat: provider-type defaults + user overrides.
         //
         // D.2 (v0.6.3) — the 6 Tier-2 providers share the OpenAI *wire*
@@ -2683,6 +2573,155 @@ impl Config {
                 compat.effort_levels = Some(vec![]);
             }
         }
+
+        // 6. Resolve API key: CLI > config file > store > env var.
+        //    Wave SD: the credentials store (plaintext-with-0o600 or
+        //    keyring) is consulted between the inline config field and
+        //    the env-var fallback, closing SECURITY MAJOR #16's
+        //    "plaintext in config.toml only" pathway.
+        // A catalog provider resolves to ProviderType::OpenAI, which is unknown
+        // to `resolve_api_key` -- it only tries OPENAI_API_KEY (and the bare
+        // API_KEY, when opted in per #685). A user
+        // who set the provider's OWN documented env var (e.g. NOVITA_API_KEY)
+        // must have it honored as a fallback HERE, in BOTH cases: when the
+        // standard chain errors (no OPENAI_API_KEY -> MissingApiKey) and when it
+        // resolves to an empty key. Resolve it once up front so it covers both
+        // paths -- previously the Err case short-circuited on the `?` BEFORE
+        // this fallback ran, so a valid catalog credential in the entry's env
+        // var produced a spurious "No API key found".
+        let catalog_env_key = (cli.api_key.is_none() && provider_config.api_key.is_none())
+            .then(|| {
+                catalog_entry
+                    .as_ref()
+                    .and_then(|e| std::env::var(&e.env_var).ok())
+            })
+            .flatten();
+        let catalog_env_source = || {
+            catalog_entry
+                .as_ref()
+                .map(|e| CredentialSource::CatalogEnvVar(e.env_var.clone()))
+                .unwrap_or(CredentialSource::OutOfBand)
+        };
+        // #1173 — the three conditions of the keyless self-hosted exemption,
+        // named once. See the `None if` arm below for why each is required.
+        let declared_keyless_self_hosted_endpoint = (cli.base_url.is_some()
+            || provider_config.base_url.is_some())
+            && compat.keyless_self_hosted()
+            && crate::self_hosted::is_self_hosted_base_url(&base_url);
+        let (mut api_key, mut credential_source) = match resolve_api_key_with_source(
+            cli.api_key.as_deref(),
+            account_id.as_deref(),
+            provider_config.api_key.as_deref(),
+            provider,
+            &merged.storage.credentials,
+        ) {
+            Ok(pair) => pair,
+            // The standard chain found nothing; honor the catalog entry's own
+            // env var before surfacing MissingApiKey.
+            Err(e) => match catalog_env_key.clone() {
+                Some(key) => (key, catalog_env_source()),
+                // 27-C2: a LOCAL model has no remote credential, so demanding
+                // one here is wrong. This is not a new affordance -- it is the
+                // one the engine already advertises. On `MissingApiKey` the CLI
+                // prints, verbatim: "To use a LOCAL model with Ollama, select a
+                // model id prefixed with `ollama:` ... no API key is needed."
+                // That route is built, wired and enabled by default
+                // (`make_plugin_provider_router` in `wcore-cli` claims any
+                // `ollama:`-prefixed model), but it was unreachable, because
+                // this function returned `MissingApiKey` before the model
+                // string was consulted at all. Measured on the shipped v0.12.25
+                // artifact natively on macOS, Linux and Windows: following the
+                // printed instruction verbatim reproduced the identical
+                // `MissingApiKey` the instruction claims to resolve.
+                //
+                // The key resolves to the empty string, exactly as it already
+                // may for a catalog provider. Nothing downstream is loosened:
+                // if no plugin claims the local route, `AgentBootstrap` refuses
+                // to fall through to a remote provider with an empty
+                // credential and fails loudly instead.
+                None if wcore_types::model_aliases::is_local_model(&model) => {
+                    (String::new(), CredentialSource::OutOfBand)
+                }
+                // #1173: a SELF-HOSTED endpoint the user explicitly pointed us
+                // at may legitimately have no credential at all — a stock
+                // Ollama or llama.cpp server ignores the bearer entirely. The
+                // provider wire already knows this
+                // (`OpenAIProvider::select_key` sends
+                // `SELF_HOSTED_PLACEHOLDER_KEY` for a self-hosted base URL),
+                // but startup refused before that path could ever run. So the
+                // capability existed and the gate in front of it did not reach
+                // it: every local-model user's first run died on "No API key
+                // found", and the discovered workaround was to invent a dummy
+                // key that is then never meaningfully used.
+                //
+                // Three conditions, ALL required, and none of them widens what
+                // COUNTS as a credential:
+                //   1. the user declared this endpoint themselves (`--base-url`
+                //      or `[providers.<name>] base_url`). A provider's own
+                //      default endpoint never qualifies, so this can only ever
+                //      fire on an address the user typed.
+                //   2. that endpoint is self-hosted, so nothing is sent to a
+                //      public host without a real key — the negative control
+                //      `remote_endpoint_without_credential_still_refuses`
+                //      pins it.
+                //   3. the provider's compat declares its wire HAS a keyless
+                //      path (`keyless_self_hosted`). A provider without one
+                //      keeps its clear startup refusal rather than trading it
+                //      for an opaque 401 several seconds into the first turn.
+                //
+                // The key resolves to the empty string, exactly as it already
+                // may for a catalog provider and for a local model; the
+                // provider layer decides what (if anything) goes on the wire.
+                None if declared_keyless_self_hosted_endpoint => {
+                    (String::new(), CredentialSource::OutOfBand)
+                }
+                None => return Err(e),
+            },
+        };
+        // The chain resolved to an empty key but a catalog env var is
+        // also present -- the explicit catalog credential wins.
+        if api_key.is_empty()
+            && let Some(key) = catalog_env_key
+        {
+            api_key = key;
+            credential_source = catalog_env_source();
+        }
+
+        // #685 — say which AMBIENT source answered. The billing complaint this
+        // closes is not that the wrong key was used, it is that the user had no
+        // way to learn WHERE the key that kept spending was coming from.
+        if let Some(notice) = ambient_credential_notice(&provider_label, &credential_source) {
+            emit_credential_notice_once(&notice);
+        }
+
+        // 7. Apply auto_approve from CLI
+        let mut tools = merged.tools;
+        if cli.auto_approve {
+            tools.auto_approve = true;
+        }
+
+        let requested_approvals = if tools.auto_approve {
+            wcore_types::execution_policy::ApprovalPolicy::Bypass
+        } else {
+            match approval_mode {
+                ApprovalMode::Default => wcore_types::execution_policy::ApprovalPolicy::Prompt,
+                ApprovalMode::AutoEdit => wcore_types::execution_policy::ApprovalPolicy::AutoEdit,
+                ApprovalMode::Force => wcore_types::execution_policy::ApprovalPolicy::Bypass,
+            }
+        };
+        let execution_policy = merged.execution.baseline_policy(requested_approvals);
+
+        // Resolve prompt_caching: default true for Anthropic
+        let prompt_caching = provider_config
+            .prompt_caching
+            .as_ref()
+            .and_then(PromptCachingConfig::enabled)
+            .unwrap_or(matches!(provider, ProviderType::Anthropic));
+        let prompt_caching_min_prefix_tokens = provider_config
+            .prompt_caching
+            .as_ref()
+            .and_then(PromptCachingConfig::min_prefix_tokens)
+            .unwrap_or(DEFAULT_CACHE_MIN_PREFIX_TOKENS);
 
         // #174 item 6: expand `[budget] preset = "..."` into concrete caps
         // HERE, before validation and before `merged.budget` is moved into the
