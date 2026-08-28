@@ -2902,6 +2902,61 @@ pub fn render_files_changed(paths: &[String], theme: &Theme) -> Vec<Line<'static
     lines
 }
 
+/// #1138 — render a `render_artifact` surface inside the transcript.
+///
+/// Before this the in-process TUI had no render surface at all: the tool was
+/// advertised to the model in every TUI session and its event was dropped on
+/// the floor. The block is a titled unit so it reads as a distinct artifact
+/// rather than as more assistant prose:
+///
+/// ```text
+/// ▸ Release notes (text/markdown)
+///   <rendered body>
+/// ```
+///
+/// `text/markdown` goes through the same [`render_markdown_with_width`] the
+/// assistant body uses. `text/plain` renders verbatim. `text/html` renders its
+/// SOURCE, and the header says so — the honest degradation for a terminal, and
+/// materially better than inventing a half-HTML renderer whose output the model
+/// cannot predict. `truncated` badges the header; the in-band cut marker is
+/// already inside `content`, put there by the emitting sink.
+fn render_artifact_block(
+    title: &str,
+    mime: wcore_protocol::events::RenderMime,
+    content: &str,
+    truncated: bool,
+    theme: &Theme,
+    content_width: u16,
+) -> Vec<Line<'static>> {
+    use wcore_protocol::events::RenderMime;
+
+    let header_style = Style::default().fg(theme.heading);
+    let mut header = format!("▸ {title} ({})", mime.as_str());
+    if matches!(mime, RenderMime::Html) {
+        header.push_str(" — showing source");
+    }
+    if truncated {
+        header.push_str(" — truncated");
+    }
+    let mut lines: Vec<Line<'static>> = vec![Line::from(Span::styled(header, header_style))];
+    match mime {
+        RenderMime::Markdown => {
+            let md_width = content_width.saturating_sub(2);
+            let (md_lines, _urls) = render_markdown_with_width(content, theme, md_width);
+            for line in md_lines {
+                lines.push(indent_line(line, 2));
+            }
+        }
+        RenderMime::Plain | RenderMime::Html => {
+            let body_style = Style::default().fg(theme.text);
+            for row in content.lines() {
+                lines.push(Line::from(Span::styled(format!("  {row}"), body_style)));
+            }
+        }
+    }
+    lines
+}
+
 /// Append one completed turn to `lines`, styled by its role.
 ///
 /// v0.9.1 W1 A: Assistant turns no longer render a `"wayland"` role
@@ -3045,6 +3100,27 @@ fn push_turn(
                                 body, *secs, *tokens, expanded, theme,
                             )
                         {
+                            lines.push(line);
+                        }
+                    }
+                    TurnElement::Artifact {
+                        title,
+                        mime,
+                        content,
+                        truncated,
+                    } => {
+                        // #1138: a blank gutter row above the block separates
+                        // the artifact from the preceding body so it reads as
+                        // its own surface, matching the FilesChanged card.
+                        lines.push(Line::from(""));
+                        for line in render_artifact_block(
+                            title,
+                            *mime,
+                            content,
+                            *truncated,
+                            theme,
+                            content_width,
+                        ) {
                             lines.push(line);
                         }
                     }
@@ -5551,6 +5627,71 @@ mod tests {
         assert!(
             !surface.user_has_scrolled_up,
             "default render must not flip the sticky-up flag"
+        );
+    }
+
+    #[test]
+    fn a_render_artifact_element_paints_a_titled_block() {
+        // #1138: the transcript is the TUI's render surface. Assert the
+        // artifact paints as a titled unit with its body, not as anonymous
+        // prose and not as nothing at all.
+        let mut app = App::new();
+        app.config.model = "anthropic/claude-opus-4-5".to_string();
+        app.session.turns.push(crate::tui::app::TurnView {
+            role: TurnRole::Assistant,
+            elements: vec![crate::tui::turn_element::TurnElement::Artifact {
+                title: "RELEASE_NOTES_v1138".into(),
+                mime: wcore_protocol::events::RenderMime::Markdown,
+                content: "BODY_LINE_v1138".into(),
+                truncated: false,
+            }],
+        });
+        let mut surface = WorkspaceSurface::new();
+        let out = render_to_string(&mut surface, &app, 80, 25);
+        assert!(
+            out.contains("RELEASE_NOTES_v1138"),
+            "the artifact title must be painted:\n{out}"
+        );
+        assert!(
+            out.contains("text/markdown"),
+            "the header names the declared mime so the user knows what \
+             they are looking at:\n{out}"
+        );
+        assert!(
+            out.contains("BODY_LINE_v1138"),
+            "the artifact body must be painted:\n{out}"
+        );
+    }
+
+    #[test]
+    fn an_html_artifact_shows_its_source_and_says_so() {
+        // #1138: a terminal cannot render HTML. Showing the source and
+        // labelling it is the honest degradation; silently painting tag soup
+        // as if it were the rendered document is not.
+        let mut app = App::new();
+        app.config.model = "anthropic/claude-opus-4-5".to_string();
+        app.session.turns.push(crate::tui::app::TurnView {
+            role: TurnRole::Assistant,
+            elements: vec![crate::tui::turn_element::TurnElement::Artifact {
+                title: "Report".into(),
+                mime: wcore_protocol::events::RenderMime::Html,
+                content: "<b>HTML_SRC_v1138</b>".into(),
+                truncated: true,
+            }],
+        });
+        let mut surface = WorkspaceSurface::new();
+        let out = render_to_string(&mut surface, &app, 100, 25);
+        assert!(
+            out.contains("showing source"),
+            "an HTML artifact must announce that it is showing source:\n{out}"
+        );
+        assert!(
+            out.contains("truncated"),
+            "a truncated artifact must be badged:\n{out}"
+        );
+        assert!(
+            out.contains("HTML_SRC_v1138"),
+            "the HTML source itself must be visible:\n{out}"
         );
     }
 

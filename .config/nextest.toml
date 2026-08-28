@@ -551,3 +551,49 @@ retries = 0
 [[profile.ci.overrides]]
 filter = 'binary(=pipeline_test)'
 retries = 0
+
+# ── #1146: the three tests whose Windows verdict churns ─────────────────────
+#
+# MEASURED (FerroxLabs/wayland#1146): on a commit whose TREE OBJECT is
+# byte-identical to `main`, `CI (windows-latest, hosted)` failed exactly these
+# three on ALL THREE tries, while the same tree passed on both self-hosted
+# Windows services. main's own recorded green had that leg SKIPPED, so the
+# green was never earned and the red could not be attributed to a tree.
+#
+# WHY `retries` IS 0 HERE. `[profile.ci] retries = 2` reports a test that
+# failed twice and passed once as PASSED in the run CONCLUSION — the thing
+# release gates, dashboards and humans read. For a test whose flake IS the
+# thing under investigation, that is the one number that must not be laundered.
+# Same reasoning and same scope discipline as the two blocks above: this names
+# three tests, and every other test in the suite keeps `retries = 2`.
+#
+# There is a second, compounding reason specific to the two bash ones. They
+# carry their own in-test re-attempt loop (`RACE_ATTEMPTS = 3`,
+# crates/wcore-tools/src/bash/tests.rs), so nextest retries were stacking on
+# top of an internal retry: three attempts times three, with only the last
+# failure ever printed. Retries here bought nine tries and one line of
+# evidence.
+#
+# Consequence, stated plainly: while #1146 is open this makes a Windows leg go
+# RED where it used to read green-with-a-buried-TRY-line. That is the intent —
+# an unattributable green is what the issue was filed about. Do not raise it
+# back to hide the failure.
+#
+# The exact-match spellings differ because the binary does: the two bash tests
+# are unit tests inside the `wcore-tools` lib binary, so their nextest test
+# name carries the module path; the third is a top-level fn in an integration
+# binary. THE MODULE PATH IS LOAD-BEARING —
+# `test(=the_bash_timeout_bounds_the_secret_deny_walk)` is a valid filterset
+# that selects zero tests, so dropping it would leave this block here and the
+# two tests back at `retries = 2` with nothing to show for it.
+#
+# `scripts/check-windows-attribution.py` fails if any of the three stops being
+# a literal operand of a `test(...)` predicate in a `retries = 0` override —
+# spelling included, comments not counted. It cannot resolve a filterset, so it
+# cannot see a rename: `just check-windows-attribution-live` runs the same
+# check with `cargo nextest list` as the oracle, and also proves no override
+# ABOVE this one sets `retries` for these tests first. Run it if you rename or
+# move any of the three.
+[[profile.ci.overrides]]
+filter = 'test(=bash::tests::the_bash_timeout_bounds_the_secret_deny_walk) + test(=bash::tests::the_streaming_bash_timeout_bounds_the_secret_deny_walk) + test(=matching_assistant_dials_scoped_deferred_server)'
+retries = 0

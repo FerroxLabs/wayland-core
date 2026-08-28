@@ -975,6 +975,14 @@ pub enum ProtocolEvent {
     McpReady {
         name: String,
         tools: Vec<String>,
+        /// wayland#605: `true` when this event is the receipt for an
+        /// `add_mcp_server` that was SKIPPED because the named server was
+        /// already connected, rather than the receipt for a real connect.
+        /// Without it the two are byte-identical and a json-stream host
+        /// cannot tell a no-op re-add from a reconnect. Forward-additive and
+        /// default-false, so a real connect stays byte-identical on the wire.
+        #[serde(default, skip_serializing_if = "is_false")]
+        already_connected: bool,
     },
     /// An MCP server failed (or timed out) at connect. The companion to
     /// [`McpReady`]: it carries the preserved failure cause so a host /
@@ -1191,6 +1199,14 @@ pub enum ProtocolEvent {
         /// Stable failure class (`http_503`, `timeout`, `stream_truncated`, ...).
         #[serde(skip_serializing_if = "Option::is_none")]
         failure: Option<String>,
+        /// #372: 1-based ordinal of this physical attempt within the current
+        /// turn. Counting `provider_attempt` frames is NOT equivalent — this
+        /// event is additive, so a host pinned below the minor that introduced
+        /// it drops it under the W0 decoder contract, and a host that attaches
+        /// mid-run never saw the earlier frames at all. Either way the ordinal
+        /// it never received is unrecoverable unless the frame carries it.
+        #[serde(default)]
+        attempt: u32,
     },
     /// Core scheduled another provider attempt after a typed failure. Kept
     /// separate from `ProviderAttempt` so a retry decision never inflates the
@@ -1198,11 +1214,31 @@ pub enum ProtocolEvent {
     ProviderRetry {
         #[serde(skip_serializing_if = "Option::is_none")]
         failure: Option<String>,
+        /// #372: 1-based ordinal of this retry decision within the current
+        /// turn — the retry count the ticket asks to be surfaced separately
+        /// from the run timer. `1` is the first re-send after the first
+        /// failure, and the sequence restarts at `1` on the next turn, so a
+        /// host renders "retry 2 of this step" rather than a running total
+        /// that never resets. Every retry source shares the sequence: the
+        /// provider ring, the stream-error re-send, the single context-overflow
+        /// compaction retry and the orphaned-tool-pair repair.
+        #[serde(default)]
+        retry: u32,
     },
     /// A typed provider failure discovered after the physical send completed
     /// (for example a truncated SSE body). It does not imply a retry.
     ProviderFailure {
         failure: String,
+    },
+    /// #372 per-turn route diagnostics. A local Ollama endpoint and a cloud
+    /// OpenAI-compatible endpoint both report `provider = "openai"`, so the
+    /// provider name alone cannot answer "did this step run locally or in the
+    /// cloud?" — the question the reporter of #372 could not answer from the
+    /// wire. This additive event carries the resolved endpoint and a derived
+    /// locality flag beside the model, once per turn. Unknown hosts drop it
+    /// under the W0 decoder contract.
+    RouteInfo {
+        route: RouteInfo,
     },
     /// F10 always-on structured monitor decision. Hosts use this additive
     /// event to distinguish a deliberate stop/replan from a generic engine
@@ -1471,6 +1507,28 @@ pub enum ProtocolEvent {
         /// Session id of the emitting engine, when known. Omitted otherwise.
         #[serde(skip_serializing_if = "Option::is_none")]
         conversation_id: Option<String>,
+        /// F13 (#889): the durable idempotency key the session journal minted
+        /// for this tool execution, when the engine has one.
+        ///
+        /// The key is STABLE across exactly the paths that legitimately re-run
+        /// one `send_message` call: an in-turn retry and the crash-resume
+        /// re-dispatch both carry the prior execution's key forward. So two
+        /// `host_send_message_request` frames bearing the SAME
+        /// `idempotency_key` are one logical delivery the engine was
+        /// interrupted in the middle of - NOT two messages the user asked for.
+        /// `call_id` cannot be used for this: it is minted fresh per request
+        /// (`hsm-{uuid}`) and differs across a re-dispatch.
+        ///
+        /// A host that can pass a caller-supplied idempotency token to its
+        /// outbound provider SHOULD do so; a host that cannot is unchanged by
+        /// this field and MUST ignore it. The engine asserts nothing about what
+        /// the host does with it - carrying the key is a PRECONDITION for
+        /// exactly-once delivery, not a claim of it.
+        ///
+        /// Omitted when the send is not running under a durable tool effect
+        /// context, because there is then no stable identity to offer.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        idempotency_key: Option<String>,
     },
     /// FerroxLabs/wayland#1098: "show this to the user" as a RENDER
     /// capability instead of an OS `open`.
@@ -1784,6 +1842,140 @@ pub enum McpRemovalOutcome {
     CapacityExceeded,
     CleanupUnverified,
     RegistryBusy,
+}
+
+/// #372 route diagnostics for one turn, carried by
+/// [`ProtocolEvent::RouteInfo`].
+///
+/// # Why the endpoint has to be on the wire
+///
+/// `provider` is the structured provider id (`"openai"`, `"anthropic"`, ...).
+/// It is not a route: a local Ollama server and a cloud OpenAI-compatible
+/// gateway are both driven as `openai`, and the only thing that tells them
+/// apart is the base URL they resolved to. Without it a host cannot say which
+/// of the two a step ran against, which is exactly what #372 asked for.
+///
+/// # `base_url` is scrubbed, and that is load-bearing
+///
+/// A base URL is a credential carrier: it can hold a key in userinfo
+/// (`https://user:secret@host/v1`) or in a query string
+/// (`https://host/v1?api_key=...`). [`RouteInfo::from_endpoint`] is the only
+/// way this struct is built inside Core, and it removes both before the value
+/// can reach the wire. Do not populate `base_url` from a raw configured URL by
+/// hand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteInfo {
+    /// Zero-based turn index this route was dispatched for.
+    pub turn: usize,
+    /// Structured provider id, same vocabulary as [`TurnCost::provider`].
+    pub provider: String,
+    /// The model actually dispatched this turn (post tier-swap).
+    pub model: String,
+    /// Resolved endpoint with userinfo, query and fragment removed. `None`
+    /// when the provider resolved no explicit endpoint (SDK-default routing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// True when `base_url` resolves to a loopback, link-local or private
+    /// host — i.e. the step ran against a machine-local or LAN model server
+    /// rather than a cloud endpoint. False when there is no endpoint.
+    pub local: bool,
+}
+
+impl RouteInfo {
+    /// Build a wire-safe route row from a resolved endpoint.
+    ///
+    /// This is the enforcement point for #372's redaction requirement: the
+    /// endpoint is scrubbed here and nowhere else, so no call site can emit a
+    /// credential-bearing base URL by forgetting to.
+    pub fn from_endpoint(
+        turn: usize,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        base_url: Option<&str>,
+    ) -> Self {
+        let raw = base_url.map(str::trim).filter(|url| !url.is_empty());
+        Self {
+            turn,
+            provider: provider.into(),
+            model: model.into(),
+            base_url: raw.map(scrub_base_url),
+            local: raw.is_some_and(is_local_endpoint),
+        }
+    }
+}
+
+/// Split a URL into `(scheme_with_separator, authority, path)`, dropping the
+/// query and the fragment. Deliberately hand-rolled: this crate carries no URL
+/// parser, and the shapes a provider `base_url` can take are narrow.
+fn split_endpoint(raw: &str) -> (&str, &str, &str) {
+    let (scheme, rest) = match raw.find("://") {
+        Some(idx) => raw.split_at(idx + 3),
+        None => ("", raw),
+    };
+    let rest = rest
+        .split_once(['?', '#'])
+        .map_or(rest, |(before, _)| before);
+    let (authority, path) = match rest.find('/') {
+        Some(idx) => rest.split_at(idx),
+        None => (rest, ""),
+    };
+    (scheme, authority, path)
+}
+
+/// Remove userinfo, query string and fragment from an endpoint so it can be
+/// published. Both positions can carry an API key.
+fn scrub_base_url(raw: &str) -> String {
+    let (scheme, authority, path) = split_endpoint(raw);
+    // `rsplit_once` so a password containing `@` cannot smuggle the rest back.
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_userinfo, host)| host);
+    format!("{scheme}{host}{path}")
+}
+
+/// The bare host of an endpoint: userinfo, port and IPv6 brackets removed.
+fn host_of(raw: &str) -> String {
+    let (_, authority, _) = split_endpoint(raw);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_userinfo, host)| host);
+    let host = if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6 literal, e.g. `[::1]:11434`.
+        rest.split_once(']').map_or(rest, |(ip, _port)| ip)
+    } else if host.matches(':').count() > 1 {
+        // Bare IPv6 literal — a port cannot be expressed without brackets, so
+        // the last colon is part of the address, not a port separator.
+        host
+    } else {
+        host.split_once(':').map_or(host, |(host, _port)| host)
+    };
+    host.trim().to_ascii_lowercase()
+}
+
+/// Whether an endpoint points at a loopback, link-local or private-range host.
+///
+/// The address checks run ONLY against a parsed IP literal. A prefix match on
+/// the raw string would call `https://127.0.0.1.evil.example.com/v1` local —
+/// a registrable public name that anyone can point anywhere — and this flag is
+/// exactly what a user would trust to decide their prompt never left the box.
+fn is_local_endpoint(raw: &str) -> bool {
+    let host = host_of(raw);
+    if let Ok(addr) = host.parse::<std::net::Ipv4Addr>() {
+        return addr.is_loopback()
+            || addr.is_private()
+            || addr.is_link_local()
+            || addr.is_unspecified();
+    }
+    if let Ok(addr) = host.parse::<std::net::Ipv6Addr>() {
+        let head = addr.segments()[0];
+        // fc00::/7 unique-local, fe80::/10 link-local. Both stdlib predicates
+        // are still unstable, so the prefixes are checked directly.
+        return addr.is_loopback()
+            || addr.is_unspecified()
+            || head & 0xfe00 == 0xfc00
+            || head & 0xffc0 == 0xfe80;
+    }
+    host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local")
 }
 
 /// W6 F7 per-turn cost row carried by [`ProtocolEvent::SessionCost`].
@@ -2391,6 +2583,7 @@ mod tests {
             body: "hello".to_string(),
             subject: Some("Re: invoice".to_string()),
             conversation_id: Some("abc123".to_string()),
+            idempotency_key: Some("eff-7".to_string()),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "host_send_message_request");
@@ -2401,6 +2594,7 @@ mod tests {
         assert_eq!(json["body"], "hello");
         assert_eq!(json["subject"], "Re: invoice");
         assert_eq!(json["conversation_id"], "abc123");
+        assert_eq!(json["idempotency_key"], "eff-7");
     }
 
     /// #1098: the render frame serializes with the field names a host
@@ -2552,12 +2746,19 @@ mod tests {
             body: "ping".to_string(),
             subject: None,
             conversation_id: None,
+            idempotency_key: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "host_send_message_request");
         assert_eq!(json["platform"], "telegram");
         assert_eq!(json["body"], "ping");
-        for key in ["chat_id", "thread_id", "subject", "conversation_id"] {
+        for key in [
+            "chat_id",
+            "thread_id",
+            "subject",
+            "conversation_id",
+            "idempotency_key",
+        ] {
             assert!(
                 json.get(key).is_none(),
                 "{key} must be omitted when None, got {json}"
@@ -2749,6 +2950,7 @@ mod tests {
         let event = ProtocolEvent::McpReady {
             name: "team-tools".to_string(),
             tools: vec!["team_send_message".into(), "team_task_create".into()],
+            already_connected: false,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "mcp_ready");
@@ -2756,6 +2958,25 @@ mod tests {
         assert_eq!(json["tools"][0], "team_send_message");
         assert_eq!(json["tools"][1], "team_task_create");
         assert_eq!(json["tools"].as_array().unwrap().len(), 2);
+        // wayland#605: a real connect must stay byte-identical to the
+        // pre-#605 wire shape, so the annotation is absent when false.
+        assert!(
+            json.get("already_connected").is_none(),
+            "a real connect must not serialize already_connected: {json}"
+        );
+    }
+
+    /// wayland#605: a skipped `add_mcp_server` for an already-connected
+    /// server must be distinguishable on the wire from a real reconnect.
+    #[test]
+    fn mcp_ready_annotates_an_already_connected_skip() {
+        let event = ProtocolEvent::McpReady {
+            name: "team-tools".to_string(),
+            tools: vec!["team_send_message".into()],
+            already_connected: true,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["already_connected"], serde_json::json!(true));
     }
 
     #[test]
@@ -3054,5 +3275,78 @@ mod tests {
         }))
         .unwrap();
         assert!(!row.priced);
+    }
+
+    /// #372 REDACTION. A provider `base_url` is a credential carrier — a key
+    /// can sit in userinfo or in a query string. Both positions must be gone
+    /// from the serialized event, because this event exists to be shown to a
+    /// user and forwarded to a host log.
+    #[test]
+    fn route_info_never_serializes_a_credential_bearing_base_url() {
+        let cases = [
+            "https://user:s3cr3t@gateway.example.com/v1",
+            "https://gateway.example.com/v1?api_key=s3cr3t",
+            "https://gateway.example.com/v1#s3cr3t",
+            "https://user:s3cr3t@gateway.example.com/v1?api_key=s3cr3t",
+            // A password containing `@` must not smuggle the rest back in.
+            "https://user:p@ss3cr3t@gateway.example.com/v1",
+        ];
+        for raw in cases {
+            let event = ProtocolEvent::RouteInfo {
+                route: RouteInfo::from_endpoint(0, "openai", "gpt-5", Some(raw)),
+            };
+            let wire = serde_json::to_string(&event).expect("serialize");
+            assert!(
+                !wire.contains("s3cr3t"),
+                "credential survived onto the wire for {raw}: {wire}"
+            );
+            assert!(
+                wire.contains("gateway.example.com/v1"),
+                "scrubbing must keep the diagnostic host+path for {raw}: {wire}"
+            );
+        }
+    }
+
+    /// The whole point of the event: `provider` is `openai` for BOTH a local
+    /// Ollama server and a cloud gateway, so `local` is the only field that
+    /// answers the question #372 asked.
+    #[test]
+    fn route_info_locality_separates_local_from_cloud_on_one_provider_id() {
+        let local = [
+            "http://127.0.0.1:11434/v1",
+            "http://localhost:11434",
+            "http://LOCALHOST:8080/v1",
+            "http://192.168.1.50:11434/v1",
+            "http://10.0.0.7:11434",
+            "http://172.20.0.4:11434",
+            "http://[::1]:11434/v1",
+            "http://ollama.local:11434",
+        ];
+        let cloud = [
+            "https://api.openai.com/v1",
+            "https://openrouter.ai/api/v1",
+            // 172.32 is OUTSIDE the private 172.16.0.0/12 block.
+            "http://172.32.0.4:11434",
+            "https://127.0.0.1.evil.example.com/v1",
+        ];
+        for raw in local {
+            let route = RouteInfo::from_endpoint(0, "openai", "qwen3:8b", Some(raw));
+            assert!(route.local, "{raw} must be reported as a local route");
+        }
+        for raw in cloud {
+            let route = RouteInfo::from_endpoint(0, "openai", "gpt-5", Some(raw));
+            assert!(!route.local, "{raw} must NOT be reported as a local route");
+        }
+    }
+
+    /// No resolved endpoint must not be published as "local" — absence of an
+    /// endpoint is not evidence of a loopback one.
+    #[test]
+    fn route_info_without_an_endpoint_is_absent_not_local() {
+        for raw in [None, Some(""), Some("   ")] {
+            let route = RouteInfo::from_endpoint(3, "anthropic", "claude", raw);
+            assert_eq!(route.base_url, None, "{raw:?}");
+            assert!(!route.local, "{raw:?}");
+        }
     }
 }

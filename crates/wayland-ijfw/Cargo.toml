@@ -31,3 +31,7 @@ workspace-hack.workspace = true
 [dev-dependencies]
 tokio  = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true, features = ["serde"] }
+# #928 — `notice_for_unreachable_server_is_user_visible` asserts the LEVEL of
+# the skip notice with a capturing Layer. External crate; no wcore-* dep, so
+# the audit F2 boundary is untouched.
+tracing-subscriber.workspace = true

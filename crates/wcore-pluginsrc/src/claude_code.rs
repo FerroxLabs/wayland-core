@@ -15,6 +15,7 @@ use wcore_plugin_api::mcp_server_spec::McpTransport;
 use crate::Result;
 use crate::adapter::{PluginFormatAdapter, detect_format};
 use crate::error::PluginSrcError;
+use crate::frontmatter::{frontmatter_name, split_frontmatter};
 use crate::model::{
     AgentAsset, CanonicalDraft, CommandAsset, IgnoredFeature, McpServerDraft, ResolvedVersion,
     SkillAsset, SourceEntry,
@@ -53,7 +54,7 @@ impl PluginFormatAdapter for ClaudeCodeAdapter {
         // Lane E2: scan the prompt-asset text (skill/command bodies + agent
         // prompts) for injection / credential markers. Non-blocking — the
         // warnings ride on the InstallPlan consent surface.
-        draft.warnings = scan_assets(root, &draft);
+        draft.warnings = crate::scan::scan_draft_assets(root, &draft);
 
         // Hooks are not run in v1: record them so the grade is honest.
         if root.join("hooks/hooks.json").is_file()
@@ -93,38 +94,6 @@ fn read_plugin_json(root: &Path) -> Result<ClaudePluginJson> {
     let txt = fs::read_to_string(&p)?;
     serde_json::from_str(&txt)
         .map_err(|e| PluginSrcError::PluginManifest(format!("{}: {e}", p.display())))
-}
-
-/// Lane E2: read each lowered asset's text and collect prompt-risk warnings.
-/// Skill/command bodies are read from disk; agent prompts are already in the
-/// draft. Unreadable files are skipped (the copy step will surface real IO
-/// errors) so scanning never fails an otherwise-valid install.
-fn scan_assets(root: &Path, draft: &CanonicalDraft) -> Vec<crate::model::PlanWarning> {
-    let mut warnings = Vec::new();
-    for s in &draft.skills {
-        if let Ok(text) = fs::read_to_string(root.join(&s.rel_dir).join("SKILL.md")) {
-            warnings.extend(crate::scan::scan_prompt_risk(
-                &format!("skill:{}", s.name),
-                &text,
-            ));
-        }
-    }
-    for c in &draft.commands {
-        if let Ok(text) = fs::read_to_string(root.join(&c.rel_file)) {
-            warnings.extend(crate::scan::scan_prompt_risk(
-                &format!("command:{}", c.name),
-                &text,
-            ));
-        }
-    }
-    for a in &draft.agents {
-        let text = format!("{}\n{}", a.description, a.system_prompt);
-        warnings.extend(crate::scan::scan_prompt_risk(
-            &format!("agent:{}", a.name),
-            &text,
-        ));
-    }
-    warnings
 }
 
 fn lower_skills(root: &Path, draft: &mut CanonicalDraft) -> Result<()> {
@@ -348,46 +317,6 @@ fn lower_mcp_server(
         transport,
         env,
     })
-}
-
-/// Split a `---`-fenced YAML frontmatter block from the markdown body.
-/// Returns `(Some(frontmatter), body)` when a complete fence is present.
-fn split_frontmatter(content: &str) -> (Option<String>, String) {
-    let mut lines = content.lines();
-    if lines.next().map(str::trim_end) != Some("---") {
-        return (None, content.to_string());
-    }
-    let mut fm = String::new();
-    let mut body = String::new();
-    let mut in_body = false;
-    for line in lines {
-        if !in_body && line.trim_end() == "---" {
-            in_body = true;
-            continue;
-        }
-        if in_body {
-            body.push_str(line);
-            body.push('\n');
-        } else {
-            fm.push_str(line);
-            fm.push('\n');
-        }
-    }
-    if !in_body {
-        // No closing fence — treat the whole thing as body.
-        return (None, content.to_string());
-    }
-    (Some(fm), body)
-}
-
-fn frontmatter_name(skill_md: &Path) -> Option<String> {
-    let content = fs::read_to_string(skill_md).ok()?;
-    let (fm, _) = split_frontmatter(&content);
-    #[derive(Deserialize)]
-    struct N {
-        name: Option<String>,
-    }
-    serde_yaml::from_str::<N>(&fm?).ok()?.name
 }
 
 fn yaml_to_string_list(v: &serde_yaml::Value) -> Vec<String> {

@@ -54,7 +54,7 @@ pub use event::{
     MentionKind, MessageReceipt, push_bounded,
 };
 pub use health::{ChannelHealth, HealthState};
-pub use manager::{ChannelManager, StartPolicy, TaggedEvent};
+pub use manager::{ChannelManager, OutboundIdempotencySnapshot, StartPolicy, TaggedEvent};
 pub use media::{MediaBounds, MediaDisposition, RawAttachment};
 pub use mock::MockChannel;
 pub use outgoing::OutgoingMessage;

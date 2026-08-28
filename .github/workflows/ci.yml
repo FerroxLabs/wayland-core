@@ -301,6 +301,39 @@ jobs:
         # it to the full test+lint+audit pipeline.
 
     steps:
+      # ── Which Windows executor served this job (gh#1146) ─────────────────
+      # The Windows pool is two runner SERVICES on one host (`ferrox-win-msvc`
+      # and `SEANDESKTOP`, both `NT AUTHORITY\NetworkService`) plus the hosted
+      # pool, and the failure set churns between them on the same tree — the
+      # matrix note in ci.yml says so and closes with "Still open". #1146
+      # measured four runs across three executors where not one job said which
+      # box served it, so neither the red nor the green could be attributed to
+      # a tree.
+      #
+      # Written to GITHUB_STEP_SUMMARY, not only to the log, so an A/B pair is
+      # readable from `gh run view` without downloading two log archives.
+      #
+      # Fails closed on purpose: a job that cannot name its executor reports
+      # nothing rather than reporting anonymously. Enforced by
+      # `scripts/check-windows-attribution.py`.
+      - name: Record which Windows executor served this job
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_NAME:-}" ]; then
+            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
+            exit 1
+          fi
+          echo "runner_name=${RUNNER_NAME}"
+          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
+          {
+            echo "### Windows executor"
+            echo "- runner_name: \`${RUNNER_NAME}\`"
+            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
+            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v6
 
       # ── Python, for the account CI actually runs as ───────────────────────
@@ -581,27 +614,55 @@ jobs:
             exit 1
           fi
 
-      # 2026-07-27: MOVED to after the test step. It used to run before it, so a
-      # contract digest drift failed the job at that step and macOS and
-      # self-hosted Windows never reached the tests at all — three separate
-      # lanes reported "CI is red on two of three platforms" when what was
-      # actually lost was test VISIBILITY on those platforms.
+      # Regression gate for FerroxLabs/wayland#1100 — it lives HERE, in `ci`,
+      # because `CI (Array)` is the REQUIRED status check on `main` and this is
+      # the only job that always reports it. The same step also exists in
+      # `ci-windows-hosted` below, but that job's `if:` is a bare `[ci-windows]`
+      # commit-message opt-in read off `github.event.head_commit.message` /
+      # `github.event.commits.*.message`, and NEITHER key exists on a
+      # `pull_request` payload — so it never runs on a PR and only runs on a
+      # push whose message carries the tag. A gate that lives only there is a
+      # gate that a revert walks straight past with every required check green.
       #
-      # Deliberately still a hard failure, and deliberately NOT fixed by
-      # regenerating: a 4-way cross-audit went 3-0 against re-stamping the
-      # digests on a working branch, on the grounds that an agent who
-      # regenerates whenever CI goes red destroys the only guard that would
-      # catch a genuine wire change. The drift here is bookkeeping only —
-      # measured field-by-field, exactly `fixture_digest` and
-      # `source_inputs_digest` moved while `schema_digest` did NOT, so the wire
-      # shape is unchanged — but the coordinated Core+Desktop re-pin is still
-      # owed and the red is the honest signal that it is owed. See
-      # .planning/SEAM-REQUESTS/CONTRACT-DIGEST-RESTAMP.md.
+      # Windows-only: the probe cache the gate is about lives in the
+      # `#[cfg(windows)]` AppContainer backend, so on the `macos-latest` leg
+      # neither test in the ordering pair is compiled in and the run would
+      # certify nothing. `runner.os`, not `matrix.os` — the Windows matrix entry
+      # is a label LIST and renders as the literal string "Array".
       #
-      # Ordering only. The command, its strictness and its exit status are
-      # untouched: the job still fails on drift, it just reports the tests first.
-      - name: Check Desktop protocol contract corpus drift
-        run: vx cargo run -p wcore-protocol --bin wcore-contract -- check
+      # `!cancelled()` rather than `success()`, matching the steps around it: an
+      # earlier red must not suppress this verdict, but a cancelled run was
+      # never going to produce evidence and must not be re-reported as a defect.
+      #
+      # Cheap: `just test-ci` above already compiled this crate's lib test
+      # binary with the same dev profile into the same target dir, so this is a
+      # re-run, not a rebuild.
+      - name: Regression gate — wcore-sandbox lib suite in ONE process (#1100)
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: bash
+        run: bash scripts/regression-gate-1100.sh
+
+      # gh#1055 ask 2 — the Desktop contract corpus check USED TO RUN HERE, once
+      # per native matrix entry. It has MOVED to `ci-linux`, and nothing was
+      # weakened in the move: it is still a hard failure, still runs after the
+      # tests, and is still deliberately NOT fixed by regenerating on a red (a
+      # 4-way cross-audit went 3-0 against re-stamping digests on a working
+      # branch — an agent who regenerates whenever CI goes red destroys the only
+      # guard that would catch a genuine wire change).
+      #
+      # What changed is the BLAST RADIUS. The check regenerates in memory and
+      # byte-compares against contracts/desktop/v1; it has no platform
+      # component. Running it on every leg turned one fact — a `SOURCE_INPUTS`
+      # file's hash moved — into `CI (Array)`, `CI (linux-containerized)` and
+      # `CI (macos-latest)` red simultaneously, which is the most alarming shape
+      # a CI board can show and is why two unrelated PRs lost a night to it.
+      # Windows keeps its coverage through `just test-ci` (the corpus drift test
+      # itself), because path-separator normalization in the generator is the one
+      # genuinely platform-sensitive part; macOS is the redundant leg.
+      #
+      # crates/wcore-protocol/tests/contract_gate_topology.rs asserts this step
+      # sits in exactly one job and that the job is `ci-linux`, so re-adding it
+      # here fails a test instead of quietly restoring the old board.
 
       # V1 C2 — release-binary smoke. Catches the v0.2.0 BLOCKER #1 class
       # of regression where `inventory::submit!` items get dead-code-stripped
@@ -802,6 +863,27 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_INCREMENTAL: "0"
     steps:
+      # Which Windows executor served this job (gh#1146). Fails closed: a job
+      # that cannot name the box that served it reports nothing rather than
+      # reporting anonymously. Why, and what enforces it:
+      # `scripts/check-windows-attribution.py`.
+      - name: Record which Windows executor served this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_NAME:-}" ]; then
+            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
+            exit 1
+          fi
+          echo "runner_name=${RUNNER_NAME}"
+          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
+          {
+            echo "### Windows executor"
+            echo "- runner_name: \`${RUNNER_NAME}\`"
+            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
+            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v6
 
       # The Linux jobs already do this (see "Free disk space" in `ci-linux`);
@@ -923,6 +1005,17 @@ jobs:
             exit 1
           fi
 
+      # Regression gate for FerroxLabs/wayland#1100. See the script header for
+      # why `cargo test --test-threads=1` is the only instrument that can see
+      # this class and why it reads its own executed count back instead of
+      # trusting exit status. This job is NOT a required check (see the note at
+      # the top of it) — the copy that gates is in the `ci` job above, on the
+      # `CI (Array)` leg. This one is the opt-in `[ci-windows]` supplier.
+      - name: Regression gate — wcore-sandbox lib suite in ONE process (#1100)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/regression-gate-1100.sh
+
       # Windows has no other clippy supplier: `ci-linux` and the macOS leg
       # cannot compile the `#[cfg(windows)]` branches at all. Runs AFTER the
       # tests (and under `!cancelled()`) so a lint red cannot suppress the test
@@ -986,7 +1079,25 @@ jobs:
   ci-linux:
     name: CI (linux-containerized)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 90 was already marginal and this branch pushed it over. MEASURED: on
+    # 497aefc1 this job ran ~81 min and finished; on df7f9f8f it was CANCELLED
+    # at exactly 90m16s with every step green and the last one — #1134's new
+    # shared-process lib suite — still running. That step is a SECOND full
+    # debug build (`cargo test --workspace --lib` cannot share nextest's
+    # artifacts) and costs ~16 min, appended to a job that already sat at ~81.
+    # A cancelled required context is not a verdict, so the cost is a whole
+    # cycle every time it tips over.
+    timeout-minutes: 120
+    # A job-level `permissions:` block REPLACES the workflow-level one at the
+    # top of this file wholesale (GHA semantics) — the same rule that cost the
+    # `report` job "multiple weeks of red" when `contents: read` was dropped by
+    # omission — so contents+checks are restated here rather than inherited.
+    # The addition is `pull-requests: read`, which the Desktop contract corpus
+    # pre-flight hint below needs to read the PR changed-file list (gh#1055).
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: read
     env:
       CI_IMAGE: wayland-core-ci:rust-1.95-slim-bookworm
       # Linux runners ship with ~14GB free; the host cleanup step
@@ -1260,6 +1371,51 @@ jobs:
           python3 scripts/check-no-personal-identifiers.py --self-test
           python3 scripts/check-no-personal-identifiers.py
 
+      # #1134 -- test code writing a process-global that production code in the
+      # SAME lib test binary reads. `cargo nextest`, which every other suite
+      # here runs, gives each test its own process, so this class can never
+      # fail under it: it is invisible at --retries 0, not merely flaky. The
+      # shared-process `--lib` leg in linux-containerized is where it SHOWS UP;
+      # this gate is what keeps it from coming back, and it runs here -- a pure
+      # text scan, no toolchain -- so a build failure cannot shadow it.
+      #
+      # It fails only on a write with NO serialization at all, which is a
+      # condition that can actually be met and is met today (zero). It is NOT
+      # the rule "every set_var must be #[serial]": that rule was measured
+      # against the four defects the shared-process leg found and would have
+      # flagged none of them while calling the binary compliant.
+      - name: No unserialized test writes to shared process globals
+        run: |
+          python3 scripts/check-test-env-globals.py --self-test
+          python3 scripts/check-test-env-globals.py
+      # ── Windows-attribution gate (#1146) ──────────────────────────────
+      # Same placement reasoning as the two steps above: AFTER checkout (it
+      # reads the workflow YAML and .config/nextest.toml out of the working
+      # tree) and EARLY, because it is a pure text scan with no toolchain and
+      # must not be shadowed by a build failure.
+      #
+      # It asserts the two conditions under which a Windows red can be
+      # attributed to a tree at all: every Windows job in the Windows test
+      # workflows records which executor served it and fails closed when it
+      # cannot, and the three tests #1146 measured churning are not laundered
+      # back to green by `[profile.ci] retries = 2`.
+      #
+      # Runs on the Linux `ci-linux` job on purpose — it is a text scan about
+      # Windows, not a Windows job, so it costs nothing on the leg that is
+      # already the critical path and it cannot be skipped by a Windows leg
+      # being skipped, which is exactly how #1146's green was recorded.
+      #
+      # `--self-test` runs first and proves the checker fires AND stays silent
+      # on the fixtures, so a checker that has stopped matching fails loudly.
+      - name: Windows CI failures stay attributable
+        run: |
+          python3 scripts/check-windows-attribution.py --self-test
+          python3 scripts/check-windows-attribution.py
+          # The red arm #1146 asks for runs through the flake ledger, and a
+          # misparsed target there selects zero tests and grades NOTRUN rather
+          # than failing, so its parser is checked here too.
+          python3 scripts/flake-ledger.py --self-test
+
       - name: Free disk space (drop unused preinstalled toolchains)
         run: |
           set -e
@@ -1320,6 +1476,67 @@ jobs:
           RUN cargo install --locked cargo-nextest --version "^0.9"
           RUN cargo install --locked cargo-audit
           EOF
+
+      # gh#1055 ask 3 — ADVISORY, never gating. A PR that edits a `SOURCE_INPUTS`
+      # file without touching crates/wcore-protocol/contracts/desktop/v1/ is a
+      # near-certain corpus drift, and that is knowable from the changed-file
+      # list before a single test runs. Emitting it as a `::notice` turns the
+      # eventual red from "this PR broke something fundamental" into something
+      # the author was already told to expect, with the SAFE procedure attached
+      # (`wcore-contract diff` first, regenerate only once the key-diff shows
+      # nothing but source_inputs_digest and fixture_digest moved).
+      #
+      # PLACEMENT IS THE POINT, AND IT WAS WRONG ONCE. This step first landed
+      # as step 11 of ~15 in this job — after fmt, after clippy, after the whole
+      # nextest workspace suite, the swarm suite and the voice suite. That is
+      # POST-flight: a hint whose entire value is "the corpus check you are
+      # about to see fail is a hash rebase, not a protocol break" is worth
+      # nothing once the failing minutes have already been spent, and worth
+      # less than nothing when an earlier gating step reds out and the job
+      # never reaches it at all. It now runs at the earliest point it CAN —
+      # immediately after the CI image exists, because it invokes the real
+      # binary rather than a hardcoded path list — and before every step that
+      # touches $DOCKER_RUN. Both bounds are held by
+      # `the_preflight_hint_runs_before_every_step_it_is_meant_to_pre_empt` in
+      # crates/wcore-protocol/tests/contract_gate_topology.rs.
+      #
+      # `pull-requests: read` in this job's `permissions:` block is load-bearing.
+      # This step reads the PR's changed-file list over the REST API; the
+      # workflow-level block (top of this file) grants contents+checks only, and
+      # GHA sets every scope a `permissions:` block omits to `none`. Without the
+      # grant `gh api` 403s — and since the step is `continue-on-error`, that
+      # 403 is SILENT: no notice, no red, the feature simply never happens. Held
+      # by `the_job_carrying_the_preflight_hint_can_actually_read_the_pull_request`.
+      #
+      # The path list comes from the binary that actually hashes it
+      # (`wcore-contract source-inputs` feeds the same constant), so this step
+      # can never re-hardcode a list and go stale. `docker run -i` rather than
+      # $DOCKER_RUN because the changed-file list arrives on stdin.
+      #
+      # Non-gating twice over: `continue-on-error: true`, AND the binary's
+      # `preflight` arm is infallible by construction — it decodes whatever
+      # arrives lossily and reports an unreadable list on stderr instead of
+      # returning it (graded by `preflight_survives_a_non_utf8_changed_file_list`
+      # and `preflight_survives_a_changed_file_list_that_cannot_be_read`). The
+      # one thing deliberately NOT silent is losing the file list itself: `gh`
+      # failing emits a ::warning, so a future permissions regression is visible
+      # rather than merely absent.
+      - name: Desktop contract corpus pre-flight hint (advisory)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          list="$RUNNER_TEMP/desktop-contract-changed-files.txt"
+          if ! gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --jq '.[].filename' > "$list"; then
+            echo "::warning title=Desktop contract corpus::could not read this PR changed-file list (gh api failed - check this job permissions block); the corpus pre-flight hint was not evaluated"
+            exit 0
+          fi
+          docker run --rm -i -v "${{ github.workspace }}:/work" -w /work "$CI_IMAGE" \
+            cargo run -q -p wcore-protocol --bin wcore-contract -- preflight < "$list"
 
       - name: Pre-build tool_token_bench
         run: $DOCKER_RUN "$CI_IMAGE" cargo build -p wcore-agent --bin tool_token_bench --features test-utils
@@ -1522,6 +1739,94 @@ jobs:
           run_suite wcore-agent 14 --features voice --lib voice_mode
           run_suite wcore-tools 32 --lib voice_mode
 
+      # -- Shared-process lib suite (#1134) ------------------------------
+      # EVERY other test leg in this repo runs under `cargo nextest`, which
+      # gives each test its OWN PROCESS. Test code here writes process-global
+      # state -- environment variables, static hooks, the panic hook -- that
+      # production code reads on GENERIC paths: `profile_home()` on every
+      # config resolve, `resolve_max_stream_retries` on every engine run,
+      # the chown pause hooks on every ownership walk. Under nextest a global
+      # written by test A can never be observed by test B, so CI was
+      # structurally BLIND to the whole class. Not retry-masked: invisible at
+      # --retries 0.
+      #
+      # `cargo test --workspace --lib` is one process per LIB BINARY, and it is
+      # the only leg in this repository that runs tests in a shared process.
+      # Four live instances it caught on the commit that added it, all green
+      # under nextest every time:
+      #   * wcore-cli::lib -- an ambient WAYLAND_HOME reached `profile_home()`
+      #     and made a signed-in ChatGPT user read as not-configured (2 of 4
+      #     full-binary runs);
+      #   * wcore-cli::lib -- a no-op `std::panic::set_hook` left installed by
+      #     two containment tests silenced that failure's message entirely;
+      #   * wcore-eval-scenarios::lib -- two tests installing the same
+      #     process-global chown pause hook HUNG the binary outright
+      #     (rc=124 at a 420 s timeout; the test passes alone in 0.00s).
+      #   * wcore-cli::lib -- nine onboarding tests wrote a real config.toml
+      #     through the process-global WAYLAND_HOME, landing this module's
+      #     fixture in a concurrent config test's tempdir (and, unset, in the
+      #     developer's own home).
+      #
+      # BLOCKING on purpose. A non-blocking shared-process leg is a gate that
+      # cannot fail, which is exactly the state it replaces.
+      #
+      # COST, measured on hetzner-dsm at the commit that added this: 332 s of
+      # test execution across 58 lib binaries, 11,442 tests. The compile is
+      # served from the same target dir the nextest step above already warmed.
+      #
+      # ANTI-VACUITY: `cargo test` exits 0 having run ZERO tests -- see
+      # scripts/check-no-vacuous-cargo-test.py for the measurement -- so the
+      # executed count is summed across every lib binary and floored. The floor
+      # is 11000 against 11442 measured, not the exact count: this leg exists to
+      # catch a suite that COLLAPSED (a crate losing its lib target drops
+      # thousands), not to red-line on a test legitimately deleted. Raise it
+      # when the measured count moves materially.
+      #
+      # `--no-fail-fast` so the count is a TOTAL and not a lower bound -- the
+      # same drift that truncated the nextest leg above.
+      #
+      # One `test result: FAILED` line in this step's output is EXPECTED and is
+      # not this suite's. plugin::scaffold::tests::plugin_test_propagates_a_-
+      # failing_suite shells out to a fixture crate whose only test panics on
+      # purpose, and that nested cargo writes to the inherited fd rather than
+      # through libtest's capture. It doubles as the known-positive control
+      # that this step really executes and really reports failures. The sum
+      # below reads only 'test result: ok.' lines; the enclosing test's own
+      # verdict is what decides the step.
+      - name: Shared-process lib suite (cargo test, one process per binary)
+        run: |
+          set -euo pipefail
+          MIN=11000
+          # vacuity-checked: every 'test result: ok. N passed' line emitted by the
+          # invocation below is summed into $total and compared against $MIN, which
+          # exits 1 when it falls short. The exit status alone is not trusted.
+          if ! out="$($DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo test --workspace --lib --no-fail-fast 2>&1)"; then
+            printf '%s\n' "$out" | grep -E '^(failures:|test result:|thread .* panicked)' || true
+            printf '%s\n' "$out" | tail -60
+            echo "::error title=Shared-process lib suite::A lib test failed in a SHARED process. This leg exists because nextest gives every test its own process and can never see this class, so a failure here is usually a process-global -- an env var, a static hook, the panic hook -- written by one test and read by another in the same binary. Reproduce it locally with a plain (non-nextest) lib run of that one crate."
+            exit 1
+          fi
+          printf '%s\n' "$out" | grep -E '^test result:' || true
+          total="$(printf '%s\n' "$out" | sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' | awk '{s+=$1} END {print s+0}')"
+          echo "shared-process lib suite: executed $total tests (floor $MIN)"
+          if [ "$total" -lt "$MIN" ]; then
+            echo "::error title=Shared-process lib suite::Executed $total tests, expected at least $MIN. A suite that exits 0 having run nothing is not a suite -- a crate lost its lib target, a module got cfg'd out, or the invocation stopped collecting. Move the floor in this step together with whatever moved."
+            exit 1
+          fi
+      # gh#1055 ask 2 — MOVED here from the `ci` matrix job, where it ran once
+      # per native platform for a fact that has no platform component. See the
+      # note at its old site for the full reasoning; the command, its strictness
+      # and its exit status are unchanged, and it still runs after the tests so a
+      # drift never costs this leg its test visibility.
+      #
+      # It carries NO `if:` and NO `continue-on-error:`, and must not grow one:
+      # this is the only remaining standalone corpus gate, so either would delete
+      # the coverage silently rather than loudly. `the_corpus_drift_step_is_a_gate
+      # _and_carries_nothing_that_could_silence_it` fails if either ever appears,
+      # on the step or on this job.
+      - name: Check Desktop protocol contract corpus drift
+        run: $DOCKER_RUN "$CI_IMAGE" cargo run -p wcore-protocol --bin wcore-contract -- check
+
       # WCORE_SMOKE_REQUIRE_PREBUILT=1 (passed into the container): a missing
       # release artifact is a hard failure here, never a silent skip (#190).
       - name: Release binary smoke (catches plugin dead-code-strip)
@@ -1693,6 +1998,28 @@ jobs:
       matrix: ${{ fromJSON((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"},{"os":"macos-latest","target":"x86_64-apple-darwin"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]}' || '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"}]}') }}
 
     steps:
+      # Which Windows executor served this job (gh#1146). Fails closed: a job
+      # that cannot name the box that served it reports nothing rather than
+      # reporting anonymously. Why, and what enforces it:
+      # `scripts/check-windows-attribution.py`.
+      - name: Record which Windows executor served this job
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_NAME:-}" ]; then
+            echo "::error title=Executor not recorded::RUNNER_NAME is unset, so this job cannot say which Windows executor served it (gh#1146)."
+            exit 1
+          fi
+          echo "runner_name=${RUNNER_NAME}"
+          echo "computername=${COMPUTERNAME:-<unset>} workspace=${RUNNER_WORKSPACE:-<unset>}"
+          {
+            echo "### Windows executor"
+            echo "- runner_name: \`${RUNNER_NAME}\`"
+            echo "- computername: \`${COMPUTERNAME:-<unset>}\`"
+            echo "- workspace: \`${RUNNER_WORKSPACE:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v6
 
       # Linux: same disk + linker setup as the ci: job.
@@ -2015,7 +2342,14 @@ jobs:
     # identify what had passed (wayland#1115). That one is now `E2E report`;
     # this is the sole producer of `report` and says so.
     name: report
-    needs: ci
+    # `ci-windows-hosted` is listed so a SKIPPED Windows leg is OBSERVABLE here
+    # (gh#1146). That leg is opt-in behind a `[ci-windows]` commit marker and is
+    # deliberately NOT a required check, so on `main` and on every PR it is
+    # skipped — and a skipped leg contributes no red, which is how it silently
+    # contributed to a green. `if: always()` below already carries `report`
+    # through a skipped dependency, so nothing about WHEN this job runs changes;
+    # what changes is that it can now say so out loud.
+    needs: [ci, ci-windows-hosted]
     if: always()
     runs-on: ubuntu-latest
     # gh#1072. Pure aggregation — measures under a minute in every sampled
@@ -2055,6 +2389,35 @@ jobs:
           pattern: nextest-junit-*
           path: junit-reports
         continue-on-error: true
+
+      # A SKIPPED WINDOWS LEG MUST NOT READ AS WINDOWS COVERAGE (gh#1146).
+      #
+      # This job publishes the aggregate verdict every reviewer and the release
+      # process read as "CI passed", and it has never said which platforms
+      # produced it. Measured on PR #341: `CI (windows-latest, hosted)` SKIPPED,
+      # overall report passing. Nothing was red, so nothing was noticed.
+      #
+      # It ANNOTATES and never fails, on purpose. Hosted Windows fails three
+      # tests on main's own byte-identical tree; that is a separately-filed
+      # defect, and gating main on it would block every merge. The defect being
+      # closed here is the honesty of the conclusion, not the redness of the
+      # platform.
+      #
+      # Placed BEFORE the evidence assert and marked `always()` so the coverage
+      # statement is emitted whether or not that gate then fails — an absence of
+      # Windows signal is most worth saying when something else is also wrong.
+      #
+      # Behaviour and wiring are both enforced on Linux by
+      # `scripts/check-windows-attribution.py` (R3), which runs in `just
+      # check-all` and in the `ci-linux` lint job — deliberately not on Windows,
+      # since the whole point is a check that survives Windows being skipped.
+      - name: Annotate Windows coverage (a skipped leg is not a pass)
+        if: always()
+        env:
+          EVIDENCE_DIR: junit-reports
+          SELF_HOSTED_RESULT: ${{ needs.ci.result }}
+          HOSTED_RESULT: ${{ needs.ci-windows-hosted.result }}
+        run: bash .github/scripts/annotate-windows-coverage.sh
 
       # A TEST STEP THAT NEVER RAN MUST NOT BE REPORTABLE AS ANYTHING BUT A
       # FAILURE. Added 2026-07-30 (lane/fix-clippy-gate) after measuring the

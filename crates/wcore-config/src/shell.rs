@@ -31,7 +31,8 @@ pub use executable_readiness::{
     ResolvedExecutable, resolve_mcp_stdio_executable,
 };
 pub use mcp_stdio_launch_context::{
-    LaunchValueSource, McpStdioLaunchContext, McpStdioLaunchContextError,
+    FORWARDED_ENVIRONMENT_VARIABLES, LaunchValueSource, MANDATORY_WINDOWS_CHILD_VARIABLES,
+    McpStdioLaunchContext, McpStdioLaunchContextError,
 };
 
 /// Process-global Bash-tool shell override, sourced from `[tools] windows_shell`

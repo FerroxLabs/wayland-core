@@ -115,6 +115,7 @@ impl wcore_agent::output::OutputSink for HostRequestCapture {
         body: &str,
         _subject: Option<&str>,
         _conversation_id: Option<&str>,
+        _idempotency_key: Option<&str>,
     ) {
         if let Ok(mut v) = self.requests.lock() {
             v.push((

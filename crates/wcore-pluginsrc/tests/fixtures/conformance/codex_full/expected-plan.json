@@ -1,0 +1,58 @@
+{
+  "adds": [
+    {
+      "kind": "command",
+      "name": "acme/codekit:reindex"
+    },
+    {
+      "kind": "skill",
+      "name": "acme/codekit:index"
+    },
+    {
+      "kind": "skill",
+      "name": "acme/codekit:lookup"
+    }
+  ],
+  "grade": "HooksIgnored",
+  "ignored": [
+    {
+      "detail": "app connectors have no Wayland runtime: drive → google-drive",
+      "kind": "apps"
+    },
+    {
+      "detail": "mcp server idx: dropped cwd",
+      "kind": "mcp-field"
+    },
+    {
+      "detail": "not carried into plugin.toml: description",
+      "kind": "manifest-metadata"
+    },
+    {
+      "detail": "plugin declares hooks (not run for foreign plugins): PreToolUse",
+      "kind": "hooks"
+    },
+    {
+      "detail": "presentation metadata not carried: theme",
+      "kind": "interface"
+    }
+  ],
+  "marketplace": "acme",
+  "namespace_collisions": [],
+  "plugin": "codekit",
+  "resolved_version": {
+    "Explicit": "3.1.0"
+  },
+  "spawns": [
+    {
+      "args": [
+        "idx.js"
+      ],
+      "command": "node",
+      "env_keys": [],
+      "name": "idx",
+      "transport_kind": "stdio"
+    }
+  ],
+  "store_path": "<store>",
+  "warnings": []
+}

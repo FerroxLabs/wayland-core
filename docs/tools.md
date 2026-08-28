@@ -184,6 +184,44 @@ Execute a shell command and return the result.
   the config key. Either way it affects the Bash tool only — hook, MCP, and
   skill shells keep `cmd /C`. No-op on Unix.
 
+### The command floor
+
+A small set of commands is refused **before any shell is spawned**, below
+approval and below `--force`. If you see a message starting with
+
+```
+Refused by the command floor: …
+```
+
+that is this layer, and no setting turns it off. There are two of them:
+
+| It names | Why it is refused |
+|---|---|
+| The repository control surface — `.git/hooks`, `.git/config`, `.wayland-core` | Writing there is arbitrary code execution as you, on your next `git` command. Ordinary git work (`add`, `commit`, `status`, `push`) is unaffected. |
+| The agent's own authority state — the Wayland profile and config directories: the grant store, workspace trust, credentials, `oauth/`, `plugins/`, `skills/`, or one of their files by name | A command that rewrites or replaces that state revokes the guard it is running under. Edit those files yourself instead. |
+
+It is deliberately not a blocklist of command names. It reads the PATHS in the
+command, after expanding `~`, `$HOME` and `$WAYLAND_HOME`, and after following
+symlinks that already exist on disk — so `cd $HOME && cd .wayland && echo … >>
+config.toml` is refused for the same reason the absolute spelling is, and so is
+a glob (`~/.way*`) whose literal prefix could expand onto one of those
+directories. `WAYLAND_HOME` can only ever ADD to what is protected; pointing it
+elsewhere does not move the floor off your real profile.
+
+Two things it deliberately does **not** do, so you know where the line is:
+
+- It cannot see a link made by the same command it is reading
+  (`ln -s ~/.config /tmp/c && echo x >> /tmp/c/wayland-core/config.toml`) —
+  the link does not exist yet when the floor runs. A second tool call through
+  that link IS caught.
+- It does not chase arbitrary indirection: `eval`, a `base64` payload, or a
+  variable holding the path. Those are the sandbox's job, and the floor is the
+  layer that sits underneath the sandbox rather than replacing it.
+
+If a legitimate command is refused, rephrase it so it does not name those
+directories, or make the change yourself — the refusal text says which of the
+two rules fired.
+
 ## Grep
 
 Search file contents with regular expressions.

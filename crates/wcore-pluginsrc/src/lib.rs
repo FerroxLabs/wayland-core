@@ -7,10 +7,13 @@
 
 pub mod adapter;
 pub mod claude_code;
+pub mod codex;
 pub mod commit;
 pub mod error;
+pub mod frontmatter;
 pub mod mcp_registry;
 pub mod model;
+pub mod path_guard;
 pub mod plan;
 pub mod scan;
 

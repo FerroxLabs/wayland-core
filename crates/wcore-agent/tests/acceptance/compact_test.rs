@@ -213,6 +213,7 @@ async fn autocompact_triggers_llm_summary() {
         &config.model,
         &compact_config,
         &mut state,
+        &Default::default(),
     )
     .await;
 

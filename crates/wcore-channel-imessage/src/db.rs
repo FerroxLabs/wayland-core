@@ -36,17 +36,30 @@ pub fn chat_db_path() -> PathBuf {
 /// `~/Library/Messages/Attachments/…`; everything downstream needs an absolute
 /// path. Non-`~` paths are returned unchanged.
 pub(crate) fn expand_tilde(path: &str) -> String {
+    expand_tilde_from(path, std::env::var("HOME").ok().as_deref())
+}
+
+/// The expansion itself, with the home directory STATED rather than read from
+/// the process environment.
+///
+/// Split out so the tests can exercise every branch without writing `HOME`.
+/// `$HOME` is process-global and production code in this very binary reads it
+/// ([`chat_db_path`], and this function via [`parse_attachment_paths`]), so a
+/// test that sets it is not testing in isolation — under plain `cargo test`
+/// one lib binary is one process shared by every test in it, and the value
+/// stays set for every sibling that runs afterwards (#1134). Stating the home
+/// makes that impossible rather than merely unlikely.
+fn expand_tilde_from(path: &str, home: Option<&str>) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_default();
-        if home.is_empty() {
+        let Some(home) = home.filter(|h| !h.is_empty()) else {
             return path.to_string();
-        }
+        };
         return format!("{home}/{rest}");
     }
     if path == "~"
-        && let Ok(home) = std::env::var("HOME")
+        && let Some(home) = home
     {
-        return home;
+        return home.to_string();
     }
     path.to_string()
 }
@@ -331,14 +344,45 @@ mod tests {
     }
 
     #[test]
-    fn expand_tilde_uses_home() {
-        // SAFETY: single-threaded test; restored implicitly at process exit.
-        unsafe { std::env::set_var("HOME", "/Users/test") };
+    fn expand_tilde_uses_the_stated_home() {
+        // The home is STATED. This test used to `set_var("HOME", ...)` under a
+        // comment claiming "single-threaded test; restored implicitly at
+        // process exit" -- both halves were false. `cargo test` runs this
+        // binary's tests on a thread POOL sharing one process, and the write
+        // was never restored, so `/Users/test` became the home of every
+        // sibling that ran afterwards, including any that reaches
+        // `chat_db_path()` or `wcore_channels`' own HOME-rooted config path.
         assert_eq!(
-            expand_tilde("~/Library/Messages/Attachments/x/IMG.heic"),
+            expand_tilde_from(
+                "~/Library/Messages/Attachments/x/IMG.heic",
+                Some("/Users/test")
+            ),
             "/Users/test/Library/Messages/Attachments/x/IMG.heic"
         );
+        // A bare `~` expands to the home itself.
+        assert_eq!(expand_tilde_from("~", Some("/Users/test")), "/Users/test");
         // A path that does not start with ~ is unchanged.
-        assert_eq!(expand_tilde("/abs/path.png"), "/abs/path.png");
+        assert_eq!(
+            expand_tilde_from("/abs/path.png", Some("/Users/test")),
+            "/abs/path.png"
+        );
+    }
+
+    /// With no usable home, a `~` path must come back UNCHANGED rather than
+    /// silently rooting itself at `/` -- `format!("{home}/{rest}")` with an
+    /// empty home yields `/Library/...`, an absolute path to a file that is
+    /// not the user's. Neither branch had any coverage before.
+    #[test]
+    fn expand_tilde_without_a_home_leaves_the_path_alone() {
+        for home in [None, Some("")] {
+            assert_eq!(
+                expand_tilde_from("~/Library/Messages/Attachments/x/IMG.heic", home),
+                "~/Library/Messages/Attachments/x/IMG.heic",
+                "an absent or empty HOME must not produce a root-relative path"
+            );
+        }
+        assert_eq!(expand_tilde_from("~", None), "~");
+        // An absolute path never consults the home at all.
+        assert_eq!(expand_tilde_from("/abs/path.png", None), "/abs/path.png");
     }
 }

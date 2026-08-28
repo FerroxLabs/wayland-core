@@ -55,18 +55,45 @@ fn await_rendezvous(go: &Path) {
     }
 }
 
+/// Wall-clock budget for one writer's whole contribution.
+///
+/// `update_at` gives up after its own 2 s and REPORTS that. The TUI turns a
+/// `LockTimeout` into a visible "could not save the always-allow decision"
+/// notice (`wcore_cli::tui::engine_bridge::persist_always_allow_grant`), so a
+/// timeout is a grant the user is TOLD about — not one silently lost, which is
+/// the property this file exists to guard.
+///
+/// The poll inside `update_at` is unfair by construction (a fixed 10 ms
+/// `try_write` retry, no queue), and a 10 ms sleep stretches on a saturated
+/// host, so at the rendezvous an unlucky writer can lose every poll inside the
+/// 2 s and be told to give up. Measured on this host: 10/10 clean at load 47,
+/// and BOTH arms failing inside the full 15,978-test parallel run at load 120+
+/// with `writer N round 0 failed: gave up after 2s`.
+///
+/// So a REPORTED timeout is retried and only this budget fails. Nothing else is
+/// retried, and [`assert_no_grant_was_lost`] is untouched: drop the lock and
+/// the grants vanish and this file still fails, which is what it is for.
+const WRITER_BUDGET: Duration = Duration::from_secs(60);
+
 /// One writer's whole contribution: `ROUNDS` distinct always-allow grants.
 fn write_grants(path: &Path, writer: usize) {
+    let deadline = Instant::now() + WRITER_BUDGET;
     for round in 0..ROUNDS {
-        LearnedPolicy::update_at(path, |policy| {
-            policy.record_in(
-                tool_name(writer, round),
-                None,
-                LearnedDecision::AllowAlways,
-                WORKSPACE,
-            )
-        })
-        .unwrap_or_else(|error| panic!("writer {writer} round {round} failed: {error}"));
+        loop {
+            match LearnedPolicy::update_at(path, |policy| {
+                policy.record_in(
+                    tool_name(writer, round),
+                    None,
+                    LearnedDecision::AllowAlways,
+                    WORKSPACE,
+                )
+            }) {
+                Ok(()) => break,
+                // Reported, not lost — try again until the budget is spent.
+                Err(LearningError::LockTimeout { .. }) if Instant::now() < deadline => {}
+                Err(error) => panic!("writer {writer} round {round} failed: {error}"),
+            }
+        }
     }
 }
 

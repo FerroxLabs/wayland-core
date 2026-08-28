@@ -124,7 +124,11 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
         {
             return Some((16_384, 128_000));
         }
-        if (m.contains("gpt-5.4") || m.contains("gpt-5.5"))
+        // 5.6 joins 5.4/5.5 (models.dev, vendor row `openai`, 2026-08-28):
+        // gpt-5.6 and its -luna / -sol / -terra siblings all serve 1,050,000.
+        // Without this arm they fell to the 400k catch below and every 5.6 run
+        // compacted at 40% of its real window.
+        if (m.contains("gpt-5.4") || m.contains("gpt-5.5") || m.contains("gpt-5.6"))
             && !m.contains("-mini")
             && !m.contains("-nano")
             && !m.contains("-codex")
@@ -132,6 +136,28 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
             return Some((128_000, 1_050_000));
         }
         return Some((128_000, 400_000));
+    }
+
+    // --- xAI Grok 4.x ---
+    // Added 2026-08-28. With no arm the whole 4.x family fell to the
+    // `CompactConfig` default and compacted a 1M-window model at 200k.
+    //
+    // The OUTPUT figures here are the vendor's own, NOT the conservative
+    // under-claim this table uses elsewhere, and that is deliberate: adding an
+    // arm REVOKES `should_omit_max_tokens`, so until now these ids sent no
+    // max_tokens at all and got xAI's natural ceiling. An arm that "errs low"
+    // would not be free here — it would be the first thing ever to cut their
+    // output. Vendor rows (models.dev provider `xai`, 2026-08-28) are the only
+    // source for these ids; no reseller serves them.
+    //
+    // The split is real: 4.20/4.3 are 1M-window / 30k-output; 4.5 and 4.6 are
+    // 500k both ways. Longest-match first so `grok-4.5` never falls into the
+    // 4.x arm and loses 470k of output.
+    if m.contains("grok-4.5") || m.contains("grok-4.6") {
+        return Some((500_000, 500_000));
+    }
+    if m.contains("grok-4") {
+        return Some((30_000, 1_000_000));
     }
 
     // --- xAI Grok 3.x ---
@@ -149,6 +175,26 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     // -native-audio / -live realtime variants: ~8k output) — an over-claim
     // would 400 them, so they are excluded and fail open to the unknown path.
     if (m.contains("gemini-2.5-pro") || m.contains("gemini-2.5-flash"))
+        && !m.contains("-image")
+        && !m.contains("-tts")
+        && !m.contains("-native-audio")
+        && !m.contains("-live")
+    {
+        return Some((65_536, 1_048_576));
+    }
+
+    // --- Google Gemini 3.x (text family) ---
+    // Added 2026-08-28. Google's CURRENT generation had no arm at all, so
+    // gemini-3.1-pro, 3.5-flash, 3.6-flash and 3.7-flash each compacted at the
+    // 200k default against a real 1,048,576 window.
+    //
+    // Same numbers and the SAME exclusion list as 2.5, and for the same reason:
+    // `google` and `google-vertex` agree at 65_536 / 1_048_576 for every text
+    // tier (models.dev, 2026-08-28), while the specialty variants are much
+    // smaller and would 400 on an over-claim — `-image` is 32_768/131_072 or
+    // less, `-tts` is an 8k window, and the `-live` / live-translate variants
+    // are smaller again.
+    if m.contains("gemini-3")
         && !m.contains("-image")
         && !m.contains("-tts")
         && !m.contains("-native-audio")
@@ -532,6 +578,99 @@ mod tests {
             model_output_ceiling("gemini", "gemini-2.5-flash-live"),
             None
         );
+    }
+
+    #[test]
+    fn gpt_5_6_gets_the_large_window_and_its_small_siblings_do_not() {
+        // Refreshed 2026-08-28: 5.6 serves 1,050,000 exactly as 5.4/5.5 do.
+        // Before this arm every 5.6 id fell to the 400k catch and compacted at
+        // 40% of its real window.
+        for id in ["gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] {
+            assert_eq!(
+                model_output_ceiling("openai", id),
+                Some((128_000, 1_050_000)),
+                "{id} must report the 1.05M window"
+            );
+        }
+        // The exclusion list is load-bearing and must apply to 5.6 too: the
+        // small variants are 400k, and claiming 1.05M for them would 400 near
+        // the top.
+        for id in ["gpt-5.6-mini", "gpt-5.6-nano", "gpt-5.6-codex"] {
+            assert_eq!(
+                model_output_ceiling("openai", id),
+                Some((128_000, 400_000)),
+                "{id} must stay at the 400k window"
+            );
+        }
+    }
+
+    #[test]
+    fn grok_4_family_splits_by_version_and_does_not_shadow_grok_3() {
+        // Added 2026-08-28. Vendor rows (models.dev provider `xai`) are the
+        // only source for these ids: 4.20/4.3 are 1M-window / 30k-output;
+        // 4.5 and 4.6 are 500k both ways.
+        for id in ["grok-4.5", "grok-4.6"] {
+            assert_eq!(
+                model_output_ceiling("xai", id),
+                Some((500_000, 500_000)),
+                "{id} is 500k both ways"
+            );
+        }
+        // ORDERING IS LOAD-BEARING. `grok-4.5` also contains `grok-4`, so
+        // moving the general arm above the 4.5/4.6 one would silently cut
+        // their output from 500,000 to 30,000. This assertion is what fails if
+        // the arms are reordered.
+        for id in [
+            "grok-4.3",
+            "grok-4.20-0309-reasoning",
+            "grok-4.20-multi-agent-0309",
+        ] {
+            assert_eq!(
+                model_output_ceiling("xai", id),
+                Some((30_000, 1_000_000)),
+                "{id} is the 1M-window / 30k-output tier"
+            );
+        }
+        // The 3.x arm is untouched, and 4.x must not have swallowed it.
+        assert_eq!(
+            model_output_ceiling("xai", "grok-3"),
+            Some((64_000, 131_072))
+        );
+    }
+
+    #[test]
+    fn gemini_3_text_family_resolves_and_its_specialty_variants_fail_open() {
+        // Added 2026-08-28: Google's CURRENT generation had no arm at all and
+        // compacted at the 200k default against a real 1,048,576 window.
+        for id in [
+            "gemini-3-flash-preview",
+            "gemini-3.1-pro-preview",
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.6-flash",
+            "gemini-3.7-flash",
+        ] {
+            assert_eq!(
+                model_output_ceiling("gemini", id),
+                Some((65_536, 1_048_576)),
+                "{id} must report the Gemini 3.x text-family limits"
+            );
+        }
+        // Same exclusions as 2.5, and they matter more here: the 3.x image and
+        // live tiers are 131_072 or smaller, so an over-claim would 400 them.
+        for id in [
+            "gemini-3-pro-image",
+            "gemini-3.1-flash-image-preview",
+            "gemini-3.1-flash-tts-preview",
+            "gemini-3.1-flash-live-preview",
+            "gemini-3.5-live-translate-preview",
+        ] {
+            assert_eq!(
+                model_output_ceiling("gemini", id),
+                None,
+                "{id} must fail open rather than inherit the text-family window"
+            );
+        }
     }
 
     #[test]

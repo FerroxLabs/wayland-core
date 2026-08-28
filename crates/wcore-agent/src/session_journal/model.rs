@@ -112,17 +112,51 @@ pub enum ProviderAttemptNotStartedReason {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ToolNotStartedReason {
-    PolicyDenied { policy: String },
-    HookDenied { reason: String },
-    BudgetDenied { reason: String },
+    PolicyDenied {
+        policy: String,
+    },
+    HookDenied {
+        reason: String,
+    },
+    BudgetDenied {
+        reason: String,
+    },
     CircuitOpen,
     UnknownTool,
-    ApprovalDenied { approval_id: String },
-    ApprovalCancelled { approval_id: String },
-    ApprovalTimedOut { approval_id: String },
-    InvalidInput { error: String },
-    DispatchFailed { error: String },
-    Cancelled { reason: String },
+    ApprovalDenied {
+        approval_id: String,
+    },
+    ApprovalCancelled {
+        approval_id: String,
+    },
+    ApprovalTimedOut {
+        approval_id: String,
+    },
+    InvalidInput {
+        error: String,
+    },
+    DispatchFailed {
+        error: String,
+    },
+    Cancelled {
+        reason: String,
+    },
+    /// The attempt was interrupted with its outcome unobserved, and the
+    /// declared effect contract makes a re-dispatch under the SAME durable
+    /// idempotency key converge on exactly one external effect.
+    ///
+    /// This is the only not-started reason that does NOT assert the effect
+    /// failed to land. It asserts something narrower and checkable: whatever
+    /// happened, re-issuing this exact execution under the key already recorded
+    /// for it cannot add a second effect, so the attempt is terminalized FOR
+    /// RE-DISPATCH rather than answered. `resume_recovered_tool_round` is its
+    /// only writer and its only reader; a session that stops between writing it
+    /// and re-dispatching leaves this receipt behind, and the next resume
+    /// re-dispatches from it — which is why it names the reconciler that
+    /// vouched for the claim.
+    RedispatchableUnderDurableKey {
+        reconciler: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

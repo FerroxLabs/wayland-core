@@ -13,7 +13,9 @@
 //!
 //! [`InstallPlan`]: crate::InstallPlan
 
-use crate::model::PlanWarning;
+use std::path::Path;
+
+use crate::model::{CanonicalDraft, PlanWarning};
 
 /// Direct instruction-override phrases. High precision: these rarely appear in
 /// a legitimate skill/agent prompt.
@@ -74,6 +76,32 @@ pub fn scan_prompt_risk(component: &str, text: &str) -> Vec<PlanWarning> {
         }
     }
     out
+}
+
+/// Read each lowered asset's text and collect prompt-risk warnings for a whole
+/// draft. Skill/command bodies are read from disk; agent prompts are already in
+/// the draft. Unreadable files are skipped (the copy step surfaces real IO
+/// errors) so scanning never fails an otherwise-valid install.
+///
+/// Format-blind on purpose: every adapter routes its lowered draft through this
+/// one function, so a new foreign format cannot arrive without the scan.
+pub fn scan_draft_assets(root: &Path, draft: &CanonicalDraft) -> Vec<PlanWarning> {
+    let mut warnings = Vec::new();
+    for s in &draft.skills {
+        if let Ok(text) = std::fs::read_to_string(root.join(&s.rel_dir).join("SKILL.md")) {
+            warnings.extend(scan_prompt_risk(&format!("skill:{}", s.name), &text));
+        }
+    }
+    for c in &draft.commands {
+        if let Ok(text) = std::fs::read_to_string(root.join(&c.rel_file)) {
+            warnings.extend(scan_prompt_risk(&format!("command:{}", c.name), &text));
+        }
+    }
+    for a in &draft.agents {
+        let text = format!("{}\n{}", a.description, a.system_prompt);
+        warnings.extend(scan_prompt_risk(&format!("agent:{}", a.name), &text));
+    }
+    warnings
 }
 
 #[cfg(test)]

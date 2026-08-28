@@ -9,6 +9,7 @@ mod check;
 mod fixtures_support;
 mod generate;
 mod observation;
+mod preflight;
 mod spec;
 
 pub use canonical::{canonical_json, digest_named_bytes};
@@ -22,6 +23,7 @@ pub use observation::{
     ContractCapabilityStatus, ContractDescriptor, HostContractObserver, HostObservation,
     HostObservationError, producer_contract_descriptor,
 };
+pub use preflight::{CONTRACT_DIR, preflight_notice};
 pub use spec::{
     COMMAND_SPECS, ContractCriticality, EVENT_SPECS, PRODUCER_COMMAND_TYPES, PRODUCER_EVENT_TYPES,
     SOURCE_INPUTS, WireSpec, command_fixture_values, event_fixture_values,

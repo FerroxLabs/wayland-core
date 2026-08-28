@@ -1,8 +1,11 @@
 // Lane C: marketplace catalog parsing + the resolve→clone→lower→plan→commit
 // install pipeline.
 //
-// Foreign-format knowledge (the Claude Code `marketplace.json` schema) lives in
-// `parse_marketplace`; everything past `detect_format` is format-blind and
+// Foreign-format knowledge is confined to the catalog parsers — the Claude Code
+// `marketplace.json` schema in `parse_marketplace`, the Codex
+// `.agents/plugins/marketplace.json` schema in `codex_marketplace`. Which
+// parser runs is decided ONCE, by `locate_catalog`, from which manifest file the
+// source actually ships. Everything past `detect_format` is format-blind and
 // flows through the `wcore-pluginsrc` adapters. Nothing here spawns a process
 // or writes to the plugin store until `commit_install` is called — planning is
 // pure (the InstallPlan is the consent surface).
@@ -18,7 +21,8 @@ use wcore_pluginsrc::{
 use crate::plugin::error::{PluginCliError, Result};
 use crate::plugin::{catalog, known, lockfile, quarantine};
 
-/// Top-level metadata from a `.claude-plugin/marketplace.json` catalog.
+/// Top-level metadata from a foreign marketplace catalog. `owner_*` and
+/// `plugin_root` are Claude Code concepts; a Codex catalog leaves them `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketplaceMeta {
     pub name: String,
@@ -105,6 +109,9 @@ pub fn parse_marketplace(json: &str) -> Result<(MarketplaceMeta, Vec<SourceEntry
             strict,
             declared_version,
             description,
+            // A Claude Code catalog declares no install/auth policy, so it
+            // carries nothing that would degrade at this layer.
+            unsupported: Vec::new(),
         });
     }
 
@@ -190,27 +197,64 @@ fn parse_source(source: &Value, plugin_root: Option<&str>) -> Result<SourceKind>
 }
 
 /// Reject any path that is absolute or contains a `..` (parent-dir) component.
-/// Shared by the parser and the quarantine clone. Rejecting absolute/root/prefix
-/// components matters because `Path::join` REPLACES its base when the argument
-/// is absolute — `clone_dir.join("/etc")` would escape the clone entirely on
-/// Unix, and a `C:\…` prefix does the same on Windows. The source string is
-/// attacker-controlled (it comes straight from `marketplace.json`).
+/// Shared by both catalog parsers and the quarantine clone. Rejecting
+/// absolute/root/prefix components matters because `Path::join` REPLACES its
+/// base when the argument is absolute — `clone_dir.join("/etc")` would escape
+/// the clone entirely on Unix, and a `C:\…` prefix does the same on Windows.
+/// The source string is attacker-controlled (it comes straight from a foreign
+/// `marketplace.json`).
+///
+/// The rule itself lives in `wcore_pluginsrc::path_guard`, which is also what
+/// the plugin-manifest adapters call, so there is exactly ONE implementation of
+/// it in the workspace. This wrapper only re-labels the error for the CLI's
+/// typed surface.
 pub(crate) fn reject_traversal(s: &str) -> Result<()> {
-    use std::path::Component;
-    let p = Path::new(s);
-    if p.is_absolute() {
-        return Err(PluginCliError::PathTraversal(s.to_string()));
+    wcore_pluginsrc::path_guard::reject_traversal(s)
+        .map_err(|_| PluginCliError::PathTraversal(s.to_string()))
+}
+
+/// Which foreign catalog dialect a marketplace ships. Decided by WHICH manifest
+/// file is present, not by sniffing the JSON: file location is the vendor's own
+/// declaration of its format, and a location-keyed decision cannot be flipped by
+/// hostile content inside the document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogDialect {
+    ClaudeCode,
+    Codex,
+}
+
+/// The catalog manifests we ingest, in priority order.
+const CATALOG_MANIFESTS: &[(&str, CatalogDialect)] = &[
+    (
+        ".claude-plugin/marketplace.json",
+        CatalogDialect::ClaudeCode,
+    ),
+    (".agents/plugins/marketplace.json", CatalogDialect::Codex),
+];
+
+/// Read whichever catalog manifest `root` ships. `what` names the source in the
+/// error so a missing catalog says which marketplace it was looking at.
+fn read_catalog(root: &Path, what: &str) -> Result<(String, CatalogDialect)> {
+    for (rel, dialect) in CATALOG_MANIFESTS {
+        let p = root.join(rel);
+        if p.is_file() {
+            return Ok((std::fs::read_to_string(&p)?, *dialect));
+        }
     }
-    let bad = p.components().any(|c| {
-        matches!(
-            c,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    });
-    if bad {
-        return Err(PluginCliError::PathTraversal(s.to_string()));
+    Err(PluginCliError::Quarantine(format!(
+        "{what} has no .claude-plugin/marketplace.json or .agents/plugins/marketplace.json"
+    )))
+}
+
+/// Parse a catalog body with the parser its dialect selects.
+fn parse_catalog(
+    json: &str,
+    dialect: CatalogDialect,
+) -> Result<(MarketplaceMeta, Vec<SourceEntry>)> {
+    match dialect {
+        CatalogDialect::ClaudeCode => parse_marketplace(json),
+        CatalogDialect::Codex => crate::plugin::codex_marketplace::parse_codex_marketplace(json),
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -253,13 +297,8 @@ pub fn resolve_source(
         .ok_or_else(|| PluginCliError::MarketplaceNotFound(market.to_string()))?;
 
     let market_root = acquire_marketplace(&mref, quarantine_root)?;
-    let mjson = std::fs::read_to_string(market_root.join(".claude-plugin/marketplace.json"))
-        .map_err(|_| {
-            PluginCliError::Quarantine(format!(
-                "no .claude-plugin/marketplace.json in marketplace '{market}'"
-            ))
-        })?;
-    let (_meta, entries) = parse_marketplace(&mjson)?;
+    let (mjson, dialect) = read_catalog(&market_root, &format!("marketplace '{market}'"))?;
+    let (_meta, entries) = parse_catalog(&mjson, dialect)?;
     let entry = entries
         .into_iter()
         .find(|e| e.name == plugin)
@@ -315,6 +354,12 @@ pub fn resolve_and_plan(
 
     let store_path = plugins_root.join(format!("{}@{market}", draft.name));
     let mut plan = InstallPlan::from_draft(&draft, market, store_path);
+
+    // Catalog-level degradation (foreign install/auth policy, product gating,
+    // display category) rides the same consent surface as plugin-level
+    // degradation. Without this the plan would show a Codex catalog's policy
+    // block as if Wayland honored it.
+    plan.ignored.extend(entry.unsupported.iter().cloned());
 
     // Lane E3: trust ≠ capability. Capability grants come from the manifest
     // permissions; trust is about provenance. An unofficial (user-added)
@@ -438,7 +483,7 @@ pub fn remove_marketplace_plugin(
 }
 
 /// Make a marketplace's catalog available on disk. Returns the directory that
-/// contains `.claude-plugin/marketplace.json`.
+/// contains one of the [`CATALOG_MANIFESTS`].
 fn acquire_marketplace(mref: &known::MarketplaceRef, quarantine_root: &Path) -> Result<PathBuf> {
     acquire_source(&mref.source, &mref.name, quarantine_root)
 }
@@ -488,11 +533,8 @@ pub fn add_marketplace_source(
 ) -> Result<MarketplaceMeta> {
     let normalized = normalize_source(source);
     let market_root = acquire_source(&normalized, "add", quarantine_root)?;
-    let mjson = std::fs::read_to_string(market_root.join(".claude-plugin/marketplace.json"))
-        .map_err(|_| {
-            PluginCliError::Quarantine("source has no .claude-plugin/marketplace.json".into())
-        })?;
-    let (meta, entries) = parse_marketplace(&mjson)?;
+    let (mjson, dialect) = read_catalog(&market_root, "source")?;
+    let (meta, entries) = parse_catalog(&mjson, dialect)?;
     known::add_marketplace(
         plugins_root,
         known::MarketplaceRef {
@@ -519,6 +561,7 @@ pub fn add_marketplace_source(
 fn adapter_for(format: &str) -> Result<Box<dyn wcore_pluginsrc::PluginFormatAdapter>> {
     match format {
         "claude-code" => Ok(Box::new(wcore_pluginsrc::claude_code::ClaudeCodeAdapter)),
+        "codex" => Ok(Box::new(wcore_pluginsrc::codex::CodexAdapter)),
         other => Err(PluginCliError::Quarantine(format!(
             "no install-time adapter for format '{other}'"
         ))),

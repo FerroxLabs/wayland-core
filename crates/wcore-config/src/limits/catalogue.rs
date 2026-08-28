@@ -109,7 +109,15 @@ pub(super) const CATALOGUE_CEILINGS: &[(&str, u32, u32)] = &[
     // same limits and the id really is decisive. 3.8-max reports output
     // 131,072; 3.7 and older report 65,536 (and `alibaba-cn` says 64,000 for
     // 3.7-plus, hence 64,000).
+    //
+    // 3.8-flash was MISSING and the release-time freshness gate refused the
+    // v0.13.9 cut over it: served first-party by `alibaba-token-plan` at
+    // 1,000,000 / 131,072, it matched no arm, fell to the `CompactConfig`
+    // default and was silently mis-sized. It carries the same 128,000 as its
+    // -max sibling rather than the vendor's 131,072 -- the same deliberate
+    // few-percent under-claim, which the gate accepts by design.
     ("qwen3.8-max", 128_000, 1_000_000),
+    ("qwen3.8-flash", 128_000, 1_000_000),
     ("qwen3.7-max", 64_000, 1_000_000),
     ("qwen3.7-plus", 64_000, 1_000_000),
     ("qwen3.7-flash", 64_000, 1_000_000),
@@ -285,6 +293,20 @@ mod tests {
         assert_eq!(
             model_output_ceiling("alibaba", "qwen3.6-plus"),
             Some((64_000, 1_000_000))
+        );
+
+        // The id the release gate caught missing. Graded against the DEFAULT
+        // it used to fall to, so this fails if the arm is dropped again
+        // rather than only if its numbers change.
+        assert_eq!(
+            model_output_ceiling("alibaba", "qwen3.8-flash"),
+            Some((128_000, 1_000_000)),
+            "qwen3.8-flash must not inherit the CompactConfig default"
+        );
+        assert_ne!(
+            model_output_ceiling("alibaba", "qwen3.8-flash"),
+            model_output_ceiling("alibaba", "qwen3.7-flash"),
+            "3.8-flash is a 128k-output tier; 3.7-flash is 64k"
         );
     }
 

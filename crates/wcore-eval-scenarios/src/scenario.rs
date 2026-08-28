@@ -64,6 +64,16 @@ pub struct Scenario {
     /// F05 packaged-proof requirements evaluated against the complete typed
     /// activation stream. These are outcome gates, not capability advertising.
     pub capability_expectations: Vec<CapabilityExpectation>,
+    /// Stream-retry budget handed to the evaluated child, or `None` to let it
+    /// use its shipped default.
+    ///
+    /// A scenario that scripts a FIXED number of failing provider steps asserts
+    /// what happens once the budget is EXHAUSTED, so it must STATE the budget
+    /// rather than inherit it — the shipped default cannot be exhausted inside
+    /// a short scenario cap. It rides on the scenario (not on a process-global
+    /// env var) so one such scenario can never change the budget another test
+    /// in the same binary runs under; see `child_env::ChildEnvironment::build`.
+    pub stream_retry_budget: Option<u32>,
 }
 
 /// Exact capability truth a scenario requires from the packaged engine.
@@ -233,6 +243,7 @@ impl Scenario {
             strict: false,
             approval: ApprovalPolicy::Yolo,
             capability_expectations: Vec::new(),
+            stream_retry_budget: None,
         }
     }
 
@@ -303,6 +314,14 @@ impl Scenario {
     /// Set the tool-approval posture (D3). Default [`ApprovalPolicy::Yolo`].
     pub fn approval(mut self, policy: ApprovalPolicy) -> Self {
         self.approval = policy;
+        self
+    }
+
+    /// State the stream-retry budget the evaluated child runs under, for
+    /// scenarios that script a fixed number of failing provider steps and
+    /// assert on exhaustion. See [`Scenario::stream_retry_budget`].
+    pub fn stream_retry_budget(mut self, retries: u32) -> Self {
+        self.stream_retry_budget = Some(retries);
         self
     }
 

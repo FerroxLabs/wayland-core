@@ -792,8 +792,9 @@ mod tests {
         // anthropic:opus is present (anthropic is keyed above). A
         // cross-provider row (openai-chatgpt:5.5) is only listed when that
         // provider is connected — its OAuth status depends on the machine's
-        // `~/.wayland/oauth/chatgpt.json` (read from $HOME, NOT WAYLAND_HOME, so
-        // ModelHomeGuard can't sandbox it). Assert it exactly when connected.
+        // stored OAuth token, resolved through `profile_home()` — which prefers
+        // WAYLAND_HOME over $HOME, so the ModelHomeGuard above DOES decide it
+        // (#1134). Assert the row exactly when the probe says connected.
         let pairs = model_rows(&p);
         assert!(pairs.iter().any(|(p, r)| *p == "anthropic" && r == "opus"));
         let chatgpt_connected = super::super::provider_connection_status("openai-chatgpt")
@@ -1079,6 +1080,14 @@ mod tests {
             "AWS_SHARED_CREDENTIALS_FILE",
             "AWS_CONFIG_FILE",
             "GOOGLE_APPLICATION_CREDENTIALS",
+            // #1134: the OAuth probe resolves its token file through
+            // `wcore_config::config::profile_home()`, which prefers
+            // WAYLAND_HOME over $HOME. Sandboxing $HOME alone left the probe
+            // reading whatever home some OTHER test in this binary had left in
+            // the process — under plain `cargo test` (one process per binary)
+            // that made a signed-in user read as not-configured. Neutralise the
+            // override too, so the $HOME below is the only thing that decides.
+            "WAYLAND_HOME",
         ];
         let tmp = tempfile::tempdir().expect("tempdir");
         if seed_chatgpt_token {
@@ -1140,6 +1149,36 @@ mod tests {
         assert!(needs_key.contains(&"vertex"), "no GCP credentials");
         assert!(!connected.contains(&"bedrock"));
         assert!(!connected.contains(&"vertex"));
+    }
+
+    /// #1134: `profile_home()` prefers WAYLAND_HOME over $HOME, so an ambient
+    /// value — leaked into the process by any other test in this binary, or
+    /// exported by the developer's own shell — used to decide where the OAuth
+    /// probe looked for the stored ChatGPT token, and a signed-in user was
+    /// reported as not-configured. Under `cargo nextest` (one process per test)
+    /// this can never fire; under plain `cargo test` it was a live flake.
+    /// The clean-env helper must neutralise the override, not just $HOME.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn an_ambient_wayland_home_cannot_hide_the_stored_chatgpt_login() {
+        let decoy = tempfile::tempdir().expect("tempdir");
+        let saved = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: serial test; restored before the assertions below.
+        unsafe { std::env::set_var("WAYLAND_HOME", decoy.path()) };
+        let (connected, _needs_key) =
+            with_clean_provider_env(true, || provider_partition(&ProviderPickerSurface::new("")));
+        // SAFETY: still serialized.
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+        assert!(
+            connected.contains(&"openai-chatgpt"),
+            "an ambient WAYLAND_HOME must not decide where the OAuth login is read from"
+        );
     }
 
     #[cfg(unix)]

@@ -40,9 +40,17 @@ pub async fn execute_shell_commands(
     // Pair matches with outputs; fail-fast on first error
     let mut pairs: Vec<(usize, usize, String)> = Vec::with_capacity(matches.len());
     for (m, result) in matches.iter().zip(outputs) {
-        let output = result.map_err(|e| ShellExecutionError::CommandFailed {
-            pattern: m.full_match.clone(),
-            output: e.to_string(),
+        let output = result.map_err(|e| {
+            // #693 — a floor refusal is not a failed command. Re-wrapping it as
+            // `CommandFailed` would tell the caller the shell ran and errored,
+            // which is the opposite of what happened: no shell was spawned.
+            if matches!(e, ShellExecutionError::FloorRefused { .. }) {
+                return e;
+            }
+            ShellExecutionError::CommandFailed {
+                pattern: m.full_match.clone(),
+                output: e.to_string(),
+            }
         })?;
         pairs.push((m.start, m.end, output));
     }
@@ -80,6 +88,13 @@ pub enum ShellExecutionError {
 
     #[error("Shell execution blocked for MCP skill")]
     McpBlocked,
+
+    /// #693 — the non-bypassable command floor refused this command. The
+    /// `!shell:` surface is a SECOND shell path: it is not the `BashTool`, so
+    /// it never saw the credential denylist, the OS sandbox or the approval
+    /// manager. The floor is the one guard both shell surfaces share.
+    #[error("Shell command refused for pattern \"{pattern}\": {reason}")]
+    FloorRefused { pattern: String, reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +224,18 @@ fn extract_shell_matches(content: &str) -> Vec<ShellMatch> {
 
 /// Execute a single shell command and return its combined stdout/stderr output.
 async fn execute_command(command: &str, cwd: &str) -> Result<String, ShellExecutionError> {
+    // #693 — the command floor, before any shell is spawned. Skill permissions
+    // and workspace trust both gate this surface, and both are waivable, which
+    // is exactly the layer a floor sits under.
+    if let Some(reason) =
+        wcore_config::command_floor::floor_refusal(command, Some(std::path::Path::new(cwd)))
+    {
+        return Err(ShellExecutionError::FloorRefused {
+            pattern: command.to_owned(),
+            reason,
+        });
+    }
+
     let output = wcore_config::shell::shell_command_builder(command)
         .current_dir(cwd)
         .output()

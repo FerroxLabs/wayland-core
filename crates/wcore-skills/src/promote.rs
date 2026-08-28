@@ -601,19 +601,55 @@ pub(crate) fn staging_root_for(skills_root: &Path) -> PathBuf {
     }
 }
 
-/// Join `rel` under `base`, rejecting absolute paths and any `..` component.
+/// Join `rel` under `base`, rejecting absolute paths, any `..` component, and
+/// any `.` component.
+///
+/// `Component::CurDir` used to be accepted here. It is refused now because this
+/// function is the WRITER for payload-supplied keys, while fences elsewhere
+/// identify the same entries by comparing the key STRING (for example
+/// `loader::generated_provenance_in_files`, which asks `rel == "manifest.json"`).
+/// Accepting `.` meant `"./manifest.json"` and `"manifest.json"` resolved to the
+/// same file while comparing as different strings — one spelling written, a
+/// different spelling matched. On a branch that gated an evidence fence behind
+/// such a match, the `./` spelling walked straight past it and produced a
+/// promotion grant with `evidence: None`.
+///
+/// Normalising instead of refusing would NOT close that gap: it fixes the path
+/// the write lands on and leaves every string-keyed matcher still looking at the
+/// raw spelling. Refusing is what makes the writer and those matchers agree by
+/// construction, so a payload can only ever name an entry one way.
 fn resolve_under(base: &Path, rel: &str) -> Option<PathBuf> {
-    let p = Path::new(rel);
-    if p.is_absolute() {
+    // The RAW key is what is validated, not a re-rendered path.
+    // `Path::components()` normalises an interior `.` away AND re-renders with
+    // the platform separator, so comparing the re-render against `rel` refused
+    // ordinary `nested/SKILL.md` on Windows (it comes back with a backslash)
+    // while still needing a separate rule for `nested/./SKILL.md`. Reading the
+    // segments directly answers both, identically on every platform.
+    //
+    // `/` is the ONE separator a key may use. A backslash is refused
+    // everywhere, not only where it would separate: a key that names a
+    // different file depending on the host is exactly the ambiguity this
+    // function exists to remove, and no skill entry needs one.
+    if rel.is_empty() || rel.contains('\\') {
         return None;
     }
-    for c in p.components() {
-        match c {
-            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
-            _ => return None,
+    for segment in rel.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return None;
         }
     }
-    Some(base.join(p))
+    // Belt and braces for the one spelling `split('/')` cannot see: on Windows
+    // `C:entry` is a single segment carrying a Prefix component, and `join`
+    // REPLACES the base with it instead of extending it. Every other refusal
+    // above is reachable on both platforms; this arm only ever fires on
+    // Windows, where a bare drive-relative key would otherwise escape.
+    if Path::new(rel)
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(base.join(rel))
 }
 
 /// Best-effort directory fsync, so a rename's effects survive a power loss.
@@ -699,4 +735,87 @@ fn tree_stats(dir: &Path) -> Result<(usize, u64), GovernError> {
         }
     }
     Ok((files.len(), bytes))
+}
+
+#[cfg(test)]
+mod resolve_under_tests {
+    use super::resolve_under;
+    use std::path::Path;
+
+    /// A payload key may name an entry exactly ONE way.
+    ///
+    /// `resolve_under` is the writer for payload-supplied keys, while fences
+    /// elsewhere identify the same entries by comparing the key STRING. When
+    /// `.` was accepted, `"./manifest.json"` and `"manifest.json"` landed on the
+    /// same file yet compared as different strings, so a fence keyed on the
+    /// canonical spelling never saw the prefixed one.
+    ///
+    /// The canonical arms are the known-positive control: without them a
+    /// `resolve_under` that refused EVERYTHING would satisfy the refusals below
+    /// and grade nothing.
+    #[test]
+    fn a_dot_prefixed_key_cannot_name_the_same_file_as_its_canonical_spelling() {
+        let base = Path::new("/tmp/base");
+
+        // Control: the canonical spellings still resolve.
+        assert_eq!(
+            resolve_under(base, "manifest.json"),
+            Some(base.join("manifest.json")),
+            "control: a canonical key must still resolve, or the refusals below prove nothing"
+        );
+        assert_eq!(
+            resolve_under(base, "nested/SKILL.md"),
+            Some(base.join("nested/SKILL.md")),
+            "control: a nested canonical key must still resolve"
+        );
+
+        // The bypass spelling, and its relatives, are refused outright.
+        for rel in [
+            "./manifest.json",
+            "./SKILL.md",
+            "././manifest.json",
+            "nested/./SKILL.md",
+            "./nested/SKILL.md",
+            // Second spellings of a separator: `nested\\SKILL.md` is one file on
+            // Windows and a different, single-component file on Unix.
+            "nested\\SKILL.md",
+            ".\\manifest.json",
+            // Empty segments name the same entry as the collapsed spelling.
+            "nested//SKILL.md",
+            "nested/",
+            "",
+        ] {
+            assert_eq!(
+                resolve_under(base, rel),
+                None,
+                "{rel} resolves to the same file as its canonical spelling but compares as a \
+                 different string, so a string-keyed fence would not see it"
+            );
+        }
+
+        // Pre-existing guarantees must not regress.
+        assert_eq!(
+            resolve_under(base, "../escape"),
+            None,
+            "`..` must stay refused"
+        );
+        assert_eq!(
+            resolve_under(base, "nested/../escape"),
+            None,
+            "an interior `..` must stay refused"
+        );
+        assert_eq!(
+            resolve_under(base, "/etc/passwd"),
+            None,
+            "an absolute path must stay refused"
+        );
+        // Drive-relative on Windows: `join` would REPLACE the base rather than
+        // extend it, so the entry lands outside the staging root entirely.
+        #[cfg(windows)]
+        assert_eq!(
+            resolve_under(base, "C:entry"),
+            None,
+            "a drive-relative key must not escape the base"
+        );
+    }
 }

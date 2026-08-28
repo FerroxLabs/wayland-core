@@ -14,6 +14,7 @@
 
 pub mod approve;
 pub mod catalog;
+pub mod codex_marketplace;
 pub mod error;
 pub mod generations;
 pub mod index;
@@ -167,11 +168,13 @@ pub enum PluginCmd {
     Recover,
 }
 
-/// `plugin marketplace <cmd>` — register and inspect Claude Code marketplaces.
+/// `plugin marketplace <cmd>` — register and inspect foreign plugin
+/// marketplaces (Claude Code and Codex catalogs).
 #[derive(Debug, Subcommand)]
 pub enum MarketplaceCmd {
     /// Register a marketplace: `owner/repo`, a git URL, or a local path to a
-    /// dir containing `.claude-plugin/marketplace.json`.
+    /// dir containing `.claude-plugin/marketplace.json` or
+    /// `.agents/plugins/marketplace.json`.
     Add {
         /// The marketplace source.
         source: String,

@@ -22,6 +22,12 @@ pub mod catalog;
 // `wcore_providers::OpenAIChatGptProvider::list_models`.
 pub mod chatgpt_catalog;
 // W8c.2 F.1: CuaConfig TOML schema (consumed by wcore-cua::adapter::from_spec).
+// #693 — the non-bypassable command floor shared by BOTH shell surfaces
+// (`wcore_tools::bash::BashTool` and `wcore_skills::shell`). It lives here
+// because `wcore-skills` does not depend on `wcore-tools`, and because the
+// protected set resolves through this crate own `profile_home()` /
+// `wayland_config_dir()`.
+pub mod command_floor;
 pub mod compact;
 pub mod compat;
 pub mod confidential_blob;

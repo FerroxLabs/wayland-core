@@ -2556,14 +2556,32 @@ impl AgentSpawner {
         }
         config.max_turns = Some(sub_config.max_turns);
         config.max_tokens = sub_config.max_tokens;
-        // #112 — a per-spawn cap is ALWAYS deliberate: it must bind on the
-        // wire and never be omitted. Without this, (a) a desktop-default
-        // session on an omit-safe provider (flux/openrouter/gemini) would
-        // omit the child's sized cap and let Spawn/council children emit the
-        // served model's full ceiling, busting the sub-agent/CouncilSpend
-        // worst-case math; and (b) a child pinned to a different provider
-        // would decide omission from the PARENT's omitted-cap signal.
-        config.max_tokens_explicit = true;
+        // #112 — a DELIBERATE per-spawn cap must bind on the wire and never
+        // be omitted. Without that, (a) a desktop-default session on an
+        // omit-safe provider (flux/openrouter/gemini) would omit the child's
+        // sized cap and let Spawn/council children emit the served model's
+        // full ceiling, busting the sub-agent/CouncilSpend worst-case math;
+        // and (b) a child pinned to a different provider would decide omission
+        // from the PARENT's omitted-cap signal.
+        //
+        // #862 — but "deliberate" is not "always". The Spawn tool has no
+        // per-task `max_tokens` at all: `parse_tasks` seeds every task with one
+        // constant and `floor_task_caps_at_parent` then raises it to the
+        // session's own cap, so a Spawn child's budget IS the parent's, never a
+        // per-spawn value. Marking that explicit made a fork SERIALIZE a wire
+        // cap that the identical no-fork session OMITS, so the fork got the
+        // conservative unknown-model floor while the no-fork run got the served
+        // model's natural ceiling — the exact fork / no-fork asymmetry #862
+        // measured. A cap that merely inherits the session's budget therefore
+        // inherits the session's wire posture too. Spend stays bounded: such a
+        // child may emit no more than the session that spawned it, an explicit
+        // `--max-tokens` still binds everywhere, and a budget-governed session
+        // forces the sized cap back on regardless (`Engine::run`).
+        let deliberately_narrower = sub_config.max_tokens < self.base_config.max_tokens;
+        let pinned_to_another_provider = sub_config.provider.is_some();
+        config.max_tokens_explicit = deliberately_narrower
+            || pinned_to_another_provider
+            || self.base_config.max_tokens_explicit;
         // Crucible #3 — honor a per-spawn temperature override. `None` leaves the
         // base config's temperature in place (top-level base is `None`, so the
         // child engine omits the field unless this sets it).
@@ -3943,6 +3961,49 @@ mod crucible_provider_resolution_tests {
         );
     }
 
+    /// #862 — a child whose cap merely INHERITS the session's own budget (the
+    /// Spawn surface, post-floor: `parse_tasks` has no per-task cap and
+    /// `floor_task_caps_at_parent` raises every task to the parent's) is not a
+    /// deliberate per-spawn value, so it must adopt the session's WIRE posture
+    /// instead of forcing the cap onto the wire. Otherwise a fork serializes a
+    /// max-tokens field that the identical no-fork session omits, and gets the
+    /// conservative unknown-model floor where the no-fork run gets the served
+    /// model's natural ceiling — the asymmetry #862 measured (forks 3/8 vs
+    /// no-fork 20/20).
+    #[test]
+    fn child_config_inheriting_the_session_cap_adopts_its_wire_posture() {
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let base = Config {
+            compat: wcore_config::compat::ProviderCompat::flux_router_defaults(),
+            max_tokens: 64_000,
+            max_tokens_explicit: false,
+            ..Config::default()
+        };
+        let spawner = AgentSpawner::new(parent, base);
+        // Post-floor Spawn shape: the child's cap IS the session's cap.
+        let mut c = sub("p", None);
+        c.max_tokens = 64_000;
+        let cfg = spawner.child_config(&c);
+        assert!(
+            !cfg.max_tokens_explicit,
+            "a child that only inherits the session's budget must inherit its \
+             omitted-cap posture too, or the fork/no-fork wire shapes diverge"
+        );
+        // And an explicitly-sized session still binds its children.
+        let parent2: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let sized = Config {
+            compat: wcore_config::compat::ProviderCompat::flux_router_defaults(),
+            max_tokens: 64_000,
+            max_tokens_explicit: true,
+            ..Config::default()
+        };
+        let cfg2 = AgentSpawner::new(parent2, sized).child_config(&c);
+        assert!(
+            cfg2.max_tokens_explicit,
+            "an operator-sized session cap must keep binding on its children"
+        );
+    }
+
     /// #862 (scope guard) — the fork output-budget floor lives in the Spawn
     /// TOOL, never here. `child_config` is shared by callers that pass a
     /// DELIBERATELY narrow cap (Crucible proposers, `wcore-skills`,
@@ -4269,7 +4330,7 @@ mod production_durable_spawn_tests {
     use tokio::sync::{Notify, mpsc, oneshot};
     use wcore_config::config::Config;
     use wcore_providers::{LlmProvider, ProviderError};
-    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::llm::{ANVIL_LOOP_OWNER, FluxLoopIntent, LlmEvent, LlmRequest};
     use wcore_types::message::{FinishReason, StopReason, TokenUsage};
     use wcore_types::spawner::{
         CHILD_ELIGIBLE_TOOLS, ChildDesiredState, ChildOrigin, ChildRecoveryState,
@@ -4294,6 +4355,13 @@ mod production_durable_spawn_tests {
         started: parking_lot::Mutex<Option<oneshot::Sender<()>>>,
         release: Arc<Notify>,
         wait_for_release: bool,
+        /// #893 — loop-ownership provenance of the last request seen, so a
+        /// test can assert what actually reached the wire rather than only
+        /// what the durable record says about the child.
+        seen_loop_intent: parking_lot::Mutex<Option<wcore_types::llm::FluxLoopIntent>>,
+        /// #863 F2/F3 — `(flux_loop_intent, flux_turn_nonce)` of every request
+        /// that actually reached the wire, in call order.
+        loop_provenance: parking_lot::Mutex<Vec<(Option<FluxLoopIntent>, Option<String>)>>,
     }
 
     impl ControlledProvider {
@@ -4303,6 +4371,8 @@ mod production_durable_spawn_tests {
                 started: parking_lot::Mutex::new(None),
                 release: Arc::new(Notify::new()),
                 wait_for_release: false,
+                seen_loop_intent: parking_lot::Mutex::new(None),
+                loop_provenance: parking_lot::Mutex::new(Vec::new()),
             })
         }
 
@@ -4312,6 +4382,8 @@ mod production_durable_spawn_tests {
                 started: parking_lot::Mutex::new(Some(started)),
                 release: Arc::new(Notify::new()),
                 wait_for_release: true,
+                seen_loop_intent: parking_lot::Mutex::new(None),
+                loop_provenance: parking_lot::Mutex::new(Vec::new()),
             })
         }
     }
@@ -4320,9 +4392,14 @@ mod production_durable_spawn_tests {
     impl LlmProvider for ControlledProvider {
         async fn stream(
             &self,
-            _request: &LlmRequest,
+            request: &LlmRequest,
         ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.seen_loop_intent.lock() = request.flux_loop_intent.clone();
+            self.loop_provenance.lock().push((
+                request.flux_loop_intent.clone(),
+                request.flux_turn_nonce.clone(),
+            ));
             if let Some(started) = self.started.lock().take() {
                 let _ = started.send(());
             }
@@ -5048,6 +5125,60 @@ mod production_durable_spawn_tests {
             .unwrap();
     }
 
+    /// #893 — `spawn_one_with_origin` is the ONLY production site that
+    /// declares Anvil loop ownership, and nothing asserted it: deleting the
+    /// `ChildOrigin::Anvil` block left every existing test green. Assert what
+    /// reaches the WIRE, not just what the durable record says.
+    #[tokio::test]
+    async fn anvil_origin_child_declares_loop_ownership_on_the_wire() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, _journal, _token) = canonical_binding(dir.path(), "f8930001", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = bound_spawner(provider_dyn, authority.clone(), dir.path());
+
+        let result = spawner
+            .spawn_one_with_origin(child("anvil-builder"), ChildOrigin::Anvil)
+            .await;
+
+        assert!(!result.is_error, "{}", result.text);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            provider.seen_loop_intent.lock().clone(),
+            Some(wcore_types::llm::FluxLoopIntent::ClientOwned(
+                wcore_types::llm::ANVIL_LOOP_OWNER.to_string()
+            )),
+            "an Anvil builder fork is mid-loop material of a client-side climb"
+        );
+    }
+
+    /// Control for the test above: an ordinary fork must NOT claim loop
+    /// ownership, or every sub-agent turn would bypass the router cache and
+    /// suppress its elevation. Proves the assertion tracks the origin, not
+    /// merely the fact that some intent is always set.
+    #[tokio::test]
+    async fn non_anvil_origin_child_declares_no_loop_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, _journal, _token) = canonical_binding(dir.path(), "f8930002", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = bound_spawner(provider_dyn, authority.clone(), dir.path());
+
+        let result = spawner
+            .spawn_one_with_origin(child("workflow-child"), ChildOrigin::Workflow)
+            .await;
+
+        assert!(!result.is_error, "{}", result.text);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            provider.seen_loop_intent.lock().clone(),
+            None,
+            "only an Anvil fork owns a client-side loop"
+        );
+    }
+
     #[tokio::test]
     async fn anvil_seat_clone_preserves_session_authority_and_terminalizes_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -5083,6 +5214,78 @@ mod production_durable_spawn_tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// Spawn one child of `origin` through the real durable-launch path and
+    /// return the loop-ownership provenance of the single request its engine
+    /// put on the wire.
+    async fn wire_loop_provenance(origin: ChildOrigin) -> (Option<FluxLoopIntent>, Option<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, _journal, _token) = canonical_binding(dir.path(), "f8630001", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = bound_spawner(provider_dyn, authority.clone(), dir.path());
+
+        let result = spawner
+            .spawn_one_with_origin(child("loop-provenance-probe"), origin)
+            .await;
+
+        assert!(!result.is_error, "{}", result.text);
+        let mut seen = provider.loop_provenance.lock().clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "expected exactly one wire turn for {origin:?}"
+        );
+        seen.pop().unwrap()
+    }
+
+    /// #863 F2 — grades the ONE production seam that turns the whole
+    /// loop-ownership handshake on for real traffic: the `ChildOrigin::Anvil`
+    /// arm at the durable-spawn site above.
+    ///
+    /// Every other flux-loop test hand-sets the intent on an engine it built
+    /// itself, so deleting that arm leaves all of them green while real Anvil
+    /// turns silently stop declaring ownership and the runtime collision
+    /// detector can never fire. This asserts on the `LlmRequest` the provider
+    /// ACTUALLY RECEIVED, not on an engine field, so it grades the wiring end
+    /// to end rather than the setter.
+    ///
+    /// The ordinary-origin arms are not decoration. Without them this test
+    /// also passes against code that marks EVERY child — a different and worse
+    /// bug, because `loop_owner` traffic is hard-off for Flux Elevation and
+    /// would suppress the server ladder on ordinary sub-agent turns.
+    #[tokio::test]
+    async fn only_anvil_origin_declares_loop_ownership_on_the_wire() {
+        let (intent, nonce) = wire_loop_provenance(ChildOrigin::Anvil).await;
+        assert_eq!(
+            intent,
+            Some(FluxLoopIntent::ClientOwned(ANVIL_LOOP_OWNER.to_string())),
+            "an Anvil-origin child reached the wire without declaring loop \
+             ownership — Flux cannot tell the turn is mid-loop material, so \
+             both ladders can run on it and the collision detector is dead"
+        );
+        assert!(
+            nonce.is_some_and(|n| !n.is_empty()),
+            "#863 F3 — loop-owned traffic must carry a per-turn nonce or the \
+             semantic cache starves the climb with identical completions"
+        );
+
+        for ordinary in [ChildOrigin::Spawn, ChildOrigin::Delegate] {
+            let (intent, nonce) = wire_loop_provenance(ordinary).await;
+            assert_eq!(
+                intent, None,
+                "a {ordinary:?}-origin child declared Anvil loop ownership — \
+                 ordinary sub-agent traffic is not mid-loop material and this \
+                 would suppress Flux Elevation across the board"
+            );
+            assert_eq!(
+                nonce, None,
+                "a {ordinary:?}-origin child sent a per-turn nonce, which \
+                 defeats the semantic cache on traffic that should hit it"
+            );
+        }
     }
 
     #[tokio::test]
