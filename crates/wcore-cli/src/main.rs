@@ -3969,6 +3969,10 @@ async fn settle_deferred_mcp_before_message(
     pending_deferred_mcp.is_none()
 }
 
+// One explicit argument per `add_mcp_server` wire field, so a field the host
+// sends cannot be dropped on the way into the config without this signature
+// changing. Collapsing them into a struct would hide exactly that.
+#[allow(clippy::too_many_arguments)]
 fn to_mcp_server_config(
     transport: &str,
     command: Option<String>,
