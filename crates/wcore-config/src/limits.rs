@@ -768,4 +768,107 @@ mod tests {
             missing.join("\n  ")
         );
     }
+
+    #[test]
+    fn claude_opus_5_resolves_to_the_one_million_window() {
+        // Anthropic's current flagship. With NO arm it fell through every
+        // Claude branch to `None`, which is NOT the 200k default: the compaction
+        // kernel substitutes `UNVERIFIED_CONTEXT_WINDOW` (32,768) and the
+        // non-omit-safe `anthropic_defaults()` preset clamps output to
+        // `UNKNOWN_CAP` (8,192) — a 30x undersize on a 1M model.
+        //
+        // Vendor-operated rows agree unanimously (models.dev, 2026-08-28):
+        //   anthropic        claude-opus-5              ctx=1000000 out=128000
+        //   google-vertex    claude-opus-5@default      ctx=1000000 out=128000
+        //   amazon-bedrock   anthropic.claude-opus-5    ctx=1000000 out=128000
+        for id in [
+            "claude-opus-5",
+            "claude-opus-5-fast",
+            "anthropic.claude-opus-5",
+            "claude-opus-5@default",
+        ] {
+            assert_eq!(
+                model_output_ceiling("anthropic", id),
+                Some((128_000, 1_000_000)),
+                "{id} must report the 1,000,000-token window / 128k output"
+            );
+        }
+        // Case-insensitive, consistent with the rest of the table.
+        assert_eq!(
+            model_output_ceiling("anthropic", "Claude-Opus-5"),
+            Some((128_000, 1_000_000))
+        );
+    }
+
+    #[test]
+    fn gpt_4o_may_2024_snapshot_caps_output_at_4096() {
+        // The ONLY over-claim in this table that bites at default settings:
+        // `size_output_cap` computes min(config_max 64_000, ceiling, room), so
+        // the generic gpt-4o arm put 16_384 on the wire against a real 4_096
+        // cap — a hard HTTP 400 mid-run, not a truncation.
+        //
+        // models.dev 2026-08-28, vendor row `openai`:
+        //   gpt-4o-2024-05-13  ctx=128000 out=4096
+        //   gpt-4o-2024-08-06  ctx=128000 out=16384
+        //   gpt-4o-2024-11-20  ctx=128000 out=16384
+        assert_eq!(
+            model_output_ceiling("openai", "gpt-4o-2024-05-13"),
+            Some((4_096, 128_000))
+        );
+        assert_eq!(
+            model_output_ceiling("openai", "openai/gpt-4o-2024-05-13"),
+            Some((4_096, 128_000))
+        );
+        assert_eq!(
+            model_output_ceiling("openai", "GPT-4o-2024-05-13"),
+            Some((4_096, 128_000))
+        );
+    }
+
+    #[test]
+    fn gpt_4o_sibling_snapshots_keep_the_16k_output() {
+        // The narrow May-2024 carve-out must not catch the siblings, which are
+        // GENUINELY 16,384 (vendor row `openai`, 2026-08-28) — clamping them to
+        // 4,096 would cut real output 4x.
+        for id in [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4o-2024-08-06",
+            "gpt-4o-2024-11-20",
+            "gpt-4o-mini-2024-07-18",
+        ] {
+            assert_eq!(
+                model_output_ceiling("openai", id),
+                Some((16_384, 128_000)),
+                "{id} must keep the 16,384 output cap"
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_latest_aliases_resolve_the_full_window() {
+        // The rolling `-latest` aliases match neither the `gemini-2.5-*` nor the
+        // `gemini-3*` arm, so they had no entry at all and fell to
+        // `UNVERIFIED_CONTEXT_WINDOW` (32,768) — a 32x undersize.
+        //
+        // Both Google-operated providers agree exactly (models.dev, 2026-08-28):
+        //   google         gemini-flash-latest       ctx=1048576 out=65536
+        //   google         gemini-flash-lite-latest  ctx=1048576 out=65536
+        //   google-vertex  gemini-flash-latest       ctx=1048576 out=65536
+        //   google-vertex  gemini-flash-lite-latest  ctx=1048576 out=65536
+        //
+        // 65,536 IS the vendor ceiling, so revoking output omission on the
+        // omit-safe gemini preset truncates nothing.
+        for id in [
+            "gemini-flash-latest",
+            "gemini-flash-lite-latest",
+            "google/gemini-flash-latest",
+        ] {
+            assert_eq!(
+                model_output_ceiling("google", id),
+                Some((65_536, 1_048_576)),
+                "{id} must report the 1,048,576-token window / 65,536 output"
+            );
+        }
+    }
 }
