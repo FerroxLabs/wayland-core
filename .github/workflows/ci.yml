@@ -1079,7 +1079,15 @@ jobs:
   ci-linux:
     name: CI (linux-containerized)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 90 was already marginal and this branch pushed it over. MEASURED: on
+    # 497aefc1 this job ran ~81 min and finished; on df7f9f8f it was CANCELLED
+    # at exactly 90m16s with every step green and the last one — #1134's new
+    # shared-process lib suite — still running. That step is a SECOND full
+    # debug build (`cargo test --workspace --lib` cannot share nextest's
+    # artifacts) and costs ~16 min, appended to a job that already sat at ~81.
+    # A cancelled required context is not a verdict, so the cost is a whole
+    # cycle every time it tips over.
+    timeout-minutes: 120
     # A job-level `permissions:` block REPLACES the workflow-level one at the
     # top of this file wholesale (GHA semantics) — the same rule that cost the
     # `report` job "multiple weeks of red" when `contents: read` was dropped by
