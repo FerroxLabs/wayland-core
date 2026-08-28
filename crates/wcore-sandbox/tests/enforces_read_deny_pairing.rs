@@ -53,15 +53,20 @@ fn denied_secret() -> (tempfile::TempDir, PathBuf, SandboxManifest) {
 /// This leg never opens these paths -- it is a string check on a pure function --
 /// so a literal is the correct input here and a real tempdir is not. The live
 /// legs keep the tempdir, because they do open theirs.
-fn denied_secret_unix_literals() -> (PathBuf, SandboxManifest) {
+fn denied_secret_unix_literals() -> (PathBuf, PathBuf, SandboxManifest) {
+    // Both spelled out in full. `root.join(".env")` would be wrong here: `join`
+    // uses the PLATFORM separator, so on Windows it yields
+    // `/tmp/wcore-pairing-root\\.env` and the rule this leg looks for can never
+    // match the one the profile emits. A literal path has to be literal all the
+    // way through, not assembled by a platform-dependent operation.
     let root = PathBuf::from("/tmp/wcore-pairing-root");
-    let secret = root.join(".env");
+    let secret = PathBuf::from("/tmp/wcore-pairing-root/.env");
     let manifest = SandboxManifest {
-        fs_read_allow: vec![root],
+        fs_read_allow: vec![root.clone()],
         fs_read_deny: vec![secret.clone()],
         ..Default::default()
     };
-    (secret, manifest)
+    (root, secret, manifest)
 }
 
 fn cat(secret: &std::path::Path) -> SandboxCommand {
@@ -126,7 +131,7 @@ async fn every_enforcing_backend_reports_it_and_every_relaxed_one_does_not() {
             se.enforces_read_deny(),
             "sandbox_exec claims to enforce fs_read_deny"
         );
-        let (unix_secret, unix_manifest) = denied_secret_unix_literals();
+        let (unix_root, unix_secret, unix_manifest) = denied_secret_unix_literals();
         let profile = wcore_sandbox::backends::sandbox_exec::SandboxExecBackend::build_profile(
             &unix_manifest,
         )
@@ -142,13 +147,7 @@ async fn every_enforcing_backend_reports_it_and_every_relaxed_one_does_not() {
         );
         // SBPL is last-match-wins, so a deny emitted BEFORE the allow of the
         // enclosing root is inert. The ordering is part of the enforcement.
-        let allow_root = format!(
-            "(subpath \"{}\")",
-            unix_secret
-                .parent()
-                .expect("literal has a parent")
-                .to_string_lossy()
-        );
+        let allow_root = format!("(subpath \"{}\")", unix_root.to_string_lossy());
         if let Some(a) = profile.find(&allow_root) {
             assert!(
                 profile.find(&rule).is_some_and(|d| d > a),
