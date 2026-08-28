@@ -24,9 +24,13 @@ use wcore_agent::output::OutputSink;
 use wcore_agent::output::null_sink::NullSink;
 use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::LlmEvent;
-use wcore_types::message::{StopReason, TokenUsage};
+use wcore_types::message::{ContentBlock, StopReason, TokenUsage};
 
 use common::{MockLlmProvider, MockTool, test_config};
+
+/// The text the mock summarization call returns. Present in the post-run
+/// conversation IFF the compaction actually replaced the buffer.
+const SUMMARY_TEXT: &str = "summary of the conversation so far";
 
 /// The watermark from the report.
 const REPORTED_TOKENS: u64 = 83_208;
@@ -196,19 +200,58 @@ async fn an_unlisted_model_hard_stops_far_below_the_reporters_watermark() {
 
 // ── the runaway, with compaction on: the autocompact trigger ────────────────
 
+/// Split the post-run conversation into "all its text" and "does it still hold
+/// raw tool traffic". Compaction folds the summarized prefix into prose, so
+/// surviving `tool_use` / `tool_result` blocks from before the boundary mean
+/// the buffer was never actually collapsed.
+fn conversation_shape(engine: &AgentEngine) -> (String, usize) {
+    let mut text = String::new();
+    let mut tool_blocks = 0usize;
+    for message in engine.conversation_messages() {
+        for block in &message.content {
+            match block {
+                ContentBlock::Text { text: t } => {
+                    text.push_str(t);
+                    text.push('\n');
+                }
+                ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => {
+                    tool_blocks += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    (text, tool_blocks)
+}
+
 /// The same position with the shipped defaults (compaction ENABLED). The
 /// engine must relieve the pressure rather than carry 83,208 tokens into the
 /// next turn.
 ///
 /// Red arm (commit 92aed93d): the autocompact threshold is 167,000, nothing
 /// fires, and the only `emit_info` traffic is unrelated.
+///
+/// # Why the info line is not the oracle
+///
+/// This test used to discard the run result and grade ONE thing: that an
+/// `Autocompact: summarized …` string reached the sink. That is the engine's
+/// own announcement, emitted before the buffer is touched, so it reports an
+/// INTENTION. **Measured:** with the emission kept at `engine.rs:17596` and the
+/// message replacement at `engine.rs:17678` deleted — the announcement fires,
+/// the fold is computed, and the conversation is left exactly as it was, which
+/// is #1150 in full — all three tests in this file passed.
+///
+/// So the oracle is the conversation itself: the summary the compaction
+/// produced must BE in the buffer, and the tool traffic it summarized must be
+/// gone. `a_disabled_compactor_leaves_the_tool_traffic_in_the_buffer` below is
+/// the known-positive for the second half.
 #[tokio::test]
 async fn an_unlisted_model_compacts_before_the_reporters_watermark() {
     let notices = Arc::new(NoticeSink::default());
     let provider = Arc::new(MockLlmProvider::with_turns(vec![
         turn_at(REPORTED_TOKENS),
         // The summarization call autocompact makes at the top of turn 2.
-        text_turn("summary of the conversation so far", 5_000),
+        text_turn(SUMMARY_TEXT, 5_000),
         text_turn("done", 4_000),
     ]));
 
@@ -233,6 +276,65 @@ async fn an_unlisted_model_compacts_before_the_reporters_watermark() {
             .any(|m| m.starts_with("Autocompact: summarized")),
         "at 83,208 input tokens on an unlisted model the engine must summarize rather than \
          keep growing. Everything it said instead: {infos:?}"
+    );
+
+    // THE STATE ASSERTIONS. An announcement is not a compaction.
+    let (text, tool_blocks) = conversation_shape(&engine);
+    assert!(
+        text.contains(SUMMARY_TEXT),
+        "the summary the compaction produced never reached the conversation - the engine \
+         announced a compaction it did not perform. Conversation text was: {text:?}"
+    );
+    assert_eq!(
+        tool_blocks, 0,
+        "the pre-boundary tool traffic is STILL in the buffer, so nothing was collapsed and \
+         the context carries into the next turn exactly as #1150 reports. Conversation text \
+         was: {text:?}"
+    );
+}
+
+/// THE KNOWN-POSITIVE for the `tool_blocks == 0` assertion above.
+///
+/// Without it, "no tool blocks survive" is equally well explained by a buffer
+/// that never held any — a mock that stopped dispatching the tool, a registry
+/// that lost it, an engine that folded the traffic away for some unrelated
+/// reason. Here compaction is OFF and the window is set wide enough that
+/// neither autocompact nor the emergency stop can fire, so the same fixture
+/// must leave the tool traffic sitting in the conversation.
+#[tokio::test]
+async fn a_disabled_compactor_leaves_the_tool_traffic_in_the_buffer() {
+    let provider = Arc::new(MockLlmProvider::with_turns(vec![
+        turn_at(REPORTED_TOKENS),
+        text_turn("done", 84_000),
+    ]));
+
+    let mut config = test_config();
+    config.compact.enabled = false;
+    // Wide enough that 83,208 tokens is nowhere near the emergency limit, so
+    // this arm measures the buffer rather than the hard stop.
+    config.compact.context_window = Some(1_000_000);
+
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config,
+        registry_with_mock_tool(),
+        Arc::new(NoticeSink::default()),
+    );
+    engine
+        .run("do something long", "msg-1")
+        .await
+        .expect("a wide window with compaction off must simply complete");
+
+    let (text, tool_blocks) = conversation_shape(&engine);
+    assert!(
+        tool_blocks >= 2,
+        "the fixture did not put a tool_use + tool_result pair in the buffer at all, so the \
+         `tool_blocks == 0` assertion in the compaction arm proves nothing. Conversation text \
+         was: {text:?}"
+    );
+    assert!(
+        !text.contains(SUMMARY_TEXT),
+        "no summary can exist with compaction disabled: {text:?}"
     );
 }
 
