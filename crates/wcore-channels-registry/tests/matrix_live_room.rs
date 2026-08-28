@@ -181,6 +181,14 @@ async fn await_nonce(
 /// available to an adapter that admits everything.
 #[tokio::test]
 #[ignore = "live: drives a real Matrix homeserver; requires MATRIX_* configuration"]
+// SERIAL, and it is not decoration. This test repoints the process-global
+// `WAYLAND_HOME` twice, and the matrix adapter persists its /sync cursor under
+// `$WAYLAND_HOME/channel-state/`. Both live tests in this binary build a
+// production adapter, and `cargo test` runs them as threads of ONE process, so
+// unserialized they steer each other's cursor into a `TempDir` the other is
+// about to delete. Serializing BOTH is what makes the write safe; serializing
+// only the writer would still race the reader.
+#[serial_test::serial(wayland_home)]
 async fn matrix_inbound_reaches_the_product_from_a_real_room() {
     assert_eq!(required("MATRIX_LIVE"), "1");
     let base = required("MATRIX_HOMESERVER");
@@ -247,6 +255,9 @@ async fn matrix_inbound_reaches_the_product_from_a_real_room() {
 /// Send → edit → delete, plus both negative controls, against a real room.
 #[tokio::test]
 #[ignore = "live: drives a real Matrix homeserver; requires MATRIX_* configuration"]
+// The other half of the pair above: this test READS `WAYLAND_HOME` through the
+// production adapter, so it has to hold the same lock the writer does.
+#[serial_test::serial(wayland_home)]
 async fn matrix_edit_and_delete_against_a_real_room() {
     assert_eq!(
         required("MATRIX_LIVE"),
@@ -260,6 +271,10 @@ async fn matrix_edit_and_delete_against_a_real_room() {
     let _ = required("MATRIX_ACCESS_TOKEN");
 
     let tmp = tempfile::tempdir().unwrap();
+    // Own `WAYLAND_HOME`, stated rather than inherited: the adapter's /sync
+    // cursor lands under it, and inheriting whatever the sibling test left
+    // behind means writing into a deleted directory.
+    unsafe { std::env::set_var("WAYLAND_HOME", tmp.path()) };
     let mgr = production_manager(tmp.path(), &user_id, &base).await;
 
     println!("MLR_ROOM={room}");

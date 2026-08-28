@@ -554,10 +554,14 @@ fn no_backend_claims_a_reaping_mechanism_it_does_not_have() {
 async fn the_local_scan_finds_an_orphan_that_no_registry_remembers() {
     let nonce = format!("f25-registryless-{}", std::process::id());
     let state = TempDir::new().unwrap();
-    // SAFETY: single-threaded test setup before any backend is constructed.
-    unsafe {
-        std::env::set_var("WAYLAND_EXEC_BACKEND_STATE_DIR", state.path());
-    }
+    // Per-THREAD injection, not the process-global
+    // `WAYLAND_EXEC_BACKEND_STATE_DIR`. `cargo test` runs the thirteen tests of
+    // this binary on threads of ONE process, so the env var pointed every
+    // concurrently-running sibling's registry at this `TempDir` and then
+    // deleted it out from under them. `StateDirGuard` is the override built for
+    // exactly that (see registry.rs); the guard lives to the end of the test,
+    // so the directory outlives every read through it.
+    let _state_dir = wcore_exec_backend::registry::StateDirGuard::set(state.path());
 
     // No `exec`: the shell keeps its full argv so the nonce is genuinely
     // visible in the process table. With `exec` the nonce vanishes and the
