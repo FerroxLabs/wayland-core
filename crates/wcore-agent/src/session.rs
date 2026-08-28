@@ -59,6 +59,22 @@ pub struct Session {
     #[serde(default)]
     pub messages: Vec<Message>,
 
+    /// #1161 — the engine's `conversation_id` for this session.
+    ///
+    /// The Flux sticky-routing header (`x-wl-conversation-id`) and the cache
+    /// ledger's file name are both keyed on it, and its doc comment on
+    /// `AgentEngine` has always claimed it "survives `/clear` and `/resume`".
+    /// It did not: nothing persisted it, so every resume minted a fresh uuid,
+    /// dropped the routing affinity and started a second ledger record for a
+    /// session the operator sees as one.
+    ///
+    /// `None` on every session written before this field existed — which is
+    /// every session a user already has on disk. The resume path mints a fresh
+    /// id in that case rather than failing; the id from that launch is simply
+    /// unrecoverable, and pretending otherwise would mean inventing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+
     /// Overflow bucket for unknown fields from newer schema versions (F-032).
     /// Preserved verbatim on save so a round-trip through an older binary
     /// does not lose data written by a newer one.
@@ -167,6 +183,10 @@ impl SessionManager {
             cwd: cwd.to_string(),
             total_usage: TokenUsage::default(),
             messages: Vec::new(),
+            // Stamped by the engine on the first persist, once the engine that
+            // owns this session is known. A session record can outlive the
+            // engine that made it, so the id is not invented here.
+            conversation_id: None,
             extra: serde_json::Map::new(),
         })
     }
@@ -687,6 +707,9 @@ impl SessionManager {
             cwd: String::new(),
             total_usage: TokenUsage::default(),
             messages: Vec::new(),
+            // A WAL carries user messages, not engine identity. The next save
+            // re-stamps this from the live engine.
+            conversation_id: None,
             extra: serde_json::Map::new(),
         };
         session

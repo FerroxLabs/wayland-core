@@ -717,3 +717,189 @@ fn a_malformed_ledger_does_not_hide_the_good_ones() {
     );
     assert_eq!(code(&run(tmp.path(), &["verify"])), 0);
 }
+
+// ── #1162: the session id the user set must resolve ─────────────────────────
+
+/// Write a persisted session snapshot that points at a ledger id.
+///
+/// Only the fields `SessionManager::load` needs; the rest carry `serde(default)`.
+fn write_session(session_dir: &Path, id: &str, conversation_id: Option<&str>) {
+    std::fs::create_dir_all(session_dir).unwrap();
+    let mut session = serde_json::json!({
+        "schema_version": 1,
+        "id": id,
+        "created_at": "2026-07-29T10:00:00Z",
+        "updated_at": "2026-07-29T10:05:00Z",
+        "provider": "anthropic",
+        "model": "claude-opus-4-7",
+        "cwd": "/tmp",
+        "messages": [],
+    });
+    if let Some(conv) = conversation_id {
+        session["conversation_id"] = serde_json::json!(conv);
+    }
+    std::fs::write(
+        session_dir.join(format!("{id}.json")),
+        serde_json::to_vec_pretty(&session).unwrap(),
+    )
+    .unwrap();
+}
+
+/// #1162 — `cache report --session <the id the user set>` must find the record.
+///
+/// The ledger is keyed by the engine-internal `conversation_id`; the flag says
+/// "Session id to report on", which is the id the user controls. Nothing
+/// bridged the two, so the only reachable outcome was a bare io error naming a
+/// path that never existed.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: drop the session-store fallback in
+/// `cache_cmd::resolve` — the run exits non-zero with
+/// `ledger io error at .../aa55aa55-0002.json`.
+#[test]
+fn a_user_chosen_session_id_resolves_to_the_ledger_keyed_by_its_conversation_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ledgers = tmp.path().join("cache-ledger");
+    let sessions = tmp.path().join("sessions");
+    healthy(&ledgers, "2fc54759-conv-uuid");
+    write_session(&sessions, "aa55aa55-0002", Some("2fc54759-conv-uuid"));
+
+    let out = Command::new(BIN)
+        .args(["cache", "report", "--session", "aa55aa55-0002"])
+        .arg("--dir")
+        .arg(&ledgers)
+        .arg("--session-dir")
+        .arg(&sessions)
+        .env("WAYLAND_HOME", tmp.path())
+        .output()
+        .expect("failed to run wayland-core cache");
+    assert_eq!(
+        code(&out),
+        0,
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&out),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report = stdout(&out);
+    assert_eq!(
+        field(&report, "session", "id"),
+        "2fc54759-conv-uuid",
+        "the report must name the real ledger key it resolved to:\n{report}"
+    );
+    assert_eq!(field(&report, "session", "round_trips"), "4");
+}
+
+/// The known-negative: an id that is neither a ledger nor a session must still
+/// fail, and the failure must name the real key and point somewhere useful.
+/// Without this, a fallback that silently returned the newest ledger would
+/// satisfy the test above.
+#[test]
+fn an_unknown_session_id_still_fails_and_says_where_to_look() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ledgers = tmp.path().join("cache-ledger");
+    let sessions = tmp.path().join("sessions");
+    healthy(&ledgers, "2fc54759-conv-uuid");
+    std::fs::create_dir_all(&sessions).unwrap();
+
+    let out = Command::new(BIN)
+        .args(["cache", "report", "--session", "no-such-id"])
+        .arg("--dir")
+        .arg(&ledgers)
+        .arg("--session-dir")
+        .arg(&sessions)
+        .env("WAYLAND_HOME", tmp.path())
+        .output()
+        .expect("failed to run wayland-core cache");
+    assert_ne!(code(&out), 0, "an unknown id must not succeed");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        err.contains("cache list"),
+        "the error must point at the verb that lists the real keys:\n{err}"
+    );
+}
+
+// ── #1163: an unpriceable counterfactual must render as unknown ─────────────
+
+/// #1163 — a counterfactual the catalog cannot price must render as `unknown`,
+/// never as a saving subtracted against a fabricated zero.
+///
+/// The fixture writes `uncached_equivalent_usd: null` — the honest encoding of
+/// "no rate exists for this model". Before the fix the field was a bare `f64`,
+/// so this ledger did not decode at all: the product had no way to SAY
+/// unknown, which is why it said `0.000000` and reported `saving_usd=-cost`.
+///
+/// The assertion is on the RENDERED verdict, not on the stored number. A test
+/// asserting `uncached_equivalent_usd == 0.0` would restate the defaulted
+/// literal and pass on the broken build.
+#[test]
+fn an_unpriced_counterfactual_renders_unknown_instead_of_a_negative_saving() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut turn = turn_json(
+        1,
+        7_000,
+        0,
+        0,
+        0.061389,
+        0.0,
+        "provider_reported",
+        None,
+        7_000,
+    );
+    turn["uncached_equivalent_usd"] = serde_json::Value::Null;
+    write_ledger(tmp.path(), "flux-sess", vec![turn], vec![]);
+
+    let out = run(tmp.path(), &["report"]);
+    assert_eq!(
+        code(&out),
+        0,
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&out),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report = stdout(&out);
+    assert_eq!(
+        field(&report, "cost", "uncached_equivalent_usd"),
+        "unknown",
+        "a counterfactual with no catalog rate is unknown, not zero:\n{report}"
+    );
+    assert_eq!(
+        field(&report, "cost", "saving_usd"),
+        "unknown",
+        "there is nothing to subtract from, so there is no saving to report:\n{report}"
+    );
+    assert_eq!(field(&report, "cost", "saving_ratio"), "unknown");
+    // The billed figure is still spend — the provider reported it — so the
+    // cost grade must NOT be dragged down. Only the saving is unknown.
+    assert_eq!(field(&report, "cost", "cost_truth"), "priced");
+    assert_eq!(field(&report, "cost", "saving_truth"), "unpriced");
+    assert!(
+        !report.contains("saving_usd=-"),
+        "the report must never render a negative saving against a zero it \
+         invented:\n{report}"
+    );
+}
+
+/// Known-negative for the test above: a REAL negative saving — a session that
+/// writes cache and never reads it back — must still print as a negative
+/// number. Rendering every saving as `unknown` would satisfy the assertions
+/// above and destroy the signal the ledger exists to carry.
+#[test]
+fn a_genuinely_negative_saving_is_still_reported_as_a_negative_number() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_ledger(
+        tmp.path(),
+        "write-heavy",
+        vec![turn_json(
+            1, 1_000, 0, 100_000, 0.4650, 0.3030, "catalog", None, 101_000,
+        )],
+        vec![],
+    );
+
+    let report = stdout(&run(tmp.path(), &["report"]));
+    let saving = f64_field(&report, "cost", "saving_usd");
+    assert!(
+        saving < 0.0,
+        "a write-dominated session really does cost more than an uncached one; \
+         that must stay reportable: {saving}\n{report}"
+    );
+    assert_eq!(field(&report, "cost", "saving_truth"), "priced");
+}

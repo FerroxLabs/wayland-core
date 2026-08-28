@@ -55,9 +55,17 @@ pub struct CacheArgs {
     #[arg(long, global = true)]
     pub dir: Option<PathBuf>,
 
-    /// Session id to report on. Defaults to the most recently updated ledger.
+    /// Session id to report on. Accepts either the ledger id printed by
+    /// `cache list` or the session id passed to `--session-id` / shown by
+    /// `session list`. Defaults to the most recently updated ledger.
     #[arg(long, global = true)]
     pub session: Option<String>,
+
+    /// Session store directory, used to translate a `--session` that names a
+    /// SESSION rather than a ledger. Defaults to the resolved
+    /// `session.directory` (`$WAYLAND_HOME/sessions`).
+    #[arg(long, global = true)]
+    pub session_dir: Option<PathBuf>,
 
     /// Emit the raw ledger / summary as JSON instead of the `F23_CACHE=` form.
     #[arg(long, global = true)]
@@ -92,6 +100,7 @@ pub enum CacheCmd {
 /// is unreadable.
 pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
     let dir = args.dir.unwrap_or_else(default_ledger_dir);
+    let session_dir = args.session_dir;
 
     match args.cmd {
         CacheCmd::List => {
@@ -124,7 +133,7 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
         }
 
         CacheCmd::Report => {
-            let (path, ledger) = resolve(&dir, args.session.as_deref())?;
+            let (path, ledger) = resolve(&dir, args.session.as_deref(), session_dir.as_deref())?;
             let s = ledger.summarize();
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&summary_json(&s))?);
@@ -135,7 +144,7 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
         }
 
         CacheCmd::Show { round_trip } => {
-            let (path, ledger) = resolve(&dir, args.session.as_deref())?;
+            let (path, ledger) = resolve(&dir, args.session.as_deref(), session_dir.as_deref())?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&ledger)?);
                 return Ok(ExitCode::SUCCESS);
@@ -175,28 +184,35 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
         }
 
         CacheCmd::Verify => {
-            let (path, ledger) = match resolve(&dir, args.session.as_deref()) {
-                Ok(v) => v,
-                Err(e) => {
-                    // An empty store is not a pass. Say so on stdout in the
-                    // same greppable form, and exit distinctly.
-                    println!(
-                        "F23_CACHE=verify trustworthy=false reason=no_ledger dir={}",
-                        dir.display()
-                    );
-                    eprintln!("wayland-core cache verify: {e}");
-                    return Ok(ExitCode::from(EXIT_NO_LEDGER));
-                }
-            };
+            let (path, ledger) =
+                match resolve(&dir, args.session.as_deref(), session_dir.as_deref()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // An empty store is not a pass. Say so on stdout in the
+                        // same greppable form, and exit distinctly.
+                        println!(
+                            "F23_CACHE=verify trustworthy=false reason=no_ledger dir={}",
+                            dir.display()
+                        );
+                        eprintln!("wayland-core cache verify: {e}");
+                        return Ok(ExitCode::from(EXIT_NO_LEDGER));
+                    }
+                };
             let s = ledger.summarize();
             let truth = s.cost_truth();
             println!(
-                "F23_CACHE=verify trustworthy={} cost_truth={} \
+                "F23_CACHE=verify trustworthy={} cost_truth={} saving_truth={} \
                  provider_reported_round_trips={} catalog_priced_round_trips={} \
                  estimated_round_trips={} unpriced_round_trips={} cost_usd={} \
                  session_complete={} session={} path={}",
                 truth.is_trustworthy(),
                 truth.as_str(),
+                // Reported, not enforced: `verify`'s documented contract and
+                // exit code 7 are about whether the BILLED figure is spend. A
+                // provider-reported spend stays spend even when no catalog can
+                // price its counterfactual, so #1163 must not start failing CI
+                // for every session on an unlisted model.
+                s.saving_truth().as_str(),
                 s.provider_reported_round_trips,
                 s.catalog_priced_round_trips,
                 s.estimated_round_trips,
@@ -265,7 +281,10 @@ pub struct StoreTotals {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: f64,
-    pub uncached_equivalent_usd: f64,
+    /// `None` when ANY session in the store had an unpriceable counterfactual —
+    /// a partial sum is a floor, and a floor here understates the saving with
+    /// full confidence (#1163).
+    pub uncached_equivalent_usd: Option<f64>,
     pub provider_reported_round_trips: u64,
     pub catalog_priced_round_trips: u64,
     pub estimated_round_trips: u64,
@@ -277,6 +296,10 @@ impl StoreTotals {
     pub fn of(summaries: &[LedgerSummary]) -> Self {
         let mut t = Self {
             sessions: summaries.len(),
+            // An empty store has no counterfactual to total; `Some(0.0)`
+            // would render as "the cache saved exactly nothing", which is a
+            // claim about a store that holds no data.
+            uncached_equivalent_usd: (!summaries.is_empty()).then_some(0.0),
             ..Self::default()
         };
         for s in summaries {
@@ -287,7 +310,14 @@ impl StoreTotals {
             t.input_tokens = t.input_tokens.saturating_add(s.total_input_tokens());
             t.output_tokens = t.output_tokens.saturating_add(s.output_tokens);
             t.cost_usd += s.cost_usd;
-            t.uncached_equivalent_usd += s.uncached_equivalent_usd;
+            match s.uncached_equivalent_usd {
+                Some(usd) => {
+                    if let Some(total) = t.uncached_equivalent_usd.as_mut() {
+                        *total += usd;
+                    }
+                }
+                None => t.uncached_equivalent_usd = None,
+            }
             t.provider_reported_round_trips = t
                 .provider_reported_round_trips
                 .saturating_add(s.provider_reported_round_trips);
@@ -331,7 +361,7 @@ fn print_totals(t: &StoreTotals, dir: &std::path::Path) {
     let truth = t.cost_truth();
     println!(
         "F23_CACHE=total sessions={} incomplete_sessions={} round_trips={} input_tokens={} \
-         output_tokens={} cost_usd={} uncached_equivalent_usd={:.6} cost_truth={} \
+         output_tokens={} cost_usd={} uncached_equivalent_usd={} cost_truth={} \
          provider_reported_round_trips={} catalog_priced_round_trips={} \
          estimated_round_trips={} unpriced_round_trips={} dir={}",
         t.sessions,
@@ -340,7 +370,7 @@ fn print_totals(t: &StoreTotals, dir: &std::path::Path) {
         t.input_tokens,
         t.output_tokens,
         render_cost_usd(t.cost_usd, truth),
-        t.uncached_equivalent_usd,
+        render_opt_usd(t.uncached_equivalent_usd),
         truth.as_str(),
         t.provider_reported_round_trips,
         t.catalog_priced_round_trips,
@@ -376,26 +406,121 @@ fn render_cost_usd(cost_usd: f64, truth: CostTruth) -> String {
     }
 }
 
+/// #1163 — render an optional USD figure, or the word `unknown`.
+///
+/// Same rule as [`render_cost_usd`] one column over. `uncached_equivalent_usd`
+/// and the saving derived from it are absent whenever the catalog cannot price
+/// the counterfactual, and `0.000000` there is a claim the ledger has not made:
+/// it turns `saving_usd` into exactly `-cost` and tells an operator the cache
+/// is costing them everything. MEASURED on `flux-router`/`flux-reasoning`
+/// beside a 98% warm hit ratio in the same report.
+fn render_opt_usd(value: Option<f64>) -> String {
+    value.map_or_else(|| "unknown".to_string(), |v| format!("{v:.6}"))
+}
+
+/// The same, for a ratio.
+fn render_opt_ratio(value: Option<f64>) -> String {
+    value.map_or_else(|| "unknown".to_string(), |v| format!("{v:.4}"))
+}
+
+/// Find the ledger `--session <id>` names, accepting EITHER identifier.
+///
+/// #1162 — the ledger is keyed by the engine's internal `conversation_id`; the
+/// flag says "Session id to report on", which is the id the user actually
+/// controls (`--session-id`). Nothing bridged the two, so a scripted run that
+/// set its own session id could only ever get
+/// `ledger io error at .../<their id>.json: No such file or directory` — a bare
+/// io error that reads as "nothing was recorded" when the record is right there
+/// under another name.
+///
+/// The bridge is `Session::conversation_id`, persisted on the session snapshot
+/// since #1161. Ledger id is tried FIRST so an operator who copied a key out of
+/// `cache list` never pays for a session-store lookup, and so this cannot
+/// change the meaning of an id that already resolved.
 fn resolve(
     dir: &std::path::Path,
     session: Option<&str>,
-) -> Result<(PathBuf, CacheLedger), wcore_agent::cache_ledger::LedgerError> {
-    match session {
-        Some(id) => {
-            let path = wcore_agent::cache_ledger::ledger_path(dir, id);
-            let ledger = load(&path)?;
-            Ok((path, ledger))
-        }
-        None => latest(dir),
+    session_dir: Option<&std::path::Path>,
+) -> anyhow::Result<(PathBuf, CacheLedger)> {
+    let Some(id) = session else {
+        return Ok(latest(dir)?);
+    };
+    let path = wcore_agent::cache_ledger::ledger_path(dir, id);
+    match load(&path) {
+        Ok(ledger) => return Ok((path, ledger)),
+        // Only a MISSING ledger is worth a second interpretation. A malformed
+        // or wrong-schema file at that path is a real answer to the question
+        // asked, and silently reporting on a different session instead would
+        // hide it.
+        Err(wcore_agent::cache_ledger::LedgerError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(other) => return Err(other.into()),
     }
+
+    let manager = session_manager(session_dir);
+    // Read the snapshot directly rather than through `SessionManager::load`.
+    // `load` repairs what it reads — it merges and then DELETES a pending WAL,
+    // and re-writes the index for an unindexed session. `cache report` is a
+    // read verb; it must not mutate the session store to answer a question
+    // about a ledger.
+    let conversation_id = std::fs::read_to_string(manager.session_file_path(id))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<wcore_agent::session::Session>(&raw).ok())
+        .and_then(|session| session.conversation_id);
+    if let Some(conversation_id) = conversation_id {
+        let path = wcore_agent::cache_ledger::ledger_path(dir, &conversation_id);
+        match load(&path) {
+            Ok(ledger) => return Ok((path, ledger)),
+            Err(e) => {
+                anyhow::bail!(
+                    "session '{id}' recorded conversation id '{conversation_id}', but its ledger                      could not be read: {e}"
+                );
+            }
+        }
+    }
+
+    // Name the key the store is actually addressed by, and the verb that lists
+    // the keys. The old message named a path that had never existed and said
+    // nothing else.
+    anyhow::bail!(
+        "no cache ledger for '{id}' in {}. Ledgers are keyed by the engine's internal          conversation id, not by the session id you set with --session-id; session '{id}' is          either unknown to the session store at {} or was recorded by a build that did not          persist its conversation id. Run `wayland-core cache list` to see the ids that exist.",
+        dir.display(),
+        manager.directory().display(),
+    )
+}
+
+/// The session store, without requiring a provider API key — the same contract
+/// `session list` honours, and the reason `cache` is dispatched before
+/// `Config::resolve` in the first place.
+fn session_manager(session_dir: Option<&std::path::Path>) -> wcore_agent::session::SessionManager {
+    if let Some(dir) = session_dir {
+        return wcore_agent::session::SessionManager::new(dir.to_path_buf(), 50);
+    }
+    let config = wcore_config::config::Config::resolve(&wcore_config::config::CliArgs {
+        provider: None,
+        api_key: None,
+        base_url: None,
+        model: None,
+        max_tokens: None,
+        max_turns: None,
+        system_prompt: None,
+        profile: None,
+        auto_approve: false,
+        project_dir: None,
+    })
+    .unwrap_or_default();
+    wcore_agent::session::SessionManager::new(
+        config.session.directory.clone().into(),
+        config.session.max_sessions,
+    )
 }
 
 fn print_turn(t: &TurnSample) {
     println!(
         "F23_CACHE=turn round_trip={} turn={} provider={} model={} retention={} \
          uncached_input={} cache_read={} cache_write={} output={} hit={} hit_ratio={:.4} \
-         invalidation={} cost_usd={} cost_source={} uncached_equivalent_usd={:.6} \
-         saving_usd={:.6} watermark={} threshold={} emergency_limit={} pressure={:.4}",
+         invalidation={} cost_usd={} cost_source={} uncached_equivalent_usd={} \
+         saving_usd={} watermark={} threshold={} emergency_limit={} pressure={:.4}",
         t.round_trip,
         t.turn,
         t.provider,
@@ -416,8 +541,8 @@ fn print_turn(t: &TurnSample) {
             "unpriced".to_string()
         },
         t.cost_source.as_str(),
-        t.uncached_equivalent_usd,
-        t.cache_saving_usd(),
+        render_opt_usd(t.uncached_equivalent_usd),
+        render_opt_usd(t.cache_saving_usd()),
         t.watermark_tokens,
         t.autocompact_threshold_tokens,
         t.emergency_limit_tokens,
@@ -491,19 +616,34 @@ fn print_report(s: &LedgerSummary, path: &std::path::Path) {
 
     // 4 — cost truth
     println!(
-        "F23_CACHE=cost usd={} uncached_equivalent_usd={:.6} saving_usd={:.6} \
-         saving_ratio={:.4} cost_truth={} provider_reported_round_trips={} \
+        "F23_CACHE=cost usd={} uncached_equivalent_usd={} saving_usd={} \
+         saving_ratio={} cost_truth={} saving_truth={} \
+         counterfactual_unpriced_round_trips={} provider_reported_round_trips={} \
          catalog_priced_round_trips={} estimated_round_trips={} unpriced_round_trips={}",
         render_cost_usd(s.cost_usd, s.cost_truth()),
-        s.uncached_equivalent_usd,
-        s.cache_saving_usd(),
-        s.cache_saving_ratio(),
+        render_opt_usd(s.uncached_equivalent_usd),
+        render_opt_usd(s.cache_saving_usd()),
+        render_opt_ratio(s.cache_saving_ratio()),
         s.cost_truth().as_str(),
+        s.saving_truth().as_str(),
+        s.counterfactual_unpriced_round_trips,
         s.provider_reported_round_trips,
         s.catalog_priced_round_trips,
         s.estimated_round_trips,
         s.unpriced_round_trips,
     );
+    // #1163 — the saving is a difference, so it is graded separately from the
+    // billed figure. A `cost_truth=priced` session whose counterfactual nothing
+    // could price is the exact shape this warning exists for: the spend is a
+    // fact, the saving is not, and one verdict cannot say both.
+    if s.saving_truth() != CostTruth::Priced && s.cost_truth() == CostTruth::Priced {
+        println!(
+            "F23_CACHE=saving_warning text=no_catalog_rate_for_the_uncached_counterfactual \
+             saving_truth={} counterfactual_unpriced_round_trips={}",
+            s.saving_truth().as_str(),
+            s.counterfactual_unpriced_round_trips,
+        );
+    }
     if s.cost_truth() != CostTruth::Priced {
         // Loud, on stdout, in the same run — an unpriced number that renders
         // like a priced one is the failure mode this whole surface exists to
@@ -545,6 +685,10 @@ fn summary_json(s: &LedgerSummary) -> serde_json::Value {
         obj.insert(
             "cost_truth".into(),
             serde_json::json!(s.cost_truth().as_str()),
+        );
+        obj.insert(
+            "saving_truth".into(),
+            serde_json::json!(s.saving_truth().as_str()),
         );
         obj.insert(
             "cost_trustworthy".into(),
@@ -622,7 +766,7 @@ mod store_total_tests {
                 uncached_input_tokens: self.uncached_input,
                 output_tokens: self.output,
                 cost_usd: self.usd,
-                uncached_equivalent_usd: self.usd,
+                uncached_equivalent_usd: Some(self.usd),
                 catalog_priced_round_trips: self.priced,
                 estimated_round_trips: self.estimated,
                 unpriced_round_trips: self.unpriced,

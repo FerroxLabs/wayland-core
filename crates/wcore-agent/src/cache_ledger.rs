@@ -45,6 +45,18 @@
 //! difference is signed on purpose — a session that writes cache it never reads
 //! back costs MORE than an uncached one, and that must be reportable as a
 //! negative saving rather than clamped to zero.
+//!
+//! #1163: that counterfactual is [`Option`]-typed, and the `Option` is the
+//! whole point. It needs catalog rates the billed figure does not — a
+//! provider-reported spend arrives priced whether or not anything can price the
+//! model. MEASURED on `flux-router`/`flux-reasoning`: the catalog had no row,
+//! the counterfactual defaulted to `0.0`, and the subtraction reported
+//! `saving_usd = -cost` on a session whose warm hit ratio was 98%. Two figures
+//! of different trustworthiness were being rendered under one verdict. So the
+//! unpriceable counterfactual is `None` — [`LedgerSummary::cache_saving_usd`]
+//! returns `None` with it, and [`LedgerSummary::saving_truth`] grades the
+//! SAVING separately from [`LedgerSummary::cost_truth`], which still grades only
+//! what was billed.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -150,7 +162,16 @@ pub struct TurnSample {
     pub cost_source: CostSource,
     /// What the SAME tokens would have cost with no cache: every cached token
     /// re-billed at the ordinary input rate.
-    pub uncached_equivalent_usd: f64,
+    ///
+    /// `None` when nothing could PRICE that counterfactual for this
+    /// provider×model — no catalog row and no user-supplied rate. A
+    /// provider-family preset is deliberately not accepted here: it is a
+    /// conservative ceiling, and subtracting a real billed figure from a
+    /// ceiling is not a measurement. Absent on the wire (#1163); a `0.0` read
+    /// back from a ledger an older build wrote decodes as `Some(0.0)`, which is
+    /// what that build meant by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncached_equivalent_usd: Option<f64>,
 
     // -- token pressure -----------------------------------------------------
     /// Real-pressure watermark (`CompactState::last_real_input_tokens`) — the
@@ -191,8 +212,14 @@ impl TurnSample {
     /// Signed cache saving. **Negative** when the cache-write premium exceeded
     /// what the reads saved back — a real and under-reported outcome for short
     /// sessions, and the reason this is not clamped at zero.
-    pub fn cache_saving_usd(&self) -> f64 {
-        self.uncached_equivalent_usd - self.cost_usd
+    ///
+    /// `None` when the counterfactual could not be priced. There is nothing to
+    /// subtract from, and subtracting against a fabricated zero yields exactly
+    /// `-cost` — a confident claim that the cache cost everything and saved
+    /// nothing (#1163).
+    pub fn cache_saving_usd(&self) -> Option<f64> {
+        self.uncached_equivalent_usd
+            .map(|uncached| uncached - self.cost_usd)
     }
 
     /// How full the context is, as a fraction of the autocompact threshold.
@@ -439,6 +466,9 @@ impl CacheLedger {
         };
 
         s.round_trips = self.turns.len() as u64;
+        // `None` the moment any round-trip's counterfactual is unknown; stays
+        // `Some` only while every one of them priced.
+        let mut counterfactual = Some(0.0f64);
         for t in &self.turns {
             s.uncached_input_tokens = s
                 .uncached_input_tokens
@@ -447,7 +477,22 @@ impl CacheLedger {
             s.cache_write_tokens = s.cache_write_tokens.saturating_add(t.cache_write_tokens);
             s.output_tokens = s.output_tokens.saturating_add(t.output_tokens);
             s.cost_usd += t.cost_usd;
-            s.uncached_equivalent_usd += t.uncached_equivalent_usd;
+            // A partial sum of counterfactuals is a FLOOR, and a floor
+            // subtracted from a complete billed total reports a saving smaller
+            // than the truth with full confidence. One unknown row therefore
+            // makes the session total unknown — the same rule
+            // `AgentEngine::fold_reported_cost` applies one level down.
+            match t.uncached_equivalent_usd {
+                Some(usd) => {
+                    if let Some(total) = counterfactual.as_mut() {
+                        *total += usd;
+                    }
+                }
+                None => {
+                    counterfactual = None;
+                    s.counterfactual_unpriced_round_trips += 1;
+                }
+            }
             match t.cost_source {
                 CostSource::ProviderReported => s.provider_reported_round_trips += 1,
                 CostSource::Catalog => s.catalog_priced_round_trips += 1,
@@ -491,6 +536,14 @@ impl CacheLedger {
             }
             s.tokens_reclaimed = s.tokens_reclaimed.saturating_add(c.tokens_freed);
         }
+
+        // An empty ledger has no counterfactual either — a `Some(0.0)` there
+        // would render as "the cache saved exactly nothing", which is a claim.
+        s.uncached_equivalent_usd = if self.turns.is_empty() {
+            None
+        } else {
+            counterfactual
+        };
 
         s
     }
@@ -575,7 +628,14 @@ pub struct LedgerSummary {
 
     // cost truth
     pub cost_usd: f64,
-    pub uncached_equivalent_usd: f64,
+    /// The session's uncached counterfactual, or `None` when ANY round-trip's
+    /// could not be priced. See [`TurnSample::uncached_equivalent_usd`].
+    #[serde(default)]
+    pub uncached_equivalent_usd: Option<f64>,
+    /// Round-trips whose counterfactual could not be priced. Reported so an
+    /// operator can see WHY the saving is unknown rather than just that it is.
+    #[serde(default)]
+    pub counterfactual_unpriced_round_trips: u64,
     /// Round-trips whose figure the provider reported itself — spend, not a
     /// price model. See [`CostSource::ProviderReported`].
     #[serde(default)]
@@ -616,17 +676,41 @@ impl LedgerSummary {
     }
 
     /// Signed saving: what the cache actually bought (or cost).
-    pub fn cache_saving_usd(&self) -> f64 {
-        self.uncached_equivalent_usd - self.cost_usd
+    ///
+    /// `None` when the counterfactual is unknown — see
+    /// [`Self::uncached_equivalent_usd`].
+    pub fn cache_saving_usd(&self) -> Option<f64> {
+        self.uncached_equivalent_usd
+            .map(|uncached| uncached - self.cost_usd)
     }
 
-    /// Saving as a fraction of the uncached counterfactual. `0.0` when the
-    /// counterfactual is zero (nothing to save against).
-    pub fn cache_saving_ratio(&self) -> f64 {
-        if self.uncached_equivalent_usd == 0.0 {
-            return 0.0;
+    /// Saving as a fraction of the uncached counterfactual. `None` when the
+    /// counterfactual is unknown, or when it is zero — there is nothing to take
+    /// a fraction of, and `0.0` would read as "the cache changed nothing".
+    pub fn cache_saving_ratio(&self) -> Option<f64> {
+        match (self.uncached_equivalent_usd, self.cache_saving_usd()) {
+            (Some(uncached), Some(saving)) if uncached != 0.0 => Some(saving / uncached),
+            _ => None,
         }
-        self.cache_saving_usd() / self.uncached_equivalent_usd
+    }
+
+    /// Grade the trustworthiness of [`Self::cache_saving_usd`].
+    ///
+    /// The saving is a DIFFERENCE of two figures, so it is only as good as the
+    /// weaker one. [`Self::cost_truth`] grades the billed half and nothing else
+    /// — that is its documented contract, and dragging a provider-reported
+    /// spend down to `partial` because the CATALOG cannot price a
+    /// counterfactual would be a second wrong claim, not a fix for the first.
+    ///
+    /// So the report carries two verdicts, one per figure. #1163 is what one
+    /// verdict over two figures looks like: `cost_truth=priced` printed beside
+    /// `saving_usd=-0.061389` on a session with a 98% warm hit ratio.
+    pub fn saving_truth(&self) -> CostTruth {
+        if self.uncached_equivalent_usd.is_none() {
+            CostTruth::Unpriced
+        } else {
+            self.cost_truth()
+        }
     }
 
     /// Peak context pressure as a fraction of the autocompact threshold.
@@ -861,10 +945,34 @@ impl CacheLedgerRecorder {
         self.dir_override.clone().unwrap_or_else(default_ledger_dir)
     }
 
-    fn arm(&mut self, session_id: &str) -> &mut CacheLedger {
+    /// Arm the recorder for `session_id`, CONTINUING the ledger already on disk
+    /// for it when there is one.
+    ///
+    /// #1161 — the continuation is the point. Keying the ledger by a stable
+    /// `conversation_id` stops a resume from writing a SECOND file, but a
+    /// recorder that always started from `CacheLedger::new` would then truncate
+    /// the first launch's rows on its first flush: same fragmentation, now with
+    /// data loss instead of an orphan. So a resumed session picks the record up
+    /// where it was left, keeping `started_at`, the round-trip numbering and
+    /// every earlier row.
+    ///
+    /// A file that will not load — malformed, or written by a schema this build
+    /// does not understand — starts a fresh ledger. It is already unreadable to
+    /// every reader; refusing to record would trade an unreadable past for an
+    /// unrecorded present.
+    pub fn arm(&mut self, session_id: &str) -> &mut CacheLedger {
         if self.ledger.is_none() {
-            self.ledger = Some(CacheLedger::new(session_id));
-            self.path = Some(ledger_path(&self.dir(), session_id));
+            let path = ledger_path(&self.dir(), session_id);
+            let mut ledger = match load(&path) {
+                Ok(existing) if existing.session_id == session_id => existing,
+                _ => CacheLedger::new(session_id),
+            };
+            // The session is live again, so it is no longer complete. A resumed
+            // ledger left `session_complete: true` would report its totals as
+            // final while the session is still spending.
+            ledger.session_complete = false;
+            self.ledger = Some(ledger);
+            self.path = Some(path);
         }
         self.ledger.as_mut().expect("armed above")
     }
@@ -978,7 +1086,7 @@ mod tests {
             invalidation_cause: None,
             cost_usd: 0.01,
             cost_source: CostSource::Catalog,
-            uncached_equivalent_usd: 0.02,
+            uncached_equivalent_usd: Some(0.02),
             watermark_tokens: 10_000 * round_trip,
             conservative_watermark_tokens: 11_000 * round_trip,
             autocompact_threshold_tokens: 100_000,
@@ -1013,10 +1121,10 @@ mod tests {
     fn cache_saving_can_be_negative() {
         let mut s = sample(1, 1_000, 0, 5_000);
         s.cost_usd = 0.05;
-        s.uncached_equivalent_usd = 0.04;
+        s.uncached_equivalent_usd = Some(0.04);
         assert!(
-            s.cache_saving_usd() < 0.0,
-            "a write-heavy turn that never read back must report a NEGATIVE saving, got {}",
+            s.cache_saving_usd().is_some_and(|saving| saving < 0.0),
+            "a write-heavy turn that never read back must report a NEGATIVE saving, got {:?}",
             s.cache_saving_usd()
         );
     }
@@ -1085,8 +1193,8 @@ mod tests {
         assert_eq!(s.miss_round_trips, 1);
         // 3 × $0.01 billed against 3 × $0.02 uncached.
         assert!((s.cost_usd - 0.03).abs() < 1e-9);
-        assert!((s.cache_saving_usd() - 0.03).abs() < 1e-9);
-        assert!((s.cache_saving_ratio() - 0.5).abs() < 1e-9);
+        assert!((s.cache_saving_usd().expect("all rows priced") - 0.03).abs() < 1e-9);
+        assert!((s.cache_saving_ratio().expect("all rows priced") - 0.5).abs() < 1e-9);
         assert_eq!(s.cost_truth(), CostTruth::Priced);
     }
 
