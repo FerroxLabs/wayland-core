@@ -123,6 +123,187 @@ impl ContextWindow {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FerroxLabs/wayland#1172 — the SERVED window, learned from what came back
+// ---------------------------------------------------------------------------
+
+/// The `reported / estimated` ratio below which a turn is judged to have been
+/// truncated by the endpoint rather than merely over-estimated by us.
+///
+/// CALIBRATED FROM MEASUREMENT, not from a model of the estimator. #1172's
+/// reproduction drove a real `qwen3:8b` on stock Ollama through a logging
+/// reverse proxy and captured every request body next to the `usage` block it
+/// came back with (`/root/w3/proxylog{1,2,3,4}` on hetzner). Across the 24
+/// turns the endpoint served IN FULL the ratio never left **0.839..0.902** —
+/// Core's `char/4` estimator runs consistently ~15% high, which is what holds
+/// the healthy band well under 1.0. The one grossly-truncated turn in the same
+/// corpus measured **0.391** (10,466 tokens estimated sent, `prompt_tokens`
+/// 4,095 came back, Ollama's journal logged `truncated = 1`).
+///
+/// 0.60 sits between 0.391 and 0.839 with room on both sides. It is
+/// deliberately NOT tight: a ratio test alone cannot separate a *marginal*
+/// truncation from estimator noise — the same corpus contains a turn that was
+/// truncated at 0.839, inside the healthy band — which is why
+/// [`TruncationSignal::Regression`] exists and why this arm additionally
+/// requires [`MIN_SHORTFALL_TOKENS`].
+pub const SERVED_SHORTFALL_RATIO: f64 = 0.60;
+
+/// Absolute corroboration for [`TruncationSignal::Shortfall`]: the endpoint
+/// must have come up short by at least this many tokens.
+///
+/// The ratio alone can be dragged down by content whose real tokenization is
+/// much denser than `char/4` (long runs of repeated whitespace, for example).
+/// Requiring an absolute shortfall too means such content must ALSO be large
+/// in absolute terms before it can be mistaken for truncation. The measured
+/// truncated turn was 6,371 tokens short.
+pub const MIN_SHORTFALL_TOKENS: u64 = 1_024;
+
+/// Turns reporting fewer prompt tokens than this carry no usable evidence:
+/// integer noise dominates, and no real served slot is this small.
+pub const MIN_OBSERVABLE_INPUT_TOKENS: u64 = 512;
+
+/// Which measured signature said the endpoint discarded part of the prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TruncationSignal {
+    /// The endpoint reported processing far fewer prompt tokens than we sent
+    /// — below [`SERVED_SHORTFALL_RATIO`] and short by at least
+    /// [`MIN_SHORTFALL_TOKENS`]. This is the gross case: measured at 0.391 on
+    /// a turn where Ollama kept 4,095 of ~10,466 tokens.
+    Shortfall,
+    /// The reported prompt count went DOWN while the prompt we sent grew.
+    ///
+    /// Prompt tokens are a monotone function of the prompt for any fixed
+    /// tokenizer, so appending to the conversation cannot reduce them. When it
+    /// does, the server dropped content. This is the arm that catches
+    /// truncation the ratio test cannot: measured at 4,050 → 3,910 reported
+    /// across a +128-token append, a ratio of 0.847 that sits INSIDE the
+    /// healthy band.
+    Regression,
+}
+
+/// What the endpoint told us about itself, and the window it implies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServedWindowEvidence {
+    /// Which signature fired.
+    pub signal: TruncationSignal,
+    /// Our estimate of the prompt we sent on this turn.
+    pub sent_estimate: u64,
+    /// The prompt tokens the endpoint reported processing on this turn.
+    pub reported_input: u64,
+    /// Best LOWER BOUND on the served slot: the largest prompt the endpoint
+    /// has been observed to actually process on this route.
+    pub served_window: u64,
+}
+
+/// Learns an endpoint's SERVED context window from the `usage` it already
+/// returns — no probe, no extra request, no endpoint sniffing.
+///
+/// # Why this is not a probe
+///
+/// The model's ADVERTISED window is not the number that binds. #1172 measured
+/// `qwen3:8b` advertising 40,960 (`/api/show`) while the loaded slot was 4,096
+/// (`ollama ps`, `n_ctx_slot = 4096`), and only `/api/ps` reports the slot.
+/// Two earlier attempts to reach for that figure were backed out: probing the
+/// endpoint means deciding WHICH endpoints to probe, and every mock server in
+/// this workspace binds `127.0.0.1`, so "the endpoint is loopback" cannot
+/// separate a real self-hosted server from a test fixture.
+///
+/// The response we already receive carries the answer. `usage.prompt_tokens`
+/// is what the server actually processed; when it is materially less than what
+/// we sent, the difference was discarded — and with llama.cpp's `n_keep = 4`
+/// the discarded head is the system prompt and the user's task.
+///
+/// # Per-route
+///
+/// Observations are keyed to a provider/model route string and thrown away
+/// when it changes: a different tokenizer shifts the reported count by a few
+/// percent, which is the same order as the [`TruncationSignal::Regression`]
+/// arm, so comparing across a model swap would manufacture evidence.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServedWindowTracker {
+    /// Provider/model the observations below belong to.
+    route: Option<String>,
+    /// Previous turn's `(sent_estimate, reported_input)` on this route.
+    prev: Option<(u64, u64)>,
+    /// Largest prompt this route has been observed to actually process.
+    max_reported: u64,
+    /// Set once truncation has been OBSERVED. `None` means "no evidence" —
+    /// never "the window is fine".
+    served_window: Option<u64>,
+}
+
+impl ServedWindowTracker {
+    /// Record one completed turn. Returns evidence exactly on the turns where
+    /// the learned served window is newly established or moves, so a caller
+    /// can tell the user once per figure instead of once per turn.
+    ///
+    /// `route` must be the POST-swap provider/model pair that actually served
+    /// the turn. `sent_estimate` is our own count of the assembled request;
+    /// `reported_input` is the provider's total input for the same turn
+    /// (`TokenUsage::total_input_tokens` — cached reads included, so a prompt
+    /// cache cannot masquerade as a shortfall).
+    pub fn observe(
+        &mut self,
+        route: &str,
+        sent_estimate: u64,
+        reported_input: u64,
+    ) -> Option<ServedWindowEvidence> {
+        if self.route.as_deref() != Some(route) {
+            *self = Self {
+                route: Some(route.to_string()),
+                ..Self::default()
+            };
+        }
+        // A turn with no reported usage is evidence in neither direction, and
+        // recording it as `prev` would fabricate a regression on the next one.
+        if reported_input == 0 || sent_estimate == 0 {
+            return None;
+        }
+        let prev = self.prev.replace((sent_estimate, reported_input));
+        self.max_reported = self.max_reported.max(reported_input);
+
+        if reported_input < MIN_OBSERVABLE_INPUT_TOKENS {
+            return None;
+        }
+
+        let regressed = matches!(
+            prev,
+            Some((prev_sent, prev_reported))
+                if prev_reported >= MIN_OBSERVABLE_INPUT_TOKENS
+                    && sent_estimate > prev_sent
+                    && reported_input < prev_reported
+        );
+        let signal = if regressed {
+            TruncationSignal::Regression
+        } else if sent_estimate.saturating_sub(reported_input) >= MIN_SHORTFALL_TOKENS
+            && (reported_input as f64) < sent_estimate as f64 * SERVED_SHORTFALL_RATIO
+        {
+            TruncationSignal::Shortfall
+        } else {
+            return None;
+        };
+
+        let served_window = self.max_reported;
+        if self.served_window == Some(served_window) {
+            // Already established and unchanged — the user has been told.
+            return None;
+        }
+        self.served_window = Some(served_window);
+        Some(ServedWindowEvidence {
+            signal,
+            sent_estimate,
+            reported_input,
+            served_window,
+        })
+    }
+
+    /// The served window learned from observation, or `None` when this session
+    /// has seen no truncation. `None` is "no evidence", never "fine".
+    pub fn served_window(&self) -> Option<u64> {
+        self.served_window
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
