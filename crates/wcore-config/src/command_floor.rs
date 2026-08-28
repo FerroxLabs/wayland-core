@@ -668,6 +668,38 @@ fn components(token: &str) -> Vec<String> {
 /// The UNQUOTED spelling of such a path stays split, and correctly: `echo x >>
 /// /a b/c` writes to `/a`, so there is nothing there for the floor to refuse.
 fn path_tokens(command: &str) -> Vec<String> {
+    // The UNION of both readings, never one instead of the other.
+    //
+    // Quote-aware tokenization is only right about a command whose quoting is
+    // BALANCED. A stray apostrophe (`echo don't && cat <home>/notes.txt`) opens
+    // a span that never closes and swallows every path after it into one token
+    // — the direction that refuses LESS.
+    //
+    // On Unix the de-obfuscated form covers that: it deletes the quote, so the
+    // second form `floor_refusal` scans has a boundary where the raw one has
+    // none. ON WINDOWS IT DOES NOT: `deobfuscate` also eats every `\` as an
+    // escape, so `C:\Users\x\notes.txt` arrives as `C:Usersxnotes.txt` and is
+    // no longer a path at all. Both passes therefore miss it, and the naive
+    // split of the RAW command is the only reading that still contains the
+    // path. Measured: `a_stray_quote_does_not_swallow_a_protected_path` passes
+    // on Linux with this union removed and FAILS on the Windows leg.
+    let mut out = quoted_tokens(command);
+    out.extend(
+        command
+            .split(|c: char| {
+                c.is_whitespace()
+                    || matches!(c, ';' | '|' | '&' | '<' | '>' | '(' | ')' | '=' | ',')
+            })
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim_matches(['"', '\'', '`']).to_owned())
+            .filter(|s| !s.is_empty()),
+    );
+    out
+}
+
+/// Tokenize the way the shell does: a delimiter inside a quoted span, or
+/// escaped with a backslash, is not a delimiter.
+fn quoted_tokens(command: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut token = String::new();
     let mut single = false;
@@ -1034,11 +1066,16 @@ mod tests {
     /// balanced. A stray apostrophe opens a span that never closes and swallows
     /// every path after it into one token — the direction that refuses LESS.
     ///
-    /// What answers it is the DE-OBFUSCATED pass, not the raw one: `deobfuscate`
-    /// removes the quote entirely, so the second form `floor_refusal` scans has
-    /// a normal token boundary where the raw form has none. This test exists to
-    /// pin that, because it is not obvious from either function alone and it is
-    /// the reason both forms are scanned.
+    /// On Unix the DE-OBFUSCATED pass answers it: `deobfuscate` removes the
+    /// quote, so that form has a token boundary where the raw one has none.
+    /// **On Windows it does not** — `deobfuscate` also eats every `\` as an
+    /// escape, so the path arrives as `C:Usersxnotes.txt` and is not a path any
+    /// more. There the naive split of the RAW command is the only reading that
+    /// still holds it, which is why `path_tokens` returns the union.
+    ///
+    /// This test was written, then briefly "proved unnecessary" by a red arm
+    /// that only ran on Linux, and then failed on the Windows leg. It is the
+    /// reason the union is in the tree.
     ///
     /// The profile home here has an ORDINARY name and the file an ordinary
     /// basename, so neither the component rule nor the bare-name rule can
