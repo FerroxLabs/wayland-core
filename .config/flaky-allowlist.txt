@@ -1,0 +1,50 @@
+# Retry allowlist — the ONLY way a `FLAKY` test does not fail `report`.
+# FerroxLabs/wayland#1169.
+#
+# ── WHAT THIS FILE IS FOR ──────────────────────────────────────────────────
+#
+# `[profile.ci] retries = 2` in .config/nextest.toml means a test that fails
+# twice and passes on the third attempt is reported `FLAKY 3/3` and counted in
+# the PASSED total. The run conclusion — the thing release gates, dashboards
+# and humans read — says SUCCESS. MEASURED consequence (#1169): the TOCTOU
+# data-loss race of #1155 failed 13 of 200 runs at `--retries 0` (6.5 %), and
+# 0.065^3 ~= 1 visible report in 3,600 CI runs. A defect that destroys user
+# data on one edit in fifteen was invisible to CI essentially forever.
+#
+# `.github/scripts/grade-retry-flakes.sh` runs in the `report` job — a REQUIRED
+# status context on main — over every leg's uploaded JUnit, and FAILS the run
+# for each `<flakyFailure>` whose test is not listed here. Retries still run:
+# the merge is not blocked by one transient network hiccup mid-suite, because
+# the retry still succeeds and the suite still finishes. What changes is that
+# the retry is no longer SILENT.
+#
+# ── WHAT A LINE HERE MEANS ─────────────────────────────────────────────────
+#
+# NOT "this test is fine". A line here means "this test is KNOWN to need
+# retries, someone owns it, and the debt has a date on it". Every entry expires;
+# an expired entry fails `report` exactly as an unlisted flake does, so the only
+# ways out are fixing the test or renewing the entry deliberately with a fresh
+# justification. The list is designed to shrink.
+#
+# DO NOT add a test here to quiet a race you have not investigated. The correct
+# home for a test whose flake IS the bug under investigation is a scoped
+# `retries = 0` override in .config/nextest.toml (three such blocks already
+# exist, for #1109, #1101 and #1146) — that makes the failure reach the run
+# conclusion directly and this gate never sees it, because a zero-retry failure
+# is a plain failure, not a flake.
+#
+# ── FORMAT ─────────────────────────────────────────────────────────────────
+#
+#   <YYYY-MM-DD expiry>  <binary-id>::<test-name>  <gh#NNNN>  <reason...>
+#
+# Whitespace-separated; the reason is the rest of the line and is MANDATORY.
+# The key is the JUnit `classname` and `name` joined by `::`, which is exactly
+# what nextest prints on its `FLAKY` line. A malformed line fails the gate —
+# an allowlist nobody can parse is an allowlist that silently allows
+# everything.
+#
+# Check a local run before pushing:  just flake-gate
+
+2026-10-15  wcore-swarm::worker_runtime_limits::multi_worker_output_exhaustion_fails_without_retaining_buffers  gh#1146  FLAKY 3/3 on the Windows leg in TWO consecutive runs (30698794888 job 91366049013, 30699019736 job 91372229704) - four failed attempts, no diagnostic surviving from any of them. Measurement job is .github/workflows/windows-flake-ledger.yml; this entry is the debt, not a clearance.
+2026-10-15  wcore-agent::crucible_council::slow_proposer_hits_per_proposer_deadline  gh#1169  Asserts a per-proposer deadline by racing real elapsed time, so it fails under box load and passes in isolation. Confirmed failing identically on the untouched baseline, so it is not a regression of this lane - but it has never been measured at --retries 0 and the rate is unknown.
+2026-10-15  wcore-cli::deterministic_openai_loop::packaged_f04_run_is_repeatable_and_content_addressed  gh#1169  Drives the sealed F04 artifact through two complete packaged runs; MEASURED at ~188s against a 120s x 4 kill budget (see the override in .config/nextest.toml), so a contended scheduler slot can still cross it. Same baseline caveat as the entry above.

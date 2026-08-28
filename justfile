@@ -69,6 +69,24 @@ test-ci:
 test-ci:
     vx cargo nextest run --workspace --profile ci --no-fail-fast
 
+# Grade a local `just test-ci` run for retried failures (wayland#1169).
+#
+# `[profile.ci] retries = 2` means a test that fails and then passes on a retry
+# is counted as PASSED and the run concludes SUCCESS — measured cost: the #1155
+# data-loss race failed 14 of 48 runs (29 %) at `--retries 0` while the same
+# defect reported as `FLAKY 2/3` inside a passing run. This is the same gate the
+# aggregate `report` job runs, pointed at the JUnit your last local CI-profile
+# run left behind, so a flake can be seen before it is pushed.
+#
+# Reads target/nextest/ci/junit.xml, which only `--profile ci` writes. With no
+# such run in the tree it grades nothing and says so — see the comment in
+# .github/scripts/grade-retry-flakes.sh about why absence is not this gate's
+# failure to report.
+
+# Grade a local CI-profile run for retried failures (wayland#1169)
+flake-gate:
+    EVIDENCE_DIR=target/nextest/ci bash .github/scripts/grade-retry-flakes.sh
+
 # Run a single test by name
 test-one NAME:
     vx cargo nextest run --workspace -E 'test({{ NAME }})'
