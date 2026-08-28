@@ -466,7 +466,11 @@ async fn tc_2_6_07_input_tokens_tracked() {
 
     let provider = Arc::new(CompactMockProvider::new(vec![turn1, turn2]));
 
-    let config = test_config();
+    let mut config = test_config();
+    // #1150: this case is about token TRACKING, not compaction. Pin the
+    // window so 50k/60k stays below every boundary; the unlisted-model
+    // fallback is now conservative and would hard-stop the second turn.
+    config.compact.context_window = Some(200_000);
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(common::MockTool::new(
         "mock_tool",
