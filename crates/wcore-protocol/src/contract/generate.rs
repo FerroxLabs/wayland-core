@@ -113,8 +113,15 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // additive and nothing existing changes shape, so this whole integration is a
 // single MINOR move: a host pinned to 1.19 keeps working, and the bump is the
 // only way it can learn the new capabilities exist to ask for.
-pub const CONTRACT_MINOR: u64 = 21;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/21";
+// 21 -> 22: wayland#1088 adds one event, `set_mode_refused`. The gate that
+// refuses a wire `set_mode` without the local operator opt-in (GHSA-8r7g) used
+// to announce itself only as an `info` frame of prose, so a host could not tell
+// its requested mode had been rejected and kept rendering a mode the session was
+// never in. The event is purely additive and nothing existing changes shape, so
+// `major` holds at 1 — but the minor has to move, because an added type is
+// undiscoverable to a host pinned below the version that introduced it.
+pub const CONTRACT_MINOR: u64 = 22;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/22";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -1470,6 +1477,80 @@ fn wire_shape_verdict(
     }
 }
 
+/// Refuse a corpus whose `approval_required` rows contradict the behaviour
+/// `ProtocolEvent::ApprovalRequired` documents.
+///
+/// A corpus row is the only thing a real integrator reads, so a row that
+/// disagrees with the engine is worse than no row: the Desktop lane built its
+/// approval reply on `resume_token` because the shipped row carried
+/// `"resume-001"` and the manifest named that field as the correlation key,
+/// while the engine emits the EMPTY string there for every ordinary tool gate
+/// and correlates on `call_id`. Answering such a gate with `approval_resume`
+/// resolves nothing and the tool hangs until its TTL (wayland#1088).
+///
+/// Deliberately inside `generated_artifacts` rather than beside the wire-shape
+/// gate: the wire-shape gate exists to make a BLESSED break impossible to
+/// bless accidentally, whereas this is an invariant no corpus may ever hold,
+/// so no caller — generator, checker, test or tool — should be able to
+/// materialise one.
+fn enforce_approval_gate_contract(
+    events: &BTreeMap<String, Value>,
+    compatibility: &BTreeMap<String, Value>,
+) -> ContractResult<()> {
+    let declared = EVENT_SPECS
+        .iter()
+        .find(|spec| spec.wire_type == "approval_required")
+        .ok_or_else(|| std::io::Error::other("EVENT_SPECS must declare approval_required"))?;
+    if declared.correlation != "call_id" {
+        return Err(std::io::Error::other(format!(
+            "approval_required declares correlation={:?}, but `resume_token` is the bridge              secret and is EMPTY on an ordinary tool gate. The public handle is `call_id`              (`correlation_id` always equals it), and an ordinary gate is answered with              tool_approve/tool_deny keyed by call_id.",
+            declared.correlation
+        ))
+        .into());
+    }
+
+    for (path, fixture) in events.iter().chain(compatibility.iter()) {
+        if fixture.get("type").and_then(Value::as_str) != Some("approval_required") {
+            continue;
+        }
+        let call_id = fixture
+            .get("call_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                std::io::Error::other(format!("{path}: approval_required must carry a call_id"))
+            })?;
+        // Omitted from the JSON when empty, so only a row that publishes it is
+        // constrained - but a row that publishes a DIFFERENT value teaches a
+        // host to correlate on the wrong field.
+        if let Some(correlation_id) = fixture.get("correlation_id").and_then(Value::as_str)
+            && correlation_id != call_id
+        {
+            return Err(std::io::Error::other(format!(
+                "{path}: correlation_id {correlation_id:?} != call_id {call_id:?}.                  `ProtocolEvent::ApprovalRequired::correlation_id` always equals `call_id`."
+            ))
+            .into());
+        }
+    }
+
+    // The canonical row is the case a host meets on nearly every session: an
+    // ordinary tool gate, which has no bridge entry and therefore no token. The
+    // bridge-backed kind keeps its own minimal compat row.
+    let canonical = events.get("events/approval_required.json").ok_or_else(|| {
+        std::io::Error::other("the corpus must publish events/approval_required.json")
+    })?;
+    let token = canonical
+        .get("resume_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !token.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "events/approval_required.json publishes resume_token={token:?}, but the canonical              row is an ordinary tool gate and an ordinary gate has NO bridge entry, so its              resume_token is the empty string. A host that echoes a token it read here answers              with approval_resume, which resolves nothing, and the tool hangs until its TTL."
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// Refuse a regeneration that would move a published wire shape while the
 /// contract version stands still.
 ///
@@ -2439,6 +2520,7 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         .into_iter()
         .map(|(path, event)| Ok((path, event_value(&event)?)))
         .collect::<ContractResult<BTreeMap<_, _>>>()?;
+    enforce_approval_gate_contract(&event_schema_fixtures, &compatibility_schema_fixtures)?;
     let legacy_child =
         compatibility_schema_fixtures.get("compat/events/sub_agent_event.legacy.json");
     let command_schema_title =

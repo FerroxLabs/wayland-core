@@ -766,6 +766,20 @@ pub fn truncate_render_title(title: &str) -> String {
     title[..cut].to_string()
 }
 
+/// Why a wire `set_mode` was refused.
+///
+/// A typed vocabulary rather than a sentence: a host branches on this, and the
+/// prose that used to be the only signal is not something a host can match on
+/// without pinning our English.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SetModeRefusalReason {
+    /// The requested mode auto-approves tools, and the local operator has not
+    /// opted in (`--force` / `WAYLAND_ALLOW_WIRE_FORCE=1`). The only cause
+    /// `set_mode_from_wire` can refuse on today.
+    LocalOptInRequired,
+}
+
 /// Events emitted by the agent to the client (Agent -> Client)
 ///
 /// `Clone` is derived (Wave 2) so the in-process TUI bridge can fan an
@@ -1301,6 +1315,30 @@ pub enum ProtocolEvent {
     ApprovalResume {
         resume_token: String,
         approved: bool,
+    },
+    /// wayland#1088 — a wire `set_mode` asking for an auto-approving mode was
+    /// REFUSED, and the session is still on the mode named by `effective`.
+    ///
+    /// `ToolApprovalManager::set_mode_from_wire` refuses `force` and
+    /// `auto_edit` from an un-opted-in wire peer (GHSA-8r7g: a wire peer that
+    /// could set `auto_edit` would get write-without-consent, and a write is a
+    /// write-to-RCE via a git hook / `.bashrc` / `authorized_keys`). That
+    /// refusal is deliberate and unchanged. What this event fixes is that it
+    /// used to be reported ONLY as an `info` frame of English prose, so a host
+    /// could not tell its request had been rejected: the session silently
+    /// stayed in `Default`, where EVERY tool category gates, and the resulting
+    /// gate storm looked like an engine fault rather than an un-applied mode.
+    ///
+    /// Always-emitted forward-additive variant, on the same footing as
+    /// `budget_exceeded`: a host that does not know the type drops the line per
+    /// the W0 decoder contract, so no capability flag gates it. The `info`
+    /// frame is still emitted beside it for hosts that only render prose.
+    SetModeRefused {
+        /// The mode the wire peer asked for.
+        requested: crate::commands::SessionMode,
+        /// The mode still in force — the refusal changes nothing.
+        effective: crate::commands::SessionMode,
+        reason: SetModeRefusalReason,
     },
     /// W8a A.7: ExecutionBudget cap exceeded — singular event per
     /// session, fires once when the first cap trips. Always-emitted +
