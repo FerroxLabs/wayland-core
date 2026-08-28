@@ -4405,6 +4405,18 @@ pub struct AgentEngine {
     /// Used to reconcile the #255 pre-flight overflow guard against the actual
     /// served-model window instead of the pre-route guess.
     flux_served_window: Option<u64>,
+    /// #434 — the concrete model the router reported serving this conversation,
+    /// carried across turns exactly as `flux_served_window` above is. A tier
+    /// alias hides the served model from every request-BUILD-time per-model
+    /// decision (strict-reasoner `reasoning_content` replay, #417), and the
+    /// router only answers on the way back — so the answer must outlive the
+    /// turn that received it.
+    ///
+    /// LIMIT: this can only inform turn N+1. Turn 1, the first turn after a
+    /// resume (in-memory, not journaled), a deployment that sends no
+    /// routed-model header, and a mid-conversation re-route are all uncovered
+    /// here and need router-side cover.
+    flux_routed_model: Option<String>,
     /// #282 contract V1: the LAST-seen Flux context pressure
     /// (`x-flux-context-pressure`, `0.0..=1.0` = required / window). Captured
     /// for #280 pressure-driven scheduling (see `smart_compact_fraction`).
@@ -4785,6 +4797,7 @@ impl AgentEngine {
             flux_loop_collisions: 0,
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             // #280: smart auto-compaction starts armed; latches seeded clear.
             smart_compact_armed: true,
@@ -5086,6 +5099,7 @@ impl AgentEngine {
             flux_loop_collisions: 0,
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             // #280: smart auto-compaction starts armed; latches seeded clear.
             smart_compact_armed: true,
@@ -5464,6 +5478,7 @@ impl AgentEngine {
         // `cache_ledger.rotate()` above, so nothing bleeds between the two.
         self.conversation_id = switched_conversation_id;
         self.flux_served_window = None;
+        self.flux_routed_model = None;
         self.flux_context_pressure = None;
         self.smart_compact_armed = true;
         self.smart_compact_last_turn = None;
@@ -5750,6 +5765,36 @@ impl AgentEngine {
             .clone()
             .or_else(|| self.current_session_id())
             .unwrap_or_else(|| "session-unknown".to_string())
+    }
+
+    /// #388 — whether an actual provider CAP (token or monetary) governs this
+    /// session, and therefore whether the wire max-tokens field must bind.
+    ///
+    /// This asks the LEDGER what it enforces, not whether a ledger exists.
+    /// `bootstrap.rs` installs a durable budget authority on every session —
+    /// capped or not — so `budget_authority.is_some()` is unconditionally true
+    /// in production. Reading presence as governance retired the whole #112 /
+    /// #456 / #462 omit-when-unsized contract there: every unsized turn shipped
+    /// the conservative 8,192 floor as a HARD wire cap and long answers were
+    /// cut at 8k. An internal accounting ledger is not the user asking for a
+    /// cap.
+    ///
+    /// When a cap IS configured the wire field still binds, because it is the
+    /// only PRE-flight bound on output: `max_tokens` feeds the admission
+    /// reservation (`reserved_output`), and omitting it would let the served
+    /// model's natural ceiling overrun a reservation the cap was sized against.
+    fn provider_cap_binds_wire_max_tokens(&self) -> Result<bool, AgentError> {
+        let session_id = self.budget_session_id();
+        if let Some(authority) = self.budget_authority.as_ref() {
+            return authority
+                .lock()
+                .inspect(|tracker, _| tracker.has_provider_cap(&session_id))
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()));
+        }
+        Ok(self
+            .budget_tracker
+            .as_ref()
+            .is_some_and(|tracker| tracker.lock().has_provider_cap(&session_id)))
     }
 
     /// Read access to the legacy in-memory `BudgetTracker` used by direct
@@ -11371,9 +11416,7 @@ impl AgentEngine {
         let request = checkpoint
             .validate_opened_prepared_request_conversation(&prepared, &state.conversation)
             .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
-        if (self.budget_authority.is_some() || self.budget_tracker.is_some())
-            && request.omit_max_tokens
-        {
+        if self.provider_cap_binds_wire_max_tokens()? && request.omit_max_tokens {
             return Err(AgentError::SessionAuthority(
                 "recovery request omits its provider output cap under active budget governance"
                     .to_string(),
@@ -12575,6 +12618,7 @@ impl AgentEngine {
                         // #112: decided below at the sizing site, AFTER the smart-
                         // routing tier swap, so the omit decision sees the final model.
                         omit_max_tokens: false,
+                        routed_model_hint: None,
                     };
 
                     // Cache-stability (token-opt): inject the per-turn skill-router
@@ -12975,12 +13019,37 @@ impl AgentEngine {
                         self.max_tokens_explicit,
                         self.compat.omit_max_tokens_when_unsized(),
                     );
-                    // A finite provider ledger can reserve only a wire-bounded output.
-                    // Keep omit-safe behavior for legacy/unmetered sessions, but force
-                    // the sized cap onto every governed provider call.
-                    if self.budget_authority.is_some() || self.budget_tracker.is_some() {
+                    // #388 — a CAPPED provider ledger can reserve only a wire-bounded
+                    // output, so force the sized cap onto a governed call. An UNCAPPED
+                    // ledger (the production default — bootstrap installs one on every
+                    // session) enforces nothing and must leave the #112 omit contract
+                    // intact, or every unsized turn ships the 8,192 floor as a hard cap.
+                    if self.provider_cap_binds_wire_max_tokens()? {
                         request.omit_max_tokens = false;
                     }
+
+                    // #434 — hand the provider the model the router reported
+                    // serving this conversation, so per-MODEL request shaping
+                    // (strict-reasoner `reasoning_content` replay, #417) is
+                    // decided against a real model instead of the tier alias
+                    // `flux-auto`, which matches no model contract at all.
+                    // Placed AFTER the tier swap so it reads the FINAL model:
+                    // a turn swapped onto a concrete model carries no hint.
+                    //
+                    // This can only ever inform turn N+1 — the router answers
+                    // on the way back. Turn 1, the first turn after a resume,
+                    // a deployment that sends no routed-model header, and a
+                    // mid-conversation re-route all still need router-side
+                    // cover. In the #417 shape the practical exposure is
+                    // narrower than "turn 1": replay only matters once the
+                    // history HOLDS reasoning, which needs a prior assistant
+                    // turn — by which point the header has normally arrived.
+                    request.routed_model_hint =
+                        if wcore_providers::is_flux_tier_alias(&request.model) {
+                            self.flux_routed_model.clone()
+                        } else {
+                            None
+                        };
 
                     // #426 / wayland#422 — separate the reasoning budget from the output
                     // budget so extended thinking can never starve the visible answer.
@@ -13272,8 +13341,12 @@ impl AgentEngine {
                     }
                     self.flux_context_pressure = round.provider_metadata.context_pressure;
                     self.flux_served_window = round.provider_metadata.model_window;
-                    if round.provider_metadata.routed_model.is_some() {
-                        last_routed_model = round.provider_metadata.routed_model;
+                    if let Some(routed) = round.provider_metadata.routed_model.clone() {
+                        // #434 — the served model outlives this turn: it is the
+                        // only thing that tells the NEXT request which model
+                        // contract a tier alias actually resolves to.
+                        self.flux_routed_model = Some(routed.clone());
+                        last_routed_model = Some(routed);
                     }
                     self.length_wedge_fingerprint = None;
                     stop_reason = round.stop_reason;
@@ -14316,9 +14389,12 @@ impl AgentEngine {
                             self.flux_context_pressure = context_pressure;
                             self.flux_served_window = model_window;
                             // Layer E1 — remember the served model for the
-                            // cache_health_warn attribution below.
+                            // cache_health_warn attribution below. #434 — and
+                            // on the SESSION, so the next request can be shaped
+                            // for the model a tier alias actually resolves to.
                             if routed_model.is_some() {
                                 last_routed_model = routed_model.clone();
+                                self.flux_routed_model = routed_model.clone();
                             }
                             if let Some(window) = model_window {
                                 // Reconcile the #255 gauge through the kernel:
@@ -14608,26 +14684,67 @@ impl AgentEngine {
                     // produced nothing usable and committing it would end the
                     // run as though the model had finished — the exact silent
                     // failure this gate exists to stop.
-                    if !attempt_truncated_tool_calls.is_empty() {
-                        let cut = attempt_truncated_tool_calls
-                            .iter()
-                            .map(|(name, bytes)| {
-                                let name = if name.is_empty() {
-                                    "<unnamed tool>"
-                                } else {
-                                    name.as_str()
-                                };
-                                format!("{name} ({bytes} bytes of arguments received)")
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                    //
+                    // #388(b) — arm on the CUT, not only on a call severed
+                    // mid-argument. A `finish_reason=length` response whose
+                    // calls all happened to close before the cut is no more
+                    // trustworthy: the model was still writing, so the calls
+                    // that did arrive are the PREFIX of a plan whose remainder
+                    // was discarded. Running that prefix and then treating the
+                    // turn as finished is the same silent failure, one byte to
+                    // the left. A length cut with NO tool calls is an ordinary
+                    // truncated prose answer and still commits.
+                    let severed_mid_argument = !attempt_truncated_tool_calls.is_empty();
+                    let severed_after_complete_calls =
+                        attempt_finish_reason == FinishReason::Length && !tool_calls.is_empty();
+                    if severed_mid_argument || severed_after_complete_calls {
+                        let cut = if severed_mid_argument {
+                            attempt_truncated_tool_calls
+                                .iter()
+                                .map(|(name, bytes)| {
+                                    let name = if name.is_empty() {
+                                        "<unnamed tool>"
+                                    } else {
+                                        name.as_str()
+                                    };
+                                    format!("{name} ({bytes} bytes of arguments received)")
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        } else {
+                            tool_calls
+                                .iter()
+                                .filter_map(|block| match block {
+                                    ContentBlock::ToolUse { name, .. } if name.is_empty() => {
+                                        Some("<unnamed tool>".to_string())
+                                    }
+                                    ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        // The calls are dropped either way: a severed response
+                        // is not a decision the engine may act on.
+                        tool_calls.clear();
                         if !output_truncation_retried {
                             output_truncation_retried = true;
-                            self.output.emit_info(&format!(
-                                "The model hit the output token limit while writing a tool \
-                                 call ({cut}) — the call was cut off mid-argument and cannot \
-                                 be run. Retrying this turn once, asking for a smaller write."
-                            ));
+                            self.output.emit_info(&if severed_mid_argument {
+                                format!(
+                                    "The model hit the output token limit while writing a tool \
+                                     call ({cut}) — the call was cut off mid-argument and \
+                                     cannot be run. Retrying this turn once, asking for a \
+                                     smaller write."
+                                )
+                            } else {
+                                format!(
+                                    "The model hit the output token limit right after \
+                                     requesting {cut} — the response was severed, so those \
+                                     calls are the start of a plan whose rest never arrived \
+                                     and they were NOT run. Retrying this turn once, asking \
+                                     for smaller steps."
+                                )
+                            });
                             // Retry-scoped nudge on the OUTBOUND copy only,
                             // the same discipline
                             // `stub_failed_tool_results_for_retry` uses below:
@@ -14648,13 +14765,24 @@ impl AgentEngine {
                             continue 'stream;
                         }
                         self.emit_error(
-                            &format!(
-                                "Run stopped: the model hit the output token limit while \
-                                 writing a tool call ({cut}), and again on the retry. The \
-                                 call was cut off mid-argument, so it was NOT run and \
-                                 nothing it would have written exists. Raise this model's \
-                                 max_tokens, or ask for the work in smaller pieces."
-                            ),
+                            &if severed_mid_argument {
+                                format!(
+                                    "Run stopped: the model hit the output token limit while \
+                                     writing a tool call ({cut}), and again on the retry. The \
+                                     call was cut off mid-argument, so it was NOT run and \
+                                     nothing it would have written exists. Raise this model's \
+                                     max_tokens, or ask for the work in smaller pieces."
+                                )
+                            } else {
+                                format!(
+                                    "Run stopped: the model hit the output token limit right \
+                                     after requesting {cut}, and again on the retry. The \
+                                     response was severed mid-plan, so those calls were NOT \
+                                     run and nothing they would have written exists. Raise \
+                                     this model's max_tokens, or ask for the work in smaller \
+                                     pieces."
+                                )
+                            },
                             false,
                         );
                         return self.finish_run_output_truncated(user_input, turn).await;
@@ -20374,6 +20502,7 @@ mod set_config_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -22252,6 +22381,7 @@ mod phase6_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -22580,6 +22710,7 @@ mod compact_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -24647,6 +24778,7 @@ mod plan_mode_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -25108,6 +25240,7 @@ mod hook_integration_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -26280,6 +26413,7 @@ mod approval_bridge_engine_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -27345,6 +27479,7 @@ mod user_model_writeback_tests {
             pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
+            flux_routed_model: None,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -38045,6 +38180,334 @@ mod stream_retry_budget_tests {
             "two 1200 ms server hints cost {elapsed:?} of REAL time; on a \
              paused clock every other test in this module would still pass, \
              which is exactly what this one is here to catch"
+        );
+    }
+}
+
+/// #388(a) — a budget LEDGER is not a user-requested output cap.
+///
+/// Production bootstrap installs a durable budget authority on EVERY session
+/// (`bootstrap.rs::install_budget_authority`, unconditional), so keying the
+/// wire max-tokens decision on "a ledger exists" retires the whole #112 /
+/// #456 / #462 omit-when-unsized contract in production: every unsized turn
+/// ships the conservative 8,192 floor as a hard wire cap and every long answer
+/// is cut at 8k. The decision must key on whether a CAP was actually
+/// configured.
+#[cfg(test)]
+mod issue_388_wire_cap_tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    /// Captures the exact `LlmRequest` the engine handed the provider, so the
+    /// wire-serialization flag can be asserted end to end rather than inferred.
+    struct RequestCapturingProvider {
+        seen: Arc<Mutex<Vec<LlmRequest>>>,
+    }
+
+    impl RequestCapturingProvider {
+        fn new() -> (Arc<Self>, Arc<Mutex<Vec<LlmRequest>>>) {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            (
+                Arc::new(Self {
+                    seen: Arc::clone(&seen),
+                }),
+                seen,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for RequestCapturingProvider {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.seen
+                .lock()
+                .expect("captured requests")
+                .push(request.clone());
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta("ok".to_string())).await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        finish_reason: FinishReason::Stop,
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    fn engine_with(provider: Arc<dyn LlmProvider>) -> super::AgentEngine {
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(crate::output::null_sink::NullSink),
+        );
+        engine.max_turns = Some(2);
+        engine
+    }
+
+    /// An omit-safe route: flux-router compat, a model the limits registry
+    /// does not know, and no explicit `--max-tokens`. All three #112
+    /// conditions hold, so this turn is exactly the one the contract is for.
+    fn omit_safe_engine(provider: Arc<dyn LlmProvider>) -> super::AgentEngine {
+        let mut engine = engine_with(provider);
+        engine.compat = wcore_config::compat::ProviderCompat::flux_router_defaults();
+        engine.model = "wl-388-unknown-model".to_string();
+        engine.max_tokens_explicit = false;
+        engine
+    }
+
+    fn tracker(
+        cap: wcore_budget::BudgetCap,
+    ) -> Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>> {
+        Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            cap,
+        )))
+    }
+
+    #[test]
+    fn a_ledger_without_caps_does_not_bind_the_wire_max_tokens() {
+        let (provider, _seen) = RequestCapturingProvider::new();
+        let mut engine = engine_with(provider);
+        // The production default: accounting is on, no ceiling configured.
+        engine.set_budget_tracker(tracker(wcore_budget::BudgetCap::builder().build()));
+        assert!(
+            !engine
+                .provider_cap_binds_wire_max_tokens()
+                .expect("predicate reads the ledger"),
+            "an uncapped ledger governs nothing, so it must not bind the wire output cap"
+        );
+    }
+
+    #[test]
+    fn a_configured_output_token_cap_binds_the_wire_max_tokens() {
+        let (provider, _seen) = RequestCapturingProvider::new();
+        let mut engine = engine_with(provider);
+        engine.set_budget_tracker(tracker(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(4_096)
+                .build(),
+        ));
+        assert!(
+            engine
+                .provider_cap_binds_wire_max_tokens()
+                .expect("predicate reads the ledger"),
+            "a real output-token ceiling must still bind the wire cap"
+        );
+    }
+
+    #[test]
+    fn a_configured_usd_cap_binds_the_wire_max_tokens() {
+        let (provider, _seen) = RequestCapturingProvider::new();
+        let mut engine = engine_with(provider);
+        engine.set_budget_tracker(tracker(
+            wcore_budget::BudgetCap::builder()
+                .per_session_usd(1.0)
+                .build(),
+        ));
+        assert!(
+            engine
+                .provider_cap_binds_wire_max_tokens()
+                .expect("predicate reads the ledger"),
+            "a real monetary ceiling must still bind the wire cap"
+        );
+    }
+
+    #[test]
+    fn no_ledger_at_all_never_binds() {
+        let (provider, _seen) = RequestCapturingProvider::new();
+        let engine = engine_with(provider);
+        assert!(
+            !engine
+                .provider_cap_binds_wire_max_tokens()
+                .expect("predicate reads the ledger"),
+            "no ledger, nothing to protect"
+        );
+    }
+
+    /// End-to-end: the flag that actually reaches the provider.
+    #[tokio::test]
+    async fn uncapped_budgeted_session_still_omits_the_wire_max_tokens() {
+        let (provider, seen) = RequestCapturingProvider::new();
+        let mut engine = omit_safe_engine(provider);
+        engine.set_budget_tracker(tracker(wcore_budget::BudgetCap::builder().build()));
+
+        engine.run("hello", "").await.expect("run completes");
+
+        let seen = seen.lock().expect("captured requests");
+        let request = seen.first().expect("the engine dispatched one request");
+        assert!(
+            request.omit_max_tokens,
+            "an unsized, omit-safe turn under an UNCAPPED ledger must still omit the wire \
+             max-tokens field; forcing it ships the {} floor as a hard cap",
+            request.max_tokens
+        );
+    }
+
+    /// The other side of the same seam: a real ceiling still binds the wire.
+    #[tokio::test]
+    async fn capped_session_binds_the_wire_max_tokens() {
+        let (provider, seen) = RequestCapturingProvider::new();
+        let mut engine = omit_safe_engine(provider);
+        engine.set_budget_tracker(tracker(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(1_000_000)
+                .build(),
+        ));
+
+        engine.run("hello", "").await.expect("run completes");
+
+        let seen = seen.lock().expect("captured requests");
+        let request = seen.first().expect("the engine dispatched one request");
+        assert!(
+            !request.omit_max_tokens,
+            "a session with a configured output ceiling must send a wire-bounded cap"
+        );
+    }
+}
+
+/// #434 — a router tier alias hides the served model, and the router only names
+/// it on the way BACK. The engine must therefore carry `x-flux-routed-model`
+/// across the turn boundary, exactly as it already carries the served window.
+#[cfg(test)]
+mod issue_434_routed_model_tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    /// A Flux-shaped stream: `ProviderMeta` first (it is built from the response
+    /// headers), then the answer.
+    struct RoutedModelProvider {
+        routed_model: Option<String>,
+        seen: Arc<Mutex<Vec<LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RoutedModelProvider {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.seen
+                .lock()
+                .expect("captured requests")
+                .push(request.clone());
+            let routed_model = self.routed_model.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(LlmEvent::ProviderMeta {
+                        routed_model,
+                        model_window: Some(128_000),
+                        context_pressure: Some(0.1),
+                        tokens_counted: Some(100),
+                        loop_engaged: None,
+                    })
+                    .await;
+                let _ = tx.send(LlmEvent::TextDelta("ok".to_string())).await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        finish_reason: FinishReason::Stop,
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    fn engine_for(
+        model: &str,
+        routed_model: Option<&str>,
+    ) -> (super::AgentEngine, Arc<Mutex<Vec<LlmRequest>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(RoutedModelProvider {
+            routed_model: routed_model.map(str::to_string),
+            seen: Arc::clone(&seen),
+        });
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(crate::output::null_sink::NullSink),
+        );
+        engine.max_turns = Some(2);
+        engine.compat = wcore_config::compat::ProviderCompat::flux_router_defaults();
+        engine.model = model.to_string();
+        (engine, seen)
+    }
+
+    #[tokio::test]
+    async fn the_served_model_from_turn_one_shapes_turn_two() {
+        let (mut engine, seen) = engine_for("flux-auto", Some("deepseek-v4-pro"));
+
+        engine.run("first", "").await.expect("first run completes");
+        engine
+            .run("second", "")
+            .await
+            .expect("second run completes");
+
+        let seen = seen.lock().expect("captured requests");
+        assert!(
+            seen[0].routed_model_hint.is_none(),
+            "turn 1 has no route signal yet — the LIMIT, asserted not assumed"
+        );
+        assert_eq!(
+            seen[1].routed_model_hint.as_deref(),
+            Some("deepseek-v4-pro"),
+            "the x-flux-routed-model answer must outlive the turn that received it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_router_that_names_no_model_leaves_the_hint_empty() {
+        let (mut engine, seen) = engine_for("flux-auto", None);
+
+        engine.run("first", "").await.expect("first run completes");
+        engine
+            .run("second", "")
+            .await
+            .expect("second run completes");
+
+        let seen = seen.lock().expect("captured requests");
+        assert!(
+            seen[1].routed_model_hint.is_none(),
+            "no header, no hint — a deployment that stays silent gets no guess"
+        );
+    }
+
+    /// A concrete model id is its own contract: a stale route from an earlier
+    /// alias turn must never reshape it.
+    #[tokio::test]
+    async fn a_concrete_model_carries_no_routed_hint() {
+        let (mut engine, seen) = engine_for("flux-auto", Some("deepseek-v4-pro"));
+        engine.run("first", "").await.expect("first run completes");
+        engine.model = "gpt-4o".to_string();
+        engine
+            .run("second", "")
+            .await
+            .expect("second run completes");
+
+        let seen = seen.lock().expect("captured requests");
+        assert!(
+            seen[1].routed_model_hint.is_none(),
+            "the hint only resolves a tier alias; a named model decides for itself"
         );
     }
 }

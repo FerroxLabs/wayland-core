@@ -195,6 +195,28 @@ pub struct LlmRequest {
     ///
     /// `Default` is `None`, so all existing construction sites emit nothing.
     pub flux_turn_nonce: Option<String>,
+    /// #434 — the concrete model a ROUTER served on the previous turn of this
+    /// conversation, as reported by `x-flux-routed-model` (`ProviderMeta`).
+    ///
+    /// A tier alias (`flux-auto`) hides the served model, so every per-MODEL
+    /// contract decided at request-BUILD time — most sharply the strict-reasoner
+    /// `reasoning_content` replay of #417 — is decided against a string that
+    /// names no model at all. This carries the router's own answer forward so
+    /// the next request can be shaped for the model that will most likely serve
+    /// it.
+    ///
+    /// LIMIT, by construction: a response header can only inform turn N+1.
+    /// Turn 1 of a process has no hint, and neither does the first turn after a
+    /// resume (this is in-memory session state, not journaled conversation
+    /// state) — nor does a deployment that sends no routed-model header, nor a
+    /// turn the router re-routes to a different family. Anything that must hold
+    /// on turn 1 needs router-side cover; this field narrows the window, it does
+    /// not close it.
+    ///
+    /// Set by the engine ONLY when the request model is a router tier alias.
+    /// `Default` is `None`, so all existing `..Default::default()` construction
+    /// sites are unaffected.
+    pub routed_model_hint: Option<String>,
 }
 
 #[derive(Debug, Clone)]

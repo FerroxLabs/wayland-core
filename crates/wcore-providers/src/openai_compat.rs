@@ -59,20 +59,45 @@ pub fn accepts_reasoning_effort(model: &str) -> bool {
     wcore_config::config::openai_model_accepts_effort(model)
 }
 
-/// #417 — true when the TARGET model is a strict reasoner that 400s unless every
-/// historical assistant message carries `reasoning_content` once any turn
-/// produced thinking (DeepSeek Reasoner, Moonshot/Kimi). This is a per-MODEL
-/// contract, so it must be keyed off the model id — not just the provider's
-/// static compat. A router provider (Flux/OpenRouter) carries a generic compat
-/// with `replays_thinking_in_history` off, yet can route to DeepSeek/Kimi, which
-/// is exactly the case wayland#417 hit. Keying off the model lets a router serve
-/// a strict reasoner correctly while NEVER replaying for a non-strict model
-/// (e.g. claude-via-Flux, which would 400 on an unsigned thinking block). The
-/// `has-thinking` gate at the replay site still prevents replay when a turn
-/// produced no reasoning, so a non-reasoning DeepSeek model is unaffected.
-pub fn requires_reasoning_content_replay(model: &str) -> bool {
+/// True when `model` NAMES a strict reasoner — DeepSeek Reasoner,
+/// Moonshot/Kimi — the endpoints that 400 unless every historical assistant
+/// message carries `reasoning_content` once any turn produced thinking.
+///
+/// Private on purpose: a bare model string is not the whole question. Callers
+/// go through [`requires_reasoning_content_replay`], which also considers the
+/// model a ROUTER actually served.
+fn is_strict_reasoner(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
     m.contains("deepseek") || m.contains("moonshot") || m.contains("kimi")
+}
+
+/// #417 / #434 — true when THIS request must replay historical
+/// `reasoning_content`, given the model the caller asked for and (when the
+/// caller asked a router) the model that router reported serving.
+///
+/// The replay requirement is a per-MODEL contract, so it cannot be read off the
+/// provider's static compat: a router (Flux/OpenRouter) carries a generic compat
+/// with `replays_thinking_in_history` off and still routes to DeepSeek/Kimi —
+/// wayland#417 exactly. But #434 then found the model-keyed form was ALSO blind
+/// through a router: the string Flux is asked for is the tier alias
+/// `flux-auto`, which names no model at all, so the strict-reasoner branch could
+/// never be taken on the very path #417 was about. `routed_model` closes that:
+/// it is the `x-flux-routed-model` the router reported, carried forward by the
+/// engine.
+///
+/// Either input is sufficient — an explicitly named strict reasoner still
+/// replays with no route signal, and a router alias replays once the route is
+/// known. Neither NAMING a non-strict model nor routing to one turns replay on
+/// (claude-via-Flux would 400 on an unsigned thinking block), and the
+/// `has-thinking` gate at the replay site still suppresses replay when no turn
+/// produced reasoning.
+///
+/// LIMIT: `routed_model` can only ever describe an EARLIER turn — a router
+/// answers on the way back. `None` (turn 1, the first turn after a resume, a
+/// deployment that sends no routed-model header) falls back to the alias, which
+/// cannot match, so those turns are uncovered here and need router-side cover.
+pub fn requires_reasoning_content_replay(model: &str, routed_model: Option<&str>) -> bool {
+    is_strict_reasoner(model) || routed_model.is_some_and(is_strict_reasoner)
 }
 
 /// True when the model must be served via the OpenAI **Responses API**
@@ -342,28 +367,60 @@ mod tests {
     #[test]
     fn requires_replay_for_strict_reasoners() {
         // DeepSeek (incl. the wayland#417 model) and Moonshot/Kimi require it.
-        assert!(requires_reasoning_content_replay("deepseek-v4-pro"));
-        assert!(requires_reasoning_content_replay("deepseek-reasoner"));
-        assert!(requires_reasoning_content_replay("deepseek-chat"));
-        assert!(requires_reasoning_content_replay("moonshot-v1-128k"));
-        assert!(requires_reasoning_content_replay("kimi-k2"));
+        assert!(requires_reasoning_content_replay("deepseek-v4-pro", None));
+        assert!(requires_reasoning_content_replay("deepseek-reasoner", None));
+        assert!(requires_reasoning_content_replay("deepseek-chat", None));
+        assert!(requires_reasoning_content_replay("moonshot-v1-128k", None));
+        assert!(requires_reasoning_content_replay("kimi-k2", None));
     }
 
     #[test]
     fn no_replay_for_non_strict_models() {
         // Crucially claude-via-Flux must NOT replay (unsigned thinking 400s
-        // Anthropic), and ordinary OpenAI / router aliases stay off.
-        assert!(!requires_reasoning_content_replay("claude-opus-4-7"));
-        assert!(!requires_reasoning_content_replay("gpt-4o"));
-        assert!(!requires_reasoning_content_replay("gpt-5"));
-        assert!(!requires_reasoning_content_replay("flux-auto"));
-        assert!(!requires_reasoning_content_replay("grok-4"));
+        // Anthropic), and ordinary OpenAI models stay off.
+        assert!(!requires_reasoning_content_replay("claude-opus-4-7", None));
+        assert!(!requires_reasoning_content_replay("gpt-4o", None));
+        assert!(!requires_reasoning_content_replay("gpt-5", None));
+        assert!(!requires_reasoning_content_replay("grok-4", None));
+    }
+
+    /// #434 — INVERTED. The previous revision of this test asserted
+    /// `!requires_reasoning_content_replay("flux-auto")` and read that as
+    /// settled policy, which pinned the defect open: through Flux the model
+    /// string IS `flux-auto`, so the strict-reasoner branch could never be taken
+    /// on the one path #417 was written for. A tier alias is not a verdict, it
+    /// is a MISSING verdict — and the route supplies it.
+    #[test]
+    fn a_tier_alias_defers_to_the_model_the_router_served() {
+        // Routed to a strict reasoner: replay.
+        assert!(requires_reasoning_content_replay(
+            "flux-auto",
+            Some("deepseek-reasoner")
+        ));
+        assert!(requires_reasoning_content_replay(
+            "flux-auto",
+            Some("kimi-k2")
+        ));
+        // Routed to a non-strict model: still off — an unsigned thinking block
+        // 400s Anthropic.
+        assert!(!requires_reasoning_content_replay(
+            "flux-auto",
+            Some("claude-opus-4-7")
+        ));
+        // The LIMIT, asserted rather than assumed: with no route signal the
+        // alias still decides nothing, so turn 1 (and the first turn after a
+        // resume) is NOT covered by this fix.
+        assert!(!requires_reasoning_content_replay("flux-auto", None));
     }
 
     #[test]
     fn requires_replay_is_case_insensitive() {
-        assert!(requires_reasoning_content_replay("DeepSeek-V4-Pro"));
-        assert!(requires_reasoning_content_replay("Kimi-K2"));
+        assert!(requires_reasoning_content_replay("DeepSeek-V4-Pro", None));
+        assert!(requires_reasoning_content_replay("Kimi-K2", None));
+        assert!(requires_reasoning_content_replay(
+            "Flux-Auto",
+            Some("DeepSeek-Reasoner")
+        ));
     }
 
     // --- model_uses_responses_api -----------------------------------------

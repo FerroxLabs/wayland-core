@@ -881,6 +881,22 @@ impl BudgetTracker {
         self.session_usd_cap(session_id).is_some() || self.caps.per_user_daily_usd.is_some()
     }
 
+    /// Whether ANY provider cap — token or monetary — governs this session.
+    ///
+    /// #388: distinct from the mere EXISTENCE of a ledger. Production bootstrap
+    /// installs a budget authority on every session, capped or not, so
+    /// `budget_authority.is_some()` says only "accounting is on", never "the
+    /// operator asked for a ceiling". A caller deciding whether to bind a
+    /// pre-flight wire limit must ask THIS: with no cap configured there is
+    /// nothing for that limit to protect, and binding it anyway silently
+    /// truncates every answer.
+    pub fn has_provider_cap(&self, session_id: &str) -> bool {
+        self.has_monetary_cap(session_id)
+            || self.session_token_cap(session_id).is_some()
+            || self.session_input_token_cap(session_id).is_some()
+            || self.session_output_token_cap(session_id).is_some()
+    }
+
     /// Reserve worst-case tokens and USD before starting a paid call. Both
     /// committed usage and other in-flight reservations participate in the
     /// admission decision, so concurrent calls cannot each claim the same
