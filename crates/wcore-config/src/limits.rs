@@ -209,13 +209,27 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     // Verified against api-docs.deepseek.com (2026-06-23): deepseek-v4-flash is
     // the canonical id; `deepseek-chat` / `deepseek-reasoner` are its (deprecated)
     // non-thinking / thinking aliases that map to the SAME model, so all three
-    // share the 1,000,000 context window. Output ceiling is held at the
-    // conservative 8_192 — the documented max is far higher, but this table errs
-    // LOW on purpose (undersizing costs a continuation round; over-claiming 400s
-    // — see the module header). Exact id checks (not a bare `deepseek` prefix)
-    // so `deepseek-v4-pro` / a future `deepseek-v5` won't inherit these limits.
-    if m.contains("deepseek-v4-flash") || m == "deepseek-chat" || m == "deepseek-reasoner" {
-        return Some((8_192, 1_000_000));
+    // share the 1,000,000 context window.
+    //
+    // OUTPUT WAS 8_192 AND THAT WAS A 47x CUT (#1157). "Err LOW" is sound while
+    // a model has NO arm — `should_omit_max_tokens` then sends no field and the
+    // provider applies its own ceiling. It stops being sound the moment an arm
+    // EXISTS, because the arm REVOKES that omission and the number here becomes
+    // the enforced cap. Measured on models.dev 2026-08-28, unanimous across the
+    // three vendor-operated providers that serve it (`deepseek`,
+    // `alibaba-token-plan`, `alibaba-cn`): 1,000,000 context / 384,000 output.
+    //
+    // `deepseek-v4-pro` is now a REAL id, not the hypothetical the old comment
+    // guarded against, and the same three vendors publish the same figures for
+    // it. Left unmapped it fell to the CompactConfig default and a 1M-context
+    // model compacted at 200k — the #165 failure, in the direction that is
+    // invisible. A future `deepseek-v5` still inherits nothing.
+    if m.contains("deepseek-v4-flash")
+        || m.contains("deepseek-v4-pro")
+        || m == "deepseek-chat"
+        || m == "deepseek-reasoner"
+    {
+        return Some((384_000, 1_000_000));
     }
 
     // --- MiniMax M-series ---
@@ -227,8 +241,16 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     // base M2 would 400 a request between 196,609 and 204,800). Match order is
     // longest-substring-first so a point release never falls through to the base
     // arm. Output held conservatively (err LOW per the header).
+    // M3's output was 128_000 against a published 512_000 — the same
+    // arm-revokes-omission mistake as DeepSeek above, costing 4x. `minimax` is
+    // the only vendor-operated provider serving it and reports
+    // 1,048,576 / 512,000 (models.dev, 2026-08-28). The context stays at the
+    // Both numbers are the vendor's, exactly. The context was 1,000,000 against
+    // a published 1,048,576 — only 4.7%, but there is no reason to round DOWN a
+    // figure the vendor states unanimously, and rounding it down is what makes a
+    // 1M model start compacting before it has to.
     if m.contains("minimax-m3") {
-        return Some((128_000, 1_000_000));
+        return Some((512_000, 1_048_576));
     }
     if m.contains("minimax-m2.1") || m.contains("minimax-m2.5") || m.contains("minimax-m2.7") {
         return Some((128_000, 204_800));
@@ -439,7 +461,7 @@ mod tests {
         // MiniMax platform docs + models.dev, 2026-07-04).
         assert_eq!(
             model_output_ceiling("minimax", "MiniMax-M3"),
-            Some((128_000, 1_000_000))
+            Some((512_000, 1_048_576))
         );
         // The point releases are 204,800...
         for id in ["MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2.7"] {
@@ -516,17 +538,22 @@ mod tests {
     #[test]
     fn deepseek_v4_flash_family_uses_1m_context_window() {
         // #255: the canonical id and both deprecated aliases share the 1M window.
-        for id in ["deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"] {
+        for id in [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-chat",
+            "deepseek-reasoner",
+        ] {
             assert_eq!(
                 model_output_ceiling("deepseek", id),
-                Some((8_192, 1_000_000)),
+                Some((384_000, 1_000_000)),
                 "{id} must report the 1,000,000-token context window"
             );
         }
         // Case-insensitive match (the lookup lowercases first).
         assert_eq!(
             model_output_ceiling("deepseek", "DeepSeek-V4-Flash"),
-            Some((8_192, 1_000_000))
+            Some((384_000, 1_000_000))
         );
     }
 
@@ -675,10 +702,35 @@ mod tests {
 
     #[test]
     fn deepseek_unmapped_variants_fail_open() {
-        // v4-pro is a distinct model; a future v5 is unknown — neither may
-        // inherit v4-flash's limits (the id checks are intentionally specific).
-        assert_eq!(model_output_ceiling("deepseek", "deepseek-v4-pro"), None);
+        // v4-pro USED to be here. It is now a real, shipped id that the three
+        // vendor-operated providers publish at the same 1,000,000 / 384,000 as
+        // v4-flash, so failing it open meant a 1M model compacting at the 200k
+        // default. A future v5 is still unknown and must inherit nothing —
+        // that half of the original claim is what this test still guards.
         assert_eq!(model_output_ceiling("deepseek", "deepseek-v5"), None);
+        assert_eq!(model_output_ceiling("deepseek", "deepseek-v3.2"), None);
+    }
+
+    /// The output ceilings that were cut by an order of magnitude, pinned
+    /// against the value they were cut TO. #1157: an arm revokes
+    /// `should_omit_max_tokens`, so a conservative number here is not caution —
+    /// it is an enforced cap the provider would not otherwise have applied.
+    #[test]
+    fn output_ceilings_are_not_the_old_conservative_cuts() {
+        assert_ne!(
+            model_output_ceiling("deepseek", "deepseek-v4-flash"),
+            Some((8_192, 1_000_000)),
+            "8,192 against a published 384,000 is a 47x cut, not caution"
+        );
+        assert_ne!(
+            model_output_ceiling("minimax", "MiniMax-M3"),
+            Some((128_000, 1_000_000)),
+            "128,000 against a published 512,000 is a 4x cut"
+        );
+        assert_eq!(
+            model_output_ceiling("minimax", "MiniMax-M3"),
+            Some((512_000, 1_048_576))
+        );
     }
 
     /// #165 DRIFT GUARD — the durable prevention. This table is hand-maintained
