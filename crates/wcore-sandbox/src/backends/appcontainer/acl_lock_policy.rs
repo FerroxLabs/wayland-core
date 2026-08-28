@@ -281,18 +281,66 @@ mod tests {
         assert_eq!(timeout_from(Some("  90  ")), Duration::from_secs(90));
     }
 
+    /// The clamp must clamp to something USABLE, not merely to its own constants.
+    ///
+    /// # wayland#934, 2026-08-28
+    ///
+    /// This read `assert_eq!(timeout_from(Some("0")), Duration::from_secs(MIN_TIMEOUT_SECS))`
+    /// — the clamp compared against the constant it clamps with, which is the
+    /// function restating itself. **Measured:** with `MIN_TIMEOUT_SECS` mutated
+    /// from 1 to 0, all 18 tests in this module passed, including this one — while
+    /// `WAYLAND_SANDBOX_ACL_LOCK_TIMEOUT_SECS=0` then produced exactly the
+    /// non-blocking poll the comment below says the floor exists to prevent.
+    ///
+    /// The assertions are now about the properties the two bounds are FOR.
     #[test]
     fn the_budget_is_clamped_at_both_ends() {
         // Zero would make the wait a non-blocking poll, which fails instantly
-        // under exactly the contention this knob exists for.
-        assert_eq!(
-            timeout_from(Some("0")),
-            Duration::from_secs(MIN_TIMEOUT_SECS)
+        // under exactly the contention this knob exists for. The floor must
+        // therefore be a real, blocking wait — and at least one whole second,
+        // because whole seconds are the only thing the operator knob can express.
+        let floor = timeout_from(Some("0"));
+        assert!(
+            floor >= Duration::from_secs(1),
+            "a floor of {floor:?} makes the wait a non-blocking poll, which fails instantly \
+             under exactly the contention this knob exists for"
         );
-        assert_eq!(
-            timeout_from(Some("99999")),
-            Duration::from_secs(MAX_TIMEOUT_SECS)
+        assert!(
+            floor <= DEFAULT_TIMEOUT,
+            "a floor of {floor:?} above the {DEFAULT_TIMEOUT:?} default would raise the budget \
+             for an operator who asked to lower it"
         );
+        // Even at the floor, every attempt must still be a wait rather than a
+        // poll: `attempt_slices` divides the budget by ACL_LOCK_ATTEMPTS.
+        assert!(
+            attempt_slices(floor).iter().all(|s| *s >= MIN_SLICE),
+            "the floor divides into slices below MIN_SLICE: {:?}",
+            attempt_slices(floor)
+        );
+
+        // The ceiling must actually cap — and stay above the default, or the
+        // documented default would be unreachable through the knob.
+        let ceiling = timeout_from(Some("99999"));
+        assert!(
+            ceiling < Duration::from_secs(99_999),
+            "the ceiling did not clamp: {ceiling:?}"
+        );
+        assert!(
+            ceiling >= DEFAULT_TIMEOUT,
+            "a ceiling of {ceiling:?} below the {DEFAULT_TIMEOUT:?} default would make the \
+             default itself unrequestable"
+        );
+
+        // The clamp must be monotone: asking for more never yields less.
+        let mut previous = Duration::ZERO;
+        for raw in ["0", "1", "10", "15", "45", "300", "99999"] {
+            let got = timeout_from(Some(raw));
+            assert!(
+                got >= previous,
+                "raising the request to {raw:?} LOWERED the budget: {previous:?} -> {got:?}"
+            );
+            previous = got;
+        }
     }
 
     #[test]
