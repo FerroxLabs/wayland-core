@@ -28,6 +28,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use wcore_agent::approval::{ApprovalBridge, ApprovalOutcome, ApprovalRequest};
+use wcore_agent::egress::{BridgeConsentDoorbell, ConsentDecision, ConsentDoorbell};
+use wcore_agent::output::OutputSink;
 use wcore_protocol::commands::ProtocolCommand;
 use wcore_protocol::events::ProtocolEvent;
 
@@ -290,5 +292,156 @@ async fn a_token_the_engine_never_minted_resolves_nothing() {
         bridge.active_tokens().await.contains(&real),
         "known-positive: the real token is registered, so the refusals above are refusals and \
          not an empty bridge answering false to everything"
+    );
+}
+
+/// A sink that records the `ApprovalRequired` emissions a host would see, and
+/// NOTHING else. This is deliberately the only channel the "host" in
+/// [`the_token_the_doorbell_emits_is_the_token_that_resolves_it`] is allowed to
+/// read: a real host has no handle on the bridge.
+#[derive(Default)]
+struct RecordingSink {
+    emitted: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl RecordingSink {
+    /// The (call_id, resume_token) of the first emission, if any.
+    fn first(&self) -> Option<(String, String)> {
+        self.emitted.lock().unwrap().first().cloned()
+    }
+}
+
+impl OutputSink for RecordingSink {
+    // The trait's required surface, none of which this test observes.
+    fn emit_text_delta(&self, _text: &str, _msg_id: &str) {}
+    fn emit_thinking(&self, _text: &str, _msg_id: &str) {}
+    fn emit_tool_call(&self, _name: &str, _input: &str) {}
+    fn emit_tool_result(&self, _name: &str, _is_error: bool, _content: &str) {}
+    fn emit_stream_start(&self, _msg_id: &str) {}
+    #[allow(clippy::too_many_arguments)]
+    fn emit_stream_end(
+        &self,
+        _msg_id: &str,
+        _turns: usize,
+        _input_tokens: u64,
+        _output_tokens: u64,
+        _cache_creation_tokens: u64,
+        _cache_read_tokens: u64,
+        _finish_reason: wcore_types::message::FinishReason,
+    ) {
+    }
+    fn emit_error(&self, _msg: &str, _retryable: bool) {}
+    fn emit_info(&self, _msg: &str) {}
+
+    fn emit_approval_required(
+        &self,
+        call_id: &str,
+        resume_token: &str,
+        _reason: &str,
+        _context: &str,
+    ) {
+        self.emitted
+            .lock()
+            .unwrap()
+            .push((call_id.to_string(), resume_token.to_string()));
+    }
+}
+
+/// THE EMITTER SEAM — the production code that puts a token in front of a host.
+///
+/// # The gap this closes
+///
+/// Everything above starts from `ApprovalBridge::request`, which is the
+/// MINTING seam, and then hand-builds the `ApprovalRequired` event. But the
+/// production egress path does not do that: `BridgeConsentDoorbell::ask`
+/// registers on the bridge, emits `ApprovalRequired` through the `OutputSink`,
+/// and parks on the receiver. The token the HOST gets is whatever reaches the
+/// sink, and no test observed that argument. Nor do the doorbell's own unit
+/// tests: they resolve via `bridge.pending_tokens()`, an in-process shortcut a
+/// host does not have, so they are satisfied by a doorbell that emits anything
+/// at all.
+///
+/// **Measured:** with the sink emission mutated to
+/// `emit_approval_required(&call_id, "", ...)` — an egress consent no host can
+/// ever answer, parking the request until the TTL reaper denies it, i.e. every
+/// `Ask` network access silently failing closed after a long stall — all five
+/// tests in this file and all three doorbell unit tests passed.
+///
+/// Here the resolver reads ONLY the sink. It echoes back exactly the bytes the
+/// doorbell put on the wire, which is the whole of a host's authority.
+#[tokio::test]
+async fn the_token_the_doorbell_emits_is_the_token_that_resolves_it() {
+    let bridge = std::sync::Arc::new(ApprovalBridge::new());
+    let sink = std::sync::Arc::new(RecordingSink::default());
+    let doorbell = BridgeConsentDoorbell::new(bridge.clone(), sink.clone());
+
+    // The "host": polls the SINK for the emission and echoes the token back.
+    // It never touches the bridge's pending set, so it cannot succeed by
+    // knowing something a host would not know.
+    let host = {
+        let bridge = bridge.clone();
+        let sink = sink.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Some((call_id, token)) = sink.first() {
+                    let resolved = bridge
+                        .resolve(
+                            &token,
+                            ApprovalOutcome {
+                                approved: true,
+                                modifications: None,
+                                cancellation: None,
+                            },
+                        )
+                        .await;
+                    return (call_id, token, resolved);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    // Bounded: an unanswerable token parks `ask` until the TTL reaper, so a
+    // bare await here would HANG instead of failing.
+    let decision = tokio::time::timeout(
+        Duration::from_secs(10),
+        doorbell.ask("react.dev", "react.dev", "data-less GET"),
+    )
+    .await;
+    let (call_id, token, resolved) = host.await.expect("the host task must not panic");
+
+    assert!(
+        !token.is_empty(),
+        "the doorbell emitted an EMPTY resume_token: no host can echo it, so the consent \
+         request parks until the TTL reaper denies it"
+    );
+    assert!(
+        token.starts_with("apr-"),
+        "the emitted token must be the bridge-minted secret, not some other string: {token:?}"
+    );
+    assert_ne!(
+        token, call_id,
+        "GHSA-8r7g: the emitted secret must not be the public correlation handle, or anything \
+         that can see the call_id could self-approve"
+    );
+    assert!(
+        call_id.starts_with("egress:"),
+        "known-positive: the recorded emission is the egress doorbell's, so the assertions \
+         above are about the right call: {call_id:?}"
+    );
+    assert!(
+        resolved,
+        "the token the doorbell put in front of the host did not resolve the approval the \
+         doorbell had just registered - the wire handle and the bridge key disagree"
+    );
+
+    let decision = decision.expect(
+        "the doorbell never observed the host's answer: it was still parked after 10s, which \
+         in production is an Ask verdict silently failing closed on the TTL",
+    );
+    assert_eq!(
+        decision,
+        ConsentDecision::Once,
+        "an approve with no scope must reach the waiting egress request as Once"
     );
 }
