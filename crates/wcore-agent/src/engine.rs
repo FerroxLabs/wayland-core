@@ -7530,7 +7530,10 @@ impl AgentEngine {
     /// genuine product text in a single indistinguishable blob.
     ///
     /// Measured on the wire before this existed: a channel turn arrived as
-    /// `…attacker bytes\nSkill hint: …\nCurrent date: 2026-08-10`.
+    /// `…attacker bytes\nSkill hint: …\nCurrent date: 2026-08-10`. (That date
+    /// line has since moved to the system prefix — #559 — so it is no longer
+    /// one of the strings a sender shares a turn with; the measurement is kept
+    /// because it is why the placement rule below exists.)
     ///
     /// This is hygiene, not the boundary. The boundary is role separation:
     /// `UNTRUSTED_CHANNEL_SESSION_DIRECTIVE` in the SYSTEM prompt tells the
@@ -7546,12 +7549,18 @@ impl AgentEngine {
     /// tool-results tail — Anthropic requires `tool_result` blocks first, so
     /// a text block must never be inserted ahead of them.
     ///
-    /// Callers: the per-turn skill hint (`Skill hint: …`), the current-date
-    /// line (`Current date: …`), and PrePrompt plugin contributions (their
-    /// own `<plugin-context … trust="untrusted">` envelope). All three are
-    /// named in the system directive; adding a FOURTH caller without adding
-    /// it there makes that directive false — `untrusted_channel_wire_test`
-    /// grades the composition of the turn on the wire and will go red.
+    /// Callers: the per-turn skill hint (`Skill hint: …`) and PrePrompt plugin
+    /// contributions (their own `<plugin-context … trust="untrusted">`
+    /// envelope). BOTH are named in the system directive; adding a THIRD
+    /// caller without adding it there makes that directive false —
+    /// `untrusted_channel_wire_test` grades the composition of the turn on the
+    /// wire and will go red.
+    ///
+    /// #559 removed a third caller, the current-date line, by moving it into
+    /// the cached system prefix. Both remaining callers are CONDITIONAL (the
+    /// router must match; a PrePrompt hook must be installed), so a default
+    /// channel session now puts no product string at all ahead of the
+    /// sender's bytes.
     fn attach_transient_block(message: &mut Message, text: String) {
         let block = ContentBlock::Text { text };
         match message.content.last() {
@@ -12636,22 +12645,13 @@ impl AgentEngine {
                         Self::attach_transient_block(last, hint);
                     }
 
-                    // Cache-stability (token-opt, finding #174): inject the current date
-                    // as a transient text block on the request's last user-role message
-                    // instead of the cached system prefix. The date value changes daily /
-                    // across cross-midnight restarts; keeping it out of the prefix lets
-                    // the cached system+tools prefix stay byte-stable, so Anthropic prompt
-                    // caching survives cold starts. `request.messages` is a clone, so this
-                    // never persists into history. Skipped unless the tail is user-role
-                    // (never orphans a tool_use or creates adjacent user messages).
-                    if let Some(last) = request.messages.last_mut()
-                        && matches!(last.role, Role::User)
-                    {
-                        Self::attach_transient_block(
-                            last,
-                            crate::context::current_date_block(&crate::context::today_string()),
-                        );
-                    }
+                    // #559: the current date is NOT injected here any more. It
+                    // now lives in the cached system prefix, frozen per session
+                    // (`context::build_system_prompt`). Injecting it on the tail
+                    // put it at `messages[1]` on turn 1 — the tail user message
+                    // and the head user message are the same message on turn 1 —
+                    // and it then vanished on turn 2, so turn 1's prompt-cache
+                    // write was unreadable by every later turn.
 
                     // C1 / Task A3: fire PrePrompt plugin hooks once per turn and apply
                     // their contributions to the request's last user-role message. Done
