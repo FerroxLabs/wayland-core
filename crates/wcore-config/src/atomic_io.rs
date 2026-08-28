@@ -492,9 +492,24 @@ mod tests {
 
         assert!(r.is_ok());
         assert_eq!(seen.as_deref(), Some(&b"old"[..]), "displaced bytes");
+        // Where an exchange primitive exists the publish has ALREADY happened
+        // when the check runs, so the destination reads as the new bytes and a
+        // refusal is a rollback. Windows has none (`Swap::Unsupported`), so the
+        // publish degrades to re-check-then-rename and the destination still
+        // reads as the old bytes at check time. That is the #1155 race staying
+        // open on Windows -- documented in `Swap` and stated here rather than
+        // asserted away, because a test that claimed the exchange held on
+        // Windows would be claiming the race was closed there.
+        #[cfg(not(windows))]
         assert_eq!(
             on_disk_during, b"new",
-            "the check ran before the publish, so it was a re-read and not an exchange"
+            "the publish precedes the check, so the check is handed what it displaced"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            on_disk_during, b"old",
+            "Windows has no exchange primitive, so the check is a re-read taken \
+             BEFORE the publish -- the race this closes elsewhere is open here"
         );
         assert_eq!(std::fs::read(&p).unwrap(), b"new");
     }

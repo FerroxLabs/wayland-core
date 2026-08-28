@@ -42,6 +42,28 @@ fn denied_secret() -> (tempfile::TempDir, PathBuf, SandboxManifest) {
     (root, secret, manifest)
 }
 
+/// Unix-shaped path LITERALS for the pure-function SBPL check.
+///
+/// `build_profile` renders a macOS profile, which is why the claim is checkable
+/// off macOS at all. But it can only be checked against paths the format has a
+/// spelling for: handed a Windows tempdir path (`C:\\WINDOWS\\SERVIC~1\\...`)
+/// it emits a profile carrying only its Unix defaults, the expected rule can
+/// never appear, and the leg fails for the platform rather than for the claim.
+///
+/// This leg never opens these paths -- it is a string check on a pure function --
+/// so a literal is the correct input here and a real tempdir is not. The live
+/// legs keep the tempdir, because they do open theirs.
+fn denied_secret_unix_literals() -> (PathBuf, SandboxManifest) {
+    let root = PathBuf::from("/tmp/wcore-pairing-root");
+    let secret = root.join(".env");
+    let manifest = SandboxManifest {
+        fs_read_allow: vec![root],
+        fs_read_deny: vec![secret.clone()],
+        ..Default::default()
+    };
+    (secret, manifest)
+}
+
 fn cat(secret: &std::path::Path) -> SandboxCommand {
     SandboxCommand {
         argv: vec!["cat".into(), secret.to_string_lossy().into()],
@@ -104,12 +126,13 @@ async fn every_enforcing_backend_reports_it_and_every_relaxed_one_does_not() {
             se.enforces_read_deny(),
             "sandbox_exec claims to enforce fs_read_deny"
         );
+        let (unix_secret, unix_manifest) = denied_secret_unix_literals();
         let profile =
-            wcore_sandbox::backends::sandbox_exec::SandboxExecBackend::build_profile(&manifest)
+            wcore_sandbox::backends::sandbox_exec::SandboxExecBackend::build_profile(&unix_manifest)
                 .expect("the profile must build for a manifest with an ordinary path");
         let rule = format!(
             "(deny file-read* (subpath \"{}\"))",
-            secret.to_string_lossy()
+            unix_secret.to_string_lossy()
         );
         assert!(
             profile.contains(&rule),
@@ -118,7 +141,10 @@ async fn every_enforcing_backend_reports_it_and_every_relaxed_one_does_not() {
         );
         // SBPL is last-match-wins, so a deny emitted BEFORE the allow of the
         // enclosing root is inert. The ordering is part of the enforcement.
-        let allow_root = format!("(subpath \"{}\")", _root.path().to_string_lossy());
+        let allow_root = format!(
+            "(subpath \"{}\")",
+            unix_secret.parent().expect("literal has a parent").to_string_lossy()
+        );
         if let Some(a) = profile.find(&allow_root) {
             assert!(
                 profile.find(&rule).is_some_and(|d| d > a),
