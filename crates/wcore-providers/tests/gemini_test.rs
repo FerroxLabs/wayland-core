@@ -636,6 +636,7 @@ async fn gemini_live_api_smoke_test() {
         client_context_tokens: None,
         temperature: None,
         omit_max_tokens: false,
+        routed_model_hint: None,
     };
 
     let rx = provider
