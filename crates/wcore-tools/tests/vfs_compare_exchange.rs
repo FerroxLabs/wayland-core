@@ -51,18 +51,60 @@ async fn in_memory_compare_exchange_is_deterministic_for_fixture_backends() {
     assert_eq!(fs.read(path).await.unwrap(), b"after");
 }
 
+/// #1155. This asserted the opposite until the atomic exchange landed:
+/// `RealFs` returned `Unsupported`, on the reasoning that a host filesystem
+/// cannot hold a pathname against a writer that never agreed to cooperate.
+/// `renameat2(RENAME_EXCHANGE)` does exactly that, so the refusal is gone and
+/// what is asserted now is that the compare-exchange actually discriminates.
 #[tokio::test]
-async fn real_host_files_do_not_advertise_authoritative_compare_exchange() {
+async fn real_host_files_compare_exchange_on_content() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("file.txt");
-    let mutation = IntendedFileMutation::new(FilePrecondition::Absent, b"content".to_vec());
 
-    let error = RealFs
-        .compare_exchange_file(&path, &mutation)
-        .await
-        .expect_err("ordinary host paths have no non-cooperative pathname CAS");
-    assert!(error.to_string().contains("unavailable"));
-    assert!(!path.exists());
+    let create = IntendedFileMutation::new(FilePrecondition::Absent, b"before".to_vec());
+    assert!(matches!(
+        RealFs.compare_exchange_file(&path, &create).await.unwrap(),
+        FileMutationOutcome::Applied {
+            previous: FileObservation::Absent,
+            ..
+        }
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), b"before");
+
+    // Re-running the same create is a no-op, not a conflict.
+    assert!(matches!(
+        RealFs.compare_exchange_file(&path, &create).await.unwrap(),
+        FileMutationOutcome::AlreadyApplied { .. }
+    ));
+
+    let update = IntendedFileMutation::new(present(b"before"), b"after".to_vec());
+    assert!(matches!(
+        RealFs.compare_exchange_file(&path, &update).await.unwrap(),
+        FileMutationOutcome::Applied { .. }
+    ));
+
+    // The pre-image is gone, so the stale replacement must not land -- and
+    // the bytes that displaced it must survive untouched.
+    let stale = IntendedFileMutation::new(present(b"before"), b"stale".to_vec());
+    assert!(matches!(
+        RealFs.compare_exchange_file(&path, &stale).await.unwrap(),
+        FileMutationOutcome::Conflict {
+            current: FileObservation::Present(_)
+        }
+    ));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"after",
+        "a refused compare-exchange left its bytes behind"
+    );
+
+    // And no temp file survives either arm.
+    let strays: Vec<_> = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n != "file.txt")
+        .collect();
+    assert!(strays.is_empty(), "left behind {strays:?}");
 }
 
 #[tokio::test]
@@ -88,4 +130,50 @@ async fn wrappers_preserve_containment_and_secret_denial() {
         denied.compare_exchange_file(&secret, &update).await,
         Err(VfsError::SecretDenied { .. })
     ));
+}
+
+/// #1155, the sub-agent shape. `SandboxedFs` observes through the inner
+/// backend and then REBINDS the mutation to the object it saw
+/// (`vfs.rs`, `with_expected_object`) before delegating. Over `InMemoryFs`
+/// that is exercised above; over `RealFs` it was not, and the identity a real
+/// host observation carries is not the one a fixture carries. A decorator
+/// that quietly conflicts on every real file would disable the guard for
+/// every sub-agent while every unit test stayed green.
+#[tokio::test]
+async fn a_jailed_real_filesystem_compare_exchanges_inside_its_root() {
+    let root = tempfile::tempdir().unwrap();
+    let jail = SandboxedFs::new(RealFs, root.path());
+    let path = root.path().join("draft.md");
+
+    let create = IntendedFileMutation::new(FilePrecondition::Absent, b"before".to_vec());
+    assert!(
+        matches!(
+            jail.compare_exchange_file(&path, &create).await.unwrap(),
+            FileMutationOutcome::Applied { .. }
+        ),
+        "a jailed create was refused"
+    );
+
+    let update = IntendedFileMutation::new(present(b"before"), b"after".to_vec());
+    assert!(
+        matches!(
+            jail.compare_exchange_file(&path, &update).await.unwrap(),
+            FileMutationOutcome::Applied { .. }
+        ),
+        "a jailed update whose preimage still holds was refused"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"after");
+
+    // An outsider save, then a replacement composed against what it replaced.
+    std::fs::write(&path, b"user save").unwrap();
+    let stale = IntendedFileMutation::new(present(b"after"), b"stale".to_vec());
+    assert!(matches!(
+        jail.compare_exchange_file(&path, &stale).await.unwrap(),
+        FileMutationOutcome::Conflict { .. }
+    ));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"user save",
+        "a jailed compare-exchange overwrote a save it should have refused"
+    );
 }

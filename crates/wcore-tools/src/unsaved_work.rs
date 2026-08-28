@@ -1483,8 +1483,10 @@ fn recorded_raw(root: &Path, commit: &str, rel: &str) -> Result<Option<Vec<u8>>,
     Ok(Some(blob.stdout))
 }
 
-/// Is the file at `path` still byte-for-byte the pre-image that was judged?
-/// `judged` is `None` when the assessment saw no file there at all.
+/// Is the pre-image that was judged still the one being replaced? `observed`
+/// is what the destination held at the instant the new bytes were published,
+/// `judged` is what the assessment saw; `None` on either side means nothing
+/// was there.
 ///
 /// ADV-7: the assessment between the pre-image read and the write runs about
 /// five `git` processes, a window measured at **13.5 ms**. With the user's
@@ -1493,29 +1495,12 @@ fn recorded_raw(root: &Path, commit: &str, rel: &str) -> Result<Option<Vec<u8>>,
 /// same save made *before* the call was protected 12 times out of 12, so that
 /// measured the product and not the harness.
 ///
-/// Running this immediately before the write NARROWS that window to the gap
-/// between this read and the rename. It does not close it — a read and a
-/// rename are two operations — and #1155 measured what was left at ~6.5%. The
-/// tools now publish through [`pre_image_matches`] and an atomic exchange
-/// instead, which has no second observation to be stale; this remains as the
-/// path-reading form of the same verdict, for a caller with no exchange to
-/// make.
-pub fn pre_image_unchanged(path: &Path, judged: Option<&[u8]>) -> Result<(), String> {
-    match std::fs::read(path) {
-        Ok(now) => pre_image_matches(Some(&now), judged),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => pre_image_matches(None, judged),
-        Err(e) => Err(format!("it could no longer be read ({e})")),
-    }
-}
-
-/// [`pre_image_unchanged`], for a pre-image that was OBSERVED rather than read
-/// back: `observed` is what the destination held at the instant the new bytes
-/// were published, `None` if it held nothing.
-///
-/// Reading the path back cannot answer this question, because the read and the
-/// write are two operations and a save between them is lost (#1155). An atomic
-/// exchange hands the displaced bytes to the caller instead, and this is the
-/// same verdict taken over those bytes.
+/// This used to be spelled `pre_image_unchanged(path, judged)`, which READ the
+/// path back and compared. That can only narrow the window, never close it: a
+/// read and a write are two operations, and #1155 measured what was left at
+/// ~6.5% on the filesystem path and 70% on the vfs path the dispatcher
+/// actually takes. The bytes are now handed in by an atomic exchange that
+/// displaced them, so there is no second observation to be stale.
 pub fn pre_image_matches(observed: Option<&[u8]>, judged: Option<&[u8]>) -> Result<(), String> {
     match (observed, judged) {
         (Some(now), Some(before)) if now == before => Ok(()),

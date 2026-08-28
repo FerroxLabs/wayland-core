@@ -17,6 +17,9 @@ use crate::file_cache::{FileStateCache, file_mtime_ms, update_cache_after_write}
 use crate::fuzzy_match::fuzzy_find_and_replace;
 use crate::path_validation::validate_user_path;
 use crate::unsaved_work::{Mode, UnsavedWorkGuard, Verdict};
+use crate::vfs::{
+    FileContentIdentity, FileMutationOutcome, FilePrecondition, IntendedFileMutation,
+};
 
 pub struct EditTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
@@ -277,10 +280,43 @@ impl EditTool {
             n.note_self_originated_write(path).await;
         }
 
-        // ADV-7, vfs side.
-        match ctx.vfs.read(path).await {
-            Ok(now) if now == bytes => {}
-            _ => {
+        // ADV-7 / #1155, vfs side. Reading through the vfs and then writing
+        // through it is the same two-operation window as on the filesystem
+        // path, and measurably wider: 140 of 200 interleaved saves were
+        // destroyed here, against 13 of 200 there, because the write is a
+        // whole `RealFs::write` rather than a bare rename. Carrying the
+        // pre-image INTO the write closes it — see
+        // `RealFs::compare_exchange_file`.
+        let mutation = IntendedFileMutation::new(
+            FilePrecondition::Present(FileContentIdentity::from_bytes(&bytes)),
+            new_content.as_bytes().to_vec(),
+        );
+
+        // F13: everything above this line left the target untouched, and
+        // everything below it may not have. A `Conflict` is the exception the
+        // backend can answer for: it means the swap was never published, so
+        // the attempt is wound back rather than left for reconciliation.
+        *attempt = FilesystemWriteAttempt::Attempted;
+        match ctx.vfs.compare_exchange_file(path, &mutation).await {
+            Ok(FileMutationOutcome::Applied { .. }) => {}
+            Ok(FileMutationOutcome::AlreadyApplied { .. }) => {
+                // Byte-identical to what is already there. A compare-exchange
+                // declines to touch the inode; the shipped write rewrites it, and
+                // F889 receipt reconciliation is calibrated against that
+                // (f889_write_edit_reconcile_test, the byte-identical-write arm).
+                // Changing WHEN a no-op rewrite happens is not this fix's business,
+                // and it costs nothing here: `AlreadyApplied` means the destination
+                // still holds the pre-image, so no save was displaced and there is
+                // no race to lose.
+                if let Err(e) = ctx.vfs.write(path, new_content.as_bytes()).await {
+                    return ToolResult {
+                        content: format!("Failed to write file: {e}"),
+                        is_error: true,
+                    };
+                }
+            }
+            Ok(FileMutationOutcome::Conflict { .. }) => {
+                *attempt = FilesystemWriteAttempt::NotAttempted;
                 return ToolResult {
                     content: crate::unsaved_work::changed_under_write(
                         file_path,
@@ -289,17 +325,35 @@ impl EditTool {
                     is_error: true,
                 };
             }
-        }
-
-        // F13: everything above this line left the target untouched, and
-        // everything below it may not have. The filesystem cannot be asked
-        // afterwards which side a failure fell on.
-        *attempt = FilesystemWriteAttempt::Attempted;
-        if let Err(e) = ctx.vfs.write(path, new_content.as_bytes()).await {
-            return ToolResult {
-                content: format!("Failed to write file: {e}"),
-                is_error: true,
-            };
+            // A backend with no compare-exchange keeps exactly the behaviour
+            // it had: re-read, then write. Racy, and unchanged by this fix.
+            Err(e) if crate::vfs::is_compare_exchange_unsupported(&e) => {
+                match ctx.vfs.read(path).await {
+                    Ok(now) if now == bytes => {}
+                    _ => {
+                        *attempt = FilesystemWriteAttempt::NotAttempted;
+                        return ToolResult {
+                            content: crate::unsaved_work::changed_under_write(
+                                file_path,
+                                "its contents changed on disk",
+                            ),
+                            is_error: true,
+                        };
+                    }
+                }
+                if let Err(e) = ctx.vfs.write(path, new_content.as_bytes()).await {
+                    return ToolResult {
+                        content: format!("Failed to write file: {e}"),
+                        is_error: true,
+                    };
+                }
+            }
+            Err(e) => {
+                return ToolResult {
+                    content: format!("Failed to write file: {e}"),
+                    is_error: true,
+                };
+            }
         }
         *attempt = FilesystemWriteAttempt::Completed;
 

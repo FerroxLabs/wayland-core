@@ -17,6 +17,7 @@ use std::sync::Arc;
 use serde_json::json;
 use tempfile::TempDir;
 use wcore_tools::Tool;
+use wcore_tools::context::ToolContext;
 use wcore_tools::edit::EditTool;
 use wcore_tools::unsaved_work::UnsavedWorkGuard;
 use wcore_tools::write::WriteTool;
@@ -639,7 +640,7 @@ async fn interleave(during: bool) -> (usize, usize, std::time::Duration) {
 // ===========================================================================
 #[tokio::test]
 async fn a_save_during_an_edit_is_not_lost() {
-    let (lost, interleaved, window) = edit_interleave(Saver::Rename).await;
+    let (lost, interleaved, window) = edit_interleave(Saver::Rename, None).await;
     println!("[edit/rename] window {window:?}; {lost} lost, {interleaved} interleavings caught");
     assert_eq!(
         lost, 0,
@@ -662,7 +663,7 @@ async fn a_save_during_an_edit_is_not_lost() {
 /// rather than as zero, because what remains is a scheduling artefact.
 #[tokio::test]
 async fn an_in_place_save_can_still_lose_to_the_final_rename() {
-    let (lost, interleaved, window) = edit_interleave(Saver::InPlace).await;
+    let (lost, interleaved, window) = edit_interleave(Saver::InPlace, None).await;
     println!("[edit/in-place] window {window:?}; {lost} lost, {interleaved} interleavings caught");
     assert!(
         interleaved > 0,
@@ -675,19 +676,34 @@ async fn an_in_place_save_can_still_lose_to_the_final_rename() {
     );
 }
 
-async fn edit_interleave(how: Saver) -> (usize, usize, std::time::Duration) {
+/// One Edit, through whichever entry point is under measurement. `ctx` of
+/// `None` drives `Tool::execute` — the filesystem path, which only tests
+/// reach. `Some(ctx)` drives `Tool::execute_with_ctx`, which is where the
+/// dispatcher lands (`wcore-agent/src/orchestration/mod.rs:2368` calls
+/// `execute_prepared_effect`, and that calls `edit_through_vfs`). Both arms
+/// share this one function so their rates are comparable.
+async fn one_edit(ws: &Ws, file: &Path, ctx: Option<&ToolContext>) -> String {
+    let tool = EditTool::new(None).with_unsaved_guard(ws.guard.clone());
+    let input = json!({
+        "file_path": file.to_str().unwrap(),
+        "old_string": "OLD",
+        "new_string": "NEW",
+    });
+    match ctx {
+        None => tool.execute(input).await.content,
+        Some(ctx) => tool.execute_with_ctx(input, ctx).await.content,
+    }
+}
+
+async fn edit_interleave(
+    how: Saver,
+    ctx: Option<&ToolContext>,
+) -> (usize, usize, std::time::Duration) {
     let warm = Ws::new();
     let wfile = warm.root().join("draft.md");
     std::fs::write(&wfile, "draft body\nOLD\n").unwrap();
     let t0 = std::time::Instant::now();
-    let _ = EditTool::new(None)
-        .with_unsaved_guard(warm.guard.clone())
-        .execute(json!({
-            "file_path": wfile.to_str().unwrap(),
-            "old_string": "OLD",
-            "new_string": "NEW",
-        }))
-        .await;
+    let _ = one_edit(&warm, &wfile, ctx).await;
     let window = t0.elapsed();
 
     // Delays spread across the measured window rather than one fixed offset:
@@ -713,17 +729,10 @@ async fn edit_interleave(how: Saver) -> (usize, usize, std::time::Duration) {
             std::thread::sleep(delay);
             save(&f2, &format!("draft body\nOLD\n{c2}\n"), how);
         });
-        let r = EditTool::new(None)
-            .with_unsaved_guard(ws.guard.clone())
-            .execute(json!({
-                "file_path": file.to_str().unwrap(),
-                "old_string": "OLD",
-                "new_string": "NEW",
-            }))
-            .await;
+        let content = one_edit(&ws, &file, ctx).await;
         saver.join().unwrap();
 
-        if r.content.contains("while this write was being checked") {
+        if content.contains("while this write was being checked") {
             interleaved += 1;
         }
         let on_disk = std::fs::read_to_string(&file).unwrap();
@@ -985,4 +994,30 @@ async fn an_unreadable_pre_image_is_refused_not_clobbered() {
 unsafe extern "C" {
     #[link_name = "getuid"]
     safe fn libc_getuid() -> u32;
+}
+
+// ===========================================================================
+// #1155, THE PRODUCTION PATH. The arm above drives `Tool::execute`, which
+// only tests reach. Every real edit is dispatched through
+// `execute_prepared_effect` (wcore-agent/src/orchestration/mod.rs:2368) and
+// lands in `edit_through_vfs`, which reads through `ctx.vfs` and then writes
+// through `ctx.vfs` — the same check-then-write window, one layer up. Fixing
+// the filesystem path alone would close the race nobody runs and leave the
+// one everybody runs open.
+// ===========================================================================
+#[tokio::test]
+async fn a_save_during_an_edit_is_not_lost_on_the_vfs_path() {
+    let ctx = ToolContext::test_default();
+    let (lost, interleaved, window) = edit_interleave(Saver::Rename, Some(&ctx)).await;
+    println!(
+        "[edit/vfs/rename] window {window:?}; {lost} lost, {interleaved} interleavings caught"
+    );
+    assert_eq!(
+        lost, 0,
+        "an Edit through the vfs overwrote a save that arrived while it was being checked"
+    );
+    assert!(
+        interleaved > 0,
+        "no save ever landed inside the window, so this arm measured nothing"
+    );
 }
