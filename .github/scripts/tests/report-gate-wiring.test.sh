@@ -101,6 +101,39 @@ else
   bad "control: matcher missed a pattern that is present"
 fi
 
+# ── RETRY-FLAKE GATE WIRING (wayland#1169) ─────────────────────────────────
+#
+# assert-test-evidence.test.sh proves the retry gate itself fails on a retried
+# failure. This proves it is REACHED. It is invoked from inside
+# assert-test-evidence.sh rather than from a workflow step of its own,
+# deliberately: that call site already runs in both aggregate report jobs, so
+# there is no second piece of YAML to keep in sync and no way to wire it into
+# one report job and not the other — which is exactly how #1115 happened.
+GRADE="$ROOT/.github/scripts/grade-retry-flakes.sh"
+ALLOWFILE="$ROOT/.config/flaky-allowlist.txt"
+
+if [ -f "$GRADE" ]; then ok "retry-flake grader exists"; else bad "retry-flake grader exists"; fi
+if [ -f "$ALLOWFILE" ]; then ok "flake allowlist exists"; else bad "flake allowlist exists"; fi
+
+want_grep "the evidence gate invokes the retry-flake grader" \
+  "$GATE" 'bash "$GRADER"'
+# A gate that can be silently deleted is worth as little as one that cannot
+# fail, and this one is invoked by path rather than by import.
+want_grep "the evidence gate fails closed if the grader is deleted" \
+  "$GATE" "Retry-flake gate missing"
+
+# The gate is only worth wiring while retries are on. If `[profile.ci]` ever
+# drops to `retries = 0` this whole mechanism becomes dead code and the comment
+# trail above becomes a lie, so say so out loud rather than leaving a check that
+# silently cannot fire.
+NEXTEST="$ROOT/.config/nextest.toml"
+if awk '/^\[profile\.ci\]/{p=1;next} /^\[/{p=0} p && /^retries[[:space:]]*=/{print; found=1} END{exit !found}' \
+     "$NEXTEST" | grep -q 'retries[[:space:]]*=[[:space:]]*[1-9]'; then
+  ok "[profile.ci] still retries, so the gate has something to grade"
+else
+  bad "[profile.ci] no longer retries — grade-retry-flakes.sh is now dead code, remove it or the retries"
+fi
+
 echo "---"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

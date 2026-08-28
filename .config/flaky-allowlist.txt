@@ -1,0 +1,60 @@
+# Retry allowlist — the ONLY way a `FLAKY` test does not fail `report`.
+# FerroxLabs/wayland#1169.
+#
+# ── WHAT THIS FILE IS FOR ──────────────────────────────────────────────────
+#
+# `[profile.ci] retries = 2` in .config/nextest.toml means a test that fails
+# twice and passes on the third attempt is reported `FLAKY 3/3` and counted in
+# the PASSED total. The run conclusion — the thing release gates, dashboards
+# and humans read — says SUCCESS. MEASURED consequence (#1169): the TOCTOU
+# data-loss race of #1155 failed 13 of 200 runs at `--retries 0` (6.5 %), and
+# 0.065^3 ~= 1 visible report in 3,600 CI runs. A defect that destroys user
+# data on one edit in fifteen was invisible to CI essentially forever.
+#
+# `.github/scripts/grade-retry-flakes.sh` runs in the `report` job — a REQUIRED
+# status context on main — over every leg's uploaded JUnit, and FAILS the run
+# for each `<flakyFailure>` whose test is not listed here. Retries still run:
+# the merge is not blocked by one transient network hiccup mid-suite, because
+# the retry still succeeds and the suite still finishes. What changes is that
+# the retry is no longer SILENT.
+#
+# ── WHAT A LINE HERE MEANS ─────────────────────────────────────────────────
+#
+# NOT "this test is fine". A line here means "this test is KNOWN to need
+# retries, someone owns it, and the debt has a date on it". Every entry expires;
+# an expired entry fails `report` exactly as an unlisted flake does, so the only
+# ways out are fixing the test or renewing the entry deliberately with a fresh
+# justification. The list is designed to shrink.
+#
+# DO NOT add a test here to quiet a race you have not investigated. The correct
+# home for a test whose flake IS the bug under investigation is a scoped
+# `retries = 0` override in .config/nextest.toml (three such blocks already
+# exist, for #1109, #1101 and #1146) — that makes the failure reach the run
+# conclusion directly and this gate never sees it, because a zero-retry failure
+# is a plain failure, not a flake.
+#
+# ── FORMAT ─────────────────────────────────────────────────────────────────
+#
+#   <YYYY-MM-DD expiry>  <binary-id>::<test-name>  <gh#NNNN>  <reason...>
+#
+# Whitespace-separated; the reason is the rest of the line and is MANDATORY.
+# The key is the JUnit `classname` and `name` joined by `::`, which is exactly
+# what nextest prints on its `FLAKY` line. A malformed line fails the gate —
+# an allowlist nobody can parse is an allowlist that silently allows
+# everything.
+#
+# Check a local run before pushing:  just flake-gate
+
+# NOT SEEDED, DELIBERATELY: `wcore-tools::inv2_round5_adversarial_test
+# a_save_during_an_edit_is_not_lost` was the fourth flake in that same run
+# (FLAKY 2/3, 16536 tests, `16536 passed (4 flaky)` — a green conclusion over
+# four retried failures). It is the #1155 data-loss race, which measured 14 of
+# 48 (29 %) at `--retries 0` before the fix and 0 of 48 after it on the merged
+# integration tree. Allowlisting the exact defect this gate exists to catch
+# would defeat the gate; if it flakes again, `report` should go red and say so.
+
+2026-10-15  wcore-swarm::worker_runtime_limits::multi_worker_output_exhaustion_fails_without_retaining_buffers  gh#1146  FLAKY 3/3 on the Windows leg in TWO consecutive runs (30698794888 job 91366049013, 30699019736 job 91372229704) - four failed attempts, no diagnostic surviving from any of them. Measurement job is .github/workflows/windows-flake-ledger.yml; this entry is the debt, not a clearance.
+2026-10-15  wcore-agent::dangerous_lease_e2e_test::dangerous_expiry_cancels_production_streaming_bash_process_tree  gh#1169  MEASURED FLAKY 2/3 in the integration gate run at HEAD 10401446: TRY 1 FAIL at 11.570s with 'Dangerous Bash must publish its PID before expiry: Elapsed(())' (dangerous_lease_e2e_test.rs:97), TRY 2 PASS at 3.530s. The assertion is a wall-clock deadline on child-process startup, so the 3.3x spread between the two attempts IS the mechanism - contention, not logic. Confirmed failing identically on a detached checkout of untouched 9d3f33c3, same invocation, so it is pre-existing and not introduced by this cycle.
+2026-10-15  wcore-agent::dangerous_lease_e2e_test::dangerous_expiry_reaches_bootstrapped_spawn_child  gh#1169  MEASURED FLAKY 2/3 in the same run at HEAD 10401446: TRY 1 FAIL at 9.167s with 'production Spawn tool must start the child provider before expiry: Elapsed(())' (dangerous_lease_e2e_test.rs:281), TRY 2 PASS at 3.257s. Same wall-clock-deadline-on-child-startup mechanism and the same 2.8x spread as its sibling above; same confirmation on untouched 9d3f33c3.
+2026-10-15  wcore-agent::crucible_council::slow_proposer_hits_per_proposer_deadline  gh#1169  MEASURED FLAKY 2/3 in the same run at HEAD 10401446: TRY 1 FAIL asserting 'council must not wait for the 10s proposer; took 5.531185508s', TRY 2 PASS at 1.346s. Races real elapsed time against a per-proposer deadline, so it fails under box load and passes in isolation. STILL UNMEASURED AT --retries 0: this proves it flakes, not how often, and the rate is what decides whether it is noise or a defect.
+2026-10-15  wcore-cli::deterministic_openai_loop::packaged_f04_run_is_repeatable_and_content_addressed  gh#1169  Did NOT flake in the HEAD 10401446 run; seeded as a hedge, not on evidence of a flake. Drives the sealed F04 artifact through two complete packaged runs and is MEASURED at ~188s against a 120s x 4 kill budget (see the override in .config/nextest.toml), so a contended scheduler slot can still cross it. NEVER MEASURED AT --retries 0. If it has not fired by the expiry, delete this line rather than renewing it.
