@@ -329,14 +329,22 @@ pub fn config_view_from(config: &wcore_config::config::Config) -> app::ConfigVie
 }
 
 /// Build the status-bar [`ContextView`](app::ContextView) snapshot from a
-/// resolved engine `Config`. The window size is the compaction
-/// `context_window` fallback (GH#635: the model-aware window arrives with the
-/// engine's live `active_window_percent` updates); `used_tokens` starts at
-/// zero and is updated live by the protocol bridge as the session runs.
+/// resolved engine `Config`. The window size is the ACTIVE model's real window
+/// (GH#635: the post-swap window arrives with the engine's live
+/// `active_window_percent` updates); `used_tokens` starts at zero and is
+/// updated live by the protocol bridge as the session runs.
+///
+/// #1150: an unknown window seeds `0`, which `ContextView::fraction` already
+/// reports as `0.0` and the diagnostics surface already hides. It used to seed
+/// the flat 200,000 fallback, so a user on a 32k model opened the TUI to a
+/// gauge reading `0 / 200000` — a number nothing had ever verified.
 pub fn context_view_from(config: &wcore_config::config::Config) -> app::ContextView {
     app::ContextView {
         used_tokens: 0,
-        window_size: config.compact.fallback_context_window() as u64,
+        window_size: config
+            .compact
+            .known_context_window(config.compat.provider_type(), &config.model)
+            .unwrap_or(0) as u64,
     }
 }
 

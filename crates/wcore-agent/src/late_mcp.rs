@@ -124,9 +124,12 @@ impl LateMcpBinder {
                 .into_iter()
                 .filter(|r| !r.disable_model_invocation)
                 .collect();
-            // `None` budget matches the bootstrap call site; the boot listing
-            // is built the same way.
-            let block = crate::context::format_skills_section(&listable, None);
+            // #1150 — the ACTIVE model's window, exactly what bootstrap sized
+            // the boot listing against. Both sites used to pass `None`, which
+            // pinned every session to the flat 8,000-character default and
+            // left the real 1%-of-window formula reachable from tests alone.
+            let block =
+                crate::context::format_skills_section(&listable, engine.known_context_window());
             if !block.is_empty() {
                 // `inject_history` (not `set_system_prompt`) because this is a
                 // framework fragment: it must also extend the retained rebind

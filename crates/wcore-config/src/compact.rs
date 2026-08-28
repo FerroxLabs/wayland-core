@@ -247,15 +247,47 @@ impl Default for ToolCallArgsConfig {
 }
 
 impl CompactConfig {
-    /// The window to divide by when the active model's real window is unknown:
-    /// the operator's `context_window` if they set one, else
-    /// [`DEFAULT_CONTEXT_WINDOW`].
+    /// The active model's context window in tokens, or `None` when it is
+    /// genuinely unknown (FerroxLabs/wayland#1150).
     ///
-    /// This is the "fail open, never fabricate a bigger number" value. Callers
-    /// that KNOW the active provider/model must use
-    /// [`Self::effective_context_window`] instead.
-    pub fn fallback_context_window(&self) -> usize {
-        self.context_window.unwrap_or(DEFAULT_CONTEXT_WINDOW)
+    /// Same precedence as [`Self::effective_context_window`] — operator
+    /// setting, then registry, then Flux tier floor — but it stops there
+    /// instead of substituting [`DEFAULT_CONTEXT_WINDOW`]. Every caller that
+    /// must not act on a guess uses this one: the
+    /// [`crate::context_window::ContextWindow`] kernel (via
+    /// [`Self::kernel_config_window`]), the skills prompt budget, and the
+    /// status-bar gauge.
+    pub fn known_context_window(&self, provider: &str, model: &str) -> Option<usize> {
+        if let Some(configured) = self.context_window {
+            return Some(configured);
+        }
+        if let Some((_out_ceiling, window)) = crate::limits::model_output_ceiling(provider, model) {
+            return Some(window as usize);
+        }
+        if let Some(floor) = crate::limits::flux_tier_context_window(model) {
+            // Router alias: conservative floor only, never a raise.
+            return Some((floor as usize).min(DEFAULT_CONTEXT_WINDOW));
+        }
+        None
+    }
+
+    /// The `config_window` argument for
+    /// [`crate::context_window::ContextWindow::resolve`]: the operator's
+    /// EXPLICIT `[compact] context_window`, or `0` meaning "there is no
+    /// fallback — do not fabricate one".
+    ///
+    /// This exists because the predecessor (`fallback_context_window`, deleted
+    /// with #1150) folded [`DEFAULT_CONTEXT_WINDOW`] into that argument, so
+    /// the kernel's documented "unknown model ⇒ `None`, no fabricated
+    /// denominator" arm was unreachable from production: `resolve` returned
+    /// `Some(200_000)` for every unlisted model. A user on a 32k local model
+    /// got a `% full` gauge divided by 200,000 and a pre-flight shed ceiling of
+    /// 177,000 tokens — a guard that could never fire before the provider 400d.
+    /// Returning `0` here is what lets `resolve` say "I do not know", which is
+    /// the truth and which every downstream consumer already handles by failing
+    /// open.
+    pub fn kernel_config_window(&self) -> u64 {
+        self.context_window.unwrap_or(0) as u64
     }
 
     /// **THE single definition of the divisor every compaction boundary uses**
@@ -287,21 +319,19 @@ impl CompactConfig {
     /// 4. **[`DEFAULT_CONTEXT_WINDOW`].** An unknown, unlisted or otherwise
     ///    unroutable model keeps exactly the pre-GH#635 fallback.
     ///
+    /// Step 4 is a declared FALLBACK, not knowledge: this returns `usize` and
+    /// promises no `None`, because its two consumers — the static autocompact
+    /// threshold and the emergency hard stop — are plain integers on the
+    /// cache-ledger/protocol surface. A caller that must not act on a guess
+    /// uses [`Self::known_context_window`] instead, and the session tells the
+    /// operator when this step is reached so they can set the real number.
+    ///
     /// `provider` / `model` must be the POST-swap effective pair — the same
     /// values fed to `size_output_cap` and
     /// [`crate::context_window::ContextWindow::resolve`].
     pub fn effective_context_window(&self, provider: &str, model: &str) -> usize {
-        if let Some(configured) = self.context_window {
-            return configured;
-        }
-        if let Some((_out_ceiling, window)) = crate::limits::model_output_ceiling(provider, model) {
-            return window as usize;
-        }
-        if let Some(floor) = crate::limits::flux_tier_context_window(model) {
-            // Router alias: conservative floor only, never a raise.
-            return (floor as usize).min(DEFAULT_CONTEXT_WINDOW);
-        }
-        DEFAULT_CONTEXT_WINDOW
+        self.known_context_window(provider, model)
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW)
     }
 }
 
@@ -404,9 +434,10 @@ mod tests {
     fn default_values_match_spec() {
         let cfg = CompactConfig::default();
         // GH#635: the default is "not configured", which is a DIFFERENT state
-        // from "configured to 200k" — the fallback number is unchanged.
+        // from "configured to 200k". #1150: and "not configured" reaches the
+        // kernel as 0 — no fabricated denominator — not as 200k.
         assert_eq!(cfg.context_window, None);
-        assert_eq!(cfg.fallback_context_window(), 200_000);
+        assert_eq!(cfg.kernel_config_window(), 0);
         assert_eq!(cfg.output_reserve, 20_000);
         assert_eq!(cfg.autocompact_buffer, 13_000);
         assert_eq!(cfg.emergency_buffer, 3_000);
@@ -750,6 +781,6 @@ epoch_turns = 6
         );
         let back: CompactConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.context_window, None);
-        assert_eq!(back.fallback_context_window(), 200_000);
+        assert_eq!(back.kernel_config_window(), 0);
     }
 }

@@ -6343,6 +6343,18 @@ impl AgentEngine {
         &self.model
     }
 
+    /// The ACTIVE model's context window in tokens, or `None` when it is
+    /// genuinely unknown (#1150).
+    ///
+    /// Exposed for the late-MCP skill listing, which must size its prompt
+    /// block against the same window bootstrap sized the boot listing against.
+    /// Both used to pass a hardcoded `None`, which is why the real budget
+    /// formula was reachable only from tests.
+    pub fn known_context_window(&self) -> Option<usize> {
+        self.compact_config
+            .known_context_window(self.compat.provider_type(), &self.model)
+    }
+
     /// D001 / D007 / D016 keystone: atomically swap the live provider,
     /// its `ProviderCompat`, and the active model.
     ///
@@ -8047,7 +8059,7 @@ impl AgentEngine {
             used_tokens,
             self.compat.provider_type(),
             effective_model,
-            self.compact_config.fallback_context_window() as u64,
+            self.compact_config.kernel_config_window(),
         )
         .percent()
     }
@@ -8092,7 +8104,7 @@ impl AgentEngine {
                 used_tokens,
                 self.compat.provider_type(),
                 &self.model,
-                self.compact_config.fallback_context_window() as u64,
+                self.compact_config.kernel_config_window(),
             )
             .fraction()
         };
@@ -12692,7 +12704,7 @@ impl AgentEngine {
                             input_token_estimate as u64,
                             self.compat.provider_type(),
                             &request.model,
-                            self.compact_config.fallback_context_window() as u64,
+                            self.compact_config.kernel_config_window(),
                         );
                         // #282 contract V1: once Flux has SIGNALLED-BACK the real served
                         // window (`x-flux-model-window`) on a prior turn of THIS Flux
@@ -14396,7 +14408,7 @@ impl AgentEngine {
                             input_token_estimate as u64,
                             self.compat.provider_type(),
                             &request.model,
-                            self.compact_config.fallback_context_window() as u64,
+                            self.compact_config.kernel_config_window(),
                         );
                         if wcore_providers::is_flux_tier_alias(&request.model)
                             && let Some(window) = self.flux_served_window
