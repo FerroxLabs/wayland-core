@@ -22,6 +22,7 @@ use crate::{
 };
 use wcore_config::compat::ProviderCompat;
 use wcore_config::debug::DebugConfig;
+use wcore_config::self_hosted::is_self_hosted_base_url;
 
 /// An async source of a fresh bearer token, resolved once per request. Returns
 /// the raw token string to place in `Authorization: Bearer …`. Used by OAuth
@@ -977,60 +978,6 @@ impl OpenAIProvider {
 /// keyless local connection succeed instead of failing the turn with
 /// `MissingApiKey` (surfaced in the UI as "OpenAI API key is required").
 const SELF_HOSTED_PLACEHOLDER_KEY: &str = "wayland-local";
-
-/// True when `base_url`'s host is a self-hosted address that is plausibly
-/// keyless: loopback (`localhost`, `127.0.0.0/8`, `::1`), unspecified
-/// (`0.0.0.0`/`::`), Docker (`host.docker.internal`), mDNS (`*.local`), an
-/// RFC1918 private LAN range (`10/8`, `172.16/12`, `192.168/16`), or the
-/// Tailscale / CGNAT range (`100.64.0.0/10`). Public hosts return `false`, so a
-/// real cloud provider with a missing key still surfaces a clear `MissingApiKey`
-/// rather than silently sending a bogus bearer and getting a 401.
-fn is_self_hosted_base_url(base_url: &str) -> bool {
-    // Host = strip scheme, take up to the first '/', drop any `user@`, strip the
-    // `:port`. IPv6 literals are bracketed (`[::1]:11434`).
-    let after_scheme = base_url
-        .split_once("://")
-        .map(|(_, r)| r)
-        .unwrap_or(base_url);
-    let authority = after_scheme.split('/').next().unwrap_or("");
-    let host_port = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if let Some(rest) = host_port.strip_prefix('[') {
-        rest.split(']').next().unwrap_or(rest)
-    } else {
-        host_port.split(':').next().unwrap_or(host_port)
-    }
-    .trim()
-    .to_ascii_lowercase();
-
-    if host.is_empty() {
-        return false;
-    }
-    if host == "localhost"
-        || host.ends_with(".localhost")
-        || host == "host.docker.internal"
-        || host.ends_with(".local")
-        || host == "0.0.0.0"
-        || host == "::1"
-        || host == "::"
-    {
-        return true;
-    }
-    // IPv4 loopback / private / CGNAT ranges. Every dotted segment must parse as
-    // a u8, so a hostname like `api.openai.com` (a non-numeric segment) yields an
-    // empty vec and falls through to `false`.
-    let octets: Vec<u8> = host
-        .split('.')
-        .map(|o| o.parse::<u8>())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_default();
-    if octets.len() == 4 {
-        return matches!(
-            (octets[0], octets[1]),
-            (127, _) | (10, _) | (192, 168) | (172, 16..=31) | (100, 64..=127)
-        );
-    }
-    false
-}
 
 /// True when a provider HTTP error means "this model does not support tool
 /// calling" — the request was otherwise valid and would succeed if the `tools`

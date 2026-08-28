@@ -760,6 +760,37 @@ omit behaviour via the `omit_max_tokens_when_unsized` compat flag:
 omit_max_tokens_when_unsized = true   # unknown model + omitted cap ⇒ omit the field
 ```
 
+### Keyless self-hosted endpoints (`keyless_self_hosted`)
+
+A local inference server — Ollama, llama.cpp, LM Studio, vLLM — usually
+requires no authentication and ignores the `Authorization` header entirely.
+Point Core at one and no API key is needed:
+
+```bash
+wayland-core --provider openai --model qwen3:8b \
+             --base-url http://127.0.0.1:11434 "explain this repo"
+```
+
+Core sends a benign placeholder bearer (`wayland-local`) that such a server
+ignores. Three things must all hold before the credential requirement is
+relaxed, and none of them changes what counts as a credential:
+
+1. **you** declared the endpoint — `--base-url`, `[providers.<name>] base_url`,
+   or a profile. A provider's own default endpoint never qualifies.
+2. the endpoint is self-hosted — loopback, `localhost`, `*.local`,
+   `host.docker.internal`, an RFC1918 LAN address, or the Tailscale/CGNAT
+   range. A **public** host with no key is still refused at startup.
+3. the provider's wire has a keyless path (`keyless_self_hosted`, on for the
+   whole OpenAI-compatible family). Anthropic-family providers do not, so they
+   keep the clear startup refusal instead.
+
+Demand a real credential even on a local endpoint:
+
+```toml
+[providers.openai.compat]
+keyless_self_hosted = false
+```
+
 ### Image-generation model (`image_model`)
 
 The built-in `image_generate` tool posts to the active provider's OpenAI-wire
