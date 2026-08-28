@@ -4925,6 +4925,82 @@ mod tests {
         assert_eq!(user["content"], "hi");
     }
 
+    /// #559 — a tool-results user turn can ALSO carry transient product text.
+    /// `AgentEngine::attach_transient_block` attaches the per-turn skill hint
+    /// (`Skill hint: …`), the current-date line (`Current date: …`) and
+    /// PrePrompt plugin contributions to that exact message. The Anthropic
+    /// adapter carries them through; this adapter used to emit only the `tool`
+    /// rows and silently drop every other block, so on the OpenAI family all
+    /// three features reached the model on turn 1 and never again.
+    ///
+    /// Graded as an ASYMMETRY between the two adapters over the SAME neutral
+    /// message: the Anthropic arm is the control, so a regression in the
+    /// harness itself cannot make this pass vacuously.
+    #[test]
+    fn tool_result_turn_keeps_transient_text_on_both_wires() {
+        const TRANSIENT: &str = "Current date: 2026-08-28";
+        // Faithful shape: the parent assistant `tool_calls` turn must be
+        // present, or `clean_orphaned_tool_results` strips the tool row and
+        // the wire is empty for reasons unrelated to this defect.
+        let turn = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call-1".into(),
+                    name: "Read".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call-1".into(),
+                        content: "file contents".into(),
+                        is_error: false,
+                    },
+                    ContentBlock::Text {
+                        text: TRANSIENT.into(),
+                    },
+                ],
+            ),
+        ];
+
+        // Control arm: Anthropic maps Text alongside tool_result in the same
+        // message, so the block is on the wire there.
+        let anthropic =
+            crate::anthropic_shared::build_messages(&turn, &ProviderCompat::anthropic_defaults());
+        let anthropic_wire = serde_json::to_string(&anthropic).unwrap();
+        assert!(
+            anthropic_wire.contains(TRANSIENT),
+            "control arm is broken — the Anthropic adapter must carry transient \
+             text alongside a tool_result, so this test cannot prove anything \
+             about the OpenAI arm. Wire: {anthropic_wire}"
+        );
+
+        // Subject arm: the same neutral message must not lose the block.
+        let openai = OpenAIProvider::build_messages(&turn, "", &openai_compat());
+        let openai_wire = serde_json::to_string(&openai).unwrap();
+        assert!(
+            openai_wire.contains(TRANSIENT),
+            "#559: the OpenAI adapter dropped the transient text block that \
+             accompanied a tool result, so the skill hint, current date and \
+             PrePrompt contributions never reach the model on a tool-result \
+             turn. Wire: {openai_wire}"
+        );
+
+        // It must trail the tool rows. Emitting it ahead of them would put
+        // volatile per-turn text inside the cached prefix — the #559 defect
+        // in a new place — and would break the `tool_call_id` pairing.
+        let roles: Vec<&str> = openai.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["assistant", "tool", "user"],
+            "transient text must be a trailing user turn after the tool rows"
+        );
+    }
+
     #[test]
     fn test_build_messages_non_vision_omits_image_and_emits_placeholder() {
         // #648: a text-only (non-vision) compat model MUST NOT emit an
