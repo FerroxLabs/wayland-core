@@ -28,19 +28,22 @@ const MAX_CUSTOM_PROMPT_BYTES: usize = 16 * 1024;
 
 /// Today's date as `YYYY-MM-DD` in local time.
 ///
-/// Read once per turn by the engine and fed to [`current_date_block`]. Kept as
-/// a thin wrapper over `chrono::Local::now()` so tests can build the volatile
-/// date block deterministically without touching the clock.
+/// Read once per session when the intro section of the system prompt is built,
+/// and fed to [`current_date_block`]. Kept as a thin wrapper over
+/// `chrono::Local::now()` so tests can build the date line deterministically
+/// without touching the clock.
 pub fn today_string() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
-/// Render the volatile per-turn current-date block.
+/// Render the current-date line carried by the cached system prefix.
 ///
-/// This is injected into the request's volatile message tail every turn — NOT
-/// into the cached system prefix — so the cached system+tools prefix stays
-/// byte-stable across days and process restarts (finding #174). The intro's
-/// authoritative-date instruction refers to this block.
+/// #559: this lives in the intro section of the system prompt, frozen for the
+/// life of the session, NOT in the per-turn message tail. See the long note at
+/// the intro site in [`build_system_prompt`] for why the #174 placement was
+/// reverted — in short, on turn 1 the "tail" user message is the head user
+/// message, so a tail injection lands in the permanent message prefix and then
+/// disappears, costing every session its turn-1 cache write.
 pub fn current_date_block(today: &str) -> String {
     format!("Current date: {today}")
 }
@@ -252,24 +255,45 @@ pub fn build_system_prompt(
 
     // Section: intro (session permanent)
     //
-    // The literal current date is deliberately NOT rendered here. This intro is
-    // assembled once at bootstrap and stored as the cached system prefix; baking
-    // a date value into it would make the cached prefix change every day / every
-    // cross-midnight process restart, busting the Anthropic prompt cache on cold
-    // start (finding #174). The authoritative-date *instruction* stays in the
-    // cached prefix; the volatile date *value* is injected per turn into the
-    // message tail by the engine (see `current_date_block`).
+    // #559: the current date is rendered HERE, inside the cached system
+    // prefix, and frozen for the life of the session.
+    //
+    // Finding #174 had moved it OUT to the per-turn message tail to keep the
+    // prefix byte-stable across days. Measured on real request bodies, that
+    // traded a small cost for a larger one: on turn 1 the tail user message
+    // IS the head user message, so the date landed at `messages[1]` and then
+    // vanished on turn 2 — every session's turn-1 cache write was unreadable
+    // by every later turn. In the prefix the value changes once per DAY and is
+    // shared by every session started that day; in the tail it cost one wasted
+    // write per SESSION, and there are many sessions per day.
+    //
+    // Freezing it for the session is correctness, not a compromise: a value
+    // that re-rendered at midnight mid-session would bust the prefix
+    // mid-session, which is the failure #174 set out to avoid. A long session
+    // crossing midnight therefore sees a stale date; a new session mints a new
+    // prefix carrying the right one, so a one-shot time-bound query is always
+    // correct.
+    //
+    // SECURITY (#559). This also removes `Current date:` from the set of
+    // product strings that appear INSIDE a user turn. On a channel session a
+    // user turn is attacker-reachable and every product string in it is
+    // forgeable — that is the surface three rounds of forged-marker bypasses
+    // were reaching for. The system field is not reachable from a user turn,
+    // so moving the date here shrinks that surface by one string, and
+    // `UNTRUSTED_CHANNEL_SESSION_DIRECTIVE` no longer names it.
     let intro = cache.sections.entry("intro").or_insert_with(|| {
         format!(
             "You are an AI assistant that can use tools to help with tasks.\n\
              You are powered by the model {model}.\n\
              Working directory: {cwd}\n\
+             {date}\n\
              When constructing time-bound queries (web searches, news, \
-             releases \"this week\"), use the current date provided in this \
-             turn as the authoritative \"today\". Do NOT substitute a \
+             releases \"this week\"), use the current date given above as \
+             the authoritative \"today\". Do NOT substitute a \
              different month or year — your training cutoff is older than \
              the current date, and guessing a future month produces wrong \
-             queries."
+             queries.",
+            date = current_date_block(&today_string())
         )
     });
     parts.push(intro.clone());
@@ -1673,17 +1697,24 @@ mod tests {
         );
     }
 
-    // --- Current date moved out of cached prefix (finding #174) ------------
+    // --- Current date lives in the cached prefix, frozen per session (#559) ---
 
-    /// The cached system prefix must NOT carry a date value, and must be
-    /// byte-identical no matter what "today" is. The date lives in the volatile
-    /// per-turn block instead. Before the fix the intro rendered
-    /// `Current date: <today>` straight into this cached prefix, so the prefix
-    /// changed every day and busted the prompt cache on cold start. This test
-    /// pins the new behavior: build the prompt twice and assert it is stable and
-    /// contains no `Current date:` value.
+    /// The cached system prefix MUST carry the date value, and must be
+    /// byte-identical across builds within a session.
+    ///
+    /// This reverses finding #174. #174 moved the date to the per-turn message
+    /// tail so the prefix would not change daily; measured on real request
+    /// bodies that was the more expensive placement, because on turn 1 the tail
+    /// user message IS the head user message, so the date entered `messages[1]`
+    /// and left it again on turn 2 — costing every session its turn-1 cache
+    /// write. Daily prefix churn is shared by every session started that day;
+    /// the tail placement cost one wasted write per session.
+    ///
+    /// The stability half of this test is the load-bearing half: it is what
+    /// catches a sub-day volatile value (a timestamp, a turn counter) being
+    /// added to the prefix, which would be the #174 failure for real.
     #[test]
-    fn current_date_absent_from_cached_system_prefix() {
+    fn current_date_present_and_stable_in_cached_system_prefix() {
         let build = || {
             build_system_prompt(
                 &mut SystemPromptCache::new(),
@@ -1701,19 +1732,49 @@ mod tests {
         };
         let first = build();
         let second = build();
-        // Cache-stability: identical across builds (the clock advancing between
-        // them must not perturb the cached prefix).
+        // Cache-stability: identical across builds. The clock advancing between
+        // them must not perturb the prefix — only the DAY may change it.
         assert_eq!(
             first, second,
             "cached system prefix must be byte-identical across builds"
         );
-        // The literal date label must not appear in the cached prefix — only the
-        // authoritative-date *instruction* may remain. This is the assertion that
-        // FAILS without the fix (the old intro rendered `Current date: <today>`).
+        // The date value is in the prefix, and is today's.
+        let today = today_string();
         assert!(
-            !first.contains("Current date:"),
-            "cached system prefix must not carry the date value"
+            first.contains(&current_date_block(&today)),
+            "cached system prefix must carry the current date; prefix was: {first}"
         );
+        // Frozen for the session: repeated reads through ONE cache return the
+        // same bytes, so a session crossing midnight cannot shift its own
+        // prefix mid-flight.
+        let mut cache = SystemPromptCache::new();
+        let a = build_system_prompt(
+            &mut cache,
+            None,
+            "/tmp",
+            "test-model",
+            &[],
+            None,
+            None,
+            false,
+            false,
+            &[],
+            false,
+        );
+        let b = build_system_prompt(
+            &mut cache,
+            None,
+            "/tmp",
+            "test-model",
+            &[],
+            None,
+            None,
+            false,
+            false,
+            &[],
+            false,
+        );
+        assert_eq!(a, b, "the session-scoped prefix must be frozen once built");
         // The authoritative-date instruction stays in the cached prefix.
         assert!(
             first.contains("authoritative"),
@@ -1721,12 +1782,13 @@ mod tests {
         );
     }
 
-    /// The current date must still reach the model — now via the volatile
-    /// per-turn block. `current_date_block` carries the value, and two different
-    /// "today" dates produce two different blocks (proving the value lives in the
-    /// volatile region, not a frozen cached prefix).
+    /// `current_date_block` is the renderer, and two different "today" dates
+    /// produce two different lines — so the cached prefix DOES change across a
+    /// day boundary. #559 accepted that cost deliberately: it is one cold start
+    /// per day, shared by every session started that day, against one wasted
+    /// cache write per session under the old per-turn placement.
     #[test]
-    fn current_date_block_carries_volatile_date() {
+    fn current_date_block_renders_the_day() {
         let day1 = current_date_block("2026-06-21");
         let day2 = current_date_block("2026-06-22");
         assert!(
