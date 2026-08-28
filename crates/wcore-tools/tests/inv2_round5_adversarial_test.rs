@@ -612,19 +612,7 @@ async fn interleave(during: bool) -> (usize, usize, std::time::Duration) {
         }
 
         let on_disk = std::fs::read_to_string(&file).unwrap();
-        let recoverable = msg
-            .split("cat-file blob ")
-            .nth(1)
-            .map(|s| s.split_whitespace().next().unwrap().to_owned())
-            .map(|oid| {
-                let o = Command::new("git")
-                    .args(["cat-file", "blob", &oid])
-                    .current_dir(&root)
-                    .output()
-                    .unwrap();
-                String::from_utf8_lossy(&o.stdout).into_owned()
-            })
-            .unwrap_or_default();
+        let recoverable = recovered_copy(&root, &msg);
         if !on_disk.contains(&canary) && !recoverable.contains(&canary) {
             lost += 1;
         }
@@ -674,6 +662,32 @@ async fn an_in_place_save_can_still_lose_to_the_final_rename() {
         "an in-place save is being lost as often as it was with no check at all: \
          {lost} of {interleaved}"
     );
+}
+
+/// The bytes the guard says it durably copied, fetched back OUT of the object
+/// store it named. Empty when the result named no copy.
+///
+/// "Not lost" means the user can get their bytes back, and this repository's
+/// guard is explicitly durable-then-allowed: when it sees unsaved work it
+/// copies it into git, anchors a ref, tells the caller the exact
+/// `cat-file` command, and only then lets the write proceed. Judging that as
+/// a loss because the bytes left the working tree measures the wrong thing --
+/// the Write arm below has always retrieved the copy before counting, and the
+/// Edit arm did not, which made a correctly-guarded overwrite indistinguishable
+/// from a silent one at about 2%.
+fn recovered_copy(root: &Path, msg: &str) -> String {
+    msg.split("cat-file blob ")
+        .nth(1)
+        .map(|s| s.split_whitespace().next().unwrap().to_owned())
+        .map(|oid| {
+            let o = Command::new("git")
+                .args(["cat-file", "blob", &oid])
+                .current_dir(root)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        })
+        .unwrap_or_default()
 }
 
 /// One Edit, through whichever entry point is under measurement. `ctx` of
@@ -736,7 +750,8 @@ async fn edit_interleave(
             interleaved += 1;
         }
         let on_disk = std::fs::read_to_string(&file).unwrap();
-        if !on_disk.contains(&canary) {
+        let recoverable = recovered_copy(&root, &content);
+        if !on_disk.contains(&canary) && !recoverable.contains(&canary) {
             lost += 1;
         }
     }
