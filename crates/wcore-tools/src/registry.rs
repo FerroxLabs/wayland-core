@@ -1342,6 +1342,57 @@ mod tests {
         }
     }
 
+    /// FerroxLabs/wayland#1171: an admitted tool must APPEND at the tail in
+    /// first-hydration order, not reappear at the registry slot it held while
+    /// deferred. A mid-array reinstatement rewrites every cached byte after
+    /// it; an append leaves the prefix byte-identical.
+    #[test]
+    fn admit_hydrated_tools_appends_in_first_hydration_order() {
+        let def = |name: &str, deferred: bool| ToolDef {
+            name: name.to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
+            deferred,
+            server: None,
+        };
+        // Registry order interleaves the deferred tools with the hot ones.
+        let mut defs = vec![
+            def("Bash", false),
+            def("Delegate", true),
+            def("Read", false),
+            def("Spawn", true),
+            def("Write", false),
+        ];
+        // Spawn hydrated FIRST, Delegate second.
+        admit_hydrated_tools(&mut defs, &["Spawn".to_string(), "Delegate".to_string()]);
+
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Bash", "Read", "Write", "Spawn", "Delegate"]);
+        assert!(
+            defs.iter().all(|d| !d.deferred),
+            "an admitted tool must ship its full schema"
+        );
+    }
+
+    /// A hydrated name that was never deferred is already in the stable base:
+    /// moving it to the tail would itself be the prefix rewrite #1171 fixes.
+    #[test]
+    fn admit_hydrated_tools_leaves_an_already_hot_tool_in_place() {
+        let def = |name: &str, deferred: bool| ToolDef {
+            name: name.to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
+            deferred,
+            server: None,
+        };
+        let mut defs = vec![def("Bash", false), def("Read", false), def("Spawn", true)];
+        admit_hydrated_tools(&mut defs, &["Bash".to_string()]);
+
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Bash", "Read", "Spawn"]);
+        assert!(defs[2].deferred, "an unhydrated stub stays deferred");
+    }
+
     #[test]
     fn to_tool_defs_includes_deferred_flag() {
         let mut registry = ToolRegistry::new();
