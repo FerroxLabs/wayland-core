@@ -1102,6 +1102,45 @@ mod tests {
             .expect("an explicit absolute attach is a capability, not a bypass");
         assert_eq!(payload.files[0].content, "outside content\n");
     }
+
+    /// core#335 c3, the `..`-relative arm of the DECIDED BEHAVIOUR (Q1,
+    /// option A: escaping attachments keep working, pinned by a test). The
+    /// absolute arm is `an_absolute_path_outside_the_workspace_still_attaches`
+    /// above. Until this test the `..` arm was pinned by NOTHING: every `..`
+    /// spelling in the suite re-enters the workspace, so a regression that
+    /// refused only the escaping `..` spelling — #335's spelling-sensitivity,
+    /// in the opposite direction — would have shipped with a green suite.
+    #[test]
+    fn a_dotdot_spelling_that_escapes_the_workspace_still_attaches() {
+        let parent = TempDir::new().expect("tempdir");
+        let root = parent.path().join("repo");
+        fs::create_dir_all(&root).expect("mkdir root");
+        fs::create_dir_all(parent.path().join("outside")).expect("mkdir outside");
+        // The workspace ignores `*.log`, and the escaping target shares that
+        // extension — so the only thing that can admit it is being OUTSIDE.
+        fs::write(root.join(".gitignore"), "*.log\n").expect("write gitignore");
+        fs::write(parent.path().join("outside/notes.log"), "outside content\n")
+            .expect("write outside");
+        fs::write(root.join("inside.log"), "inside content\n").expect("write inside");
+
+        // In-fixture control: the same extension INSIDE the workspace is
+        // genuinely refused, so the attach below cannot pass on a toothless
+        // gitignore. Passes on BOTH arms.
+        let inside = resolve(&AtRef::parse("@inside.log").expect("parse"), &root);
+        assert!(
+            matches!(inside, Err(AtRefError::GitIgnored(_))),
+            "fixture check: the workspace gitignore must have teeth, got {inside:?}"
+        );
+
+        // The escaping `..` spelling lands outside the workspace, so the
+        // workspace gitignore has no jurisdiction over it and the attach
+        // stands — the decided behaviour, on the spelling c1 promised to pin.
+        let at = AtRef::parse("@../outside/notes.log").expect("parse");
+        let payload = resolve(&at, &root).expect(
+            "a `..` spelling that lands outside the workspace is a capability, not a bypass",
+        );
+        assert_eq!(payload.files[0].content, "outside content\n");
+    }
     // ── core#339 c6 / core#322 c4: the @dir walk's remaining lexical
     //    judgements — the gitignore match and the VCS-store skip ────────────
 
