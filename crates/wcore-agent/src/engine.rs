@@ -487,6 +487,40 @@ struct ProviderBudgetReservation {
     conservative_input_tokens: u64,
     conservative_output_tokens: u64,
     conservative_cost_usd: f64,
+    audit: SettledDispatchAudit,
+}
+
+/// #174 c2 — the task-audit half of a provider reservation.
+///
+/// Carried on the reservation rather than read from the engine at settle time
+/// because two of the four reservation sites live inside the configured-
+/// fallback admitter closure, which does not hold `&self`. Binding the audit
+/// identity at RESERVE time also means the record names the provider/model the
+/// reservation was actually taken against, not whatever the engine moved to
+/// afterwards.
+struct SettledDispatchAudit {
+    auditor: Arc<wcore_budget::SpendAuditor>,
+    provider: String,
+    model: String,
+    /// `conversation` or `configured_fallback`.
+    purpose: &'static str,
+    /// Whether the reserved cost was a real price. An unpriced dispatch is
+    /// recorded as unpriced, never as $0 — the record's `unpriced_dispatches`
+    /// count is what tells a reader the total is a floor.
+    priced: bool,
+}
+
+impl SettledDispatchAudit {
+    fn charge(&self, input_tokens: u64, output_tokens: u64, cost_usd: f64) {
+        self.auditor.charge(wcore_budget::SpendAuditDispatch {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            purpose: self.purpose.to_owned(),
+            tokens_in: input_tokens,
+            tokens_out: output_tokens,
+            cost_usd: self.priced.then_some(cost_usd),
+        });
+    }
 }
 
 enum ProviderBudgetOwner {
@@ -510,6 +544,7 @@ impl ProviderBudgetReservation {
         conservative_input_tokens: u64,
         conservative_output_tokens: u64,
         conservative_cost_usd: f64,
+        audit: SettledDispatchAudit,
     ) -> Self {
         Self {
             owner,
@@ -518,6 +553,7 @@ impl ProviderBudgetReservation {
             conservative_input_tokens,
             conservative_output_tokens,
             conservative_cost_usd,
+            audit,
         }
     }
 
@@ -531,6 +567,10 @@ impl ProviderBudgetReservation {
             .reservation
             .take()
             .expect("provider budget reservation settles exactly once");
+        // #174 c2 — every settled provider dispatch is charged to the task's
+        // spend audit here, at the ONE place all five settle call sites funnel
+        // through, rather than at each of them.
+        self.audit.charge(actual_input_tokens, actual_output_tokens, actual_cost_usd);
         match &self.owner {
             ProviderBudgetOwner::Durable {
                 authority,
@@ -640,6 +680,13 @@ impl Drop for ProviderBudgetReservation {
 enum ConfiguredFallbackAdmissionFailure {
     Budget(ProviderBudgetMutationError),
     Unpriced { provider: String, model: String },
+    /// #174 c3-c5 — the fallback's provider/model is refused by the session's
+    /// spend mode, or is an un-authorized model escalation.
+    ///
+    /// This site needs its own gate: a configured fallback swaps the model
+    /// INSIDE `ResilientProvider::stream`, below the engine's guarded provider
+    /// handle, so the decorator that covers every other dispatch never sees it.
+    SpendGuard(wcore_budget::SpendRefusal),
 }
 
 struct ConfiguredFallbackBudgetState {
@@ -3805,8 +3852,36 @@ impl ReplayProtectionLoss {
     }
 }
 
+/// #174 — an unrestricted, in-memory spend guard for the hand-built
+/// `AgentEngine` literals in this test module. The constructors install a real
+/// one; these literals bypass the constructors, so they need their own.
+#[cfg(test)]
+fn test_spend_guard() -> Arc<crate::spend_guard::SpendGuard> {
+    Arc::new(crate::spend_guard::SpendGuard::new(
+        wcore_budget::SpendMode::Unrestricted,
+        "test-session",
+        wcore_budget::ModelSpendProfile::new(
+            "test",
+            "test-model",
+            wcore_budget::ModelBilling::Free,
+            0.0,
+        ),
+        Arc::new(wcore_budget::MemorySpendAuditSink::default()),
+    ))
+}
+
 pub struct AgentEngine {
     provider: Arc<dyn LlmProvider>,
+    /// #174 c2-c5 — the run's spend guard. Always present, even in the default
+    /// unrestricted mode, because the per-task spend AUDIT is unconditional
+    /// while the modes are opt-in.
+    ///
+    /// `self.provider` is a [`crate::spend_guard::SpendGuardProvider`] wrapping
+    /// this guard, so every dispatch made through the engine's provider handle
+    /// — the conversation turn, its compaction call, the online-evolution
+    /// paraphrase — is admitted by it without each of those sites having to
+    /// remember to ask.
+    spend_guard: Arc<crate::spend_guard::SpendGuard>,
     /// Immutable outbound authority for this session. Runtime-lazy clients
     /// must clone this handle instead of consulting process or task globals.
     egress_policy: wcore_egress::SharedPolicy,
@@ -4589,6 +4664,45 @@ pub(crate) fn resolve_user_model_user_id() -> String {
     }
 }
 
+/// #174 c2 — durable per-task spend audit log for this profile.
+///
+/// Beside the daily spend ledger, not inside the prunable diagnostics cost
+/// ledger: an audit trail that a prune can silently truncate is not one.
+pub fn spend_audit_log_path() -> std::path::PathBuf {
+    wcore_config::config::wayland_config_dir()
+        .join("budget")
+        .join("spend-audit.jsonl")
+}
+
+/// Build the run's spend guard from `config` and wrap `provider` in it.
+///
+/// The ONE place the engine installs a provider handle. Every constructor and
+/// `rebind_provider` route through it, so there is no code path that leaves the
+/// engine holding an unguarded provider.
+fn install_spend_guard(
+    provider: Arc<dyn LlmProvider>,
+    provider_key: &str,
+    model: &str,
+    compat: &wcore_config::compat::ProviderCompat,
+    mode: wcore_budget::SpendMode,
+    session_id: &str,
+) -> (Arc<dyn LlmProvider>, Arc<crate::spend_guard::SpendGuard>) {
+    let baseline = crate::spend_guard::classify_model(provider_key, model, compat);
+    let sink: Arc<dyn wcore_budget::SpendAuditSink> = Arc::new(
+        wcore_budget::JsonlSpendAuditSink::new(spend_audit_log_path()),
+    );
+    let guard = Arc::new(crate::spend_guard::SpendGuard::new(
+        mode, session_id, baseline, sink,
+    ));
+    let wrapped: Arc<dyn LlmProvider> = Arc::new(crate::spend_guard::SpendGuardProvider::new(
+        provider,
+        Arc::clone(&guard),
+        provider_key,
+        compat.clone(),
+    ));
+    (wrapped, guard)
+}
+
 impl AgentEngine {
     pub fn new(config: Config, tools: ToolRegistry, output: Arc<dyn OutputSink>) -> Self {
         let provider = create_provider(&config);
@@ -4609,6 +4723,16 @@ impl AgentEngine {
         // on `self.config` solely for the live gate's transient `AgentSpawner`.
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
+        // #174 — install the spend guard BEFORE the struct literal partially
+        // moves `config`.
+        let (provider, spend_guard) = install_spend_guard(
+            provider,
+            config.compat.provider_type(),
+            &config.model,
+            &config.compat,
+            config.budget.spend_mode(),
+            &uuid::Uuid::new_v4().to_string(),
+        );
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
         let confirmer = ToolConfirmer::with_policy(
             config.smart_approval_policy(),
@@ -4638,6 +4762,7 @@ impl AgentEngine {
         Self {
             flux_loop_intent: None,
             provider,
+            spend_guard,
             egress_policy: wcore_egress::default_policy(),
             tools: Arc::new(tools),
             messages: Vec::new(),
@@ -4870,6 +4995,16 @@ impl AgentEngine {
         // `new_with_provider` for the rationale).
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
+        // #174 — see `new_with_provider`: guard installed before the literal
+        // partially moves `config`.
+        let (provider, spend_guard) = install_spend_guard(
+            provider,
+            config.compat.provider_type(),
+            &config.model,
+            &config.compat,
+            config.budget.spend_mode(),
+            &uuid::Uuid::new_v4().to_string(),
+        );
         // #1161 — read the persisted conversation id BEFORE `session` is moved
         // into `current_session` below.
         let resumed_conversation_id = session
@@ -4929,6 +5064,7 @@ impl AgentEngine {
         Self {
             flux_loop_intent: None,
             provider,
+            spend_guard,
             egress_policy: wcore_egress::default_policy(),
             tools: Arc::new(tools),
             messages: session.messages.clone(),
@@ -6365,6 +6501,25 @@ impl AgentEngine {
     /// `/new`) to release the pin and let hook/skill switches resume.
     pub fn set_model(&mut self, model: impl Into<String>) {
         let model = model.into();
+        // #174 c5 — an explicit operator pick is not a SILENT escalation, but
+        // it is still an escalation and must be recorded with its reason.
+        // A spend MODE still binds: `/model` cannot buy through `local-only`.
+        let profile =
+            crate::spend_guard::classify_model(self.compat.provider_type(), &model, &self.compat);
+        if let Err(refusal) = self.spend_guard.authorize(
+            profile,
+            crate::spend_guard::EscalationSource::Operator,
+            "explicit operator model selection",
+        ) {
+            tracing::warn!(
+                target: "wcore_agent::spend_guard",
+                requested = %model,
+                %refusal,
+                "model selection refused by the spend guard"
+            );
+            self.output.emit_info(&refusal.to_string());
+            return;
+        }
         self.user_model_pin = Some(model.clone());
         self.model = model;
     }
@@ -6421,7 +6576,56 @@ impl AgentEngine {
             );
             return;
         }
+        // #174 c5 — this IS the silent-escalation path: a skill or hook moving
+        // the live model with nobody asked. `admit` (not `authorize`) is
+        // deliberate — a hook cannot supply an operator's reason, so an upward
+        // move here is refused rather than recorded and allowed.
+        let profile = crate::spend_guard::classify_model(
+            self.compat.provider_type(),
+            &new_model,
+            &self.compat,
+        );
+        if let Err(refusal) = self.spend_guard.admit(&profile) {
+            tracing::warn!(
+                target: "wcore_agent::spend_guard",
+                requested = %new_model,
+                %refusal,
+                "skill/hook switch_model refused by the spend guard"
+            );
+            self.output.emit_info(&refusal.to_string());
+            return;
+        }
         self.model = new_model;
+    }
+
+    /// #174 c2 — the run's spend guard, for hosts and tests that need to read
+    /// the audit or authorize an escalation.
+    pub fn spend_guard(&self) -> &Arc<crate::spend_guard::SpendGuard> {
+        &self.spend_guard
+    }
+
+    /// #174 c2 — close the current task's spend audit and persist its record.
+    ///
+    /// Called from exactly one place ([`Self::run_with_content`]), on EVERY
+    /// terminal path including the error ones, which is what makes "a record
+    /// after every task" true rather than "a record after a task that ended
+    /// the way we expected".
+    fn emit_task_spend_audit(&self) {
+        let Some(record) = self.spend_guard.finish_task() else {
+            return;
+        };
+        tracing::info!(
+            target: "wcore_agent::spend_audit",
+            task = %record.task_id,
+            summary = %record.summary(),
+            "per-task spend audit record"
+        );
+        // Only surface it to the user when something was refused or escalated.
+        // A line on every turn would train the reader to skip the one turn
+        // where it mattered.
+        if !record.refusals.is_empty() || !record.escalations.is_empty() {
+            self.output.emit_info(&record.summary());
+        }
     }
 
     /// The active model identifier (used by the TUI status bar + tests).
@@ -6462,7 +6666,20 @@ impl AgentEngine {
         compat: wcore_config::compat::ProviderCompat,
         model: String,
     ) {
-        self.provider = provider;
+        // #174 — a rebind installs a deliberately chosen provider+model, so it
+        // is the new authorized baseline. Routed through the same installer as
+        // the constructors: there must be no way to reach `self.provider` with
+        // an unguarded handle.
+        let (wrapped, spend_guard) = install_spend_guard(
+            provider,
+            compat.provider_type(),
+            &model,
+            &compat,
+            self.spend_guard.mode(),
+            &self.budget_session_id(),
+        );
+        self.provider = wrapped;
+        self.spend_guard = spend_guard;
         self.compat = compat;
         self.model = model;
         // D014: a provider rebind installs a deliberately chosen model for the
@@ -8537,6 +8754,24 @@ impl AgentEngine {
     /// The active provider receives the image blocks in this turn directly;
     /// no auxiliary vision backend or second credential is involved.
     pub async fn run_with_content(
+        &mut self,
+        user_input: &str,
+        additional_content: Vec<ContentBlock>,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
+        // #174 c2 — ONE task, ONE spend audit record. The body below has a
+        // dozen `return` paths (answered, budget-stopped, cancelled, journal
+        // refusal, `?` on an authority error); wrapping it here is the only
+        // shape where every one of them emits, and where adding a thirteenth
+        // cannot forget to.
+        let outcome = self
+            .run_with_content_audited(user_input, additional_content, msg_id)
+            .await;
+        self.emit_task_spend_audit();
+        outcome
+    }
+
+    async fn run_with_content_audited(
         &mut self,
         user_input: &str,
         additional_content: Vec<ContentBlock>,
@@ -12878,15 +13113,42 @@ impl AgentEngine {
                         if let Some(tier_model) =
                             select_tier_model(&decision, requires_vision, &self.compat)
                         {
-                            tracing::debug!(
-                                target: "wcore_agent::routing",
-                                from = %self.model,
-                                to = %tier_model,
-                                hint = %decision.to_hint().0,
-                                "smart-routing tier swap"
+                            // #174 c3-c5 — a tier "downgrade" is only a
+                            // downgrade if the tier model is actually cheaper.
+                            // A `[compat.tier_models]` entry naming a pricier
+                            // (or unpriced, or hosted-under-local-only) model
+                            // is an escalation wearing a cheap tier's name, so
+                            // it is checked, not trusted. Refusing here DECLINES
+                            // THE SWAP rather than failing the turn: the
+                            // configured model is still perfectly runnable, and
+                            // the decorator remains the backstop if it is not.
+                            let tier_profile = crate::spend_guard::classify_model(
+                                self.compat.provider_type(),
+                                &tier_model,
+                                &self.compat,
                             );
-                            request.model = tier_model.clone();
-                            effective_model = tier_model;
+                            match self.spend_guard.admit(&tier_profile) {
+                                Ok(()) => {
+                                    tracing::debug!(
+                                        target: "wcore_agent::routing",
+                                        from = %self.model,
+                                        to = %tier_model,
+                                        hint = %decision.to_hint().0,
+                                        "smart-routing tier swap"
+                                    );
+                                    request.model = tier_model.clone();
+                                    effective_model = tier_model;
+                                }
+                                Err(refusal) => {
+                                    tracing::warn!(
+                                        target: "wcore_agent::routing",
+                                        from = %self.model,
+                                        to = %tier_model,
+                                        %refusal,
+                                        "smart-routing tier swap refused by the spend guard"
+                                    );
+                                }
+                            }
                         }
                     }
 
@@ -13623,7 +13885,13 @@ impl AgentEngine {
                          conservative ceiling. Spend is reported only where a real price is known."
                     ));
                 }
+                // #174 c2 — keep the priced/unpriced verdict alongside the
+                // number. `reserved_cost.usd` is a conservative CEILING even
+                // when nothing is priced, and recording that ceiling as a cost
+                // would report an unpriced call as a known bill.
+                let reserved_cost_priced = reserved_cost.priced;
                 let reserved_cost = reserved_cost.usd;
+                let dispatch_auditor = self.spend_guard.auditor();
                 let budget_dispatch_id = provider_dispatch_id.clone().unwrap_or_else(|| {
                     format!("provider-budget-dispatch-{}", uuid::Uuid::new_v4())
                 });
@@ -13650,6 +13918,13 @@ impl AgentEngine {
                             reserved_input,
                             reserved_output,
                             reserved_cost,
+                            SettledDispatchAudit {
+                                auditor: dispatch_auditor.clone(),
+                                provider: reservation_provider.to_string(),
+                                model: effective_model.clone(),
+                                purpose: "conversation",
+                                priced: reserved_cost_priced,
+                            },
                         )),
                         Err(wcore_budget::BudgetError::CapExceeded {
                             kind,
@@ -13685,6 +13960,13 @@ impl AgentEngine {
                             reserved_input,
                             reserved_output,
                             reserved_cost,
+                            SettledDispatchAudit {
+                                auditor: dispatch_auditor.clone(),
+                                provider: reservation_provider.to_string(),
+                                model: effective_model.clone(),
+                                purpose: "conversation",
+                                priced: reserved_cost_priced,
+                            },
                         )),
                         Err(wcore_budget::BudgetError::CapExceeded {
                             kind,
@@ -13721,6 +14003,8 @@ impl AgentEngine {
                 let fallback_session_id = reservation_session_id.clone();
                 let fallback_dispatch_id = budget_dispatch_id.clone();
                 let fallback_compat = self.compat.clone();
+                let auditor_for_fallback = self.spend_guard.auditor();
+                let guard_for_fallback = Arc::clone(&self.spend_guard);
                 let fallback_admitter: wcore_providers::retry::ConfiguredFallbackAdmitter =
                     Arc::new(move |_, _, next_provider, next_model, previous_attempted| {
                         let mut state = fallback_state_for_admission
@@ -13755,6 +14039,24 @@ impl AgentEngine {
                             }
                         }
 
+                        // #174 c3-c5 — the spend guard binds here, before any
+                        // reservation is taken, because this is the one
+                        // dispatch path that changes provider AND model below
+                        // the guarded provider handle.
+                        let next_profile = crate::spend_guard::classify_model(
+                            next_provider,
+                            next_model,
+                            &fallback_compat,
+                        );
+                        if let Err(refusal) = guard_for_fallback.admit(&next_profile) {
+                            state.failure =
+                                Some(ConfiguredFallbackAdmissionFailure::SpendGuard(refusal));
+                            return Err(ProviderError::NotAttempted {
+                                reason: "configured fallback refused by the spend guard"
+                                    .to_string(),
+                                failure_code: Some("spend_guard_refused".to_string()),
+                            });
+                        }
                         let next_cost = resolve_conservative_reservation_cost(
                             next_provider,
                             next_model,
@@ -13792,6 +14094,13 @@ impl AgentEngine {
                                         reserved_input,
                                         reserved_output,
                                         next_cost_usd,
+                                        SettledDispatchAudit {
+                                            auditor: auditor_for_fallback.clone(),
+                                            provider: next_provider.to_string(),
+                                            model: next_model.to_string(),
+                                            purpose: "configured_fallback",
+                                            priced: next_cost.priced,
+                                        },
                                     )),
                                     Ok(Err(error)) => {
                                         state.failure =
@@ -13829,6 +14138,13 @@ impl AgentEngine {
                                         reserved_input,
                                         reserved_output,
                                         next_cost_usd,
+                                        SettledDispatchAudit {
+                                            auditor: auditor_for_fallback.clone(),
+                                            provider: next_provider.to_string(),
+                                            model: next_model.to_string(),
+                                            purpose: "configured_fallback",
+                                            priced: next_cost.priced,
+                                        },
                                     )),
                                     Err(error) => {
                                         state.failure =
@@ -14051,6 +14367,14 @@ impl AgentEngine {
                                 ),
                                 false,
                             );
+                        }
+                        ConfiguredFallbackAdmissionFailure::SpendGuard(refusal) => {
+                            self.output.emit_budget_exceeded(
+                                refusal.kind(),
+                                &format!("{current_attempt_provider}/{current_attempt_model}"),
+                                "a model this session is permitted to use",
+                            );
+                            self.emit_error(&refusal.to_string(), false);
                         }
                     }
                     return self
@@ -20569,6 +20893,7 @@ mod set_config_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -22447,6 +22772,7 @@ mod phase6_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -22776,6 +23102,7 @@ mod compact_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -24844,6 +25171,7 @@ mod plan_mode_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -25306,6 +25634,7 @@ mod hook_integration_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -26479,6 +26808,7 @@ mod approval_bridge_engine_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
@@ -27786,6 +28116,7 @@ mod user_model_writeback_tests {
             flux_loop_collisions: 0,
             flux_loop_intent: None,
             provider: Arc::new(NullProvider),
+            spend_guard: super::test_spend_guard(),
             egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
