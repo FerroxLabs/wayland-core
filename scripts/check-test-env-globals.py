@@ -35,10 +35,40 @@ WHAT IT CHECKS
     integration test in the repository was unexamined by BOTH instruments at
     once. `crates/*/tests` is where most of this repo's env writing lives.
 
+HOW A HELPER WRITE IS AUDITED
+    A `set_var` inside a helper -- an RAII env guard, a `temp_state()`, a
+    `PinnedRetryBudget::pin` -- used to be classified `helper` and excused,
+    on the reasoning that proving a helper safe means proving EVERY caller
+    serialized. That excuse covered the defect shape #1134 was OPENED about,
+    and 153 sites with it: the lint fired only on a `set_var` written
+    lexically inside a test fn, so moving the same write one call deep made it
+    invisible while changing nothing about the hazard.
+
+    Callers are now resolved, by attribution key:
+      * a write inside `impl [Trait for] Type` is keyed on `Type`, not on the
+        method name. That is what makes a guard tractable: `Drop::drop` and
+        the constructor belong to ONE key, and `Type` is a specific CamelCase
+        identifier rather than `drop`/`new`/`set`, whose bare names collide
+        with std on every line of the repository.
+      * a write inside a free fn is keyed on the fn name, and ONLY when that
+        name is declared exactly once in the binary. Otherwise it is
+        unattributable and reported, never failed -- a colliding name would
+        otherwise convict the wrong caller.
+    Every mention of the key inside the binary, outside the key's own defining
+    block, is a call site; its enclosing fn is classified the same way, and a
+    helper caller is followed one level further (bounded, cycle-guarded).
+    A key with even one UNSERIALIZED-TEST caller is `UNSERIALIZED-HELPER` and
+    FAILS exactly like a direct write.
+
+    Under-attribution is the safe direction and is taken deliberately:
+    receiver-style calls through a re-export, or a key whose name collides,
+    end up in the reported residue rather than in the verdict.
+
 WHAT IT DOES NOT CHECK
-    Writes inside helper functions are reported but not failed: proving a
-    helper safe means proving EVERY caller serialized, which this text scan
-    cannot do. That residue is printed on every run so it cannot rot silently.
+    A write whose callers are all production code is a PRODUCTION write, not
+    this class, and is reported rather than failed -- `wcore-config`'s
+    `.env` loader is the honest example. It is counted on every run so a test
+    helper cannot hide in that bucket silently.
 
     A write in a binary that holds exactly ONE test is reported, not failed:
     with no sibling running in that process there is nothing to contaminate.
@@ -143,6 +173,15 @@ CONST = re.compile(r"const\s+([A-Z][A-Z0-9_]*)\s*:\s*&(?:'static\s+)?str\s*=\s*\
 FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)", re.M)
 PKG_NAME = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
 TESTATTR = re.compile(r"#\[(?:[A-Za-z0-9_]+::)*test(?:\s*\([^)]*\))?\s*\]")
+# `impl [Generics] [Trait for] Type` -- group 1 is the TYPE, which is the
+# attribution key for every write inside the block. Keying on the type rather
+# than the method is what makes an RAII env guard resolvable: `pin` and `drop`
+# are the same guard, and `Drop::drop` cannot be found by searching for `drop(`.
+IMPL = re.compile(
+    r"^[ \t]*impl(?:\s*<[^>]*>)?\s+"
+    r"(?:[A-Za-z0-9_:<>, \'&]+?\s+for\s+)?([A-Za-z0-9_]+)",
+    re.M,
+)
 # Deliberately BROADER than the hazard analysis below, and used only to SCOPE
 # the shared-process CI leg. That leg's subject is process-global state of every
 # kind -- the four defects the lib leg caught on the day it was added were an
@@ -175,6 +214,44 @@ def test_spans(t):
             j += 1
         out.append((m.start(), j))
     return out
+
+
+def brace_span(t, start):
+    """(open, close) offsets of the first balanced `{...}` at or after `start`."""
+    i = t.find("{", start)
+    if i < 0:
+        return None
+    d, j = 0, i
+    while j < len(t):
+        if t[j] == "{":
+            d += 1
+        elif t[j] == "}":
+            d -= 1
+            if d == 0:
+                return (i, j)
+        j += 1
+    return None
+
+
+def impl_spans(t):
+    """[(open, close, type name)] for every `impl` block in the file."""
+    out = []
+    for m in IMPL.finditer(t):
+        span = brace_span(t, m.end())
+        if span:
+            out.append((span[0], span[1], m.group(1)))
+    return out
+
+
+def classify_site(attrs, body):
+    """The four kinds a write site can carry, from its enclosing fn alone."""
+    if "serial" in attrs:
+        return "serial-attr"
+    if ".lock()" in body:
+        return "lock-guarded"
+    if TESTATTR.search(attrs):
+        return "UNSERIALIZED-TEST"
+    return "helper"
 
 
 def enclosing(t, pos, fns=None):
@@ -300,11 +377,15 @@ def scan(pkgs):
 
     stripped = {p: strip_noise(t) for p, t in raw.items()}
     fn_index = {p: list(FN.finditer(t)) for p, t in stripped.items()}
+    impl_index = {p: impl_spans(t) for p, t in stripped.items()}
 
     writers, readers, sites = {}, {}, {}
     kinds, ntests, crate_of = {}, {}, {}
+    pending = []          # helper writes awaiting caller resolution
+    files_of = {}         # binary -> its (path, whole) list
     for binary, c, files in us:
         crate_of[binary] = c
+        files_of[binary] = files
         ntests.setdefault(binary, 0)
         for p, whole in files:
             t = stripped[p]
@@ -314,23 +395,39 @@ def scan(pkgs):
                 1 for m in TESTATTR.finditer(t)
                 if any(a <= m.start() <= b for a, b in sp)
             )
+            # EVERY write in a scanned file counts, not only the ones
+            # lexically inside `#[cfg(test)]`. `PinnedRetryBudget::pin` -- the
+            # helper #1134 opens with -- lives in an ungated `pub mod
+            # test_utils`, and `src/bash/tests.rs` is a whole test module
+            # whose `#[cfg(test)]` sits in its PARENT file. Both were invisible
+            # to a span-limited scan; whether they are test code is decided
+            # below by WHO CALLS THEM, which needs no naming convention.
             for m in WRITE.finditer(t):
                 v = resolve(m.group(1))
-                if not v or not any(a <= m.start() <= b for a, b in sp):
+                if not v:
+                    continue
+                fn, attrs, body = enclosing(t, m.start(), fns)
+                kind = classify_site(attrs, body)
+                in_test_span = any(a <= m.start() <= b for a, b in sp)
+                if kind != "helper" and not in_test_span:
+                    # A `#[test]` outside a test span cannot happen in `src/`;
+                    # if it ever does, treat it as the test it declares itself
+                    # to be rather than dropping it.
+                    in_test_span = True
+                if kind == "helper":
+                    key = None
+                    for a, b, ty in impl_index[p]:
+                        if a <= m.start() <= b:
+                            key = ty
+                    pending.append((binary, v, p,
+                                    t[: m.start()].count("\n") + 1, fn, key))
+                    continue
+                if not in_test_span:
                     continue
                 writers.setdefault(binary, set()).add(v)
-                fn, attrs, body = enclosing(t, m.start(), fns)
-                if "serial" in attrs:
-                    kind = "serial-attr"
-                elif ".lock()" in body:
-                    kind = "lock-guarded"
-                elif TESTATTR.search(attrs):
-                    kind = "UNSERIALIZED-TEST"
-                else:
-                    kind = "helper"
                 kinds[kind] = kinds.get(kind, 0) + 1
                 sites.setdefault((binary, v), []).append(
-                    (p, t[: m.start()].count("\n") + 1, kind, fn)
+                    (p, t[: m.start()].count("\n") + 1, kind, fn, None)
                 )
             # Only PRODUCTION code counts as a reader: `src/` outside
             # `#[cfg(test)]`. A read from a test file is the test observing its
@@ -341,6 +438,89 @@ def scan(pkgs):
                 v = resolve(m.group(1))
                 if v and not any(a <= m.start() <= b for a, b in sp):
                     readers.setdefault(c, set()).add(v)
+
+    # ── helper caller resolution ────────────────────────────────────────
+    #
+    # A helper write is only as safe as its WEAKEST caller. Resolve the
+    # attribution key (see the module docstring), walk every mention of it in
+    # the same binary, and take the strongest kind found: one unserialized
+    # test caller makes the write UNSERIALIZED-HELPER and fails the gate.
+    fn_decls = {}
+    for binary, files in files_of.items():
+        counter = {}
+        for path, _ in files:
+            for m in fn_index[path]:
+                counter[m.group(1)] = counter.get(m.group(1), 0) + 1
+        fn_decls[binary] = counter
+
+    def callers_of(binary, key, qualified):
+        """[(fn name, kind)] for every call site of `key` in this binary."""
+        # A type key must be USED, not merely mentioned: `Type::`, `Type {` or
+        # `Type(`. The declaration keywords are excluded by lookbehind so
+        # `struct Type`/`impl Drop for Type` are not read as call sites --
+        # `enclosing()` would otherwise attribute them to whatever fn happens
+        # to precede the declaration.
+        rx = re.compile(
+            r"(?<!struct )(?<!enum )(?<!impl )(?<!for )(?<!fn )\b"
+            + re.escape(key)
+            + (r"\s*(?:::|\{|\()" if qualified else r"\s*(?:::<[^>]*>)?\s*\("))
+        out = []
+        for path, whole in files_of[binary]:
+            t = stripped[path]
+            for m in rx.finditer(t):
+                if qualified and any(a <= m.start() <= b and ty == key
+                                     for a, b, ty in impl_index[path]):
+                    continue          # inside the key's own impl block
+                fn, attrs, body = enclosing(t, m.start(), fn_index[path])
+                if fn is None or fn == key:
+                    continue
+                out.append((fn, classify_site(attrs, body)))
+        return out
+
+    unattributable = 0
+    production_write = 0
+    for binary, v, path, line, fn, key in pending:
+        qualified = key is not None
+        if key is None:
+            if fn is None or fn_decls[binary].get(fn, 0) != 1:
+                # A colliding or missing name convicts the wrong caller.
+                # Report it; never fail on it.
+                unattributable += 1
+                kinds["unattributable-helper"] = (
+                    kinds.get("unattributable-helper", 0) + 1)
+                continue
+            key = fn
+        seen, frontier, verdict, reached = set(), [(key, qualified)], set(), False
+        for _ in range(3):
+            nxt = []
+            for name, qual in frontier:
+                if name in seen:
+                    continue
+                seen.add(name)
+                for caller, kind in callers_of(binary, name, qual):
+                    reached = True
+                    if kind == "helper":
+                        nxt.append((caller, False))
+                    else:
+                        verdict.add(kind)
+            frontier = nxt
+            if not frontier:
+                break
+        if "UNSERIALIZED-TEST" in verdict:
+            kind = "UNSERIALIZED-HELPER"
+        elif verdict:
+            kind = "serialized-helper"
+        else:
+            # Nobody in this binary's test code calls it. Either production
+            # code owns the write (`wcore-config`'s .env loader) or the call
+            # spelling is one this scan does not resolve. Neither is a verdict.
+            production_write += 1
+            kinds["unreached-helper"] = kinds.get("unreached-helper", 0) + 1
+            continue
+        writers.setdefault(binary, set()).add(v)
+        kinds[kind] = kinds.get(kind, 0) + 1
+        via = sorted(verdict)
+        sites.setdefault((binary, v), []).append((path, line, kind, fn, via))
 
     def closure(n):
         seen, st = set(), [n]
@@ -376,6 +556,28 @@ _SIBLING = "    #[test]\n    fn sibling() { assert!(true); }\n"
 _UNSERIAL = '    #[test]\n    fn t() { unsafe { std::env::set_var("SHARED_V", "x") }; }\n' + _SIBLING
 _SERIAL = '    #[test]\n    #[serial_test::serial]\n    fn t() { unsafe { std::env::set_var("SHARED_V", "x") }; }\n' + _SIBLING
 _COMMENT_ONLY = '    /// This test used to `set_var("SHARED_V", ...)` and no longer does.\n    #[test]\n    fn t() { assert!(true); }\n' + _SIBLING
+# #1134 c3. The SAME write, moved one call deep into an RAII guard -- the shape
+# that used to be classified `helper` and excused, and the shape the issue
+# opens with (`PinnedRetryBudget::pin`). The hazard is identical; only the
+# lexical position changed, so the gate must behave identically.
+_GUARD = (
+    "    struct EnvPin;\n"
+    "    impl EnvPin {\n"
+    "        fn new() -> Self { unsafe { std::env::set_var(\"SHARED_V\", \"x\") }; Self }\n"
+    "    }\n"
+)
+_HELPER_UNSERIAL = (
+    _GUARD + '    #[test]\n    fn t() { let _p = EnvPin::new(); }\n' + _SIBLING
+)
+_HELPER_SERIAL = (
+    _GUARD
+    + '    #[test]\n    #[serial_test::serial]\n    fn t() { let _p = EnvPin::new(); }\n'
+    + _SIBLING
+)
+# The guard is defined but never constructed. Nothing in this binary can reach
+# the write, so convicting it would be convicting an unreachable line -- the
+# residue bucket, not the verdict.
+_HELPER_UNCALLED = _GUARD + '    #[test]\n    fn t() { assert!(true); }\n' + _SIBLING
 
 
 # An integration test file carries no `#[cfg(test)]`; the file IS the test
@@ -419,7 +621,8 @@ def _live(root):
         (v, b)
         for v, b, _ in pairs
         if ntests.get(b, 0) >= 2
-        and any(s[2] == "UNSERIALIZED-TEST" for s in sites.get((b, v), []))
+        and any(s[2] in ("UNSERIALIZED-TEST", "UNSERIALIZED-HELPER")
+                for s in sites.get((b, v), []))
     ]
 
 
@@ -439,6 +642,9 @@ def self_test():
     cases = [
         ("src: unserialized writer + prod reader", _UNSERIAL, None, True),
         ("src: the same writer, serialized", _SERIAL, None, False),
+        ("src: the write one call deep, caller unserialized", _HELPER_UNSERIAL, None, True),
+        ("src: the write one call deep, caller serialized", _HELPER_SERIAL, None, False),
+        ("src: a guard nothing ever constructs", _HELPER_UNCALLED, None, False),
         ("src: set_var quoted in a doc comment", _COMMENT_ONLY, None, False),
         ("tests/: unserialized writer + sibling", None, _INT_UNSERIAL, True),
         ("tests/: the same writer, serialized", None, _INT_SERIAL, False),
@@ -564,6 +770,42 @@ def format_targets(selected):
     return lines
 
 
+DEBT_FILE = ".config/env-global-helper-debt.txt"
+
+
+def load_debt(root, today):
+    """-> ({(binary, var): reason}, [complaints]) from the helper-debt file.
+
+    Absence of the file is not silence: the gate says so and exempts nothing.
+    """
+    path = os.path.join(root, DEBT_FILE)
+    if not os.path.isfile(path):
+        return {}, ["%s is missing; no pair is exempt." % DEBT_FILE]
+    out, bad = {}, []
+    for n, raw in enumerate(open(path, encoding="utf-8"), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            bad.append("%s:%d is not `<expiry> <binary> <VAR> <gh#N> <reason>`: "
+                       "%r. A list nobody can parse is a list that exempts "
+                       "everything." % (DEBT_FILE, n, line))
+            continue
+        expiry, binary, var, issue, reason = parts
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", expiry):
+            bad.append("%s:%d expiry %r is not YYYY-MM-DD."
+                       % (DEBT_FILE, n, expiry))
+            continue
+        if expiry < today:
+            bad.append("%s:%d expired on %s and was not renewed: %s %s (%s). "
+                       "An expired entry fails exactly as an unlisted pair does."
+                       % (DEBT_FILE, n, expiry, binary, var, issue))
+            continue
+        out[(binary, var)] = "%s expires %s -- %s" % (issue, expiry, reason)
+    return out, bad
+
+
 def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     pkgs = discover(root)
@@ -607,12 +849,30 @@ def main():
               "exact blind spot this scanner was widened to close.")
         return 2
 
-    live, sole = [], []
+    debt, debt_complaints = load_debt(
+        root, __import__("datetime").date.today().isoformat())
+    used_debt = set()
+
+    live, sole, excused = [], [], []
     for v, c, rc in pairs:
-        bad = [s for s in sites.get((c, v), []) if s[2] == "UNSERIALIZED-TEST"]
+        bad = [s for s in sites.get((c, v), [])
+               if s[2] in ("UNSERIALIZED-TEST", "UNSERIALIZED-HELPER")]
         if not bad:
             continue
+        # A DIRECT write is never excused, whatever the debt file says: the
+        # exemption covers only the class the lint could not previously see.
+        only_helper = all(x[2] == "UNSERIALIZED-HELPER" for x in bad)
+        if only_helper and (c, v) in debt:
+            used_debt.add((c, v))
+            excused.append((v, c, rc, bad))
+            continue
         (live if ntests.get(c, 0) >= 2 else sole).append((v, c, rc, bad))
+
+    for key in sorted(set(debt) - used_debt):
+        debt_complaints.append(
+            "%s lists %s %s, which no longer matches any hazard. A line that "
+            "has stopped applying would excuse the next occurrence for free -- "
+            "delete it." % (DEBT_FILE, key[0], key[1]))
 
     print("control ok: %s found in %s (production readers: %s)"
           % (control[0][0], control[0][1], ",".join(control[0][2])))
@@ -623,17 +883,32 @@ def main():
     print("  of those, integration binaries: %d"
           % len([p for p in pairs if "::" in p[1]]))
     print("write sites by kind: %s" % kinds)
-    print("NOT audited by this gate: %d write(s) inside helper functions -- "
-          "safe only if every caller is serialized." % kinds.get("helper", 0))
+    print("helper writes AUDITED by caller (#1134 c3): %d reached only "
+          "serialized callers, %d reached an unserialized test and FAIL below."
+          % (kinds.get("serialized-helper", 0),
+             kinds.get("UNSERIALIZED-HELPER", 0)))
+    print("NOT audited by this gate: %d write(s) whose attribution key is a fn "
+          "name declared more than once in the binary (a colliding name would "
+          "convict the wrong caller), and %d whose callers are production code "
+          "or a call spelling this scan does not resolve."
+          % (kinds.get("unattributable-helper", 0),
+             kinds.get("unreached-helper", 0)))
     print("shared-process integration leg: %d target(s) selected, %d test(s) "
           "excluded from it with a stated reason"
           % (len(selected), sum(len(v) for v in SHARED_PROCESS_SKIPS.values())))
     for (c, t), tests in sorted(SHARED_PROCESS_SKIPS.items()):
         for name in sorted(tests):
             print("      excluded: %s --test %s :: %s" % (c, t, name))
-    if skip_complaints:
+    if excused:
+        print("\nDEBT, reported not failed: %d helper-attributed pair(s) listed "
+              "in %s. Each is a real hazard under the shared-process leg; the "
+              "list is dated and is designed to shrink." % (len(excused), DEBT_FILE))
+        for v, c, _, bad in excused:
+            print("      %s  %s  (%s)" % (v, c, debt[(c, v)]))
+
+    if skip_complaints or debt_complaints:
         print()
-        for c in skip_complaints:
+        for c in skip_complaints + debt_complaints:
             print("FAIL: %s" % c)
         return 1
 
@@ -643,9 +918,11 @@ def main():
               "process to contaminate. Adding a second test to one of these files "
               "turns it into a failure, which is the correct direction." % len(sole))
         for v, c, _, bad in sole:
-            for p, line, _, fn in bad:
-                print("      %s  %s:%d  fn %s"
-                      % (v, os.path.relpath(p, root), line, fn))
+            for p, line, kind, fn, via in bad:
+                print("      %s  %s:%d  fn %s%s"
+                      % (v, os.path.relpath(p, root), line, fn,
+                         "" if via is None else "  [helper, reached from %s]"
+                         % ",".join(via)))
 
     if not live:
         print("\nOK: no unserialized test writes a global that its own binary's "
@@ -658,8 +935,12 @@ def main():
         print("  %s  written by test binary %s (%d tests in that process)"
               % (v, c, ntests.get(c, 0)))
         print("      production readers in that binary: %s" % ",".join(rc))
-        for p, line, _, fn in bad:
-            print("      %s:%d  fn %s" % (os.path.relpath(p, root), line, fn))
+        for p, line, kind, fn, via in bad:
+            print("      %s:%d  fn %s%s"
+                  % (os.path.relpath(p, root), line, fn,
+                     "" if via is None else
+                     "  [helper write, reached from an unserialized test; "
+                     "caller kinds seen: %s]" % ",".join(via)))
     print("\nFix by STATING the value instead of writing the process global -- pass it "
           "as an argument to the code under test, or use the crate's own per-thread "
           "override where one exists. Serializing the writer is sufficient ONLY when "
