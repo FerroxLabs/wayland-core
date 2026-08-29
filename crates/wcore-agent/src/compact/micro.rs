@@ -22,6 +22,14 @@ pub const SUPERSEDED_TOOL_RESULT_PREFIX: &str = "[Stale read superseded by a lat
 /// Tools whose result mutates a file, invalidating earlier full reads of it.
 const MUTATION_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
+/// Constant PREFIX for a tool result dropped by
+/// [`bound_accumulated_tool_results`] because the conversation's TOTAL
+/// tool-result budget was exceeded. A PREFIX, not an exact constant, so the
+/// stub can name the tool and the size it dropped while staying idempotent:
+/// any body starting with it is treated as already-bounded and is never
+/// re-mutated, which is what makes the pass byte-stable for the prompt cache.
+pub const BOUNDED_TOOL_RESULT_PREFIX: &str = "[Tool result dropped: over the accumulated";
+
 /// Marker key stamped into a `ToolUse.input` object whose arguments were
 /// compacted by [`compact_tool_call_args`] (parity gap 2). Presence of this
 /// key means "already compacted — never re-mutate", which is what makes the
@@ -586,6 +594,154 @@ fn args_stub(name: &str, input: &serde_json::Value, original_bytes: usize) -> se
         serde_json::Value::String(summary),
     );
     serde_json::Value::Object(obj)
+}
+
+// ── Accumulated tool-result ceiling (wayland#1150 c4) ───────────────────────
+
+/// Whether this tool-result body has already been replaced by one of the
+/// compaction stubs, and so must never be re-mutated.
+fn is_stubbed_result(content: &str) -> bool {
+    content == CLEARED_TOOL_RESULT
+        || content.starts_with(SUPERSEDED_TOOL_RESULT_PREFIX)
+        || content.starts_with(BOUNDED_TOOL_RESULT_PREFIX)
+}
+
+/// The replacement body for a tool result dropped by the accumulated ceiling.
+/// Deterministic in `(name, original_bytes)` so a message that has been
+/// bounded once serializes byte-identically at every later turn.
+fn bounded_result_stub(name: &str, original_bytes: usize) -> String {
+    format!(
+        "{BOUNDED_TOOL_RESULT_PREFIX} tool-result budget. {name} returned \
+         {original_bytes} bytes; re-run the tool if you still need them.]"
+    )
+}
+
+/// Bound the TOTAL size of accumulated tool RESULT bodies (wayland#1150 c4).
+///
+/// The gap this closes: per-result truncation already exists
+/// (`Tool::max_result_size()`, applied at ingestion), and the recency pass
+/// [`microcompact`] clears old results — but only once real context pressure
+/// has reached a fraction of the autocompact threshold. Between those two,
+/// N results each at the per-result cap ride in history at full size and are
+/// re-sent whole on every turn. Twenty 50,000-byte results is a megabyte of
+/// re-billed prompt per turn, which is the shape #1150 reported.
+///
+/// This pass is a CEILING, so it is deliberately unconditional:
+/// - **ungated** — no pressure trigger, no time/count heuristic; it runs on
+///   every compaction pipeline pass, so the sum can never exceed the budget
+///   in the first place rather than being relieved after it already has;
+/// - **every tool** — not just `compactable_tools`. That list gates an
+///   optimization; a ceiling a tool can opt out of is not a ceiling.
+///
+/// Prompt-cache discipline, mirroring [`compact_tool_call_args`]:
+/// - the newest `keep_recent` results are never touched (live working set);
+/// - stubbing is marker-gated and MONOTONE — [`is_stubbed_result`] skips a
+///   body that has already been replaced, so a bounded message never changes
+///   bytes again and the prefix up to it stays cache-valid;
+/// - the boundary is EPOCH-QUANTIZED: the count of stubbed results is rounded
+///   up to a multiple of `epoch_results`, so it advances in batches instead of
+///   flipping one message per turn inside the provider's cached prefix.
+///
+/// Returns a [`MicrocompactResult`] with the number of results dropped and a
+/// rough token estimate freed.
+pub fn bound_accumulated_tool_results(
+    messages: &mut [Message],
+    config: &CompactConfig,
+) -> MicrocompactResult {
+    let none = MicrocompactResult {
+        cleared_count: 0,
+        estimated_tokens_freed: 0,
+    };
+    let tr = &config.tool_results;
+    if !config.enabled || !tr.enabled {
+        return none;
+    }
+
+    let tool_names = build_tool_name_map(messages);
+
+    // Every tool-result block in conversation order, with its current size.
+    let mut all: Vec<(usize, usize, usize, bool)> = Vec::new();
+    let mut total = 0usize;
+    for (mi, msg) in messages.iter().enumerate() {
+        for (bi, block) in msg.content.iter().enumerate() {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                total += content.len();
+                all.push((mi, bi, content.len(), is_stubbed_result(content)));
+            }
+        }
+    }
+    if total <= tr.total_budget_bytes {
+        return none;
+    }
+
+    // Candidates: not already stubbed, and outside the protected tail.
+    let protected = tr.keep_recent.min(all.len());
+    let candidates: Vec<(usize, usize, usize)> = all[..all.len() - protected]
+        .iter()
+        .filter(|(_, _, _, stubbed)| !*stubbed)
+        .map(|&(mi, bi, len, _)| (mi, bi, len))
+        .collect();
+    if candidates.is_empty() {
+        return none;
+    }
+
+    // How many of the OLDEST candidates must go for the sum to fit again.
+    let mut running = total;
+    let mut need = 0usize;
+    for &(mi, bi, len) in &candidates {
+        if running <= tr.total_budget_bytes {
+            break;
+        }
+        let name = result_tool_name(messages, mi, bi, &tool_names);
+        let stub_len = bounded_result_stub(&name, len).len();
+        running = running.saturating_sub(len.saturating_sub(stub_len));
+        need += 1;
+    }
+    if need == 0 {
+        return none;
+    }
+
+    // Epoch quantization: round the batch UP so the boundary advances in
+    // steps of `epoch_results` and is byte-frozen in between.
+    let epoch = tr.epoch_results.max(1);
+    let eligible = need
+        .div_ceil(epoch)
+        .saturating_mul(epoch)
+        .min(candidates.len());
+
+    let mut cleared_count = 0usize;
+    let mut tokens_freed = 0usize;
+    for &(mi, bi, len) in &candidates[..eligible] {
+        let name = result_tool_name(messages, mi, bi, &tool_names);
+        let stub = bounded_result_stub(&name, len);
+        if let ContentBlock::ToolResult { content, .. } = &mut messages[mi].content[bi] {
+            tokens_freed += content.len().saturating_sub(stub.len()) / 4;
+            *content = stub;
+            cleared_count += 1;
+        }
+    }
+
+    MicrocompactResult {
+        cleared_count,
+        estimated_tokens_freed: tokens_freed,
+    }
+}
+
+/// Name of the tool that produced the result at `(mi, bi)`, or `"tool"` when
+/// the originating `ToolUse` is no longer in history.
+fn result_tool_name(
+    messages: &[Message],
+    mi: usize,
+    bi: usize,
+    tool_names: &HashMap<String, String>,
+) -> String {
+    match &messages[mi].content[bi] {
+        ContentBlock::ToolResult { tool_use_id, .. } => tool_names
+            .get(tool_use_id.as_str())
+            .cloned()
+            .unwrap_or_else(|| "tool".to_string()),
+        _ => "tool".to_string(),
+    }
 }
 
 // ── Permanent cache anchor (gap-1 + gap-2 coupling) ─────────────────────────
@@ -1865,5 +2021,205 @@ mod tests {
         compact_tool_call_args(&mut msgs, &cfg);
         assert_eq!(cache_anchor_index(&msgs), cache_anchor_index(&msgs));
         assert_eq!(cache_anchor_index(&msgs), Some(0));
+    }
+    // ── Accumulated tool-result ceiling (wayland#1150 c4) ───────────────
+
+    /// Build a session of `n` tool rounds, each returning `bytes` of result.
+    fn session_with_results(n: usize, bytes: usize) -> Vec<Message> {
+        let mut msgs = Vec::new();
+        for i in 0..n {
+            let id = format!("t{i}");
+            msgs.push(assistant_msg(vec![tool_use_block(&id, "Read")]));
+            msgs.push(user_msg(vec![tool_result_block(&id, &"x".repeat(bytes))]));
+        }
+        msgs
+    }
+
+    fn total_result_bytes(msgs: &[Message]) -> usize {
+        msgs.iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content.len()),
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// The #1150 shape: results at the per-result cap accumulating across a
+    /// session, no context pressure, nothing else in the pipeline touching
+    /// them. The claim under test is the one the ticket makes — the carried
+    /// size must stop growing with the session — so it is measured at two very
+    /// different session lengths against ONE constant ceiling.
+    #[test]
+    fn accumulated_tool_results_are_bounded_across_a_session() {
+        let config = default_config();
+        let tr = &config.tool_results;
+        // The guarantee: everything but the protected newest `keep_recent`
+        // results is squeezed under the budget. Both terms are constants, so
+        // the ceiling does not depend on how long the session ran.
+        let ceiling = tr.total_budget_bytes + tr.keep_recent * 50_000;
+
+        let mut short = session_with_results(20, 50_000);
+        let mut long = session_with_results(100, 50_000);
+        let unbounded_short = total_result_bytes(&short);
+        let unbounded_long = total_result_bytes(&long);
+        assert!(
+            unbounded_long > ceiling * 10,
+            "precondition: the long session must start far over the ceiling"
+        );
+
+        let result = bound_accumulated_tool_results(&mut short, &config);
+        bound_accumulated_tool_results(&mut long, &config);
+
+        assert!(result.cleared_count > 0, "the ceiling must have bitten");
+        assert!(
+            total_result_bytes(&short) <= ceiling,
+            "20 results must fit the ceiling: {} > {ceiling}",
+            total_result_bytes(&short)
+        );
+        assert!(
+            total_result_bytes(&long) <= ceiling,
+            "100 results must fit the SAME ceiling: {} > {ceiling}",
+            total_result_bytes(&long)
+        );
+        // Five times the tool calls must not mean five times the carried
+        // bytes — that difference is what "re-sent whole on every turn" cost.
+        assert!(
+            total_result_bytes(&long) < total_result_bytes(&short) + 20_000,
+            "carried bytes must not scale with session length: {} vs {}",
+            total_result_bytes(&long),
+            total_result_bytes(&short)
+        );
+        assert!(
+            total_result_bytes(&long) * 20 < unbounded_long,
+            "the long session must shrink by at least 20x, {} vs {unbounded_long}",
+            total_result_bytes(&long)
+        );
+        let _ = unbounded_short;
+    }
+
+    /// The live working set is protected however hard the ceiling bites.
+    #[test]
+    fn the_newest_results_are_never_dropped_by_the_ceiling() {
+        let config = default_config();
+        let keep = config.tool_results.keep_recent;
+        let mut msgs = session_with_results(20, 50_000);
+
+        bound_accumulated_tool_results(&mut msgs, &config);
+
+        let bodies: Vec<&String> = msgs
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+            .collect();
+        for body in &bodies[bodies.len() - keep..] {
+            assert!(
+                !body.starts_with(BOUNDED_TOOL_RESULT_PREFIX),
+                "the newest {keep} results must survive, found a stub"
+            );
+        }
+    }
+
+    /// Negative control: a session under the budget is left completely alone.
+    /// Without this the test above would pass on a pass that stubs everything.
+    #[test]
+    fn a_session_under_the_budget_is_untouched() {
+        let config = default_config();
+        let mut msgs = session_with_results(4, 1_000);
+        let before = msgs.clone();
+
+        let result = bound_accumulated_tool_results(&mut msgs, &config);
+
+        assert_eq!(result.cleared_count, 0);
+        assert_eq!(
+            total_result_bytes(&msgs),
+            total_result_bytes(&before),
+            "nothing may be dropped while the sum fits"
+        );
+    }
+
+    /// Monotone: a second pass over an already-bounded history changes ZERO
+    /// bytes. This is the prompt-cache property — a bounded message must
+    /// serialize identically on every later turn.
+    #[test]
+    fn the_ceiling_is_byte_stable_on_a_second_pass() {
+        let config = default_config();
+        let mut msgs = session_with_results(20, 50_000);
+        bound_accumulated_tool_results(&mut msgs, &config);
+        let after_first = serde_json::to_string(&msgs).unwrap();
+
+        let second = bound_accumulated_tool_results(&mut msgs, &config);
+
+        assert_eq!(
+            second.cleared_count, 0,
+            "a settled history must not re-mutate"
+        );
+        assert_eq!(
+            serde_json::to_string(&msgs).unwrap(),
+            after_first,
+            "a second pass must change zero bytes"
+        );
+    }
+
+    /// The boundary advances in epoch-sized batches, not one result per turn,
+    /// so the cached prefix is not invalidated on every single turn.
+    #[test]
+    fn the_ceiling_advances_in_epoch_sized_batches() {
+        let config = default_config();
+        let epoch = config.tool_results.epoch_results;
+        let mut msgs = session_with_results(20, 50_000);
+
+        let first = bound_accumulated_tool_results(&mut msgs, &config);
+
+        assert!(
+            first.cleared_count > 0,
+            "non-vacuity: the ceiling must have bitten for the batch size to mean anything"
+        );
+        assert_eq!(
+            first.cleared_count % epoch,
+            0,
+            "the batch must be a whole number of epochs, got {}",
+            first.cleared_count
+        );
+    }
+
+    /// A tool the operator excluded from `compactable_tools` is still bounded:
+    /// that list gates an optimization, this is a ceiling.
+    #[test]
+    fn the_ceiling_applies_to_tools_outside_the_compactable_list() {
+        let mut config = default_config();
+        config.compactable_tools = vec!["Read".to_string()];
+        let ceiling =
+            config.tool_results.total_budget_bytes + config.tool_results.keep_recent * 50_000;
+        let mut msgs = Vec::new();
+        for i in 0..20 {
+            let id = format!("t{i}");
+            msgs.push(assistant_msg(vec![tool_use_block(&id, "NotListed")]));
+            msgs.push(user_msg(vec![tool_result_block(&id, &"y".repeat(50_000))]));
+        }
+
+        bound_accumulated_tool_results(&mut msgs, &config);
+
+        assert!(
+            total_result_bytes(&msgs) <= ceiling,
+            "an unlisted tool must not be able to escape the ceiling"
+        );
+    }
+
+    /// Disabling the pass restores the old (unbounded) behaviour exactly.
+    #[test]
+    fn the_ceiling_can_be_switched_off() {
+        let mut config = default_config();
+        config.tool_results.enabled = false;
+        let mut msgs = session_with_results(20, 50_000);
+        let before = total_result_bytes(&msgs);
+
+        let result = bound_accumulated_tool_results(&mut msgs, &config);
+
+        assert_eq!(result.cleared_count, 0);
+        assert_eq!(total_result_bytes(&msgs), before);
     }
 }

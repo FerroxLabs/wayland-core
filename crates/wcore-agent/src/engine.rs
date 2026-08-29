@@ -6785,8 +6785,12 @@ impl AgentEngine {
         // `run_compaction` step 0. No file-cache bump for this pass: it never
         // touches tool-RESULT bodies (where diff-resend bases live).
         let args_result = micro::compact_tool_call_args(&mut self.messages, &self.compact_config);
+        // #1150 c4: the accumulated tool-RESULT ceiling, mirroring
+        // `run_compaction` step 0b.
+        let results_result =
+            micro::bound_accumulated_tool_results(&mut self.messages, &self.compact_config);
         let result = micro::microcompact(&mut self.messages, &self.compact_config);
-        if result.cleared_count > 0 {
+        if result.cleared_count + results_result.cleared_count > 0 {
             // Token-opt (diff-resend): clearing a tool-result body can remove
             // the read content a cached diff base references. Bump the file
             // cache's compaction generation so those bases stop qualifying —
@@ -6794,9 +6798,12 @@ impl AgentEngine {
             self.bump_file_cache_generation();
         }
         micro::MicrocompactResult {
-            cleared_count: result.cleared_count + args_result.cleared_count,
+            cleared_count: result.cleared_count
+                + args_result.cleared_count
+                + results_result.cleared_count,
             estimated_tokens_freed: result.estimated_tokens_freed
-                + args_result.estimated_tokens_freed,
+                + args_result.estimated_tokens_freed
+                + results_result.estimated_tokens_freed,
         }
     }
 
@@ -13046,11 +13053,17 @@ impl AgentEngine {
                     // accounts for the final content. Skipped unless the tail is
                     // user-role (never orphans a tool_use or creates adjacent user
                     // messages).
+                    //
+                    // #559 c6: every such injection is recorded, because the
+                    // message it lands on must not become a prompt-cache write
+                    // point — see the `mark_cache_boundaries` call below.
+                    let mut transient_tail = false;
                     if let Some(hint) = skill_hint
                         && let Some(last) = request.messages.last_mut()
                         && matches!(last.role, Role::User)
                     {
                         Self::attach_transient_block(last, hint);
+                        transient_tail = true;
                     }
 
                     // #559: the current date is NOT injected here any more. It
@@ -13087,7 +13100,8 @@ impl AgentEngine {
                         for line in &outcome.hook_trace {
                             tracing::debug!(target: "wcore_agent::hooks", "{line}");
                         }
-                        Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);
+                        transient_tail |=
+                            Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);
                     }
 
                     // W1 S3: place per-message cache breakpoints when the provider
@@ -13100,10 +13114,19 @@ impl AgentEngine {
                     // keeps the long prefix cache-valid while continuous
                     // args-compaction transitions the message at the
                     // keep_recent_turns boundary inside it.
+                    //
+                    // #559 c6: `transient_tail` carries the per-turn injections
+                    // above. The blocks they add live only in this clone, so the
+                    // message they land on is re-sent WITHOUT them next turn —
+                    // an entry written there can never be read back. On turn 1
+                    // that message is the whole conversation, which is how a
+                    // session reaches turn 26 with `cache_read = 0` on every
+                    // turn. The write point moves off it.
                     mark_cache_boundaries(
                         &mut request,
                         &self.compat,
                         micro::cache_anchor_index(&self.messages),
+                        transient_tail,
                     );
 
                     // W1 v0.6.3: stamp a smart-routing hint onto the request so
@@ -18063,6 +18086,26 @@ impl AgentEngine {
             ));
         }
 
+        // 0b. Accumulated tool-RESULT ceiling (#1150 c4) — CONTINUOUS, for the
+        // same reason as step 0: per-result truncation caps ONE result at
+        // ingestion and the microcompact below only fires under context
+        // pressure, so between them N results at the per-result cap ride in
+        // history at full size and are re-sent whole on every turn. This
+        // bounds their SUM. Monotone + epoch-quantized like step 0, so a
+        // bounded result never changes bytes again and the boundary advances
+        // in batches rather than once per turn inside the cached prefix.
+        let results_result =
+            micro::bound_accumulated_tool_results(&mut self.messages, &self.compact_config);
+        if results_result.cleared_count > 0 {
+            self.output.emit_info(&format!(
+                "Dropped {} tool result(s) over the accumulated budget (~{} tokens freed)",
+                results_result.cleared_count, results_result.estimated_tokens_freed
+            ));
+            // Token-opt (diff-resend): dropping a tool-result body can remove
+            // the read content a cached diff base references.
+            self.bump_file_cache_generation();
+        }
+
         // 1. Microcompact (lightweight, no LLM call)
         //
         // A-6: the count trigger is gated on the SAME real-pressure watermark
@@ -18580,10 +18623,13 @@ impl AgentEngine {
     ///
     /// Operates on `request_messages` (the per-turn CLONE), never on session
     /// history.
+    ///
+    /// Returns whether anything was appended — #559 c6: the caller must know,
+    /// because the message it landed on cannot be a prompt-cache write point.
     fn apply_pre_prompt_contribution(
         request_messages: &mut [Message],
         outcome: &crate::hooks::HookOutcome,
-    ) {
+    ) -> bool {
         // Collect this turn's whole contribution (budget-capped).
         let mut blocks: Vec<String> = Vec::new();
         for msg in &outcome.injected_messages {
@@ -18596,7 +18642,7 @@ impl AgentEngine {
             }
         }
         if blocks.is_empty() {
-            return;
+            return false;
         }
         // Drop blocks that already exist verbatim in the request (e.g. the
         // turn-1 SessionStart prelude carried in the clone). Per-block, scanning
@@ -18609,22 +18655,23 @@ impl AgentEngine {
         };
         let to_append: Vec<String> = blocks.into_iter().filter(|b| !already_present(b)).collect();
         if to_append.is_empty() {
-            return;
+            return false;
         }
         // Cache-safe tail rule: only append onto a user-role tail. If the tail
         // isn't user-role, inject nothing so a later user-role turn can still
         // surface this content (the clone is regenerated each turn).
         let Some(last) = request_messages.last_mut() else {
-            return;
+            return false;
         };
         if !matches!(last.role, Role::User) {
-            return;
+            return false;
         }
         for text in to_append {
             // Trusted product/plugin context must not land after the user's
             // own words — see `attach_transient_block`.
             Self::attach_transient_block(last, text);
         }
+        true
     }
 
     /// Move session-tier memory onto the real per-session DB file.

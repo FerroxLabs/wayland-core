@@ -1013,6 +1013,29 @@ impl ApprovalMode {
 /// under its own per-model minimum anyway).
 pub const DEFAULT_CACHE_MIN_PREFIX_TOKENS: usize = 1024;
 
+/// Whether `prompt_caching` defaults ON for `provider` when the user has not
+/// said (wayland#559 c3).
+///
+/// The whole Anthropic FAMILY — native Anthropic, Anthropic-on-Bedrock,
+/// Anthropic-on-Vertex — speaks the same `cache_control` dialect and is
+/// already handed the same breakpoint hints: all three set
+/// `cache_message_breakpoints: Some(true)` in `ProviderCompat`. Before this,
+/// only native Anthropic flipped the flag, so on Bedrock and Vertex the engine
+/// computed cache boundaries every turn and the adapter dropped the system and
+/// tools markers on the floor — prompt caching was OFF at two of the three
+/// sites that support it. #559's "caching is already on" measurement was taken
+/// against one provider and generalized; this is the rest of the enumeration.
+///
+/// Providers outside the family are untouched: OpenAI-shaped endpoints cache
+/// implicitly (nothing to enable) and Gemini does not honour explicit
+/// breakpoints at all.
+pub fn prompt_caching_on_by_default(provider: ProviderType) -> bool {
+    matches!(
+        provider,
+        ProviderType::Anthropic | ProviderType::Bedrock | ProviderType::Vertex
+    )
+}
+
 /// Prompt-caching preference for a provider entry. Accepts both TOML shapes:
 ///
 /// ```toml
@@ -2711,12 +2734,13 @@ impl Config {
         };
         let execution_policy = merged.execution.baseline_policy(requested_approvals);
 
-        // Resolve prompt_caching: default true for Anthropic
+        // Resolve prompt_caching: default ON for the whole Anthropic FAMILY.
+        // See `prompt_caching_on_by_default`.
         let prompt_caching = provider_config
             .prompt_caching
             .as_ref()
             .and_then(PromptCachingConfig::enabled)
-            .unwrap_or(matches!(provider, ProviderType::Anthropic));
+            .unwrap_or(prompt_caching_on_by_default(provider));
         let prompt_caching_min_prefix_tokens = provider_config
             .prompt_caching
             .as_ref()
@@ -3533,7 +3557,7 @@ pub fn resolve_council_provider(
         .prompt_caching
         .as_ref()
         .and_then(PromptCachingConfig::enabled)
-        .unwrap_or(matches!(provider, ProviderType::Anthropic));
+        .unwrap_or(prompt_caching_on_by_default(provider));
     let prompt_caching_min_prefix_tokens = provider_config
         .prompt_caching
         .as_ref()
@@ -11814,5 +11838,127 @@ require_priced = true
         both.browser.stealth.preferred_provider = crate::browser::BrowserProvider::Camoufox;
         both.browser.stealth.allow_cloud_fallback = true;
         assert_eq!(inert_config_keys(&both).len(), 2);
+    }
+}
+
+// --- wayland#559 c3: prompt caching defaults, enumerated -------------------
+
+#[cfg(test)]
+mod prompt_caching_default_tests {
+    use super::*;
+
+    /// Every provider whose compat says it honours explicit cache breakpoints
+    /// must also default `prompt_caching` ON. That pairing is the whole point:
+    /// `cache_message_breakpoints` makes the engine COMPUTE boundaries every
+    /// turn, `prompt_caching` decides whether the adapter emits them. Bedrock
+    /// and Vertex sat on the wrong side of that pairing — the engine marked,
+    /// the adapter dropped the system and tools markers — so prompt caching
+    /// was OFF at two of the three sites that support it while a measurement
+    /// against the third said it was on.
+    ///
+    /// This is an ENUMERATION, not a spot check: a new Anthropic-family
+    /// provider that sets `cache_message_breakpoints` and forgets the default
+    /// fails here rather than shipping silently uncached.
+    /// Every `ProviderType`, kept honest by `exhaustive_guard` below: adding a
+    /// variant breaks that match, which is the prompt to extend this list.
+    const ALL: [ProviderType; 23] = [
+        ProviderType::Anthropic,
+        ProviderType::OpenAI,
+        ProviderType::Bedrock,
+        ProviderType::Vertex,
+        ProviderType::Gemini,
+        ProviderType::AzureOpenAI,
+        ProviderType::Together,
+        ProviderType::Fireworks,
+        ProviderType::Nvidia,
+        ProviderType::Perplexity,
+        ProviderType::Cerebras,
+        ProviderType::OpenRouter,
+        ProviderType::FluxRouter,
+        ProviderType::Sakana,
+        ProviderType::Deepseek,
+        ProviderType::Xai,
+        ProviderType::Groq,
+        ProviderType::Moonshot,
+        ProviderType::Qwen,
+        ProviderType::Mistral,
+        ProviderType::Cohere,
+        ProviderType::OpenAIChatGpt,
+        ProviderType::MiniMax,
+    ];
+
+    /// Position of `p` in [`ALL`]. Exhaustive, so a new `ProviderType`
+    /// variant fails to compile here until it is added to the list — and
+    /// [`all_is_complete_and_correctly_ordered`] proves the two agree, so a
+    /// duplicated or misplaced entry cannot silently shrink the enumeration.
+    fn index_in_all(p: ProviderType) -> usize {
+        match p {
+            ProviderType::Anthropic => 0,
+            ProviderType::OpenAI => 1,
+            ProviderType::Bedrock => 2,
+            ProviderType::Vertex => 3,
+            ProviderType::Gemini => 4,
+            ProviderType::AzureOpenAI => 5,
+            ProviderType::Together => 6,
+            ProviderType::Fireworks => 7,
+            ProviderType::Nvidia => 8,
+            ProviderType::Perplexity => 9,
+            ProviderType::Cerebras => 10,
+            ProviderType::OpenRouter => 11,
+            ProviderType::FluxRouter => 12,
+            ProviderType::Sakana => 13,
+            ProviderType::Deepseek => 14,
+            ProviderType::Xai => 15,
+            ProviderType::Groq => 16,
+            ProviderType::Moonshot => 17,
+            ProviderType::Qwen => 18,
+            ProviderType::Mistral => 19,
+            ProviderType::Cohere => 20,
+            ProviderType::OpenAIChatGpt => 21,
+            ProviderType::MiniMax => 22,
+        }
+    }
+
+    #[test]
+    fn all_is_complete_and_correctly_ordered() {
+        for (i, p) in ALL.iter().enumerate() {
+            assert_eq!(index_in_all(*p), i, "{p:?} is out of place in ALL");
+        }
+    }
+
+    #[test]
+    fn every_breakpoint_provider_defaults_prompt_caching_on() {
+        for provider in ALL {
+            let compat = compat_defaults_for(provider);
+            if compat.cache_message_breakpoints() {
+                assert!(
+                    prompt_caching_on_by_default(provider),
+                    "{provider:?} honours cache breakpoints but defaults prompt_caching OFF —                      the engine would mark boundaries the adapter then drops"
+                );
+            }
+        }
+    }
+
+    /// Named arms, so the enumeration above cannot pass vacuously if the
+    /// compat presets ever stop advertising breakpoints.
+    #[test]
+    fn the_anthropic_family_defaults_on_and_the_rest_do_not() {
+        for on in [
+            ProviderType::Anthropic,
+            ProviderType::Bedrock,
+            ProviderType::Vertex,
+        ] {
+            assert!(prompt_caching_on_by_default(on), "{on:?} must default ON");
+        }
+        for off in [
+            ProviderType::OpenAI,
+            ProviderType::Gemini,
+            ProviderType::FluxRouter,
+        ] {
+            assert!(
+                !prompt_caching_on_by_default(off),
+                "{off:?} has no explicit cache_control dialect and must stay OFF"
+            );
+        }
     }
 }

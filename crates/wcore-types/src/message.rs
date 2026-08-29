@@ -81,6 +81,17 @@ pub enum MessageCacheHint {
     /// permits up to four `cache_control` markers per request; the helper uses
     /// at most three (system + tools + this message), staying inside the cap.
     Breakpoint,
+    /// This message carries PER-TURN TRANSIENT content (the skill-router hint,
+    /// a PrePrompt hook contribution) that will NOT be present on the next
+    /// turn, because it is injected into a per-turn CLONE of history rather
+    /// than into history itself.
+    ///
+    /// It is therefore poison as a cache WRITE point: the entry a provider
+    /// writes at this message can never be read again, because every later
+    /// turn re-sends the same message without the transient blocks. Providers
+    /// must emit no cache marker here and must move the write point to the
+    /// newest message that carries no transient content (wayland#559 c6).
+    Transient,
 }
 
 /// A message in the conversation

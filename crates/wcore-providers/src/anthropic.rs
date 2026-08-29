@@ -290,6 +290,7 @@ impl AnthropicProvider {
                 &mut body,
                 request.cache_tier.unwrap_or(CacheTier::Ephemeral5m),
                 self.min_prefix_tokens,
+                request_has_transient_tail(request),
             );
         } else {
             // Codex audit (e399feb1 finding 1): `build_messages` above runs
@@ -303,6 +304,16 @@ impl AnthropicProvider {
 
         body
     }
+}
+
+/// Whether the request's last message carries per-turn transient content, as
+/// stamped by `wcore_observability::cache::mark_cache_boundaries`. Shared by
+/// every Anthropic-family adapter so the prohibition is read the same way.
+pub fn request_has_transient_tail(request: &LlmRequest) -> bool {
+    matches!(
+        request.messages.last().and_then(|m| m.cache_breakpoint),
+        Some(wcore_types::message::MessageCacheHint::Transient)
+    )
 }
 
 /// Anthropic's hard limit on `cache_control` blocks per request.
@@ -358,7 +369,23 @@ const BYTES_PER_TOKEN_ESTIMATE: usize = 2;
 ///   - [`CacheTier::Ephemeral1h`] -> `{ "type": "ephemeral", "ttl": "1h" }`
 ///   - [`CacheTier::None`]        -> strip + return (caching disabled for
 ///     this request — pre-existing hint markers must not leak to the wire)
-pub fn apply_cache_zones(body: &mut Value, tier: CacheTier, min_prefix_tokens: usize) {
+///
+/// `transient_tail` (wayland#559 c6) says the last wire message carries
+/// per-turn transient content — the skill-router hint or a `PrePrompt` hook
+/// contribution, injected into a per-turn CLONE of history. That message is
+/// re-sent WITHOUT those blocks on every later turn, so an entry written at it
+/// can never be read back; on turn 1 it is the whole conversation, which is
+/// how a session ends up with `cache_read = 0` on all 26 turns. When set, the
+/// tail is stripped of any marker and zones 3+4 move back one message, onto
+/// the newest content every later turn will re-send byte-identically. With
+/// only the transient message present there is nothing stable to write at, so
+/// the messages zones are skipped entirely and only system + tools are cached.
+pub fn apply_cache_zones(
+    body: &mut Value,
+    tier: CacheTier,
+    min_prefix_tokens: usize,
+    transient_tail: bool,
+) {
     let marker = match cache_control_marker(tier) {
         Some(m) => m,
         None => {
@@ -373,6 +400,16 @@ pub fn apply_cache_zones(body: &mut Value, tier: CacheTier, min_prefix_tokens: u
     if estimated_prefix_tokens(body) < min_prefix_tokens {
         strip_message_cache_markers(body);
         return;
+    }
+
+    // The transient tail is a PROHIBITION, enforced before the budget is
+    // counted: strip anything an upstream hint path left on it so it can
+    // neither carry a marker nor consume a budget slot.
+    if transient_tail
+        && let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut)
+        && let Some(last) = messages.last_mut()
+    {
+        strip_one_message_cache_markers(last);
     }
 
     // Zone 1: system prompt — mark the last text block.
@@ -403,16 +440,39 @@ pub fn apply_cache_zones(body: &mut Value, tier: CacheTier, min_prefix_tokens: u
     {
         let last_idx = messages.len() - 1;
 
-        // Zone 4 first (newest wins the budget): the tail write point.
-        apply_message_zone_marker_budgeted(&mut messages[last_idx], &marker, &mut budget);
+        // The newest message an entry may be WRITTEN at. One short of the tail
+        // when the tail is transient; `None` when that leaves nothing stable.
+        let write_idx = if transient_tail {
+            last_idx.checked_sub(1)
+        } else {
+            Some(last_idx)
+        };
 
-        // Zone 3: the previous user boundary — the last user-role message
-        // strictly before the tail (= the previous turn's write point).
-        if let Some(prev) = messages[..last_idx]
-            .iter()
-            .rposition(|m| m.get("role").and_then(Value::as_str) == Some("user"))
-        {
-            apply_message_zone_marker_budgeted(&mut messages[prev], &marker, &mut budget);
+        if let Some(write_idx) = write_idx {
+            // Zone 4 first (newest wins the budget): the write point.
+            apply_message_zone_marker_budgeted(&mut messages[write_idx], &marker, &mut budget);
+
+            // Zone 3: the previous boundary — the last message strictly
+            // before the write point that was the PREVIOUS turn's write
+            // point. Without a transient tail that is the previous user
+            // boundary, as it has always been. With one, the write point has
+            // moved back onto the message before the tail, and the previous
+            // turn's write point sits at the same offset from ITS tail — so
+            // the role to look for is the write point's own.
+            let boundary_role = if transient_tail {
+                messages[write_idx]
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("user")
+                    .to_owned()
+            } else {
+                "user".to_owned()
+            };
+            if let Some(prev) = messages[..write_idx].iter().rposition(|m| {
+                m.get("role").and_then(Value::as_str) == Some(boundary_role.as_str())
+            }) {
+                apply_message_zone_marker_budgeted(&mut messages[prev], &marker, &mut budget);
+            }
         }
     }
 
@@ -432,19 +492,26 @@ pub fn apply_cache_zones(body: &mut Value, tier: CacheTier, min_prefix_tokens: u
 /// Removal is byte-safe for siblings: serde_json objects are BTreeMap-backed
 /// (sorted keys, no `preserve_order` swap-remove hazard), so deleting a key
 /// cannot reorder the remaining fields.
-fn strip_message_cache_markers(body: &mut Value) {
+pub(crate) fn strip_message_cache_markers(body: &mut Value) {
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
     for message in messages {
-        if let Some(obj) = message.as_object_mut() {
-            obj.remove("cache_control");
-        }
-        if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
-            for block in blocks {
-                if let Some(obj) = block.as_object_mut() {
-                    obj.remove("cache_control");
-                }
+        strip_one_message_cache_markers(message);
+    }
+}
+
+/// Remove every `cache_control` marker from ONE wire message (the message
+/// object and each of its content blocks). Same byte-safety argument as
+/// [`strip_message_cache_markers`].
+fn strip_one_message_cache_markers(message: &mut Value) {
+    if let Some(obj) = message.as_object_mut() {
+        obj.remove("cache_control");
+    }
+    if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+        for block in blocks {
+            if let Some(obj) = block.as_object_mut() {
+                obj.remove("cache_control");
             }
         }
     }
@@ -858,7 +925,7 @@ mod tests {
     #[test]
     fn all_four_zones_injected_when_present() {
         let mut body = body_with_all_zones();
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
 
         // System: last block has marker, first does not.
         let system = body["system"].as_array().unwrap();
@@ -889,7 +956,7 @@ mod tests {
                 { "role": "user", "content": [ { "type": "text", "text": "hi" } ] }
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
 
         assert_eq!(body["system"][0]["cache_control"], marker_5m());
         assert_eq!(
@@ -908,7 +975,7 @@ mod tests {
                 { "role": "user", "content": [ { "type": "text", "text": "hi" } ] }
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
 
         // Empty system array -> nothing to mark, no panic.
         assert!(body["system"].as_array().unwrap().is_empty());
@@ -926,7 +993,7 @@ mod tests {
                 { "role": "user", "content": [ { "type": "text", "text": "hi" } ] }
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
 
         assert_eq!(
             body["messages"][0]["content"][0]["cache_control"],
@@ -939,21 +1006,21 @@ mod tests {
     #[test]
     fn idempotent_when_applied_twice() {
         let mut body = body_with_all_zones();
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
         let after_first = body.clone();
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
         assert_eq!(body, after_first, "second apply must be a no-op shape");
     }
 
     #[test]
     fn ttl_propagates_5m_vs_1h() {
         let mut body_5m = body_with_all_zones();
-        apply_cache_zones(&mut body_5m, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body_5m, CacheTier::Ephemeral5m, 0, false);
         assert_eq!(body_5m["system"][1]["cache_control"], marker_5m());
         assert!(body_5m["system"][1]["cache_control"].get("ttl").is_none());
 
         let mut body_1h = body_with_all_zones();
-        apply_cache_zones(&mut body_1h, CacheTier::Ephemeral1h, 0);
+        apply_cache_zones(&mut body_1h, CacheTier::Ephemeral1h, 0, false);
         assert_eq!(body_1h["system"][1]["cache_control"], marker_1h());
         assert_eq!(body_1h["tools"][1]["cache_control"]["ttl"], "1h");
         assert_eq!(
@@ -966,7 +1033,7 @@ mod tests {
     fn cache_tier_none_is_noop() {
         let mut body = body_with_all_zones();
         let before = body.clone();
-        apply_cache_zones(&mut body, CacheTier::None, 0);
+        apply_cache_zones(&mut body, CacheTier::None, 0, false);
         assert_eq!(body, before);
     }
 
@@ -979,7 +1046,7 @@ mod tests {
                 { "role": "user", "content": [ { "type": "text", "text": "U" } ] }
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
 
         let expected = json!({
             "system": [
@@ -1006,7 +1073,7 @@ mod tests {
             "system": [ { "type": "text", "text": "S" } ],
             "messages": []
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
 
         // System still marked.
         assert_eq!(body["system"][0]["cache_control"], marker_5m());
@@ -1024,7 +1091,7 @@ mod tests {
                 { "role": "user", "content": "plain string" }
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
         assert_eq!(body["messages"][0]["cache_control"], marker_5m());
     }
 
@@ -1089,7 +1156,7 @@ mod tests {
                 "tools": [ { "name": "t", "description": "d" } ],
                 "messages": messages
             });
-            apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+            apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
 
             assert!(
                 total_markers(&body) <= 4,
@@ -1137,7 +1204,7 @@ mod tests {
                 ] }
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
 
         assert_eq!(
             total_markers(&body),
@@ -1171,7 +1238,7 @@ mod tests {
                 user("u3")
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
 
         assert_eq!(total_markers(&body), 4, "hard cap must hold");
         let marked = marked_message_indices(&body);
@@ -1213,7 +1280,7 @@ mod tests {
                 ] }
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
 
         assert_eq!(
             total_markers(&body),
@@ -1327,10 +1394,10 @@ mod tests {
             "messages": [ user("hi") ]
         });
         let estimate = super::estimated_prefix_tokens(&body);
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, estimate + 1);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, estimate + 1, false);
         assert_eq!(total_markers(&body), 0, "estimate < floor must skip");
 
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, estimate);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, estimate, false);
         assert!(total_markers(&body) > 0, "estimate >= floor must inject");
     }
 
@@ -1498,7 +1565,7 @@ mod tests {
     #[test]
     fn injection_does_not_perturb_sibling_serialization() {
         let mut marked = body_with_all_zones();
-        apply_cache_zones(&mut marked, CacheTier::Ephemeral5m, 0);
+        apply_cache_zones(&mut marked, CacheTier::Ephemeral5m, 0, false);
 
         fn strip(v: &mut Value) {
             match v {
@@ -1637,6 +1704,139 @@ mod tests {
             body["max_tokens"],
             json!(8_192),
             "anthropic must ALWAYS serialize max_tokens (Messages API mandate)"
+        );
+    }
+    // --- wayland#559 c6: the transient tail is never a cache write point ----
+
+    use wcore_types::message::MessageCacheHint;
+
+    /// Turn 1 of the reported session: ONE user message, carrying the
+    /// skill-router hint / PrePrompt contribution that lives only in the
+    /// per-turn clone. Marking it writes a cache entry no later turn can
+    /// read, which is how a 26-turn session reports `cache_read = 0`
+    /// throughout. No message marker may be emitted.
+    #[test]
+    fn a_transient_turn_one_tail_gets_no_wire_marker() {
+        let mut req = cache_req(None);
+        req.messages.last_mut().unwrap().cache_breakpoint = Some(MessageCacheHint::Transient);
+
+        let body = provider().build_request_body(&req);
+
+        assert_eq!(
+            marked_message_indices(&body),
+            Vec::<usize>::new(),
+            "no message may be a cache write point when the only one is transient"
+        );
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            marker_5m(),
+            "the stable system prefix must still be cached"
+        );
+    }
+
+    /// From turn 2 on the write point moves back onto the newest message that
+    /// every later turn re-sends byte-identically.
+    #[test]
+    fn a_transient_tail_moves_the_write_point_back_one_message() {
+        let mut body = json!({
+            "system": [ { "type": "text", "text": "sys" } ],
+            "tools": [ { "name": "t", "description": "d" } ],
+            "messages": [
+                user("u1"),
+                assistant("a1"),
+                user("u2"),
+                assistant("a2"),
+                // Tail: the user turn the per-turn transient was injected into.
+                user("u3 + hint")
+            ]
+        });
+
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, true);
+
+        let marked = marked_message_indices(&body);
+        assert!(
+            !marked.contains(&4),
+            "the transient tail must never be marked, got {marked:?}"
+        );
+        assert!(
+            marked.contains(&3),
+            "the write point must move onto the newest stable message, got {marked:?}"
+        );
+        assert!(
+            marked.contains(&1),
+            "the previous turn's write point must stay addressable, got {marked:?}"
+        );
+        assert!(total_markers(&body) <= ANTHROPIC_CACHE_CONTROL_LIMIT);
+    }
+
+    /// A marker an upstream path already placed on the transient tail is a
+    /// leak, and the prohibition strips it rather than counting it.
+    #[test]
+    fn a_marker_already_on_the_transient_tail_is_stripped() {
+        let mut body = json!({
+            "system": [ { "type": "text", "text": "sys" } ],
+            "messages": [
+                user("u1"),
+                assistant("a1"),
+                { "role": "user", "content": [
+                    { "type": "text", "text": "u2 + hint",
+                      "cache_control": { "type": "ephemeral" } }
+                ] }
+            ]
+        });
+
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, true);
+
+        assert!(
+            !marked_message_indices(&body).contains(&2),
+            "a pre-existing marker on the transient tail must be stripped"
+        );
+    }
+
+    /// Negative control: the SAME body without the transient flag keeps the
+    /// tail as the write point. Without this the tests above would pass on a
+    /// change that simply stopped marking messages at all.
+    #[test]
+    fn without_a_transient_tail_the_tail_is_still_the_write_point() {
+        let mut body = json!({
+            "system": [ { "type": "text", "text": "sys" } ],
+            "tools": [ { "name": "t", "description": "d" } ],
+            "messages": [
+                user("u1"),
+                assistant("a1"),
+                user("u2"),
+                assistant("a2"),
+                user("u3")
+            ]
+        });
+
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0, false);
+
+        assert!(
+            marked_message_indices(&body).contains(&4),
+            "the tail must hold the write point when nothing transient was injected"
+        );
+    }
+
+    /// End to end: the hint the engine stamps is what the adapter reads. A
+    /// `Breakpoint` on the tail still reaches the wire; a `Transient` does not.
+    #[test]
+    fn the_engine_hint_decides_whether_the_tail_reaches_the_wire() {
+        let mut breakpoint = cache_req(None);
+        breakpoint.messages.last_mut().unwrap().cache_breakpoint =
+            Some(MessageCacheHint::Breakpoint);
+        assert!(!request_has_transient_tail(&breakpoint));
+        assert!(
+            !marked_message_indices(&provider().build_request_body(&breakpoint)).is_empty(),
+            "a Breakpoint hint must still produce a wire marker"
+        );
+
+        let mut transient = cache_req(None);
+        transient.messages.last_mut().unwrap().cache_breakpoint = Some(MessageCacheHint::Transient);
+        assert!(request_has_transient_tail(&transient));
+        assert!(
+            marked_message_indices(&provider().build_request_body(&transient)).is_empty(),
+            "a Transient hint must suppress the wire marker"
         );
     }
 }
