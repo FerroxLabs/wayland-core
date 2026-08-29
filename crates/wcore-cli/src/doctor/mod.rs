@@ -1360,6 +1360,21 @@ mod tests {
     #[serial]
     async fn the_browser_row_recommends_the_compiled_backend_not_chromium() {
         let empty = tempfile::tempdir().unwrap();
+        // PATH is process-global, and this binary runs its tests in ONE
+        // process. Emptying PATH outright breaks any concurrently running test
+        // that spawns through `wcore_config::shell`, which resolves `sh` (Unix)
+        // / `cmd` (Windows) off PATH — measured: it took `goal_cmd`'s worker
+        // tests down with "worker command 'sh' failed to start: No such file or
+        // directory" in the shared-process `--lib` leg. Carry the system shell
+        // across. It is not a browser backend, so `resolve_any` still finds
+        // nothing and the row under test is unchanged.
+        #[cfg(unix)]
+        {
+            let sh = std::path::Path::new("/bin/sh");
+            if sh.exists() {
+                let _ = std::os::unix::fs::symlink(sh, empty.path().join("sh"));
+            }
+        }
         let prior_path = std::env::var_os("PATH");
         let prior_bin = std::env::var_os("WAYLAND_CAMOUFOX_BIN");
         unsafe {
