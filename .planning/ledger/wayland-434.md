@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Flux tier-alias -> strict-reasoner: #417 replay gap (engine keys off request.model, alias resolves server-side)"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: be4467ed
 criteria:
   - id: c1
     text: "The replay socket is populated, so the engine has somewhere to learn the served model from"
@@ -21,7 +21,8 @@ criteria:
     text: "The alias-resolves-server-side path is closed end to end"
     state: blocked
     owner: flux
-    note: "requires the router to declare the resolved model on the turn it resolves it; core cannot close this alone. Ticket carries needs:flux"
+    handoff: "FerroxLabs/wayland#1226"
+    note: "AUDITED 2026-08-29 and CONFIRMED cross-team, WITH a caveat #1185 states in its own words: this criterion AS WORDED ('the router must declare the resolved model on the turn it resolves it') is already satisfied -- x-flux-routed-model rides the response of the turn that resolved the alias. What core actually needs is either resolution BEFORE the request is built, which no per-response header can ever give, or a published, drift-detectable guarantee that the router's own server-side reasoning_content repair covers every strict-reasoner family the bandit can route to. #1185 is open, needs:flux, carries both shapes with acceptance criteria and states core's preference for the second. Read this beside c2: the user-visible half is no longer open, because c2 closed turn N from the other side via the refusal classifier, so a single-turn run recovers without the router changing anything. #1185's 'Core's half' section still describes c2 as not-met and is stale on that point HANDOFF TARGET RECONCILED ON MERGE: this criterion was decomposed twice on 2026-08-29, by two lanes that could not see each other. The audit lane pointed it at FerroxLabs/wayland#1185, which already existed and already carries the work; the decomposition lane filed FerroxLabs/wayland#1226 and that is the ticket named above, because it is scoped to this criterion. BOTH ARE OPEN AND THEY OVERLAP -- they are adjacent rather than identical: #1226 asks the router to declare the resolved model on the first response, #1185 asks for a published, drift-detectable list of the families the server-side reasoning_content repair covers. The audit found the wording of this criterion is ALREADY satisfied by x-flux-routed-model, which is why #1185 exists at all. Core does not close issues, so this is recorded rather than acted on: a maintainer should dedupe the pair, and whichever survives is the carrier. The audit evidence in this note was gathered against FerroxLabs/wayland#1185 and applies to either."
 ---
 
 Partially fixed in v0.13.10. The engine keys reasoner replay off

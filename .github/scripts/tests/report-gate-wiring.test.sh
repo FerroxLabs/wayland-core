@@ -31,6 +31,24 @@ want_no_grep() { # want_no_grep <label> <file> <fixed-pattern>
 # The gate must exist and be runnable.
 if [ -f "$GATE" ]; then ok "gate script exists"; else bad "gate script exists"; fi
 
+# wayland-core#367 — the failing-SET gate is invoked BY PATH from the shared
+# evidence gate, so deleting the script or the call silently stops every run on
+# this repository from ever comparing failure identities again. Both halves are
+# asserted: the file, and the line that runs it.
+SETGATE="$ROOT/.github/scripts/grade-failing-set.sh"
+if [ -f "$SETGATE" ]; then ok "failing-set gate script exists"; else bad "failing-set gate script exists"; fi
+want_grep "the shared evidence gate runs the failing-set gate" \
+  "$GATE" 'bash "$SETGRADER"'
+want_grep "the failing-set gate fails closed on its own absence" \
+  "$GATE" "Failing-set gate missing"
+if [ -f "$ROOT/.config/known-failing-tests.txt" ]; then
+  ok "the named allowlist file exists"
+else
+  bad "the named allowlist file exists (.config/known-failing-tests.txt)"
+fi
+want_grep "the failing-set self-test runs in lint.yml" \
+  "$ROOT/.github/workflows/lint.yml" "bash .github/scripts/tests/failing-set.test.sh"
+
 # Both report jobs must call the ONE gate. Two copies is how they diverged.
 want_grep "ci.yml report job runs the shared evidence gate" \
   "$CI" "run: bash .github/scripts/assert-test-evidence.sh"

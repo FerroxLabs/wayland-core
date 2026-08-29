@@ -821,6 +821,132 @@ mod tests {
 
     use super::*;
 
+    /// Keep the callsite-interest cache from ever being computed against a
+    /// bare `NoSubscriber`, by holding two always-interested dispatchers
+    /// registered for the life of the test process.
+    ///
+    /// # The mechanism this exists for (FerroxLabs/wayland-core#373)
+    ///
+    /// `tracing` caches one `Interest` per callsite, globally, and it is
+    /// computed exactly once — the first time that line of code executes
+    /// anywhere in the process. Which subscriber it is computed against
+    /// depends on the *registering thread*, not on the thread that will read
+    /// the events:
+    ///
+    /// ```text
+    /// tracing_core::callsite::dispatchers::Rebuilder::for_each
+    ///     Rebuilder::JustOne => dispatcher::get_default(f)
+    /// ```
+    ///
+    /// `Rebuilder::JustOne` is taken whenever at most ONE dispatcher is
+    /// registered, which is the normal state of a test binary that installs a
+    /// single scoped subscriber. `get_default` then resolves the *calling*
+    /// thread's default. So when a test that installs no subscriber reaches a
+    /// callsite first, `rebuild_callsite_interest` collects nothing,
+    /// `interest.unwrap_or_else(Interest::never)` caches **never**, and the
+    /// `tracing::error!` at that line becomes a no-op for every thread in the
+    /// process — including a thread that is holding a scoped subscriber and
+    /// asserting on what it captured. The event is not filtered, not routed
+    /// elsewhere, not late: it is never constructed.
+    ///
+    /// That is why the two log-visibility tests below could capture `[]` a few
+    /// runs in a hundred: `check_refuses_unsafe_endpoint` reaches the same
+    /// SSRF `error!` line with no subscriber installed, and a scoped
+    /// subscriber's own `set_default` only rebuilds callsites that are ALREADY
+    /// registered, so a registration that lands after it is not healed.
+    ///
+    /// With two dispatchers permanently registered, `has_just_one` is false,
+    /// the rebuilder reads the registered-dispatcher list instead of the
+    /// calling thread's default, and a `Registry` answers `Interest::always`
+    /// for every callsite — so `never` is unreachable and registration order
+    /// stops mattering. The dispatchers are only ever consulted for interest;
+    /// they are never any thread's default, so they receive no events and
+    /// cannot perturb what a test captures.
+    ///
+    /// Deliberately leaked: tracing-core holds each registered dispatcher by
+    /// `Weak`, so a dropped one is pruned and the pin would come undone.
+    ///
+    /// Production is not exposed to this. It installs ONE global default
+    /// subscriber, which `get_default` returns on every thread, so there is no
+    /// thread from which a callsite can register against nothing.
+    fn pin_callsite_interest() {
+        use std::sync::OnceLock;
+        static PINNED: OnceLock<()> = OnceLock::new();
+        PINNED.get_or_init(|| {
+            for _ in 0..2 {
+                std::mem::forget(tracing::Dispatch::new(
+                    tracing_subscriber::registry::Registry::default(),
+                ));
+            }
+        });
+    }
+
+    /// The mechanism above, graded directly, on a callsite this test owns.
+    ///
+    /// A thread with no subscriber touches the callsite FIRST; the thread that
+    /// holds the scoped subscriber emits SECOND and must still see it. Without
+    /// [`pin_callsite_interest`] this is red 5 times out of 5 when run alone —
+    /// it is the deterministic form of the race that made
+    /// `ssrf_refusal_is_visible_at_default_log_levels` fail 5 times in 100
+    /// under the shared-process `--lib` leg.
+    ///
+    /// `after_poison` is the vacuity guard: the subscriber-less thread's own
+    /// event must NOT have been captured, or the two threads are not playing
+    /// the roles the test names.
+    #[test]
+    fn a_callsite_first_registered_by_a_subscriberless_thread_stays_visible() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<tracing::Level>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.lock().unwrap().push(*event.metadata().level());
+            }
+        }
+        // One callsite, reached from both threads, and from nowhere else in
+        // the binary — so this test controls its registration order.
+        fn emit() {
+            tracing::error!(target: "wcore::osv_check", "callsite-interest probe");
+        }
+
+        pin_callsite_interest();
+
+        // `LevelFilter::current()` starts at OFF and no callsite registers at
+        // all until a subscriber raises it. Installing and dropping one is
+        // what puts the process into the state the race needs.
+        drop(tracing::subscriber::set_default(
+            tracing_subscriber::registry::Registry::default(),
+        ));
+
+        let captured = Captured::default();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry::Registry::default().with(captured.clone()),
+        );
+        std::thread::spawn(emit).join().expect("probe thread");
+        let after_poison = captured.0.lock().unwrap().len();
+        emit();
+        drop(guard);
+
+        assert_eq!(
+            after_poison, 0,
+            "a thread with no subscriber must not reach this subscriber; the \
+             two threads are not in the roles this test names"
+        );
+        assert_eq!(
+            captured.0.lock().unwrap().clone(),
+            vec![tracing::Level::ERROR],
+            "the scoped subscriber saw nothing: the callsite cached \
+             Interest::never when the subscriber-less thread registered it \
+             (FerroxLabs/wayland-core#373)"
+        );
+    }
+
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
@@ -1294,6 +1420,10 @@ mod tests {
             }
         }
 
+        // The interest cache is process-global and first-writer-wins;
+        // without this a subscriber-less sibling can make this callsite a
+        // no-op for everyone. See `pin_callsite_interest`.
+        pin_callsite_interest();
         let captured = Captured::default();
         let subscriber = tracing_subscriber::registry::Registry::default().with(captured.clone());
         let guard = tracing::subscriber::set_default(subscriber);
@@ -1340,6 +1470,10 @@ mod tests {
             }
         }
 
+        // The interest cache is process-global and first-writer-wins;
+        // without this a subscriber-less sibling can make this callsite a
+        // no-op for everyone. See `pin_callsite_interest`.
+        pin_callsite_interest();
         let captured = Captured::default();
         let subscriber = tracing_subscriber::registry::Registry::default().with(captured.clone());
         let guard = tracing::subscriber::set_default(subscriber);

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "[Bug]: Clean install of 0.12.4 / core 0.13.6 — the Bash tool is cmd.exe, and the transcript still assembles out of order"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: be4467ed
 criteria:
   - id: c1
     text: "The Bash tool discloses which shell it really runs, and the disclosure reaches the model"
@@ -22,7 +22,8 @@ criteria:
     text: "The transcript stops assembling out of order"
     state: blocked
     owner: desktop
-    note: "no commit in this release touches ordering or assembly, and the symbols involved do not exist under crates/ at all — this half was never core's"
+    handoff: "FerroxLabs/wayland#1224"
+    note: "AUDITED 2026-08-29 and CONFIRMED cross-team, on the REPORTER's own attribution rather than on ours: #1151's body says 'The second is #1088 / #1143, still open, and I mention it here only because both were sitting in the very first conversation of a clean install.' #1143 is that ticket -- open, needs:desktop, split out of #1000 when the engine defect under it was fixed -- and its stated ask is to reproduce on 0.12.4, decide whether the ordering is fixed at stream-assembly or at render time, and pin the correct interleaving with a test. No commit in this release touches ordering or assembly and the symbols involved do not exist under crates/, so this half was never core's HANDOFF TARGET RECONCILED ON MERGE: this criterion was decomposed twice on 2026-08-29, by two lanes that could not see each other. The audit lane pointed it at FerroxLabs/wayland#1143, which already existed and already carries the work; the decomposition lane filed FerroxLabs/wayland#1224 and that is the ticket named above, because it is scoped to this criterion. BOTH ARE OPEN AND THEY OVERLAP -- both are the Desktop transcript-ordering defect, #1143 framed as self-diagnosis text rendering ahead of its tool calls. Core does not close issues, so this is recorded rather than acted on: a maintainer should dedupe the pair, and whichever survives is the carrier. The audit evidence in this note was gathered against FerroxLabs/wayland#1143 and applies to either."
 ---
 
 One of three sub-asks met in v0.13.10.

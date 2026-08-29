@@ -49,6 +49,33 @@ on:
       # because GitHub exposes it only for workflows present on the DEFAULT
       # branch and ci.yml on `main` has no such trigger.
       - 'lane/**'
+      # 2026-08-29. THE INTEGRATION BRANCH HAD NEVER RUN CI. NOT ONCE.
+      #
+      # The matrix note above states that "`main`, the integration branch and
+      # every pull_request keep the full matrix". That was true of the MATRIX
+      # but not of the TRIGGER: `integ/**` matches neither `push` (main,
+      # lane/**) nor `pull_request` (base main), and the integration branch has
+      # no open PR while it is being assembled. Measured 2026-08-29:
+      # `gh run list --branch integ/f13 --workflow CI` returned EMPTY for the
+      # entire life of the branch, while six lane branches each burned a full
+      # ~67-minute matrix that day.
+      #
+      # So the branch that gets merged, released and tagged was the ONE branch
+      # with no cross-platform coverage, and every lane paid for coverage of a
+      # tree that would never ship in that shape. Exactly inverted.
+      #
+      # A draft PR would also have armed `pull_request` and needs no workflow
+      # change, but opening a PR on this repo is the maintainer's action, not
+      # an agent's. Naming the ref here is the route that does not take a
+      # decision that is not ours.
+      #
+      # This does NOT double-run: the `plan/f20-unified-audit-repair` entry
+      # above was removed because an open PR made every push fire BOTH `push`
+      # and `pull_request` under different concurrency groups. That risk
+      # returns the moment a PR opens from `integ/**` — when the release PR
+      # opens, REMOVE this entry, because the PR then provides exactly the
+      # coverage it was added for.
+      - 'integ/**'
 
 permissions:
   contents: read
@@ -253,7 +280,7 @@ jobs:
       # hosted-`windows-latest` workflows remain the cheaper route for a
       # narrow proof.
       matrix:
-        os: ${{ fromJSON(((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && (github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))) && '["macos-latest",["self-hosted","Windows","X64","msvc"]]' || ((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '["macos-latest"]' || '[["self-hosted","Windows","X64","msvc"]]')) }}
+        os: ${{ fromJSON(((github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && (github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))) && '["macos-latest",["self-hosted","Windows","X64","msvc"]]' || ((github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '["macos-latest"]' || '[["self-hosted","Windows","X64","msvc"]]')) }}
         # 2026-08-04 — an `appcontainer` label requirement was added here and
         # then REVERTED the same day. Recording why, so it is not re-attempted.
         #
@@ -1249,7 +1276,7 @@ jobs:
       # condition in the two `strategy.matrix` expressions.
       - name: Report macOS runner budget (DARWIN_REQUESTED / DARWIN_SKIPPED)
         env:
-          DARWIN: ${{ (github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && 'true' || 'false' }}
+          DARWIN: ${{ (github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && 'true' || 'false' }}
         run: |
           set -euo pipefail
           {
@@ -1437,6 +1464,23 @@ jobs:
       # defect class and stays silent on the control, with every red arm
       # asserting the message it fired on, so an arm whose mutation stopped
       # applying fails loudly instead of reading as a pass.
+      # The macOS/Windows admission condition is duplicated across the `ci` os
+      # matrix, the `build` matrix and the reporting step, because GitHub Actions
+      # supports neither YAML anchors nor the `env` context inside `strategy`.
+      # gate.py asserts those copies stay byte-identical and evaluates the
+      # condition against a truth table.
+      #
+      # It was never wired to anything. It went RED when the `[ci-windows]`
+      # opt-in nested the `ci` matrix into a shape its regex no longer matched --
+      # so it silently stopped covering the matrix that schedules the macOS test
+      # leg, reported "found 2, expected 3", and nobody saw. A gate nothing runs
+      # is a gate that cannot fail.
+      - name: macOS/Windows admission control is consistent
+        run: |
+          set -euo pipefail
+          python3 .planning/evidence/ci-macos-budget/gate.py --self-test .github/workflows/ci.yml
+          python3 .planning/evidence/ci-macos-budget/gate.py .github/workflows/ci.yml
+
       - name: Criteria ledger is anchored and parseable
         run: |
           python3 scripts/check-criteria-ledger.py --self-test
@@ -2208,7 +2252,7 @@ jobs:
       # only job that UPLOADS the arm64 binary (ci.yml:600 below) and it does so
       # independently of whether the test suite passed, which is exactly when a
       # lane needs a binary most. The saving would have been ~1.2% of pool load.
-      matrix: ${{ fromJSON((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"},{"os":"macos-latest","target":"x86_64-apple-darwin"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]}' || '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"}]}') }}
+      matrix: ${{ fromJSON((github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"},{"os":"macos-latest","target":"x86_64-apple-darwin"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]}' || '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"}]}') }}
 
     steps:
       # Which Windows executor served this job (gh#1146). Fails closed: a job
@@ -2562,7 +2606,18 @@ jobs:
     # contributed to a green. `if: always()` below already carries `report`
     # through a skipped dependency, so nothing about WHEN this job runs changes;
     # what changes is that it can now say so out loud.
-    needs: [ci, ci-windows-hosted]
+    # `ci-linux` WAS ABSENT UNTIL 2026-08-30 AND THAT MADE THIS CHECK HOLLOW.
+    # `report` is a REQUIRED status context, and it depended only on the matrix
+    # legs. `ci-linux` -- which runs the workspace nextest suite, both
+    # shared-process suites, the corpus drift check, the security audit, the
+    # signed-manifest drill and every host-side gate -- was not a dependency, so
+    # `report` could and did go GREEN while `ci-linux` was RED (measured: run
+    # 33262552890). On run 33264117264 `report` started and finished in ELEVEN
+    # SECONDS, at the same instant `ci-linux` began.
+    #
+    # `eval-gate-linux`, `build` and `all-features-check` were absent for the
+    # same reason and are added with it.
+    needs: [ci, ci-windows-hosted, ci-linux, eval-gate-linux, build, all-features-check]
     if: always()
     runs-on: ubuntu-latest
     # gh#1072. Pure aggregation — measures under a minute in every sampled
@@ -2581,6 +2636,40 @@ jobs:
       checks: write
       pull-requests: write
     steps:
+      # THE AGGREGATE ASSERTION. `if: always()` is what lets this job report on a
+      # skipped or failed dependency -- and it is also what makes the job succeed
+      # by default when one FAILED, because a job's own steps decide its result,
+      # not its needs'. Every gate below this line is downstream of that: if a
+      # dependency died, its evidence never existed, and the checks that grade
+      # evidence cannot notice its absence (see wayland#1177).
+      #
+      # SKIPPED is deliberately NOT a failure here: the macOS/Windows legs are
+      # rationed by design and a skipped leg contributes no red. That is exactly
+      # why the step below cannot be the only gate -- it is gated on
+      # `needs.ci.result != 'skipped'`, and `ci` is the leg most often skipped,
+      # so on a rationed run the one assertion that would catch a hollow pass
+      # skipped too and `report` asserted NOTHING.
+      - name: No dependency failed (a required check must grade what it aggregates)
+        run: |
+          set -euo pipefail
+          fail=0
+          check() {
+            case "$2" in
+              failure|cancelled)
+                echo "::error title=report::dependency '$1' concluded '$2' — the required check cannot pass over it."
+                fail=1 ;;
+              *) printf '  ok   %-22s %s\n' "$1" "$2" ;;
+            esac
+          }
+          check ci                 "${{ needs.ci.result }}"
+          check ci-windows-hosted  "${{ needs.ci-windows-hosted.result }}"
+          check ci-linux           "${{ needs.ci-linux.result }}"
+          check eval-gate-linux    "${{ needs.eval-gate-linux.result }}"
+          check build              "${{ needs.build.result }}"
+          check all-features-check "${{ needs.all-features-check.result }}"
+          [ "$fail" -eq 0 ] || exit 1
+          echo "OK: no dependency failed or was cancelled."
+
       - uses: actions/checkout@v6
 
       # `merge-multiple: true` was REMOVED 2026-08-02 (lane/ci-windows-fallback).

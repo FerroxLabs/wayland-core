@@ -626,3 +626,41 @@ retries = 0
 [[profile.ci.overrides]]
 filter = 'binary(=inv2_round5_adversarial_test)'
 retries = 0
+
+# ── #358 c4: a containment verdict must not be retried into a pass ──────────
+#
+# MECHANISM, not instance. These three binaries are the whole of this crate's
+# RUNTIME process-containment grading: they each end in "this pid is / is not a
+# process any more" after a guard was dropped. Both directions of that verdict
+# are races against the scheduler, and both are laundered by a retry:
+#
+#   * OVER-kill (harness_guard_kills_only_its_own_tree) — the guard reaps a
+#     sibling tree. `kill(pid, SIGKILL)` returns while the signal is merely
+#     pending, so the victim still looks live for a scheduling quantum.
+#   * UNDER-kill (harness_owns_spawned_trees, ..._windows) — the guard leaks a
+#     descendant. Detected by a process still being there after a 10s budget,
+#     which a loaded box can turn into a slow pass.
+#
+# MEASURED on hetzner-dsm (96 cores), `--retries 0`, guard mutated to walk from
+# the child's PPid so it reaps its sibling — an over-broad kill the control is
+# supposed to catch every time:
+#   * sampled liveness, sequential:     n=20, 19 detected, 1 missed (5.0 %)
+#   * sampled liveness, 8 concurrent:   n=80, 71 detected, 9 missed (11.3 %)
+# At `[profile.ci] retries = 2` an 11.3 % per-attempt miss is a 30 % chance the
+# run CONCLUSION — the number release gates, dashboards and humans read —
+# reports a guard that reaped the build agent's siblings as PASSED, with the
+# evidence buried in a `TRY 1 FAIL` line. That is the same laundering
+# FerroxLabs/wayland#1101 and #1155 were filed about.
+#
+# The per-attempt miss is now 0 (the control probes the bystander with a round
+# trip instead of sampling its liveness — see the module docs), so this block is
+# not compensating for a flake: it is what keeps a REINTRODUCED one visible
+# instead of retried away. `every_spawn_site_owns_its_tree` is deliberately NOT
+# here — it is a static source ratchet with no process in it and nothing for a
+# retry to hide.
+#
+# Scoped to three binaries, same discipline as the four blocks above: every
+# other test in the suite keeps `retries = 2`.
+[[profile.ci.overrides]]
+filter = 'binary(=harness_guard_kills_only_its_own_tree) + binary(=harness_owns_spawned_trees) + binary(=harness_owns_spawned_trees_windows)'
+retries = 0

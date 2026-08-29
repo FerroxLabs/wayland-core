@@ -59,10 +59,23 @@ pub struct ContainerBackend {
 
 impl ContainerBackend {
     pub fn new(limits: ResourceBudget) -> Result<Self> {
-        let seed = load_or_create_seed(BACKEND_ID)?;
-        let signer = ReceiptSigner::from_seed(seed);
         let image =
             std::env::var("WAYLAND_EXEC_CONTAINER_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.into());
+        Self::with_image(limits, image)
+    }
+
+    /// Construct against an EXPLICIT image, without consulting the process
+    /// environment.
+    ///
+    /// `WAYLAND_EXEC_CONTAINER_IMAGE` is a process GLOBAL, and a test that
+    /// sets it to steer one construction steers every sibling test running in
+    /// the same binary at that moment. `serial_test` does not help: it orders
+    /// only the tests carrying the attribute. Stating the image is what makes
+    /// the test independent of what else is running.
+    pub fn with_image(limits: ResourceBudget, image: impl Into<String>) -> Result<Self> {
+        let image = image.into();
+        let seed = load_or_create_seed(BACKEND_ID)?;
+        let signer = ReceiptSigner::from_seed(seed);
         Ok(Self {
             capabilities: BackendCapabilities {
                 backend_id: BACKEND_ID.into(),

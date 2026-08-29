@@ -1,0 +1,81 @@
+# Known-failing allowlist — the NAMED set a test run's failures are compared
+# against. FerroxLabs/wayland-core#367.
+#
+# ── WHY THIS FILE EXISTS ───────────────────────────────────────────────────
+#
+# `8d6add71 RED ARM (throwaway, never merge)` reached `integ/f13` and survived
+# three more commits. It was not hidden: a full workspace run reported it every
+# single time. What it reported was `1 failed`, this repository is known to
+# carry a standing failure, and `1 failed` was read as `the known 1 failed`.
+# It was a different test — the process-tree guard's own regression case — and
+# what shipped was a spawned process tree that outlives its guard
+# (FerroxLabs/wayland#1156, reintroduced).
+#
+# A COUNT CANNOT SEE THAT. Swap one failure for another and the count does not
+# move. `.github/scripts/grade-failing-set.sh` compares the failing test
+# IDENTITIES in every leg's JUnit against the SET named here, and fails when
+# they differ — including when they differ at the same count, which is the only
+# case the old reading got wrong.
+#
+# ── WHAT A LINE HERE MEANS ─────────────────────────────────────────────────
+#
+# NOT "this test is allowed to fail forever". A line means "this failure is
+# known, someone owns it, and the debt has a date on it". Every entry expires,
+# and an expired entry fails the gate exactly as an unlisted failure does.
+#
+# It also means the run is RED-BY-POLICY-AND-GREEN-BY-EXCEPTION: the gate still
+# names the test on every run as a warning. If the test starts PASSING, the gate
+# goes red for a STALE entry and the remedy is to delete the line — an allowlist
+# that outlives its failure is a hole the next unexpected failure fits through.
+#
+# ── FORMAT ─────────────────────────────────────────────────────────────────
+#
+#   <YYYY-MM-DD expiry>  <binary-id>::<test-name>  <gh#NNNN>  <reason...>
+#
+# Identical to .config/flaky-allowlist.txt, deliberately: one shape to learn,
+# one validator to trust. Whitespace-separated; the reason is the rest of the
+# line and is MANDATORY. The key is the JUnit `classname` and `name` joined by
+# `::`, which is exactly what nextest prints on its FAIL line. A malformed line
+# FAILS the gate — an allowlist nobody can parse is an allowlist that silently
+# allows everything.
+#
+# This file is NOT .config/flaky-allowlist.txt. That one governs
+# `<flakyFailure>` — a test that failed and was RETRIED INTO A PASS. This one
+# governs `<failure>` — a test that simply failed. The two never see the same
+# element and must not be merged; a retried failure and a hard failure have
+# different remedies.
+#
+# Check a local `--profile ci` run before pushing:  just failing-set-gate
+#
+# ── THE SET, TODAY: EMPTY ──────────────────────────────────────────────────
+#
+# MEASURED. `cargo nextest run --workspace --profile ci --no-fail-fast` on
+# hetzner-dsm at this branch's base (integ/f13, f0060a2e8):
+#
+#   Summary [727.847s] 17345 tests run: 17342 passed (2 slow, 6 flaky),
+#                      2 failed, 1 timed out, 97 skipped
+#
+# and the gate names all three rather than reporting "3":
+#
+#   wcore-agent::workflow_limits_test::fix1_dispatch_budget_aborts_with_partial_result
+#   wcore-exec-backend::container_wedge::a_task_that_exits_125_on_its_own_is_attested_as_a_real_run
+#   wcore-exec-backend::container_wedge::the_leftover_is_actually_reclaimed_and_not_merely_stepped_around
+#
+# NONE OF THE THREE IS SEEDED HERE, and the reasoning is the point of the file.
+# All three are host state on a shared 96-core box at load average 160-190: the
+# two `container_wedge` cases drive a Docker daemon this repository shares with
+# other tenants, and `fix1_dispatch_budget_aborts_with_partial_result` TIMED OUT
+# while three sibling worktrees on the same box were executing the identical
+# binary. They pass elsewhere, so a line here would be STALE on the next leg and
+# would red the gate for the wrong reason. An allowlist is for a failure that is
+# known to fail HERE, on the legs this gate reads, not for one host's weather.
+#
+# The run also settles the ticket's own premise empirically. The "standing known
+# failure" everyone reaches for —
+# `wcore-exec-backend::conformance_matrix::every_reference_backend_passes_the_same_harness_or_reports_why_it_did_not`
+# — did NOT fail in this run: it failed on TRY 1, passed on TRY 2, and is one of
+# the six FLAKY. So the number a reader would have compared against was not even
+# stable, and three genuinely different tests failed instead. That is exactly
+# how `1 failed` came to be read as `the known 1 failed`.
+#
+# An empty list is the fail-closed state: every failing test is unexpected.

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "[Bug]: an Edit can overwrite a save that arrives while the guard is checking it (TOCTOU), and retries=2 hides it"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: 9de21aa1
 criteria:
   - id: c1
     text: "A guarded write publishes through an atomic compare-and-exchange rather than a re-check"
@@ -14,10 +14,10 @@ criteria:
     note: "measured on the path the dispatcher actually takes, interleaved at n=200 per arm: 160 losses before, 0 after. The pre-existing suite test went 14/48 -> 0/48"
   - id: c2
     text: "The same guarantee holds on Windows"
-    state: met
+    state: not-met
     evidence: "test:crates/wcore-config/src/atomic_io.rs::the_check_is_handed_the_bytes_the_publish_displaced"
     owner: core
-    note: "publish_displacing now uses ReplaceFileW with lpBackupFileName on Windows (atomic_io.rs:327-380), so the check reads the bytes the publish displaced on every platform and the assertion is no longer cfg-split. TWO caveats: ReplaceFileW is not an exchange (there is an instant at which the destination name does not resolve), so c1's literal compare-and-exchange wording holds on Unix only; and this arm is UNEXECUTED by the lane that wrote it - it ships on cargo check --target x86_64-pc-windows-gnu plus the Windows CI job."
+    note: "publish_displacing now uses ReplaceFileW with lpBackupFileName on Windows (atomic_io.rs:327-380), so the check reads the bytes the publish displaced on every platform and the assertion is no longer cfg-split. TWO caveats: ReplaceFileW is not an exchange (there is an instant at which the destination name does not resolve), so c1's literal compare-and-exchange wording holds on Unix only; and this arm is UNEXECUTED by the lane that wrote it - it ships on cargo check --target x86_64-pc-windows-gnu plus the Windows CI job. REFUTED 2026-08-29 by the 0.13.12 close-sweep, recorded verbatim: NEEDS-PLATFORM-RUN, not met. Evidence `test:...::the_check_is_handed_the_bytes_the_publish_displaced` resolves (atomic_io.rs:611) and the assertion is genuinely no longer cfg-split — it asserts `on_disk_during == b'new'` on every platform. But NOTHING has run it on Windows. I checked the ledger's own stated safety net and it has not fired: the Windows fix is commit cdf918f6 (2026-08-29 01:14), which is NOT on main and reaches only integ/f13, integ/f13-base, integ/next and lane/f13-instrument-integrity. The single CI run on any of those (run 33247044042, headSha 78e722ed, lane/f13-instrument-integrity) reports `skipped CI (${{ matrix.os }})` and `skipped CI (windows-latest, hosted)` — both Windows test legs SKIPPED. The only green Windows job is `Build (x86_64-pc-windows-msvc)`, a release build that does not compile or run `#[cfg(test)]` code. I did confirm it COMPILES: `cargo check --target x86_64-pc-windows-gnu -p wcore-config --all-targets` → `Finished dev profile in 12.17s`. A cross-compile is not a runtime proof. The ledger itself says 'this arm is UNEXECUTED by the lane that wrote it' and still grades the criterion `met`; that grading is the finding. Note also c2 is a LEDGER ADDITION — the ticket never mentions Windows — so it is stricter than the ticket, not drifted away from it."
   - id: c3
     text: "No remaining test tolerates data loss as a pass"
     state: met

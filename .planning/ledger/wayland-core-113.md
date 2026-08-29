@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Browser tool non-functional by default - Camoufox sidecar never spawned + policy-disabled (web automation/screenshots broken)"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: be4467ed
 criteria:
   - id: c1
     text: "A browser op launches the configured Camoufox sidecar through the real production adapter path"
@@ -31,10 +31,17 @@ criteria:
     owner: core
     note: "1092e0c1 (red arm) then f83fcd2e (fix). The scanner walks shipped source with a positive control that fails if it reads nothing, plus the_two_real_backends_are_present so the prose cannot be fixed by deleting the real backends. registry-default.json - the description wayland plugin list prints - was fixed too and is guarded in plugin_install_smoke.rs."
   - id: c5
-    text: "The deny-by-default browsing posture is recorded as a decision on the issue and the issue is dispositioned"
+    text: "The deny-by-default browsing posture is recorded as a decision on the issue"
+    state: met
+    evidence: "file:.planning/DECISIONS.md:16"
+    owner: core
+    note: "SPLIT 2026-08-29: the old c5 asked for two different things -- a record and a close -- and only one of them was ever a maintainer act. The record is core's and is now DONE. Line 16 of .planning/DECISIONS.md is the Q-113 row taking the decision (close as refuted, recording deny-by-default), and the core lane posted that record as a comment on the issue on 2026-08-29, so the in-tree decision and the issue now agree -- previously the latest comment on #113 was a verification write-up and the posture appeared nowhere a reader of the issue could find it. The close is c6"
+  - id: c6
+    text: "The issue is dispositioned: closed as refuted, or the decision reversed"
     state: blocked
     owner: maintainer
-    note: "The issue is still OPEN and the deny-by-default posture is not recorded ON IT: the latest comment is a verification write-up, not a disposition. Q-113 in .planning/DECISIONS.md takes the decision (close as refuted, recording deny-by-default), and only the maintainer closes issues in this repo, so the remaining act is the maintainer's."
+    handoff: "FerroxLabs/wayland#1229"
+    note: "The residue of the old c5, and a genuine maintainer act: only the maintainer closes issues in this repo. There is no code owed -- c1 through c4 refute or supersede three of the four reported claims with a test each, and the fourth (deny-by-default) is the intended posture with a config snippet that is round-tripped to a real Allow decision. wayland-core#364 carries it with the evidence table, and states the alternative plainly: perform the close, or reverse Q-113 and name a lane to build the opposite HANDOFF TARGET RECONCILED ON MERGE: this criterion was decomposed twice on 2026-08-29, by two lanes that could not see each other. The audit lane pointed it at FerroxLabs/wayland-core#364, which already existed and already carries the work; the decomposition lane filed FerroxLabs/wayland#1229 and that is the ticket named above, because it is scoped to this criterion. BOTH ARE OPEN AND THEY OVERLAP -- both are the same maintainer disposition -- close #113 recording deny-by-default, or reverse Q-113 and name a lane. Core does not close issues, so this is recorded rather than acted on: a maintainer should dedupe the pair, and whichever survives is the carrier. The audit evidence in this note was gathered against FerroxLabs/wayland-core#364 and applies to either."
 ---
 
 The issue reports that the browser tool is advertised to the model but cannot
@@ -49,6 +56,12 @@ half-built. The fourth claim - deny-by-default policy - is still accurate and
 still deliberate, but the opaque dead end it caused is gone: the refusal is
 routed by reason and carries a config snippet that is proven to work.
 
-What remains is a stale doc comment (c4) and a maintainer disposition (c5).
+What remains is the disposition, and only the disposition. The stale doc comment
+is fixed and guarded (c4), and the old c5 has been split: recording the
+deny-by-default decision on the issue was core's and is done (c5, posted
+2026-08-29), while the close itself is the maintainer's and is queued on
+wayland-core#364 (c6). There is no code owed on this issue.
+
 Criteria are transcribed from the cluster F verification note of 2026-08-29 and
-each evidence token was re-checked against this tree before being cited.
+each evidence token was re-checked against this tree before being cited; c5 was
+split by the 2026-08-29 handoff audit.

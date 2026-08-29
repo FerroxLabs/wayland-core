@@ -741,6 +741,13 @@ mod tests {
     }
 
     #[test]
+    // Reads the `WAYLAND_TRACE_RESULT_SNIPPETS` gate through
+    // `with_result_snippet`, so it must hold the same lock as the tests
+    // that WRITE that var. A `#[serial(env)]` group excludes its own
+    // members from each other, never an unmarked reader: without this
+    // the gate could read `off` mid-test and the snippet came back
+    // `None`.
+    #[serial(env)]
     fn with_result_snippet_short_value_preserved() {
         let raw: String = "x".repeat(100);
         let t = ToolCallTrace::new("c1".into(), "Read".into(), json!({})).with_result_snippet(&raw);
@@ -749,6 +756,13 @@ mod tests {
     }
 
     #[test]
+    // Reads the `WAYLAND_TRACE_RESULT_SNIPPETS` gate through
+    // `with_result_snippet`, so it must hold the same lock as the tests
+    // that WRITE that var. A `#[serial(env)]` group excludes its own
+    // members from each other, never an unmarked reader: without this
+    // the gate could read `off` mid-test and the snippet came back
+    // `None`.
+    #[serial(env)]
     fn with_result_snippet_truncates_at_512_bytes() {
         let raw: String = "a".repeat(1000);
         let t = ToolCallTrace::new("c1".into(), "Read".into(), json!({})).with_result_snippet(&raw);
@@ -758,6 +772,13 @@ mod tests {
     }
 
     #[test]
+    // Reads the `WAYLAND_TRACE_RESULT_SNIPPETS` gate through
+    // `with_result_snippet`, so it must hold the same lock as the tests
+    // that WRITE that var. A `#[serial(env)]` group excludes its own
+    // members from each other, never an unmarked reader: without this
+    // the gate could read `off` mid-test and the snippet came back
+    // `None`.
+    #[serial(env)]
     fn with_result_snippet_truncates_at_utf8_boundary() {
         // "日本語" is 9 bytes (3 chars × 3 bytes). 200 repeats == 1800 bytes,
         // and 512 / 3 = 170 r 2 — so the naive byte-512 cut would land
