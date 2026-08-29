@@ -1248,4 +1248,52 @@ mod tests {
             "control: the in-root file and its in-root link must both stay attached: {names:?}"
         );
     }
+
+    /// core#339 — the walk's SECRET DENYLIST, asked about what the entry
+    /// RESOLVES to. `at_dir_never_walks_a_symlink_into_a_credential_store`
+    /// looks like it pins this and does not: its `.git-credentials` sits
+    /// OUTSIDE the root, so the scope check refuses it before the denylist is
+    /// ever consulted, and `is_secret_path(&admitted.canonical)` could be
+    /// deleted with all 67 `at_ref` tests green.
+    ///
+    /// The reachable shape is an IN-root link at an IN-root secret, where the
+    /// scope check has nothing to say and only the resolved-name test stands
+    /// between `@./` and the credential body.
+    #[cfg(unix)]
+    #[test]
+    fn at_dir_judges_the_secret_denylist_on_the_resolved_path() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join(".env"), CREDENTIAL_BODY).expect("write env");
+        fs::write(root.join("ok.txt"), "safe\n").expect("write ok");
+        // In root, at an in-root secret, under a name no denylist carries.
+        std::os::unix::fs::symlink(root.join(".env"), root.join("notes.txt")).expect("symlink");
+        // WRONG-REFUSAL CONTROL: an in-root link at an ordinary in-root file
+        // stays attached. Passes on BOTH arms.
+        std::os::unix::fs::symlink(root.join("ok.txt"), root.join("alias.txt")).expect("symlink");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
+        let names: Vec<String> = payload
+            .files
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect();
+        assert!(
+            !payload
+                .files
+                .iter()
+                .any(|f| f.content.contains("s3cr3t-token")),
+            "the @dir walk inlined a secret reached through a link named around \
+             the denylist: {names:?}"
+        );
+        assert_eq!(
+            payload
+                .files
+                .iter()
+                .filter(|f| f.content == "safe\n")
+                .count(),
+            2,
+            "control: the ordinary file and its link must both stay attached: {names:?}"
+        );
+    }
 }
