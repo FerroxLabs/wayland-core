@@ -564,9 +564,9 @@ fn shell_disclosure(prefix: &[String], os: &str) -> String {
     let program = prefix
         .first()
         .map(|p| p.to_ascii_lowercase())
-        .and_then(|p| {
+        .map(|p| {
             let base = p.rsplit(['/', '\\']).next().unwrap_or(&p).to_string();
-            Some(base.strip_suffix(".exe").unwrap_or(&base).to_string())
+            base.strip_suffix(".exe").unwrap_or(&base).to_string()
         })
         .unwrap_or_default();
     let syntax = match program.as_str() {
