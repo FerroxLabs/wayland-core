@@ -124,25 +124,76 @@ mod tests {
     /// server-initiated tool-list changes.
     #[test]
     fn every_transport_decides_take_tools_changed_for_itself() {
-        const SOURCES: [(&str, &str); 3] = [
-            ("stdio", include_str!("stdio.rs")),
-            ("sse", include_str!("sse.rs")),
-            ("streamable_http", include_str!("streamable_http.rs")),
-        ];
+        // This lint used to `include_str!` a hardcoded list of the three
+        // transports that existed when #1175 was fixed. That is a regression
+        // guard, not a class guard: a FOURTH transport would simply not be in
+        // the list, would inherit the `false` default, and this test would
+        // stay green while its tools/list_changed was discarded for the life
+        // of the session — the exact defect, in a new file. So the set is
+        // DISCOVERED from the tree instead of written down.
+        //
+        // A production transport impl is a `impl McpTransport for` at column
+        // zero in a file under some crate's `src/`. The indentation is the
+        // discriminator: every mock in the tree lives inside an inline
+        // `#[cfg(test)] mod tests`, so its impl is indented, and a mock is
+        // legitimately allowed to inherit the default — it observes no
+        // server-initiated stream to report on. Integration-test mocks are at
+        // column zero but live under a `tests/` directory, which is excluded.
+        let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/<crate> has a parent")
+            .to_path_buf();
 
-        for (name, source) in SOURCES {
-            // POSITIVE CONTROL: prove the file really is a transport impl
-            // before reading anything into the absence below.
+        let mut stack = vec![crates_dir];
+        let mut production: Vec<(String, String)> = Vec::new();
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir).expect("read crates tree");
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if path.is_dir() {
+                    // `target/` is build output, `tests/` is integration-test
+                    // mocks, and neither ships a transport an operator uses.
+                    if name != "target" && name != "tests" && !name.starts_with('.') {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                if !name.ends_with(".rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read rust source");
+                if source
+                    .lines()
+                    .any(|line| line.starts_with("impl McpTransport for"))
+                {
+                    production.push((path.display().to_string(), source));
+                }
+            }
+        }
+
+        // POSITIVE CONTROL. The walk is the whole test; if it silently found
+        // nothing (wrong root, renamed trait, changed `impl` spelling) every
+        // assertion below would vacuously pass. Pin the three transports that
+        // are known to exist — as a control on the DISCOVERY, not as the set
+        // being graded, which is whatever the walk actually returns.
+        for known in ["stdio.rs", "sse.rs", "streamable_http.rs"] {
             assert!(
-                source.contains("impl McpTransport for"),
-                "{name} no longer implements McpTransport — this lint is \
-                 grading the wrong file"
+                production.iter().any(|(path, _)| path.ends_with(known)),
+                "the transport walk did not find {known} — discovery is broken \
+                 and this lint is grading an empty set. Found: {:?}",
+                production.iter().map(|(p, _)| p).collect::<Vec<_>>()
             );
+        }
+
+        for (path, source) in &production {
             assert!(
                 source.contains("fn take_tools_changed"),
-                "{name} inherits the `false` default for take_tools_changed, so \
-                 a tools/list_changed it receives is discarded and the tool \
-                 stays uncallable for the session (FerroxLabs/wayland#1175)"
+                "{path} implements McpTransport but inherits the `false` \
+                 default for take_tools_changed, so a tools/list_changed it \
+                 receives is discarded and the tool stays uncallable for the \
+                 session (FerroxLabs/wayland#1175)"
             );
         }
     }
