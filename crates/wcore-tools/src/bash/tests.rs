@@ -2446,6 +2446,40 @@ fn walk_floor(root: &std::path::Path, samples: usize) -> Duration {
 /// Windows host ~25-30 ms against the ~15.6 ms system tick, which still clears
 /// it. The regression arm is proven by mutation, not argued: breaking the
 /// attribution arm in `bash.rs` turns both tests RED here.
+/// The walk cost at which a wall-clock comparison against this host's deadline
+/// becomes decisive.
+///
+/// A deadline does NOT fire at `timeout`: a timer wait returns on the host's
+/// next tick, so the honest estimate of when it fired is `timeout + allowance`.
+/// `* 2` is the margin: the walk has to DOMINATE the deadline, not merely
+/// exceed it, before the difference between "the timeout cut the walk" and "it
+/// did not" is larger than the host's timer quantum. Integer arithmetic
+/// throughout, so there is no float rounding between two measured quantities.
+///
+/// One expression, used by BOTH halves of the two timeout tests. wayland-core#350:
+/// only the attribution half had it. The latency half compared against
+/// `allowance` alone, which omits the timeout entirely and is a regime where
+/// the comparison cannot hold — on the Windows runner that produced a bound the
+/// host could not satisfy at any speed.
+fn decisive_walk_floor(timeout: Duration, allowance: Duration) -> Duration {
+    (timeout + allowance) * 2
+}
+
+/// How many times each latency measurement is repeated before its SMALLEST
+/// sample is used.
+///
+/// wayland-core#350: one sample cannot be told apart from one scheduler stall.
+/// Measured on the nightly Windows soak (run 33154839230): the same call
+/// returned 45.13 ms on the first attempt and 161.07 ms on the second, against
+/// a walk floor of 68-79 ms, on a box that was building another lane. Neither
+/// number says anything about whether the timeout bounds the walk.
+///
+/// The MINIMUM is the honest statistic here, and it is conservative in the
+/// direction that matters: if the timeout does not bound the walk, EVERY sample
+/// pays a whole walk, so the minimum is still above the threshold and the
+/// regression still reddens. A mean or a max would let one stall decide.
+const LATENCY_SAMPLES: usize = 3;
+
 fn grade_manifest_attribution(
     test: &str,
     content: &str,
@@ -2494,7 +2528,7 @@ fn grade_manifest_attribution(
     // this half skips there, loudly, instead of reporting the host's timer
     // quantum as a product defect. The LATENCY half above is unaffected and
     // still grades on every attempt, on every platform.
-    if floor > (timeout + allowance) * 2 {
+    if floor > decisive_walk_floor(timeout, allowance) {
         panic!(
             "the manifest build was still walking when the deadline fired — the walk \
              this tree costs floors at {floor:?}, decisively above this host's \
@@ -2648,9 +2682,10 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
 
     for attempt in 0..RACE_ATTEMPTS {
         let last_attempt = attempt + 1 == RACE_ATTEMPTS;
-        let (policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
-
-        let ctx = canned_ctx(policy, CannedBackend::enforcing());
+        // The policy this returns is deliberately DROPPED: every latency
+        // sample below builds its own, because the exec path memoises the
+        // deny walk and a shared policy would time a cache lookup.
+        let (_policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
         // #1111 grades "the user's `timeout` BOUNDS the walk", which is a
         // relation between the two — so the bound is derived from the walk just
@@ -2658,7 +2693,30 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
         // walk becomes large against a faster one, and this assertion would
         // then pass for the wrong reason (or, as with the 250 ms target this
         // replaced, never get the chance to run at all).
-        let timeout_ms = (walk / 10).as_millis().max(1) as u64;
+        //
+        // wayland-core#350: FLOORED AT THE HOST'S TIMER GRANULARITY. `walk / 10`
+        // alone asks for a timeout the host cannot deliver — on the self-hosted
+        // Windows runner it derived 6-7 ms against a measured 15.8 ms cost for
+        // ONE timer wait on the ~15.6 ms system tick. A deadline that fires two
+        // ticks after a 6 ms request tells you nothing about a 68 ms walk, and
+        // the assertion built on it was not satisfiable at any product speed:
+        //
+        // ```text
+        // a 6ms streaming timeout returned after 45.1335ms (29.3245ms above this
+        // host's 15.809ms allowance for one timer wait) against a walk measured
+        // at 68.2965ms — the manifest build is outside the timeout scope
+        // ```
+        //
+        // Asking for at least one tick costs nothing on Linux and macOS (~1 ms)
+        // and makes the request meaningful on Windows. It cannot make the test
+        // vacuous: the decisiveness precondition below is stated against
+        // `timeout + allowance`, so a longer timeout RAISES the walk this tree
+        // must reach before anything is graded.
+        let allowance_before = timer_allowance(1, TIMER_ALLOWANCE_SAMPLES).await;
+        let timeout_ms = (walk / 10)
+            .as_millis()
+            .max(allowance_before.as_millis())
+            .max(1) as u64;
 
         // The host's timer cost is BRACKETED around the call under test and the
         // larger bracket is used. On Windows the timer resolution is a
@@ -2668,26 +2726,76 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
         // appear and vanish inside the bracket to escape it. These samples
         // touch nothing but the timer, so the before-bracket cannot warm or
         // perturb the call it is correcting.
-        let allowance_before = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
+        let allowance_at = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
 
-        phase_align_to_the_timer_tick().await;
-        let started = std::time::Instant::now();
-        let result = BashTool
-            .execute_with_ctx(json!({"command": "echo hi", "timeout": timeout_ms}), &ctx)
-            .await;
-        let elapsed = started.elapsed();
+        let mut observed = Duration::MAX;
+        let mut result = None;
+        for _ in 0..LATENCY_SAMPLES {
+            // A FRESH policy per sample: the exec path memoises the deny walk,
+            // so re-using one would time a cache lookup from the second sample
+            // on and the floor would collapse to nothing.
+            let ctx = canned_ctx(
+                std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::contained(&root)),
+                CannedBackend::enforcing(),
+            );
+            phase_align_to_the_timer_tick().await;
+            let started = std::time::Instant::now();
+            let sample = BashTool
+                .execute_with_ctx(json!({"command": "echo hi", "timeout": timeout_ms}), &ctx)
+                .await;
+            observed = observed.min(started.elapsed());
+            // The FIRST sample is the one attribution is graded on: it is the
+            // cold one, the same regime the deadline lands in on a first exec,
+            // and the only one whose message describes an unwarmed process.
+            result.get_or_insert(sample);
+        }
+        let result = result.expect("LATENCY_SAMPLES must be at least 1");
         let allowance_after = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
-        let allowance = allowance_before.max(allowance_after);
-        let bounded = elapsed.saturating_sub(allowance);
+        let allowance = allowance_at.max(allowance_after);
+        let timeout = Duration::from_millis(timeout_ms);
+        let decisive = decisive_walk_floor(timeout, allowance);
+        let floor = walk_floor(&root, 3);
 
-        // Graded on EVERY attempt and never retried: this is the half a product
-        // regression breaks, and re-racing past a failure here would hide
-        // exactly the defect #1111 exists to catch.
+        // The instrument has to be able to tell the two outcomes APART before
+        // it is allowed to call either of them. If the timeout bounds the walk
+        // the call costs about `timeout + allowance`; if it does not it costs
+        // about `walk`. Those are only distinguishable when the walk dominates
+        // the deadline, and on a host whose timer quantum is the same order as
+        // the tree's walk they are not. Grow the tree and race again; on the
+        // last attempt SKIP LOUDLY rather than report the host's timer
+        // granularity as a product defect.
+        if floor <= decisive {
+            if last_attempt {
+                eprintln!(
+                    "SKIP (wayland-core#350) {}: a {timeout_ms}ms timeout against a walk \
+                     flooring at {floor:?} cannot be told apart from an unbounded one on \
+                     this host — the deadline alone costs up to {decisive:?} \
+                     (timeout + a measured {allowance:?} timer allowance, doubled). \
+                     Nothing was graded on this attempt.",
+                    "the_bash_timeout_bounds_the_secret_deny_walk"
+                );
+                return;
+            }
+            grow_workspace(&root, attempt);
+            continue;
+        }
+
+        // Graded on EVERY attempt the instrument can decide, and never retried
+        // past a failure: this is the half a product regression breaks, and
+        // re-racing past a red here would hide exactly the defect #1111 exists
+        // to catch.
+        //
+        // Stated on the SMALLEST of `LATENCY_SAMPLES` calls, not on one — see
+        // `LATENCY_SAMPLES` for the measured reason and for why the minimum
+        // cannot hide the regression.
         assert!(
-            bounded * 3 < walk,
-            "a {timeout_ms}ms timeout returned after {elapsed:?} ({bounded:?} above \
-             this host's {allowance:?} allowance for one timer wait) against a walk \
-             measured at {walk:?} — the manifest build is outside the timeout scope"
+            observed < decisive,
+            "a {timeout_ms}ms {} timeout floors at {observed:?} over \
+             {LATENCY_SAMPLES} calls, at or above the {decisive:?} this host's \
+             deadline alone can cost (timeout + a measured {allowance:?} timer \
+             allowance, doubled), against a walk flooring at {floor:?} — the \
+             manifest build is outside the timeout scope",
+            "buffered"
         );
 
         // #1111 acceptance 3: "a manifest build that exceeds the timeout
@@ -2755,9 +2863,10 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
 
     for attempt in 0..RACE_ATTEMPTS {
         let last_attempt = attempt + 1 == RACE_ATTEMPTS;
-        let (policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
-
-        let ctx = canned_ctx(policy, CannedBackend::enforcing());
+        // The policy this returns is deliberately DROPPED: every latency
+        // sample below builds its own, because the exec path memoises the
+        // deny walk and a shared policy would time a cache lookup.
+        let (_policy, walk) = workspace_whose_walk_costs_at_least(&root, CALIBRATED_WALK);
 
         // #1111 grades "the user's `timeout` BOUNDS the walk", which is a
         // relation between the two — so the bound is derived from the walk just
@@ -2765,7 +2874,30 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
         // walk becomes large against a faster one, and this assertion would
         // then pass for the wrong reason (or, as with the 250 ms target this
         // replaced, never get the chance to run at all).
-        let timeout_ms = (walk / 10).as_millis().max(1) as u64;
+        //
+        // wayland-core#350: FLOORED AT THE HOST'S TIMER GRANULARITY. `walk / 10`
+        // alone asks for a timeout the host cannot deliver — on the self-hosted
+        // Windows runner it derived 6-7 ms against a measured 15.8 ms cost for
+        // ONE timer wait on the ~15.6 ms system tick. A deadline that fires two
+        // ticks after a 6 ms request tells you nothing about a 68 ms walk, and
+        // the assertion built on it was not satisfiable at any product speed:
+        //
+        // ```text
+        // a 6ms streaming timeout returned after 45.1335ms (29.3245ms above this
+        // host's 15.809ms allowance for one timer wait) against a walk measured
+        // at 68.2965ms — the manifest build is outside the timeout scope
+        // ```
+        //
+        // Asking for at least one tick costs nothing on Linux and macOS (~1 ms)
+        // and makes the request meaningful on Windows. It cannot make the test
+        // vacuous: the decisiveness precondition below is stated against
+        // `timeout + allowance`, so a longer timeout RAISES the walk this tree
+        // must reach before anything is graded.
+        let allowance_before = timer_allowance(1, TIMER_ALLOWANCE_SAMPLES).await;
+        let timeout_ms = (walk / 10)
+            .as_millis()
+            .max(allowance_before.as_millis())
+            .max(1) as u64;
 
         // The host's timer cost is BRACKETED around the call under test and the
         // larger bracket is used. On Windows the timer resolution is a
@@ -2775,31 +2907,81 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
         // appear and vanish inside the bracket to escape it. These samples
         // touch nothing but the timer, so the before-bracket cannot warm or
         // perturb the call it is correcting.
-        let allowance_before = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
+        let allowance_at = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
 
-        phase_align_to_the_timer_tick().await;
-        let started = std::time::Instant::now();
-        let sink = crate::NullToolOutputSink;
-        let result = BashTool
-            .execute_streaming_with_ctx(
-                json!({"command": "echo hi", "timeout": timeout_ms}),
-                &ctx,
-                &sink,
-            )
-            .await;
-        let elapsed = started.elapsed();
+        let mut observed = Duration::MAX;
+        let mut result = None;
+        for _ in 0..LATENCY_SAMPLES {
+            // A FRESH policy per sample: the exec path memoises the deny walk,
+            // so re-using one would time a cache lookup from the second sample
+            // on and the floor would collapse to nothing.
+            let ctx = canned_ctx(
+                std::sync::Arc::new(crate::workspace_policy::WorkspacePolicy::contained(&root)),
+                CannedBackend::enforcing(),
+            );
+            let sink = crate::NullToolOutputSink;
+            phase_align_to_the_timer_tick().await;
+            let started = std::time::Instant::now();
+            let sample = BashTool
+                .execute_streaming_with_ctx(
+                    json!({"command": "echo hi", "timeout": timeout_ms}),
+                    &ctx,
+                    &sink,
+                )
+                .await;
+            observed = observed.min(started.elapsed());
+            // The FIRST sample is the one attribution is graded on: it is the
+            // cold one, the same regime the deadline lands in on a first exec,
+            // and the only one whose message describes an unwarmed process.
+            result.get_or_insert(sample);
+        }
+        let result = result.expect("LATENCY_SAMPLES must be at least 1");
         let allowance_after = timer_allowance(timeout_ms, TIMER_ALLOWANCE_SAMPLES).await;
-        let allowance = allowance_before.max(allowance_after);
-        let bounded = elapsed.saturating_sub(allowance);
+        let allowance = allowance_at.max(allowance_after);
+        let timeout = Duration::from_millis(timeout_ms);
+        let decisive = decisive_walk_floor(timeout, allowance);
+        let floor = walk_floor(&root, 3);
 
-        // Graded on EVERY attempt and never retried: this is the half a product
-        // regression breaks, and re-racing past a failure here would hide
-        // exactly the defect #1111 exists to catch.
+        // The instrument has to be able to tell the two outcomes APART before
+        // it is allowed to call either of them. If the timeout bounds the walk
+        // the call costs about `timeout + allowance`; if it does not it costs
+        // about `walk`. Those are only distinguishable when the walk dominates
+        // the deadline, and on a host whose timer quantum is the same order as
+        // the tree's walk they are not. Grow the tree and race again; on the
+        // last attempt SKIP LOUDLY rather than report the host's timer
+        // granularity as a product defect.
+        if floor <= decisive {
+            if last_attempt {
+                eprintln!(
+                    "SKIP (wayland-core#350) {}: a {timeout_ms}ms timeout against a walk \
+                     flooring at {floor:?} cannot be told apart from an unbounded one on \
+                     this host — the deadline alone costs up to {decisive:?} \
+                     (timeout + a measured {allowance:?} timer allowance, doubled). \
+                     Nothing was graded on this attempt.",
+                    "the_streaming_bash_timeout_bounds_the_secret_deny_walk"
+                );
+                return;
+            }
+            grow_workspace(&root, attempt);
+            continue;
+        }
+
+        // Graded on EVERY attempt the instrument can decide, and never retried
+        // past a failure: this is the half a product regression breaks, and
+        // re-racing past a red here would hide exactly the defect #1111 exists
+        // to catch.
+        //
+        // Stated on the SMALLEST of `LATENCY_SAMPLES` calls, not on one — see
+        // `LATENCY_SAMPLES` for the measured reason and for why the minimum
+        // cannot hide the regression.
         assert!(
-            bounded * 3 < walk,
-            "a {timeout_ms}ms streaming timeout returned after {elapsed:?} ({bounded:?} above \
-             this host's {allowance:?} allowance for one timer wait) against a walk \
-             measured at {walk:?} — the manifest build is outside the timeout scope"
+            observed < decisive,
+            "a {timeout_ms}ms {} timeout floors at {observed:?} over \
+             {LATENCY_SAMPLES} calls, at or above the {decisive:?} this host's \
+             deadline alone can cost (timeout + a measured {allowance:?} timer \
+             allowance, doubled), against a walk flooring at {floor:?} — the \
+             manifest build is outside the timeout scope",
+            "streaming"
         );
 
         // #1111 acceptance 3: "a manifest build that exceeds the timeout
