@@ -33,6 +33,9 @@ use std::process::{Command, Stdio};
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
+mod support;
+use support::owned_tree::OwnedTree;
+
 /// Set on the re-executed copy of this binary; its presence switches this test
 /// from driver to probe.
 const PROBE_ENV: &str = "WCORE_QUARANTINE_TTY_PROBE";
@@ -115,7 +118,9 @@ fn quarantine_child_cannot_reach_the_controlling_terminal() {
     cmd.env(PROBE_ENV, "1");
     cmd.env("TERM", "xterm-256color");
 
-    let mut child = pair.slave.spawn_command(cmd).expect("spawn probe in PTY");
+    // #352: the tree guard, not a bare Child — if this test panics or returns
+    // early the PTY probe and anything it spawned must still be reaped.
+    let mut child = OwnedTree::new(pair.slave.spawn_command(cmd).expect("spawn probe in PTY"));
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().expect("clone PTY reader");
@@ -125,7 +130,7 @@ fn quarantine_child_cannot_reach_the_controlling_terminal() {
         String::from_utf8_lossy(&buf).into_owned()
     });
 
-    let status = child.wait().expect("probe exited");
+    let status = child.child_mut().wait().expect("probe exited");
     drop(pair.master);
     let output = drain.join().expect("drain thread");
 
