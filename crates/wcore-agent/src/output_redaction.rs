@@ -68,7 +68,22 @@ pub(crate) fn redact_tool_output(content: &str) -> String {
     // so a token straddling a truncation boundary is removed while it is still
     // one contiguous string. `redact` is an exact `str::replace`; a token cut
     // in half survives an emit-time-only pass.
-    redact_active_tokens(&PIIScrubber.scrub(content))
+    //
+    // Within that pass the ACTIVE-TOKEN scrub must run FIRST. `PIIScrubber` is
+    // itself a cutter: its patterns are greedy and none of them know where an
+    // `apr-<uuid>` begins or ends, so a match that starts INSIDE a token
+    // consumes the tail and strands the head, which the exact-match token
+    // scrub can then no longer see. That is not hypothetical — a v4 UUID whose
+    // fourth group ends in `fc` (1 token in 256) puts `fc-` inside the token,
+    // FIRECRAWL_API_KEY (`fc-[A-Za-z0-9]{20,}`) matches from there through the
+    // final group and on into any alphanumeric output that follows, and 25
+    // characters of a live approval token reach the wire ahead of the
+    // replacement. Token-first is unconditionally safer: it reads unmodified
+    // input, so it can only find MORE tokens, and the PII pass still sees
+    // everything the token scrub did not remove.
+    PIIScrubber
+        .scrub(&redact_active_tokens(content))
+        .into_owned()
 }
 
 const MAX_PENDING_BYTES: usize = 1024 * 1024;
@@ -650,6 +665,48 @@ mod tests {
         assert_eq!(
             redactor.push(&block),
             Some("g\n[REDACTED:PRIVATE_KEY_BLOCK]\n".to_string())
+        );
+    }
+
+    /// #584 regression. `PIIScrubber` must not run ahead of the active-token
+    /// scrub inside [`redact_tool_output`]. Its patterns are greedy and
+    /// token-unaware, so a PII match that starts INSIDE an `apr-<uuid>` eats
+    /// the token's tail and leaves the head on the wire, past the exact-match
+    /// token scrub that would otherwise have removed the whole thing.
+    ///
+    /// This token's fourth group ends in `fc` — the 1-in-256 UUID that puts a
+    /// FIRECRAWL_API_KEY prefix (`fc-[A-Za-z0-9]{20,}`) inside the token — and
+    /// the alphanumeric filler behind it is what the greedy match runs into.
+    /// Under the old ordering the output opened with 25 plaintext characters
+    /// of the token.
+    #[test]
+    fn pii_scrub_cannot_strand_the_head_of_an_active_token() {
+        let token = String::from("apr-00000000-0000-4000-80fc-000000000000");
+        // Keep the handle alive: sources are held by `Weak`.
+        let redactor = crate::output::protocol_sink::ActiveTokenRedactor::new();
+        redactor.set(vec![token.clone()]);
+        let head = &token[..16];
+        let payload = format!("{}{token}{}", "A".repeat(80), "B".repeat(400));
+
+        // CONTROL: the old ordering really does strand the head on this input,
+        // so the assertion below pins the ordering rather than passing
+        // vacuously if the PII pattern set ever stops matching here.
+        let pii_first = redact_active_tokens(&PIIScrubber.scrub(&payload));
+        assert!(
+            pii_first.contains(head),
+            "control failed: PII-first left no stranded token head, so this \
+             test no longer exercises the ordering it exists to pin: {pii_first}"
+        );
+
+        let out = redact_tool_output(&payload);
+        assert!(
+            !out.contains(head),
+            "the PII scrub stranded the head {head} of an active approval \
+             token on the wire: {out}"
+        );
+        assert!(
+            !out.contains(&token),
+            "the whole active approval token survived redaction: {out}"
         );
     }
 }
