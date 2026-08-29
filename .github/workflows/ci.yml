@@ -1397,6 +1397,38 @@ jobs:
         run: |
           python3 scripts/check-test-env-globals.py --self-test
           python3 scripts/check-test-env-globals.py
+
+      # ── criteria-ledger gate ──────────────────────────────────────────
+      # `.planning/ledger/<repo>-<number>.md` says what must be TRUE for an
+      # issue to close and anchors every `met` claim to something a machine
+      # can resolve -- a test name that can be grepped, a symbol that is
+      # declared, a line that exists. It is here for the same reason as the
+      # three steps above: a pure text scan, no toolchain, so a build failure
+      # cannot shadow it.
+      #
+      # This is the OFFLINE arm. It catches the rot -- a `met` criterion
+      # whose test was deleted, a `blocked` criterion owned by `core`, a
+      # malformed entry, and a run that scanned nothing. It deliberately does
+      # NOT check tracker coverage: that needs `gh` against two repositories,
+      # and a network dependency in the per-PR path buys flakiness for
+      # nothing. The offline run prints, in as many words, that coverage was
+      # not checked, so the green here cannot be read as more than it is.
+      #
+      # Coverage runs at RELEASE time (`release.yml` prepare-release), where
+      # every publishing job depends on it and a FAIL actually stops the
+      # release. That is where the miss happened: the sweep that produced
+      # 0.13.9 filtered one tracker on `area:core` and the entire second
+      # tracker was invisible for a full release.
+      #
+      # `--self-test` runs first and proves BOTH directions -- it builds
+      # throwaway ledgers in a temp dir and asserts the gate fires on each
+      # defect class and stays silent on the control, with every red arm
+      # asserting the message it fired on, so an arm whose mutation stopped
+      # applying fails loudly instead of reading as a pass.
+      - name: Criteria ledger is anchored and parseable
+        run: |
+          python3 scripts/check-criteria-ledger.py --self-test
+          python3 scripts/check-criteria-ledger.py --offline
       # ── Windows-attribution gate (#1146) ──────────────────────────────
       # Same placement reasoning as the two steps above: AFTER checkout (it
       # reads the workflow YAML and .config/nextest.toml out of the working

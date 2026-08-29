@@ -241,7 +241,10 @@ _auto-commit-fixes:
 # muting it is TRUE against the real graph. See the recipe above.
 # `check-no-personal-identifiers` added 2026-08-02 (lane identifier-scrub): a
 # ~3s pure text scan, no toolchain, so it runs first and costs nothing.
-check-all: check-no-personal-identifiers check-model-limits check-windows-attribution fmt-check lint test-ci hakari-verify audit deny verify-suppressions
+# `ledger-check` added 2026-08-29 (lane ledger): the OFFLINE arm only. The
+# coverage arm needs `gh` against two repos and lives in `ledger-check-live`,
+# because a network dependency inside `check-all` buys flakiness for nothing.
+check-all: check-no-personal-identifiers check-model-limits check-windows-attribution ledger-check fmt-check lint test-ci hakari-verify audit deny verify-suppressions
 
 # ── User-flow harness (CLI + TUI + failure injection) ────────────────────
 # Drives the COMPILED wayland-core binary the way a user does:
@@ -334,6 +337,42 @@ check-no-assertion-todos:
         exit 1
     fi
     echo "OK: no todo!() in eval-scenarios assertion paths"
+
+# ── Criteria-ledger gate ──────────────────────────────────────────────────
+# `.planning/ledger/<repo>-<number>.md` is one file per open issue, on BOTH
+# trackers, saying what must be TRUE for that issue to close and pointing each
+# `met` claim at something a machine can resolve. It exists because handoffs
+# in this repo are narratives of what was DONE, so every session re-derives
+# "is this done?" from prose and gets a different answer: v0.13.10 shipped
+# claiming 22 issues closed and grading found 9.
+#
+# The largest contributor was structural. The sweep that produced 0.13.9
+# filtered `FerroxLabs/wayland` on `area:core`, and the whole second tracker
+# (`FerroxLabs/wayland-core`, 17 open issues) was invisible for a full
+# release. Nothing went red, because nothing could.
+#
+# TWO recipes, for the same reason `check-model-limits` has two:
+#   * `ledger-check`      — self-test THEN the structural gate. No network.
+#     Catches the rot (a `met` criterion whose test was deleted), a malformed
+#     entry, a `blocked` owned by core, and scanning nothing. Chained into
+#     `check-all`, so it costs a second and cannot be shadowed.
+#   * `ledger-check-live` — adds tracker COVERAGE and ledger/GitHub
+#     DIVERGENCE. Needs `gh` with read access to BOTH repos. This is the arm
+#     that catches a tracker going missing, so run it before any release.
+#
+# The offline arm prints, in as many words, that it did NOT check coverage.
+# A skip that reads as a pass is the defect class this repo keeps finding.
+# `--self-test` builds throwaway ledgers in a temp dir and proves the gate
+# fires on each defect and stays silent on the control, both directions.
+# Run: `just ledger-check`
+ledger-check:
+    python3 scripts/check-criteria-ledger.py --self-test
+    python3 scripts/check-criteria-ledger.py --offline
+
+# Run: `just ledger-check-live` — the coverage arm; needs gh on both trackers
+ledger-check-live:
+    python3 scripts/check-criteria-ledger.py --self-test
+    python3 scripts/check-criteria-ledger.py
 
 # ── Vacuous-green gate ─────────────────────────────────────────────────────
 # `cargo nextest` fails closed on a zero-test run (`no-tests = "fail"` in
