@@ -8,10 +8,9 @@ last_verified_commit: bb850cc5
 criteria:
   - id: c1
     text: "OwnedTree kills the process TREE on Windows, not just the direct child"
-    state: met
-    evidence: "symbol:crates/wcore-cli/tests/support/owned_tree.rs::own_windows_tree"
+    state: not-met
     owner: core
-    note: "OwnedTree::new now assigns its child to a fresh kill-on-close Job Object on Windows (own_windows_tree -> wcore_types::job_object::WindowsJobObject::attach_running), and reap() calls TerminateJobObject on it; every one of the 49 swept sites gains this with no call-site edit because it hangs off `new`. The Job Object is the primitive the Windows sandbox and the MCP stdio transport already use -- no second mechanism was invented. The lying stubs are gone rather than left in place: the cfg(windows) child_pids that returned Vec::new() and the cfg(windows) sigkill that did nothing are deleted, and descendants()/the `known` pid list are now cfg(unix)-only concepts. Failure to create the job PANICS -- no fallback, matching the Linux arm that refuses to degrade to pgrep. The one window it does NOT close, stated at attach_running and in the guard module docs: `new` is handed an ALREADY-RUNNING child and the kernel puts only a process's FUTURE descendants into a job, so anything spawned between CreateProcess returning and the assignment landing stays outside it; WindowsJobObject::attach (CREATE_SUSPENDED) is the race-free constructor for a caller that holds the Command, and no site needs it today so none was added speculatively. Compiles for Windows: clippy --target x86_64-pc-windows-gnu -p wcore-cli --all-targets -- -D warnings exits 0 (see c6 for why that is not the msvc run)."
+    note: "RE-GRADED 2026-08-29 from met to not-met -- needs-platform-run. The criterion is a RUNTIME claim about what the Windows kernel does, and NOTHING HAS EVER RUN ON WINDOWS. Every fact that closed it is a fact about the SOURCE; not one of them says TerminateJobObject reached a descendant on a real machine. Grading it met while its own grading test (c2) is not-met, and while c3 and c5 record that no Windows run exists at all, reached past the evidence. CODE-LEVEL FACTS RE-VERIFIED HERE at e1f151a5 so nobody repeats them: own_windows_tree resolves at crates/wcore-cli/tests/support/owned_tree.rs:183 and panics rather than falling back; OwnedTree::new assigns the child at :293-296 via child.pid().map(own_windows_tree); reap() calls job.terminate() at :399-402 and Drop calls reap() at :471-474; WindowsJobObject::attach_running (CreateJobObjectW plus JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE plus AssignProcessToJobObject) is crates/wcore-types/src/job_object.rs:147 and ::contains (IsProcessInJob) is :209; 67 OwnedTree::new call sites across 36 files inherit it with no call-site edit (measured on this tree, definition file excluded); the lying Windows stubs are gone (the cfg(windows) child_pids that returned Vec::new(), the cfg(windows) sigkill that did nothing); and cargo clippy --target x86_64-pc-windows-gnu -p wcore-cli --test harness_owns_spawned_trees_windows -- -D warnings exits 0 on this tree. The one window it does not close is stated at attach_running: new is handed an ALREADY-RUNNING child and the kernel puts only a process's FUTURE descendants into a job. WHAT A WINDOWS RUN MUST SHOW BEFORE THIS GOES BACK TO met -- three separate facts, none inferable from the others. (1) AssignProcessToJobObject SUCCEEDS on a real runner. A runner that already places its processes in a Job Object is the normal case and nested jobs have been permitted since Windows 8, but an outer job that does not permit nesting still refuses the assignment with ERROR_ACCESS_DENIED -- and own_windows_tree PANICS rather than degrading, so a refusal takes all 67 sites down at once instead of leaking quietly. Evidence: the test does not panic inside own_windows_tree. (2) The grandchild is really INSIDE the job BEFORE anything is killed -- IsProcessInJob true for the grandchild and FALSE for the test runner, the anti-vacuity block at harness_owns_spawned_trees_windows.rs:73-86. (3) TerminateJobObject actually reaps the DESCENDANT and not just the direct child -- both pids gone after the guard is dropped while unwinding, :104-115. That is exactly the c2 command: cargo nextest run -p wcore-cli --test harness_owns_spawned_trees_windows on a Windows host. c1, c2, c3, c5 and c6 all settle on that one run; do not close one of them from it and leave the rest open."
   - id: c2
     text: "A test grades the grandchild case ON WINDOWS: a direct child with a detached grandchild, guard dropped while unwinding, both gone afterwards"
     state: not-met
@@ -22,7 +21,7 @@ criteria:
     text: "The red arm is quoted VERBATIM from a real Windows run, showing the grandchild surviving before the change"
     state: not-met
     owner: core
-    note: "Not observed. Nothing on the Linux build host can produce it: the claim is that Windows TerminateProcess reaches exactly one process and that a child does not die with its parent, which only Windows can answer. The red arm is one step away and is a revert of one file, not a rewrite: `git show integ/f13-base:crates/wcore-cli/tests/support/owned_tree.rs > crates/wcore-cli/tests/support/owned_tree.rs` (that version has the Vec::new() Windows child_pids and no job), keep both new test files, `touch` the restored file so cargo does not skip the rebuild and measure the wrong binary, then run the c2 command on Windows. The expected failure is the grandchild assertion in dropping_the_guard_kills_a_detached_grandchild_on_windows."
+    note: "Not observed, and the recipe this criterion used to prescribe DOES NOT COMPILE -- corrected here rather than left for the Windows operator to discover on the box, because they get one shot. WHY THE OLD RECIPE FAILS: it said to restore integ/f13-base's crates/wcore-cli/tests/support/owned_tree.rs, keep both new test files, and expect the grandchild assertion to fail. That base file has no job field, no fn job and zero job_object references (measured: grep -c job_object on it returns 0, and its single hit for the word job is a CI doc comment), and harness_owns_spawned_trees_windows.rs:73 calls guard.job(), which cannot resolve through Deref<Target = Child> either. MEASURED on hetzner, verbatim: error[E0599]: no method named `job` found for struct `support::owned_tree::OwnedTree<std::process::Child>` in the current scope --> crates/wcore-cli/tests/harness_owns_spawned_trees_windows.rs:73:21 // error: could not compile `wcore-cli` (test harness_owns_spawned_trees_windows) due to 1 previous error. Stubbing that call out to make it build deletes lines 73-86, which ARE the anti-vacuity block (IsProcessInJob on the grandchild, and on the runner). A red arm that has to delete its own anti-vacuity proves nothing: without it a red is indistinguishable from a fixture whose grandchild was never in the job. A SECOND OBVIOUS SHAPE ALSO FAILS, silently and in the dangerous direction: merely deleting job.terminate() from reap() does NOT redden the test. WindowsJobObject::Drop itself calls TerminateJobObject then CloseHandle (job_object.rs:377-389) and the job carries JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (:168), so dropping the guard still kills the tree and that arm comes back GREEN. Do not use it. THE RED ARM THAT ACTUALLY WORKS -- one file, one hunk, anti-vacuity intact. In crates/wcore-cli/tests/support/owned_tree.rs, inside pub fn reap at lines 399-402, replace the terminate with a leak of the same handle. BEFORE: #[cfg(windows)] if let Some(job) = self.job.as_ref() { job.terminate(); }. AFTER: #[cfg(windows)] if let Some(job) = self.job.take() { std::mem::forget(job); }. Then touch crates/wcore-cli/tests/support/owned_tree.rs (an edit or a cp/mv restore with an older mtime makes cargo skip the rebuild and measure the WRONG binary) and run the c2 command. WHY THIS IS THE RIGHT MUTATION: the job is still created and the child is still assigned to it, so guard.job() still exists, IsProcessInJob is still true for the grandchild and false for the runner, and BOTH anti-vacuity assertions still run and still pass. What is removed is the job's reach at kill time -- both of it: terminate() is gone, and mem::forget suppresses the kill-on-close Drop. reap() is then exactly the pre-fix behaviour: TerminateProcess on the direct child and nothing else. EXPECTED RESULT: the direct-child assertion at :104 stays GREEN and :109 goes RED with -- the grandchild <pid> outlived the guard -- on Windows killing the direct child does not reach a descendant, so without a Job Object the guard owns the leaf and leaks the TREE (FerroxLabs/wayland-core#358). That single red IS also the kernel fact c3 asks for: it is the observation that a Windows child does not die with its parent. VERIFIED TO COMPILE FOR WINDOWS FROM THE LINUX HOST, so the operator does not burn a cycle on a build error: with the mutation applied, cargo clippy --target x86_64-pc-windows-gnu -p wcore-cli --test harness_owns_spawned_trees_windows -- -D warnings exits 0, and Checking wcore-cli appears in that run so it is not a cache artifact. POSITIVE CONTROL for that exit 0, run on the same file: appending a deliberate type error to owned_tree.rs makes the identical command fail with error[E0308]: mismatched types. The mutation was reverted, the file touched, and git status is clean. AFTERWARDS on the Windows box: git checkout -- crates/wcore-cli/tests/support/owned_tree.rs and touch the same file before re-running the green arm."
   - id: c4
     text: "A negative control passes in both arms, so a change that kills too much fails here"
     state: met
@@ -59,18 +58,37 @@ that looks present and owns nothing.
 ## State after lane `lane/f13-win-owned-tree`
 
 The mechanism is built and the tests are written; what is missing is a Windows
-host to run them on. `c1` and `c4` are closed with evidence measured on Linux
-(`c1`: the code plus a Windows-target clippy; `c4`: both arms plus a reddening
-mutation). `c2`, `c3`, `c5` and `c6` all reduce to the SAME missing run and
-should be settled together:
+host to run them on. Only `c4` is closed — it is graded on Linux on purpose,
+where an over-broad walk is reachable today, and both its arms plus a reddening
+mutation were measured there.
+
+`c1` was closed on Linux evidence and has been re-graded `not-met`: it is a
+statement about what the Windows kernel does at runtime, every fact behind it is
+a fact about the source, and no Windows process has ever run this code. `c1`,
+`c2`, `c3`, `c5` and `c6` now all reduce to the SAME missing run and settle
+together — closing one of them from that run and leaving the rest open is the
+error this ledger just corrected.
 
 ```
-# on a Windows host, from this branch
+# on a Windows host, from this branch — c1, c2, c5, c6
 cargo clippy --target x86_64-pc-windows-msvc -p wcore-cli --all-targets -- -D warnings
 cargo nextest run -p wcore-cli --test harness_owns_spawned_trees_windows
 
-# then, for c3, restore the pre-fix guard and repeat the nextest run
-git show integ/f13-base:crates/wcore-cli/tests/support/owned_tree.rs \
-    > crates/wcore-cli/tests/support/owned_tree.rs
+# then, for c3, the RED ARM. Do NOT restore the base owned_tree.rs: that file has
+# no `fn job`, so the test stops at E0599 instead of at the grandchild assertion,
+# and the only way to make it build is to delete the anti-vacuity block itself.
+# Instead, in crates/wcore-cli/tests/support/owned_tree.rs, inside `pub fn reap`:
+#
+#     -        if let Some(job) = self.job.as_ref() {
+#     -            job.terminate();
+#     +        if let Some(job) = self.job.take() {
+#     +            std::mem::forget(job);
+#          }
+#
+# The job is still assigned, so both anti-vacuity assertions still run and pass;
+# `mem::forget` also suppresses the kill-on-close `Drop`, which a bare deletion of
+# `terminate()` would not — that shape comes back GREEN and proves nothing.
 touch crates/wcore-cli/tests/support/owned_tree.rs   # else cargo measures the OLD binary
+cargo nextest run -p wcore-cli --test harness_owns_spawned_trees_windows
+git checkout -- crates/wcore-cli/tests/support/owned_tree.rs && touch crates/wcore-cli/tests/support/owned_tree.rs
 ```

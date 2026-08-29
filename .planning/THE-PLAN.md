@@ -5,17 +5,17 @@
 > verification) and `PLAN-ROUTING.json` (assignment). If this disagrees with anyone's
 > recollection, this is right and the recollection is wrong — that is the entire point.
 
-Rendered 2026-08-29 13:28 UTC
+Rendered 2026-08-29 14:17 UTC
 
 ## VERDICT: BLOCKED
 
-**37 criteria block the 0.13.12 release.** Full list in §3.
+**39 criteria block the 0.13.12 release.** Full list in §3.
 
 | state | count | means |
 |---|---:|---|
 | DONE | 0 | met, evidence resolves, independently verified |
-| CLAIMED | 227 | met but NOT yet independently verified — never report as done |
-| OPEN | 40 | outstanding work |
+| CLAIMED | 225 | met but NOT yet independently verified — never report as done |
+| OPEN | 42 | outstanding work |
 | HANDOFF | 0 | another team's half, with a filed ticket carrying it |
 
 ## §3 BLOCKING — the definition of done for 0.13.12
@@ -121,6 +121,14 @@ Runs on: **hetzner**  ·  1-build
 |---|---|---|
 | `c7` | core#354 | The already-shipping non-session MCP launch path reads the operator's chosen mode, not the uninstalled permissive default |
 
+### `prompt-cache` — Prompt-cache collapse and re-billed context
+
+Runs on: **hetzner**  ·  1-build
+
+| criterion | issue | what must become true |
+|---|---|---|
+| `c6` | wl#559 | The skill-router hint and PrePrompt hook contributions no longer land at messages[1] on turn 1 |
+
 ### `telegram-topic` — Telegram forum-topic target sent as reply_to_message_id, never message_thread_id
 
 Runs on: **hetzner**  ·  1-build
@@ -135,6 +143,7 @@ Runs on: **hetzner**  ·  1-build
 
 | criterion | issue | what must become true |
 |---|---|---|
+| `c1` | core#358 | OwnedTree kills the process TREE on Windows, not just the direct child |
 | `c6` | core#358 | clippy --target x86_64-pc-windows-msvc -p wcore-cli --all-targets -D warnings is clean |
 
 ### `win-runs` — Windows measurement arms - serialize, ONE box
@@ -163,7 +172,7 @@ it appears in §3 as blocking, because that is what it is.
 
 _None recorded yet._
 
-## §5 CLAIMED BUT UNVERIFIED — 227
+## §5 CLAIMED BUT UNVERIFIED — 225
 
 Marked `met` with resolving evidence, but no independent verifier has confirmed the lane.
 Historically this is exactly where a partial hides: a criterion written thin reads `met`
@@ -190,14 +199,14 @@ while the reported bug is still live. Do not report these as done.
 - **core#354** — c1, c2, c3, c4, c5, c6
 - **core#355** — c1, c2, c3, c4
 - **core#356** — c1, c2, c3, c4
-- **core#358** — c1, c4
+- **core#358** — c4
 - **core#360** — c1, c2, c3, c4, c5
 - **core#363** — c1, c2, c3, c4, c5
 - **wl#174** — c1, c2, c3, c4, c5
 - **wl#305** — c1
 - **wl#388** — c1, c2, c3
 - **wl#434** — c1, c2
-- **wl#559** — c1, c2, c3, c5, c6
+- **wl#559** — c1, c2, c3, c5
 - **wl#863** — c1, c2
 - **wl#908** — c1, c2, c3
 - **wl#934** — c1, c2, c3, c4, c6, c7
