@@ -2297,7 +2297,7 @@ fn request_wire_fingerprint(
 /// tool-result body in the outbound retry context. `short_error` is the first
 /// line of the original body, capped, so the model still sees WHAT failed
 /// without the engine re-sending the full contaminated transcript.
-fn retry_stub(tool_name: &str, error_body: &str) -> String {
+pub(crate) fn retry_stub(tool_name: &str, error_body: &str) -> String {
     const MAX_ERR_CHARS: usize = 200;
     let mut short: String = error_body
         .lines()
@@ -8315,6 +8315,25 @@ impl AgentEngine {
             StopReason::MaxTokens => "the output limit of the model cut the reply off".to_string(),
             _ => return,
         };
+        self.emit_incomplete_run_admission(&cause);
+    }
+
+    /// Say on the ANSWER stream that the run stopped short, for ONE stated
+    /// cause.
+    ///
+    /// #388, Expected-Behavior bullet 3 ("clearly mark the task as
+    /// failed/incomplete"). Extracted from
+    /// [`Self::emit_terminated_run_admission`] because the limit exits were
+    /// not the only ones that owe this sentence and were the only ones saying
+    /// it. A run that ends on a provider failure returns `Err`, never reaches
+    /// `finish_run_terminated_inner`, and emits its explanation through
+    /// `emit_error` — which goes to **stderr**. A `-p` run's stdout therefore
+    /// ends on the model's last narration, which reads as a finished answer:
+    /// the Job-corpus A-10 failure, on the paths #388 actually reports.
+    ///
+    /// One body, one wording, so the admission a failure exit gives and the
+    /// admission a limit exit gives cannot drift apart.
+    fn emit_incomplete_run_admission(&self, cause: &str) {
         let admission = format!(
             "\n\n[stopped early] I did not finish this: {cause}. Anything above is \
              partial work, not an answer."
@@ -14752,6 +14771,10 @@ impl AgentEngine {
                         // what propagates and the session stays usable.
                         self.settle_failed_turn_provider_attempts(&e.to_string())
                             .await;
+                        self.emit_incomplete_run_admission(
+                            "the provider refused this request and it could not be repaired \
+                             into one worth re-sending",
+                        );
                         return Err(e.into());
                     }
                 };
@@ -14945,6 +14968,10 @@ impl AgentEngine {
                                     loop_owner = %owner,
                                     loop_engaged = %engaged,
                                     "{detail}"
+                                );
+                                self.emit_incomplete_run_admission(
+                                    "the router and this engine both tried to own the same \
+                                     escalation loop, so the turn was abandoned",
                                 );
                                 return Err(AgentError::ApiError(detail));
                             }
@@ -15554,6 +15581,32 @@ impl AgentEngine {
                             );
                             self.emit_error(&gate_msg, false);
                             self.emit_midflight_monitor_occurrence();
+                            // #388, Expected-Behavior bullets 2 and 3. This is
+                            // a TERMINAL exit of the run, so it owes what every
+                            // other terminal exit gives: the work the turn
+                            // produced written down, and an admission where the
+                            // ANSWER went. It was the one exit in this loop that
+                            // gave neither. The retry-exhausted exit below
+                            // already persists for the reason stated there —
+                            // "Returning the error without writing discards it,
+                            // the next run starts from nothing" — and a stall is
+                            // that same event with a different trigger.
+                            if journal_turn_id.is_none()
+                                && let Err(persist_error) =
+                                    self.prepare_durable_conversation().await
+                            {
+                                tracing::warn!(
+                                    error = %persist_error,
+                                    "could not prepare the conversation for a durable write \
+                                     after the output-stall gate stopped the run"
+                                );
+                            }
+                            self.save_session_mirror();
+                            self.emit_incomplete_run_admission(
+                                "the provider stream failed twice with no output while the last \
+                                 tool round had failed, so retrying the same context was \
+                                 spending tokens without progress",
+                            );
                             return Err(AgentError::ApiError(gate_msg));
                         }
                         MonitorAction::CancelBudget { reason } => {
@@ -15676,6 +15729,9 @@ impl AgentEngine {
                 );
                 self.output
                     .emit_error(&final_error, !is_client_error && !permanent_endpoint);
+                self.emit_incomplete_run_admission(&format!(
+                    "the provider failed every one of {sends} attempts at this turn"
+                ));
                 return Err(AgentError::ApiError(final_error));
             }
 
@@ -37303,6 +37359,117 @@ mod retry_wedge_protection_tests {
             result: rendered.chars().take(300).collect(),
             sends: sends.load(std::sync::atomic::Ordering::SeqCst),
         }
+    }
+
+    /// #388, Expected-Behavior bullets 2 and 3, on the exit that fires on this
+    /// ticket's own symptom.
+    ///
+    /// The output-stall gate is the engine's answer to "it stalls and burns
+    /// tokens without progress". Until the retry-stub fix above it could not
+    /// run at all on a durable session — the run died on the provider-dispatch
+    /// proof first — so this asserts BOTH that it is now reachable there and
+    /// that it does what a terminal exit owes:
+    ///
+    ///  * the work the turn produced is written down (bullet: "preserve a
+    ///    checkpoint and allow the user to continue"), and
+    ///  * the ANSWER stream says the run did not finish (bullet: "clearly mark
+    ///    the task as failed/incomplete"). `emit_error` reaches stderr only, so
+    ///    without this a `-p` run's stdout ends on the model's narration.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_output_stall_stop_persists_and_admits_itself() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "m", "/tmp", Some("38800000c6c3"))
+            .unwrap();
+
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(DurableScriptedProvider {
+            scripts: Mutex::new(
+                vec![
+                    vec![LlmEvent::Error("boom".into())],
+                    vec![LlmEvent::Error("boom again".into())],
+                    // Only reached if the gate failed to stop the run.
+                    vec![
+                        LlmEvent::TextDelta("must not run".into()),
+                        done(StopReason::EndTurn, FinishReason::Stop, 0),
+                    ],
+                ]
+                .into(),
+            ),
+            sends: Arc::clone(&sends),
+            url: Some(server.uri()),
+        });
+        let sink = Arc::new(TestSink::new());
+        let handle = sink.handle();
+        let mut engine = wedge_engine(provider);
+        engine.output = sink;
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
+        engine.messages = tool_round_history("BigTool blew up", true);
+        let result = engine.run("try again", "m-388-stall").await;
+        drop(engine);
+
+        match &result {
+            Err(super::AgentError::ApiError(msg)) => assert!(
+                msg.contains("BigTool"),
+                "the stall gate's error must name the failing tool: {msg}"
+            ),
+            other => panic!(
+                "#388: the output-stall gate must be REACHABLE on a durable session — \
+                 before the retry-stub fix the run died on the provider-dispatch proof \
+                 instead and this gate never ran. Got: {other:?}"
+            ),
+        }
+        assert_eq!(
+            sends.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the gate must stop after 2 no-output failures, not burn a third \
+             full-context send"
+        );
+
+        let events = handle.snapshot();
+        let answer_stream: String = events
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            answer_stream.contains("[stopped early]"),
+            "#388: a run that ends on a provider stall must admit it where the \
+             ANSWER went — `emit_error` is stderr, so stdout otherwise ends \
+             mid-narration and reads as a finished answer. Answer stream: \
+             {answer_stream:?}"
+        );
+        assert!(
+            answer_stream.contains("not an answer"),
+            "the admission must say the partial work is not an answer: \
+             {answer_stream:?}"
+        );
+
+        let verify = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let loaded = verify.load("38800000c6c3").expect("the stopped session must load");
+        assert!(
+            loaded.messages.iter().any(|m| m
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { name, .. } if name == "BigTool"))),
+            "#388: the work the turn produced must be written down when the gate \
+             stops the run — every other terminal exit in this loop persists, and \
+             returning without writing is what makes a provider stall into work \
+             that has to be redone from scratch. Saved: {:?}",
+            loaded.messages.len()
+        );
     }
 
     /// #388 — a stream failure on a turn whose last tool round FAILED must
