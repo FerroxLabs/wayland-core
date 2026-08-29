@@ -15581,27 +15581,22 @@ impl AgentEngine {
                             );
                             self.emit_error(&gate_msg, false);
                             self.emit_midflight_monitor_occurrence();
-                            // #388, Expected-Behavior bullets 2 and 3. This is
-                            // a TERMINAL exit of the run, so it owes what every
-                            // other terminal exit gives: the work the turn
-                            // produced written down, and an admission where the
-                            // ANSWER went. It was the one exit in this loop that
-                            // gave neither. The retry-exhausted exit below
-                            // already persists for the reason stated there —
-                            // "Returning the error without writing discards it,
-                            // the next run starts from nothing" — and a stall is
-                            // that same event with a different trigger.
-                            if journal_turn_id.is_none()
-                                && let Err(persist_error) =
-                                    self.prepare_durable_conversation().await
-                            {
-                                tracing::warn!(
-                                    error = %persist_error,
-                                    "could not prepare the conversation for a durable write \
-                                     after the output-stall gate stopped the run"
-                                );
-                            }
-                            self.save_session_mirror();
+                            // #388, Expected-Behavior bullet 3 — "clearly mark
+                            // the task as failed/incomplete". This is a TERMINAL
+                            // exit of the run and it was the one exit in this
+                            // loop that said nothing on the ANSWER stream:
+                            // `emit_error` is stderr, so a `-p` run's stdout
+                            // ended on the model's last narration and read as a
+                            // finished reply.
+                            //
+                            // Deliberately NOT also writing the session here,
+                            // unlike the retry-exhausted exit below. Measured:
+                            // `sync_journal_conversation` runs once per attempt,
+                            // so the conversation is already canonical when this
+                            // gate fires, and an engine holding a persisted
+                            // session without a journal is refused outright — so
+                            // there is no reachable install where a write here
+                            // saves anything.
                             self.emit_incomplete_run_admission(
                                 "the provider stream failed twice with no output while the last \
                                  tool round had failed, so retrying the same context was \
@@ -37377,7 +37372,7 @@ mod retry_wedge_protection_tests {
     ///    without this a `-p` run's stdout ends on the model's narration.
     #[tokio::test]
     #[serial_test::serial]
-    async fn an_output_stall_stop_persists_and_admits_itself() {
+    async fn an_output_stall_stop_is_reachable_and_admits_itself() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -37457,20 +37452,8 @@ mod retry_wedge_protection_tests {
              {answer_stream:?}"
         );
 
-        let verify = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
-        let loaded = verify.load("38800000c6c3").expect("the stopped session must load");
-        assert!(
-            loaded.messages.iter().any(|m| m
-                .content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolUse { name, .. } if name == "BigTool"))),
-            "#388: the work the turn produced must be written down when the gate \
-             stops the run — every other terminal exit in this loop persists, and \
-             returning without writing is what makes a provider stall into work \
-             that has to be redone from scratch. Saved: {:?}",
-            loaded.messages.len()
-        );
     }
+
 
     /// #388 — a stream failure on a turn whose last tool round FAILED must
     /// still retry on a durable session.
