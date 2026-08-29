@@ -691,19 +691,20 @@ mod tests {
 
     /// The bridge's cap is the boundary the chunker splits on.
     ///
-    /// wayland#934: this adapter had NO cap test of any kind. It is the eighth
-    /// `max_message_len` in the product and the only one no test and no document
-    /// touched — the declaration harness in `wcore-channels-registry` enumerates
-    /// platforms the registry constructs from a platform string, and the bridge
-    /// is reached through `whatsapp` + a `backend` key, so it adds none.
+    /// wayland#934: this adapter had NO cap test of any kind, because it was the
+    /// eighth `max_message_len` in the product and the only one no test and no
+    /// document could reach — every gate enumerated platforms the registry
+    /// constructs from a platform string, and the bridge is reached through
+    /// `whatsapp` plus a `backend` key. That is no longer true: the gates walk
+    /// `wcore_channels_registry::constructible_selectors()` and this adapter has
+    /// rows in `docs/delivery-semantics.md` §2 and §4.2 keyed `whatsapp+baileys`
+    /// and `whatsapp+whatsapp-web` (wayland-core#360 c2/c4).
     ///
-    /// This cannot check the NUMBER, and says so rather than implying otherwise:
-    /// 4096 is carried over from Meta's Cloud API documentation, which does not
-    /// govern the `baileys` / `whatsapp-web.js` backends this channel actually
-    /// drives, and no vendor documents a body limit for those. What it checks is
-    /// that the number is load-bearing — that a body over it splits into pieces
-    /// each of which is within it, losslessly. A chunk wider than the cap is the
-    /// HIGH-6 reject-and-drop bug regardless of where the cap came from.
+    /// This test still cannot check the NUMBER, and says so rather than implying
+    /// otherwise. What it checks is that the number is load-bearing — that a body
+    /// over it splits into pieces each of which is within it, losslessly. A chunk
+    /// wider than the cap is the HIGH-6 reject-and-drop bug regardless of where
+    /// the cap came from.
     #[test]
     fn a_body_over_the_bridge_cap_splits_into_pieces_within_it() {
         let ch =

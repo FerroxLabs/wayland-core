@@ -456,11 +456,11 @@ Being wrong is not cosmetic, and the two directions differ by platform:
 - **Cap set too high — every platform.** The send exceeds what the destination accepts and is
   rejected. Chunking exists precisely so an over-long reply is not rejected and dropped
   (HIGH-6), so a too-high cap silently reinstates that bug. This is the dangerous direction and
-  it applies to all seven.
+  it applies to all nine capped implementations.
 - **Cap set too low — Matrix, materially; the rest, cosmetically.** Bodies are chunked that did
   not need to be, and per [§4.1](#41-exactly-once-stops-at-the-message-cap) chunking is what
   drops the idempotency key. On Matrix that **downgrades exactly-once to at-least-once for
-  messages that should have been covered by it**. On the other six the guarantee is
+  messages that should have been covered by it**. On the other eight the guarantee is
   `at-most-once` at every length already, so an unnecessary split costs readability and
   nothing else.
 
