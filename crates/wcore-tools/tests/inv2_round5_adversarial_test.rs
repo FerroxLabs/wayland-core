@@ -640,27 +640,54 @@ async fn a_save_during_an_edit_is_not_lost() {
     );
 }
 
-/// The residual, measured rather than asserted away. An editor that truncates
-/// and writes **in place** can begin its write before the last-moment check
-/// and finish it after: those bytes go to an inode the rename then unlinks,
-/// and no amount of re-reading closes that — it needs a lock the editor would
-/// have to take too. Measured across 24 spread interleavings: 12 of 12 lost
-/// with no check at all; 2 of 24 with the check before `atomic_write`, whose
-/// tempfile fsync sat inside the window; 0 of 24 over five runs with the check
-/// moved into the rename slot. Asserted as "materially better than no check"
-/// rather than as zero, because what remains is a scheduling artefact.
+/// The in-place-save arm, which the atomic exchange closed outright.
+///
+/// # Why this used to tolerate a quarter of the saves
+///
+/// It was written against a re-check-then-rename publish, where an editor that
+/// truncates and writes **in place** could begin its write before the check
+/// and finish it after: those bytes went to an inode the rename then unlinked,
+/// and no amount of re-reading closed it. Measured then, across 24 spread
+/// interleavings: 12 of 12 lost with no check at all; 2 of 24 with the check
+/// before `atomic_write`; 0 of 24 over five runs with the check moved into the
+/// rename slot. It was asserted as `lost * 4 < interleaved` — "materially
+/// better than no check" — because what remained looked like a scheduling
+/// artefact that a re-read could never remove.
+///
+/// # Why it is zero now, structurally and not just empirically
+///
+/// `atomic_write_checked` publishes with `RENAME_EXCHANGE`, so the bytes the
+/// verdict reads ARE the bytes the destination held at the instant of
+/// publication. An in-place save opens the destination `O_TRUNC`, so from the
+/// moment its `open` returns the inode is empty or partial — there is no
+/// instant at which it still holds the pre-image the verdict demands. Every
+/// interleaved save therefore fails `pre_image_matches`, the publish is
+/// retracted by a second exchange, and the saved bytes stay where the editor
+/// put them.
+///
+/// # Re-graded against the exchange
+///
+/// 12 runs × 24 attempts on hetzner (Linux 6.x, ext4): 230 of 288 saves landed
+/// inside the window and **0 were lost** — every run. The old tolerance was
+/// never re-graded after the exchange landed (FerroxLabs/wayland#1155); a test
+/// that permits a quarter of saves to vanish is not a test, so it asserts zero.
+///
+/// Not vacuous: forcing `exchange` to report `Swap::Unsupported` (the Windows
+/// and unsupported-filesystem path) puts the publish back on
+/// re-check-then-rename and this arm loses saves again — see the mutation
+/// recorded in the #1155 lane.
 #[tokio::test]
-async fn an_in_place_save_can_still_lose_to_the_final_rename() {
+async fn an_in_place_save_is_not_lost_to_the_final_rename() {
     let (lost, interleaved, window) = edit_interleave(Saver::InPlace, None).await;
     println!("[edit/in-place] window {window:?}; {lost} lost, {interleaved} interleavings caught");
     assert!(
         interleaved > 0,
         "no save ever landed inside the window, so this arm measured nothing"
     );
-    assert!(
-        lost * 4 < interleaved,
-        "an in-place save is being lost as often as it was with no check at all: \
-         {lost} of {interleaved}"
+    assert_eq!(
+        lost, 0,
+        "an in-place save that arrived while the write was being checked was \
+         overwritten: {lost} of {interleaved} interleavings lost"
     );
 }
 
