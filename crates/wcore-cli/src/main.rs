@@ -8627,7 +8627,7 @@ mod tests {
                     source) does not drain the approval stores. Every \
                     `commands_open = false` site must call \
                     deny_pending_approvals_on_host_eof, or a bridge approval \
-                    parked there waits out CRUCIBLE_APPROVAL_TTL (86,400s).                  Context: {window}"
+                    parked there waits out CRUCIBLE_APPROVAL_TTL (86,400s). Context: {window}"
             );
         }
     }

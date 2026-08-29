@@ -38276,7 +38276,7 @@ mod stream_retry_budget_tests {
         );
         assert!(
             budget < super::DEFAULT_MAX_STREAM_RETRIES,
-            "a stalled attempt still gets the full {} retries: that is              {:?} of wall clock for an endpoint that has already answered \
+            "a stalled attempt still gets the full {} retries: that is {:?} of wall clock for an endpoint that has already answered \
                 the same way — the measured 92.4 s of #1077",
             super::DEFAULT_MAX_STREAM_RETRIES,
             connect * (super::DEFAULT_MAX_STREAM_RETRIES + 1),
