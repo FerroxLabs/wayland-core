@@ -238,6 +238,57 @@ want_grep "the preserved attempts are uploaded with the JUnit artifact" \
 want_grep "the retry-flake grader is still invoked from the shared evidence gate" \
   "$ROOT/.github/scripts/assert-test-evidence.sh" "grade-retry-flakes.sh"
 
+# ── PART D — a setup failure must not masquerade as a test failure ─────────
+#
+# wayland#1177 c1. On run 33227927478 the wrapper died at `mkdir -p
+# "$ATTEMPT_DIR"` because target/ was root-owned by an earlier in-container
+# step, and the ONLY thing the step surfaced was "Child_process exited with
+# error code 2" -- byte-identical to what a genuinely failing test suite
+# produces. Nothing had run. A red that names the wrong cause costs what a
+# false green costs, so the two states must be distinguishable.
+
+D="$(mktemp -d)"
+touch "$D/blocker"                       # a FILE where the parent dir must be,
+                                         # so mkdir fails even as root -- CI
+                                         # runs this suite unprivileged, hetzner
+                                         # runs it as root, and the arm has to
+                                         # reproduce on both.
+setup_out="$(ATTEMPT_DIR="$D/blocker/attempts" JUNIT_PATH="$D/j.xml" \
+  bash "$WRAPPER" true 2>&1)"
+setup_status=$?
+
+if [ "$setup_status" -eq 2 ]; then
+  ok "an unusable attempt directory exits 2 without running the command"
+else
+  bad "an unusable attempt directory exits 2 without running the command (got $setup_status)"
+fi
+
+case "$setup_out" in
+  *"SETUP FAILURE, no test ran"*)
+    ok "the setup failure says it is a setup failure, not a test failure" ;;
+  *)
+    bad "the setup failure says it is a setup failure, not a test failure (got: $setup_out)" ;;
+esac
+
+# The counterpart: the same wrapper, given a usable directory, must actually
+# invoke the command. Without this the arm above is satisfiable by a wrapper
+# that refuses everything.
+run_out="$(ATTEMPT_DIR="$D/ok/attempts" JUNIT_PATH="$D/j.xml" \
+  bash "$WRAPPER" echo WRAPPER-RAN-THE-COMMAND 2>&1)"
+case "$run_out" in
+  *WRAPPER-RAN-THE-COMMAND*)
+    ok "a usable attempt directory still runs the command (anti-vacuity)" ;;
+  *)
+    bad "a usable attempt directory still runs the command (anti-vacuity)" ;;
+esac
+rm -rf "$D"
+
+# The fix for the root cause itself: the evidence tree is reserved for the
+# runner user BEFORE any container step can create target/ as root. Without
+# this line the wrapper is correct and still never runs.
+want_grep "the evidence tree is reserved before any root-owned target/ exists" \
+  "$CI" "mkdir -p target/nextest/ci/outer-attempts"
+
 echo ""
 echo "outer-retry-evidence: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

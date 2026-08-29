@@ -63,7 +63,18 @@ if [ "$#" -lt 1 ]; then
   exit 2
 fi
 
-mkdir -p "$ATTEMPT_DIR" || exit 2
+# A SETUP failure here must never be reported as a TEST failure. This exact
+# line died with a bare `Permission denied` on run 33227927478 (target/ was
+# root-owned by the earlier in-container `cargo build`, this wrapper runs on
+# the host as uid 1001), and all the step surfaced was "Child_process exited
+# with error code 2" -- which reads identically to the test suite failing.
+# Nothing had run. Say which of the two states this is.
+if ! mkdir -p "$ATTEMPT_DIR" 2>/tmp/attempt-dir-err.$$; then
+  echo "::error title=Outer-retry evidence::SETUP FAILURE, no test ran. Could not create the attempt directory '${ATTEMPT_DIR}': $(cat /tmp/attempt-dir-err.$$ 2>/dev/null). This is NOT a test failure -- nextest was never invoked and no JUnit report exists, so the required 'report' check will receive no evidence from this leg. Usual cause: an earlier in-container step created target/ as root while this wrapper runs as $(id -un) (uid $(id -u))." >&2
+  rm -f /tmp/attempt-dir-err.$$
+  exit 2
+fi
+rm -f /tmp/attempt-dir-err.$$
 COUNTER="$ATTEMPT_DIR/.attempt"
 
 attempt=0

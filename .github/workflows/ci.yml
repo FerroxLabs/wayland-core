@@ -1610,6 +1610,27 @@ jobs:
           docker run --rm -i -v "${{ github.workspace }}:/work" -w /work "$CI_IMAGE" \
             cargo run -q -p wcore-protocol --bin wcore-contract -- preflight < "$list"
 
+      # wayland#1177 c1. The outer-retry wrapper at the test step below runs on
+      # the HOST as uid 1001, but every `$DOCKER_RUN` step in this job runs as
+      # root (there is no `-u`; see the DOCKER_RUN note above), so the first
+      # `cargo build` creates `target/` root-owned. The wrapper then died at
+      # `mkdir -p "$ATTEMPT_DIR"` with `Permission denied` BEFORE it invoked
+      # nextest -- nextest never ran, no junit.xml was written, and the required
+      # `report` check received ZERO evidence from this leg while the step
+      # reported only "Child_process exited with error code 2". Measured on run
+      # 33227927478, both attempts, 2026-08-29T02:33:48Z.
+      #
+      # Creating the tree here -- as the runner user, before anything root
+      # touches target/ -- is sufficient and cheap: root can still write INTO a
+      # 1001-owned directory, and delete permission on the junit report comes
+      # from the containing directory, which the runner now owns.
+      #
+      # A recursive `chown` of target/ was rejected: it is the same full-tree
+      # walk that makes a cold workspace slow, and it would run on every job to
+      # repair a directory that need never have been root-owned.
+      - name: Reserve the outer-retry evidence tree for the runner user
+        run: mkdir -p target/nextest/ci/outer-attempts
+
       - name: Pre-build tool_token_bench
         run: $DOCKER_RUN "$CI_IMAGE" cargo build -p wcore-agent --bin tool_token_bench --features test-utils
 
