@@ -270,6 +270,21 @@ fn the_locality_predicate_rejects_public_hosts() {
         "https://127.0.0.1.attacker.example/v1",
         "https://localhost.attacker.example/v1",
         "https://8.8.8.8/v1",
+        // #1173 D29 — the authority ends at the FIRST of `/`, `?`, `#` or `\`.
+        // Cutting at `/` alone left the query, the fragment or a
+        // backslash-smuggled userinfo inside the "authority", and the trailing
+        // `rsplit('@')` then read the private literal parked there. A PUBLIC
+        // host was exempted from the credential requirement and the prompt was
+        // dispatched to it with the placeholder bearer.
+        "https://api.openai.com?x=@127.0.0.1",
+        "https://h?a=@10.0.0.1",
+        "https://api.openai.com#@127.0.0.1",
+        "https://api.openai.com#@[::1]",
+        // reqwest (WHATWG) maps `\` to `/` for special schemes, so the host
+        // actually dialled here is api.openai.com — the same smuggle the SSE
+        // transport's `resolve_endpoint_backslash_at_smuggle_rejected` pins.
+        r"https://api.openai.com\@127.0.0.1",
+        r"https://api.openai.com\@127.0.0.1/v1",
     ] {
         assert!(!is_self_hosted_base_url(url), "expected public: {url}");
     }
