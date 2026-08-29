@@ -80,6 +80,7 @@
 
 #[path = "support/mod.rs"]
 mod support;
+use support::owned_tree::OwnedTree;
 
 use std::path::Path;
 
@@ -187,10 +188,9 @@ fn run_headless(home: &Path, args: &[&str]) -> (std::process::ExitStatus, String
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let child = cmd.spawn();
+    let child = OwnedTree::new(cmd.spawn().expect("spawn wayland-core headless"));
     drop(vault);
     let out = child
-        .expect("spawn wayland-core headless")
         .wait_with_output()
         .expect("wait for wayland-core headless");
     (
@@ -340,13 +340,14 @@ fn smoke_17_force_posture_auto_approves_mutating_tool_in_engine() {
     cmd.args(["--json-stream", "--force", "--provider", "anthropic"])
         .current_dir(home.path());
     let vault = harden_child_env(&mut cmd, home.path());
-    let child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+    let mut child = OwnedTree::new(
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn --json-stream --force"),
+    );
     drop(vault);
-    let mut child = child.expect("spawn --json-stream --force");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -434,13 +435,14 @@ fn stop_mid_turn_does_not_strand_json_stream_session() {
     cmd.args(["--json-stream", "--provider", "anthropic"])
         .current_dir(home.path());
     let vault = harden_child_env(&mut cmd, home.path());
-    let child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+    let mut child = OwnedTree::new(
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn --json-stream"),
+    );
     drop(vault);
-    let mut child = child.expect("spawn --json-stream");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -568,13 +570,14 @@ fn approval_mode_auto_edit_from_config_reaches_json_stream_session() {
     cmd.args(["--json-stream", "--provider", "anthropic"])
         .current_dir(home.path());
     let vault = harden_child_env(&mut cmd, home.path());
-    let child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+    let mut child = OwnedTree::new(
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn --json-stream"),
+    );
     drop(vault);
-    let mut child = child.expect("spawn --json-stream");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -643,7 +646,7 @@ mod pty {
         writer: Box<dyn Write + Send>,
         parser: std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
         _master: Box<dyn MasterPty + Send>,
-        child: Box<dyn portable_pty::Child + Send + Sync>,
+        child: OwnedTree<Box<dyn portable_pty::Child + Send + Sync>>,
         _reader: std::thread::JoinHandle<()>,
     }
 
@@ -670,9 +673,10 @@ mod pty {
             }
             let vault = support::vault::configure_pty(&mut cmd);
             cmd.cwd(home);
-            let child = pty.slave.spawn_command(cmd);
+            let child = OwnedTree::new(
+                pty.slave.spawn_command(cmd).expect("spawn wayland-core"),
+            );
             drop(vault);
-            let child = child.expect("spawn wayland-core");
 
             let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
             let parser = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(40, 120, 0)));
@@ -749,13 +753,8 @@ mod pty {
         }
     }
 
-    impl Drop for Pty {
-        fn drop(&mut self) {
-            if let Ok(None) = self.child.try_wait() {
-                let _ = self.child.kill();
-            }
-        }
-    }
+    // No `impl Drop` here: `child` is an `OwnedTree`, whose own `Drop` kills the
+    // whole process tree and reaps it (FerroxLabs/wayland-core#352).
 
     /// Boot the TUI to the Workspace surface (chrome wordmark + tab painted).
     pub fn boot(home: &Path) -> Pty {
@@ -1237,13 +1236,14 @@ fn gap_d012_acp_protocol_gates_mutating_tools() {
     cmd.args(["--json-stream", "--provider", "anthropic"])
         .current_dir(home.path());
     let vault = harden_child_env(&mut cmd, home.path());
-    let child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+    let mut child = OwnedTree::new(
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn --json-stream"),
+    );
     drop(vault);
-    let mut child = child.expect("spawn --json-stream");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -1352,10 +1352,9 @@ fn live_real_key_first_prompt_round_trip() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let vault = support::vault::configure_process(&mut cmd);
-    let child = cmd.spawn();
+    let child = OwnedTree::new(cmd.spawn().expect("spawn live wayland-core"));
     drop(vault);
     let out = child
-        .expect("spawn live wayland-core")
         .wait_with_output()
         .expect("wait for live wayland-core");
     let stdout = String::from_utf8_lossy(&out.stdout);

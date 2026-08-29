@@ -113,6 +113,9 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+#[cfg(unix)]
+use super::owned_tree::OwnedTree;
+
 /// Path to the debug binary under test (Cargo wires this env var).
 #[cfg(unix)]
 fn binary() -> &'static str {
@@ -127,7 +130,7 @@ pub struct Pty {
     writer: Box<dyn Write + Send>,
     parser: std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
     _master: Box<dyn MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    child: OwnedTree<Box<dyn portable_pty::Child + Send + Sync>>,
     _reader: std::thread::JoinHandle<()>,
     /// FerroxLabs/wayland#1109. What the reader thread has managed to do.
     /// When a `wait_for` gives up, the last 40-row screen alone cannot say
@@ -247,7 +250,8 @@ impl Pty {
             cmd.env(k.as_ref(), v.as_ref());
         }
         cmd.cwd(cwd);
-        let child = pty.slave.spawn_command(cmd).expect("spawn wayland-core");
+        let child =
+            OwnedTree::new(pty.slave.spawn_command(cmd).expect("spawn wayland-core"));
 
         let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
         let parser = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(rows, cols, 0)));
@@ -524,14 +528,9 @@ impl Pty {
     }
 }
 
-#[cfg(unix)]
-impl Drop for Pty {
-    fn drop(&mut self) {
-        if let Ok(None) = self.child.try_wait() {
-            let _ = self.child.kill();
-        }
-    }
-}
+// No `impl Drop for Pty`: `child` is an `OwnedTree`, whose own `Drop` kills the
+// whole process tree and reaps it — strictly stronger than the leaf-only kill
+// that used to live here (FerroxLabs/wayland-core#352).
 
 /// Boot the TUI to the Workspace surface (chrome wordmark + tab painted).
 #[cfg(unix)]

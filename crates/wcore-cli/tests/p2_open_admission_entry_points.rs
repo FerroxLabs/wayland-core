@@ -81,6 +81,7 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[path = "support/mod.rs"]
 mod support;
+use support::owned_tree::OwnedTree;
 
 /// A syntactically valid key so `Config::resolve` succeeds and the run reaches
 /// the startup stage under test. It authenticates nothing.
@@ -189,11 +190,12 @@ impl Case {
     /// own threads so a child that fills one cannot deadlock against a harness
     /// that is waiting on the other.
     fn run(&self, args: &[&str]) -> Capture {
-        let mut child = self
-            .command()
-            .args(args)
-            .spawn()
-            .expect("spawn wayland-core");
+        let mut child = OwnedTree::new(
+            self.command()
+                .args(args)
+                .spawn()
+                .expect("spawn wayland-core"),
+        );
         drop(child.stdin.take());
         let mut out_pipe = child.stdout.take().expect("stdout is piped");
         let mut err_pipe = child.stderr.take().expect("stderr is piped");
@@ -582,11 +584,12 @@ fn gateway_run_refuses_an_unparseable_channel_file() {
 #[test]
 fn gateway_run_stays_up_on_a_bounded_channel() {
     let case = Case::new(BOUNDED_INBOUND, None);
-    let mut child: Child = case
-        .command()
-        .args(["gateway", "run"])
-        .spawn()
-        .expect("spawn gateway");
+    let mut child: OwnedTree<Child> = OwnedTree::new(
+        case.command()
+            .args(["gateway", "run"])
+            .spawn()
+            .expect("spawn gateway"),
+    );
     drop(child.stdin.take());
 
     // Give it long enough to pass bootstrap, then require it to still be alive.
