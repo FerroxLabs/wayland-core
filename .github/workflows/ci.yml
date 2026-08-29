@@ -1744,6 +1744,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
+          # Runs with `if: !cancelled()`, so it executes even when the image
+          # build was skipped by an earlier failure. Without this the docker
+          # failure below would be reported as a swarm delegated dispatch regression.
+          bash .github/scripts/require-ci-image.sh "Swarm delegated dispatch"
           # A ledger left by an earlier step would be read as this step's
           # result. Clear it so what we read back is only what we produced.
           rm -f target/swarm-delegated-skips.txt
@@ -2089,6 +2093,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
+          # Runs with `if: !cancelled()`, so it executes even when the image
+          # build was skipped by an earlier failure. Without this the docker
+          # failure below would be reported as a signed release-manifest drill regression.
+          bash .github/scripts/require-ci-image.sh "Signed release-manifest drill"
           DRILL=.github/scripts/release-manifest-drill.sh
           TARGET=crates/wcore-cli/tests/release_manifest_pipeline.rs
           # Fail CLOSED and say which of the two states this is. A missing check
