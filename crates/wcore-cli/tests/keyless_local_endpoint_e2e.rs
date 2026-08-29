@@ -29,6 +29,10 @@ use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 /// The bearer `OpenAIProvider::select_key` sends when no key is configured and
 /// the endpoint is self-hosted (`SELF_HOSTED_PLACEHOLDER_KEY`, openai.rs).
 const PLACEHOLDER_BEARER: &str = "Bearer wayland-local";
@@ -177,9 +181,7 @@ fn run_headless(dir: &Path, base_url: &str) -> Capture {
         cmd.env_remove(key);
     }
 
-    let out = cmd
-        .spawn()
-        .expect("spawn wayland-core")
+    let out = OwnedTree::new(cmd.spawn().expect("spawn wayland-core"))
         .wait_with_output()
         .expect("wait for wayland-core");
     Capture {

@@ -16,6 +16,7 @@
 
 #[path = "support/mod.rs"]
 mod support;
+use support::owned_tree::OwnedTree;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -101,13 +102,14 @@ fn run_scripted_write(home: &Path, cwd: &Path, target: &Path, body: &str) -> Str
         cmd.env_remove(key);
     }
     let vault = support::vault::configure_process(&mut cmd);
-    let child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+    let mut child = OwnedTree::new(
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn --json-stream --force"),
+    );
     drop(vault);
-    let mut child = child.expect("spawn --json-stream --force");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");

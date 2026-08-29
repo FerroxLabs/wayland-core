@@ -66,6 +66,10 @@ use wcore_eval_scenarios::fixtures::openai::{OpenAiFixtureScript, OpenAiStep};
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
 use wcore_eval_scenarios::tempenv::{self, TempEnv};
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 const FIXTURE_MODEL: &str = "fixture-chat-v1";
 const FIXTURE_KEY: &str = "fixture-local-token";
 const TURNS: usize = 3;
@@ -129,40 +133,42 @@ async fn run_degraded_repl() -> (String, String) {
         .with_base_url(fixture.base_url());
     let env: TempEnv = tempenv::build(&provider).expect("build hermetic Core environment");
 
-    let mut child = Command::new(binary())
-        .arg("--no-tui")
-        .arg("--provider")
-        .arg("openai")
-        .arg("--model")
-        .arg(FIXTURE_MODEL)
-        .arg("--base-url")
-        .arg(fixture.base_url())
-        .current_dir(env.path())
-        .env("HOME", env.path())
-        .env("WAYLAND_HOME", env.home())
-        .env("OPENAI_API_KEY", FIXTURE_KEY)
-        .env("NO_COLOR", "1")
-        // `log_to_file` is `will_enter_tui || !rust_log_set`. Stdout is a pipe
-        // so the TUI half is already false; inheriting a developer's or CI's
-        // RUST_LOG would route the record to stderr instead of the file and
-        // make leg 2 assert on an empty log.
-        .env_remove("RUST_LOG")
-        // Deny every credential backend, which is what forces the degrade.
-        .env_remove("WAYLAND_VAULT_PASSPHRASE")
-        .env_remove("WAYLAND_VAULT_PASSPHRASE_FD")
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!(
-                "unix:path={}",
-                env.path().join("missing-secret-service-bus").display()
-            ),
-        )
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn wayland-core");
+    let mut child = OwnedTree::new(
+        Command::new(binary())
+            .arg("--no-tui")
+            .arg("--provider")
+            .arg("openai")
+            .arg("--model")
+            .arg(FIXTURE_MODEL)
+            .arg("--base-url")
+            .arg(fixture.base_url())
+            .current_dir(env.path())
+            .env("HOME", env.path())
+            .env("WAYLAND_HOME", env.home())
+            .env("OPENAI_API_KEY", FIXTURE_KEY)
+            .env("NO_COLOR", "1")
+            // `log_to_file` is `will_enter_tui || !rust_log_set`. Stdout is a pipe
+            // so the TUI half is already false; inheriting a developer's or CI's
+            // RUST_LOG would route the record to stderr instead of the file and
+            // make leg 2 assert on an empty log.
+            .env_remove("RUST_LOG")
+            // Deny every credential backend, which is what forces the degrade.
+            .env_remove("WAYLAND_VAULT_PASSPHRASE")
+            .env_remove("WAYLAND_VAULT_PASSPHRASE_FD")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!(
+                    "unix:path={}",
+                    env.path().join("missing-secret-service-bus").display()
+                ),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn wayland-core"),
+    );
 
     let mut stdin = child.stdin.take().expect("Core stdin pipe");
     let mut script = String::new();

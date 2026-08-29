@@ -23,6 +23,10 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 /// Drive `--json-stream` and return the first `frame_count` stdout lines,
 /// parsed. Mirrors the isolation recipe in `release_binary_smoke.rs`:
 /// `HOME` alone does NOT isolate on Windows (`dirs::home_dir()` reads
@@ -31,22 +35,24 @@ use tempfile::TempDir;
 fn first_frames(frame_count: usize) -> Vec<serde_json::Value> {
     let tmp = TempDir::new().expect("create tmp workspace");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wayland-core"))
-        .args([
-            "--json-stream",
-            "--provider",
-            "anthropic",
-            "--api-key",
-            "test-key-not-used-because-we-stop-before-message",
-        ])
-        .current_dir(tmp.path())
-        .env("HOME", tmp.path())
-        .env("WAYLAND_HOME", tmp.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn wayland-core --json-stream");
+    let mut child = OwnedTree::new(
+        Command::new(env!("CARGO_BIN_EXE_wayland-core"))
+            .args([
+                "--json-stream",
+                "--provider",
+                "anthropic",
+                "--api-key",
+                "test-key-not-used-because-we-stop-before-message",
+            ])
+            .current_dir(tmp.path())
+            .env("HOME", tmp.path())
+            .env("WAYLAND_HOME", tmp.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn wayland-core --json-stream"),
+    );
 
     let mut stdout = child.stdout.take().expect("capture stdout");
     let (tx, rx) = std::sync::mpsc::channel();

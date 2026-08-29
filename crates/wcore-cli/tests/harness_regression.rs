@@ -44,6 +44,10 @@ use wcore_eval_scenarios::assertions::Assertion;
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
 use wcore_eval_scenarios::scenario::{Category, Scenario, Turn};
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
@@ -375,23 +379,25 @@ async fn r003_no_model_guard() {
     );
     std::fs::write(cfg_dir.join("config.toml"), &body).expect("write config");
 
-    let mut child = AsyncCommand::new(&bin)
-        .arg("--yolo")
-        .arg("--json-stream")
-        .arg("--provider")
-        .arg("anthropic")
-        .arg("--model")
-        .arg("") // empty model — triggers the no-model guard
-        .current_dir(home.path())
-        .env("HOME", home.path())
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn json-stream");
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
+            .arg("--yolo")
+            .arg("--json-stream")
+            .arg("--provider")
+            .arg("anthropic")
+            .arg("--model")
+            .arg("") // empty model — triggers the no-model guard
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("OPENAI_API_KEY")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn json-stream"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -500,23 +506,25 @@ async fn r004_crash_sentinel_clears_on_clean_exit() {
     );
 
     // --- First launch: clean session (close stdin → engine exits 0) ---
-    let mut child1 = AsyncCommand::new(&bin)
-        .arg("--yolo")
-        .arg("--json-stream")
-        .arg("--provider")
-        .arg("anthropic")
-        .arg("--model")
-        .arg("claude-sonnet-4-20250514")
-        .current_dir(home.path())
-        .env("HOME", home.path())
-        .env("WAYLAND_HOME", &wayland_home)
-        .env_remove("ANTHROPIC_API_KEY")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn first session");
+    let mut child1 = OwnedTree::new(
+        AsyncCommand::new(&bin)
+            .arg("--yolo")
+            .arg("--json-stream")
+            .arg("--provider")
+            .arg("anthropic")
+            .arg("--model")
+            .arg("claude-sonnet-4-20250514")
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env("WAYLAND_HOME", &wayland_home)
+            .env_remove("ANTHROPIC_API_KEY")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn first session"),
+    );
 
     let mut stdin1 = child1.stdin.take().expect("piped stdin");
 
@@ -584,22 +592,24 @@ async fn r005_force_mode_aliases() {
     // (the in-process deserialization test already covers this, but this
     // confirms the binary-level wire path also works).
     for alias in ["yolo", "dangerously_skip_permissions", "force"] {
-        let mut child = AsyncCommand::new(&bin)
-            .arg("--yolo")
-            .arg("--json-stream")
-            .arg("--provider")
-            .arg("anthropic")
-            .arg("--model")
-            .arg("claude-sonnet-4-20250514")
-            .current_dir(home.path())
-            .env("HOME", home.path())
-            .env_remove("ANTHROPIC_API_KEY")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn for set_mode test");
+        let mut child = OwnedTree::new(
+            AsyncCommand::new(&bin)
+                .arg("--yolo")
+                .arg("--json-stream")
+                .arg("--provider")
+                .arg("anthropic")
+                .arg("--model")
+                .arg("claude-sonnet-4-20250514")
+                .current_dir(home.path())
+                .env("HOME", home.path())
+                .env_remove("ANTHROPIC_API_KEY")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn for set_mode test"),
+        );
 
         let mut stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
@@ -667,22 +677,24 @@ async fn r006_init_history_injects_system_prompt() {
         "sk-ant-harness-000000",
     );
 
-    let mut child = AsyncCommand::new(&bin)
-        .arg("--yolo")
-        .arg("--json-stream")
-        .arg("--provider")
-        .arg("anthropic")
-        .arg("--model")
-        .arg("claude-sonnet-4-20250514")
-        .current_dir(home.path())
-        .env("HOME", home.path())
-        .env_remove("ANTHROPIC_API_KEY")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn for init_history test");
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
+            .arg("--yolo")
+            .arg("--json-stream")
+            .arg("--provider")
+            .arg("anthropic")
+            .arg("--model")
+            .arg("claude-sonnet-4-20250514")
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env_remove("ANTHROPIC_API_KEY")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn for init_history test"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -746,22 +758,24 @@ async fn r007_session_wal_survives_mid_turn_kill() {
     );
     seed_config(home.path());
 
-    let mut child = AsyncCommand::new(&bin)
-        .arg("--yolo")
-        .arg("--json-stream")
-        .arg("--provider")
-        .arg("anthropic")
-        .arg("--model")
-        .arg("claude-sonnet-4-20250514")
-        .current_dir(home.path())
-        .env("HOME", home.path())
-        .env_remove("ANTHROPIC_API_KEY")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn for WAL test");
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
+            .arg("--yolo")
+            .arg("--json-stream")
+            .arg("--provider")
+            .arg("anthropic")
+            .arg("--model")
+            .arg("claude-sonnet-4-20250514")
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env_remove("ANTHROPIC_API_KEY")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn for WAL test"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -962,22 +976,24 @@ async fn r010_openrouter_url_no_double_v1() {
     let home = TempDir::new().expect("tempdir");
     seed_json_stream_env(home.path(), "openrouter", "openai/gpt-4o-mini", &key);
 
-    let mut child = AsyncCommand::new(&bin)
-        .arg("--yolo")
-        .arg("--json-stream")
-        .arg("--provider")
-        .arg("openrouter")
-        .arg("--model")
-        .arg("openai/gpt-4o-mini")
-        .current_dir(home.path())
-        .env("HOME", home.path())
-        .env("OPENROUTER_API_KEY", &key)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn for openrouter test");
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
+            .arg("--yolo")
+            .arg("--json-stream")
+            .arg("--provider")
+            .arg("openrouter")
+            .arg("--model")
+            .arg("openai/gpt-4o-mini")
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env("OPENROUTER_API_KEY", &key)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn for openrouter test"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -1223,67 +1239,69 @@ async fn r012_honcho_fallback_on_no_key() {
     let isolated_home = home.path().join("wayland-home");
     std::fs::create_dir_all(&isolated_home).expect("create isolated WAYLAND_HOME");
 
-    let mut child = AsyncCommand::new(&bin)
-        .arg("--yolo")
-        .arg("--json-stream")
-        .arg("--provider")
-        .arg("anthropic")
-        .arg("--model")
-        .arg("claude-sonnet-4-20250514")
-        .current_dir(home.path())
-        .env("HOME", home.path())
-        // A fake key, in the env, NOT via the seeded config — see the caveat on
-        // `seed_json_stream_env`: the config's provider table is inert, so
-        // `env_remove("ANTHROPIC_API_KEY")` (what this used to do) left the
-        // engine with no credential at all. It then refused with `init_failed`
-        // before emitting `ready`, and the ready-event layer below — guarded by
-        // `if let` at the time — passed by never running. Hermeticity is
-        // preserved by pinning a known-fake value rather than by removing the
-        // variable; no request is made before `stop`.
-        .env("ANTHROPIC_API_KEY", "sk-ant-harness-r012-000000")
-        // PIN the home; do NOT remove it. This line used to be
-        // `.env_remove("WAYLAND_HOME")` under the comment "do not inherit a
-        // developer's or host's isolated profile" — which is exactly backwards
-        // on Windows, and is why this test was the one W9 failure in the
-        // 2026-07-31 triage.
-        //
-        // `wayland_config_dir()` (wcore-config/src/config.rs) resolves
-        // `WAYLAND_HOME` -> `XDG_DATA_HOME` -> `dirs::config_dir()`. On Windows
-        // `dirs::config_dir()` is the FOLDERID_RoamingAppData known folder,
-        // which is read from the OS and ignores `HOME` entirely. So with
-        // `WAYLAND_HOME` removed and only `HOME` set, this test did not run
-        // against an empty profile — it ran against whatever the invoking
-        // account has in `%APPDATA%\wayland-core`. Measured on the Windows box
-        // 2026-08-01: the real profile there carries
-        // `[storage.credentials] backend = "plaintext"` with
-        // `[session] enabled = true`, which `reject_backend_without_confidential_storage`
-        // refuses BY DESIGN, so the engine emitted
-        // `{"type":"error","code":"init_failed",...}` instead of `ready` and
-        // the assertion below reported "no ready event". Nothing was wrong with
-        // the engine; the test was reading someone else's config.
-        //
-        // Same binary, same box, same second, `WAYLAND_HOME` pinned to an empty
-        // directory: `{"type":"ready",...,"user_model_backend":"local",...}`.
-        //
-        // `HOME` stays set for the Unix legs (it is what `~/.wayland` and
-        // `dirs::config_dir()` resolve from there), but it is `WAYLAND_HOME`
-        // that makes the isolation real on every platform.
-        .env("WAYLAND_HOME", &isolated_home)
-        .env_remove("HONCHO_API_KEY")
-        .env("RUST_LOG", "info")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        // NOT `Stdio::null()`. When this wait times out, the engine's own
-        // stderr is the only thing that can distinguish "refused to start and
-        // said why" from "started fine but was not scheduled in time", and
-        // discarding it is why W9 survived two lanes as an unexplained
-        // deadline. Piped and drained concurrently below — inheriting it would
-        // interleave with nextest's capture, and leaving a piped stderr
-        // undrained deadlocks the child once the pipe buffer fills.
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn for ready-event check");
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
+            .arg("--yolo")
+            .arg("--json-stream")
+            .arg("--provider")
+            .arg("anthropic")
+            .arg("--model")
+            .arg("claude-sonnet-4-20250514")
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            // A fake key, in the env, NOT via the seeded config — see the caveat on
+            // `seed_json_stream_env`: the config's provider table is inert, so
+            // `env_remove("ANTHROPIC_API_KEY")` (what this used to do) left the
+            // engine with no credential at all. It then refused with `init_failed`
+            // before emitting `ready`, and the ready-event layer below — guarded by
+            // `if let` at the time — passed by never running. Hermeticity is
+            // preserved by pinning a known-fake value rather than by removing the
+            // variable; no request is made before `stop`.
+            .env("ANTHROPIC_API_KEY", "sk-ant-harness-r012-000000")
+            // PIN the home; do NOT remove it. This line used to be
+            // `.env_remove("WAYLAND_HOME")` under the comment "do not inherit a
+            // developer's or host's isolated profile" — which is exactly backwards
+            // on Windows, and is why this test was the one W9 failure in the
+            // 2026-07-31 triage.
+            //
+            // `wayland_config_dir()` (wcore-config/src/config.rs) resolves
+            // `WAYLAND_HOME` -> `XDG_DATA_HOME` -> `dirs::config_dir()`. On Windows
+            // `dirs::config_dir()` is the FOLDERID_RoamingAppData known folder,
+            // which is read from the OS and ignores `HOME` entirely. So with
+            // `WAYLAND_HOME` removed and only `HOME` set, this test did not run
+            // against an empty profile — it ran against whatever the invoking
+            // account has in `%APPDATA%\wayland-core`. Measured on the Windows box
+            // 2026-08-01: the real profile there carries
+            // `[storage.credentials] backend = "plaintext"` with
+            // `[session] enabled = true`, which `reject_backend_without_confidential_storage`
+            // refuses BY DESIGN, so the engine emitted
+            // `{"type":"error","code":"init_failed",...}` instead of `ready` and
+            // the assertion below reported "no ready event". Nothing was wrong with
+            // the engine; the test was reading someone else's config.
+            //
+            // Same binary, same box, same second, `WAYLAND_HOME` pinned to an empty
+            // directory: `{"type":"ready",...,"user_model_backend":"local",...}`.
+            //
+            // `HOME` stays set for the Unix legs (it is what `~/.wayland` and
+            // `dirs::config_dir()` resolve from there), but it is `WAYLAND_HOME`
+            // that makes the isolation real on every platform.
+            .env("WAYLAND_HOME", &isolated_home)
+            .env_remove("HONCHO_API_KEY")
+            .env("RUST_LOG", "info")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            // NOT `Stdio::null()`. When this wait times out, the engine's own
+            // stderr is the only thing that can distinguish "refused to start and
+            // said why" from "started fine but was not scheduled in time", and
+            // discarding it is why W9 survived two lanes as an unexplained
+            // deadline. Piped and drained concurrently below — inheriting it would
+            // interleave with nextest's capture, and leaving a piped stderr
+            // undrained deadlocks the child once the pipe buffer fills.
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn for ready-event check"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -1380,29 +1398,31 @@ async fn r013_customer_flow_assistants() {
     let home = TempDir::new().expect("tempdir");
     seed_json_stream_env(home.path(), provider, model, &key);
 
-    let mut child = AsyncCommand::new(&bin)
-        .arg("--yolo")
-        .arg("--json-stream")
-        .arg("--provider")
-        .arg(provider)
-        .arg("--model")
-        .arg(model)
-        .current_dir(home.path())
-        .env("HOME", home.path())
-        .env(
-            if provider == "anthropic" {
-                "ANTHROPIC_API_KEY"
-            } else {
-                "OPENAI_API_KEY"
-            },
-            &key,
-        )
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn for assistant flow test");
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
+            .arg("--yolo")
+            .arg("--json-stream")
+            .arg("--provider")
+            .arg(provider)
+            .arg("--model")
+            .arg(model)
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env(
+                if provider == "anthropic" {
+                    "ANTHROPIC_API_KEY"
+                } else {
+                    "OPENAI_API_KEY"
+                },
+                &key,
+            )
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn for assistant flow test"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -1501,29 +1521,31 @@ async fn r014_customer_flow_skills_hello() {
     let home = TempDir::new().expect("tempdir");
     seed_json_stream_env(home.path(), provider, model, &key);
 
-    let mut child = AsyncCommand::new(&bin)
-        .arg("--yolo")
-        .arg("--json-stream")
-        .arg("--provider")
-        .arg(provider)
-        .arg("--model")
-        .arg(model)
-        .current_dir(home.path())
-        .env("HOME", home.path())
-        .env(
-            if provider == "anthropic" {
-                "ANTHROPIC_API_KEY"
-            } else {
-                "OPENAI_API_KEY"
-            },
-            &key,
-        )
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn for skills flow test");
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
+            .arg("--yolo")
+            .arg("--json-stream")
+            .arg("--provider")
+            .arg(provider)
+            .arg("--model")
+            .arg(model)
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env(
+                if provider == "anthropic" {
+                    "ANTHROPIC_API_KEY"
+                } else {
+                    "OPENAI_API_KEY"
+                },
+                &key,
+            )
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn for skills flow test"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");

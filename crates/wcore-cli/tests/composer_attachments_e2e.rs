@@ -2,6 +2,7 @@
 
 #[path = "support/mod.rs"]
 mod support;
+use support::owned_tree::OwnedTree;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
@@ -144,9 +145,8 @@ fn packaged_json_stream_ingests_images_on_active_provider_and_rejects_bad_files(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let vault = support::vault::configure_process(&mut command);
-    let child = command.spawn();
+    let mut child = OwnedTree::new(command.spawn().expect("spawn packaged JSON-stream binary"));
     drop(vault);
-    let mut child = child.expect("spawn packaged JSON-stream binary");
     let mut stdin = child.stdin.take().expect("child stdin");
     let stdout = child.stdout.take().expect("child stdout");
     let frames = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -364,9 +364,8 @@ fn packaged_json_stream_text_only_provider_degrades_with_actionable_placeholder(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let vault = support::vault::configure_process(&mut command);
-    let child = command.spawn();
+    let mut child = OwnedTree::new(command.spawn().expect("spawn text-only packaged binary"));
     drop(vault);
-    let mut child = child.expect("spawn text-only packaged binary");
     let mut stdin = child.stdin.take().expect("child stdin");
     let stdout = child.stdout.take().expect("child stdout");
     let frames = Arc::new(Mutex::new(Vec::<Value>::new()));

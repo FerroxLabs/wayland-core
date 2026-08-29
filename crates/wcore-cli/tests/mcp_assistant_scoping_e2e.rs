@@ -44,6 +44,10 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 /// Path to the debug binary under test (Cargo wires this env var).
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_wayland-core")
@@ -135,12 +139,13 @@ fn observe_deferred_dials(assistant: Option<&str>) -> DialObs {
     let mut cmd = std::process::Command::new(binary());
     cmd.args(&args).current_dir(home.path());
     harden_child_env(&mut cmd, home.path());
-    let mut child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn --json-stream");
+    let mut child = OwnedTree::new(
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn --json-stream"),
+    );
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");

@@ -23,6 +23,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 /// A dummy key so `Config::resolve` SUCCEEDS and the run reaches the later
 /// startup stages under test. It authenticates nothing and contacts nothing.
 const DUMMY_KEY: &str = "sk-ant-not-a-real-key-000000000000000000";
@@ -91,7 +95,7 @@ fn run_json_stream(case_dir: &Path, config_toml: &str, with_key: bool, extra: &[
         cmd.env("ANTHROPIC_API_KEY", DUMMY_KEY);
     }
 
-    let mut child = cmd.spawn().expect("spawn wayland-core --json-stream");
+    let mut child = OwnedTree::new(cmd.spawn().expect("spawn wayland-core --json-stream"));
     // Close stdin immediately: the protocol loop ends when the host hangs up,
     // so a healthy run emits `ready` and then exits cleanly.
     drop(child.stdin.take());
@@ -236,19 +240,21 @@ fn profile_guard_refusal_reaches_the_host() {
     .expect("write config");
 
     // WAYLAND_HOME deliberately NOT set -- that is the condition under test.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wayland-core"))
-        .args(["--json-stream", "--profile", "work", "--project-dir"])
-        .arg(&proj)
-        .env_remove("WAYLAND_HOME")
-        .env("ANTHROPIC_API_KEY", DUMMY_KEY)
-        .env("HOME", &fake_home)
-        .env("USERPROFILE", &fake_home)
-        .env("TERM", "dumb")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn wayland-core");
+    let mut child = OwnedTree::new(
+        Command::new(env!("CARGO_BIN_EXE_wayland-core"))
+            .args(["--json-stream", "--profile", "work", "--project-dir"])
+            .arg(&proj)
+            .env_remove("WAYLAND_HOME")
+            .env("ANTHROPIC_API_KEY", DUMMY_KEY)
+            .env("HOME", &fake_home)
+            .env("USERPROFILE", &fake_home)
+            .env("TERM", "dumb")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn wayland-core"),
+    );
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("wait");
     let cap = Capture {
