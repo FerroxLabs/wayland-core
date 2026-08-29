@@ -30,6 +30,12 @@ criteria:
     evidence: "test:crates/wcore-config/tests/issue_1172_served_window_corpus_test.rs::a_reported_count_that_goes_backwards_is_detected"
     owner: core
     note: "The notice path keeps its one-observation sensitivity: detection still fires on a single backwards report. The corroboration gate sits only on served_window(), which is what sizes the session."
+  - id: c6
+    text: "The notice tells the truth about whether the session was actually resized"
+    state: met
+    evidence: "test:crates/wcore-agent/src/engine.rs::a_single_observation_notice_does_not_claim_the_session_was_resized"
+    owner: core
+    note: "ADDED 2026-08-29 (sweep finding D10), the cost of the c1/c4 telling-versus-sizing split. The notice asserted `Core is now sizing this session against the {served}-token window this endpoint has actually demonstrated` on EVERY arm, and after #353 that sentence was false on every first Regression - which is the only turn the notice ever fired for that arm, because observe() returns evidence on the first backwards report while sizing_window() is still None. The corroborating turn, the one where it becomes true, was swallowed by the once-per-figure suppression at context_window.rs:355. So the operator was told core had fixed itself at the one moment it had not, and was never told when it had; both existing tests pinned that pair without noticing. FIXED in two places: ServedWindowEvidence now carries `corroborated` and observe() re-opens the gate exactly once when corroboration lands (symbol:crates/wcore-config/src/context_window.rs::ServedWindowEvidence), and the wording moved out of the turn loop into the pure symbol:crates/wcore-agent/src/engine.rs::truncation_notice, which has three arms - not yet corroborated, corroborated and workable, corroborated and unworkable (the #1172 4,096 case, where it says the run will stop instead of promising a resize that would brick it). RED ARM (hetzner-dsm, 2026-08-29): restoring the suppression and forcing the wording unconditional (`let sizing_note = if false {`) turned a_second_regression_corroborates_it_and_the_session_is_sized and a_single_observation_notice_does_not_claim_the_session_was_resized red; restored, touched, 4/4 green."
   - id: c5
     text: "A red arm is quoted verbatim"
     state: met
