@@ -180,7 +180,37 @@ const AUTHORITY_DIR_COMPONENTS: &[&str] = &[".wayland"];
 const MAX_CANDIDATE_CWDS: usize = 32;
 
 /// Repository-control path components matched wherever they appear in a token.
+///
+/// `.wayland-core` is qualified by [`REPO_CONTROL_DATA_CHILDREN`]; every other
+/// entry here is refused flat.
 const REPO_CONTROL_COMPONENTS: &[&str] = &[".wayland-core", ".wayland-core.toml"];
+
+/// The `.wayland-core` children that are DATA, not control surface, and are
+/// therefore reachable from a shell.
+///
+/// **This is an ALLOWLIST and the polarity is the whole point. Do not invert
+/// it into a denylist of control children.** `.wayland-core` holds
+/// `config.toml`, `agents/*.yaml` (project-supplied manifests that
+/// `acp_roster` explicitly treats as UNTRUSTED), `plugins/`, `shadow/`,
+/// `skills-audit.json` — and more control files will be added. A denylist
+/// would silently open a hole on the day one is added; an allowlist fails
+/// CLOSED on a child nobody has taught it about yet. That is why `.git`'s
+/// CLOSED set of control children ([`GIT_CONTROL_CHILDREN`]) may be expressed
+/// the other way round and this one may not.
+///
+/// `skills` is here because every project skill's executable lives at
+/// `.wayland-core/skills/**`. With the component refused at any depth, no
+/// skill that ships an executable could run at all — `cd`, `find` and
+/// `node <path>` were refused alike — and the refusal did not fail cleanly.
+/// Writes under that subtree are still denied a layer up by
+/// `RepoControlDenyFs`, which names `.wayland-core/skills/**` for both the
+/// strict and the trusted profile; "deny writes, allow reads" is the product
+/// policy, and the floor was the layer disagreeing with it.
+///
+/// Matched by EXACT name, never through [`component_may_be`]: a glob child is
+/// not definitely `skills` (`.wayland-core/sk*` also expands onto
+/// `skills-audit.json`), so it stays on the refusing side.
+const REPO_CONTROL_DATA_CHILDREN: &[&str] = &["skills"];
 
 /// The `.git` children that are execute-on-next-command surfaces.
 const GIT_CONTROL_CHILDREN: &[&str] = &["hooks", "config"];
@@ -258,6 +288,7 @@ fn token_refusal(
         if REPO_CONTROL_COMPONENTS
             .iter()
             .any(|name| component_may_be(part, name))
+            && !opens_a_repo_control_data_subtree(&parts, i)
         {
             return Some(REPO_CONTROL_REFUSAL);
         }
@@ -518,6 +549,28 @@ fn cwd_is_inside_an_authority_dirname(cwd: &Path) -> bool {
             .any(|dir| name.to_string_lossy() == **dir),
         _ => false,
     })
+}
+
+/// Whether `parts[i]` is the `.wayland-core` directory entered through a child
+/// that is DATA rather than control surface — see [`REPO_CONTROL_DATA_CHILDREN`].
+///
+/// `parts` is already lexically normalized by [`components`], so
+/// `.wayland-core/./skills` and `.wayland-core/x/../skills` both arrive here as
+/// `skills` and are allowed, while `.wayland-core/skills/../config.toml`
+/// arrives as `config.toml` and is not.
+///
+/// A bare `.wayland-core` has no next component and stays refused, as does any
+/// child the allowlist does not name — including one that does not exist yet.
+fn opens_a_repo_control_data_subtree(parts: &[String], i: usize) -> bool {
+    if parts[i] != ".wayland-core" {
+        // Only the directory is qualified. `.wayland-core.toml` is a separate
+        // literal, and a GLOB standing in for either names no child in
+        // particular, so neither may reach the allowlist.
+        return false;
+    }
+    parts
+        .get(i + 1)
+        .is_some_and(|child| REPO_CONTROL_DATA_CHILDREN.contains(&child.as_str()))
 }
 
 /// Whether a path component IS `name`, or is a glob that could expand onto it.
@@ -1664,5 +1717,73 @@ mod tests {
             None,
             ".git/HEAD is not an execute-on-next-command surface"
         );
+    }
+
+    /// The hotfix arm. `.wayland-core/skills/**` is where every project
+    /// skill's executable lives. Refusing the `.wayland-core` component at
+    /// any depth made every skill that ships an executable unrunnable —
+    /// `cd`, `find` and `node <path>` alike — and the refusal did not fail
+    /// cleanly: the model staged the skill under `/tmp` and told the user it
+    /// could not run the brief.
+    #[test]
+    fn skill_scripts_under_wayland_core_are_runnable() {
+        for command in [
+            "node .wayland-core/skills/foo/run.js",
+            "cd .wayland-core/skills",
+            "find .wayland-core/skills -name '*.sh'",
+            "bash .wayland-core/skills/tide/scripts/build.sh",
+            "cat /work/.wayland-core/skills/foo/SKILL.md",
+            "cp -R .wayland-core/skills/foo /tmp/staged",
+            // Through the same normalization every other rule uses.
+            "ls .wayland-core/./skills",
+            "ls .wayland-core/x/../skills",
+        ] {
+            assert_eq!(
+                floor_refusal(command, Some(Path::new("/work"))),
+                None,
+                "must NOT be refused: {command}"
+            );
+        }
+    }
+
+    /// The security half of the same change, and the half that matters more.
+    /// The allowlist is one entry wide; every other child of `.wayland-core`
+    /// — including one nobody has invented yet — must still be refused.
+    #[test]
+    fn the_wayland_core_control_surface_stays_refused() {
+        for command in [
+            "echo x > .wayland-core/config.toml",
+            // `..` is resolved BEFORE the child is read, so a token that
+            // enters through `skills` and leaves again is not a skill path.
+            "cat .wayland-core/skills/../config.toml",
+            "cp /tmp/evil .wayland-core/agents/evil.yaml",
+            "cp /tmp/evil .wayland-core/plugins/x.so",
+            "cat .wayland-core/shadow/x",
+            "cat .wayland-core/skills-audit.json",
+            "rm -rf .wayland-core",
+            "du -sh .wayland-core",
+            "cat .wayland-core.toml",
+            "echo x > /home/u/other/.wayland-core/config.toml",
+            // A child that is a glob is not definitely `skills`: `sk*` also
+            // expands onto `skills-audit.json`, so the allow side matches by
+            // exact name only.
+            "cp /tmp/evil .wayland-core/sk*",
+            // A control surface added next month, with no code change here.
+            "echo x > .wayland-core/newcontrolsurface/x",
+            // The whole-component glob still reaches the directory itself.
+            "cp -r /tmp/evil .wayland-cor*",
+            // Only the LITERAL directory is qualified by the allowlist. A glob
+            // standing in for it names no directory in particular, so it may
+            // not be admitted by the child that follows it.
+            "cp -r /tmp/evil .wayland-cor*/skills/x",
+            // `.wayland-core.toml` is a separate literal and is never
+            // qualified, whatever follows it.
+            "cat .wayland-core.toml/skills",
+        ] {
+            assert!(
+                floor_refusal(command, Some(Path::new("/work"))).is_some(),
+                "must be refused: {command}"
+            );
+        }
     }
 }
