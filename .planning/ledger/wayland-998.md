@@ -34,9 +34,10 @@ criteria:
     note: "Desktop's wire types drop the field before it reaches core, so core cannot honour a selection it never receives"
   - id: c6
     text: "The ACP backend has an MCP surface for the switches to act on"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/tests/acp_mcp_tool_selection.rs::a_switched_off_mcp_tool_is_not_offered_over_acp"
     owner: core
-    note: "Re-verified against 43848f75: wcore-acp has NO MCP surface at all. Grepping the crate for mcp returns three incidental comments (client.rs:59, client.rs:368 buffer-size analogies; idempotency.rs:17 naming the JSON-stream command), and crates/wcore-cli/src/acp.rs contains the string zero times. There is no route, type or field for the switches to act on."
+    note: "Built. `McpToolSelection { server, allowed_tools }` (symbol:crates/wcore-acp/src/protocol.rs::McpToolSelection, Desktop's `allowedTools` accepted as an alias) rides `SessionCreateRequest::mcp_servers`, is stored on the session record, and is read from THERE on every turn onto `TurnRequest::mcp_servers` (test:crates/wcore-acp/src/server.rs::session_create_mcp_switches_reach_the_turn_engine). `message/send` carries no MCP field at all, so a later message can neither introduce a selection nor widen one. symbol:crates/wcore-cli/src/acp_engine.rs::narrow_mcp_tool_selection applies it to the Config the engine is built from, BEFORE bootstrap dials, so a denied tool is never registered rather than merely hidden. Version skew is negotiated via symbol:crates/wcore-acp/src/protocol.rs::ServerCapabilities.mcp_tool_selection because the request types are deny_unknown_fields. Production caller: `wayland-core acp request create-session --mcp-tools <server>=<tool,tool>`. SECURITY: strictly authority-REDUCING - it names a server the operator already configured and intersects with what that config allowed, and wcore-acp carries no field for a command, URL, header or credential, so a client can never declare a server (test:crates/wcore-cli/tests/acp_mcp_tool_selection.rs::a_selection_can_never_widen_what_the_config_allowed). RED ARM, run: replacing the `narrow_mcp_tool_selection` call with `let _ = mcp_selection;` reddened 4 of the 6 cases, e.g. `the tool the operator switched OFF must not be offered; offered: [... \"safe_read\", \"danger_delete\"]`. Restored + touched, 29/29 green."
 ---
 
 Core-side enforcement is complete. The TICKET is not, and the safety framing

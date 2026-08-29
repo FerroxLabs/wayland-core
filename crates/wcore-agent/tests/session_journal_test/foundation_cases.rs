@@ -158,6 +158,7 @@ fn fully_populated_llm_request() -> LlmRequest {
         flux_loop_intent: Some(FluxLoopIntent::ClientOwned("anvil".into())),
         flux_turn_nonce: Some("nonce-1".into()),
         routed_model_hint: Some("deepseek-reasoner".into()),
+        replay_reasoning_content: true,
     }
 }
 
@@ -205,6 +206,7 @@ fn prepared_provider_request_snapshot_round_trips_every_request_field() {
         flux_loop_intent,
         flux_turn_nonce,
         routed_model_hint,
+        replay_reasoning_content,
     } = restored;
 
     assert_journaled_field!("model", model, expected.model, defaults.model);
@@ -291,6 +293,12 @@ fn prepared_provider_request_snapshot_round_trips_every_request_field() {
         routed_model_hint,
         expected.routed_model_hint,
         defaults.routed_model_hint
+    );
+    assert_journaled_field!(
+        "replay_reasoning_content",
+        replay_reasoning_content,
+        expected.replay_reasoning_content,
+        defaults.replay_reasoning_content
     );
 }
 

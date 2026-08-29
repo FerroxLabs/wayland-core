@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use futures::stream::Stream;
 
 use crate::error::AcpError;
-use crate::protocol::{MessageEvent, ToolDefinition};
+use crate::protocol::{McpToolSelection, MessageEvent, ToolDefinition};
 
 /// Transport-neutral approval scope for a host-driven resolution.
 ///
@@ -79,6 +79,17 @@ pub struct TurnRequest {
     /// `Some(id)` here as already-authorized — but it MUST still resolve it
     /// through the same authorized set (fail closed) rather than trusting it.
     pub agent: Option<String>,
+    /// #998 — the per-tool MCP switches this session was CREATED with.
+    ///
+    /// Read from the session record, never from the per-message body: a
+    /// selection is bound at `session/create` so a later message can neither
+    /// smuggle one in nor widen one an earlier message applied.
+    ///
+    /// Empty means no selection, and the engine bridge behaves exactly as it
+    /// did before #998. A non-empty list can only NARROW the servers the bridge
+    /// already has configured — `wcore-acp` deliberately carries no way to
+    /// declare a server, a command or a credential (see [`McpToolSelection`]).
+    pub mcp_servers: Vec<McpToolSelection>,
 }
 
 /// Turns one user prompt into a stream of [`MessageEvent`]s.
@@ -197,6 +208,7 @@ mod tests {
             text: "go".to_string(),
             tools: Vec::new(),
             agent: None,
+            mcp_servers: Vec::new(),
         };
         let frames: Vec<MessageEvent> = Arc::new(engine)
             .run_turn(req)
@@ -239,6 +251,7 @@ mod tests {
             text: "go".to_string(),
             tools: Vec::new(),
             agent: None,
+            mcp_servers: Vec::new(),
         };
         let frames: Vec<MessageEvent> = Arc::new(engine)
             .run_turn(req)

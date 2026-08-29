@@ -2039,6 +2039,55 @@ const AUTH_FAILURE_REMEDY: &str = "The provider rejected this API key — not re
      encrypted vault), pass --api-key for a one-off, or set the provider's \
      environment variable (ANTHROPIC_API_KEY, OPENAI_API_KEY, …).";
 
+/// #434 c2 — does this provider refusal say the request is missing the
+/// historical `reasoning_content` a strict reasoner requires?
+///
+/// This is the ONE refusal the engine may answer by re-shaping the SAME turn.
+/// It exists because the shaping decision is made BEFORE the answer that would
+/// inform it: a Flux tier alias (`flux-auto`) names no model, and
+/// `x-flux-routed-model` only arrives on the way back, so on the turn the alias
+/// FIRST resolves to DeepSeek/Kimi the request goes out without the replay that
+/// endpoint requires. The refusal itself is the missing signal, and re-sending
+/// with replay on has a real chance of being accepted.
+///
+/// The gate is deliberately narrow, for the same reason
+/// [`is_orphaned_tool_pair_rejection`] is: every other 400 fails identically on
+/// a second send, so a wider match bills the user twice for nothing. The
+/// refusal must be a 400, must NAME `reasoning_content` (the wire field, not
+/// the concept), and must describe it as absent or mandatory — a sentence that
+/// merely mentions reasoning does not qualify.
+fn is_missing_reasoning_content_rejection(error: &ProviderError) -> bool {
+    let ProviderError::Api { status, message } = error else {
+        return false;
+    };
+    if *status != 400 {
+        return false;
+    }
+    let message = message.to_ascii_lowercase();
+    // The wire field, in either spelling a provider serializes it with.
+    if !(message.contains("reasoning_content") || message.contains("reasoningcontent")) {
+        return false;
+    }
+    // ...and the complaint has to be that it is ABSENT or REQUIRED. A refusal
+    // that names the field for some other reason ("reasoning_content is not
+    // supported by this model") is a capability refusal: re-sending it WITH
+    // more reasoning_content is strictly worse than not retrying.
+    const ABSENCE_NEEDLES: [&str; 6] = [
+        "missing",
+        "required",
+        "must be",
+        "must contain",
+        "must include",
+        "expected",
+    ];
+    if ABSENCE_NEEDLES.iter().any(|n| message.contains(n)) {
+        // "not supported" wins over any absence wording in the same sentence:
+        // a model that rejects the field cannot be appeased by sending it.
+        return !(message.contains("not supported") || message.contains("unsupported"));
+    }
+    false
+}
+
 /// #923(3) — does this provider refusal name an orphaned `tool_use` /
 /// `tool_result` pair?
 ///
@@ -4417,6 +4466,15 @@ pub struct AgentEngine {
     /// routed-model header, and a mid-conversation re-route are all uncovered
     /// here and need router-side cover.
     flux_routed_model: Option<String>,
+    /// #434 c2 — replay historical `reasoning_content` on every remaining
+    /// request of this conversation.
+    ///
+    /// Learned from a provider refusal, never from a model string: see
+    /// [`is_missing_reasoning_content_rejection`]. Sticky once set, because the
+    /// contract belongs to the conversation's served model — un-setting it on
+    /// the next turn would re-earn the same 400 the recovery just paid for.
+    /// Cleared with the rest of the router state when the conversation is.
+    forced_reasoning_replay: bool,
     /// #282 contract V1: the LAST-seen Flux context pressure
     /// (`x-flux-context-pressure`, `0.0..=1.0` = required / window). Captured
     /// for #280 pressure-driven scheduling (see `smart_compact_fraction`).
@@ -4798,6 +4856,7 @@ impl AgentEngine {
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             // #280: smart auto-compaction starts armed; latches seeded clear.
             smart_compact_armed: true,
@@ -5100,6 +5159,7 @@ impl AgentEngine {
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             // #280: smart auto-compaction starts armed; latches seeded clear.
             smart_compact_armed: true,
@@ -5492,6 +5552,7 @@ impl AgentEngine {
         self.conversation_id = switched_conversation_id;
         self.flux_served_window = None;
         self.flux_routed_model = None;
+        self.forced_reasoning_replay = false;
         self.flux_context_pressure = None;
         self.smart_compact_armed = true;
         self.smart_compact_last_turn = None;
@@ -12437,6 +12498,12 @@ impl AgentEngine {
             // Worst case after a mid-turn resume is one further retry — still
             // bounded, never a loop.
             let mut orphan_repair_retried = false;
+            // #434 c2 REPLAY GATE: bounds the reasoning-content re-shape to ONE
+            // extra provider send per turn, exactly like the orphan repair
+            // above. The flag it sets is sticky for the conversation, so a
+            // later turn never pays this again — the second send happens once,
+            // on the turn the alias first resolves.
+            let mut reasoning_replay_retried = false;
             let mut resumed_provider_dispatch = false;
             let mut resumed_dispatch_id = None;
             let (mut request, effective_model, mut input_token_estimate, mut last_routed_model) =
@@ -12761,6 +12828,7 @@ impl AgentEngine {
                         // routing tier swap, so the omit decision sees the final model.
                         omit_max_tokens: false,
                         routed_model_hint: None,
+                        replay_reasoning_content: false,
                     };
 
                     // Cache-stability (token-opt): inject the per-turn skill-router
@@ -13173,6 +13241,13 @@ impl AgentEngine {
                         } else {
                             None
                         };
+                    // #434 c2 — and once THIS conversation has been refused for
+                    // missing `reasoning_content`, keep replaying it. The hint
+                    // above cannot cover the turn on which the alias first
+                    // resolves (the router answers on the way back); this is
+                    // what the engine learned from that refusal, and it holds
+                    // for every later request of the conversation.
+                    request.replay_reasoning_content = self.forced_reasoning_replay;
 
                     // #426 / wayland#422 — separate the reasoning budget from the output
                     // budget so extended thinking can never starve the visible answer.
@@ -14285,6 +14360,41 @@ impl AgentEngine {
                         // sibling ContextOverflow retry arm above emits info for
                         // exactly this reason. The capture is still written
                         // either way, and still named.
+                        // #434 c2 — a strict reasoner refused this request for
+                        // the `reasoning_content` a tier alias could not know it
+                        // needed. The refusal IS the route signal the response
+                        // header would have carried, so learn it here and
+                        // re-issue the SAME turn shaped for the served model,
+                        // rather than failing the turn and covering only N+1.
+                        // Placed ahead of the orphan gate: the two classifiers
+                        // are disjoint, and this one changes no history.
+                        if !reasoning_replay_retried
+                            && !self.forced_reasoning_replay
+                            && is_missing_reasoning_content_rejection(&e)
+                        {
+                            reasoning_replay_retried = true;
+                            self.forced_reasoning_replay = true;
+                            request.replay_reasoning_content = true;
+                            self.output.emit_provider_retry(
+                                Some("missing_reasoning_content"),
+                                provider_retry_seq.fetch_add(1, Ordering::SeqCst) + 1,
+                            );
+                            let mut retry_note = "the router resolved this request to a \
+                                 reasoning model that requires the conversation's earlier \
+                                 reasoning to be replayed — retrying once with it, and \
+                                 keeping it on for the rest of the conversation"
+                                .to_string();
+                            if let Some(path) = captured.as_ref() {
+                                retry_note.push_str(&format!(
+                                    " (the refused request was captured to {})",
+                                    path.display()
+                                ));
+                            }
+                            self.output.emit_info(&retry_note);
+                            self.settle_failed_turn_provider_attempts(&e.to_string())
+                                .await;
+                            continue 'stream;
+                        }
                         if !orphan_repair_retried && is_orphaned_tool_pair_rejection(&e) {
                             // The three pre-send guards already ran against
                             // THIS array and all three are idempotent, so
@@ -20698,6 +20808,7 @@ mod set_config_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -22577,6 +22688,7 @@ mod phase6_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -22906,6 +23018,7 @@ mod compact_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -24974,6 +25087,7 @@ mod plan_mode_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -25436,6 +25550,7 @@ mod hook_integration_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -26609,6 +26724,7 @@ mod approval_bridge_engine_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -27909,6 +28025,7 @@ mod user_model_writeback_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_routed_model: None,
+            forced_reasoning_replay: false,
             flux_context_pressure: None,
             smart_compact_armed: true,
             smart_compact_last_turn: None,
@@ -38918,6 +39035,197 @@ mod issue_434_routed_model_tests {
         assert!(
             seen[1].routed_model_hint.is_none(),
             "no header, no hint — a deployment that stays silent gets no guess"
+        );
+    }
+
+    /// A router that refuses a tier-alias request the way a strict reasoner
+    /// does when the conversation's earlier `reasoning_content` is absent, and
+    /// serves it once the replay is there. The refusal is the ONLY signal —
+    /// this provider never reports a `routed_model`, which is exactly the turn
+    /// #434 c2 is about: the alias has not resolved anywhere the engine can
+    /// read it yet.
+    struct StrictReasonerBehindAnAlias {
+        seen: Arc<Mutex<Vec<LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StrictReasonerBehindAnAlias {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.seen
+                .lock()
+                .expect("captured requests")
+                .push(request.clone());
+            if !request.replay_reasoning_content {
+                return Err(ProviderError::Api {
+                    status: 400,
+                    message: "messages[1]: missing field `reasoning_content`; the last \
+                              assistant message must contain reasoning_content"
+                        .to_string(),
+                });
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta("ok".to_string())).await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        finish_reason: FinishReason::Stop,
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    fn engine_behind_alias(provider: Arc<dyn LlmProvider>, model: &str) -> super::AgentEngine {
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(crate::output::null_sink::NullSink),
+        );
+        engine.max_turns = Some(2);
+        engine.compat = wcore_config::compat::ProviderCompat::flux_router_defaults();
+        engine.model = model.to_string();
+        engine
+    }
+
+    /// #434 c2 — THE criterion. On the turn the alias first resolves there is
+    /// no `x-flux-routed-model` to read (the router answers on the way back),
+    /// so the request goes out unshaped and is refused. The turn must still
+    /// COMPLETE, by learning the contract from the refusal and re-issuing the
+    /// same turn with the replay — not merely by covering turn N+1.
+    #[tokio::test]
+    async fn the_turn_the_alias_first_resolves_recovers_from_the_refusal() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(StrictReasonerBehindAnAlias {
+            seen: Arc::clone(&seen),
+        });
+        let mut engine = engine_behind_alias(provider, "flux-auto");
+
+        engine
+            .run("first", "")
+            .await
+            .expect("the FIRST turn must complete, not only the one after it");
+
+        let seen = seen.lock().expect("captured requests");
+        assert_eq!(
+            seen.len(),
+            2,
+            "exactly one extra send: the refused shape, then the replayed one"
+        );
+        assert!(
+            !seen[0].replay_reasoning_content,
+            "CONTROL: the first send is the unshaped one — if it already carried \
+             the replay the provider would never have refused and this test would \
+             prove nothing"
+        );
+        assert!(
+            seen[0].routed_model_hint.is_none(),
+            "CONTROL: no route signal exists on this turn, which is why the \
+             #434 c1 socket cannot cover it"
+        );
+        assert!(
+            seen[1].replay_reasoning_content,
+            "the re-issued request must carry the replay the refusal asked for"
+        );
+    }
+
+    /// The recovery is sticky for the conversation: having paid one extra send
+    /// to learn the contract, the NEXT turn must be shaped correctly from its
+    /// very first send.
+    #[tokio::test]
+    async fn the_learned_contract_outlives_the_turn_that_paid_for_it() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(StrictReasonerBehindAnAlias {
+            seen: Arc::clone(&seen),
+        });
+        let mut engine = engine_behind_alias(provider, "flux-auto");
+
+        engine.run("first", "").await.expect("first turn completes");
+        engine
+            .run("second", "")
+            .await
+            .expect("second turn completes");
+
+        let seen = seen.lock().expect("captured requests");
+        assert_eq!(
+            seen.len(),
+            3,
+            "the second turn must NOT re-earn the 400: {} sends",
+            seen.len()
+        );
+        assert!(
+            seen[2].replay_reasoning_content,
+            "the second turn's first send already carries the learned contract"
+        );
+    }
+
+    /// The gate is narrow. A 400 that is not about a missing `reasoning_content`
+    /// fails identically on a second send, so it must be billed once.
+    struct AlwaysRefuses {
+        message: String,
+        seen: Arc<Mutex<Vec<LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for AlwaysRefuses {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.seen
+                .lock()
+                .expect("captured requests")
+                .push(request.clone());
+            Err(ProviderError::Api {
+                status: 400,
+                message: self.message.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_400_is_not_re_sent() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(AlwaysRefuses {
+            message: "invalid_api_key: incorrect API key provided".to_string(),
+            seen: Arc::clone(&seen),
+        });
+        let mut engine = engine_behind_alias(provider, "flux-auto");
+
+        let outcome = engine.run("first", "").await;
+        assert!(outcome.is_err(), "an auth refusal must still fail the turn");
+        assert_eq!(
+            seen.lock().expect("captured requests").len(),
+            1,
+            "a refusal that is not about reasoning_content must be billed once"
+        );
+    }
+
+    /// A model that REJECTS the field must never be answered by sending more of
+    /// it. This is the polarity trap in the classifier, pinned.
+    #[tokio::test]
+    async fn a_not_supported_refusal_is_not_re_sent() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(AlwaysRefuses {
+            message: "reasoning_content is required by this endpoint but is not supported \
+                      for this model"
+                .to_string(),
+            seen: Arc::clone(&seen),
+        });
+        let mut engine = engine_behind_alias(provider, "flux-auto");
+
+        let outcome = engine.run("first", "").await;
+        assert!(outcome.is_err());
+        assert_eq!(
+            seen.lock().expect("captured requests").len(),
+            1,
+            "\"not supported\" wins over the absence wording in the same sentence"
         );
     }
 

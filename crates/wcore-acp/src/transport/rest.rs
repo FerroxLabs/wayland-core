@@ -305,6 +305,7 @@ impl<H: HttpHandler> RestTransport<H> {
         AgentsListResponse,
         InitializeResponse,
         crate::protocol::AgentInfo,
+        crate::protocol::McpToolSelection,
         crate::protocol::ServerCapabilities,
         crate::protocol::SessionMetadata,
         crate::protocol::ToolCall,

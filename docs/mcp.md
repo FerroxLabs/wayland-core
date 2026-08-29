@@ -161,7 +161,73 @@ appearing or disappearing.
 
 `allowed_tools` is the canonical spelling; the Wayland desktop model spells the
 same field `allowedTools`, which is accepted as an alias wherever this field is
-read (config file and the `add_mcp_server` command alike).
+read (config file, the `add_mcp_server` command, and the ACP `session/create`
+selection below alike).
+
+### Over ACP
+
+The ACP backend takes the same selection per session, on `session/create`:
+
+```json
+{
+  "model": "claude-opus-4-8",
+  "mcp_servers": [
+    {"server": "warehouse", "allowed_tools": ["inventory_lookup"]}
+  ]
+}
+```
+
+The three states are the ones in the table above, and they are applied to the
+config the session's engine is built from — before its MCP servers are dialled —
+so a denied tool is never registered.
+
+Two rules make this safe on a network-exposed endpoint:
+
+* **It can only narrow.** The selection names a server the operator already
+  declared and INTERSECTS with whatever that declaration allowed. There is no
+  ACP field for a server's command, URL, headers or credentials, so a client
+  cannot introduce a server — only reduce one.
+* **Naming a server that is not configured does nothing.** That is fail-safe,
+  not a silent failure: an unconfigured server contributes no tools, so every
+  tool the switch would have turned off is already absent.
+
+The selection is bound at `session/create` and read from the session record on
+every turn — `message/send` carries no MCP field — so a later message can
+neither introduce a selection nor widen one. Consult
+`capabilities.mcp_tool_selection` from `initialize` before sending the key: ACP
+request types reject unknown fields, so an older server hard-rejects it rather
+than ignoring it.
+
+From the command line:
+
+```bash
+wayland-core acp request create-session --mcp-tools warehouse=inventory_lookup
+wayland-core acp request create-session --mcp-tools warehouse=   # disable all
+```
+
+## Reconfiguring a Connected Server
+
+Re-adding a server that is already connected is a **no-op** by design: the live
+connection, its configuration and its lifecycle generation are left untouched,
+so a retry, a reconnect, or two hosts racing the same add can never tear a
+working server down as a side effect.
+
+To reconfigure one deliberately, opt in:
+
+```
+/mcp add --replace warehouse npx -y warehouse-mcp@next
+```
+
+and on the JSON stream, `{"type": "add_mcp_server", ..., "replace": true}`.
+
+Either spelling tears the existing connection down — the stdio child exits and
+its tools are unregistered — and re-establishes it from the new configuration.
+Only a server introduced at runtime can be replaced; a config-declared name is
+refused, and so is a server that is still connecting, is stopping, or whose
+prior transport cleanup could not be verified. `--replace` sits between the
+verb and the name because everything after the name is the child's own command
+line, where a trailing `--replace` has to keep meaning what the child means
+by it.
 
 ## Smart Tool Curation
 

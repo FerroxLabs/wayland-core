@@ -245,12 +245,20 @@ impl OpenAIProvider {
     /// so a non-strict model (e.g. claude-via-Flux) never replays an unsigned
     /// thinking block. Direct DeepSeek/Kimi already set the flag, so this is a
     /// no-op clone for them.
+    ///
+    /// `forced` is the engine's #434 same-turn recovery: neither the alias nor
+    /// the (absent) routed-model hint can name the contract on the turn the
+    /// alias FIRST resolves, so once the router refuses that request for
+    /// missing `reasoning_content` the engine re-issues it with
+    /// `LlmRequest::replay_reasoning_content` set and this argument true. It
+    /// only ever turns replay ON, and only from an observed refusal.
     fn message_compat(
         compat: &ProviderCompat,
         model: &str,
         routed_model: Option<&str>,
+        forced: bool,
     ) -> ProviderCompat {
-        if openai_compat::requires_reasoning_content_replay(model, routed_model)
+        if (forced || openai_compat::requires_reasoning_content_replay(model, routed_model))
             && !compat.replays_thinking_in_history()
         {
             let mut c = compat.clone();
@@ -837,6 +845,7 @@ impl OpenAIProvider {
             &self.compat,
             &request.model,
             request.routed_model_hint.as_deref(),
+            request.replay_reasoning_content,
         );
         let mut body = json!({
             "model": request.model,
@@ -4083,7 +4092,7 @@ mod tests {
             !flux.replays_thinking_in_history(),
             "precondition: router compat has replay off"
         );
-        let resolved = OpenAIProvider::message_compat(&flux, "deepseek-v4-pro", None);
+        let resolved = OpenAIProvider::message_compat(&flux, "deepseek-v4-pro", None, false);
         assert!(
             resolved.replays_thinking_in_history(),
             "DeepSeek via Flux must replay reasoning_content"
@@ -4096,11 +4105,12 @@ mod tests {
         // thinking block. Ordinary OpenAI models stay off too.
         let flux = ProviderCompat::flux_router_defaults();
         assert!(
-            !OpenAIProvider::message_compat(&flux, "claude-opus-4-7", None)
+            !OpenAIProvider::message_compat(&flux, "claude-opus-4-7", None, false)
                 .replays_thinking_in_history()
         );
         assert!(
-            !OpenAIProvider::message_compat(&flux, "gpt-4o", None).replays_thinking_in_history()
+            !OpenAIProvider::message_compat(&flux, "gpt-4o", None, false)
+                .replays_thinking_in_history()
         );
     }
 
@@ -4110,7 +4120,50 @@ mod tests {
         let ds = ProviderCompat::deepseek_defaults();
         assert!(ds.replays_thinking_in_history());
         assert!(
-            OpenAIProvider::message_compat(&ds, "deepseek-v4-pro", None)
+            OpenAIProvider::message_compat(&ds, "deepseek-v4-pro", None, false)
+                .replays_thinking_in_history()
+        );
+    }
+
+    /// #434 c2 — the turn on which the alias FIRST resolves has no route
+    /// signal at all, so `routed_model` is `None` and the alias names no
+    /// model. The engine's post-refusal `replay_reasoning_content` is the only
+    /// thing that can turn replay on there, and it must.
+    #[test]
+    fn message_compat_replays_when_the_engine_forces_it_on_a_bare_alias() {
+        let flux = ProviderCompat::flux_router_defaults();
+        assert!(
+            !flux.replays_thinking_in_history(),
+            "CONTROL: the router compat must start with replay OFF, else this \
+             test cannot distinguish the forced arm from the base compat"
+        );
+        assert!(
+            !OpenAIProvider::message_compat(&flux, "flux-auto", None, false)
+                .replays_thinking_in_history(),
+            "CONTROL: without the force there is nothing to key on — this is \
+             the uncovered turn #434 c2 names"
+        );
+        assert!(
+            OpenAIProvider::message_compat(&flux, "flux-auto", None, true)
+                .replays_thinking_in_history(),
+            "a forced request must replay reasoning_content even though the \
+             alias and the (absent) route both name no model"
+        );
+    }
+
+    /// The force only ever turns replay ON. A model that already replays is
+    /// unchanged, and — the load-bearing half — nothing about the force lets a
+    /// caller turn replay OFF for a strict reasoner.
+    #[test]
+    fn forcing_replay_never_turns_it_off_for_a_strict_reasoner() {
+        let flux = ProviderCompat::flux_router_defaults();
+        assert!(
+            OpenAIProvider::message_compat(&flux, "deepseek-v4-pro", None, false)
+                .replays_thinking_in_history(),
+            "a named strict reasoner replays with no force at all"
+        );
+        assert!(
+            OpenAIProvider::message_compat(&flux, "deepseek-v4-pro", None, true)
                 .replays_thinking_in_history()
         );
     }
@@ -4250,6 +4303,7 @@ mod tests {
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -4349,6 +4403,7 @@ mod tests {
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         }
     }
 
@@ -4903,6 +4958,7 @@ mod tests {
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 2048);
@@ -4945,6 +5001,7 @@ mod tests {
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 1024);
@@ -4983,6 +5040,7 @@ mod tests {
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -5019,6 +5077,7 @@ mod tests {
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         };
         let body = provider.build_request_body(&req);
         assert!(
@@ -5055,6 +5114,7 @@ mod tests {
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["reasoning_effort"], "medium");

@@ -60,6 +60,7 @@ fn request_with_tools(model: &str) -> LlmRequest {
         temperature: None,
         omit_max_tokens: false,
         routed_model_hint: None,
+        replay_reasoning_content: false,
     }
 }
 

@@ -420,6 +420,25 @@ pub enum ProtocolCommand {
             skip_serializing_if = "Option::is_none"
         )]
         allowed_tools: Option<Vec<String>>,
+        /// wayland#1165 — the EXPLICIT opt-in to reconfigure a server that is
+        /// already connected under this name: tear its connection down and
+        /// re-establish it from the configuration carried by THIS command.
+        ///
+        /// Default `false`, which is wayland#605's guarantee and must stay the
+        /// default: a duplicate add of a ready server is a no-op that leaves
+        /// the live connection, its configuration and its lifecycle generation
+        /// untouched, and re-emits `McpReady { already_connected: true }`. A
+        /// host that genuinely wants the new configuration has to say so, so
+        /// that tearing down a working server is never a side effect of a
+        /// retry, a reconnect, or two hosts racing the same add.
+        ///
+        /// Only a RUNTIME-declared server may be replaced — a config-declared
+        /// name is refused by the existing collision check, and a server that
+        /// is still connecting or stopping is refused rather than interrupted.
+        /// `serde(default)` keeps an existing host's bytes decoding exactly as
+        /// they did before #1165.
+        #[serde(default)]
+        replace: bool,
     },
     /// Remove a server previously introduced by [`ProtocolCommand::AddMcpServer`]
     /// in this process. Configured and plugin-owned servers remain authoritative.
@@ -905,8 +924,15 @@ mod tests {
                 headers,
                 allow_local,
                 allowed_tools,
+                replace,
             } => {
                 assert_eq!(name, "team-tools");
+                // wayland#1165 back-compat control: a host that does not ask
+                // for the destructive reconfigure must never get one.
+                assert!(
+                    !replace,
+                    "an absent replace must default to the #605 no-op re-add"
+                );
                 assert_eq!(transport, "stdio");
                 assert_eq!(command.unwrap(), "node");
                 assert_eq!(args.unwrap(), vec!["bridge.js", "--port", "9000"]);
@@ -1020,6 +1046,30 @@ mod tests {
             }
             _ => panic!("expected AddMcpServer"),
         }
+    }
+
+    /// wayland#1165 — the destructive reconfigure is OPT-IN. This wire is
+    /// inbound-only (`ProtocolCommand` derives `Deserialize`, not `Serialize`),
+    /// so the property that matters is what an EXISTING host's bytes decode to:
+    /// a command that says nothing about `replace` must never get one.
+    #[test]
+    fn add_mcp_server_replace_is_opt_in_and_absent_by_default() {
+        fn replace_of(json: &str) -> bool {
+            match serde_json::from_str::<ProtocolCommand>(json).unwrap() {
+                ProtocolCommand::AddMcpServer { replace, .. } => replace,
+                _ => panic!("expected AddMcpServer"),
+            }
+        }
+        let base = r#""type":"add_mcp_server","name":"t","transport":"stdio""#;
+        assert!(
+            !replace_of(&format!("{{{base}}}")),
+            "absent means the #605 no-op re-add, never a teardown"
+        );
+        assert!(
+            !replace_of(&format!("{{{base},\"replace\":false}}")),
+            "an explicit false is still the safe default"
+        );
+        assert!(replace_of(&format!("{{{base},\"replace\":true}}")));
     }
 
     #[test]

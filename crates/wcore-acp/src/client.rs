@@ -470,6 +470,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: None,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -489,6 +490,7 @@ mod tests {
                     tools: Vec::new(),
                     system_prompt: None,
                     agent: None,
+                    mcp_servers: Vec::new(),
                 })
                 .await
                 .unwrap();
@@ -507,6 +509,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: None,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -528,6 +531,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: None,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();

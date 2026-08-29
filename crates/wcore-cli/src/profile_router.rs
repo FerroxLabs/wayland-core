@@ -488,6 +488,7 @@ impl ProfileRouter for CliProfileRouter {
                 tools: req.tools.clone(),
                 system_prompt: req.system_prompt.clone(),
                 agent: None,
+                mcp_servers: Vec::new(),
             })
             .await;
 
@@ -681,6 +682,7 @@ mod tests {
             tools: Vec::new(),
             system_prompt: None,
             agent: None,
+            mcp_servers: Vec::new(),
         }
     }
 
