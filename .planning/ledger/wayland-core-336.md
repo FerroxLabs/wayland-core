@@ -3,28 +3,30 @@ issue: 336
 repo: FerroxLabs/wayland-core
 title: "Flaky: harness_tui_flow narrow_terminal_resize_stays_coherent_without_panicking times out under parallel load"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "PtyHarness::resize resizes the vt100 parser as well as the PTY master"
-    state: not-met
+    state: met
+    evidence: "symbol:crates/wcore-cli/tests/harness_tui_flow.rs::resize"
     owner: core
-    note: "the parser grid is created 40x120 and never told about a resize; there is no set_size call anywhere in the file. vt100::Parser::set_size exists in the pinned 0.15.2, so no version bump is needed"
+    note: "The body calls parser.set_size(rows, cols) before master.resize(). set_size rather than a fresh Parser, deliberately: a cleared grid breaks the diff-renderer and was measured to fail the chrome wait on a healthy binary."
   - id: c2
     text: "The post-resize predicate can only be satisfied by a frame that is actually 80 columns wide"
-    state: not-met
+    state: met
+    evidence: "symbol:crates/wcore-cli/tests/harness_tui_flow.rs::widest_painted_row"
     owner: core
-    note: "today it waits for WAYLAND and Workspace, which boot_to_workspace already waited for, so the wait can be satisfied by pre-resize residue in the stale 120-wide grid. The test is vacuously passable in one direction"
+    note: "DEVIATION FROM THE WORDING, flagged. The discriminating predicate is at 140 columns, not 80: the test shrinks to 80 and asks the PROCESS about survival, then widens to 140 (past the 120 boot grid) and requires wait_for_width(140), so a glyph past column 120 cannot be pre-resize residue. 536fbfbe removed the post-shrink screen predicate because a healthy binary need not fully repaint at the intermediate width. widest_painted_row reads the GRID cell by cell rather than screen_text(), because vt100 contents() re-joins wrapped rows and would have passed against the defect."
   - id: c3
     text: "Making PtyHarness::resize a no-op turns the test red"
     state: not-met
     owner: core
-    note: "on the shipped tree that mutation still PASSES, which is the proof the test is half-vacuous. A second mutation - a render panic below 100 columns - must fail both before and after"
+    note: "Structurally a no-op resize leaves the parser at 120 so wait_for_width(140) should time out, and the shrink arm's assert!(h.is_running()) covers the render-panic mutation. But this arm depends on the binary repainting, and that repaint has ITSELF been observed flaky in this very test (one full-suite run in six timed out at the intermediate width). MUTATION ARM NOT RUN. The structural argument is recorded above, but this criterion asserts an OBSERVED outcome and nothing in the tree records one. The standing rule in this repo is that a test nobody watched fail is not evidence, so it grades not-met until one cheap run flips it."
   - id: c4
     text: "The flake rate is re-measured at retries=0 over N of at least 20 with a known-positive control in the same run"
     state: not-met
     owner: core
-    note: "the issue's own first figure of four in eight was discarded because an empty grep is not a verdict. Raising the 5s budget would make the timeout rarer and leave the vacuity untouched - green bought on a test that already cannot fail in one direction"
+    note: "Requires a MEASURED rate at retries=0 over N of at least 20 with a known-positive control in the same run. No such measurement exists anywhere in the tree; a code change cannot satisfy it. AGGRAVATING: this test is in NEITHER .config/flaky-allowlist.txt NOR any nextest retries=0 override, so it costs real CI reds today, and PAINT_BUDGET was raised 5s to 30s without re-measuring the rate."
 ---
 
 The reported symptom is a PTY test that times out about one run in six under

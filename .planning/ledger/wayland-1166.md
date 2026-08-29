@@ -3,7 +3,7 @@ issue: 1166
 repo: FerroxLabs/wayland
 title: "CacheBreakDetector reports Healthy with 0 causes on a 3% hit ratio: a flat cache_read never reaches attribute_cause, and messages are never hashed"
 status: closed
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "A flat cache_read is reported rather than falling through to Healthy — an absolute floor, not only a ratio"
@@ -20,12 +20,13 @@ criteria:
     state: met
     evidence: "symbol:crates/wcore-agent/src/cache_diagnostics.rs::CacheBreakCause"
     owner: core
-    note: "MessagesChanged { first_divergent_index }, fed from &request.messages at engine.rs:13108"
+    note: "Re-verified at 43848f75. The message hashing that lets a changed prefix be named with its first divergent index feeds record_request at engine.rs:13213 (formerly cited as :13108, which had drifted)."
   - id: c4
     text: "The snapshot describes the request actually dispatched — taken after the tier swap and transient injections"
     state: met
-    evidence: "file:crates/wcore-agent/src/engine.rs:13108"
+    evidence: "file:crates/wcore-agent/src/engine.rs:13213"
     owner: core
+    note: "RE-ANCHORED 2026-08-29: the old anchor engine.rs:13108 still resolved but had drifted onto an unrelated max_tokens sizing block. The record_request site is now at :13213, and the comment immediately above it at :13207-13212 states that the snapshot is taken after the tier swap and the transient tail injections, which is the claim."
   - id: c5
     text: "The detector can still report Healthy when the cache genuinely is — a positive control that passes in every mutation arm"
     state: met

@@ -3,7 +3,7 @@ issue: 244
 repo: FerroxLabs/wayland-core
 title: "VFS Read of raw .git/objects permitted (compressed; info-only)"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "A VFS read of a raw object store is refused, at the workspace root and at any nested depth"

@@ -3,28 +3,49 @@ issue: 253
 repo: FerroxLabs/wayland-core
 title: "[Feature]: Bind conversation topics and threads to authorized agents"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "The bindings umbrella feature is either scheduled or explicitly deferred, in writing"
-    state: blocked
+    state: met
+    evidence: "file:.planning/DECISIONS.md"
     owner: maintainer
-    note: "this is absent behaviour, not broken behaviour - new config surface, new routing, new session identity. Slice 2 also carries a breaking migration that invalidates every acknowledge_open_admission token an operator has written. Not a defect-sweep item"
+    note: "TAKEN 2026-08-29 as Q6: keep the umbrella OPEN and UNSCHEDULED, and split the buried Telegram defect out now. That is the explicit written deferral the criterion asks for. The reason is recorded with it: slice 2 carries a breaking migration (SHAPE_FIELDS 13 to 14, ADMISSION_SHAPE_VERSION admission-v2 to v3) that invalidates every acknowledge_open_admission token an operator has written."
   - id: c2
     text: "OutgoingMessage carries a destination thread distinct from the quoted message it replies to"
-    state: not-met
+    state: met
+    evidence: "symbol:crates/wcore-channels/src/outgoing.rs::OutgoingMessage"
     owner: core
-    note: "outgoing.rs declares conversation_id, text, reply_to and attachments and no thread_id, so a parsed destination thread has nowhere to go. Any new field needs serde default plus skip_serializing_if because the type is deny_unknown_fields"
+    note: "e2d083c7. thread_id: Option<String> at outgoing.rs:23 with serde(default, skip_serializing_if) as the ledger required under deny_unknown_fields; reply_to keeps its own doc line saying it is NOT a destination. The ::text() constructor was updated so the silent-default path sets both to None."
   - id: c3
     text: "A send to a target of the form telegram:chat:topic sets message_thread_id and leaves reply_to_message_id unset"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-channel-telegram/src/lib.rs::outbound_forum_topic_sets_message_thread_id_not_reply_to"
     owner: core
-    note: "channel_send_transport.rs:236 assigns target.thread_id to reply_to, and the Telegram adapter maps reply_to to reply_to_message_id. message_thread_id is read inbound only - no outbound path in the tree sets it. Slack maps reply_to to thread_ts correctly and must not regress"
+    note: "Asserts on the serialized wire body with message_thread_id set and no reply_to_message_id, needing no live credential. channel_send_transport.rs:242 routes target.thread_id into thread_id and leaves reply_to empty; the red arm topic_destination_never_occupies_the_reply_quote_slot and its control threadless_target_still_delivers_with_no_reply_quote sit at the transport."
   - id: c4
     text: "The Telegram topic defect is filed as its own defect-labelled issue rather than living in a feature request comment thread"
     state: not-met
     owner: core
-    note: "as filed today the defect is invisible to any defect-labelled query, which is exactly how it survived a release. Discord has the same class of bug through message_reference"
+    note: "VERIFIED ABSENT against all 200 issues in the tracker: filtering every state on telegram, topic and thread returns only #253 itself (open, no labels), #210 and #110 (both closed, unrelated). The defect is FIXED in code but is still tracked only inside a feature request's comment thread, so it stays invisible to any defect-labelled query - which is exactly the condition this criterion names. Discord's message_reference carries the same class of bug and is likewise unfiled."
+  - id: c5
+    text: "The inbound and default-agent-reply arm inherits the thread as a DESTINATION and the quote separately"
+    state: met
+    evidence: "test:crates/wcore-agent/src/channel_inbound.rs::a_reply_inherits_the_thread_as_a_destination_and_the_quote_separately"
+    owner: core
+    note: "Added 2026-08-29; the buried defect's acceptance has four halves and the ledger carried only the outbound one. The sibling outbound_quote_target_does_not_fall_back_to_thread closes the fallback that also put a Discord thread CHANNEL id into a message reference."
+  - id: c6
+    text: "Every chunk of a chunked send carries the thread destination, and a threadless send does not invent one"
+    state: met
+    evidence: "test:crates/wcore-channels/src/manager.rs::a_chunked_send_carries_the_thread_destination_on_every_chunk"
+    owner: core
+    note: "Added 2026-08-29. Control: a_chunked_send_without_a_thread_does_not_invent_one, in the same file."
+  - id: c7
+    text: "Slack does not regress: thread_ts comes from the thread destination and a thread root supplied as reply_to is still honoured"
+    state: met
+    evidence: "test:crates/wcore-channel-slack/src/lib.rs::slack_takes_its_thread_ts_from_the_thread_destination"
+    owner: core
+    note: "Added 2026-08-29. The wrong-refusal twin is slack_still_honours_a_thread_root_supplied_as_reply_to, so the new field cannot break the adapter that already worked."
 ---
 
 Two different things are tracked under one number.

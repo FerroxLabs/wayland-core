@@ -3,13 +3,13 @@ issue: 324
 repo: FerroxLabs/wayland-core
 title: "AppContainer ACL race: a deny identity strips a concurrent allow identity's access (4 of last 8 nightlies, never tracked)"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "An instrumented run establishes whether the failure is a product race in AppContainer ACE application or a race in the test fixture"
     state: not-met
     owner: core
-    note: "nobody has ever run this test alone. Step one is N of at least 20 alone and N of at least 20 with the two execute() calls serialized, on ferrox-win-msvc through the runner service - a session-0 SSH logon reports is_available() false, so it cannot be observed over SSH at all"
+    note: "No instrumented run exists. crates/wcore-sandbox/tests/live_fs_acl.rs is untouched by this cycle - its last commits long predate the graded tree. The measurement needs ferrox-win-msvc through the runner service (session-0 SSH reports is_available() false), which is Sean-only infrastructure."
   - id: c2
     text: "concurrent_allow_and_deny_identities_do_not_interfere passes at retries=0 over N of at least 20 on the AppContainer-capable host"
     state: not-met
@@ -19,7 +19,7 @@ criteria:
     text: "Whichever arm the measurement indicts, the deny half of the test is still non-vacuous afterwards"
     state: not-met
     owner: core
-    note: "the assertions at live_fs_acl.rs:475-478 must not become vacuous while making the allow arm green - that would convert a real Windows multi-agent defect into a passing test"
+    note: "Moot until c1 indicts an arm; the deny assertions at live_fs_acl.rs:475-478 are unmodified, so nothing has been made vacuous either. STRUCTURAL DEPENDENCY the criteria did not encode: until wayland-core#325's soak-tracker landed, any tracker row for this vanished on the next green soak. #325 is now met, so a row here would survive."
 ---
 
 Two Windows sandbox identities race the same secret.txt: one arm carries a

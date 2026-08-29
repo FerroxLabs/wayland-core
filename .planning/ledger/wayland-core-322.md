@@ -3,7 +3,7 @@ issue: 322
 repo: FerroxLabs/wayland-core
 title: "Nested/vendored VCS object stores are not secret-denied (deny walk inspects the workspace root only)"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "A vendored or nested VCS object store is refused at any depth, not only directly under the workspace root"
@@ -27,7 +27,7 @@ criteria:
     text: "The TUI @-ref directory walk gives the same treatment to a store reached under another name"
     state: not-met
     owner: core
-    note: "at_ref_resolve.rs:315 skips a directory only when its file_name is exactly .git, so a symlink or directory named anything else pointing at an object store is walked and inlined. The @-ref surface has no equivalent of is_vcs_content_store. Tracked as the second half of #339"
+    note: "NARROWED BY #339 BUT STILL OPEN, and NOT superseded: #339 shipped without touching it, so handing the residual to an issue that has already passed over it would retire a live defect. The 6d130a62 walk prunes a link pointing at a store OUTSIDE the workspace (canonicalize + starts_with(root_canonical), at_ref_resolve.rs:353-365), but a directory or symlink inside the root under any other name still canonicalizes inside and is walked. at_ref_resolve.rs:350 still skips a directory only when its file_name is exactly .git."
 ---
 
 The issue reports that the secret deny walk classified VCS object stores only

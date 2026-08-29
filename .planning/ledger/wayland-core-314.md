@@ -3,7 +3,7 @@ issue: 314
 repo: FerroxLabs/wayland-core
 title: "grant_path, revoke_path and grant_workspace_capability are missing from the published desktop contract schema"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "Every ProtocolCommand variant is published with a schema branch and a fixture, enforced by an exhaustive match that fails to compile when a variant is added"
@@ -25,14 +25,15 @@ criteria:
     note: "this is the parity gate the event direction already had; #314 is what extended it to commands, so the same hole cannot reopen silently"
   - id: c4
     text: "A refused grant_path emits the workspace_policy receipt the published docs promise after any grant"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/main.rs::path_grant_refused_by_policy_still_emits_the_policy_receipt"
     owner: core
-    note: "docs/json-stream-protocol.md:977-980 promises a receipt after ANY grant_path, and tells hosts to prefer it over host-side tracking. emit_path_grant has three exits and only the success arm emits one; emit_workspace_capability_grant has the same shape. A host that follows the doc hangs on exactly the cases it cannot predict"
+    note: "d3660467. emit_workspace_policy_receipt now precedes the refusal Info on all FOUR refusal exits (main.rs:4215 launcher-refused, :4243 policy-refused, plus the two capability-grant arms). Four refusal tests plus two must-pass-in-both-arms controls. The emitters now take &dyn ProtocolEmitter, which is what made them testable at all. docs/json-stream-protocol.md:982-990 states the every-exit rule and tells hosts not to read an absent receipt as a refusal."
   - id: c5
     text: "A grant refusal is machine-readable rather than untyped English prose in an Info frame"
     state: blocked
     owner: maintainer
-    note: "adding a typed refusal event widens the event union, forces a contract minor bump and moves schema_digest on a cross-lane boundary; the reporter has the question open with the Desktop lane on FerroxLabs/wayland#1099. Precedent exists in goal_control_refused and quiesce_refused, but this is a product decision on the grant surface"
+    note: "STALE NOTE CORRECTED 2026-08-29: the previous note pointed at FerroxLabs/wayland#1099, which is CLOSED and is a different subject (an escalation prompt for an out-of-workspace path), so there is NO open cross-lane thread carrying this. Refusals are still untyped English prose - main.rs:4218 and :4246 emit ProtocolEvent::Info with an empty msg_id, no grant_id echo, no machine-readable reason. Q4 in .planning/DECISIONS.md takes the decision (yes, as a contract minor bump with Desktop); what is now owed is a NEW Desktop-facing issue to carry it."
 ---
 
 The headline claim - three grant and revoke commands missing from the published

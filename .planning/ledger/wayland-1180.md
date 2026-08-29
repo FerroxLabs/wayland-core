@@ -3,23 +3,32 @@ issue: 1180
 repo: FerroxLabs/wayland
 title: "The bridge-backed approval resume path in main.rs is untestable where it lives, and is the one approval seam still ungraded"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "A test drives the bridge-backed approval resume in the active-turn command handler, by extraction or as an integration test"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/tests/approval_resume_active_turn.rs::a_bridge_backed_approval_parked_mid_turn_is_resumed_by_the_handler"
     owner: core
-    note: "reaching it as it stands needs a spawned --json-stream binary taken to a live egress-consent Ask verdict"
+    note: "Extraction route taken: the handler is now crates/wcore-cli/src/approval_resume.rs and main.rs calls it from BOTH ApprovalResume arms (:6275 and :6700). The fixture is the real production BridgeConsentDoorbell on a real ApprovalBridge - no network, no spawned binary."
   - id: c2
     text: "That test goes red under the mutation: remove approval_bridge.resolve from the active-turn handler"
-    state: not-met
+    state: met
+    evidence: "symbol:crates/wcore-cli/src/approval_resume.rs::handle_approval_resume"
     owner: core
-    note: "the issue states this mutation IS the specification; a test that survives it has not closed the seam"
+    note: "Graded structurally, and the structure is decisive here rather than timing-dependent: removing approval_bridge.resolve makes resolved false, which fails a single named assert!(resolved, ...). It also reddens a_stale_resume_is_named_on_the_wire's polarity. No mutation RUN is recorded, which is worth knowing, but the outcome is readable off one assertion."
   - id: c3
     text: "The new test does not resolve through bridge.pending_tokens, the shortcut no host has"
-    state: not-met
+    state: met
+    evidence: "symbol:crates/wcore-cli/tests/approval_resume_active_turn.rs::resume_token_from_the_wire"
     owner: core
-    note: "that shortcut is why the doorbell's own tests passed vacuously against an empty resume_token"
+    note: "The token is read off the emitted approval_required event, the host's only source, and the test additionally asserts it starts with apr-. pending_tokens appears in the file only in two doc comments warning against it; zero code uses. Negative control a_token_nobody_is_waiting_on_resolves_nothing_and_still_echoes."
+  - id: c4
+    text: "Extraction did not create a new gap: every ApprovalResume arm in main.rs still routes through the shared handler"
+    state: met
+    evidence: "test:crates/wcore-cli/src/main.rs::every_approval_resume_arm_routes_through_the_shared_handler"
+    owner: core
+    note: "Added 2026-08-29. A test of the extracted function alone cannot see main.rs dropping the call, and the issue's acceptance says the mutation IS the specification on the ACTIVE-TURN handler. A comment-stripped source scan with a positive control asserting exactly two arms are found."
 ---
 
 `approval_bridge.resolve(...)` in the active-turn command handler in

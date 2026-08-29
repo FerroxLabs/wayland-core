@@ -3,7 +3,7 @@ issue: 1164
 repo: FerroxLabs/wayland
 title: "Windows: use a real bash when one is present, resolved explicitly (never System32 bash.exe)"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "Git Bash is resolved by known install location rather than by a bare PATH lookup for bash.exe"

@@ -3,7 +3,7 @@ issue: 998
 repo: FerroxLabs/wayland
 title: "Per-tool switches in the MCP Library are inert on Wayland Core and ACP backends"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "A tool the operator switched off is not registered at boot"
@@ -22,9 +22,10 @@ criteria:
     owner: core
   - id: c4
     text: "The enforcement holds under defer_config_mcp — the mode Desktop actually runs"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/main.rs::a_deferred_servers_empty_allowlist_survives_the_refresh"
     owner: core
-    note: "bootstrap.rs:1810 gates the config-MCP connect on !defer_config_mcp, so under it no catalog refresher is installed at all and mid-session list_changed is invisible. Filed as #1174"
+    note: "The old gate is gone: bootstrap.rs:3528 installs the refresh unconditionally and engine.rs:5189 no longer returns early on an empty one. integrate_deferred_mcp (main.rs:3887) admits the deferred manager WITH its server_configs through McpCatalogRefresh::register_runtime_server, which REFUSES an empty config map (tool_proxy.rs:429-441) precisely so a refresh cannot hit the config==None allow-all read and restore the full tool set. The cited test drives the real integrate_deferred_mcp with allowed_tools = Some([]) and asserts the locked tool is still absent after a live list_changed. Landed with wayland#1174."
   - id: c5
     text: "Desktop sends the per-tool field on the ACP path"
     state: blocked
@@ -34,7 +35,7 @@ criteria:
     text: "The ACP backend has an MCP surface for the switches to act on"
     state: not-met
     owner: core
-    note: "the 'ACP half' is a flat per-turn tool list; wcore-acp has no MCP surface at all"
+    note: "Re-verified against 43848f75: wcore-acp has NO MCP surface at all. Grepping the crate for mcp returns three incidental comments (client.rs:59, client.rs:368 buffer-size analogies; idempotency.rs:17 naming the JSON-stream command), and crates/wcore-cli/src/acp.rs contains the string zero times. There is no route, type or field for the switches to act on."
 ---
 
 Core-side enforcement is complete. The TICKET is not, and the safety framing

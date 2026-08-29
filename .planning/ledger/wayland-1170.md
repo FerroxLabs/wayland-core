@@ -3,7 +3,7 @@ issue: 1170
 repo: FerroxLabs/wayland
 title: "Journal snapshot round-trip test cannot detect an unthreaded LlmRequest field — 17 fields unasserted"
 status: closed
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "The round-trip test destructures LlmRequest with no `..`, so a new field is a compile error rather than silent coverage loss"

@@ -3,7 +3,7 @@ issue: 1161
 repo: FerroxLabs/wayland
 title: "--resume mints a new conversation_id, breaking Flux sticky routing and fragmenting the cache ledger"
 status: closed
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "Resuming a session restores the persisted conversation id instead of minting a new one"

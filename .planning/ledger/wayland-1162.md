@@ -3,7 +3,7 @@ issue: 1162
 repo: FerroxLabs/wayland
 title: "cache report --session rejects the session id the user set; ledger is keyed by the internal conversation UUID"
 status: closed
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "A user-chosen session id resolves against a ledger keyed by the internal conversation UUID"

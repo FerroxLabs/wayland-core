@@ -3,7 +3,7 @@ issue: 863
 repo: FerroxLabs/wayland
 title: "CONTRACT: Loop ownership between Anvil (wayland-core) and Elevation (Flux) — anti-collision invariants"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "F2 client half: core marks driver-seat requests with loop_owner on the wire, on a concrete model id"

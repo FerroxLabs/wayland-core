@@ -3,33 +3,37 @@ issue: 340
 repo: FerroxLabs/wayland-core
 title: "The MCP malware gate does not cover every launch, and its doc claims it does"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "The malware gate's doc comment states the coverage the gate actually has, rather than asserting every stdio launch is checked before execution"
-    state: not-met
+    state: met
+    evidence: "file:crates/wcore-mcp/src/malware_gate.rs:23"
     owner: core
-    note: "seeded from the issue body and NOT graded against the tree. The report calls this the cheap fix regardless of the rest - an overstated security guarantee is worse than an understated one because it stops the next person looking"
+    note: "The 'every stdio launch is checked before execution' claim is gone. malware_gate.rs:23-69 is an explicit covered / NOT covered / fails-open section naming the five uncovered shapes. Q2 in .planning/DECISIONS.md is the decision behind it: do NOT try to detect indirect runners by spelling, say so in the doc instead."
   - id: c2
     text: "An indirect runner shape such as a shell command wrapping a registry package does not reach exec unchecked"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-mcp/tests/mcp_launch_malware_gate.rs::a_shell_wrapped_runner_is_refused_before_exec"
     owner: core
-    note: "seeded from the issue body and NOT graded against the tree. The report verifies that a NotApplicable classification is permitted, and reports but does NOT verify end to end that sh -c npx evil-pkg classifies that way"
+    note: "Drives the real launch path for sh -c 'npx evil-pkg', sh -c 'cd /tmp && npx -y evil-pkg' and sh -c 'exec pipx run evil-pkg', asserting Err(MalwareBlocked) AND !launch.executed. Negative control ordinary_launches_are_still_neither_queried_nor_blocked keeps it from being a gate that refuses everything."
   - id: c3
     text: "The fail-open on an unreachable OSV endpoint is an explicit operator choice, and where it stays open it is visible to the user"
-    state: not-met
+    state: superseded
     owner: core
-    note: "seeded from the issue body and NOT graded against the tree. The report accepts the fail-open as deliberate and tested, but notes that blocking the OSV host is enough to run a known-malicious package, and that a warn-level log reaches nobody with RUST_LOG unset"
+    note: "HALF SHIPPED, and the remainder is wayland-core#354 which is open. The VISIBILITY half is here and graded: osv_check.rs:754 logs the fail-open at tracing::error! and fail_open_is_visible_at_default_log_levels asserts on the recorded LEVEL so a downgrade to warn! reddens it. The OPERATOR-CHOICE half is not: there is no strict/permissive setting anywhere in wcore-config, wcore-mcp or osv_check. Q3 in .planning/DECISIONS.md rules that the real answer is a typed protocol frame, not a log level, and that frame lands with Q4."
   - id: c4
     text: "The wayland-ijfw npx reachability probe is confirmed to run after the gate, or is moved behind it"
-    state: not-met
+    state: met
+    evidence: "test:crates/wayland-ijfw/src/mcp.rs::a_package_runner_spec_is_never_spawned_by_the_probe"
     owner: core
-    note: "seeded from the issue body and NOT graded against the tree. The reporter confirmed the file constructs an npx command but explicitly did not confirm the ordering. If the probe runs first it is a production pre-exec bypass and package install code runs before OSV is queried"
+    note: "MOVED BEHIND, not reordered - mcp.rs:283 returns true for a package-runner command without spawning at all, so the probe no longer executes package-runner argv. Stage 1 (npx --version, names no package) still runs. Negative control a_non_runner_command_that_cannot_start_is_still_rejected keeps the probe from becoming always-true. CAVEAT: the test is cfg(unix) while the fixture uses a Windows npx.cmd spelling, so the Windows branch is unexercised."
   - id: c5
     text: "Each runner form has a test pinning which token is queried - uvx, npx, pipx run, pipx install, --from and --with"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-tools/src/osv_check.rs::every_registry_runner_form_is_checked"
     owner: core
-    note: "seeded from the issue body and NOT graded against the tree. The claim that pipx run queries the literal run is marked likely partially wrong by the reporter, since the parser already reasons about entry-point-versus-package for some runners. It needs a test per form rather than an assumption either way"
+    note: "Pins the queried token for npx, bunx, bun x, pnpm dlx, yarn dlx, npm exec, npm x, uvx, uv tool run and deno run npm:. The remaining named forms are pinned elsewhere: pipx run / pipx install / --spec by pipx_run_queries_the_package_not_the_subcommand, and --from / --with by the_gate_queries_the_from_package_not_the_entry_point. The issue's claim that pipx run queries the literal 'run' is refuted by the tree."
 ---
 
 The OSV malware gate refuses an MCP stdio launch whose command names a package

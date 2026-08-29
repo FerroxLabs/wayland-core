@@ -3,14 +3,14 @@ issue: 1134
 repo: FerroxLabs/wayland
 title: "Test-written process globals are invisible to CI: nextest isolates per process, cargo test does not"
 status: closed
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "A shared-process lib leg runs in CI, floored so it cannot pass while scanning nothing"
     state: met
     evidence: "file:.github/workflows/ci.yml:1806"
     owner: core
-    note: "cargo test --workspace --lib, floored at 11,000 executed tests"
+    note: "ANCHOR IMPRECISE, NOT BROKEN: ci.yml:1806 now lands inside the 'Shared-process lib suite (#1134)' comment block rather than on the cargo test --workspace --lib command itself. It still resolves and still points into the right step; re-anchor it if the workflow is edited again."
   - id: c2
     text: "A shared-process integration leg runs in CI over the targets that touch process globals"
     state: met

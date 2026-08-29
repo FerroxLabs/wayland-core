@@ -3,7 +3,7 @@ issue: 174
 repo: FerroxLabs/wayland
 title: "[Feature]: prevent runaway token spend with budget guards and spend audits"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "Budget presets expand into concrete caps that reach the engine"

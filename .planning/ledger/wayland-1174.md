@@ -3,23 +3,26 @@ issue: 1174
 repo: FerroxLabs/wayland
 title: "Under defer_config_mcp the engine gets no catalog refresh at all: mid-session tools/list_changed is invisible for every server"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "A session running with defer_config_mcp honours tools/list_changed for its config-declared servers"
-    state: not-met
+    state: met
+    evidence: "symbol:crates/wcore-agent/src/engine.rs::set_mcp_catalog_refresh"
     owner: core
-    note: "today mcp_refresh_configs stays empty, is_empty() is true, and set_mcp_catalog_refresh returns early so no refresher is installed"
+    note: "The is_empty() early return is gone; the body is unconditional and the reason is documented at engine.rs:5187-5193. Config-declared servers join via main.rs:3887 register_runtime_server inside integrate_deferred_mcp."
   - id: c2
     text: "A test drives the deferred-config path and asserts a late-registered tool becomes callable"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/main.rs::deferred_config_mcp_still_honours_a_late_tools_list_changed"
     owner: core
-    note: "the issue states this test fails today"
+    note: "Installs an EMPTY McpCatalogRefresh exactly as bootstrap does under defer_config_mcp, drives the real integrate_deferred_mcp, then asserts the late tool is absent before and callable after. Paired with mcp_dynamic_tools.rs::a_refresh_that_started_empty_serves_the_deferred_config_connect."
   - id: c3
     text: "The per-tool allowlist from #998 is still honoured on the refresh path that defer_config_mcp gains"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/main.rs::a_deferred_servers_empty_allowlist_survives_the_refresh"
     owner: core
-    note: "#998 c4 is open on exactly this: the enforcement is real and bypassed by the mode Desktop runs in"
+    note: "Structurally enforced too: register_runtime_server (tool_proxy.rs:429) REFUSES a manager whose server_configs map is empty and logs at ERROR, keeping the 'config == None means allow-all' read out of reach. Graded by mcp_dynamic_tools.rs::a_runtime_manager_with_no_config_is_refused."
 ---
 
 When `defer_config_mcp` is set — the mode the Wayland Desktop host runs in — the

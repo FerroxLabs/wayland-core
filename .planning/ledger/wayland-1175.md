@@ -3,23 +3,26 @@ issue: 1175
 repo: FerroxLabs/wayland
 title: "A runtime-added MCP server's tools/list_changed is ignored for the life of the session"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "An MCP server attached at runtime has its tools/list_changed honoured, or the product plainly says it will not be"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/main.rs::every_runtime_mcp_add_joins_the_catalog_refresh"
     owner: core
-    note: "the issue accepts either outcome; what must stop is the silent opt-out with no warning and no way for the user to tell"
+    note: "The outcome chosen is 'honoured', not 'say plainly it will not be'. A source lint over main.rs and tui/engine_bridge.rs asserting the register_runtime_server call count and the forget_runtime_server rollback. All three paths are wired: main.rs:3887 (deferred config), main.rs:5702 (AddMcpServer), tui/engine_bridge.rs:3043 (/mcp add), with :3117 forgetting on rollback."
   - id: c2
     text: "A test adds a server at runtime, has it announce a new tool, and asserts that tool becomes callable"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-mcp/tests/mcp_dynamic_tools.rs::a_runtime_added_server_is_refreshed_alongside_the_boot_servers"
     owner: core
-    note: "the issue states this test fails today"
+    note: "Rollback direction covered by a_withdrawn_runtime_server_stops_being_refreshed."
   - id: c3
     text: "A manager created after boot can be registered with McpCatalogRefresh"
-    state: not-met
+    state: met
+    evidence: "symbol:crates/wcore-mcp/src/tool_proxy.rs::register_runtime_server"
     owner: core
-    note: "its fields are plain Vec/HashMap behind an Arc with &self methods only, so there is no post-construction registration path at all"
+    note: "McpCatalogRefresh's fields are now Mutex-wrapped (tool_proxy.rs:375-378), so the '&self methods only, no post-construction registration' obstacle the ticket named is gone. Returns bool and refuses on empty configs."
 ---
 
 Every runtime-add path builds a brand-new `McpManager` that never enters the

@@ -3,7 +3,7 @@ issue: 342
 repo: FerroxLabs/wayland-core
 title: "a_save_during_an_edit_is_not_lost is a real Edit-vs-save data loss, not a load flake"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "A guarded write publishes through one atomic name swap, so there is no second observation of the destination left to be stale"
@@ -21,17 +21,18 @@ criteria:
     text: "The same guarantee holds on Windows, where the product ships"
     state: not-met
     owner: core
-    note: "there is no exchange primitive there - atomic_io.rs:251-254 returns Swap::Unsupported - so the publish degrades to read-then-accept-then-persist, which is the re-check-then-rename design the exchange replaced. #1155 measured that design's residual at about 6.5 percent on the filesystem path and about 70 percent on the vfs path. Nothing tells a Windows user the guarded write is unguarded there"
+    note: "STALE NOTE CORRECTED 2026-08-29. The Windows primitive DID land in cdf918f6 - publish_displacing now uses ReplaceFileW with lpBackupFileName (atomic_io.rs:327-380) and returns Swap::Displaced - so the previous claim that there is no exchange primitive there is false. It is still not the same guarantee, for three reasons all recorded in-tree: the module's own doc says that unlike RENAME_EXCHANGE there is an instant at which the destination name does not resolve (:230-242); EVERY ReplaceFileW failure degrades SILENTLY to Swap::Unsupported and the old re-check-then-rename fallback (:369-380), including the sharing violation an open editor produces, which is the reported scenario; and the lane self-declares it ungraded on Windows (:244-249), with no Windows run recorded anywhere in the tree."
   - id: c4
     text: "The in-place adversarial arm asserts zero loss rather than tolerating a quarter of the interleavings"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-tools/tests/inv2_round5_adversarial_test.rs::an_in_place_save_is_not_lost_to_the_final_rename"
     owner: core
-    note: "inv2_round5_adversarial_test.rs:661 asserts lost*4 < interleaved, which at the measured rate of about 15 interleavings per run passes with up to 3 real losses per 24-attempt run. The exchange makes in-place loss structurally impossible on Linux and macOS, so this is now a gate that cannot fail sitting on the exact regression it was written to catch, and its doc comment still describes the design that was replaced"
+    note: "95e0220c. The lost*4 < interleaved tolerance is gone and the vacuity floor interleaved > 0 is kept, so the arm cannot pass by measuring nothing. Re-graded against a recorded run: 12 runs x 24 attempts on hetzner (Linux 6.x, ext4), 230 of 288 saves landing inside the window, 0 lost every run, with Swap::Unsupported named as the red arm."
   - id: c5
     text: "The two arms asserting a Unix-only guarantee state the Windows truth, from a measured Windows rate"
     state: not-met
     owner: core
-    note: "a_save_during_an_edit_is_not_lost and a_save_during_an_edit_is_not_lost_on_the_vfs_path are not cfg-gated and run on the self-hosted Windows leg, asserting lost == 0 - the guarantee the code documents as unavailable there - and 0.13.10 shipped green. Nobody has a Windows loss rate. The sibling wcore-config unit test was split by platform for exactly this reason and these two were not"
+    note: "PREMISE SHIFTED, MEASUREMENT HALF STILL UNMET. The guarantee is no longer Unix-only now that ReplaceFileW landed, so the two arms no longer assert a Unix-only guarantee - but a_save_during_an_edit_is_not_lost (:630) and a_save_during_an_edit_is_not_lost_on_the_vfs_path (:1051) are both still ungated, both still assert lost == 0, and neither doc comment mentions Windows. No measured Windows rate exists in the tree: no evidence file, no CI artifact, no run log. The instrument that would produce one, atomic_io.rs::the_check_is_handed_the_bytes_the_publish_displaced, is ungated and will run in the Windows CI job, but has never been observed to."
 ---
 
 The issue argues that an Edit overwriting a save which lands mid-operation is a

@@ -3,7 +3,7 @@ issue: 113
 repo: FerroxLabs/wayland-core
 title: "Browser tool non-functional by default - Camoufox sidecar never spawned + policy-disabled (web automation/screenshots broken)"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "A browser op launches the configured Camoufox sidecar through the real production adapter path"
@@ -25,14 +25,15 @@ criteria:
     note: "the printed snippet is round-tripped through the real ConfigFile serde types to an actual Allow decision, so it cannot drift into prose that does not parse"
   - id: c4
     text: "No shipped doc still advertises the chromiumoxide fallback backend, which no longer exists in the tree"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-browser/tests/no_phantom_backend_test.rs::no_shipped_source_advertises_a_chromiumoxide_backend"
     owner: core
-    note: "crates/wcore-browser/src/provider.rs:3 and :159 still name chromiumoxide as a feature-gated fallback; backends/ contains only browserbase.rs, camoufox.rs and mod.rs, and Cargo.toml has no chromium feature. Cosmetic, one-line doc fix"
+    note: "1092e0c1 (red arm) then f83fcd2e (fix). The scanner walks shipped source with a positive control that fails if it reads nothing, plus the_two_real_backends_are_present so the prose cannot be fixed by deleting the real backends. registry-default.json - the description wayland plugin list prints - was fixed too and is guarded in plugin_install_smoke.rs."
   - id: c5
     text: "The deny-by-default browsing posture is recorded as a decision on the issue and the issue is dispositioned"
     state: blocked
     owner: maintainer
-    note: "item 4 of the issue asks whether a shipped agent should browse the open internet by default. The verification recommends keeping deny-by-default and closing with the decision recorded; only Sean closes issues in this repo"
+    note: "The issue is still OPEN and the deny-by-default posture is not recorded ON IT: the latest comment is a verification write-up, not a disposition. Q-113 in .planning/DECISIONS.md takes the decision (close as refuted, recording deny-by-default), and only the maintainer closes issues in this repo, so the remaining act is the maintainer's."
 ---
 
 The issue reports that the browser tool is advertised to the model but cannot

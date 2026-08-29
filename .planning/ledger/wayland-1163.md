@@ -3,7 +3,7 @@ issue: 1163
 repo: FerroxLabs/wayland
 title: "Cache ledger reports a negative saving against a fabricated zero counterfactual, graded cost_truth=priced"
 status: closed
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "An unpriceable model reports its saving as unknown instead of manufacturing a zero baseline"

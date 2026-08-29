@@ -3,7 +3,7 @@ issue: 1173
 repo: FerroxLabs/wayland
 title: "CLI refuses to start against a keyless local endpoint despite having a self-hosted placeholder path"
 status: closed
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "A keyless self-hosted endpoint the user declared starts and dispatches, with the placeholder bearer pinned on the wire"
@@ -21,7 +21,7 @@ criteria:
     text: "The ticket's VERBATIM repro invocation works, /v1 suffix and all"
     state: superseded
     owner: core
-    note: "the repro used a base_url ending /v1, which now starts but 404s because api_path appends another /v1. Carried by #1178; the e2e here uses the bare root so it structurally cannot catch it"
+    note: "Successor wayland#1178 verified OPEN, so the handover is structurally valid, and #1178's own criteria are now all met in this tree: de90aae2 added wcore_config::compat::join_endpoint and routed openai.rs:660, openai.rs:798 and compat.rs:1150 through it, with negative controls for a substring match and for an authority literally named v1. c3 is still NOT met HERE: this ticket's own e2e (keyless_local_endpoint_e2e.rs:199-200) still drives the bare root and structurally cannot catch the doubled path, and the verbatim keyless-plus-/v1 repro has no test. The grading of the fix belongs to #1178."
 ---
 
 Closed in v0.13.10, with the caveat above recorded as an explicit unmet

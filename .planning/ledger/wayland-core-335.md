@@ -3,28 +3,32 @@ issue: 335
 repo: FerroxLabs/wayland-core
 title: "@-ref: absolute paths escape the workspace root and skip the gitignore check"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "The policy question - whether an explicitly attached path outside the workspace obeys the workspace gitignore - is decided and written down"
-    state: blocked
+    state: met
+    evidence: "file:.planning/DECISIONS.md"
     owner: maintainer
-    note: "three options with different costs: leave as is and pin it, apply the nearest enclosing repo's gitignore which needs upward discovery that does not exist, or refuse escaping paths which users experience as a regression. This is not privilege escalation - the user already holds read authority over their own files"
+    note: "TAKEN 2026-08-29 as Q1: option A, leave escaping attachments working and pin the behaviour with a test. Recorded in .planning/DECISIONS.md and restated in code at at_ref_resolve.rs:214-218. It is NOT stated in any user-facing doc under docs/, which is the one soft spot."
   - id: c2
     text: "The decision is phrased over paths that escape the root, not over absolute paths"
-    state: not-met
+    state: met
+    evidence: "symbol:crates/wcore-cli/src/tui/commands/at_ref_resolve.rs::canonical_root"
     owner: core
-    note: "a relative path escapes identically - @../../secrets/foo.txt joins under the root and then fails rel_to_root on the residual ParentDir, same None, same skipped gitignore, same read. Refusing absolute paths would remove a real capability and leave the hole open"
+    note: "Phrased over escape, not spelling: resolve_file computes rel_to_root(&admitted.canonical, &canonical_root(root)) at :219, so absolute and ..-relative spellings are judged identically by where they land. Nothing anywhere refuses a path for being absolute."
   - id: c3
     text: "The decided behaviour is pinned by a test covering both escaping spellings, absolute and ..-relative"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/tui/commands/at_ref_resolve.rs::a_dotdot_spelling_does_not_escape_the_workspace_gitignore"
     owner: core
-    note: "if the decision is to leave it as is, the test must PIN the behaviour and document it as out of gitignore jurisdiction, so the next auditor does not refile it"
+    note: "The ..-relative arm, with an in-fixture control that the plain spelling is genuinely refused first. The absolute arm is an_absolute_path_outside_the_workspace_still_attaches (:951), which pins the decided behaviour rather than a refusal. Both escaping spellings are covered; the one-token rule forced naming one."
   - id: c4
     text: "Wrong-refusal controls hold - an in-root gitignored file is still refused and an in-root ordinary file still resolves"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/tui/commands/at_ref_resolve.rs::resolving_a_gitignored_file_is_refused"
     owner: core
-    note: "without these the suite is satisfied by a guard that refuses more than it should, which is how this surface has gone wrong before"
+    note: "In-root gitignored file still refused. The in-root ordinary file still resolving is pinned by resolve_file_reads_contents_and_reports_token_cost and by an_at_dir_walk_respects_gitignore's kept.txt assertion."
 ---
 
 An @-ref naming a path outside the workspace root is read without the

@@ -3,28 +3,32 @@ issue: 325
 repo: FerroxLabs/wayland-core
 title: "nightly-windows-soak closes its tracker issue from a job that cannot see half the run's failures"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "The tracker close is gated on the result of every job in the run, not on one job's step-level success()"
-    state: not-met
+    state: met
+    evidence: "file:.github/workflows/nightly-windows-soak.yml:676"
     owner: core
-    note: "the close step sits inside the windows-soak job with if success(), which means every prior step in THIS job passed. It cannot read a sibling job's result, so adding needs: to the existing steps does not fix it - report and close must move into a terminal job with if always()"
+    note: "A new terminal job soak-tracker: needs [windows-soak, keyring-blob-size, windows-live-acceptance] with if: always(). The close step is gated on the decision from .github/scripts/soak-tracker-decision.sh, which closes only when EVERY roster entry is success. Fail-closed extras: an empty or incomplete roster, or an uninterpretable needs.<id>.result, exits 1 and closes nothing; the soak job no longer holds issues: write."
   - id: c2
     text: "A run whose sibling job failed posts a red report instead of closing the tracker green"
-    state: not-met
+    state: met
+    evidence: "file:.github/scripts/tests/soak-tracker-truth.test.sh:65"
     owner: core
-    note: "this already fired. Run 33053333326 on 2026-08-27 concluded failure with windows-live-acceptance red, and issue #319 was auto-closed at 08:56:03Z with a bot comment reading Windows soak GREEN. That run is the recorded red arm to replay"
+    note: "Replays the exact shape of run 33053333326 as a unit case - soak green, keyring green, live-acceptance red -> report, never close - with a negative control at :59 (all three green -> close) so the guard cannot be one that never PASSes. Shell script, so file: rather than symbol:. This is the red arm replayed, not a re-run of the historical workflow."
   - id: c3
     text: "windows-live-acceptance and keyring-blob-size are inside the tracker's sight, not just windows-soak"
-    state: not-met
+    state: met
+    evidence: "file:.github/workflows/nightly-windows-soak.yml:692"
     owner: core
-    note: "the issue body names two test jobs; there are three jobs outside the tracker's sight. windows-live-acceptance holds contents: read only and owns neither the report nor the close step"
+    note: "REQUIRED_JOBS names all three; a job id missing from the roster exits 1 with 'Incomplete soak roster'. soak-tracker-truth.test.sh:162-201 derives the scheduled-job set from the YAML and reddens if REQUIRED_JOBS or needs: drifts from it, so a fourth job cannot narrow the view silently."
   - id: c4
     text: "The existing label and title-prefix narrowing survives, so the reporter still cannot touch a human-filed issue"
-    state: not-met
+    state: met
+    evidence: "file:.github/workflows/nightly-windows-soak.yml:723"
     owner: core
-    note: "the fix must not widen what the bot can close while it widens what the bot can see. This is a property to preserve, and it is untested today"
+    note: "labels: ['windows-soak','test-debt'] plus a title startsWith('[nightly-windows-soak] FAIL') narrowing, repeated on the report step. PRESERVED BUT STILL UNTESTED: nothing under .github/scripts/ grades the label or title narrowing, so a later edit could widen what the bot may close without reddening anything."
 ---
 
 The nightly Windows soak workflow closes its own failure-tracker issue from a

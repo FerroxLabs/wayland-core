@@ -328,6 +328,12 @@ core#338 c4 (`not-met`, owner `maintainer`).
 
 Each carries a recommendation. Nothing here should be picked silently by a lane.
 
+> **TAKEN 2026-08-29 — see [`.planning/DECISIONS.md`](DECISIONS.md).** Every row in the
+> table below has since been decided and recorded there with its reason. This section is
+> kept for the reasoning that led to each recommendation; `DECISIONS.md` is what a lane
+> should read for the choice itself. The criteria ledger cites `DECISIONS.md`, not this
+> table, for `core#335 c1`, `core#238 c5`, `core#253 c1` and `core#338 c4`.
+
 | ID | Decision | Recommendation | Reason |
 |---|---|---|---|
 | **SECRET** | Create `LEDGER_ISSUES_TOKEN` — a PAT with issue-read on **both** `FerroxLabs/wayland` and `FerroxLabs/wayland-core`. | **Create it.** | `release.yml:96-105` runs the live coverage arm with `secrets.LEDGER_ISSUES_TOKEN \|\| secrets.GITHUB_TOKEN`. The repo-scoped `GITHUB_TOKEN` **cannot see the second tracker** — which is exactly the miss in §3. Without the PAT the release-time check either fails (blocking the release) or, in the worse case, reaches wayland and returns an empty-but-successful list for wayland-core: the `reached == 0` guard is summed **across both trackers**, so that case would have to be caught by the per-issue ORPHAN path instead. **Recommend also splitting `reached` per tracker and failing on a per-tracker zero** — that closes the one hole in the fail-closed claim. |
@@ -442,3 +448,33 @@ Each of these has cost real time.
   *specified*, not *observed*. Run the red arm before believing the control.
 - **Any claim that an item is done.** This file is the *plan*. `.planning/ledger/` is
   the *state*. If they disagree, the ledger is right and this file is stale.
+
+---
+
+## 12. Ready to close — the 2026-08-29 re-grade
+
+Graded against `origin/integ/next` @ `43848f75` (the 0.13.12 integration tree, all
+sixteen lanes merged including `lane/session-tickets`). `scripts/check-criteria-ledger.py`
+passes `--self-test` and `--offline`; the live run reports **zero** coverage gaps, zero
+unresolvable `met` evidence and zero orphans. Every one of its 17 findings is the same
+shape:
+
+> DIVERGENCE: … marks every criterion met, but … is still open.
+
+That is the gate working. **Only the maintainer closes an issue in this repo**, so an
+issue whose work is finished cannot go green until they do. These seventeen are the
+close-list, not a defect list:
+
+| Tracker | Issues |
+|---|---|
+| `FerroxLabs/wayland` | #908, #1156, #1172, #1174, #1175, #1176, #1177, #1178, #1179, #1180, #1182 |
+| `FerroxLabs/wayland-core` | #323, #325, #335, #338, #340, #356 |
+
+Two of them carry a `superseded` residual rather than a plain sweep, and the successor
+must be open when they close — both are: `core#340 c3 → core#354` (the OSV strict /
+permissive knob) and `wayland#934 c6 → core#360` (the WhatsApp bridge cap). Neither
+issue may be closed by anyone acting on this table alone; it records readiness, not
+permission.
+
+Until they close, the live gate stays red on these seventeen and green on everything
+else. Do NOT "fix" that by marking a criterion not-met.

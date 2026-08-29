@@ -3,7 +3,7 @@ issue: 1172
 repo: FerroxLabs/wayland
 title: "Core cannot see a self-hosted endpoint's served context window: stock Ollama silently discards the system prompt while core reports 6% pressure"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "Core learns the window an endpoint actually serves, from the token counts already in its responses"
@@ -14,14 +14,15 @@ criteria:
   - id: c2
     text: "The shortfall is named to the user, and says the HEAD of the prompt is what was lost"
     state: met
-    evidence: "file:crates/wcore-config/tests/issue_1172_served_window_corpus_test.rs"
+    evidence: "file:crates/wcore-agent/src/engine.rs:15348"
     owner: core
-    note: "uses emit_info rather than warn!, so it reaches the user with RUST_LOG unset — a warn! here would have reached nobody"
+    note: "Upgraded from the corpus test, which evidences DETECTION rather than the user-facing notice this criterion is about. engine.rs:15348-15351 is the emit_info site that names the shortfall and says the HEAD of the prompt is what was lost. SOFT SPOT: no test asserts the notice STRING - grep for the phrase returns the production site only."
   - id: c3
     text: "COMPENSATION: the learned window feeds the pre-flight guard and autocompact, so the truncation stops"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-agent/src/engine.rs::a_learned_served_window_narrows_the_preflight_window_when_it_is_workable"
     owner: core
-    note: "engine.rs:12790 and :8199 still re-resolve without it. Feeding it there today would BRICK the run: at a 4,096 slot the absolute context buffers saturate to zero. Tracked as #1179"
+    note: "eb2f2635 added narrow_to_served_window / resolve_preflight_window / autocompact_threshold_now; both #255 guard call sites and the autocompact trigger route through them, so the guard, the trigger and the reported threshold cannot disagree. Narrowing is gated on CompactConfig::supports_compaction, so a 4,096 window is deliberately not narrowed onto. The spurious-compaction risk this wiring created is wayland-core#353."
 ---
 
 Detection shipped in v0.13.10. Compensation did not — and this ticket's BODY

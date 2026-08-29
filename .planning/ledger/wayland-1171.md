@@ -3,7 +3,7 @@ issue: 1171
 repo: FerroxLabs/wayland
 title: "ToolSearch hydration re-sorts tools[] mid-array, invalidating the prompt cache on the turn after any deferred-tool load"
 status: closed
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "Hydration APPENDS to tools[] instead of re-sorting it, so the serialized prefix is byte-identical across a hydration"

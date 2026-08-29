@@ -3,7 +3,7 @@ issue: 388
 repo: FerroxLabs/wayland
 title: "[Bug]: Long-running tasks intermittently truncate, stall, or restart inconsistently through Free Models Router"
 status: open
-last_verified_commit: cfa89a9c
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "Output caps are decided from what is actually known about the served model, not from the alias the request named"
