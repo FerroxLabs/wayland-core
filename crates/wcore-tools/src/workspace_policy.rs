@@ -2350,6 +2350,14 @@ thread_local! {
     /// walks and the count would quietly stop meaning anything. Every
     /// `project_committed_secrets` call runs on the thread that asked for it.
     static WALK_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// #1182: how many filesystem entries the walks on this thread actually
+    /// VISITED. Thread-local for the same reason as `WALK_CALLS`, and
+    /// attributed to the thread that ASKED for the walk even when the parallel
+    /// arm does the visiting on a pool — the question a caller asks is "did the
+    /// operation I just performed enumerate the tree", and an answer that
+    /// depended on which worker happened to see an entry would not be one.
+    static WALK_ENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Number of full workspace secret walks ([`project_committed_secrets`])
@@ -2364,6 +2372,29 @@ thread_local! {
 /// executable evidence for why this walk is deliberately NOT memoised.
 pub fn walk_calls() -> u64 {
     WALK_CALLS.with(|c| c.get())
+}
+
+/// Number of filesystem entries the secret walks requested **on the calling
+/// thread** have visited since the process started.
+///
+/// Read it either side of an operation to assert, by DIRECT OBSERVATION, how
+/// much of the tree that operation enumerated. `walk_calls` answers "was the
+/// walk entered"; this answers "did it enumerate the tree", which is the half a
+/// caller needs when it is asserting that some other operation did NOT walk.
+///
+/// #1182: `contained_construction_does_not_walk_the_workspace` used to
+/// establish that its instrument was alive with a WALL-CLOCK RATIO (the real
+/// tree's walk had to be measurably slower than an empty tree's). Under load
+/// the two timings compress and the control declared itself dead. Counting the
+/// entries removes the timing from the question entirely while keeping the
+/// property that mattered: a walk that became unreachable reports ZERO here and
+/// still fails the test.
+///
+/// Counts the arm that produced the answer. An oversized tree re-walks its
+/// first `SERIAL_WALK_BUDGET` entries in parallel; only the parallel arm's
+/// entries are counted, so the prefix is not double-charged.
+pub fn walk_entries() -> u64 {
+    WALK_ENTRIES.with(|c| c.get())
 }
 
 /// Absolute, canonicalized paths of the workspace's OWN committed secrets
@@ -2450,6 +2481,7 @@ fn project_committed_secrets(
         if !oversized {
             out.sort();
             dirs.append(&mut stamp);
+            WALK_ENTRIES.with(|c| c.set(c.get() + visited as u64));
             return out;
         }
     }
@@ -2466,8 +2498,13 @@ fn project_committed_secrets(
     // by `tests/walk_parallel_identity_test.rs`.
     let found = Mutex::new(Vec::<PathBuf>::new());
     let walked = Mutex::new(Vec::<(PathBuf, SystemTime)>::new());
+    // #1182: entries are counted into a per-CALL atomic and folded into the
+    // calling thread's `WALK_ENTRIES` once the pool has joined, so the count a
+    // caller reads is the one its own operation caused.
+    let visited_parallel = std::sync::atomic::AtomicU64::new(0);
     builder().build_parallel().run(|| {
         Box::new(|result| {
+            visited_parallel.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // An unreadable directory is skipped here exactly as the serial
             // arm's `Err` skips it.
             if let Ok(entry) = result {
@@ -2487,6 +2524,9 @@ fn project_committed_secrets(
     let mut out = found.into_inner().expect(POISONED);
     out.sort();
     dirs.extend(walked.into_inner().expect(POISONED));
+    WALK_ENTRIES.with(|c| {
+        c.set(c.get() + visited_parallel.load(std::sync::atomic::Ordering::Relaxed))
+    });
     out
 }
 
