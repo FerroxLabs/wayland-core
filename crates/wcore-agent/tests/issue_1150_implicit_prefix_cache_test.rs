@@ -283,7 +283,7 @@ async fn a_bounded_tool_result_is_rewritten_once_and_then_frozen() {
     let mut cfg = openai_shaped_config();
     cfg.compact.tool_results.total_budget_bytes = 4_000;
     cfg.compact.tool_results.keep_recent = 2;
-    cfg.compact.tool_results.epoch_results = 2;
+    cfg.compact.tool_results.epoch_results = 6;
     let dispatches = session_dispatches(6, 2, 1_000, cfg).await;
     assert_eq!(dispatches.len(), 18, "6 turns x (2 tool rounds + 1 answer)");
 
@@ -334,11 +334,17 @@ async fn a_bounded_tool_result_is_rewritten_once_and_then_frozen() {
         .filter(|(_, pair)| shared_prefix(&pair[0], &pair[1]) < pair[0].messages.len())
         .map(|(n, _)| n + 1)
         .collect();
+    // MEASURED, and the bound is set from the measurement rather than chosen:
+    // with `epoch_results = 6` this session breaks the prefix on 5 of its 17
+    // dispatch pairs; with the quantization removed (`let epoch = 1`) the same
+    // session breaks 8. A bound that both numbers satisfy would be a gate that
+    // cannot fail, so it is pinned at the quantized figure.
     assert!(
-        breaks.len() * 2 < dispatches.len() - 1,
-        "{} of {} dispatch pairs broke the prefix - the ceiling is invalidating the cache \
-         on the majority of dispatches, which is a cost c4's first half was supposed to \
-         trade away, not add: {breaks:?}",
+        breaks.len() <= 5,
+        "the ceiling broke the prefix on {} of {} dispatch pairs; the epoch-quantized \
+         boundary measures 5 and an unquantized one measures 8, so the boundary is \
+         advancing more often than `epoch_results` allows and the cache never settles \
+         between ticks: {breaks:?}",
         breaks.len(),
         dispatches.len() - 1
     );
