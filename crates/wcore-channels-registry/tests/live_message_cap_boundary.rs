@@ -542,6 +542,39 @@ fn a_settled_unit_verdict_is_enforced_against_the_shipped_cap() {
          verdict that took a credential and a destination to obtain must not be withdrawn by an \
          edit to a literal — re-drive the arm or take the key out of STILL_UNSETTLED on purpose"
     );
+
+    // wayland#934 c8, settled by the run recorded on the cell. Assert the
+    // verdict is RECORDED, because losing it is otherwise invisible here:
+    // `unit_safety_faults` is silent on an unsettled cell by design, so
+    // reverting telegram to `UnsettledAsciiOnly` would keep every assertion
+    // above green while the product went back to shipping an unverified unit.
+    let Boundary::Measured { unit, .. } = cell("telegram").boundary else {
+        panic!("telegram must have a measured boundary");
+    };
+    assert!(
+        matches!(unit, CapUnit::MeasuredScalars { .. }),
+        "telegram's unit question was settled in SCALARS by a live astral run on 2026-08-29 \
+         (4,096 scalars = 8,192 UTF-16 code units accepted at the cap; 4,097 refused). Got: \
+         {unit:?}"
+    );
+
+    // And a scalar verdict only means something if the run FOUND the boundary.
+    // An astral arm accepted on both sides settles nothing, so a
+    // `MeasuredScalars` cell whose over-arm is not a refusal is a verdict with
+    // no boundary behind it.
+    for c in CELLS {
+        let Boundary::Measured { unit, above, .. } = c.boundary else {
+            continue;
+        };
+        if matches!(unit, CapUnit::MeasuredScalars { .. }) {
+            assert!(
+                matches!(above, Above::Refused(_)),
+                "{}: the unit is recorded as MeasuredScalars, but the over-arm is {above:?} — a \
+                 run that never found the boundary cannot settle the unit",
+                c.key
+            );
+        }
+    }
 }
 
 /// The cells whose unit question is still OPEN, and the only ones allowed to be.

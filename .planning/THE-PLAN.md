@@ -5,20 +5,20 @@
 > verification) and `PLAN-ROUTING.json` (assignment). If this disagrees with anyone's
 > recollection, this is right and the recollection is wrong — that is the entire point.
 
-Rendered 2026-08-29 17:22 UTC
+Rendered 2026-08-29 17:29 UTC
 
 ## VERDICT: BLOCKED
 
-**14 criteria block the 0.13.12 release.** Full list in §3.
+**16 criteria block the 0.13.12 release.** Full list in §3.
 
 | state | count | means |
 |---|---:|---|
 | DONE | 32 | met, evidence resolves, independently verified |
-| CLAIMED | 226 | met but NOT yet independently verified — never report as done |
-| OPEN | 22 | outstanding work |
-| HANDOFF | 9 | another team's half, with a filed ticket carrying it |
+| CLAIMED | 229 | met but NOT yet independently verified — never report as done |
+| OPEN | 25 | outstanding work |
+| HANDOFF | 11 | another team's half, with a filed ticket carrying it |
 
-### ⚠ 14 UNROUTED — nobody is doing these
+### ⚠ 19 UNROUTED — nobody is doing these
 
 An unrouted criterion is how work goes missing. The render fails until each has a lane.
 
@@ -26,12 +26,17 @@ An unrouted criterion is how work goes missing. The render fails until each has 
 - `wl#1228 c2` — The astral run is executed and both arms of its LIVE_CAP_UNIT block are pasted onto the issue
 - `wl#1228 c3` — The verdict is APPLIED: a refusal at 4,096 astral scalars drops the declared cap to 2,048, an accept leaves 4,
 - `wl#1228 c4` — docs/delivery-semantics.md records the unit, the date, and which arm settled it
+- `wl#388 c6` — Expected-Behavior bullet 3: a truncated or stalled long task preserves a checkpoint the user can continue from
+- `wl#388 c7` — Expected-Behavior bullet 7: the failure categories core CAN decide are machine-readable rather than a free-for
+- `core#364 c1` — wayland-core#113 is closed as refuted, or Q-113 is reversed and a lane is named to build the opposite
+- `core#364 c2` — One of the three WhatsApp Cloud outcomes is chosen: free slots on the existing Meta account, a separate develo
 - `core#366 d1` — The product can enumerate wayland-created containers WITHOUT being given a nonce -- a key-presence scan reacha
 - `core#366 d2` — The nonce-scoped scan_orphans(nonce) contract is left intact for the caller that genuinely wants one run's orp
 - `core#366 d3` — An operator surface reports a leftover it did not create in this process -- one whose nonce is not in the live
 - `core#366 d4` — The conformance check at conformance.rs:340 is re-examined: it asserts enumerated && found.is_empty() for a no
 - `core#366 d5` — A regression test plants a labelled leftover under a nonce the running process has never used, and asserts the
 - `core#366 d6` — Whether reclamation is in scope is DECIDED and recorded: state whether an unscoped scan only reports, or also 
+- `core#367 c2` — An integration run's failing-test SET is compared against a named allow-list, so `1 failed` can never be read 
 - `core#373 c1` — The mechanism is named in code: what makes the ERROR not reach the scoped subscriber. Not inferred -- two infe
 - `core#373 c3` — The fix arm scores 0 failures at n>=100 on that same instrument, and the baseline is re-measured at the same n
 - `core#373 c4` — Both osv_check log-visibility tests keep their exact-equality assertion on [Level(Error)]
@@ -49,10 +54,13 @@ An unrouted criterion is how work goes missing. The render fails until each has 
 | `d4` | core#366 | The conformance check at conformance.rs:340 is re-examined: it asserts enumerated && found.is_empty() for a nonce chosen so nothing can ever be found |
 | `d5` | core#366 | A regression test plants a labelled leftover under a nonce the running process has never used, and asserts the unscoped scan reports it -- creating th |
 | `d6` | core#366 | Whether reclamation is in scope is DECIDED and recorded: state whether an unscoped scan only reports, or also reclaims, and justify it against #365's  |
+| `c2` | core#367 | An integration run's failing-test SET is compared against a named allow-list, so `1 failed` can never be read as `the known 1 failed` |
 | `c1` | core#373 | The mechanism is named in code: what makes the ERROR not reach the scoped subscriber. Not inferred -- two inferences have already failed |
 | `c3` | core#373 | The fix arm scores 0 failures at n>=100 on that same instrument, and the baseline is re-measured at the same n in the same session |
 | `c4` | core#373 | Both osv_check log-visibility tests keep their exact-equality assertion on [Level(Error)] |
 | `c5` | core#373 | cargo test --workspace --lib --no-fail-fast passes N>=10 consecutive times on hetzner-dsm, run count recorded |
+| `c6` | wl#388 | Expected-Behavior bullet 3: a truncated or stalled long task preserves a checkpoint the user can continue from |
+| `c7` | wl#388 | Expected-Behavior bullet 7: the failure categories core CAN decide are machine-readable rather than a free-form string |
 
 ### `decompose` — File each cross-team remainder as its OWN ticket with a contract
 
@@ -61,7 +69,6 @@ Runs on: **gh**  ·  2-decompose
 | criterion | issue | what must become true |
 |---|---|---|
 | `c5` | core#314 | A grant refusal is machine-readable rather than untyped English prose in an Info frame |
-| `c4` | wl#388 | The remaining four bullets of this ticket's own Expected Behavior list are met |
 
 ### `prompt-cache` — Prompt-cache collapse and re-billed context
 
@@ -87,9 +94,11 @@ it appears in §3 as blocking, because that is what it is.
 
 | criterion | issue | owner | carried by |
 |---|---|---|---|
-| `c5` | core#113 | maintainer | FerroxLabs/wayland#1229 |
+| `c6` | core#113 | maintainer | FerroxLabs/wayland#1229 |
 | `c2` | wl#1088 | desktop | FerroxLabs/wayland#1223 |
 | `c3` | wl#1151 | desktop | FerroxLabs/wayland#1224 |
+| `c5` | wl#1186 | maintainer | FerroxLabs/wayland-core#364 |
+| `c4` | wl#388 | flux | FerroxLabs/wayland#1184 |
 | `c3` | wl#434 | flux | FerroxLabs/wayland#1226 |
 | `c3` | wl#863 | flux | FerroxLabs/wayland#1227 |
 | `c4` | wl#863 | flux | FerroxLabs/wayland#1227 |
@@ -97,13 +106,13 @@ it appears in §3 as blocking, because that is what it is.
 | `c5` | wl#934 | maintainer | FerroxLabs/wayland#1186 |
 | `c5` | wl#998 | desktop | FerroxLabs/wayland#1225 |
 
-## §5 CLAIMED BUT UNVERIFIED — 226
+## §5 CLAIMED BUT UNVERIFIED — 229
 
 Marked `met` with resolving evidence, but no independent verifier has confirmed the lane.
 Historically this is exactly where a partial hides: a criterion written thin reads `met`
 while the reported bug is still live. Do not report these as done.
 
-- **core#113** — c1, c2, c3, c4
+- **core#113** — c1, c2, c3, c4, c5
 - **core#238** — c1, c2, c3, c4, c5, c6
 - **core#244** — c1, c2
 - **core#253** — c1, c2, c3, c5, c6, c7
@@ -129,10 +138,11 @@ while the reported bug is still live. Do not report these as done.
 - **core#361** — c1, c2, c3, c4, c5, c6
 - **core#363** — c1, c2, c3, c4, c5, c6
 - **core#365** — c1, c2, c3, c4, c5, c6
+- **core#367** — c1
 - **core#373** — c2
 - **wl#174** — c1, c2, c3, c4, c5
 - **wl#305** — c1
-- **wl#388** — c1, c2, c3
+- **wl#388** — c1, c2, c3, c5
 - **wl#434** — c1
 - **wl#559** — c1, c2, c4
 - **wl#863** — c1, c2
