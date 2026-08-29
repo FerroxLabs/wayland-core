@@ -675,7 +675,7 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -714,12 +714,33 @@ mod tests {
         }
 
         // Negative control: hardening pins prompting, it does not blanket-clear
-        // the environment. `credential.helper` must keep working for private
-        // plugin sources, so nothing here may remove an unrelated variable.
+        // the environment. Nothing here may remove an unrelated variable.
         assert!(
             !seen.contains_key("PATH"),
             "hardening must not touch unrelated environment entries: {seen:?}"
         );
+
+        // Windows cannot deny the helper a console (measured — see
+        // `harden_against_credential_prompt`), so it denies the helper
+        // instead, and the reset must lead the argv or a later `-c` would
+        // re-add what it cleared.
+        #[cfg(windows)]
+        {
+            let argv: Vec<String> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                argv.first().map(String::as_str),
+                Some("-c"),
+                "the credential pins must lead the quarantine argv: {argv:?}"
+            );
+            assert_eq!(
+                argv.get(1).map(String::as_str),
+                Some("credential.helper="),
+                "the quarantine argv must reset the credential helper list: {argv:?}"
+            );
+        }
     }
 
     /// `run_git` must not be wedgeable by a process `git` leaves behind.
@@ -734,6 +755,7 @@ mod tests {
     ///
     /// Unix-only because backgrounding a process portably from a git alias
     /// needs a POSIX shell. The guard itself is platform-independent.
+    #[cfg(unix)]
     #[test]
     fn a_helper_holding_a_pipe_is_reported_instead_of_hanging_the_install() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -779,12 +801,14 @@ mod tests {
     /// `kill(pid, 0)` is the only portable oracle here. It also answers "yes"
     /// for a zombie, which is the conservative direction for these tests: a
     /// false "alive" fails them, it never passes them.
+    #[cfg(unix)]
     fn is_alive(pid: libc::pid_t) -> bool {
         // SAFETY: signal 0 performs the permission/existence check only.
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
     /// Wait up to `budget` for `pid` to disappear.
+    #[cfg(unix)]
     fn wait_gone(pid: libc::pid_t, budget: Duration) -> bool {
         let deadline = Instant::now() + budget;
         while Instant::now() < deadline {
@@ -799,6 +823,7 @@ mod tests {
     /// Prove the liveness oracle can say BOTH things in this process, so a
     /// "the descendant is gone" result below cannot come from an oracle that
     /// only ever says "gone".
+    #[cfg(unix)]
     fn assert_oracle_is_bidirectional() {
         let mut probe = std::process::Command::new("sleep")
             .arg("30")
@@ -825,6 +850,7 @@ mod tests {
     /// `child.kill()` left them running with no owner and nothing else would
     /// ever reap them. A `!`-alias reproduces the exact production shape (a
     /// helper `git` spawns that backgrounds a worker) with no network.
+    #[cfg(unix)]
     #[test]
     fn a_timed_out_git_reaps_the_whole_detached_tree() {
         assert_oracle_is_bidirectional();
@@ -877,6 +903,7 @@ mod tests {
     /// Enumerated deliberately — `run_git` has two failure shapes that leave a
     /// tree behind, and an entry written from one of them leaves the other to
     /// surface later.
+    #[cfg(unix)]
     #[test]
     fn a_pipe_holding_helper_is_reaped_when_the_drain_guard_fires() {
         assert_oracle_is_bidirectional();
@@ -910,5 +937,96 @@ mod tests {
             "the pipe-holding worker {worker} survived the drain-guard failure — the install \
              reported an error and left an unowned process running"
         );
+    }
+
+    /// A worker `git` leaves behind must stop doing work when the guard fires
+    /// — on EVERY platform, not just the one that has process groups.
+    ///
+    /// Deliberately observes WORK rather than a pid. The pid-based arms above
+    /// are the stronger unix evidence, but `git`'s `!`-alias shell on Windows
+    /// is an msys one whose `$!` is an msys pid, not a Win32 pid, so a pid
+    /// oracle there would be measuring the wrong namespace. A file that stops
+    /// growing is the same claim in a namespace both platforms share.
+    #[test]
+    fn a_timed_out_git_leaves_no_descendant_still_doing_work() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        run_git(&["init", "-q", "."], Some(repo), Duration::from_secs(60)).expect("git init");
+
+        let beat = repo.join("heartbeat");
+        let script = repo.join("worker.sh");
+        let sh_beat = beat.display().to_string().replace('\\', "/");
+        let sh_script = script.display().to_string().replace('\\', "/");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n( while : ; do echo x >> '{sh_beat}' ; sleep 0.1 ; done ) &\nsleep 300\n"
+            ),
+        )
+        .expect("write worker");
+
+        // ORACLE CONTROL: prove that "the file stopped growing" is a signal
+        // this test can distinguish from "the file was never growing".
+        //
+        // Its own file and a BOUNDED, self-terminating writer that is the
+        // shell's own foreground work — no background job, so it cannot
+        // outlive the control and go on writing into the arm's measurement.
+        // (It did, in the first draft of this test, and produced a red arm
+        // that was the control's writer rather than git's.)
+        let ctl_beat = repo.join("control-heartbeat");
+        let sh_ctl_beat = ctl_beat.display().to_string().replace('\\', "/");
+        let mut ctl = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "i=0; while [ $i -lt 20 ]; do echo x >> '{sh_ctl_beat}'; sleep 0.1; \
+                 i=$((i+1)); done"
+            ))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the growth control");
+        std::thread::sleep(Duration::from_millis(600));
+        let a = size(&ctl_beat);
+        std::thread::sleep(Duration::from_millis(600));
+        let b = size(&ctl_beat);
+        assert!(
+            b > a && a > 0,
+            "the growth oracle never saw the heartbeat grow ({a} -> {b}); this test could not \
+             tell a live worker from a dead one"
+        );
+        let _ = ctl.wait();
+
+        let alias = format!("alias.wedge=!sh '{sh_script}'");
+        let err = run_git(
+            &["-c", &alias, "wedge"],
+            Some(repo),
+            Duration::from_millis(2_000),
+        )
+        .expect_err("the wall-clock guard must fire");
+        assert!(
+            err.to_string().contains("timed out"),
+            "it must be the timeout path that fired: {err}"
+        );
+
+        // Non-vacuity: the helper really did start a background worker.
+        let at_kill = size(&beat);
+        assert!(
+            at_kill > 0,
+            "the helper never wrote a heartbeat, so nothing was left running to reap and this \
+             test proves nothing"
+        );
+
+        std::thread::sleep(Duration::from_secs(3));
+        let later = size(&beat);
+        assert_eq!(
+            later, at_kill,
+            "a background worker the timed-out git spawned is STILL WRITING ({at_kill} -> \
+             {later} bytes) — the guard reaped the direct child and not the tree"
+        );
+    }
+
+    fn size(p: &Path) -> u64 {
+        std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
     }
 }
