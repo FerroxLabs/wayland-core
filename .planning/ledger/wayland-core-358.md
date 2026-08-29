@@ -35,7 +35,7 @@ criteria:
     state: met
     evidence: "test:crates/wcore-cli/tests/harness_owns_spawned_trees_windows.rs::dropping_the_guard_kills_a_detached_grandchild_on_windows"
     owner: core
-    note: "https://github.com/FerroxLabs/wayland-core/actions/runs/33258852685 - job 99117201158, `CI (windows-latest, hosted)`, step `Run tests (nextest CI profile)`, on lane/f13-fin-windows-runs at bd184563. THE ARM EXECUTED AND PASSED, quoted from that job's log: `PASS [   0.406s] ( 7619/15962) wcore-cli::harness_owns_spawned_trees_windows dropping_the_guard_kills_a_detached_grandchild_on_windows`, with the four support::mock_llm self-tests in the same binary also PASS. `7619/15962` is the point: it ran as part of the ordinary workspace nextest, not a hand-picked invocation. THE JOB'S OVERALL CONCLUSION IS `failure` AND THAT IS NOT THIS ARM - stated plainly rather than left for a reader to trip over. Nine tests failed in that leg, all pre-existing at the branch point (this branch changed ZERO Rust code relative to ab6b602f - `git diff ab6b602f..HEAD -- \"*.rs\"` has no non-doc-comment line): two were desktop-contract-corpus staleness, since fixed on integ/f13 by e1f151a52 and green after merging it; one is FerroxLabs/wayland-core#374; three are FerroxLabs/wayland-core#387, the wl#1164 bash-resolution regression this same session found and A/B-proved. A criterion asking for the URL of the run that executed the arm is answered by the arm's own line, and the arm passed. Corroborated independently on hardware: c2 records the same test passing on a Windows 11 build 26200 workstation, and c3 the red arm on the same box."
+    note: "https://github.com/FerroxLabs/wayland-core/actions/runs/33258852685 - job 99117201158, `CI (windows-latest, hosted)`, step `Run tests (nextest CI profile)`, on lane/f13-fin-windows-runs at bd184563. THE ARM EXECUTED AND PASSED, quoted from that job's log: `PASS [   0.406s] ( 7619/15962) wcore-cli::harness_owns_spawned_trees_windows dropping_the_guard_kills_a_detached_grandchild_on_windows`, with the four support::mock_llm self-tests in the same binary also PASS. `7619/15962` is the point: it ran as part of the ordinary workspace nextest, not a hand-picked invocation. THE JOB'S OVERALL CONCLUSION IS `failure` AND THAT IS NOT THIS ARM - stated plainly rather than left for a reader to trip over. Nine tests failed in that leg, all pre-existing at the branch point (CORRECTION 2026-08-30: pre-existence is proven by the zero-Rust-diff below and holds for all nine, but an earlier draft enumerated only SIX, which read as though all nine had been accounted for; the three unnamed are wcore-exec-backend conformance_matrix every_reference_backend_passes_the_same_harness_or_reports_why_it_did_not, wcore-cli sandbox_activeness sandbox_status_filesystem_claim_matches_a_real_escape_attempt, and wcore-cli mcp_assistant_scoping_e2e matching_assistant_dials_scoped_deferred_server) (this branch changed ZERO Rust code relative to ab6b602f - `git diff ab6b602f..HEAD -- \"*.rs\"` has no non-doc-comment line): two were desktop-contract-corpus staleness, since fixed on integ/f13 by e1f151a52 and green after merging it; one is FerroxLabs/wayland-core#374; three are FerroxLabs/wayland-core#387, the wl#1164 bash-resolution regression this same session found and A/B-proved. A criterion asking for the URL of the run that executed the arm is answered by the arm's own line, and the arm passed. Corroborated independently on hardware: c2 records the same test passing on a Windows 11 build 26200 workstation, and c3 the red arm on the same box."
   - id: c6
     text: "clippy --target x86_64-pc-windows-msvc -p wcore-cli --all-targets -D warnings is clean"
     state: met
@@ -140,8 +140,15 @@ same verdicts:
   `5 tests run: 5 passed, 0 skipped`, kernel-side anti-vacuity reached.
 * **c3 red** — `the grandchild 33688 outlived the guard`, `FAIL [  10.169s] (1/1)`,
   `1 test run: 0 passed, 1 failed, 4 skipped`. The DIRECT-CHILD assertion did not
-  fire, only the grandchild one, and the 10.169s red against a 0.149s green is
-  the `await_gone` budget expiring, so the arms differ by wall clock too.
+  fire, only the grandchild one, and the 10.169s red is the `await_gone` budget
+  expiring, so the arms differ by wall clock too. CORRECTION 2026-08-30: an
+  earlier draft of this line compared it against a `0.149s` post-revert green.
+  That figure is NOT recorded in any file under the Windows scratch dir -- a
+  recursive search for both `0.149s` and `1 passed, 4 skipped` returns only
+  unrelated hits in a copied nextest.log. It was asserted, not evidenced, and
+  is withdrawn. The substance is unaffected: the primary green
+  (`c358-green.log`, 21:05) PREDATES the red arm (21:39), so the green does
+  not depend on a post-revert re-measurement.
 * **c6 clean** — `cargo clippy --target x86_64-pc-windows-msvc -p wcore-cli --all-targets -- -D warnings`,
   EXIT=0, no warning line.
 
