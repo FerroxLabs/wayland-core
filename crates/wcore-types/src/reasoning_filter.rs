@@ -73,6 +73,31 @@ const MAX_TAG_BUFFER: usize = 256;
 /// The tracked reasoning tag names, lowercase.
 const TAG_NAMES: &[&str] = &["think", "thinking", "reasoning", "thought"];
 
+/// #908 — a reasoning block that has been OPENED and not yet closed, kept
+/// verbatim so that a stream which ends inside it can be retracted.
+///
+/// `raw` is every character consumed since (and including) the opening tag, in
+/// order, with the text of any nested tags the filter swallowed on the way —
+/// so it reconstructs the input exactly, which is what makes
+/// [`ReasoningFilter::finish`] lossless.
+#[derive(Debug)]
+struct UnclosedBlock {
+    /// Everything consumed since the block opened, verbatim, starting with the
+    /// opening tag as it arrived (`<think>`, `<thinking attr="x">`, any
+    /// casing).
+    raw: String,
+    /// How many BYTES at the tail of `captured` belong to this block.
+    ///
+    /// It is NOT `raw.len()`: nested tag text goes into `raw` but never into
+    /// `captured`, and the `\n` separator between two captured blocks goes
+    /// into `captured` but never into `raw`. Retracting the block truncates
+    /// exactly this many bytes, so the two buffers cannot disagree.
+    ///
+    /// A drain zeroes it: forwarded reasoning is already gone and cannot be
+    /// unsaid, so there is nothing left in the buffer to retract.
+    captured_bytes: usize,
+}
+
 #[derive(Debug)]
 pub struct ReasoningFilter {
     state: FilterState,
@@ -97,6 +122,10 @@ pub struct ReasoningFilter {
     /// `false` there and the separator condition is bit-for-bit the one that
     /// shipped.
     captured_any: bool,
+    /// #908 — see [`UnclosedBlock`]. `Some` exactly while an outermost
+    /// reasoning block is open; cleared the moment it closes, so it only ever
+    /// holds text that is still at risk of being eaten to end of stream.
+    unclosed: Option<UnclosedBlock>,
 }
 
 impl Default for ReasoningFilter {
@@ -113,6 +142,7 @@ impl ReasoningFilter {
             captured: String::new(),
             prev_block_committed: true,
             captured_any: false,
+            unclosed: None,
         }
     }
 
@@ -124,6 +154,11 @@ impl ReasoningFilter {
     pub fn take_captured(&mut self) -> String {
         self.prev_block_committed = true;
         self.captured_any = false;
+        if let Some(open) = self.unclosed.as_mut() {
+            // #908 — drained reasoning has left the filter; there is nothing
+            // in the buffer left for a later `finish` to retract.
+            open.captured_bytes = 0;
+        }
         std::mem::take(&mut self.captured)
     }
 
@@ -139,6 +174,10 @@ impl ReasoningFilter {
     pub fn take_captured_delta(&mut self) -> String {
         let drained = std::mem::take(&mut self.captured);
         self.captured_any |= !drained.is_empty();
+        if let Some(open) = self.unclosed.as_mut() {
+            // #908 — as `take_captured`: already forwarded, so not retractable.
+            open.captured_bytes = 0;
+        }
         drained
     }
 
@@ -149,6 +188,61 @@ impl ReasoningFilter {
         for ch in chunk.chars() {
             self.feed_char(ch, &mut out);
         }
+        out
+    }
+
+    /// #908 — drain what the filter is still holding when the stream ENDS,
+    /// as plain text, and un-do the guesses that could only be resolved by
+    /// input that never arrived.
+    ///
+    /// [`Self::process`] can only answer for the input it has seen, so two
+    /// things are still inside the filter when a stream stops:
+    ///
+    /// * an ambiguous `<` prefix (`the answer is 5 <`, `result: <th`) buffered
+    ///   while waiting to learn whether it starts a tag, and
+    /// * a reasoning block whose opening tag never closed, which the v0.9.0
+    ///   policy deliberately eats to the end of the stream.
+    ///
+    /// A consumer that stops at the last `process` DISCARDS both. For a
+    /// rendering that is a defensible choice — a runaway `<think>` tail is
+    /// better hidden than leaked — and it stays the default, because this is a
+    /// separate call: a consumer that wants the old behaviour simply does not
+    /// make it.
+    ///
+    /// It is NOT defensible for a DURABLE record. An assistant answer that
+    /// merely MENTIONS `<thinking>` in prose has no closing tag, so everything
+    /// after the word is eaten; where the filter's output is stored history,
+    /// replayed upstream on the next turn, that loss is permanent and silent.
+    /// `finish` therefore reclassifies an unclosed block as what it always was
+    /// — plain text — returning its opening tag and body, and retracting that
+    /// body from the capture buffer so it is not also emitted as reasoning.
+    ///
+    /// The retraction reaches only what is still IN the capture buffer. A
+    /// consumer that drains mid-stream ([`Self::take_captured_delta`]) has
+    /// already forwarded that reasoning and cannot unsay it; `finish` still
+    /// returns the block as text, so nothing is lost, but the drained part is
+    /// then duplicated. The durable path never drains, so there it is exact.
+    ///
+    /// Leaves the filter in its initial parse state, so a `process` after a
+    /// `finish` starts clean.
+    pub fn finish(&mut self) -> String {
+        let mut out = String::new();
+        if let Some(unclosed) = self.unclosed.take() {
+            let keep = self
+                .captured
+                .len()
+                .saturating_sub(unclosed.captured_bytes.min(self.captured.len()));
+            if self.captured.is_char_boundary(keep) {
+                self.captured.truncate(keep);
+            }
+            out.push_str(&unclosed.raw);
+        }
+        // Whatever is still ambiguous never became a tag. In a block this is
+        // the partial close tag, which follows the body; in `Text` it is the
+        // whole of what is pending. Either way it goes last.
+        out.push_str(&self.pending);
+        self.pending.clear();
+        self.state = FilterState::Text;
         out
     }
 
@@ -165,6 +259,7 @@ impl ReasoningFilter {
         self.captured.clear();
         self.prev_block_committed = true;
         self.captured_any = false;
+        self.unclosed = None;
     }
 
     fn feed_char(&mut self, ch: char, out: &mut String) {
@@ -183,7 +278,10 @@ impl ReasoningFilter {
                 match classify_open(&self.pending) {
                     OpenClass::CompleteOpen { self_closing } => {
                         // `<think>` or `<think/>` or `<thinking attr="x">`.
-                        self.pending.clear();
+                        // #908 — keep the tag verbatim, not just its shape: if
+                        // this block never closes, `finish` gives it back as
+                        // the plain text it turned out to be.
+                        let raw_open = std::mem::take(&mut self.pending);
                         if self_closing {
                             // `<think/>` — nothing to drop, return to Text.
                             self.state = FilterState::Text;
@@ -193,12 +291,20 @@ impl ReasoningFilter {
                             // have captured content, separate the two with
                             // a single `\n` so the downstream Thinking body
                             // reads as a multi-block transcript.
+                            let mut captured_bytes = 0;
                             if self.prev_block_committed
                                 && (!self.captured.is_empty() || self.captured_any)
                             {
                                 self.captured.push('\n');
+                                // #908 — the separator belongs to THIS block,
+                                // so a retraction takes it with it.
+                                captured_bytes += '\n'.len_utf8();
                             }
                             self.prev_block_committed = false;
+                            self.unclosed = Some(UnclosedBlock {
+                                raw: raw_open,
+                                captured_bytes,
+                            });
                             self.state = FilterState::InThinking { depth: 1 };
                         }
                     }
@@ -254,6 +360,10 @@ impl ReasoningFilter {
                     // v0.9.3 — capture the reasoning content char. The
                     // existing strip path simply dropped it.
                     self.captured.push(ch);
+                    if let Some(open) = self.unclosed.as_mut() {
+                        open.raw.push(ch);
+                        open.captured_bytes += ch.len_utf8();
+                    }
                 }
             }
             FilterState::MaybeCloseTag { depth } => {
@@ -263,15 +373,22 @@ impl ReasoningFilter {
                         // `</think>` — pop one level of depth. The
                         // `pending` was the close tag itself (never
                         // reasoning content), so it is discarded.
-                        self.pending.clear();
+                        let raw_close = std::mem::take(&mut self.pending);
                         if depth <= 1 {
                             // v0.9.3 — the outermost reasoning block just
                             // closed; mark committed so a subsequent open
                             // block prepends `\n` to keep blocks readable
                             // in the captured body.
                             self.prev_block_committed = true;
+                            // #908 — the block closed, so it really was
+                            // reasoning and there is nothing left to retract.
+                            self.unclosed = None;
                             self.state = FilterState::Text;
                         } else {
+                            if let Some(open) = self.unclosed.as_mut() {
+                                // Tag text: part of the block, never captured.
+                                open.raw.push_str(&raw_close);
+                            }
                             self.state = FilterState::InThinking { depth: depth - 1 };
                         }
                     }
@@ -281,7 +398,11 @@ impl ReasoningFilter {
                         // so `pending` is discarded; we do NOT prepend `\n`
                         // because the captured stream is continuous within
                         // the outer block.
-                        self.pending.clear();
+                        let raw_nested = std::mem::take(&mut self.pending);
+                        if let Some(open) = self.unclosed.as_mut() {
+                            // Tag text: part of the block, never captured.
+                            open.raw.push_str(&raw_nested);
+                        }
                         if self_closing {
                             // Nested `<think/>` is a no-op for depth.
                             self.state = FilterState::InThinking { depth };
@@ -298,6 +419,10 @@ impl ReasoningFilter {
                             // emitted Thinking body. The previous strip
                             // path simply discarded them silently.
                             self.captured.push_str(&self.pending);
+                            if let Some(open) = self.unclosed.as_mut() {
+                                open.raw.push_str(&self.pending);
+                                open.captured_bytes += self.pending.len();
+                            }
                             self.pending.clear();
                             self.state = FilterState::InThinking { depth };
                         }
@@ -314,6 +439,10 @@ impl ReasoningFilter {
                         // Push the head (everything except the last char)
                         // into captured before discarding pending.
                         self.captured.push_str(&self.pending[..head_len]);
+                        if let Some(open) = self.unclosed.as_mut() {
+                            open.raw.push_str(&self.pending[..head_len]);
+                            open.captured_bytes += head_len;
+                        }
                         self.pending.clear();
                         if last == Some('<') {
                             self.state = FilterState::MaybeCloseTag { depth };
@@ -323,6 +452,10 @@ impl ReasoningFilter {
                             // too (not a `<`) — capture it as well.
                             if let Some(c) = last {
                                 self.captured.push(c);
+                                if let Some(open) = self.unclosed.as_mut() {
+                                    open.raw.push(c);
+                                    open.captured_bytes += c.len_utf8();
+                                }
                             }
                             self.state = FilterState::InThinking { depth };
                         }
@@ -923,5 +1056,147 @@ mod tests {
         let visible = f.process(src);
         assert_eq!(visible, src);
         assert_eq!(f.take_captured(), "");
+    }
+    // -----------------------------------------------------------------------
+    // #908 — `finish`: the end-of-stream drain.
+    // -----------------------------------------------------------------------
+
+    /// Feed `chunks`, then `finish`. Returns `(visible_text, captured)`.
+    fn run_finished(chunks: &[&str]) -> (String, String) {
+        let mut filter = ReasoningFilter::new();
+        let mut out = String::new();
+        for c in chunks {
+            out.push_str(&filter.process(c));
+        }
+        out.push_str(&filter.finish());
+        (out, filter.take_captured())
+    }
+
+    /// The headline loss: a tag that never closes was never a reasoning block,
+    /// and `finish` gives it and everything after it back verbatim.
+    #[test]
+    fn finish_gives_back_a_block_that_never_closed() {
+        let src = "Use the <thinking> tag to wrap reasoning. Then answer.";
+        let (visible, captured) = run_finished(&[src]);
+        assert_eq!(visible, src);
+        assert_eq!(
+            captured, "",
+            "the retracted text must not ALSO be emitted as reasoning"
+        );
+    }
+
+    /// The opening tag comes back exactly as it arrived — casing and attributes
+    /// included — not as a normalised reconstruction.
+    #[test]
+    fn finish_returns_the_opening_tag_verbatim() {
+        let src = r#"see <Thinking attr="x"> here"#;
+        let (visible, captured) = run_finished(&[src]);
+        assert_eq!(visible, src);
+        assert_eq!(captured, "");
+    }
+
+    /// Nested and stray tag text inside an unclosed block is part of the text
+    /// that was eaten, so it comes back too. This is the bookkeeping most
+    /// likely to drop characters, because those tags are consumed on branches
+    /// that never touch the content path.
+    #[test]
+    fn finish_reconstructs_nested_tag_text_inside_an_unclosed_block() {
+        for src in [
+            "a<think>b<think>c</think>d",
+            "a<think>b<div>c</div>d",
+            "a<think>b<think/>c",
+            "a<think>b<not a tag",
+        ] {
+            let (visible, captured) = run_finished(&[src]);
+            assert_eq!(visible, src, "lost characters from {src:?}");
+            assert_eq!(captured, "", "{src:?} was also emitted as reasoning");
+        }
+    }
+
+    /// An ambiguous `<` prefix that the stream ended on was plain text.
+    #[test]
+    fn finish_flushes_an_unresolved_prefix() {
+        for src in ["the answer is 5 <", "result: <th", "trailing <thinkin"] {
+            let (visible, captured) = run_finished(&[src]);
+            assert_eq!(visible, src, "lost characters from {src:?}");
+            assert_eq!(captured, "");
+        }
+    }
+
+    /// The control that stops `finish` from becoming "never filter anything":
+    /// a block that DID close is reasoning, stays out of the visible text, and
+    /// stays in the capture buffer.
+    #[test]
+    fn finish_does_not_resurrect_a_block_that_closed() {
+        let (visible, captured) = run_finished(&["a<think>hidden</think>b"]);
+        assert_eq!(visible, "ab");
+        assert_eq!(captured, "hidden");
+
+        let (visible, captured) = run_finished(&["<think>all of it</think>"]);
+        assert_eq!(visible, "");
+        assert_eq!(captured, "all of it");
+    }
+
+    /// A closed block followed by an unclosed one: the first is reasoning, the
+    /// second is text, and neither takes the other's characters.
+    #[test]
+    fn finish_separates_a_closed_block_from_a_later_unclosed_one() {
+        let (visible, captured) = run_finished(&["<think>one</think>mid<think>two"]);
+        assert_eq!(visible, "mid<think>two");
+        assert_eq!(captured, "one");
+    }
+
+    /// `finish` leaves the filter parsing from a clean slate, so a consumer
+    /// that drains at a stream boundary and keeps going cannot inherit the
+    /// state it just drained.
+    #[test]
+    fn finish_leaves_the_filter_in_its_initial_state() {
+        let mut f = ReasoningFilter::new();
+        assert_eq!(f.process("text <thi"), "text ");
+        assert_eq!(f.finish(), "<thi");
+        assert_eq!(f.finish(), "", "a second drain has nothing left");
+        assert_eq!(f.process("<think>x</think>y"), "y");
+        assert_eq!(f.take_captured(), "x");
+    }
+
+    /// The ONE remaining drop, asserted so it is a decision and not an
+    /// oversight: a recognised closing tag with no matching open is still
+    /// removed. That is #908's own reported symptom — the reporter read a bare
+    /// `</thought>` at the end of an answer — so restoring it would reopen the
+    /// ticket that asked for it. It costs the tag's own characters and nothing
+    /// after them, unlike an unclosed OPEN, which ate the rest of the stream.
+    #[test]
+    fn finish_does_not_resurrect_a_stray_closing_tag() {
+        let (visible, captured) = run_finished(&["answer </thought> continues"]);
+        assert_eq!(visible, "answer  continues");
+        assert_eq!(captured, "");
+    }
+
+    /// The whole property, stated once: with no reasoning block ever closing
+    /// and no stray close (see above), process-then-finish is the identity.
+    /// Any character the filter drops is a character the durable record loses.
+    #[test]
+    fn process_then_finish_is_lossless_when_nothing_closes() {
+        for src in [
+            "plain text",
+            "if a < b then c",
+            "<div>hello</div>",
+            "trailing <",
+            "<think>",
+            "<think>unterminated reasoning",
+            "mentions <thinking> then more",
+            "a<thi",
+            "unicode ✂ <think>ときどき",
+        ] {
+            // Fed whole, and fed one character at a time — the split must not
+            // change the answer.
+            let (whole, _) = run_finished(&[src]);
+            assert_eq!(whole, src, "whole-chunk feed lost characters: {src:?}");
+
+            let chars: Vec<String> = src.chars().map(|c| c.to_string()).collect();
+            let refs: Vec<&str> = chars.iter().map(String::as_str).collect();
+            let (split, _) = run_finished(&refs);
+            assert_eq!(split, src, "per-character feed lost characters: {src:?}");
+        }
     }
 }

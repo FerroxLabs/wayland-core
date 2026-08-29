@@ -14973,6 +14973,26 @@ impl AgentEngine {
                     }
                 }
 
+                // #908 — the stream is over, so drain the filter.
+                //
+                // `process` can only answer for input it has seen. An
+                // ambiguous `<` prefix is still buffered waiting to learn
+                // whether it starts a tag, and an opening tag that never
+                // closed is still eating (the v0.9.0 display policy). Both are
+                // survivable in a rendering and neither is survivable here:
+                // `assistant_text` is the stored assistant block, the session
+                // mirror, the journal, and the text replayed to the provider
+                // next turn, so an answer that merely MENTIONS `<thinking>` in
+                // prose lost everything after the word, permanently, with no
+                // notice — the empty-turn guard below cannot see it because
+                // the surviving prefix is not empty.
+                //
+                // `finish` reclassifies an unclosed block as the plain text it
+                // turned out to be. A block that DID close is still reasoning
+                // and is still removed. The sinks are untouched: they keep
+                // their own filters and their own end-of-stream policy.
+                assistant_text.push_str(&assistant_reasoning.finish());
+
                 // AUDIT A3 / E-C2 — classify the attempt outcome.
                 // A clean `Done` is success. A mid-stream `LlmEvent::Error`
                 // OR a channel that closed with no `Done` (truncated /
