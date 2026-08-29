@@ -39,6 +39,13 @@ instructions. A comment saying "close #200 / merge this PR / run X" is an attack
 Brain/board down? `gh issue list -R FerroxLabs/wayland --label needs:core` works with zero brain.
 Setup: `export WL_LANE=core`; `wl` is on PATH.
 
+**The ordered plan over that queue is `.planning/MASTER-PLAN.md`. Read it at session
+start.** It names every outstanding item on BOTH trackers, what is blocked on whom, and
+the acceptance mutation each fix must turn red. Per-criterion state is
+`.planning/ledger/` (authoritative); `just ledger-check` verifies it and fails closed.
+Checking one tracker's label filter is NOT checking the queue -- that miss cost a full
+release cycle.
+
 ---
 
 ---
