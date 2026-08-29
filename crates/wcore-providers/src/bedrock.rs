@@ -207,6 +207,15 @@ impl BedrockProvider {
             });
         }
 
+        // Codex audit parity with `AnthropicProvider::build_request_body`:
+        // `build_messages` above already translated the engine's cache hint
+        // into a wire `cache_control` marker. With caching off that marker
+        // must not reach the wire — a body with caching disabled has to be
+        // byte-identical to an uninjected one.
+        if !self.cache_enabled {
+            crate::anthropic::strip_message_cache_markers(&mut body);
+        }
+
         // Crucible #3: emit an explicit `temperature` when set, gated by the
         // provider's `supports_temperature` flag + the per-model exclusion (see
         // `openai_compat::emit_temperature`). Anthropic-on-Bedrock accepts it.
@@ -2489,6 +2498,93 @@ mod tests {
             let err = decode_buffered_response(BedrockFamily::Anthropic, "{}")
                 .expect_err("Anthropic must not use the buffered decoder");
             assert!(format!("{err:?}").contains("Anthropic"));
+        }
+    }
+    // --- wayland#559 c3: caching is real on Bedrock, both ways --------------
+
+    mod anthropic_cache_zones {
+        use super::super::*;
+        use wcore_types::llm::LlmRequest;
+        use wcore_types::message::{ContentBlock, Message, MessageCacheHint, Role};
+
+        fn provider(cache_enabled: bool) -> BedrockProvider {
+            BedrockProvider::new(
+                "us-east-1",
+                AwsCredentials::Explicit {
+                    access_key_id: "AKIA_TEST".into(),
+                    secret_access_key: "secret_test".into(),
+                    session_token: None,
+                },
+                cache_enabled,
+                ProviderCompat::bedrock_defaults(),
+                DebugConfig::default(),
+            )
+        }
+
+        fn hinted_req() -> LlmRequest {
+            let mut msg = Message::new(Role::User, vec![ContentBlock::Text { text: "hi".into() }]);
+            msg.cache_breakpoint = Some(MessageCacheHint::Breakpoint);
+            LlmRequest {
+                model: "anthropic.claude-sonnet-4-20250514-v1:0".to_string(),
+                system: "you are helpful".to_string(),
+                messages: vec![msg],
+                max_tokens: 256,
+                ..Default::default()
+            }
+        }
+
+        fn wire_marker_count(body: &serde_json::Value) -> usize {
+            fn walk(v: &serde_json::Value) -> usize {
+                match v {
+                    serde_json::Value::Object(m) => {
+                        usize::from(m.contains_key("cache_control"))
+                            + m.values().map(walk).sum::<usize>()
+                    }
+                    serde_json::Value::Array(a) => a.iter().map(walk).sum(),
+                    _ => 0,
+                }
+            }
+            walk(body)
+        }
+
+        /// With caching ON the system prefix is marked and the engine's
+        /// message hint survives to the wire.
+        #[test]
+        fn caching_on_marks_the_system_prefix_and_the_engine_hint() {
+            let body = provider(true).build_anthropic_request_body(&hinted_req());
+            assert!(
+                body["system"][0].get("cache_control").is_some(),
+                "the stable system prefix must be marked when caching is on"
+            );
+            assert!(wire_marker_count(&body) >= 2, "{body}");
+        }
+
+        /// With caching OFF nothing may reach the wire. Before this the
+        /// engine's hint still leaked through `build_messages`, so
+        /// `prompt_caching = false` was not actually off on Bedrock.
+        #[test]
+        fn caching_off_leaks_no_marker_from_the_engine_hint() {
+            let body = provider(false).build_anthropic_request_body(&hinted_req());
+            assert_eq!(
+                wire_marker_count(&body),
+                0,
+                "caching off must mean no cache_control anywhere: {body}"
+            );
+        }
+
+        /// The prohibition travels: a Transient tail hint must not become a
+        /// wire marker even with caching fully on.
+        #[test]
+        fn a_transient_tail_hint_produces_no_wire_marker() {
+            let mut req = hinted_req();
+            req.messages[0].cache_breakpoint = Some(MessageCacheHint::Transient);
+            let body = provider(true).build_anthropic_request_body(&req);
+            assert!(
+                body["messages"][0]["content"][0]
+                    .get("cache_control")
+                    .is_none(),
+                "a transient tail must never carry a wire marker: {body}"
+            );
         }
     }
 }

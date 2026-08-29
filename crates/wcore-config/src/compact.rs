@@ -334,6 +334,67 @@ pub struct CompactConfig {
     /// with a compact stub. TOML table: `[compact.tool_call_args]`.
     #[serde(default)]
     pub tool_call_args: ToolCallArgsConfig,
+
+    /// Ceiling on the TOTAL size of accumulated tool RESULT bodies carried in
+    /// history (FerroxLabs/wayland#1150 c4). TOML table:
+    /// `[compact.tool_results]`.
+    #[serde(default)]
+    pub tool_results: ToolResultsConfig,
+}
+
+/// Config for the accumulated tool-RESULT ceiling (wayland#1150 c4).
+///
+/// Per-result truncation already exists: every tool declares
+/// `Tool::max_result_size()` (50,000 chars by default) and the orchestration
+/// layer truncates at it before the result enters history. What did not exist
+/// is a bound on the SUM. Twenty results at the per-result cap is a megabyte
+/// of history re-sent whole on every turn, and the recency pass that clears
+/// old results (`micro_keep_recent`) is gated on context pressure, so nothing
+/// touches them until the window is nearly full.
+///
+/// This pass is therefore UNGATED — it runs on every compaction pipeline pass
+/// like the tool-call-argument pass, and it applies to every tool rather than
+/// only `compactable_tools`: a ceiling a tool can opt out of is not a ceiling.
+///
+/// **The guarantee**: carried tool-result bytes never exceed
+/// `total_budget_bytes` plus the `keep_recent` newest results. Both terms are
+/// constants, so the carried size stops growing with session length — which
+/// is the property #1150 is about, not any particular number.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultsConfig {
+    /// Master gate for the pass. Default ON.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Total budget, in bytes of tool-result body text, for the whole
+    /// conversation. Once the sum exceeds this, the OLDEST results are
+    /// replaced with a stub until it fits again.
+    #[serde(default = "default_tr_total_budget_bytes")]
+    pub total_budget_bytes: usize,
+
+    /// Newest tool results that are never bounded, however large — the
+    /// model's live working set. Counted over tool results, not turns.
+    #[serde(default = "default_tr_keep_recent")]
+    pub keep_recent: usize,
+
+    /// Epoch quantization of the stub boundary, exactly as
+    /// [`ToolCallArgsConfig::epoch_turns`]: the boundary advances in batches
+    /// of this many results, so between ticks the pass changes ZERO bytes and
+    /// the provider's contiguous prefix cache holds end-to-end. `1` = advance
+    /// as tightly as the budget requires. Floored to 1 at the use site.
+    #[serde(default = "default_tr_epoch_results")]
+    pub epoch_results: usize,
+}
+
+impl Default for ToolResultsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            total_budget_bytes: default_tr_total_budget_bytes(),
+            keep_recent: default_tr_keep_recent(),
+            epoch_results: default_tr_epoch_results(),
+        }
+    }
 }
 
 /// Config for continuous tool-call-argument compaction (parity gap 2).
@@ -590,6 +651,7 @@ impl Default for CompactConfig {
             smart_min_shrink_tokens: default_smart_min_shrink_tokens(),
             smart_handoff_to_memory: true,
             tool_call_args: ToolCallArgsConfig::default(),
+            tool_results: ToolResultsConfig::default(),
         }
     }
 }
@@ -661,6 +723,20 @@ fn default_tca_min_args_bytes() -> usize {
     768
 }
 fn default_tca_epoch_turns() -> usize {
+    4
+}
+/// ~30k tokens of accumulated tool-result body at the ~4 bytes/token
+/// heuristic. Chosen against the per-result cap it sits above: one result may
+/// still be 50,000 bytes, so the ceiling holds at least two full-size results
+/// plus the protected tail, and only bites once a session has genuinely
+/// accumulated a working set larger than that.
+fn default_tr_total_budget_bytes() -> usize {
+    120_000
+}
+fn default_tr_keep_recent() -> usize {
+    4
+}
+fn default_tr_epoch_results() -> usize {
     4
 }
 
