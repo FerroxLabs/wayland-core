@@ -784,11 +784,18 @@ mod tests {
         let parent = TempDir::new().expect("tempdir");
         let root = parent.path().join("repo");
         fs::create_dir_all(root.join("build")).expect("mkdir");
-        fs::write(root.join(".gitignore"), "build/\n").expect("write gitignore");
+        fs::write(root.join(".gitignore"), "*.log\n").expect("write gitignore");
         fs::write(root.join("build/out.log"), "build log\n").expect("write log");
 
-        // The same file the relative spelling refuses, spelled to defeat the
-        // lexical prefix test.
+        // The plain spelling IS refused — proof the fixture is really ignored,
+        // and it passes on both arms.
+        let plain = resolve(&AtRef::parse("@build/out.log").expect("parse"), &root);
+        assert!(
+            matches!(plain, Err(AtRefError::GitIgnored(_))),
+            "fixture check: the relative spelling must be refused, got {plain:?}"
+        );
+
+        // The same file, spelled to defeat the lexical prefix test.
         let at = AtRef::parse("@../repo/build/out.log").expect("parse");
         let got = resolve(&at, &root);
         assert!(
