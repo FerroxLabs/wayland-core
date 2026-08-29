@@ -682,3 +682,135 @@ async fn e_control_ordinary_turn_emits_no_error() {
         h.sink.errors()
     );
 }
+
+// ===========================================================================
+// #908 — an empty turn caused by OUR filter, blamed on the endpoint
+// ===========================================================================
+
+/// RED (#908). The reporter's model wrapped its whole reply in inline
+/// reasoning tags. `508405d4` stopped those tags leaking into the answer, which
+/// was the right fix and is not in question here — but it turned the reporter's
+/// second symptom ("`</thought>` before responses") into their first one ("not
+/// producing any response at all"), and the message that fires for it is false.
+///
+/// `assistant_content` carries NATIVE thinking blocks. An open-weights model
+/// (DeepSeek-R1, QwQ, the Ollama-class models this was reported against) emits
+/// its reasoning as ordinary text deltas instead, so `assistant_content` is
+/// empty, the reasoning branch is skipped, and the turn is diagnosed as
+/// "the endpoint or model may be incompatible" — sending the user to verify a
+/// wire format that just delivered a complete response.
+#[tokio::test]
+async fn f_a_turn_the_reasoning_filter_emptied_is_not_blamed_on_the_endpoint() {
+    let mut h = harness(vec![Ok(vec![
+        LlmEvent::TextDelta("<think>I should answer this.</think>".into()),
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: usage(),
+        },
+    ])])
+    .await;
+    let _ = h.engine.run(USER_MARKER, "").await;
+    let errors = h.sink.errors();
+    assert!(
+        !errors.is_empty(),
+        "#908: a turn whose whole reply was reasoning-tagged ended with nothing said at all"
+    );
+    let joined = errors.join("\n");
+    assert!(
+        !joined.contains("may be incompatible"),
+        "#908: the provider streamed a complete response and OUR filter removed it, and the \
+         user was told their endpoint may be incompatible. Got:\n{joined}"
+    );
+    assert!(
+        joined.contains("reasoning tags"),
+        "#908: the message must name the real cause — the reply was all reasoning — so the \
+         user does not go and re-check a working endpoint. Got:\n{joined}"
+    );
+}
+
+/// RED (#908), the reporter's literal wording: *"sometimes just `</thought>`
+/// repeatedly, the most so far has been 5 times along one row without anything
+/// else included"*.
+///
+/// A stray closing tag is dropped by the filter and captured as nothing, so
+/// this shape reaches the guard with an empty visible lane AND an empty
+/// reasoning lane. It is the same defect and it must get the same honest
+/// answer, which is why the fix counts RAW characters rather than captured
+/// reasoning.
+#[tokio::test]
+async fn f_a_turn_of_only_stray_closing_tags_is_not_blamed_on_the_endpoint() {
+    let mut h = harness(vec![Ok(vec![
+        LlmEvent::TextDelta("</thought></thought></thought></thought></thought>".into()),
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: usage(),
+        },
+    ])])
+    .await;
+    let _ = h.engine.run(USER_MARKER, "").await;
+    let joined = h.sink.errors().join("\n");
+    assert!(
+        !joined.is_empty(),
+        "#908: five stray closing tags ended the turn in silence"
+    );
+    assert!(
+        !joined.contains("may be incompatible"),
+        "#908: a turn of nothing but stray `</thought>` tags was blamed on the endpoint. \
+         Got:\n{joined}"
+    );
+}
+
+/// NEGATIVE CONTROL — the guard must keep its teeth. A provider that streams
+/// NOTHING is the genuinely unexplained empty response and must still get the
+/// endpoint diagnosis; if this reddens, the fix above has simply deleted the
+/// message rather than narrowing it.
+///
+/// (`d_control_empty_turn_with_clean_stop_keeps_the_endpoint_diagnosis` asserts
+/// the same thing from the other direction. Both are kept: that one guards the
+/// `finish_reason` chain, this one guards the raw-character count.)
+#[tokio::test]
+async fn f_control_a_provider_that_streams_nothing_still_gets_the_endpoint_diagnosis() {
+    let mut h = harness(vec![Ok(vec![
+        // An EMPTY text delta: the provider spoke and said nothing, which must
+        // not be mistaken for text the filter ate.
+        LlmEvent::TextDelta(String::new()),
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: usage(),
+        },
+    ])])
+    .await;
+    let _ = h.engine.run(USER_MARKER, "").await;
+    let joined = h.sink.errors().join("\n");
+    assert!(
+        joined.contains("may be incompatible"),
+        "CONTROL BROKEN: the unexplained empty response lost its diagnosis, so the two \
+         assertions above pass against a guard that says nothing to anybody. Got:\n{joined}"
+    );
+}
+
+/// NEGATIVE CONTROL — an ordinary turn that also carries reasoning must be
+/// silent. Without this, a fix that fired the new message on every turn with a
+/// `<think>` block in it would still pass the tests above.
+#[tokio::test]
+async fn f_control_reasoning_followed_by_an_answer_emits_no_error() {
+    let mut h = harness(vec![Ok(vec![
+        LlmEvent::TextDelta("<think>weighing it up</think>here is your answer".into()),
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: usage(),
+        },
+    ])])
+    .await;
+    let result = h.engine.run(USER_MARKER, "").await.expect("run");
+    assert_eq!(result.text, "here is your answer");
+    assert!(
+        h.sink.errors().is_empty(),
+        "CONTROL BROKEN: a normal reasoning-then-answer turn emitted an error. Got: {:?}",
+        h.sink.errors()
+    );
+}
