@@ -1,0 +1,10 @@
+=== FMT ===
+FMT_OK
+=== CHECK ===
+CHECK_OK
+=== CLIPPY ===
+CLIPPY_OK
+=== NEXTEST ===
+NEXTEST_EXIT=100
+     Summary [ 436.338s] 17318 tests run: 17314 passed (1 leaky), 4 failed, 97 skipped
+GATE_DONE
