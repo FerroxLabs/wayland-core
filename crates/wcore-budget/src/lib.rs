@@ -23,6 +23,8 @@
 pub mod config;
 pub mod daily;
 pub mod execution;
+pub mod spend;
+pub mod spend_audit;
 pub mod tracker;
 
 /// Validation failures while persisting or restoring durable budget authority.
@@ -47,6 +49,14 @@ pub use daily::{
 pub use execution::{
     AgentDepthGuard, ExecutionBudget, ExecutionBudgetSnapshot, ExecutionBudgetView,
     ProcessCleanupProof, ToolRunGuard,
+};
+pub use spend::{
+    EscalationError, EscalationGate, EscalationRecord, ModelBilling, ModelSpendProfile,
+    SPEND_SCHEMA_VERSION, SpendMode, SpendPolicy, SpendRefusal,
+};
+pub use spend_audit::{
+    JsonlSpendAuditSink, MemorySpendAuditSink, SpendAuditDispatch, SpendAuditError,
+    SpendAuditRecord, SpendAuditRefusal, SpendAuditSink, SpendAuditor, now_unix_ms,
 };
 pub use tracker::{
     BudgetCap, BudgetCapBuilder, BudgetError, BudgetEvent, BudgetEventSink, BudgetExtensionError,
