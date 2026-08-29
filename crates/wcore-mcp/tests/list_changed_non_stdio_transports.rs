@@ -24,9 +24,6 @@ use wcore_mcp::transport::McpTransport;
 use wcore_mcp::transport::sse::SseTransport;
 use wcore_mcp::transport::streamable_http::StreamableHttpTransport;
 
-/// The notification under test, as a server would frame it.
-const LIST_CHANGED: &str = r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
-
 /// Poll `take_tools_changed` for up to a second so the assertion does not race
 /// the background listener.
 async fn await_tools_changed(transport: &dyn McpTransport) -> bool {
@@ -295,5 +292,178 @@ async fn streamable_http_close_makes_the_transport_not_alive() {
         !transport.is_alive(),
         "a closed transport must stop being treated as live, or the manager \
          keeps advertising a removed server's tools"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// End to end, through the manager
+// ---------------------------------------------------------------------------
+
+/// A loopback SSE MCP server that speaks the real handshake.
+///
+/// One `GET` establishes the event stream; every `POST` is answered by writing
+/// a `message` event back onto that stream, which is how the SSE transport
+/// binding actually works. After the first `tools/list` the server announces
+/// `notifications/tools/list_changed` and starts answering `tools/list` with a
+/// SECOND tool — the mid-session registration the ticket is about.
+fn spawn_sse_mcp_server() -> String {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let listener = TcpListener::from_std(listener).expect("from_std");
+
+    // The GET socket, shared so POST handlers can push responses onto it.
+    let stream: Arc<AsyncMutex<Option<tokio::net::TcpStream>>> = Arc::new(AsyncMutex::new(None));
+    let listed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let stream = Arc::clone(&stream);
+            let listed_once = Arc::clone(&listed_once);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let text = String::from_utf8_lossy(&buf[..n]).to_string();
+
+                if text.starts_with("GET") {
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+                              event: endpoint\ndata: /messages\n\n",
+                        )
+                        .await;
+                    let _ = socket.flush().await;
+                    *stream.lock().await = Some(socket);
+                    // Hold the task; the socket now lives in the shared slot.
+                    std::future::pending::<()>().await;
+                    return;
+                }
+
+                let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                let _ = socket
+                    .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+                let _ = socket.flush().await;
+
+                let id = body
+                    .split("\"id\":")
+                    .nth(1)
+                    .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty()))
+                    .unwrap_or("1")
+                    .to_string();
+
+                let mut frames: Vec<String> = Vec::new();
+                if body.contains("\"initialize\"") {
+                    frames.push(format!(
+                        r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"2025-03-26","capabilities":{{"tools":{{"listChanged":true}}}}}}}}"#
+                    ));
+                } else if body.contains("\"tools/list\"") {
+                    let first = !listed_once.swap(true, std::sync::atomic::Ordering::SeqCst);
+                    let tools = if first {
+                        r#"[{"name":"alpha","description":"d","inputSchema":{"type":"object"}}]"#
+                    } else {
+                        r#"[{"name":"alpha","description":"d","inputSchema":{"type":"object"}},{"name":"beta","description":"d","inputSchema":{"type":"object"}}]"#
+                    };
+                    frames.push(format!(
+                        r#"{{"jsonrpc":"2.0","id":{id},"result":{{"tools":{tools}}}}}"#
+                    ));
+                    if first {
+                        // The mid-session registration announcement.
+                        frames.push(
+                            r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#
+                                .to_string(),
+                        );
+                    }
+                }
+
+                if frames.is_empty() {
+                    return;
+                }
+                let mut slot = stream.lock().await;
+                if let Some(sse) = slot.as_mut() {
+                    for frame in frames {
+                        let _ = sse
+                            .write_all(format!("event: message\ndata: {frame}\n\n").as_bytes())
+                            .await;
+                    }
+                    let _ = sse.flush().await;
+                }
+            });
+        }
+    });
+
+    format!("http://{addr}/sse")
+}
+
+/// THE TICKET, end to end. A tool registered by an SSE MCP server AFTER connect
+/// must become visible to the manager — the property #1175 states and the one
+/// that decides whether the tool is callable at all.
+#[tokio::test]
+async fn the_manager_picks_up_a_tool_an_sse_server_registers_mid_session() {
+    use std::collections::HashMap as Map;
+
+    use wcore_config::config::{McpServerConfig, TransportType};
+    use wcore_mcp::manager::McpManager;
+
+    let url = spawn_sse_mcp_server();
+    let mut configs = Map::new();
+    configs.insert(
+        "hosted".to_string(),
+        McpServerConfig {
+            transport: TransportType::Sse,
+            command: None,
+            args: None,
+            env: None,
+            url: Some(url),
+            headers: None,
+            deferred: None,
+            allow_local: true,
+            only_for_assistant: None,
+            allowed_tools: None,
+        },
+    );
+
+    let manager = McpManager::connect_all(&configs)
+        .await
+        .expect("the SSE MCP server must connect");
+    let before: Vec<String> = manager
+        .all_tools()
+        .into_iter()
+        .map(|(_, tool)| tool.name)
+        .collect();
+    assert_eq!(
+        before,
+        vec!["alpha".to_string()],
+        "precondition: only the connect-time tool is advertised"
+    );
+
+    // The engine calls this at the top of every turn.
+    let mut refreshed = Vec::new();
+    for _ in 0..100 {
+        refreshed = manager.refresh_signalled_tools().await;
+        if !refreshed.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(
+        refreshed,
+        vec!["hosted".to_string()],
+        "the server announced tools/list_changed; the manager must re-list it"
+    );
+    let after: Vec<String> = manager
+        .all_tools()
+        .into_iter()
+        .map(|(_, tool)| tool.name)
+        .collect();
+    assert_eq!(
+        after,
+        vec!["alpha".to_string(), "beta".to_string()],
+        "the mid-session tool must now be advertised, or it stays uncallable \
+         for the life of the session"
     );
 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -40,10 +41,25 @@ fn redacted_body_preview(body: &[u8]) -> String {
 #[derive(Debug)]
 pub struct StreamableHttpTransport {
     client: wcore_egress::EgressClient,
+    /// A second client for the standalone notification stream. Identical to
+    /// `client` except that it carries NO request-wide `.timeout()`: that bound
+    /// covers the response body, so it would guillotine a long-lived SSE stream
+    /// after 120s. Every SSRF protection is the same.
+    stream_client: wcore_egress::EgressClient,
     url: String,
     headers: HeaderMap,
     session_id: Mutex<Option<String>>,
     next_id: AtomicU64,
+    /// Raised when the server sends `notifications/tools/list_changed` on
+    /// either channel; take-and-cleared by
+    /// [`McpTransport::take_tools_changed`] (#1175).
+    tools_changed: Arc<AtomicBool>,
+    /// The standalone `GET` SSE stream, once opened. Aborted by `close()`.
+    notification_stream: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Set by `close()`. Without it `is_alive()` was permanently `true`, so a
+    /// server the operator removed could have its tools re-registered by the
+    /// manager on the next `list_changed` (#1175).
+    closed: AtomicBool,
 }
 
 impl StreamableHttpTransport {
@@ -124,6 +140,7 @@ impl StreamableHttpTransport {
         // and resolver so reqwest can actually dial 127.0.0.1/::1 (the default
         // SsrfSafeResolver drops loopback at connect time). Both variants keep
         // every non-loopback SSRF protection intact.
+        let stream_policy = egress_policy.clone();
         let builder = wcore_egress::EgressClient::builder()
             .policy(egress_policy)
             .pool_idle_timeout(std::time::Duration::from_secs(5))
@@ -146,12 +163,39 @@ impl StreamableHttpTransport {
             .build()
             .map_err(|e| McpError::Transport(format!("HTTP client initialization failed: {e}")))?;
 
+        // #1175 -- the standalone notification stream needs the same hardening
+        // and the same policy, minus the request-wide body timeout.
+        let stream_builder = wcore_egress::EgressClient::builder()
+            .policy(stream_policy)
+            .pool_idle_timeout(std::time::Duration::from_secs(5))
+            .connect_timeout(std::time::Duration::from_secs(15));
+        let stream_builder = if allow_local {
+            stream_builder
+                .redirect(wcore_tools::url_safety::ssrf_safe_redirect_policy_allow_loopback())
+                .dns_resolver(std::sync::Arc::new(
+                    wcore_tools::url_safety::LoopbackOkResolver,
+                ))
+        } else {
+            stream_builder
+                .redirect(wcore_tools::url_safety::ssrf_safe_redirect_policy())
+                .dns_resolver(std::sync::Arc::new(
+                    wcore_tools::url_safety::SsrfSafeResolver,
+                ))
+        };
+        let stream_client = stream_builder.build().map_err(|e| {
+            McpError::Transport(format!("HTTP client initialization failed: {e}"))
+        })?;
+
         Ok(Self {
             client,
+            stream_client,
             url: url.to_string(),
             headers: header_map,
             session_id: Mutex::new(None),
             next_id: AtomicU64::new(1),
+            tools_changed: Arc::new(AtomicBool::new(false)),
+            notification_stream: Mutex::new(None),
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -259,6 +303,13 @@ impl StreamableHttpTransport {
                 let data = data_lines.join("\n");
                 match classify_sse_frame(&data) {
                     SseFrame::Empty | SseFrame::Skip => continue,
+                    // #1175 -- a server may interleave a notification into the
+                    // SSE framing of the response it is streaming. Record it
+                    // and keep reading for the response itself.
+                    SseFrame::ToolsChanged => {
+                        self.tools_changed.store(true, Ordering::SeqCst);
+                        continue;
+                    }
                     SseFrame::Response(rpc_response) => return Ok(*rpc_response),
                     SseFrame::Error(err) => return Err(err),
                 }
@@ -280,6 +331,9 @@ enum SseFrame {
     /// A JSON-RPC error frame WITHOUT a usable `id` — surfaced structurally
     /// instead of being discarded.
     Error(McpError),
+    /// The `notifications/tools/list_changed` notification (#1175). Id-less by
+    /// definition, so it is neither a response nor an error frame.
+    ToolsChanged,
     /// Non-empty but neither a response nor an error frame; logged and skipped.
     Skip,
 }
@@ -296,6 +350,13 @@ enum SseFrame {
 fn classify_sse_frame(data: &str) -> SseFrame {
     if data.is_empty() {
         return SseFrame::Empty;
+    }
+
+    // #1175 -- the tool-list-changed notification. Checked BEFORE the response
+    // parse: it carries no `id`, so it can only ever fall through to `Skip`,
+    // which is how it was silently discarded.
+    if super::notified_tools_changed(data) {
+        return SseFrame::ToolsChanged;
     }
 
     // Happy path: a well-formed JSON-RPC response (result or error, with id).
@@ -365,9 +426,113 @@ impl McpTransport for StreamableHttpTransport {
         Ok(())
     }
 
+    /// #1175 -- open the MCP spec's standalone serverâclient SSE stream.
+    ///
+    /// A streamable-HTTP server has no other way to reach us when no request is
+    /// in flight, which is exactly the case the ticket describes: a server
+    /// attached mid-session announces a new tool. Without this the transport
+    /// only ever read `text/event-stream` as the framing of a reply to its own
+    /// POST, so the announcement was never delivered at all.
+    ///
+    /// Deliberately forgiving, because none of this may cost the session:
+    /// answering `GET` with `405 Method Not Allowed` is spec-legal and common,
+    /// any non-2xx or non-event-stream answer simply ends the attempt, and the
+    /// stream is never re-opened after it ends (a reconnect loop against a
+    /// server that refuses would be a hot loop).
+    async fn start_notification_stream(&self) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut slot = self.notification_stream.lock().await;
+        if slot.is_some() {
+            return;
+        }
+
+        let mut request = self
+            .stream_client
+            .get(&self.url)
+            .headers(self.headers.clone())
+            .header("Accept", "text/event-stream");
+        if let Some(sid) = self.session_id.lock().await.as_ref() {
+            request = request.header("Mcp-Session-Id", sid.as_str());
+        }
+
+        let tools_changed = Arc::clone(&self.tools_changed);
+        let url = self.url.clone();
+        *slot = Some(tokio::spawn(async move {
+            use futures::StreamExt;
+
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::debug!(%url, %error, "[mcp] no standalone notification stream");
+                    return;
+                }
+            };
+            if !response.status().is_success() {
+                // 405 is the spec's own way of saying "I do not offer one".
+                tracing::debug!(
+                    %url, status = %response.status(),
+                    "[mcp] server does not serve a standalone notification stream"
+                );
+                return;
+            }
+
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+            let mut utf8 = wcore_types::utf8_stream::Utf8StreamDecoder::new();
+            while let Some(chunk) = stream.next().await {
+                let Ok(chunk) = chunk else { return };
+                buffer.push_str(&utf8.push(&chunk));
+
+                // mcp-40 -- the same reassembly bound the response path uses.
+                if buffer.len() > MAX_SSE_BUFFER_BYTES {
+                    tracing::warn!(
+                        %url,
+                        "[mcp] notification stream exceeded the reassembly bound; dropping it"
+                    );
+                    return;
+                }
+
+                while let Some(event_end) = buffer.find("\n\n") {
+                    let event_block = buffer[..event_end].to_string();
+                    buffer = buffer[event_end + 2..].to_string();
+                    for line in event_block.lines() {
+                        if let Some(value) = line.strip_prefix("data:")
+                            && super::notified_tools_changed(value.trim())
+                        {
+                            tools_changed.store(true, Ordering::SeqCst);
+                            tracing::debug!(
+                                %url,
+                                "[mcp] streamable-http server signalled tools/list_changed"
+                            );
+                        }
+                    }
+                }
+            }
+        }));
+    }
+
+    fn take_tools_changed(&self) -> bool {
+        self.tools_changed.swap(false, Ordering::SeqCst)
+    }
+
     async fn close(&self) -> Result<(), McpError> {
-        // No persistent connection to close for HTTP
+        // No persistent request connection to close for HTTP, but the
+        // standalone notification stream IS persistent and the transport must
+        // stop reporting itself alive (#1175): with `take_tools_changed` now
+        // implemented here, a permanently-alive closed transport would let the
+        // manager re-register an operator-removed server's tools on its next
+        // `list_changed`.
+        self.closed.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.notification_stream.lock().await.take() {
+            handle.abort();
+        }
         Ok(())
+    }
+
+    fn is_alive(&self) -> bool {
+        !self.closed.load(Ordering::SeqCst)
     }
 }
 

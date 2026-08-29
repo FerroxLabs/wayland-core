@@ -38,6 +38,16 @@ pub struct SseTransport {
     /// Set by `close()` so a new `request()` fast-fails instead of parking
     /// on a `oneshot` whose listener has been aborted (audit F26).
     closed: AtomicBool,
+    /// Raised by the listener when the server sends
+    /// `notifications/tools/list_changed`; take-and-cleared by
+    /// [`McpTransport::take_tools_changed`] (#1175).
+    ///
+    /// Shared with the listener task, which is where the only server-initiated
+    /// frames arrive. Before this existed the listener dropped every id-less
+    /// frame -- exactly the shape of a JSON-RPC notification -- so a hosted MCP
+    /// server that registered a tool mid-session stayed invisible for the life
+    /// of the session.
+    tools_changed: Arc<AtomicBool>,
 }
 
 impl SseTransport {
@@ -266,12 +276,26 @@ impl SseTransport {
 
         // Spawn background task to listen for SSE responses
         let pending_clone = pending.clone();
+        let tools_changed = Arc::new(AtomicBool::new(false));
+        let tools_changed_clone = Arc::clone(&tools_changed);
         let listener = tokio::spawn(async move {
             let mut buf = buffer; // carry over remaining buffer
             let mut utf8 = utf8; // carry the UTF-8 decoder tail across loops
-            while let Some(chunk) = bytes_stream.next().await {
-                let Ok(chunk) = chunk else { break };
-                buf.push_str(&utf8.push(&chunk));
+            // #1175 — drain what the HANDSHAKE already read before parking on
+            // the next chunk. The handshake stops at the `endpoint` event, so
+            // any event the server put in the SAME TCP segment (a
+            // `tools/list_changed` announced immediately on connect is exactly
+            // that) sat in `buf` unparsed until some LATER chunk arrived — and
+            // for a server with nothing more to say, that is never.
+            let mut carried = Some(());
+            loop {
+                if carried.take().is_none() {
+                    let Some(chunk) = bytes_stream.next().await else {
+                        break;
+                    };
+                    let Ok(chunk) = chunk else { break };
+                    buf.push_str(&utf8.push(&chunk));
+                }
 
                 // mcp-40 — bound the listener reassembly buffer. On overflow
                 // we drop the stream (break): pending requests then time out
@@ -286,8 +310,22 @@ impl SseTransport {
 
                     let (event_type, event_data) = parse_sse_event(&event_block);
 
-                    if (event_type == "message" || event_type.is_empty())
-                        && let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&event_data)
+                    if event_type != "message" && !event_type.is_empty() {
+                        continue;
+                    }
+
+                    // #1175 -- a JSON-RPC NOTIFICATION carries no `id`, so it
+                    // fails the response match below and used to be dropped
+                    // silently. `tools/list_changed` is the one the manager
+                    // needs: it is how a server announces that the tool set it
+                    // advertised at connect is no longer current.
+                    if super::notified_tools_changed(&event_data) {
+                        tools_changed_clone.store(true, Ordering::SeqCst);
+                        tracing::debug!("[mcp] SSE server signalled tools/list_changed");
+                        continue;
+                    }
+
+                    if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&event_data)
                         && let Some(id) = response.id
                     {
                         let mut map: tokio::sync::MutexGuard<
@@ -319,6 +357,7 @@ impl SseTransport {
             _listener: listener,
             request_timeout,
             closed: AtomicBool::new(false),
+            tools_changed,
         })
     }
 
@@ -445,6 +484,10 @@ impl McpTransport for SseTransport {
         // listener's own drain-on-exit (Rank 26).
         self.pending.lock().await.clear();
         Ok(())
+    }
+
+    fn take_tools_changed(&self) -> bool {
+        self.tools_changed.swap(false, Ordering::SeqCst)
     }
 
     fn is_alive(&self) -> bool {
@@ -575,6 +618,7 @@ mod tests {
             _listener: listener,
             request_timeout: std::time::Duration::from_secs(1),
             closed: AtomicBool::new(false),
+            tools_changed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -648,6 +692,7 @@ mod tests {
             _listener: tokio::spawn(async {}),
             request_timeout: Duration::from_millis(500),
             closed: std::sync::atomic::AtomicBool::new(false),
+            tools_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         let req = JsonRpcRequest::new(1, "tools/call", None);
@@ -725,6 +770,7 @@ mod tests {
             _listener: tokio::spawn(async {}),
             request_timeout: Duration::from_millis(500),
             closed: std::sync::atomic::AtomicBool::new(false),
+            tools_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         let req = JsonRpcRequest::new(1, "tools/call", None);
@@ -820,6 +866,7 @@ mod tests {
             // catch the regression.
             request_timeout: Duration::from_secs(30),
             closed: std::sync::atomic::AtomicBool::new(false),
+            tools_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         let req = JsonRpcRequest::new(1, "tools/call", None);

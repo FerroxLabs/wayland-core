@@ -615,6 +615,14 @@ impl McpManager {
                 JsonRpcRequest::notification("notifications/initialized", None);
             transport.notify(&initialized_notification).await?;
 
+            // 3b. #1175 -- open the transport's server->client notification
+            // channel, now that the handshake has assigned whatever session
+            // identity it needs. No-op for stdio and SSE, whose inbound streams
+            // already exist; Streamable-HTTP opens the spec's standalone GET
+            // SSE stream here because it has no other channel for a
+            // `tools/list_changed` announced while no request is in flight.
+            transport.start_notification_stream().await;
+
             // 4. Discover tools only when the server advertises that capability.
             // Resource-only MCP servers are valid and may reject `tools/list`.
             let tools = if supports_tools {
