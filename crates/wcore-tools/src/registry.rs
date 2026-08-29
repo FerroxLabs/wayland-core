@@ -554,6 +554,31 @@ pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
     }
 }
 
+/// Cache stability (FerroxLabs/wayland#1171, `defer_cold.catalog = false`):
+/// move every deferred stub to the TAIL, keeping registry order inside each
+/// group.
+///
+/// In catalog mode the deferred defs leave `tools[]` altogether, so the
+/// full-schema entries form a contiguous head that no hydration can disturb.
+/// With the catalog fold off the stubs stay in the array at their registry
+/// slots, interleaved with the hot tools — and `admit_hydrated_tools` then
+/// lifts one out of the MIDDLE and appends it, shifting every entry after it.
+/// MEASURED on the reference builtin set: turn 1
+/// `[Bash, Delegate, Edit, Forge, Glob, Grep, Read, Spawn, ToolSearch, Workflow, Write]`
+/// became turn 2
+/// `[Bash, Edit, Forge, Glob, Grep, Read, ToolSearch, Write, Delegate, Spawn, Workflow]`
+/// — first differing wire index 1, i.e. the entire cached prompt prefix
+/// re-billed on any session that touches a deferred tool, Spawn included.
+///
+/// Hoisting the hot defs first gives both modes ONE ordering discipline: the
+/// full-schema head is a pure function of the def names and the static
+/// allowlist, so it is byte-identical for the life of the conversation, and a
+/// hydration can only change bytes from the deferred region onward.
+pub fn partition_deferred_to_tail(defs: &mut [ToolDef]) {
+    // Stable, so registry order survives inside each group.
+    defs.sort_by_key(|def| def.deferred);
+}
+
 /// Layer D1 follow-up (hydrated-tool admission): un-defer every def whose name
 /// the model has hydrated via `ToolSearch` this session, so the full schema
 /// ships and the tool is genuinely callable (providers validate tool calls

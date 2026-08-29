@@ -8,6 +8,8 @@
 //! named and assigned a guard. The behavioural tests below then drive the real
 //! `AgentEngine` through the two that the criteria turn on.
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -526,5 +528,184 @@ async fn no_paid_mode_refuses_a_metered_model_at_the_engine() {
     assert_eq!(
         records[0]["payload"]["refusals"][0]["kind"],
         "paid_model_refused"
+    );
+}
+
+// ── #1161 / D21: the spend-audit trail must be joinable ─────────────────────
+
+/// Every `task_spend_audit` record the run wrote, in file order.
+fn audit_records(home: &HomeGuard) -> Vec<serde_json::Value> {
+    home.audit_lines()
+        .into_iter()
+        .filter(|v| v["kind"] == "task_spend_audit")
+        .collect()
+}
+
+/// #1161 — a `--resume` must file its spend under the SAME key as the launch it
+/// continues.
+///
+/// `install_spend_guard` was called with `&uuid::Uuid::new_v4().to_string()` at
+/// both engine constructors, so the id every `SpendAuditRecord.session_id`
+/// carries was minted fresh per construction and persisted nowhere. A fresh
+/// launch and each `--resume` therefore wrote under different random keys, and
+/// a conversation's true authorized spend could never be totalled from
+/// `spend-audit.jsonl` — the same unjoinable-ledger defect #1161 closed for the
+/// cache ledger, one crate over.
+///
+/// The oracle is the on-disk log, not the engine's memory. HOW THIS FAILS IF
+/// THE DEFECT RETURNS: put `&uuid::Uuid::new_v4().to_string()` back as the
+/// `session_id` argument at either constructor and the two records stop
+/// agreeing.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_resumed_session_files_its_spend_under_the_key_the_first_launch_used() {
+    use wcore_agent::session::SessionManager;
+
+    let home = HomeGuard::new();
+    let server = common::physical_attempt_server().await;
+    let root = TempDir::new().unwrap();
+    let ledger_dir = TempDir::new().unwrap();
+
+    let mut config = common::test_config();
+    config.model = "claude-opus-4-7".to_string();
+    config.compact.enabled = false;
+    common::configure_persisted_test_session(&mut config, root.path());
+    let session_dir = PathBuf::from(&config.session.directory);
+    let workspace = root.path().to_string_lossy().into_owned();
+
+    // Launch 1.
+    let provider = Arc::new(
+        common::MockLlmProvider::with_text_response("one").with_physical_url(server.uri()),
+    );
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config.clone(),
+        ToolRegistry::new(),
+        null_output(),
+    );
+    engine.set_cache_ledger_dir(ledger_dir.path());
+    engine
+        .init_session("test-provider", &workspace, Some("aa55aa55-1161"))
+        .expect("init_session");
+    engine.use_recovery_test_key(&common::RECOVERY_TEST_KEY);
+    engine.run("go", "m1").await.expect("first run");
+    drop(engine);
+
+    let after_first = audit_records(&home);
+    assert_eq!(
+        after_first.len(),
+        1,
+        "launch 1 writes one record: {after_first:#?}"
+    );
+
+    // Launch 2 — the ordinary `--resume` path.
+    let manager = SessionManager::new(session_dir, 10);
+    let active = manager
+        .load_for_run("aa55aa55-1161")
+        .expect("the session must be resumable");
+    let provider = Arc::new(
+        common::MockLlmProvider::with_text_response("two").with_physical_url(server.uri()),
+    );
+    let mut engine = AgentEngine::resume_active_with_provider(
+        provider,
+        config,
+        ToolRegistry::new(),
+        null_output(),
+        active,
+    );
+    engine.set_cache_ledger_dir(ledger_dir.path());
+    engine.use_recovery_test_key(&common::RECOVERY_TEST_KEY);
+    engine.run("again", "m2").await.expect("resumed run");
+    drop(engine);
+
+    let records = audit_records(&home);
+    assert_eq!(records.len(), 2, "one record per task: {records:#?}");
+    let keys: BTreeSet<String> = records
+        .iter()
+        .map(|r| {
+            r["payload"]["session_id"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        keys.len(),
+        1,
+        "the launch and the resume must file under ONE key, got {keys:?}"
+    );
+    let key = keys.into_iter().next().unwrap();
+    assert!(!key.is_empty(), "the audit key must not be empty");
+    // The task ids must still differ — this is a join, not a collapse.
+    let tasks: BTreeSet<&str> = records
+        .iter()
+        .map(|r| r["payload"]["task_id"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(tasks.len(), 2, "two tasks stay two records: {tasks:?}");
+
+    // And the key is the one the CACHE ledger uses, so the two durable records
+    // of the same conversation can actually be joined.
+    let ledger = std::fs::read_dir(ledger_dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+        .expect("the run wrote a cache ledger");
+    let ledger: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&ledger).unwrap()).unwrap();
+    assert_eq!(
+        ledger["session_id"].as_str(),
+        Some(key.as_str()),
+        "the spend audit and the cache ledger must name the same conversation"
+    );
+}
+
+/// #1161 — a mid-session `/model` rebind must not split one conversation into
+/// two audit sessions.
+///
+/// `rebind_provider` reinstalls the guard, and it passed `budget_session_id()`
+/// while the constructors passed a random uuid — so the records written before
+/// and after a `/model` switch carried different keys and one uninterrupted
+/// session appeared in the log as two unrelated ones.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_model_rebind_does_not_split_one_conversation_into_two_audit_sessions() {
+    let home = HomeGuard::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let mut config = config_with_mode(wcore_types::model_aliases::ANTHROPIC_SONNET, None);
+    config.max_turns = Some(1);
+    let provider: Arc<dyn LlmProvider> = Arc::new(CountingProvider {
+        calls: Arc::clone(&calls),
+    });
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config.clone(),
+        ToolRegistry::new(),
+        null_output(),
+    );
+    engine.run("before", "m1").await.expect("first turn");
+
+    // The `/model` switch: a new provider handle, a new compat row, a new model.
+    let provider: Arc<dyn LlmProvider> = Arc::new(CountingProvider {
+        calls: Arc::clone(&calls),
+    });
+    engine.rebind_provider(
+        provider,
+        ProviderCompat::anthropic_defaults(),
+        wcore_types::model_aliases::ANTHROPIC_SONNET.to_string(),
+    );
+    engine.run("after", "m2").await.expect("second turn");
+
+    let records = audit_records(&home);
+    assert_eq!(records.len(), 2, "one record per task: {records:#?}");
+    let keys: BTreeSet<&str> = records
+        .iter()
+        .map(|r| r["payload"]["session_id"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        keys.len(),
+        1,
+        "a `/model` rebind must not re-key the audit trail, got {keys:?}"
     );
 }

@@ -4755,13 +4755,21 @@ impl AgentEngine {
         let retained_config = config.clone();
         // #174 — install the spend guard BEFORE the struct literal partially
         // moves `config`.
+        // #1161 — mint the stable conversation id HERE rather than inside the
+        // struct literal, so the spend guard can be keyed by it. Keying the
+        // audit trail by a throwaway `Uuid::new_v4()` minted per construction,
+        // persisted nowhere, is the same unjoinable-ledger defect #1161 closed
+        // for the cache ledger: a fresh launch and every `--resume` filed under
+        // a different key, so a conversation's authorized spend could never be
+        // totalled from `spend-audit.jsonl`.
+        let conversation_id = uuid::Uuid::new_v4().to_string();
         let (provider, spend_guard) = install_spend_guard(
             provider,
             config.compat.provider_type(),
             &config.model,
             &config.compat,
             config.budget.spend_mode(),
-            &uuid::Uuid::new_v4().to_string(),
+            &conversation_id,
         );
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
         let confirmer = ToolConfirmer::with_policy(
@@ -4948,7 +4956,8 @@ impl AgentEngine {
             pending_hook_actions: Vec::new(),
             pending_hook_phase_consumptions: Vec::new(),
             // #282: mint the stable Flux conversation id once per engine.
-            conversation_id: uuid::Uuid::new_v4().to_string(),
+            // Minted above so the spend guard is keyed by it (#1161).
+            conversation_id,
             flux_loop_collisions: 0,
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
@@ -5026,6 +5035,14 @@ impl AgentEngine {
         // `new_with_provider` for the rationale).
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
+        // #1161 — read the persisted conversation id BEFORE `session` is moved
+        // into `current_session` below, and BEFORE the spend guard is built, so
+        // a resumed session continues the SAME spend-audit key it left off at
+        // instead of opening a second, unjoinable one.
+        let resumed_conversation_id = session
+            .conversation_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         // #174 — see `new_with_provider`: guard installed before the literal
         // partially moves `config`.
         let (provider, spend_guard) = install_spend_guard(
@@ -5034,14 +5051,8 @@ impl AgentEngine {
             &config.model,
             &config.compat,
             config.budget.spend_mode(),
-            &uuid::Uuid::new_v4().to_string(),
+            &resumed_conversation_id,
         );
-        // #1161 — read the persisted conversation id BEFORE `session` is moved
-        // into `current_session` below.
-        let resumed_conversation_id = session
-            .conversation_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
         let confirmer = ToolConfirmer::with_policy(
             config.smart_approval_policy(),
@@ -5332,6 +5343,57 @@ impl AgentEngine {
     /// [`Self::set_system_prompt`].
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
+    }
+
+    /// #1161 — keep the spend guard filed under the LIVE conversation id.
+    ///
+    /// `conversation_id` is the engine's durable identity: minted once per
+    /// engine, persisted on the session record, restored on `--resume`, and
+    /// replaced wholesale by a session switch or a checkpoint restore. The
+    /// spend guard is built before any of those can have happened, so without
+    /// this the audit record keeps the id it was constructed with — the exact
+    /// unjoinable trail #1161 closed for the cache ledger.
+    ///
+    /// Cheap and idempotent: a string compare on every turn, a write on the
+    /// rare turn after the identity actually moved.
+    fn sync_spend_audit_identity(&self) {
+        if self.spend_guard.session_id() != self.conversation_id {
+            self.spend_guard.rebind_session_id(&self.conversation_id);
+        }
+    }
+
+    /// #1168 — bring the baked `Current date:` line up to today.
+    ///
+    /// `bootstrap` renders the system prefix once and hands the engine a
+    /// `String`; the only other path that touches it is the explicit
+    /// [`Self::set_system_prompt`] rebind, which re-prepends the SAME baked
+    /// prefix. So without this the date is frozen for the lifetime of the
+    /// engine — and `channel_dispatch` keeps one engine per channel session in
+    /// a map with no eviction, so that lifetime is "until the gateway
+    /// restarts". Meanwhile the prompt tells the model, in the next sentence,
+    /// to treat the date as authoritative and not to substitute a different
+    /// month or year.
+    ///
+    /// `rebind_system_prefix` is refreshed alongside it, or the next `/model`
+    /// switch would re-prepend the stale line and undo this.
+    ///
+    /// See `context::refresh_current_date` for why this costs one prompt-cache
+    /// invalidation per day rather than one per turn.
+    fn refresh_session_date(&mut self) {
+        let today = crate::context::today_string();
+        let Some(updated) = crate::context::refresh_current_date(&self.system_prompt, &today)
+        else {
+            return;
+        };
+        self.system_prompt = updated;
+        if let Some(base) = self.rebind_system_prefix.take() {
+            self.rebind_system_prefix =
+                Some(crate::context::refresh_current_date(&base, &today).unwrap_or(base));
+        }
+        tracing::debug!(
+            date = %today,
+            "system prompt `Current date:` refreshed across a day rollover"
+        );
     }
 
     /// Wave OR: returns the registry by mutable reference only when no
@@ -6709,7 +6771,12 @@ impl AgentEngine {
             &model,
             &compat,
             self.spend_guard.mode(),
-            &self.budget_session_id(),
+            // #1161 — the SAME key the constructors use. This used to pass
+            // `budget_session_id()`, so a mid-session `/model` rebind silently
+            // moved every later record onto a different id and one uninterrupted
+            // conversation appeared in `spend-audit.jsonl` as two unrelated
+            // sessions.
+            &self.conversation_id,
         );
         self.provider = wrapped;
         self.spend_guard = spend_guard;
@@ -12891,6 +12958,21 @@ impl AgentEngine {
                     // (cache guard: `tools_array_byte_stable_across_roundtrips`);
                     // a hydration changes it once.
                     let tools = self.apply_tool_deferral(tools);
+
+                    // #1168 — the `Current date:` line lives in the cached
+                    // system prefix, which is built ONCE at bootstrap into a
+                    // plain String. Refresh it if the day has rolled over since
+                    // then, before the prefix is used for this turn. A no-op on
+                    // every turn but the first one after midnight, so the prompt
+                    // cache pays for it once a day, not once a turn.
+                    self.refresh_session_date();
+
+                    // #1161 — the conversation id moves on resume, on a session
+                    // switch and on a checkpoint restore. Re-point the spend
+                    // guard at it rather than hunting every mutation site: a
+                    // record filed under the id the engine was CONSTRUCTED with
+                    // cannot be joined to the conversation it belongs to.
+                    self.sync_spend_audit_identity();
 
                     // Build system prompt: append plan mode instructions when active
                     let system = if self.plan_state.is_active {
@@ -20113,6 +20195,14 @@ impl AgentEngine {
         let defer_cfg = &self.config.builtin_tools.defer_cold;
         if defer_cfg.enabled {
             wcore_tools::registry::apply_cold_deferral(&mut tools, &defer_cfg.hot_allowlist);
+            // #1171 — hoist the full-schema defs ahead of the stubs BEFORE the
+            // admission below lifts a hydrated one out. Without this the stubs
+            // sit interleaved at their registry slots in `catalog = false` mode
+            // and every hydration shifts the array from index 1 onward, which
+            // re-bills the whole cached prompt prefix. No-op in catalog mode
+            // (the stubs are folded out below) — deliberately unconditional so
+            // the two modes share one ordering rule.
+            wcore_tools::registry::partition_deferred_to_tail(&mut tools);
         }
         wcore_tools::registry::admit_hydrated_tools(&mut tools, &self.hydrated_tool_names);
         if defer_cfg.enabled && defer_cfg.catalog {
@@ -21920,6 +22010,142 @@ mod set_config_tests {
             .await;
         assert!(!result.is_error, "hydrated tool must dispatch: {result:?}");
         assert_eq!(result.content, "ok");
+    }
+
+    /// FerroxLabs/wayland#1171 with `builtin_tools.defer_cold.catalog = false`.
+    ///
+    /// The documented knob restores per-tool stub entries, so the deferred defs
+    /// stay in `tools[]` — and before the fix they stayed at their REGISTRY
+    /// slots, interleaved with the hot tools. A ToolSearch hydration then
+    /// lifted one out of mid-array and appended it, shifting every entry after
+    /// it. `tools[]` sits in the cached prompt prefix, so that re-bills the
+    /// whole prompt uncached on any session that touches a deferred tool,
+    /// including every Spawn. A user who turns the catalog fold off is opting
+    /// out of a token optimisation, not out of cache stability.
+    ///
+    /// MEASURED red arm (this exact input, pre-fix): turn 1
+    /// `[Bash, Delegate*, Edit, Glob, Grep, Read, Spawn*, ToolSearch, Write]`
+    /// against turn 2 `[Bash, Edit, Glob, Grep, Read, ToolSearch, Write, ...]`
+    /// — first differing WIRE index 1.
+    ///
+    /// Asserted on the serialized entries, because that is what the provider
+    /// hashes. The claim is bounded to the FULL-SCHEMA region: a stub becoming
+    /// a full schema must change bytes somewhere, and the fix makes that
+    /// somewhere the deferred tail rather than index 1.
+    #[test]
+    fn catalog_off_keeps_the_hot_wire_prefix_stable_across_a_hydration() {
+        let mut engine = make_engine("m");
+        engine.config.builtin_tools.defer_cold.catalog = false;
+        let tools = vec![
+            builtin_tool("Bash"),
+            builtin_tool("Delegate"), // cold
+            builtin_tool("Edit"),
+            builtin_tool("Glob"),
+            builtin_tool("Grep"),
+            builtin_tool("Read"),
+            builtin_tool("Spawn"), // cold
+            builtin_tool("ToolSearch"),
+            builtin_tool("Write"),
+        ];
+
+        let wire = |defs: &[wcore_types::tool::ToolDef]| -> Vec<String> {
+            wcore_providers::anthropic_shared::build_tools(defs)
+                .iter()
+                .map(|t| serde_json::to_string(t).unwrap())
+                .collect()
+        };
+
+        let turn1 = engine.apply_tool_deferral(tools.clone());
+        assert_eq!(
+            turn1.len(),
+            tools.len(),
+            "sanity: stub mode keeps every def in the array"
+        );
+        assert!(
+            turn1.iter().any(|t| t.name == "Spawn" && t.deferred),
+            "sanity: the cold tool really is a stub here"
+        );
+        let hot = turn1.iter().filter(|t| !t.deferred).count();
+        assert!(hot >= 5, "sanity: the hot region is the bulk of the array");
+
+        engine.push_hydrated_name("Spawn");
+        let turn2 = engine.apply_tool_deferral(tools.clone());
+
+        assert!(
+            turn1.iter().take(hot).all(|t| !t.deferred)
+                && turn2.iter().take(hot).all(|t| !t.deferred),
+            "the full-schema defs must lead the array in BOTH turns\n  turn1: \
+             {:?}\n  turn2: {:?}",
+            turn1
+                .iter()
+                .map(|t| (&t.name, t.deferred))
+                .collect::<Vec<_>>(),
+            turn2
+                .iter()
+                .map(|t| (&t.name, t.deferred))
+                .collect::<Vec<_>>(),
+        );
+        let (w1, w2) = (wire(&turn1), wire(&turn2));
+        assert_eq!(
+            w1[..hot],
+            w2[..hot],
+            "the {hot}-entry full-schema prefix must be byte-identical across a \
+             hydration; first difference at {:?}",
+            (0..w1.len().min(w2.len())).find(|&i| w1[i] != w2[i]),
+        );
+        // And the hydration must still have HAPPENED — a "fix" that stopped
+        // admitting the tool would satisfy the prefix check above.
+        let spawn = turn2
+            .iter()
+            .find(|t| t.name == "Spawn")
+            .expect("the hydrated tool stays in the array");
+        assert!(
+            !spawn.deferred,
+            "the hydrated tool must ship its full schema"
+        );
+    }
+
+    /// Catalog mode already had this discipline (the stubs leave the array and
+    /// the catalog carrier moves to the tail). Pinned beside the stub-mode test
+    /// so a future change cannot fix one mode by breaking the other.
+    #[test]
+    fn catalog_on_keeps_the_hot_wire_prefix_stable_across_a_hydration() {
+        let mut engine = make_engine("m");
+        let tools = vec![
+            builtin_tool("Bash"),
+            builtin_tool("Delegate"),
+            builtin_tool("Edit"),
+            builtin_tool("Read"),
+            builtin_tool("Spawn"),
+            builtin_tool("ToolSearch"),
+            builtin_tool("Write"),
+        ];
+        let wire = |defs: &[wcore_types::tool::ToolDef]| -> Vec<String> {
+            wcore_providers::anthropic_shared::build_tools(defs)
+                .iter()
+                .map(|t| serde_json::to_string(t).unwrap())
+                .collect()
+        };
+        let turn1 = engine.apply_tool_deferral(tools.clone());
+        engine.push_hydrated_name("Spawn");
+        let turn2 = engine.apply_tool_deferral(tools.clone());
+
+        // ToolSearch carries the catalog line, which legitimately changes when
+        // a name leaves the deferred set; everything AHEAD of it must not.
+        let stable = turn1
+            .iter()
+            .position(|t| t.name == "ToolSearch")
+            .expect("catalog mode keeps ToolSearch");
+        assert!(
+            stable > 0,
+            "sanity: there are hot tools ahead of the carrier"
+        );
+        let (w1, w2) = (wire(&turn1), wire(&turn2));
+        assert_eq!(
+            w1[..stable],
+            w2[..stable],
+            "catalog mode must keep every entry ahead of the carrier identical"
+        );
     }
 
     /// Layer D3 (catalog fold): cold tools produce NO per-tool stub entries

@@ -161,6 +161,26 @@ impl SpendGuard {
         self.policy.mode()
     }
 
+    /// The session identity this guard files its audit record and its
+    /// escalations under.
+    #[must_use]
+    pub fn session_id(&self) -> String {
+        self.auditor.lock().session_id()
+    }
+
+    /// Re-point BOTH halves — the audit record and the escalation gate — at
+    /// `session_id`.
+    ///
+    /// #1161 — the guard is installed by `install_spend_guard` at engine
+    /// construction, which is before the engine has a durable conversation
+    /// identity to offer. Both halves must move together: filing the record
+    /// under one id while the escalations that justify it carry another is the
+    /// same unjoinable trail with an extra step.
+    pub fn rebind_session_id(&self, session_id: &str) {
+        self.auditor.lock().rebind_session_id(session_id);
+        self.gate.lock().rebind_session_id(session_id);
+    }
+
     /// The model the run is currently authorized up to.
     #[must_use]
     pub fn authorized_model(&self) -> String {

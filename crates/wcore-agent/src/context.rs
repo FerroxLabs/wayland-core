@@ -48,6 +48,47 @@ pub fn current_date_block(today: &str) -> String {
     format!("Current date: {today}")
 }
 
+/// Rewrite the `Current date:` line of an ALREADY-BUILT system prompt when the
+/// day has rolled over. Returns `None` when there is nothing to change.
+///
+/// #1168 — the date belongs in the cached system prefix rather than the
+/// per-turn message tail (see the intro site in [`build_system_prompt`] for the
+/// measurement). But the prefix is built exactly once, at bootstrap, into a
+/// plain `String` on the engine; nothing re-renders it, so the value is frozen
+/// for the whole life of that engine. For a one-shot CLI run that is
+/// indistinguishable from correct. For a long-lived one it is not: the channel
+/// gateway holds one engine per channel session in a map with no eviction, so a
+/// Slack/Discord/Telegram bot running for a week answers every date-bound
+/// question with the day the gateway first saw it — while the next sentence of
+/// the same prompt instructs the model to treat that date as the authoritative
+/// "today" and NOT to substitute a different month or year. The model is told
+/// to trust a value the product knows is stale.
+///
+/// The cost of fixing it is one prefix invalidation per day per long session —
+/// exactly the daily churn #559 already priced in and accepted when it put the
+/// date here. Returning `None` on an unchanged date is what keeps that cost at
+/// one per day instead of one per turn.
+///
+/// Only the FIRST occurrence is rewritten: that is the intro section, which is
+/// always `parts[0]`, and it is the line the surrounding instruction refers to.
+/// A date a user wrote into their own custom prompt or AGENTS.md is theirs, and
+/// is left alone.
+pub fn refresh_current_date(prompt: &str, today: &str) -> Option<String> {
+    let wanted = current_date_block(today);
+    let start = prompt.find("Current date: ")?;
+    let end = prompt[start..]
+        .find('\n')
+        .map_or(prompt.len(), |offset| start + offset);
+    if prompt[start..end] == *wanted.as_str() {
+        return None;
+    }
+    let mut out = String::with_capacity(prompt.len() + wanted.len());
+    out.push_str(&prompt[..start]);
+    out.push_str(&wanted);
+    out.push_str(&prompt[end..]);
+    Some(out)
+}
+
 /// Session-scoped cache for system prompt sections.
 ///
 /// Each section (intro, tool guidance, AGENTS.md, memory, skills) is cached
@@ -1699,6 +1740,82 @@ mod tests {
 
     // --- Current date lives in the cached prefix, frozen per session (#559) ---
 
+    /// #1168 — a session that outlives the day must not keep asserting the day
+    /// it started on. The engine holds the built prefix as a plain `String`;
+    /// this is the rewrite it applies when the clock has rolled over.
+    #[test]
+    fn a_day_rollover_rewrites_the_date_line_and_nothing_else() {
+        let prompt = build_system_prompt(
+            &mut SystemPromptCache::new(),
+            Some("custom instructions here"),
+            "/tmp",
+            "test-model",
+            &[],
+            None,
+            None,
+            false,
+            false,
+            &[],
+            false,
+        );
+        let today = today_string();
+        assert!(prompt.contains(&current_date_block(&today)));
+
+        let rolled = refresh_current_date(&prompt, "2027-01-01")
+            .expect("a different day must produce a rewrite");
+        assert!(
+            rolled.contains(&current_date_block("2027-01-01")),
+            "the new day must be in the prefix"
+        );
+        assert!(
+            !rolled.contains(&current_date_block(&today)),
+            "the stale day must be gone, not merely joined by a second one"
+        );
+        assert_eq!(
+            rolled.len(),
+            prompt.len(),
+            "only the date VALUE may change; both are YYYY-MM-DD"
+        );
+        assert_eq!(
+            rolled.replace(
+                &current_date_block("2027-01-01"),
+                &current_date_block(&today)
+            ),
+            prompt,
+            "every other byte of the prefix must be untouched"
+        );
+    }
+
+    /// The other half, and the load-bearing one for cost: within a day the
+    /// refresher must be a no-op, or it would bust the prompt cache on every
+    /// turn — the failure #559 moved the date here to avoid.
+    #[test]
+    fn the_same_day_is_not_a_rewrite() {
+        let prompt = build_system_prompt(
+            &mut SystemPromptCache::new(),
+            None,
+            "/tmp",
+            "test-model",
+            &[],
+            None,
+            None,
+            false,
+            false,
+            &[],
+            false,
+        );
+        assert_eq!(
+            refresh_current_date(&prompt, &today_string()),
+            None,
+            "an unchanged day must leave the prefix byte-identical"
+        );
+        assert_eq!(
+            refresh_current_date("no date line in here at all", "2027-01-01"),
+            None,
+            "a prompt with no date line has nothing to refresh"
+        );
+    }
+
     /// The cached system prefix MUST carry the date value, and must be
     /// byte-identical across builds within a session.
     ///
@@ -1744,9 +1861,11 @@ mod tests {
             first.contains(&current_date_block(&today)),
             "cached system prefix must carry the current date; prefix was: {first}"
         );
-        // Frozen for the session: repeated reads through ONE cache return the
-        // same bytes, so a session crossing midnight cannot shift its own
-        // prefix mid-flight.
+        // Frozen per BUILD: repeated reads through ONE cache return the same
+        // bytes, so no sub-day value can shift the prefix between turns. The
+        // day rollover is handled one level up, by
+        // `refresh_current_date` on the engine's already-built prompt
+        // (#1168) — this cache is deliberately not a clock.
         let mut cache = SystemPromptCache::new();
         let a = build_system_prompt(
             &mut cache,

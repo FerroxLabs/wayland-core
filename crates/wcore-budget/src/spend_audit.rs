@@ -319,6 +319,34 @@ impl SpendAuditor {
         }
     }
 
+    /// The session this task's record will be filed under.
+    #[must_use]
+    pub fn session_id(&self) -> String {
+        self.inner.lock().session_id.clone()
+    }
+
+    /// Re-point the record at the session identity the engine has since
+    /// established.
+    ///
+    /// #1161 / #174 — the guard is installed at engine CONSTRUCTION, before a
+    /// session id exists, so its first value is necessarily provisional. Baking
+    /// that provisional value in is what left every record keyed by a throwaway
+    /// id that nothing could join: a fresh launch and each `--resume` filed
+    /// under different keys, so a conversation's authorized spend could never be
+    /// totalled from the log.
+    ///
+    /// A no-op once the record is closed: a record already written cannot be
+    /// re-filed, and silently changing a finished task's key would be a second
+    /// way to lose it.
+    pub fn rebind_session_id(&self, session_id: &str) {
+        let mut state = self.inner.lock();
+        if state.finished {
+            return;
+        }
+        state.session_id.clear();
+        state.session_id.push_str(session_id);
+    }
+
     /// Charge one settled dispatch.
     pub fn charge(&self, dispatch: SpendAuditDispatch) {
         self.inner.lock().dispatches.push(dispatch);

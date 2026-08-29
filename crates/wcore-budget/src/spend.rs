@@ -348,6 +348,21 @@ impl EscalationGate {
         }
     }
 
+    /// The session every [`EscalationRecord`] this gate emits is stamped with.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Re-point the gate at the session identity the caller has since
+    /// established. See `SpendAuditor::rebind_session_id` (#1161): the gate is
+    /// built at engine construction, before any session id exists, and an
+    /// escalation stamped with a provisional id is an escalation nobody can
+    /// attribute to the conversation that authorized it.
+    pub fn rebind_session_id(&mut self, session_id: impl Into<String>) {
+        self.session_id = session_id.into();
+    }
+
     /// The model this run is currently authorized up to.
     #[must_use]
     pub fn authorized(&self) -> &ModelSpendProfile {
