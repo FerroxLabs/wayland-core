@@ -186,9 +186,31 @@ enum Swap {
 /// primitive's atomicity: a second `RENAME_EXCHANGE` / `RENAME_SWAP` where the
 /// publish was one, and a replacing rename on Windows where the publish was
 /// `ReplaceFileW`.
+///
+/// #1155 residual: the discriminant is load-bearing and must not be discarded.
+/// Only [`Swap::Displaced`] put the pre-image back. [`Swap::Vacant`] means the
+/// destination name has disappeared since the publish (an external `rm`, a
+/// `git checkout`, an editor that unlinks before it writes) and
+/// [`Swap::Unsupported`] means the primitive refused; in both, NOTHING was
+/// exchanged, the caller's new bytes stand published, and `displaced` holds
+/// the only surviving copy of what the check refused to replace. Answering
+/// `Ok` there sent control on to `discard_displaced`, which unlinked that
+/// copy, and `atomic_write_checked` then returned `Ok(Err(why))` -- whose
+/// contract is "the destination is exactly as it was" -- over published data
+/// loss. Both must be errors, so the `keep_displaced` preservation path runs
+/// and the bytes are named to the user.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn restore(displaced: &Path, dest: &Path) -> std::io::Result<()> {
-    publish_displacing(displaced, dest).map(|_| ())
+    match publish_displacing(displaced, dest)? {
+        Swap::Displaced(_) => Ok(()),
+        Swap::Vacant => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the destination no longer exists, so the pre-image could not be exchanged back",
+        )),
+        Swap::Unsupported => Err(std::io::Error::other(
+            "the filesystem refused the exchange, so the pre-image could not be put back",
+        )),
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -798,5 +820,68 @@ mod tests {
         // pre-rename error path.
         let result = atomic_write(&path, b"contents");
         assert!(result.is_err());
+    }
+    /// #1155 residual. A rollback that exchanged NOTHING must never be
+    /// reported as a clean refusal.
+    ///
+    /// `restore` is the inverse exchange. It can answer three ways, and only
+    /// one of them put the pre-image back. `Swap::Vacant` means the
+    /// destination name has disappeared since the publish -- an external
+    /// `rm`, a `git checkout`, an editor that unlinks before it writes --
+    /// which is exactly the non-cooperating concurrent writer this module
+    /// exists to survive. `Swap::Unsupported` means the primitive refused.
+    /// In both, nothing was swapped: the caller's new bytes are still
+    /// published (or the name is gone), and `displaced` holds the ONLY
+    /// surviving copy of what the check refused to replace.
+    ///
+    /// Discarding the discriminant answered `Ok` for all three. Control then
+    /// fell to `discard_displaced`, which unlinked that only copy, and
+    /// `atomic_write_checked` returned `Ok(Err(why))` -- whose documented
+    /// contract is "the destination is exactly as it was". The caller
+    /// (`edit.rs`, `write.rs`) rendered `changed_under_write` and told the
+    /// user nothing had been written, over published data loss.
+    ///
+    /// Only the exchange platforms are affected: the Windows arm is a
+    /// replacing `fs::rename`, which reports the failure it had.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_rollback_that_exchanged_nothing_is_not_a_clean_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, b"the user's only copy").unwrap();
+
+        let victim = p.clone();
+        let outcome = atomic_write_checked(&p, b"ours", move |observed| {
+            assert_eq!(observed, Some(&b"the user's only copy"[..]));
+            // The concurrent writer unlinks the destination while we judge.
+            std::fs::remove_file(&victim).unwrap();
+            Err("changed under write".to_owned())
+        });
+
+        let err = match outcome {
+            Err(e) => e,
+            Ok(clean) => {
+                let survivors: Vec<_> = std::fs::read_dir(dir.path())
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name())
+                    .collect();
+                panic!(
+                    "a rollback that exchanged nothing was reported as {clean:?} \
+                     -- the caller will tell the user the destination is untouched. \
+                     Surviving files in the directory: {survivors:?}"
+                )
+            }
+        };
+        let msg = err.to_string();
+        let kept = msg
+            .split("it is preserved at ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("the error must name where the bytes were kept: {msg}"))
+            .trim();
+        assert_eq!(
+            std::fs::read(kept).unwrap(),
+            b"the user's only copy",
+            "the preserved file must hold the bytes the refusal was protecting"
+        );
     }
 }
