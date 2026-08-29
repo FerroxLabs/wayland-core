@@ -13164,6 +13164,25 @@ impl AgentEngine {
             // Stateful across deltas, because a tag straddles chunk
             // boundaries; reset per attempt alongside `assistant_text`.
             let mut assistant_reasoning = ReasoningFilter::new();
+            // #908 — how much text the provider actually streamed, counted
+            // BEFORE the filter above removed any of it.
+            //
+            // The empty-turn guard below has to tell two very different
+            // situations apart: the provider sent nothing, and the provider
+            // sent a reply that was entirely reasoning and we deleted it. They
+            // look identical from `assistant_text`, and only the first is an
+            // endpoint problem. Nothing else here can distinguish them:
+            // `assistant_content` carries NATIVE thinking blocks only, so an
+            // open-weights model emitting inline `<think>`/`<thought>` tags —
+            // the class this issue was reported against — leaves it empty and
+            // falls to the "the endpoint may be incompatible" diagnosis, which
+            // sends the user to debug a working endpoint. A count is enough to
+            // separate them and costs one `usize` per turn.
+            //
+            // Declared without an initial value, like `stop_reason` below: the
+            // per-attempt reset inside `'stream` is the only assignment that
+            // can be observed, so an initialiser here would be dead.
+            let mut raw_text_chars: usize;
             let mut thinking_text = String::new();
             // C-4b — an opaque provider signature covering this turn's
             // reasoning (Gemini `thoughtSignature` on a thought part). Kept
@@ -13199,6 +13218,7 @@ impl AgentEngine {
                 // double-commits text/tool-calls from a failed attempt.
                 assistant_text.clear();
                 assistant_reasoning.reset();
+                raw_text_chars = 0;
                 thinking_text.clear();
                 let _ = thinking_signature.take();
                 tool_calls.clear();
@@ -14256,6 +14276,7 @@ impl AgentEngine {
                             // renders a collapsed `Thought:` block. Only the
                             // durable copy is filtered (#908).
                             self.output.emit_text_delta(&text, &self.current_msg_id);
+                            raw_text_chars += text.chars().count();
                             assistant_text.push_str(&assistant_reasoning.process(&text));
                         }
                         LlmEvent::ToolUse {
@@ -15446,6 +15467,23 @@ impl AgentEngine {
                      content. That is the provider reporting a failure on this request, not \
                      a wire-format mismatch — check the provider's own error detail (and any \
                      content filter or safety stop) for it."
+                } else if raw_text_chars > 0 {
+                    // #908. The provider streamed text and the reasoning filter
+                    // removed all of it, so `assistant_text` is empty for a
+                    // reason that has nothing to do with the endpoint. This is
+                    // the inline-tag twin of the branch below: `<think>` /
+                    // `<thought>` / `<reasoning>` arrive as ordinary text
+                    // deltas, never as `assistant_content`, so without this
+                    // count the turn falls through to the incompatibility
+                    // diagnosis and the user is sent to verify a wire format
+                    // that is working perfectly. Reported here rather than
+                    // logged: RUST_LOG is unset on a default install, so a
+                    // `warn!` would reach nobody.
+                    "This model's entire reply arrived inside reasoning tags \
+                     (<think>, <thought>, <reasoning>), so once they were stripped there was no \
+                     answer left to show. The endpoint and the wire format are working — this \
+                     model emitted no answer text outside its own reasoning. Ask again, or use \
+                     a model that emits its answer outside its reasoning tags."
                 } else if !assistant_content.is_empty() {
                     // Reasoning, and nothing else. The model thought and then
                     // said nothing; the thinking is not an answer and on most

@@ -50,6 +50,12 @@
 //! `wcore-browser::readability::extract` helper); non-HTML responses are
 //! returned verbatim (`application/json`, `text/plain`, etc.) up to a
 //! size cap.
+//!
+//! `text` is additionally capped at [`WEB_FETCH_MAX_TEXT_CHARS`] before it
+//! enters the conversation (wayland#1150). When that trim fires, `truncated`
+//! is `true` and a `truncation_notice` field is added saying how much was
+//! dropped and what to do about it - so the model can tell the user rather
+//! than reasoning over a silently shortened page.
 
 use std::sync::Arc;
 
@@ -76,6 +82,51 @@ pub const WEB_FETCH_MAX_TIMEOUT_MS: u32 = 90_000;
 
 /// Cap on the body the backend returns to us.
 pub const WEB_FETCH_MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// Cap on the page text this tool puts into the MODEL'S CONTEXT.
+///
+/// Deliberately a different, much smaller number than
+/// [`WEB_FETCH_MAX_RESPONSE_BYTES`], because the two bound different things.
+/// That one bounds the network read and the readability parser's input - a
+/// transport and CPU budget, paid once. This one bounds what enters the
+/// conversation, and a tool result is not paid for once: it is replayed in the
+/// `messages` array of EVERY later request for the rest of the session.
+///
+/// wayland#1150 measured the gap. One `WebFetch` of an HTML page put about
+/// 50,000 characters of page text into a chat holding two visible sentences,
+/// and the next turn cost 83,208 input tokens against a local model that then
+/// spent minutes in prefill. 50,000 was not arbitrary: it is
+/// [`crate::tool_output_limits::DEFAULT_MAX_BYTES`], the shared cap every tool
+/// inherits from [`crate::Tool::max_result_size`], and it is sized for a
+/// command's stdout rather than for an unbounded remote document.
+///
+/// 20,000 characters is roughly 5,000 tokens - the budget [`crate::grep`]
+/// already takes for the same reason (unbounded external content, read once
+/// and reasoned about), and more than the readable body of essentially any
+/// article or documentation page. A model that needs what was cut is told so
+/// by the notice below and can fetch a narrower URL; silently dropping the
+/// tail is the half of this that would be its own bug.
+pub const WEB_FETCH_MAX_TEXT_CHARS: usize = 20_000;
+
+/// Trim `text` to [`WEB_FETCH_MAX_TEXT_CHARS`] characters, returning the kept
+/// prefix and how many characters were dropped.
+///
+/// Character-wise, not byte-wise. The cap is about context cost, the notice
+/// reports a character count, and slicing at a byte offset would either panic
+/// or cut a multi-byte scalar in half - `char_indices` gives a real boundary
+/// for free.
+fn cap_page_text(text: &str) -> (String, usize) {
+    let total = text.chars().count();
+    if total <= WEB_FETCH_MAX_TEXT_CHARS {
+        return (text.to_string(), 0);
+    }
+    let end = text
+        .char_indices()
+        .nth(WEB_FETCH_MAX_TEXT_CHARS)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    (text[..end].to_string(), total - WEB_FETCH_MAX_TEXT_CHARS)
+}
 
 /// A single fetch request handed to the backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +352,22 @@ impl Tool for WebFetchTool {
         false
     }
 
+    fn max_result_size(&self) -> usize {
+        // Headroom over the text cap so `orchestration::truncate_result` never
+        // fires on this tool's result. That cut compares BYTES against this
+        // number and, above it, replaces the middle of the serialized JSON
+        // with a marker - destroying the envelope and leaving the surviving
+        // head declaring `"truncated": false` over a body that was truncated
+        // twice. Bounding the payload here, in the field the trim applies to,
+        // is `pdf_tool` / `doc_tool` / `email_parse_tool`'s pattern.
+        //
+        // Six bytes per character is the worst case for JSON-escaped text (a
+        // control character renders as `\u00XX`); the rest covers the URL
+        // (itself capped at `WEB_FETCH_MAX_URL_BYTES`), the content type and
+        // the notice.
+        WEB_FETCH_MAX_TEXT_CHARS * 6 + WEB_FETCH_MAX_URL_BYTES + 4_096
+    }
+
     fn category(&self) -> ToolCategory {
         ToolCategory::Mcp
     }
@@ -340,17 +407,41 @@ impl Tool for WebFetchTool {
                 text,
                 truncated,
                 final_url,
-            } => ToolResult {
-                content: json!({
+            } => {
+                // wayland#1150. The backend's cap bounds the read; this bounds
+                // the CONTEXT. Trimming here, on the `text` field, rather than
+                // leaving it to the registry-level cut in
+                // `orchestration::truncate_result`, is the whole point: that
+                // cut slices the SERIALIZED JSON in half and splices a marker
+                // into the middle, which leaves the model an unparseable
+                // envelope whose surviving head still says `"truncated": false`.
+                let total = text.chars().count();
+                let (text, dropped) = cap_page_text(&text);
+                let mut body = json!({
                     "url": final_url,
                     "status": status,
                     "content_type": content_type,
                     "text": text,
-                    "truncated": truncated,
-                })
-                .to_string(),
-                is_error: false,
-            },
+                    "truncated": truncated || dropped > 0,
+                });
+                if dropped > 0 {
+                    // Say it in the payload, not in a log line: `warn!` never
+                    // reaches a user whose RUST_LOG is unset, which is every
+                    // default install. The model is the one that has to know
+                    // the page is incomplete, and it only reads this.
+                    body["truncation_notice"] = json!(format!(
+                        "Only the first {kept} characters of this page are in context; \
+                         {dropped} more were dropped (the page held {total}). Say so if you \
+                         summarise it. If what you need is missing, fetch a more specific URL \
+                         rather than this one again - a repeat fetch returns the same prefix.",
+                        kept = WEB_FETCH_MAX_TEXT_CHARS,
+                    ));
+                }
+                ToolResult {
+                    content: body.to_string(),
+                    is_error: false,
+                }
+            }
             FetchOutcome::HttpError { status, message } => {
                 err_result(format!("WebFetch HTTP {status}: {message}"))
             }
@@ -410,6 +501,142 @@ mod tests {
         let r = tool.execute(json!({})).await;
         assert!(r.is_error);
         assert!(r.content.contains("missing required `url`"));
+    }
+
+    // -- wayland#1150: a fetched page must not blow the context window ----
+
+    fn page_backend(text: String) -> Arc<CapturingFetchBackend> {
+        Arc::new(CapturingFetchBackend::new(FetchOutcome::Ok {
+            status: 200,
+            content_type: "text/html".to_string(),
+            text,
+            truncated: false,
+            final_url: "https://93.184.216.34/".to_string(),
+        }))
+    }
+
+    async fn fetch_page(text: String) -> Value {
+        let tool = WebFetchTool::new(page_backend(text));
+        let r = tool
+            .execute(json!({ "url": "https://93.184.216.34" }))
+            .await;
+        assert!(!r.is_error, "unexpected error: {}", r.content);
+        serde_json::from_str(&r.content).unwrap_or_else(|e| {
+            panic!(
+                "a WebFetch result must be parseable JSON - {e}: {}",
+                r.content
+            )
+        })
+    }
+
+    /// **wayland#1150.** A single fetch must not put an unbounded document into
+    /// the conversation.
+    ///
+    /// The reporter measured a `WebFetch` result of about 50,000 characters of
+    /// HTML sitting in a chat with two visible sentences in it, and the next
+    /// turn costing 83,208 input tokens against a local model. A tool result is
+    /// replayed to the provider on every subsequent turn, so this is a
+    /// per-turn cost for the rest of the session, not a one-off.
+    ///
+    /// The size in this test is the reporter's own.
+    #[tokio::test]
+    async fn a_large_fetched_page_does_not_enter_the_context_whole() {
+        let page = "A".repeat(50_000);
+        let body = fetch_page(page.clone()).await;
+        let text = body["text"].as_str().expect("the result must carry `text`");
+        assert!(
+            text.chars().count() <= WEB_FETCH_MAX_TEXT_CHARS,
+            "a {}-character page put {} characters into the context; the cap is {}",
+            page.chars().count(),
+            text.chars().count(),
+            WEB_FETCH_MAX_TEXT_CHARS
+        );
+    }
+
+    /// Trimming silently would trade one bug for another: the model would
+    /// summarise a page it believes it read in full. `truncated` must flip and
+    /// the notice must name the missing amount.
+    #[tokio::test]
+    async fn a_trimmed_page_says_so_and_says_how_much() {
+        let page = "A".repeat(50_000);
+        let body = fetch_page(page).await;
+        assert_eq!(
+            body["truncated"].as_bool(),
+            Some(true),
+            "a trimmed page reported truncated=false, so the model has no way to know: {body}"
+        );
+        let notice = body["truncation_notice"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a trimmed page carries no truncation_notice: {body}"));
+        assert!(
+            notice.contains("30000")
+                || notice.contains(&(50_000 - WEB_FETCH_MAX_TEXT_CHARS).to_string()),
+            "the notice must name how much was dropped, got: {notice}"
+        );
+    }
+
+    /// NEGATIVE CONTROL. A page under the cap must be passed through untouched
+    /// and must NOT claim to have been trimmed - otherwise the assertions above
+    /// would pass against a tool that mangles every fetch.
+    #[tokio::test]
+    async fn a_page_under_the_cap_is_untouched_and_not_marked_truncated() {
+        let page = "B".repeat(WEB_FETCH_MAX_TEXT_CHARS);
+        let body = fetch_page(page.clone()).await;
+        assert_eq!(body["text"].as_str(), Some(page.as_str()));
+        assert_eq!(body["truncated"].as_bool(), Some(false));
+        assert!(
+            body.get("truncation_notice").is_none(),
+            "an untrimmed page must not carry a truncation notice: {body}"
+        );
+    }
+
+    /// The cut must land on a character boundary. A multi-byte page trimmed at
+    /// a byte offset either panics or emits a lone continuation byte, and the
+    /// second is worse: it survives into the context as replacement characters.
+    #[tokio::test]
+    async fn a_multibyte_page_is_cut_on_a_character_boundary() {
+        // Every scalar is 3 bytes, so no byte-offset cut can land cleanly.
+        let page = "\u{4f60}".repeat(50_000);
+        let body = fetch_page(page).await;
+        let text = body["text"].as_str().expect("the result must carry `text`");
+        assert_eq!(
+            text.chars().count(),
+            WEB_FETCH_MAX_TEXT_CHARS,
+            "a CJK page was cut to the wrong length, which means it was cut by bytes"
+        );
+        assert!(
+            !text.contains('\u{fffd}'),
+            "the trim produced a replacement character, so it split a scalar"
+        );
+    }
+
+    /// The registry-level cut must never reach this tool's envelope.
+    ///
+    /// `orchestration::truncate_result` compares `content.len()` in BYTES
+    /// against `max_result_size()` and, above it, replaces the middle of the
+    /// string with `... [truncated N chars] ...`. On a JSON payload that is not
+    /// a truncation, it is corruption: the model gets an unparseable object
+    /// whose surviving head still reads `"truncated": false`. Bounding the
+    /// payload inside the tool is only half the fix; this is the half that
+    /// stops the outer cut firing at all.
+    #[tokio::test]
+    async fn the_worst_case_result_fits_inside_this_tools_declared_budget() {
+        // Worst case for the trim: a page of multi-byte scalars, so the kept
+        // prefix is `WEB_FETCH_MAX_TEXT_CHARS` characters of 3 bytes each, plus
+        // the notice and the envelope.
+        let page = "\u{4f60}".repeat(50_000);
+        let tool = WebFetchTool::new(page_backend(page));
+        let r = tool
+            .execute(json!({ "url": "https://93.184.216.34" }))
+            .await;
+        assert!(!r.is_error, "unexpected error: {}", r.content);
+        assert!(
+            r.content.len() <= tool.max_result_size(),
+            "a worst-case result is {} bytes against a declared budget of {} - the registry cut \
+             fires and the model receives wreckage instead of JSON",
+            r.content.len(),
+            tool.max_result_size()
+        );
     }
 
     #[tokio::test]

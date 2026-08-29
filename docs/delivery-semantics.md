@@ -653,6 +653,16 @@ wrong costs in each direction, and names, per platform, the exact credential the
 probe is waiting on. Two of the seven are runnable today, one needs a token refresh, and four
 need a credential nobody on the programme holds.
 
+**The probe itself is committed**, at
+`crates/wcore-channels-registry/tests/live_message_cap_boundary.rs` (wayland#934 item 2). It
+holds one cell per capped adapter carrying either the boundary that was measured and what the
+platform did one character above it, or the credential the measurement is waiting on. Three of
+its checks run on every ordinary `cargo test`: the shipped cap must not exceed a measured
+boundary, every `cap_measured = live` row here must have a measured cell there (and the
+reverse), and the never-driven cells are PRINTED as a census so an unmeasured cap is loud
+rather than absent. The seven live cells are `#[ignore]`d and each PANICS naming its missing
+variable, because a probe that cannot run must not report a pass.
+
 ---
 
 ## 8. Discord was wrong, and how it was found

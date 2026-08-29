@@ -745,6 +745,14 @@ fn no_cap_is_claimed_measured_at_a_real_platform_yet() {
     // 2026-08-27 (slack 4,040 intact / 4,041 splits; discord 2,000 ok / 2,001 refused
     // 400 50035). The guard still holds the remaining five to the same bar, so it keeps
     // its teeth: it reddens the moment a sixth platform claims `live` without evidence.
+    //
+    // Those two numbers are no longer only a date in a comment. `tests/
+    // live_message_cap_boundary.rs` carries them as a committed cell per platform,
+    // checks each against the cap the production factory builds, and re-derives it
+    // when the live cell is run. That file also enforces the other half of this
+    // exemption from the opposite side: a `cap_measured = live` row with no measured
+    // cell there fails, and a measured cell with no `live` row fails too. Neither
+    // direction of a half-updated commit can survive both files.
     let unproven: Vec<&str> = claimed
         .iter()
         .copied()
