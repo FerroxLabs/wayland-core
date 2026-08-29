@@ -368,6 +368,17 @@ impl EscalationGate {
     /// 2. an `Unpriced` target always is — an unknown price cannot be shown to
     ///    be cheaper, and assuming it is, is the exact mistake the pricing
     ///    layer's `priced` flag exists to prevent;
+    /// 2b. but an `Unpriced` BASELINE can never be exceeded, which is the
+    ///    symmetric case and the one rule 4 gets wrong on its own. An
+    ///    unpriced profile carries `blended_usd_per_mtok == 0.0` because no
+    ///    price was FOUND, not because the price IS zero, so a bare numeric
+    ///    comparison reads every catalogued model as an escalation above it.
+    ///    That turns one missing pricing row into a total loss of provider
+    ///    fallback and tier routing for the session, and a missing row must
+    ///    not be able to take the run down. Nothing is weakened by admitting
+    ///    here: [`SpendPolicy`] is checked first and independently, so
+    ///    `no-paid` still refuses a metered target and `local-only` still
+    ///    refuses a hosted one, whatever this gate says;
     /// 3. moving from an unpaid baseline (local or catalogued-free) onto ANY
     ///    paid model always is, whatever the rate: $0 to $0.25/Mtok is an
     ///    infinite proportional increase and the run was authorized to spend
@@ -382,6 +393,12 @@ impl EscalationGate {
         }
         if requested.billing == ModelBilling::Unpriced {
             return self.authorized.billing != ModelBilling::Unpriced;
+        }
+        if self.authorized.billing == ModelBilling::Unpriced {
+            // Rule 2b: the ceiling is unknown, so nothing can be shown to
+            // exceed it. See the doc comment above for why refusing instead
+            // would be worse than admitting.
+            return false;
         }
         if !self.authorized.billing.is_paid() && requested.billing.is_paid() {
             return true;
@@ -551,6 +568,39 @@ mod tests {
         let gate = EscalationGate::new("s1", metered("haiku", 1.0));
         assert!(gate.is_escalation(&unpriced("flux-auto")));
         assert!(gate.admit(&unpriced("flux-auto")).is_err());
+    }
+
+    #[test]
+    fn an_unpriced_baseline_is_not_a_zero_ceiling_that_refuses_every_priced_model() {
+        // The symmetric twin of the rule-2 case above, and a real outage when
+        // it is missed: a session whose CONFIGURED model has no catalog row
+        // gets an unpriced baseline, whose `blended_usd_per_mtok` reads 0.0
+        // because no price was found. Under a bare numeric comparison every
+        // catalogued model then sits "above" it, so the configured provider
+        // fallback and the smart-routing tier swap are both refused and a
+        // primary failure takes the whole turn down. Nothing may be shown to
+        // exceed a ceiling nobody could read.
+        let gate = EscalationGate::new("s1", unpriced("some-private-endpoint"));
+        for target in [metered("opus", 75.0), metered("haiku", 0.25), free("flux-free")] {
+            assert!(
+                !gate.is_escalation(&target),
+                "{} must not read as an escalation above an unpriced baseline",
+                target.label()
+            );
+            assert!(gate.admit(&target).is_ok());
+        }
+        // ... and the mode policy is what still binds, independently.
+        assert!(
+            SpendPolicy::new(SpendMode::NoPaid)
+                .admit(&metered("opus", 75.0))
+                .is_err(),
+            "admitting at the gate must not admit at the mode policy"
+        );
+        assert!(
+            SpendPolicy::new(SpendMode::LocalOnly)
+                .admit(&free("flux-free"))
+                .is_err()
+        );
     }
 
     #[test]
