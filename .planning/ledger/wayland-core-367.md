@@ -13,6 +13,11 @@ criteria:
     owner: core
     note: "The ten lines 8d6add71 added to crates/wcore-cli/tests/support/owned_tree.rs are removed on lane/f13-fin-handoff-audit. This criterion cites the regression test rather than the source because the test is what makes the removal checkable: with the instrument present it fails 3 of 3 in a workspace run AND 3 of 3 alone on an otherwise idle box -- verbatim, `the grandchild 312060 outlived the guard - killing the direct child does not reach a backgrounded descendant, which is exactly the surviving process TREE the ticket reported (FerroxLabs/wayland#1156)` at harness_owns_spawned_trees.rs:121:5 -- and with it removed the binary is 24/24 green. That IS the red arm; it did not have to be constructed, it was running in the integration branch."
   - id: c2
+    text: "A red-arm instrument cannot be merged by accident: a test or CI grep fails when a shipped source file under crates/ contains black_box(true) or a RED ARM marker, with a positive control so the grep cannot pass by reading nothing"
+    state: not-met
+    owner: core
+    note: "Seeded 2026-08-29 by the 0.13.12 bookkeeping pass: this open issue had NO ledger file, so it was invisible to scripts/check-criteria-ledger.py's coverage check -- the check that exists because an entire tracker once went unseen for a release. The criterion text is the ticket's own acceptance wording. Nothing has been graded against the tree by this pass."
+  - id: c3
     text: "An integration run's failing-test SET is compared against a named allow-list, so `1 failed` can never be read as `the known 1 failed`"
     state: not-met
     owner: core

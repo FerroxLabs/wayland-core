@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Flaky: harness_tui_flow narrow_terminal_resize_stays_coherent_without_panicking times out under parallel load"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: 9de21aa1
 criteria:
   - id: c1
     text: "PtyHarness::resize resizes the vt100 parser as well as the PTY master"
@@ -14,10 +14,10 @@ criteria:
     note: "The body calls parser.set_size(rows, cols) before master.resize(). set_size rather than a fresh Parser, deliberately: a cleared grid breaks the diff-renderer and was measured to fail the chrome wait on a healthy binary."
   - id: c2
     text: "The post-resize predicate can only be satisfied by a frame that is actually 80 columns wide"
-    state: met
+    state: not-met
     evidence: "symbol:crates/wcore-cli/tests/harness_tui_flow.rs::widest_painted_row"
     owner: core
-    note: "DEVIATION FROM THE WORDING, flagged. The discriminating predicate is at 140 columns, not 80: the test shrinks to 80 and asks the PROCESS about survival, then widens to 140 (past the 120 boot grid) and requires wait_for_width(140), so a glyph past column 120 cannot be pre-resize residue. 536fbfbe removed the post-shrink screen predicate because a healthy binary need not fully repaint at the intermediate width. widest_painted_row reads the GRID cell by cell rather than screen_text(), because vt100 contents() re-joins wrapped rows and would have passed against the defect."
+    note: "DEVIATION FROM THE WORDING, flagged. The discriminating predicate is at 140 columns, not 80: the test shrinks to 80 and asks the PROCESS about survival, then widens to 140 (past the 120 boot grid) and requires wait_for_width(140), so a glyph past column 120 cannot be pre-resize residue. 536fbfbe removed the post-shrink screen predicate because a healthy binary need not fully repaint at the intermediate width. widest_painted_row reads the GRID cell by cell rather than screen_text(), because vt100 contents() re-joins wrapped rows and would have passed against the defect. REFUTED 2026-08-29 by the 0.13.12 close-sweep, recorded verbatim: NOT MET AS WRITTEN, and the ledger says so itself. The criterion demands a post-resize predicate satisfiable only by a frame 'actually 80 columns wide'. No such predicate exists: after `h.resize(NARROW_COLS=80, …)` the test sleeps 300ms and asserts only `h.is_running()` (line 627). The discriminating predicate is `wait_for_width(140)` at line 663. Two things follow. (a) The substitution is HARDER, not easier, and the literal wording would have been VACUOUS: after `set_size` truncates the grid to 80, the surviving 120-column boot residue already fills col 79, so `widest_painted_row()==80` is trivially true with no repaint at all. So c2's own wording describes an unfalsifiable check and could not have been implemented as stated. (b) There is nonetheless a real, disclosed coverage loss: the pre-fix test asserted the chrome was present at the narrow width; it now asserts only that the process is alive there. A surface that corrupts at 80 columns and recovers on widening passes. The test name still promises 'stays_coherent'. Remainder is a ledger-text correction (restate c2 at 140 columns) plus, optionally, an owned decision on the narrow-width coherence gap — no engineering is blocked."
   - id: c3
     text: "Making PtyHarness::resize a no-op turns the test red"
     state: met

@@ -26,7 +26,7 @@ criteria:
     text: "Both osv_check log-visibility tests keep their exact-equality assertion on [Level(Error)]"
     state: not-met
     owner: core
-    note: "A guard on the fix, not work of its own. The assertion is the security-visibility invariant for a fail-open SSRF refusal: at RUST_LOG unset the operator only ever sees ERROR. Ignoring the test, relaxing it to 'at most one ERROR', or moving it to nextest-only is refused."
+    note: "MERGE 2026-08-30: the bookkeeping entry phrased this same criterion as `...; weakening either is refused` -- identical intent, recorded here rather than rewritten into the text because the sentence is the contract. A guard on the fix, not work of its own. The assertion is the security-visibility invariant for a fail-open SSRF refusal: at RUST_LOG unset the operator only ever sees ERROR. Ignoring the test, relaxing it to 'at most one ERROR', or moving it to nextest-only is refused."
   - id: c5
     text: "cargo test --workspace --lib --no-fail-fast passes N>=10 consecutive times on hetzner-dsm, run count recorded"
     state: not-met
