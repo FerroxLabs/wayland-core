@@ -49,15 +49,38 @@
 //! OPEN WEIGHTS, STATED HONESTLY. This module used to claim "no open-weights
 //! family is listed here". That was false on its own contents: the MiniMax M2
 //! and M3 rows and the DeepSeek V4 rows below are open-weights ids, served by
-//! third parties at their own limits -- `minimax-m2.5` runs 65,536 to 228,700
-//! across 46 host rows on the 2026-08-28 pull, `deepseek-v4-pro` 128,000 to
-//! 1,050,000 across 74 -- and `model_output_ceiling` is keyed on the model id
-//! ALONE, so each arm is handed to every host serving that name. Those twelve
-//! rows predate this table's guards and are tracked in
-//! FerroxLabs/wayland#1232; do not read them as precedent. What IS enforced
-//! is the forward direction: `check-model-limits-freshness.py` will not demand
-//! an arm for a NEW open-weights id whose hosts disagree by 2x or more, it
-//! REPORTs and says why (AGENTS.md's third model-limits rule).
+//! third parties at their own limits, and `model_output_ceiling` is keyed on
+//! the model id ALONE, so each arm is handed to every host serving that name.
+//!
+//! PROVENANCE, MEASURED -- an earlier draft of this paragraph said the twelve
+//! rows "predate this table's guards", and that conflated the ROWS with the
+//! ARMS. The rows are new: `git log --oneline -- limits/passthrough.rs` shows
+//! this file has two commits and both are #1176's. The ARMS they assert are
+//! older, and that is what predates the guards:
+//! `git log --oneline -S "minimax-m2.5" -- limits.rs` -> `e17a33b22` (the #165
+//! fix), `-S "deepseek-v4-pro"` -> `30dad572c` then `9d3f33c3e`, and
+//! `git show beb335953^:crates/wcore-config/src/limits.rs | grep minimax`
+//! finds `minimax-m2.5` already in the chain one commit before this file
+//! existed (control: `-S "claude"` over the same path returns 4 commits, so
+//! the query is not silently empty). #1176 added no arm; it pinned arms that
+//! were already shipping.
+//!
+//! Twelve of the rows below are open-weights ids. On the 2026-08-30 pull SEVEN
+//! of them violate AGENTS.md's third rule -- `deepseek-v4-flash` (8.0x across
+//! 61 hosts), `deepseek-v4-flash-0731` (5.1x/35), `deepseek-v4-pro` (8.2x/64),
+//! `minimax-m2` (5.1x/19), `minimax-m2.1` (5.1x/24), `minimax-m2.5`
+//! (65,536-228,700, 3.5x/44) and `minimax-m3` (4.0x/43). The other five have
+//! hosts that agree and are not violations. Removing an arm changes product
+//! behaviour -- an arm revokes `should_omit_max_tokens` -- so the removals are
+//! graded on FerroxLabs/wayland#1232, not here. Do not read them as precedent.
+//!
+//! Both directions ARE enforced by `check-model-limits-freshness.py`:
+//! `scan_passthrough` will not DEMAND an arm for a new open-weights id whose
+//! hosts disagree by 2x or more, and `scan_open_weights_arms` reads this
+//! table's own contents on every run, so a new host-variable open-weights arm
+//! that is ADDED here FAILS the release. The seven above are listed, dated and
+//! owned in `OPEN_WEIGHTS_ARM_DEBT`, keyed on the exact model id so that
+//! listing one cannot excuse the next.
 //!
 //! Ids are recorded in their CANONICAL vendor spelling. The lookup is a
 //! substring match, so the provider-specific dressings -- `anthropic.`,

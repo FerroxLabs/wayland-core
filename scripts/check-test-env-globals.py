@@ -60,6 +60,13 @@ HOW A HELPER WRITE IS AUDITED
     A key with even one UNSERIALIZED-TEST caller is `UNSERIALIZED-HELPER` and
     FAILS exactly like a direct write.
 
+    Pre-existing helper hazards are listed in
+    `.config/env-global-helper-debt.txt`, keyed on `<file>.rs::<writing fn>`
+    -- the SITE. A line is an exemption for ONE write, not for a (binary, var)
+    class: a second helper writing the same var in the same binary is a new
+    instance and fails. Direct writes are never exempt, an expired line fails,
+    and a line matching nothing fails as stale.
+
     Under-attribution is the safe direction and is taken deliberately:
     receiver-style calls through a re-export, or a key whose name collides,
     end up in the reported residue rather than in the verdict.
@@ -578,6 +585,41 @@ _HELPER_SERIAL = (
 # the write, so convicting it would be convicting an unreachable line -- the
 # residue bucket, not the verdict.
 _HELPER_UNCALLED = _GUARD + '    #[test]\n    fn t() { assert!(true); }\n' + _SIBLING
+# A SECOND guard writing the SAME var in the SAME binary from a DIFFERENT site.
+# This is the shape the debt file must not excuse for free: a line written for
+# `EnvPin::new` says nothing about `EnvPin2::newer`.
+_GUARD2 = (
+    "    struct EnvPin2;\n"
+    "    impl EnvPin2 {\n"
+    "        fn newer() -> Self { unsafe { std::env::set_var(\"SHARED_V\", \"y\") }; Self }\n"
+    "    }\n"
+)
+_HELPER_TWO_SITES = (
+    _GUARD + _GUARD2
+    + '    #[test]\n    fn t() { let _p = EnvPin::new(); }\n'
+    + '    #[test]\n    fn u() { let _q = EnvPin2::newer(); }\n'
+    + _SIBLING
+)
+_DEMO_SITE1 = "crates/demo/src/lib.rs::new"
+_DEMO_SITE2 = "crates/demo/src/lib.rs::newer"
+_DEMO_DIRECT = "crates/demo/src/lib.rs::t"
+
+
+def _debt_line(site, expiry="2999-01-01"):
+    return ("%s  demo  SHARED_V  %s  gh#1233  Stated debt, long enough to be a "
+            "real reason." % (expiry, site))
+
+
+def _debt_gate(root, lines, today="2026-01-01"):
+    """-> (fired, stale_keys, parse_complaints) over a synthetic tree.
+
+    Runs the REAL `partition` and the REAL parser, so the self-test grades the
+    code the gate runs rather than a restatement of it.
+    """
+    pairs, sites, _, ntests = scan(discover(root))
+    debt, complaints = parse_debt_lines(lines, today)
+    live, _s, _e, used = partition(root, pairs, sites, ntests, debt)
+    return bool(live), sorted(set(debt) - used), complaints
 
 
 # An integration test file carries no `#[cfg(test)]`; the file IS the test
@@ -661,6 +703,48 @@ def self_test():
             % (label, "FIRE" if must_fire else "quiet", "FIRE" if fired else "quiet",
                "ok" if good else "SELF-TEST FAILED")
         )
+
+    # ── the debt file, proven in both directions ────────────────────────
+    #
+    # D2 is the case a verifier broke this gate on: the exemption used to be
+    # keyed on (binary, var), so a brand-new helper writing an already-listed
+    # var in an already-listed binary landed silently. D3 is its control --
+    # the same tree, both sites listed, quiet -- so D2's fire is attributable
+    # to the missing LINE and not to the two-guard shape.
+    debt_cases = [
+        ("debt: the listed site is quiet",
+         _HELPER_UNSERIAL, [_debt_line(_DEMO_SITE1)], False, False),
+        ("debt: a NEW site of a listed (binary,var) fires",
+         _HELPER_TWO_SITES, [_debt_line(_DEMO_SITE1)], True, False),
+        ("debt: both sites listed, quiet (control for the above)",
+         _HELPER_TWO_SITES, [_debt_line(_DEMO_SITE1), _debt_line(_DEMO_SITE2)],
+         False, False),
+        ("debt: a line whose site is gone is STALE",
+         _HELPER_UNSERIAL,
+         [_debt_line(_DEMO_SITE1), _debt_line("crates/demo/src/lib.rs::gone")],
+         False, True),
+        ("debt: a DIRECT write is never excused",
+         _UNSERIAL, [_debt_line(_DEMO_DIRECT)], True, True),
+        ("debt: an expired line does not exempt",
+         _HELPER_UNSERIAL, [_debt_line(_DEMO_SITE1, "2020-01-01")], True, False),
+        ("debt: a line with no site column is refused",
+         _HELPER_UNSERIAL,
+         ["2999-01-01  demo  SHARED_V  gh#1233  no site column here"],
+         True, False),
+    ]
+    for label, lib_body, lines, must_fire, must_stale in debt_cases:
+        with tempfile.TemporaryDirectory() as td:
+            fired, stale, complaints = _debt_gate(_tree(td, lib_body, None), lines)
+        # A parse complaint fails the gate exactly as a live pair does, so the
+        # observable is "would this run exit non-zero", not "was there a pair".
+        reds = fired or bool(complaints)
+        good = (reds == must_fire) and (bool(stale) == must_stale)
+        ok &= good
+        print("  %-42s expected %-6s got %-6s  %s"
+              % (label, ("FIRE" if must_fire else "quiet")
+                 + ("+stale" if must_stale else ""),
+                 ("FIRE" if reds else "quiet") + ("+stale" if stale else ""),
+                 "ok" if good else "SELF-TEST FAILED"))
 
     # The sole-test carve-out is the one place this gate deliberately does NOT
     # fail, so it is proven in BOTH directions too: held back with no sibling,
@@ -773,37 +857,95 @@ def format_targets(selected):
 DEBT_FILE = ".config/env-global-helper-debt.txt"
 
 
+def site_key(root, path, fn):
+    """`<repo-relative file>::<writing fn>` -- the SITE a debt line binds to.
+
+    Line numbers are deliberately NOT part of it: they move on every edit above
+    the write, and a key that drifts turns unrelated edits into stale-entry
+    failures. File plus writing fn is what a reader can find, and it is what
+    makes an exemption an INSTANCE rather than a class.
+    """
+    return "%s::%s" % (os.path.relpath(path, root).replace(os.sep, "/"), fn)
+
+
+def parse_debt_lines(lines, today):
+    """-> ({(binary, var, site): reason}, [complaints]).
+
+    Keyed on the SITE as well as the pair. A line written for one helper does
+    not excuse a SECOND helper writing the same var in the same binary: that is
+    a new instance of the class, and catching the next one is the whole job.
+    """
+    out, bad = {}, []
+    for n, raw in enumerate(lines, 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 5)
+        if len(parts) < 6:
+            bad.append("%s:%d is not `<expiry> <binary> <VAR> <file.rs::fn> "
+                       "<gh#N> <reason>`: %r. A list nobody can parse is a "
+                       "list that exempts everything." % (DEBT_FILE, n, line))
+            continue
+        expiry, binary, var, site, issue, reason = parts
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", expiry):
+            bad.append("%s:%d expiry %r is not YYYY-MM-DD."
+                       % (DEBT_FILE, n, expiry))
+            continue
+        if not re.match(r"^[\w./-]+\.rs::\w+$", site):
+            bad.append("%s:%d site %r is not `<path>.rs::<fn>`. A line naming "
+                       "no site would exempt the whole (binary, var) class, "
+                       "which is exactly what this column exists to stop."
+                       % (DEBT_FILE, n, site))
+            continue
+        if expiry < today:
+            bad.append("%s:%d expired on %s and was not renewed: %s %s at %s "
+                       "(%s). An expired entry fails exactly as an unlisted "
+                       "site does."
+                       % (DEBT_FILE, n, expiry, binary, var, site, issue))
+            continue
+        out[(binary, var, site)] = "%s expires %s -- %s" % (issue, expiry, reason)
+    return out, bad
+
+
 def load_debt(root, today):
-    """-> ({(binary, var): reason}, [complaints]) from the helper-debt file.
+    """`parse_debt_lines` over the on-disk file.
 
     Absence of the file is not silence: the gate says so and exempts nothing.
     """
     path = os.path.join(root, DEBT_FILE)
     if not os.path.isfile(path):
-        return {}, ["%s is missing; no pair is exempt." % DEBT_FILE]
-    out, bad = {}, []
-    for n, raw in enumerate(open(path, encoding="utf-8"), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
+        return {}, ["%s is missing; no site is exempt." % DEBT_FILE]
+    return parse_debt_lines(open(path, encoding="utf-8"), today)
+
+
+def partition(root, pairs, sites, ntests, debt):
+    """-> (live, sole, excused, used_debt).
+
+    `live` fails the gate. A write is excused only when the debt file names
+    THAT SITE: an unlisted site inside an already-listed (binary, var) is a new
+    instance and fails, and a DIRECT write is never excused whatever the file
+    says. A pair with even one uncovered site fails, and only the uncovered
+    sites are reported -- the covered ones are already stated debt.
+    """
+    live, sole, excused, used = [], [], [], set()
+    for v, c, rc in pairs:
+        bad = [s for s in sites.get((c, v), [])
+               if s[2] in ("UNSERIALIZED-TEST", "UNSERIALIZED-HELPER")]
+        if not bad:
             continue
-        parts = line.split(None, 4)
-        if len(parts) < 5:
-            bad.append("%s:%d is not `<expiry> <binary> <VAR> <gh#N> <reason>`: "
-                       "%r. A list nobody can parse is a list that exempts "
-                       "everything." % (DEBT_FILE, n, line))
+        covered, uncovered = [], []
+        for site in bad:
+            key = (c, v, site_key(root, site[0], site[3]))
+            if site[2] == "UNSERIALIZED-HELPER" and key in debt:
+                used.add(key)
+                covered.append(site)
+            else:
+                uncovered.append(site)
+        if not uncovered:
+            excused.append((v, c, rc, covered))
             continue
-        expiry, binary, var, issue, reason = parts
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", expiry):
-            bad.append("%s:%d expiry %r is not YYYY-MM-DD."
-                       % (DEBT_FILE, n, expiry))
-            continue
-        if expiry < today:
-            bad.append("%s:%d expired on %s and was not renewed: %s %s (%s). "
-                       "An expired entry fails exactly as an unlisted pair does."
-                       % (DEBT_FILE, n, expiry, binary, var, issue))
-            continue
-        out[(binary, var)] = "%s expires %s -- %s" % (issue, expiry, reason)
-    return out, bad
+        (live if ntests.get(c, 0) >= 2 else sole).append((v, c, rc, uncovered))
+    return live, sole, excused, used
 
 
 def main():
@@ -851,28 +993,14 @@ def main():
 
     debt, debt_complaints = load_debt(
         root, __import__("datetime").date.today().isoformat())
-    used_debt = set()
-
-    live, sole, excused = [], [], []
-    for v, c, rc in pairs:
-        bad = [s for s in sites.get((c, v), [])
-               if s[2] in ("UNSERIALIZED-TEST", "UNSERIALIZED-HELPER")]
-        if not bad:
-            continue
-        # A DIRECT write is never excused, whatever the debt file says: the
-        # exemption covers only the class the lint could not previously see.
-        only_helper = all(x[2] == "UNSERIALIZED-HELPER" for x in bad)
-        if only_helper and (c, v) in debt:
-            used_debt.add((c, v))
-            excused.append((v, c, rc, bad))
-            continue
-        (live if ntests.get(c, 0) >= 2 else sole).append((v, c, rc, bad))
+    live, sole, excused, used_debt = partition(root, pairs, sites, ntests, debt)
 
     for key in sorted(set(debt) - used_debt):
         debt_complaints.append(
-            "%s lists %s %s, which no longer matches any hazard. A line that "
-            "has stopped applying would excuse the next occurrence for free -- "
-            "delete it." % (DEBT_FILE, key[0], key[1]))
+            "%s lists %s %s at %s, which no longer matches a hazard the scan "
+            "reports. A line that has stopped applying would excuse the next "
+            "write at that site for free -- delete it."
+            % (DEBT_FILE, key[0], key[1], key[2]))
 
     print("control ok: %s found in %s (production readers: %s)"
           % (control[0][0], control[0][1], ",".join(control[0][2])))
@@ -900,11 +1028,20 @@ def main():
         for name in sorted(tests):
             print("      excluded: %s --test %s :: %s" % (c, t, name))
     if excused:
-        print("\nDEBT, reported not failed: %d helper-attributed pair(s) listed "
+        print("\nDEBT, reported not failed: %d helper-attributed SITE(s) listed "
               "in %s. Each is a real hazard under the shared-process leg; the "
-              "list is dated and is designed to shrink." % (len(excused), DEBT_FILE))
-        for v, c, _, bad in excused:
-            print("      %s  %s  (%s)" % (v, c, debt[(c, v)]))
+              "list is dated, is keyed on the site rather than on the (binary, "
+              "var) class, and is designed to shrink."
+              % (len({(x[1], x[0], site_key(root, y[0], y[3]))
+                       for x in excused for y in x[3]}), DEBT_FILE))
+        shown = set()
+        for v, c, _, covered in excused:
+            for p, _line, _kind, fn, _via in covered:
+                key = (c, v, site_key(root, p, fn))
+                if key in shown:   # one site, several writes inside the same fn
+                    continue
+                shown.add(key)
+                print("      %s  %s  %s  (%s)" % (v, c, key[2], debt[key]))
 
     if skip_complaints or debt_complaints:
         print()
@@ -946,6 +1083,10 @@ def main():
           "override where one exists. Serializing the writer is sufficient ONLY when "
           "every test in the same binary that reaches the same global is serialized "
           "too: serial_test orders only the tests that carry the attribute.")
+    print("A site that is genuinely pre-existing debt goes in %s keyed on "
+          "`<file>.rs::<writing fn>` -- the SITE, never the (binary, var) pair, "
+          "so that listing one helper cannot silently excuse the next one."
+          % DEBT_FILE)
     return 1
 
 
