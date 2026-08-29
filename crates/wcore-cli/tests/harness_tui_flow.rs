@@ -549,6 +549,22 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
     const NARROW_COLS: u16 = 80;
     /// WIDER than the boot geometry on purpose — see the restore leg.
     const WIDE_COLS: u16 = 140;
+    /// How long one paint may take.
+    ///
+    /// core#336 reported this test as "intermittently fails with a 5s PTY
+    /// `wait_for` timeout under full parallel suite load", 1 failure in 6 runs,
+    /// and asked whether that budget is too tight or the resize path is racing.
+    /// It is the budget. The resize path is not racing: with the direct
+    /// observation above in place this test passes in isolation and reddens on
+    /// BOTH ways of breaking the resize (parser pinned at the boot width, PTY
+    /// never resized), so a wedged resize is caught at any budget.
+    ///
+    /// What was left was a 5s wait on the same class of event — the TUI
+    /// painting a frame — that the SAME harness grants 60s at boot
+    /// (`boot_to_workspace`). Nothing justified the 12x gap, and a repaint is
+    /// not the cheaper of the two under 90 concurrent tests: by then the box is
+    /// busy. Half the boot budget, and only a FAILING run ever pays it.
+    const PAINT_BUDGET: Duration = Duration::from_secs(30);
 
     // v0.9.1.2 F15 removed the rail's `Path map` panel and W8 removed the
     // `Tools` panel; the rail's sole remaining tenant is `Activity`, which
@@ -585,7 +601,7 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
     // unfalsifiable in the other direction.
     h.wait_for_width(
         HARNESS_COLS as usize,
-        Duration::from_secs(5),
+        PAINT_BUDGET,
         "the boot chrome to paint out to the 120-column edge",
     );
 
@@ -595,7 +611,7 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
     h.resize(NARROW_COLS, HARNESS_ROWS);
     h.wait_for(
         |s| s.contains("WAYLAND") && s.contains("Workspace"),
-        Duration::from_secs(5),
+        PAINT_BUDGET,
         "the chrome to REPAINT after shrinking to 80 cols",
     );
 
@@ -616,7 +632,7 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
     h.resize(WIDE_COLS, HARNESS_ROWS);
     h.wait_for(
         |s| s.contains("WAYLAND") && s.contains("Workspace"),
-        Duration::from_secs(5),
+        PAINT_BUDGET,
         "the chrome to REPAINT after resizing out to 140 cols",
     );
 
@@ -631,7 +647,7 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
     // app painting 120, and a surface that ignores `Resize` does the same.
     h.wait_for_width(
         WIDE_COLS as usize,
-        Duration::from_secs(5),
+        PAINT_BUDGET,
         "the app to re-lay-out and paint out to the new 140-column edge",
     );
 
