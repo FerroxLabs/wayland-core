@@ -222,6 +222,36 @@
       "lane": "channel-caps",
       "phase": "1-build"
     },
+    "core#361 c1": {
+      "host": "hetzner",
+      "lane": "flake-584",
+      "phase": "1-build"
+    },
+    "core#361 c2": {
+      "host": "hetzner",
+      "lane": "flake-584",
+      "phase": "1-build"
+    },
+    "core#361 c3": {
+      "host": "hetzner",
+      "lane": "flake-584",
+      "phase": "1-build"
+    },
+    "core#361 c4": {
+      "host": "hetzner",
+      "lane": "flake-584",
+      "phase": "1-build"
+    },
+    "core#361 c5": {
+      "host": "hetzner",
+      "lane": "flake-584",
+      "phase": "1-build"
+    },
+    "core#361 c6": {
+      "host": "hetzner",
+      "lane": "flake-584",
+      "phase": "1-build"
+    },
     "wl#1088 c2": {
       "host": "gh",
       "lane": "decompose",
@@ -470,6 +500,11 @@
       "host": "Desktop app",
       "phase": "2-platform",
       "title": "Live Desktop session measurement"
+    },
+    "flake-584": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Shared-process lib suite: the #584 fixture misses its truncation boundary under load"
     },
     "floor-disclosure": {
       "host": "hetzner",

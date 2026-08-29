@@ -5,17 +5,17 @@
 > verification) and `PLAN-ROUTING.json` (assignment). If this disagrees with anyone's
 > recollection, this is right and the recollection is wrong — that is the entire point.
 
-Rendered 2026-08-29 08:12 UTC
+Rendered 2026-08-29 08:38 UTC
 
 ## VERDICT: BLOCKED
 
-**71 criteria block the 0.13.12 release.** Full list in §3.
+**77 criteria block the 0.13.12 release.** Full list in §3.
 
 | state | count | means |
 |---|---:|---|
 | DONE | 0 | met, evidence resolves, independently verified |
 | CLAIMED | 174 | met but NOT yet independently verified — never report as done |
-| OPEN | 80 | outstanding work |
+| OPEN | 86 | outstanding work |
 | HANDOFF | 0 | another team's half, with a filed ticket carrying it |
 
 ## §3 BLOCKING — the definition of done for 0.13.12
@@ -92,6 +92,19 @@ Runs on: **Desktop app**  ·  2-platform
 | criterion | issue | what must become true |
 |---|---|---|
 | `c4` | wl#559 | This ticket's own close condition: ONE real 26-turn Desktop team run showing non-zero cache_read |
+
+### `flake-584` — Shared-process lib suite: the #584 fixture misses its truncation boundary under load
+
+Runs on: **hetzner**  ·  1-build
+
+| criterion | issue | what must become true |
+|---|---|---|
+| `c1` | core#361 | The mechanism is named: what makes output lack truncated under load is identified in code, not inferred |
+| `c2` | core#361 | The failure is reproduced deliberately at least once, with the command and environment recorded, before any fix is written |
+| `c3` | core#361 | The fixture reaches the truncation boundary deterministically, independent of scheduling |
+| `c4` | core#361 | Both assertions survive: the anti-vacuity control at mod.rs:5744 and the fragment assertion at :5749 |
+| `c5` | core#361 | A red arm is quoted verbatim: the fixture failing before the change, from a real run |
+| `c6` | core#361 | After the fix, cargo test --workspace --lib --no-fail-fast passes N>=10 consecutive times on the build host, and the run count is recorded |
 
 ### `floor-disclosure` — Command-floor refusal reaches the user, not model improvisation
 
