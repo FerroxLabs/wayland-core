@@ -363,13 +363,13 @@ impl EscalationGate {
     /// Is moving to `requested` an escalation relative to the authorized
     /// ceiling?
     ///
-    /// Four rules, in order:
+    /// Five rules, in order:
     /// 1. the same model is never an escalation;
     /// 2. an `Unpriced` target always is — an unknown price cannot be shown to
     ///    be cheaper, and assuming it is, is the exact mistake the pricing
     ///    layer's `priced` flag exists to prevent;
-    /// 2b. but an `Unpriced` BASELINE can never be exceeded, which is the
-    ///    symmetric case and the one rule 4 gets wrong on its own. An
+    /// 3. an `Unpriced` BASELINE can never be exceeded, which is the
+    ///    symmetric case and the one rule 5 gets wrong on its own. An
     ///    unpriced profile carries `blended_usd_per_mtok == 0.0` because no
     ///    price was FOUND, not because the price IS zero, so a bare numeric
     ///    comparison reads every catalogued model as an escalation above it.
@@ -379,11 +379,11 @@ impl EscalationGate {
     ///    here: [`SpendPolicy`] is checked first and independently, so
     ///    `no-paid` still refuses a metered target and `local-only` still
     ///    refuses a hosted one, whatever this gate says;
-    /// 3. moving from an unpaid baseline (local or catalogued-free) onto ANY
+    /// 4. moving from an unpaid baseline (local or catalogued-free) onto ANY
     ///    paid model always is, whatever the rate: $0 to $0.25/Mtok is an
     ///    infinite proportional increase and the run was authorized to spend
     ///    nothing;
-    /// 4. otherwise it is an escalation exactly when the blended rate rises.
+    /// 5. otherwise it is an escalation exactly when the blended rate rises.
     #[must_use]
     pub fn is_escalation(&self, requested: &ModelSpendProfile) -> bool {
         if requested.model == self.authorized.model
@@ -395,7 +395,7 @@ impl EscalationGate {
             return self.authorized.billing != ModelBilling::Unpriced;
         }
         if self.authorized.billing == ModelBilling::Unpriced {
-            // Rule 2b: the ceiling is unknown, so nothing can be shown to
+            // Rule 3: the ceiling is unknown, so nothing can be shown to
             // exceed it. See the doc comment above for why refusing instead
             // would be worse than admitting.
             return false;
@@ -581,7 +581,11 @@ mod tests {
         // primary failure takes the whole turn down. Nothing may be shown to
         // exceed a ceiling nobody could read.
         let gate = EscalationGate::new("s1", unpriced("some-private-endpoint"));
-        for target in [metered("opus", 75.0), metered("haiku", 0.25), free("flux-free")] {
+        for target in [
+            metered("opus", 75.0),
+            metered("haiku", 0.25),
+            free("flux-free"),
+        ] {
             assert!(
                 !gate.is_escalation(&target),
                 "{} must not read as an escalation above an unpriced baseline",
