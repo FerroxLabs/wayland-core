@@ -2155,6 +2155,38 @@ fn path_is_in_credential_store(path: &Path) -> bool {
         .any(|store| path.starts_with(store))
 }
 
+/// The static, lexical sibling of [`WorkspacePolicy::is_vcs_content_store`],
+/// for the one caller that has no policy instance to ask: `grep_policy`
+/// (SR-05).
+///
+/// FerroxLabs/wayland-core#244 c3 asks that the VCS content store be
+/// "unreachable to a shell subprocess". `BashTool`'s subprocess is confined by
+/// the OS sandbox, which consumes [`vcs_content_stores`] as `fs_read_deny`.
+/// `GrepTool` spawns its OWN subprocess (`rg` / `grep` / `findstr`) through
+/// `shell_command_argv`, OUTSIDE that sandbox, so none of that deny list ever
+/// reaches it — and its only other predicate, [`is_secret_path_static`],
+/// matches credential NAMES while a loose object is named after its hash.
+///
+/// MEASURED at integ/f13 a278f8c3b before this existed, with the production
+/// `SandboxedFs::new(SecretDenyFs::new(RealFs, WorkspacePolicy::contained))`
+/// stack: `Grep(pattern, path = ".git")` returned
+/// `.git/lfs/objects/aa/bb/deadbeef:1:WLCANARY-LFSOBJ-244` and
+/// `.git/objects/ab/cd1234:1:WLCANARY-ROOTOBJ-244` in PLAINTEXT, while naming
+/// the store outright was refused. `ctx.vfs.exists()` gates only the TOP-LEVEL
+/// `path` argument and `.git` is not itself a store, so naming the control
+/// directory ONE COMPONENT ABOVE it walked straight in.
+///
+/// Deliberately the any-depth LEXICAL arm only ([`inside_vcs_store`]) — the
+/// same arm [`WorkspacePolicy::is_vcs_content_store`] tries first, so the two
+/// cannot answer differently on anything Grep can reach. Grep never sees the
+/// second arm's targets: a gitfile-pointed or `alternates`-borrowed store lives
+/// OUTSIDE the workspace root, the walk is `follow_links(false)`, and an
+/// absolute path outside the jail is refused by `ctx.vfs.exists()` before any
+/// backend is chosen.
+pub fn is_vcs_content_store_static(path: &Path) -> bool {
+    inside_vcs_store(path)
+}
+
 /// Free-function body of `is_secret_path` (uses no `self` fields). Extracted
 /// so `compute_secret_deny` can call it without a `WorkspacePolicy` instance.
 /// The one credential-file name predicate in the crate. `Read`/`SecretDenyFs`

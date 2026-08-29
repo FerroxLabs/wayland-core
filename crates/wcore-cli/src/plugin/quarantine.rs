@@ -317,9 +317,35 @@ fn normalize_copy(src: &Path, dst: &Path, copied: &mut u64, cap: u64) -> Result<
 /// controlling terminal away rather than to ask the child not to use it:
 /// `setsid(2)` between fork and exec puts the child in a fresh session with no
 /// ctty, `open("/dev/tty")` then fails with `ENXIO`, and every descendant the
-/// child spawns — helpers included — inherits that session. On Windows the
-/// analogue is `DETACHED_PROCESS`, which denies the child the parent's console
-/// and so `CONIN$`/`CONOUT$` with it.
+/// child spawns — helpers included — inherits that session.
+///
+/// **Windows is NOT the same primitive, and this doc used to say it was.**
+/// `DETACHED_PROCESS` withholds the parent's console AT CREATION; it does not
+/// make that console unreachable afterwards. MEASURED on Windows 11 build
+/// 10.0.26200.9168 by `crates/wcore-cli/tests/quarantine_console_authority_
+/// windows.rs`, which is the reason that file exists:
+///
+/// ```text
+/// [plain]    SHARES_USER_CONSOLE_BEFORE=true   CONOUT_BEFORE=OPEN
+/// [hardened] SHARES_USER_CONSOLE_BEFORE=false  CONOUT_BEFORE=DENIED(6)
+/// [hardened] ATTACH_PARENT_PROCESS=SUCCEEDED   SHARES_USER_CONSOLE_AFTER=true
+/// [hardened] ATTACH_BY_EXPLICIT_PID=SUCCEEDED  CONOUT_AFTER_EXPLICIT=OPEN
+/// ```
+///
+/// One documented call — `AttachConsole(ATTACH_PARENT_PROCESS)` — puts a
+/// `DETACHED_PROCESS` child back on the USER'S OWN console, and attaching by
+/// EXPLICIT pid works too, so reparenting the child onto a console-less
+/// process is not a remedy either. `FreeConsole` then `AttachConsole` also
+/// defeats giving the child a console of its own (`CREATE_NO_WINDOW`).
+/// A `setsid`'d unix child has no such move: `TIOCSCTTY` refuses a terminal
+/// that is already another session's controlling terminal.
+///
+/// So on Windows this is a REDUCTION (the child is not created on the user's
+/// console, and never has it by default), not the elimination unix gets. #338
+/// c2 is scoped to unix in its own text and the Windows remainder is tracked
+/// as FerroxLabs/wayland-core#380. Do not restore the analogy sentence: an
+/// overstated security guarantee is worse than an understated one, because it
+/// stops the next person looking.
 ///
 /// `credential.helper` is deliberately NOT cleared. Clearing it would break
 /// installs from private plugin sources, which is a real product cost, and
@@ -358,8 +384,10 @@ pub fn harden_against_credential_prompt(cmd: &mut std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        /// `DETACHED_PROCESS` — the child gets no console, and does not
-        /// inherit ours.
+        /// `DETACHED_PROCESS` — the child is CREATED with no console and
+        /// does not inherit ours. Creation-time only; see the measured
+        /// residual in this function's doc comment and
+        /// `tests/quarantine_console_authority_windows.rs`.
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         cmd.creation_flags(DETACHED_PROCESS);
     }

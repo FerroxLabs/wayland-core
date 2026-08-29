@@ -308,6 +308,19 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Threading",
 ] }
 
+# FerroxLabs/wayland-core#338 c2, Windows arm.
+# `quarantine_console_authority_windows.rs` measures what `DETACHED_PROCESS`
+# actually delivers, which needs GetConsoleWindow / AttachConsole / FreeConsole
+# / AllocConsole / GetConsoleProcessList from the test binary itself. Same
+# version and a subset of the feature set already declared in
+# `[target.'cfg(windows)'.dependencies]` above, so cargo unions them and this
+# adds NOTHING to Cargo.lock.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+] }
+
 [dev-dependencies]
 # `start_paused` tests need tokio's `test-util`, which the workspace `full`
 # feature set does NOT include. Without this line the crate compiles only when

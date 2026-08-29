@@ -29,14 +29,26 @@
 //!    `workspace_policy::is_secret_path_static` — the same list `Read`,
 //!    `SecretDenyFs` and the OS sandbox already use — not a second, divergent
 //!    one.
-//! 4. **Surviving match content is scrubbed** with `wcore_safety::PIIScrubber`.
+//! 4. **A VCS CONTENT store is never traversed** (core#244 c3). `Bash`'s
+//!    subprocess is confined by the OS sandbox, which is handed
+//!    `vcs_content_stores(root)` as `fs_read_deny`; the subprocess GREP spawns
+//!    is not, and `is_secret_path_static` cannot see a store because a loose
+//!    object is named after its hash. `ctx.vfs.exists()` refuses a `path`
+//!    argument INSIDE a store, but `.git` and `<vendor>/.git` are not
+//!    themselves stores — so naming the directory one component up walked
+//!    into `.git/objects` and `.git/lfs` in plaintext. The predicate is
+//!    `workspace_policy::is_vcs_content_store_static`, the same lexical arm
+//!    `WorkspacePolicy::is_vcs_content_store` uses, not a second copy.
+//!    `.git/HEAD` and `.git/refs` are NOT stores and stay searchable, matching
+//!    the `git rev-parse` carve-out the OS deny list already makes.
+//! 5. **Surviving match content is scrubbed** with `wcore_safety::PIIScrubber`.
 //!    This is not belt-and-braces: the engine's central `redact_tool_output`
 //!    ALREADY runs that scrubber over every tool result, but its
 //!    `SECRET_ASSIGNMENT` rule is `(?im)^\s*`-anchored and Grep prefixes each
 //!    hit with `path:lineno:`, which pushes the assignment off the start of the
 //!    line and makes the rule unmatchable. Scrubbing the content field alone,
 //!    with the prefix removed, is what restores it.
-//! 5. **Withholding is reported, never silent.** A search whose every hit was
+//! 6. **Withholding is reported, never silent.** A search whose every hit was
 //!    withheld must not render as "No matches found" — "could not show you" and
 //!    "there was nothing" are different answers and the model acts on them
 //!    differently.
@@ -45,7 +57,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::path_validation::lex_normalize;
-use crate::workspace_policy::is_secret_path_static;
+use crate::workspace_policy::{is_secret_path_static, is_vcs_content_store_static};
 
 /// Cap on the number of withheld filenames named in the footer. A name is not
 /// a secret — the model needs to know WHICH file it cannot see — but an
@@ -71,6 +83,11 @@ pub(crate) struct Filtered {
     pub(crate) secret_files: BTreeSet<String>,
     /// Matches withheld because the ignore policy excluded their file.
     pub(crate) ignored: usize,
+    /// Matches withheld because their file lives in a VCS CONTENT store
+    /// (core#244 / #322 / #243). Counted separately from `ignored`: an
+    /// operator who searched `.git` deserves to know the store was refused,
+    /// not that "something was gitignored".
+    pub(crate) vcs_store: usize,
     /// Output lines that named no file we could attribute them to. Dropped
     /// rather than forwarded — an unattributable line cannot be policed, and
     /// an unpoliceable line is exactly what this module exists to stop.
@@ -79,7 +96,10 @@ pub(crate) struct Filtered {
 
 impl Filtered {
     pub(crate) fn withheld_anything(&self) -> bool {
-        !self.secret_files.is_empty() || self.ignored > 0 || self.unattributable > 0
+        !self.secret_files.is_empty()
+            || self.ignored > 0
+            || self.vcs_store > 0
+            || self.unattributable > 0
     }
 
     /// One deterministic line explaining what was withheld, or `None` when
@@ -111,6 +131,12 @@ impl Filtered {
         }
         if self.ignored > 0 {
             parts.push(format!("{} match(es) in ignored paths", self.ignored));
+        }
+        if self.vcs_store > 0 {
+            parts.push(format!(
+                "{} match(es) in VCS content stores withheld",
+                self.vcs_store
+            ));
         }
         if self.unattributable > 0 {
             parts.push(format!(
@@ -158,7 +184,13 @@ pub(crate) fn scope_for(resolved: &Path) -> GrepScope {
         // Rule 3: a secret-shaped file is never reportable, even though the
         // walker admitted it (`config/prod.pem` is neither hidden nor
         // gitignored).
-        if is_secret_path_static(path) {
+        //
+        // Rule 4: nor is anything inside a VCS content store. The walker
+        // admits it whenever the search target is the store's PARENT
+        // (`Grep(path = ".git")`), because the `.git/` filter only prunes a
+        // `.git` found DURING traversal, and a loose object is neither hidden
+        // nor secret-NAMED.
+        if is_secret_path_static(path) || is_vcs_content_store_static(path) {
             continue;
         }
         allowed.insert(lex_normalize(path));
@@ -172,7 +204,9 @@ impl GrepScope {
         match self {
             // Rule 2 + rule 3: an explicitly named file is searched, unless it
             // is secret-shaped.
-            GrepScope::File(f) => path == f && !is_secret_path_static(path),
+            GrepScope::File(f) => {
+                path == f && !is_secret_path_static(path) && !is_vcs_content_store_static(path)
+            }
             GrepScope::Dir(allowed) => allowed.contains(path),
         }
     }
@@ -186,6 +220,7 @@ impl GrepScope {
             lines: Vec::new(),
             secret_files: BTreeSet::new(),
             ignored: 0,
+            vcs_store: 0,
             unattributable: 0,
         };
 
@@ -204,12 +239,14 @@ impl GrepScope {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.to_string_lossy().into_owned());
                     out.secret_files.insert(name);
+                } else if is_vcs_content_store_static(&path) {
+                    out.vcs_store += 1;
                 } else {
                     out.ignored += 1;
                 }
                 continue;
             }
-            // Rule 4: scrub the CONTENT only. The `path:lineno:` prefix is what
+            // Rule 5: scrub the CONTENT only. The `path:lineno:` prefix is what
             // defeats the line-anchored credential rules, so it must not be
             // part of the string handed to the scrubber.
             let (prefix, content) = line.split_at(content_start);
@@ -337,6 +374,7 @@ mod tests {
             lines: Vec::new(),
             secret_files: BTreeSet::new(),
             ignored: 0,
+            vcs_store: 0,
             unattributable: 0,
         };
         assert!(f.footer().is_none());
@@ -345,5 +383,13 @@ mod tests {
         let footer = f.footer().expect("footer");
         assert!(footer.contains(".env"), "{footer}");
         assert!(footer.contains("2 match(es) in ignored paths"), "{footer}");
+        // core#244 c3: a withheld VCS-store match is reported as such, not
+        // folded into "ignored paths" and not rounded down to silence.
+        f.vcs_store = 3;
+        let footer = f.footer().expect("footer");
+        assert!(
+            footer.contains("3 match(es) in VCS content stores withheld"),
+            "{footer}"
+        );
     }
 }
