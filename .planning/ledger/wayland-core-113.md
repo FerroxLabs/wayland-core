@@ -34,6 +34,7 @@ criteria:
     text: "The deny-by-default browsing posture is recorded as a decision on the issue and the issue is dispositioned"
     state: blocked
     owner: maintainer
+    handoff: "FerroxLabs/wayland#1229"
     note: "The issue is still OPEN and the deny-by-default posture is not recorded ON IT: the latest comment is a verification write-up, not a disposition. Q-113 in .planning/DECISIONS.md takes the decision (close as refuted, recording deny-by-default), and only the maintainer closes issues in this repo, so the remaining act is the maintainer's."
 ---
 

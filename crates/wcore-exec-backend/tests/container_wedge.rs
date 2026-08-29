@@ -270,14 +270,9 @@ async fn a_daemon_refusal_yields_no_receipt_and_carries_the_daemons_words() {
     }
     // An image the daemon cannot resolve is a refusal no naming scheme can
     // avoid, so it exercises the classifier end to end against a real daemon.
-    unsafe {
-        std::env::set_var(
-            "WAYLAND_EXEC_CONTAINER_IMAGE",
-            "wayland-f25-no-such-image-365:absent",
-        )
-    };
-    let backend = ContainerBackend::new(reference_budget()).expect("construct");
-    unsafe { std::env::remove_var("WAYLAND_EXEC_CONTAINER_IMAGE") };
+    let backend =
+        ContainerBackend::with_image(reference_budget(), "wayland-f25-no-such-image-365:absent")
+            .expect("construct");
 
     let task = reference_task(
         "wedge365-refused",
@@ -328,9 +323,8 @@ async fn a_client_side_refusal_yields_no_receipt_either() {
     }
     // Uppercase is not a legal repository name, so the docker CLI rejects the
     // reference itself. Nothing reaches the daemon and nothing is created.
-    unsafe { std::env::set_var("WAYLAND_EXEC_CONTAINER_IMAGE", "BadImage:Tag") };
-    let backend = ContainerBackend::new(reference_budget()).expect("construct");
-    unsafe { std::env::remove_var("WAYLAND_EXEC_CONTAINER_IMAGE") };
+    let backend =
+        ContainerBackend::with_image(reference_budget(), "BadImage:Tag").expect("construct");
 
     let task_id = "wedge365-clientside";
     let task = reference_task(task_id, "wedge365-nonce-clientside", reference_budget());

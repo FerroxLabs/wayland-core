@@ -57,6 +57,14 @@ would refuse addressable user files - and this guard grades paths to the user's
 own data, where a false refusal loses something.
 
 So the residual is narrow: a Write to a bare NUL discards bytes and claims
-success. Everything here is not-met, and the scope question is deliberately
-parked with the maintainer rather than resolved by a lane. Criteria come from
-the cluster A verification note of 2026-08-29.
+success. Criteria come from the cluster A verification note of 2026-08-29.
+
+The last sentence of that note said the scope question is parked with the
+maintainer. It is not, any more: c5 was TAKEN as Q5 in .planning/DECISIONS.md
+and shipped in fcc152bf, and c4 was RE-GRADED 2026-08-29 from
+`blocked owner=maintainer` to `not-met owner=core`. The probe is not #[ignore],
+the ci.yml Array matrix carries a self-hosted Windows/X64/msvc leg, and its
+test step runs `vx just test-ci`, which on Windows is a `--workspace` nextest.
+The probe therefore already executes and asserts on every Windows CI run; what
+is missing is only the printed RECORD, because nextest captures stdout for a
+passing test. That is a core-owned workflow change, not Sean-only infra.

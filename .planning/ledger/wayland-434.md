@@ -21,6 +21,7 @@ criteria:
     text: "The alias-resolves-server-side path is closed end to end"
     state: blocked
     owner: flux
+    handoff: "FerroxLabs/wayland#1226"
     note: "requires the router to declare the resolved model on the turn it resolves it; core cannot close this alone. Ticket carries needs:flux"
 ---
 

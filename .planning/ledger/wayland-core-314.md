@@ -32,9 +32,9 @@ criteria:
     note: "d3660467. emit_workspace_policy_receipt now precedes the refusal Info on all FOUR refusal exits (main.rs:4215 launcher-refused, :4243 policy-refused, plus the two capability-grant arms). Four refusal tests plus two must-pass-in-both-arms controls. The emitters now take &dyn ProtocolEmitter, which is what made them testable at all. docs/json-stream-protocol.md:982-990 states the every-exit rule and tells hosts not to read an absent receipt as a refusal."
   - id: c5
     text: "A grant refusal is machine-readable rather than untyped English prose in an Info frame"
-    state: blocked
-    owner: maintainer
-    note: "STALE NOTE CORRECTED 2026-08-29: the previous note pointed at FerroxLabs/wayland#1099, which is CLOSED and is a different subject (an escalation prompt for an out-of-workspace path), so there is NO open cross-lane thread carrying this. Refusals are still untyped English prose - main.rs:4218 and :4246 emit ProtocolEvent::Info with an empty msg_id, no grant_id echo, no machine-readable reason. Q4 in .planning/DECISIONS.md takes the decision (yes, as a contract minor bump with Desktop); what is now owed is a NEW Desktop-facing issue to carry it."
+    state: not-met
+    owner: core
+    note: "RE-OWNED TO CORE 2026-08-29. The previous note said what is owed is a NEW Desktop-facing issue. Graded against the criterion text, the work is core's: both refusal sites are ProtocolEvent::Info with an empty msg_id and English prose in crates/wcore-cli/src/main.rs (path grant refused: the local launcher did not opt in ... at :4305, path grant refused: {error} at :4333, and the two capability-grant arms at :4389 and :4411). Making a refusal machine-readable is a typed variant in wcore-protocol plus a schema branch, a fixture and a manifest digest -- the same forward-additive shape wayland#1088 used for set_mode_refused, which core shipped alone at contract 21 -> 22. The maintainer decision this was parked on is already TAKEN as Q4 in .planning/DECISIONS.md. Desktop consuming the typed refusal is a real follow-on, but it is not this criterion, which is graded entirely on core's wire."
 ---
 
 The headline claim - three grant and revoke commands missing from the published
