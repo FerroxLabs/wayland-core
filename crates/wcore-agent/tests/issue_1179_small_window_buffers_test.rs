@@ -277,6 +277,58 @@ fn supports_compaction_switches_where_the_baseline_turn_stops_fitting() {
     assert!(cfg.supports_compaction(8_192));
 }
 
+/// **c2's own gate**, and the reason the band is a FIXED range rather than a
+/// derived one.
+///
+/// c2 is a claim about the THRESHOLD, and the threshold is what a change to the
+/// reserve arithmetic moves. Phrasing it as "wherever `supports_compaction`
+/// holds, the threshold clears the baseline turn" would have been a TAUTOLOGY —
+/// that predicate is literally
+/// `autocompact_threshold_for_window(w) > BASELINE_TURN_TOKENS`, so the
+/// assertion would restate its own hypothesis and could not fail for any
+/// threshold function whatsoever.
+///
+/// It is equally not gradeable through `should_autocompact` at the baseline
+/// turn. That call is `threshold > B && ... && B >= threshold`, which is
+/// unsatisfiable while the refusal gate stands, so a sweep of it reports
+/// nothing about where the threshold sits — it grades the GATE (c6), not this.
+///
+/// So the band is pinned from the ticket's own words — "the band where a small
+/// window is still workable, roughly 8k to 32k" — and the comparison is against
+/// the constant.
+#[test]
+fn every_window_in_the_8k_to_32k_band_clears_the_baseline_turn() {
+    let mut tightest = (usize::MAX, 0usize);
+    for window in 8_192usize..=32_768 {
+        let threshold = boundaries(window).0;
+        assert!(
+            threshold > BASELINE_TURN_TOKENS,
+            "window {window}: threshold {threshold} is at or below the \
+             {BASELINE_TURN_TOKENS}-token baseline turn, so on the very band #1179 \
+             scopes itself to, compaction fires on an empty conversation, every turn, \
+             forever"
+        );
+        let room = threshold - BASELINE_TURN_TOKENS;
+        if room < tightest.0 {
+            tightest = (room, window);
+        }
+    }
+    // NON-VACUITY, pinned from the MEASUREMENT rather than from the arithmetic.
+    // The obvious derivation — "the tightest point is the bottom of the band,
+    // 3,688 - 3,118 = 570 at 8,192" — is wrong, and asserting it failed: the
+    // scale is an f64 fraction whose product truncates, so the threshold is not
+    // monotone token-by-token and 8,193 is one token TIGHTER than 8,192. The
+    // band's worst case is therefore 569, at 8,193. A band that had silently
+    // become empty, or one whose worst case had drifted comfortable, would
+    // satisfy the loop above while asserting nothing.
+    assert_eq!(
+        tightest,
+        (569, 8_193),
+        "the tightest room above the baseline turn anywhere in 8_192..=32_768 must be \
+         569 tokens, at 8_193"
+    );
+}
+
 // ── The CONFIGURED path (#1179 c2) ──────────────────────────────────────────
 
 /// #1179's acceptance sentence is "a learned **or configured** small window",

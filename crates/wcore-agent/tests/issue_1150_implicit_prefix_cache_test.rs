@@ -153,6 +153,11 @@ async fn session_dispatches(
         &"P".repeat(result_bytes),
         false,
     )));
+    // Registered and never called. `admit_hydrated_tools` hydrates on FIRST USE,
+    // per tool, so this one stays a deferred stub for the whole session — which
+    // is what makes the hydration break below bounded by the TOOL count rather
+    // than by the turn count.
+    tools.register(Box::new(MockTool::new("idle", "never called", false)));
 
     let mut engine = AgentEngine::new_with_provider(
         provider,
@@ -178,15 +183,81 @@ fn content_bytes(message: &Message) -> String {
     serde_json::to_string(&message.content).expect("messages serialize")
 }
 
-/// How many leading messages of `a` and `b` are byte-identical — the length of
-/// the prefix an implicit cache can serve from.
+/// The prompt an implicit-cache endpoint actually keys on, as the ordered list
+/// of segments it matches: the system prompt, then the tool schemas, then one
+/// segment per message.
+///
+/// System and tools are segments 0 and 1 because that is where they sit on an
+/// OpenAI-shaped body — ahead of the entire conversation. The first cut of this
+/// file compared `messages` alone, which is blind to the single most expensive
+/// way to lose the cache: a prompt whose FIRST segment differs on every
+/// dispatch reuses nothing at all, at token 0, while every message still
+/// matches. A per-dispatch nonce in the system prompt, a tool list rebuilt in a
+/// different order, a re-labelled message — all of them are a total cache miss
+/// on the wire and all of them were invisible here.
+///
+/// `role` travels inside a message segment alongside `content` for the same
+/// reason: a re-labelled message is different bytes even when its text is
+/// identical. The cache HINT deliberately stays out — it is metadata a provider
+/// consumes, not prompt bytes.
+fn prefix_segments(request: &LlmRequest) -> Vec<String> {
+    let tools: Vec<serde_json::Value> = request
+        .tools
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+                "deferred": t.deferred,
+            })
+        })
+        .collect();
+    let mut segments = vec![
+        serde_json::to_string(&request.system).expect("the system prompt serializes"),
+        serde_json::to_string(&tools).expect("tool schemas serialize"),
+    ];
+    segments.extend(
+        request
+            .messages
+            .iter()
+            .map(|m| serde_json::to_string(&(m.role, &m.content)).expect("messages serialize")),
+    );
+    segments
+}
+
+/// What segment `i` is, so a failure names the part of the prompt that moved
+/// instead of an index.
+fn segment_label(i: usize) -> String {
+    match i {
+        0 => "the SYSTEM PROMPT (token 0 - nothing at all is reused)".to_string(),
+        1 => "the TOOL SCHEMAS (nothing after the system prompt is reused)".to_string(),
+        n => format!("message {}", n - 2),
+    }
+}
+
+/// How many leading prefix segments of `a` and `b` are byte-identical — the
+/// length of the prefix an implicit cache can serve from.
 fn shared_prefix(a: &LlmRequest, b: &LlmRequest) -> usize {
-    let n = a.messages.len().min(b.messages.len());
+    let (x, y) = (prefix_segments(a), prefix_segments(b));
+    let n = x.len().min(y.len());
     let mut i = 0;
-    while i < n && content_bytes(&a.messages[i]) == content_bytes(&b.messages[i]) {
+    while i < n && x[i] == y[i] {
         i += 1;
     }
     i
+}
+
+/// The tools still travelling as deferred stubs. `openai.rs:622` truncates a
+/// deferred tool's description on the wire, so this flag is not bookkeeping —
+/// it decides the bytes of the tool block on the reporter's own route.
+fn deferred_names(request: &LlmRequest) -> Vec<&str> {
+    request
+        .tools
+        .iter()
+        .filter(|t| t.deferred)
+        .map(|t| t.name.as_str())
+        .collect()
 }
 
 fn breakpoints(request: &LlmRequest) -> usize {
@@ -217,8 +288,9 @@ async fn an_openai_shaped_route_places_no_cache_write_point() {
 }
 
 /// THE CLAIM. Across a whole multi-turn session — not merely within one turn —
-/// every dispatch repeats the previous dispatch's messages verbatim and
-/// appends. That is exactly the condition under which an OpenAI-compatible
+/// every dispatch repeats the previous dispatch's WHOLE prompt prefix verbatim
+/// - system prompt, tool schemas, then messages - and appends. That is exactly
+/// the condition under which an OpenAI-compatible
 /// endpoint bills dispatch N its delta instead of the whole context, which is
 /// what "prompt/KV cache is reused where possible" means where there is no
 /// write point to place.
@@ -230,26 +302,100 @@ async fn every_dispatch_extends_the_previous_dispatchs_byte_prefix() {
     let dispatches = session_dispatches(4, 3, 64, openai_shaped_config()).await;
     assert_eq!(dispatches.len(), 16, "4 turns x (3 tool rounds + 1 answer)");
 
+    // NON-VACUITY for the two segments ahead of the conversation: comparing an
+    // empty system prompt against another empty one, or an empty tool list
+    // against another empty one, proves nothing about either.
+    assert!(
+        !dispatches[0].system.is_empty(),
+        "this route sent no system prompt, so segment 0 compares empty to empty"
+    );
+    assert_eq!(
+        dispatches[0].tools.len(),
+        2,
+        "this route must carry both fixture tools, or segment 1 measures nothing"
+    );
+
+    // THE SYSTEM PROMPT admits no exception at all. It sits at token 0, so a
+    // prompt whose first segment moves reuses NOTHING — not one message, on any
+    // dispatch, for the whole session. This is the assertion the messages-only
+    // instrument could not make, and a per-dispatch nonce in the system prompt
+    // passed straight through it.
+    let system0 = prefix_segments(&dispatches[0])[0].clone();
+    for (n, d) in dispatches.iter().enumerate() {
+        assert_eq!(
+            prefix_segments(d)[0],
+            system0,
+            "dispatch {n} changed the system prompt, so every dispatch from the first \
+             one on re-bills its entire context at full price"
+        );
+    }
+
     for (n, pair) in dispatches.windows(2).enumerate() {
-        let (earlier, later) = (&pair[0], &pair[1]);
         assert!(
-            later.messages.len() >= earlier.messages.len(),
+            pair[1].messages.len() >= pair[0].messages.len(),
             "dispatch {} dropped messages ({} -> {}): a shortened prompt is a cache miss \
              from the first divergence",
             n + 1,
-            earlier.messages.len(),
-            later.messages.len()
+            pair[0].messages.len(),
+            pair[1].messages.len()
         );
-        let shared = shared_prefix(earlier, later);
+    }
+
+    // Every divergence in the whole session, as (dispatch, first diverging
+    // segment).
+    let breaks: Vec<(usize, usize)> = dispatches
+        .windows(2)
+        .enumerate()
+        .filter_map(|(n, pair)| {
+            let expected = prefix_segments(&pair[0]).len();
+            let shared = shared_prefix(&pair[0], &pair[1]);
+            (shared < expected).then_some((n + 1, shared))
+        })
+        .collect();
+
+    // MEASURED, not chosen, and stated as an exception SET because the absolute
+    // form is false and this file's first cut was merely blind to it.
+    //
+    // Exactly one break in sixteen dispatches, and it is the TOOL-DEFERRAL
+    // HYDRATION: `probe` is dispatched once as a deferred stub, used, and
+    // admitted by `admit_hydrated_tools`, which un-defers it and moves it to the
+    // tail of `tools[]`. Both halves change the tool block's bytes, and the tool
+    // block sits ahead of the whole conversation.
+    //
+    // What makes that affordable is the SHAPE of the bound: it is one break per
+    // distinct tool FIRST USED, never one per turn. #1150's reported failure is
+    // the per-turn shape, and a per-turn shape would show up here as fifteen
+    // entries rather than one.
+    let labelled: Vec<String> = breaks
+        .iter()
+        .map(|(dispatch, segment)| format!("dispatch {dispatch} at {}", segment_label(*segment)))
+        .collect();
+    assert_eq!(
+        breaks,
+        vec![(1usize, 1usize)],
+        "the implicit prefix cache must break exactly once in this session — at \
+         dispatch 1, on the tool-schema segment, for the deferral hydration — and be \
+         frozen either side of it. Each entry is (dispatch, first diverging segment); \
+         segment 0 is the system prompt, segment 1 the tool schemas, and segment n+2 \
+         message n: {breaks:?} = {labelled:?}"
+    );
+
+    // ...and the break is pinned to that cause rather than merely coinciding
+    // with it. Hydration is PER TOOL, on first use: `idle` is registered and
+    // never called, so it is still a stub on the last dispatch of the session.
+    // That is why the bound above is by tool count — a session that first-uses
+    // K deferred tools pays K of these, on K different dispatches.
+    assert_eq!(
+        deferred_names(&dispatches[0]),
+        vec!["probe", "idle"],
+        "both tools must start deferred, or the hydration this break is attributed to \
+         never happened"
+    );
+    for (n, d) in dispatches.iter().enumerate().skip(1) {
         assert_eq!(
-            shared,
-            earlier.messages.len(),
-            "dispatch {} diverges from dispatch {} at message {shared} of {}: everything \
-             from there on re-bills at full price on an implicit-cache endpoint, every \
-             turn, for the rest of the session",
-            n + 1,
-            n,
-            earlier.messages.len()
+            deferred_names(d),
+            vec!["idle"],
+            "dispatch {n}: after `probe`'s first use exactly one stub must remain"
         );
     }
 
@@ -328,12 +474,39 @@ async fn a_bounded_tool_result_is_rewritten_once_and_then_frozen() {
     // ...and the invalidation is EPOCH-QUANTIZED rather than per-dispatch:
     // most consecutive dispatch pairs must share a full prefix, or the cache
     // never gets a chance to settle between ticks.
+    // Split by CAUSE. Segments 0 and 1 are the system prompt and the tool
+    // schemas; the ceiling rewrites MESSAGES, so only a divergence at segment 2
+    // or later is its doing. The one-off tool-deferral hydration is measured and
+    // pinned by `every_dispatch_extends_the_previous_dispatchs_byte_prefix`
+    // above; folding it in here would move this bound for a reason that has
+    // nothing to do with epoch quantization.
+    let diverge = |pair: &[LlmRequest]| {
+        let expected = prefix_segments(&pair[0]).len();
+        let shared = shared_prefix(&pair[0], &pair[1]);
+        (shared < expected).then_some(shared)
+    };
     let breaks: Vec<usize> = dispatches
         .windows(2)
         .enumerate()
-        .filter(|(_, pair)| shared_prefix(&pair[0], &pair[1]) < pair[0].messages.len())
+        .filter(|(_, pair)| diverge(pair).is_some_and(|shared| shared >= 2))
         .map(|(n, _)| n + 1)
         .collect();
+
+    // ...and the split is not a place to hide one. Everything ahead of the
+    // messages must be the single hydration break and nothing else, or this
+    // filter would quietly absorb a new system-prompt or tool-schema churn.
+    let ahead_of_the_conversation: Vec<usize> = dispatches
+        .windows(2)
+        .enumerate()
+        .filter(|(_, pair)| diverge(pair).is_some_and(|shared| shared < 2))
+        .map(|(n, _)| n + 1)
+        .collect();
+    assert_eq!(
+        ahead_of_the_conversation,
+        vec![1usize],
+        "the only divergence ahead of the conversation may be `probe`'s one-off \
+         deferral hydration at dispatch 1: {ahead_of_the_conversation:?}"
+    );
     // MEASURED, and the bound is set from the measurement rather than chosen:
     // with `epoch_results = 6` this session breaks the prefix on 5 of its 17
     // dispatch pairs; with the quantization removed (`let epoch = 1`) the same
