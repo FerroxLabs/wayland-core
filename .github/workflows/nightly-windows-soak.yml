@@ -55,6 +55,26 @@ on:
         type: string
         required: false
         default: ""
+      # core#325 c2 asks for A RUN in which one job is green and another red,
+      # shown NOT to close the tracker. No such run had ever executed: every
+      # scheduled tick is on main, and a dispatch of the real thing writes to a
+      # real tracker issue, which is why nobody fired one.
+      #
+      # This input removes that reason. It skips the two heavy jobs, fails
+      # `keyring-blob-size` on purpose so the tracker sees a genuinely RED
+      # sibling, and replaces both issue-writing steps with a step that PRINTS
+      # the payload and ASSERTS the decision was `report`. Everything c2 is
+      # about still runs for real: the `${{ needs.<job>.result }}` expansion,
+      # the multi-line JOB_RESULTS env, $GITHUB_OUTPUT -> steps.decide.outputs,
+      # and `always()` admitting the tracker while a sibling is red.
+      #
+      # Unreachable from the cron: `github.event.inputs.*` is empty for a
+      # `schedule` event, so every guard below reads '' != 'true'.
+      tracker_rehearsal:
+        description: "Rehearse the soak-tracker decision against a RED sibling. Writes to no issue."
+        type: boolean
+        required: false
+        default: false
 
 # Least-privilege default. The scheduled soak's issue-opening step needs
 # issues: write, so that job re-grants it at job scope; the candidate F20 jobs
@@ -109,7 +129,12 @@ jobs:
   windows-soak:
     name: Windows soak (windows-2025)
     # Skipped in candidate mode — only the exact F20 native jobs run then.
-    if: github.event.inputs.f20_candidate != 'true'
+    # Skipped in a tracker rehearsal too: the rehearsal grades the tracker's
+    # arithmetic, not the soak, and a skipped job is a non-success the decision
+    # script already handles (`cancelled | skipped` -> NONSUCCESS).
+    if: >-
+      ${{ github.event.inputs.f20_candidate != 'true'
+      && github.event.inputs.tracker_rehearsal != 'true' }}
     runs-on: windows-2025
     timeout-minutes: 60
     permissions:
@@ -229,6 +254,16 @@ jobs:
       contents: read
 
     steps:
+      # The RED sibling of the core#325 c2 rehearsal, and the only job that
+      # runs during one. First step, so nothing else executes and the rehearsal
+      # costs about a minute.
+      - name: Deliberate red sibling (tracker rehearsal only)
+        if: ${{ github.event.inputs.tracker_rehearsal == 'true' }}
+        shell: bash
+        run: |
+          echo "::notice title=Tracker rehearsal::failing on purpose so soak-tracker sees a RED sibling (core#325 c2). This step is unreachable from the schedule."
+          exit 1
+
       # Which Windows executor served this job (gh#1146). Fails closed: a job
       # that cannot name the box that served it reports nothing rather than
       # reporting anonymously. Why, and what enforces it:
@@ -362,6 +397,7 @@ jobs:
     needs: f20-windows-candidate
     if: >-
       ${{ !cancelled()
+      && github.event.inputs.tracker_rehearsal != 'true'
       && (github.event.inputs.f20_candidate != 'true'
       || needs.f20-windows-candidate.result == 'success') }}
     runs-on:
@@ -700,7 +736,9 @@ jobs:
       # and its title prefix, and always leaves an auditable comment naming the
       # green run. It never touches a human-filed issue.
       - name: Close the failure issue on a green RUN
-        if: ${{ steps.decide.outputs.action == 'close' }}
+        if: >-
+          ${{ steps.decide.outputs.action == 'close'
+          && github.event.inputs.tracker_rehearsal != 'true' }}
         uses: actions/github-script@v7
         env:
           JOB_RESULTS: |
@@ -757,11 +795,50 @@ jobs:
             });
             core.info(`closed #${existing.number} on a green run`);
 
+      # The rehearsal's own verdict. This is what makes a dispatch EVIDENCE
+      # rather than a demonstration: it asserts the decision the whole-run
+      # arithmetic produced from real `needs.<job>.result` values, so a
+      # regression that starts closing on a red run makes THIS RUN FAIL.
+      - name: Rehearsal verdict - assert the red sibling did not close anything
+        if: ${{ github.event.inputs.tracker_rehearsal == 'true' }}
+        shell: bash
+        env:
+          ACTION: ${{ steps.decide.outputs.action }}
+          REASON: ${{ steps.decide.outputs.reason }}
+          JOB_RESULTS: |
+            windows-soak=${{ needs.windows-soak.result }}
+            keyring-blob-size=${{ needs.keyring-blob-size.result }}
+            windows-live-acceptance=${{ needs.windows-live-acceptance.result }}
+        run: |
+          set -euo pipefail
+          echo "-- core#325 c2 rehearsal ------------------------------------"
+          printf '%s\n' "$JOB_RESULTS"
+          echo "action=${ACTION} reason=${REASON}"
+          echo "no issue was created, commented on or closed by this run."
+
+          # The red sibling must be real: a rehearsal in which nothing actually
+          # failed would assert `report` against an empty premise.
+          case "$JOB_RESULTS" in
+            *keyring-blob-size=failure*) : ;;
+            *)
+              echo "::error title=Rehearsal premise absent::keyring-blob-size did not report 'failure', so this run has no red sibling and proves nothing."
+              exit 1
+              ;;
+          esac
+
+          if [ "${ACTION}" != "report" ]; then
+            echo "::error title=core#325 REGRESSED::a run with a failed sibling job decided '${ACTION}' (reason '${REASON}'), not 'report'. That is the laundering this issue was opened about."
+            exit 1
+          fi
+          echo "OK: one job red -> action=report, reason=${REASON}. Nothing was closed."
+
       # Opens (or comments on) the tracker issue when ANY gating job failed —
       # including the self-hosted live-acceptance job, whose three consecutive
       # reds produced no issue at all under the old wiring.
       - name: Report red result to issue tracker
-        if: ${{ steps.decide.outputs.action == 'report' }}
+        if: >-
+          ${{ steps.decide.outputs.action == 'report'
+          && github.event.inputs.tracker_rehearsal != 'true' }}
         uses: actions/github-script@v7
         env:
           JOB_RESULTS: |
