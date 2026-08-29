@@ -404,6 +404,19 @@ impl EscalationGate {
         Ok(())
     }
 
+    /// Undo the most recent [`Self::authorize`], restoring the ceiling it
+    /// raised.
+    ///
+    /// Exists for exactly one caller: an authorization whose durable record
+    /// could not be written. An escalation that is not recorded must not be in
+    /// force, and rebuilding the gate from scratch would silently drop the
+    /// escalations that WERE recorded before it.
+    pub fn revert_last_authorization(&mut self) -> Option<EscalationRecord> {
+        let record = self.history.pop()?;
+        self.authorized = record.from.clone();
+        Some(record)
+    }
+
     /// Authorize an escalation, raising the ceiling and minting the durable
     /// record that must be persisted.
     ///
@@ -582,6 +595,25 @@ mod tests {
         // The refusal must not have moved the ceiling.
         assert_eq!(gate.authorized().model, "haiku");
         assert!(gate.history().is_empty());
+        assert!(gate.admit(&metered("opus", 30.0)).is_err());
+    }
+
+    #[test]
+    fn reverting_an_authorization_restores_the_previous_ceiling_only() {
+        let mut gate = EscalationGate::new("s1", metered("haiku", 1.0));
+        gate.authorize(metered("sonnet", 6.0), "operator", "first", 1)
+            .unwrap()
+            .unwrap();
+        gate.authorize(metered("opus", 30.0), "operator", "second", 2)
+            .unwrap()
+            .unwrap();
+        let reverted = gate.revert_last_authorization().expect("a record to revert");
+        assert_eq!(reverted.to.model, "opus");
+        // The FIRST escalation survives — a failed write of the second must
+        // not silently un-authorize a model that was properly recorded.
+        assert_eq!(gate.authorized().model, "sonnet");
+        assert_eq!(gate.history().len(), 1);
+        assert!(gate.admit(&metered("sonnet", 6.0)).is_ok());
         assert!(gate.admit(&metered("opus", 30.0)).is_err());
     }
 
