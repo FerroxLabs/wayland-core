@@ -5,18 +5,18 @@
 > verification) and `PLAN-ROUTING.json` (assignment). If this disagrees with anyone's
 > recollection, this is right and the recollection is wrong — that is the entire point.
 
-Rendered 2026-08-29 14:14 UTC
+Rendered 2026-08-29 14:25 UTC
 
 ## VERDICT: BLOCKED
 
-**43 criteria block the 0.13.12 release.** Full list in §3.
+**42 criteria block the 0.13.12 release.** Full list in §3.
 
 | state | count | means |
 |---|---:|---|
 | DONE | 32 | met, evidence resolves, independently verified |
 | CLAIMED | 195 | met but NOT yet independently verified — never report as done |
-| OPEN | 46 | outstanding work |
-| HANDOFF | 0 | another team's half, with a filed ticket carrying it |
+| OPEN | 45 | outstanding work |
+| HANDOFF | 1 | another team's half, with a filed ticket carrying it |
 
 ## §3 BLOCKING — the definition of done for 0.13.12
 
@@ -124,7 +124,6 @@ Runs on: **Sean**  ·  2-maintainer
 | criterion | issue | what must become true |
 |---|---|---|
 | `c5` | wl#1186 | whatsapp (Meta Cloud API): a credential exists and a boundary probe sends at cap and at +1 |
-| `c5` | wl#934 | Every adapter's declared cap is verified against the real platform limit |
 
 ### `mcp-gate-mode` — MCP malware gate: explicit permissive/strict operator choice
 
@@ -174,7 +173,9 @@ These are NOT partials. Core's half is closed; the remainder is filed against a 
 owner with its own contract. A blocked criterion with no ticket does not appear here —
 it appears in §3 as blocking, because that is what it is.
 
-_None recorded yet._
+| criterion | issue | owner | carried by |
+|---|---|---|---|
+| `c5` | wl#934 | maintainer | FerroxLabs/wayland#1186 |
 
 ## §5 CLAIMED BUT UNVERIFIED — 195
 

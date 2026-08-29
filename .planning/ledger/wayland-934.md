@@ -32,6 +32,7 @@ criteria:
     text: "Every adapter's declared cap is verified against the real platform limit"
     state: blocked
     owner: maintainer
+    handoff: "FerroxLabs/wayland#1186"
     note: "Three caps still declare cap_measured = no, and the reasons are now DIFFERENT from each other. whatsapp (Meta Cloud API) is blocked on Meta's 15-app-per-developer cap against an account holding 44 apps - see wayland#1186 c5. matrix and msteams are NOT credential-blocked at all; see c7. The previous note said seven unmeasured and no Twilio credential; both are now false."
   - id: c6
     text: "The WhatsApp BRIDGE cap, the eighth max_message_len, is measured or made honest and is reachable by the coverage guard"
