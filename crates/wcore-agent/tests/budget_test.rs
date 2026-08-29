@@ -371,6 +371,7 @@ fn budget_config_into_execution_budget_translates_seconds_to_duration() {
         max_tokens_out: Some(16_384),
         max_cost_usd: Some(0.50),
         max_daily_cost_usd: None,
+        mode: None,
     };
     let exec: ExecutionBudget = (&cfg).into();
     assert_eq!(exec.max_wall_time, Some(Duration::from_secs(600)));

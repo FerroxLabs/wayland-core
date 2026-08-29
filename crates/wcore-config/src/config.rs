@@ -5789,6 +5789,15 @@ fn merge_config_files_with_trust(
             (Some(value), None) | (None, Some(value)) => Some(value),
             (None, None) => None,
         },
+        // STRICTEST wins, for the same reason as `max_daily_cost_usd`: the
+        // spend MODE is a machine-owner guarantee ("nothing paid", "nothing
+        // leaves this box"), and a repo-local config file must never be able
+        // to relax one.
+        mode: match (project.budget.mode, global.budget.mode) {
+            (Some(project), Some(global)) => Some(project.strictest(global)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        },
     };
 
     // Wave SD — storage section: project overrides global if its backend
