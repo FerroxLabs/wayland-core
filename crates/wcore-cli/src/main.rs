@@ -6262,27 +6262,14 @@ async fn run_json_stream_mode(
                                         // council/consent unresolvable (hang until the TTL)
                                         // on a JSON-stream host (the desktop app). Route the
                                         // secret resume_token through the shared bridge.
-                                        let outcome = wcore_agent::approval::ApprovalOutcome {
+                                        wcore_cli::approval_resume::handle_approval_resume(
+                                            &approval_bridge,
+                                            writer.as_ref(),
+                                            resume_token,
                                             approved,
                                             modifications,
-                                            cancellation: None,
-                                        };
-                                        let resolved =
-                                            approval_bridge.resolve(&resume_token, outcome).await;
-                                        let _ = writer.emit(
-                                            &wcore_protocol::events::ProtocolEvent::ApprovalResume {
-                                                resume_token: resume_token.clone(),
-                                                approved,
-                                            },
-                                        );
-                                        if !resolved {
-                                            let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                                                msg_id: String::new(),
-                                                message: format!(
-                                                    "approval_resume received for unknown token: {resume_token} (stale resume?)"
-                                                ),
-                                            });
-                                        }
+                                        )
+                                        .await;
                                     }
                                     ProtocolCommand::HostSendMessageResult { call_id, ok, message_id, error } => {
                                         // #537/#141: a host-delegated send_message parks
@@ -6700,24 +6687,14 @@ async fn run_json_stream_mode(
                 // We still emit the `ApprovalResume` event so host UI can
                 // clear its pending-approval state; the diagnostic `Info` is
                 // emitted only when the token is unknown (stale resume).
-                let outcome = wcore_agent::approval::ApprovalOutcome {
+                wcore_cli::approval_resume::handle_approval_resume(
+                    &approval_bridge,
+                    writer.as_ref(),
+                    resume_token,
                     approved,
                     modifications,
-                    cancellation: None,
-                };
-                let resolved = approval_bridge.resolve(&resume_token, outcome).await;
-                let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::ApprovalResume {
-                    resume_token: resume_token.clone(),
-                    approved,
-                });
-                if !resolved {
-                    let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                        msg_id: String::new(),
-                        message: format!(
-                            "approval_resume received for unknown token: {resume_token} (stale resume?)"
-                        ),
-                    });
-                }
+                )
+                .await;
             }
             ProtocolCommand::HostSendMessageResult {
                 call_id,
@@ -8184,6 +8161,58 @@ mod tests {
             Some(HOST_EOF_DENY_REASON),
             "#1083 asked the bridge not to reuse #1070's string verbatim"
         );
+    }
+
+    /// FerroxLabs/wayland#1180 -- every `ApprovalResume` arm is WIRED.
+    ///
+    /// `crates/wcore-cli/tests/approval_resume_active_turn.rs` grades what
+    /// `handle_approval_resume` DOES, driving it with the real egress-consent
+    /// doorbell. It cannot see whether `main.rs` still calls it. An arm that
+    /// stopped calling it would leave that suite green while a bridge-backed
+    /// approval parked mid-turn waited out its TTL -- which is the exact shape
+    /// of #1180 in the first place, and the reason its acceptance criterion is
+    /// a mutation on the CALL SITE.
+    ///
+    /// Comment lines are stripped first: a scan that matches its own
+    /// documentation grades nothing.
+    #[test]
+    fn every_approval_resume_arm_routes_through_the_shared_handler() {
+        let source = include_str!("main.rs");
+        let code: Vec<&str> = source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect();
+
+        let arms: Vec<usize> = code
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| **line == "ProtocolCommand::ApprovalResume {")
+            .map(|(i, _)| i)
+            .collect();
+
+        // POSITIVE CONTROL: both arms (mid-turn and between-turn) exist today.
+        // If the match arm is ever spelled differently this scan finds nothing
+        // and would pass while grading nothing at all.
+        assert_eq!(
+            arms.len(),
+            2,
+            "expected the 2 known ApprovalResume arms (mid-turn and \
+             between-turn), found {} -- the pattern this scan looks for must \
+             have changed, and the check below is now vacuous",
+            arms.len()
+        );
+
+        for arm in arms {
+            let window = code[arm..code.len().min(arm + 12)].join(" ");
+            assert!(
+                window.contains("handle_approval_resume("),
+                "the ApprovalResume arm at code line {arm} (of comment-stripped \
+                 source) does not route through the shared handler, so nothing \
+                 resolves the parked approval and it waits out its TTL. \
+                 Context: {window}"
+            );
+        }
     }
 
     /// FerroxLabs/wayland#1083 criterion 1 -- "awaited at EVERY EOF site".

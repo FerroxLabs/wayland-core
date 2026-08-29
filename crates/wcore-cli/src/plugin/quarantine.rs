@@ -286,7 +286,92 @@ fn normalize_copy(src: &Path, dst: &Path, copied: &mut u64, cap: u64) -> Result<
 /// interprets `;`/`&&`/`$()` — combined with `--`, `protocol.ext.allow=never`,
 /// and the leading-`-` reject above. Mirrors the sync git calls in
 /// `tui/commands/at_ref_send.rs` and `wcore-skills/src/discovery.rs`.
-fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<String> {
+/// Deny an untrusted quarantine child every route to the user's terminal.
+///
+/// The clone URL on this path is CATALOG-controlled and the install fires from
+/// inside the TUI alt screen, so a prompt that reaches the terminal is both
+/// attacker-triggered and unattributable. Two distinct routes exist, and only
+/// one of them is the stdio we hand the child.
+///
+/// **Route 1 — the child asks its parent's plumbing to prompt.** Pinned by
+/// environment, matching the three git-spawning sites that already do this
+/// (`wcore-tools/src/unsaved_work.rs`, `wcore-swarm/src/worktree_cleanup.rs`,
+/// `wcore-eval-scenarios/src/child_env.rs`):
+///
+/// * `GIT_TERMINAL_PROMPT=0` — git's own prompt.
+/// * `GIT_ASKPASS=""` — git's `prompt.c` takes the first NON-EMPTY of
+///   `GIT_ASKPASS`, `core.askpass`, `SSH_ASKPASS`, so an empty value is git's
+///   own spelling of "no askpass", not a broken program path. Setting it here
+///   also shadows a `core.askpass` in the user's global config, which an
+///   inherited-env-only fix would leave live.
+/// * `SSH_ASKPASS=""` + `SSH_ASKPASS_REQUIRE=never` — the OpenSSH equivalent,
+///   for an `ssh://` or `git@` source.
+/// * `GCM_INTERACTIVE=Never` — Git Credential Manager's GUI dialog.
+/// * `GIT_PAGER=cat` — a pager takes the terminal too.
+///
+/// **Route 2 — `open("/dev/tty")`.** This needs none of our stdio and reads no
+/// environment, so route 1 does not touch it: a third-party credential helper
+/// that opens `/dev/tty` itself prompts regardless of every variable above.
+/// That is the route issue #338 is actually about. A process can only open
+/// `/dev/tty` if it has a CONTROLLING terminal, so the fix is to take the
+/// controlling terminal away rather than to ask the child not to use it:
+/// `setsid(2)` between fork and exec puts the child in a fresh session with no
+/// ctty, `open("/dev/tty")` then fails with `ENXIO`, and every descendant the
+/// child spawns — helpers included — inherits that session. On Windows the
+/// analogue is `DETACHED_PROCESS`, which denies the child the parent's console
+/// and so `CONIN$`/`CONOUT$` with it.
+///
+/// `credential.helper` is deliberately NOT cleared. Clearing it would break
+/// installs from private plugin sources, which is a real product cost, and
+/// route 2 already removes the helper's terminal.
+///
+/// Fail-closed: if `setsid` fails the spawn fails, and the install reports an
+/// error rather than proceeding with a child that still holds the terminal.
+///
+/// `pub` because the `/dev/tty` property is only observable from a process that
+/// HAS a controlling terminal, which a test must build with a PTY — see
+/// `crates/wcore-cli/tests/quarantine_terminal_authority.rs`.
+pub fn harden_against_credential_prompt(cmd: &mut std::process::Command) {
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS", "")
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .env("GCM_INTERACTIVE", "Never")
+        .env("GIT_PAGER", "cat");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: the hook runs between fork and exec in the child. `setsid(2)`
+        // is async-signal-safe, allocates nothing, and touches no state shared
+        // with the parent; it is the only thing this closure does.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        /// `DETACHED_PROCESS` — the child gets no console, and does not
+        /// inherit ours.
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        cmd.creation_flags(DETACHED_PROCESS);
+    }
+}
+
+/// Build the `git` command `run_git` runs, hardened, without spawning it.
+///
+/// Split out so a test grades the WIRING and not just the function: an
+/// assertion against `harden_against_credential_prompt` alone still passes
+/// when `run_git` stops calling it, which is the failure mode that has reached
+/// a PR here before. Every quarantine `git` spawn goes through this.
+pub fn build_git_command(args: &[&str], cwd: Option<&Path>) -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
     cmd.args(args);
     if let Some(c) = cwd {
@@ -295,6 +380,12 @@ fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<Strin
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    harden_against_credential_prompt(&mut cmd);
+    cmd
+}
+
+fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<String> {
+    let mut cmd = build_git_command(args, cwd);
 
     let mut child = cmd
         .spawn()
@@ -389,6 +480,49 @@ fn env_u64(key: &str, default: u64) -> u64 {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// Every quarantine `git` spawn carries the credential-prompt pins.
+    ///
+    /// Asserted against a real `Command` built the way `run_git` builds one,
+    /// not against the pin list itself — deleting the `.env()` calls reddens
+    /// this, whereas a test that compared the constant to itself would not.
+    #[test]
+    fn quarantine_git_spawns_cannot_be_asked_to_prompt() {
+        let cmd = build_git_command(&["clone", "--", "https://example.invalid/p", "/x"], None);
+
+        let seen: std::collections::HashMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+
+        for (key, value) in [
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("GIT_ASKPASS", ""),
+            ("SSH_ASKPASS", ""),
+            ("SSH_ASKPASS_REQUIRE", "never"),
+            ("GCM_INTERACTIVE", "Never"),
+            ("GIT_PAGER", "cat"),
+        ] {
+            assert_eq!(
+                seen.get(key).cloned().flatten().as_deref(),
+                Some(value),
+                "{key} is not pinned on the quarantine git command: {seen:?}"
+            );
+        }
+
+        // Negative control: hardening pins prompting, it does not blanket-clear
+        // the environment. `credential.helper` must keep working for private
+        // plugin sources, so nothing here may remove an unrelated variable.
+        assert!(
+            !seen.contains_key("PATH"),
+            "hardening must not touch unrelated environment entries: {seen:?}"
+        );
+    }
 
     /// `run_git` must not be wedgeable by a process `git` leaves behind.
     ///

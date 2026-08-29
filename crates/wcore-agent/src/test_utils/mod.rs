@@ -146,6 +146,31 @@ impl TestSinkHandle {
 }
 
 impl OutputSink for TestSink {
+    /// Mirrors `ProtocolSink`'s mapping so a test can read the
+    /// `resume_token` the way a HOST reads it — off the wire.
+    ///
+    /// Without this the doorbell's emission is a default no-op here, and the
+    /// only way a test could learn the token is `bridge.pending_tokens()`,
+    /// which is a shortcut no host has. Tests written against that shortcut
+    /// passed vacuously under a mutation that emitted an EMPTY token
+    /// (FerroxLabs/wayland#1180).
+    fn emit_approval_required(
+        &self,
+        call_id: &str,
+        resume_token: &str,
+        reason: &str,
+        context: &str,
+    ) {
+        self.record(&ProtocolEvent::ApprovalRequired {
+            call_id: call_id.to_string(),
+            resume_token: resume_token.to_string(),
+            correlation_id: resume_token.to_string(),
+            reason: reason.to_string(),
+            context: context.to_string(),
+            plan: None,
+        });
+    }
+
     fn emit_midflight_monitor_decision(
         &self,
         directive: wcore_protocol::events::MonitorDirective,
