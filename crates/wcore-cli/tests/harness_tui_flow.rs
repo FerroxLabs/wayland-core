@@ -370,6 +370,79 @@ impl PtyHarness {
         );
     }
 
+    /// Row indices carrying a visible GLYPH at column `col` (0-based).
+    ///
+    /// core#336 c2: the primitive a NARROW-width observation is built from.
+    /// `widest_painted_row` cannot make one, for two independent reasons.
+    /// First, after `set_size` truncates the grid to 80 columns the boot
+    /// frame's full-width horizontal rules still fill column 79, so
+    /// `widest_painted_row() == 80` is true with no repaint at all. Second —
+    /// MEASURED while writing this — `vt100::Cell::has_contents()` is true for
+    /// a cell the app painted a background colour into, and this TUI paints a
+    /// background across the whole surface, so every row of every frame
+    /// "reaches" the last column and the answer is the grid width by
+    /// construction. This helper therefore reads `contents()` and requires a
+    /// non-whitespace character: the question is where the app put INK, not
+    /// where it put paint.
+    fn rows_painted_at_column(&self, col: usize) -> Vec<usize> {
+        let parser = self.parser.lock().expect("parser lock");
+        let screen = parser.screen();
+        let (rows, cols) = screen.size();
+        if col >= cols as usize {
+            return Vec::new();
+        }
+        (0..rows)
+            .filter(|row| {
+                screen
+                    .cell(*row, col as u16)
+                    .is_some_and(|cell| !cell.contents().trim().is_empty())
+            })
+            .map(usize::from)
+            .collect()
+    }
+
+    /// Wait until the app has RE-LAID-OUT for a narrower grid, and prove it
+    /// from the frame rather than from the process.
+    ///
+    /// core#336 c2 asks for a post-resize predicate "that can only be satisfied
+    /// by a frame that is actually 80 columns wide". This is that predicate.
+    ///
+    /// `vt100::Screen::set_size` TRUNCATES: every cell in columns `0..cols`
+    /// survives the shrink byte for byte. So `was_painted` — the rows that
+    /// carried a glyph at the new right-hand edge while the grid was still 120
+    /// wide — is exactly the set a pure truncation preserves. A row LEAVING
+    /// that set means the app wrote a blank over a cell that the shrink itself
+    /// could not have touched, which no stale frame, no undelivered resize and
+    /// no truncation can do. The session is hermetic and static — no agent
+    /// turn, no scrollback movement, no activity rail — so the only layout that
+    /// clears the edge of a row the 120-column layout filled is a layout for
+    /// the narrower width.
+    ///
+    /// MEASURED on a healthy binary, idle box: 21 of 40 rows change inside
+    /// columns 0..80 within 500ms of the shrink, the tab labels come back
+    /// ellipsized (`Workspa…`, `Sub-Age…`) and the transcript rule stops at
+    /// column 78 where the 120-column frame ran past the edge.
+    fn wait_for_narrower_relayout(&self, col: usize, was_painted: &[usize], timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let mut still = Vec::new();
+        while Instant::now() < deadline {
+            still = self.rows_painted_at_column(col);
+            if was_painted.iter().any(|row| !still.contains(row)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        panic!(
+            "timed out after {timeout:?} waiting for the app to re-lay-out for a \
+             {}-column grid: every one of the {} rows that reached column {col} before \
+             the resize still reaches it ({still:?}), which is what a grid that was \
+             merely TRUNCATED looks like.\n--- last screen ---\n{}\n--- end ---",
+            col + 1,
+            was_painted.len(),
+            self.screen_text()
+        );
+    }
+
     /// True while the spawned binary is still running.
     ///
     /// core#336: what the SHRINK leg of the resize test uniquely guards is that
@@ -609,25 +682,80 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
         "the boot chrome to paint out to the 120-column edge",
     );
 
+    // core#336 c2 — read the discriminator's BASELINE while the grid is still
+    // 120 wide: which rows carry a glyph at what is about to become the last
+    // column. `vt100`'s `set_size` truncates rather than repaints, so every one
+    // of these cells survives the shrink untouched, and a row leaving this set
+    // afterwards can only be the app painting into the new geometry.
+    //
+    // KNOWN-POSITIVE CONTROL for the instrument: the set must be non-empty, or
+    // the wait below would be unfalsifiable in the other direction.
+    let edge_before = h.rows_painted_at_column(NARROW_COLS as usize - 1);
+    assert!(
+        !edge_before.is_empty(),
+        "no row reaches column {} at the boot width, so a narrow-width observation \
+         has nothing to observe.\n{}",
+        NARROW_COLS - 1,
+        h.screen_text()
+    );
+
     // Shrink well below RAIL_RESPONSIVE_MIN_WIDTH = 100. 80 cols is the
     // canonical "narrow terminal" size. A render-primitive panic on tight
     // rows would crash the child here.
     h.resize(NARROW_COLS, HARNESS_ROWS);
 
-    // What this leg promises is SURVIVAL, and it is asked of the process, not
-    // of the screen. MEASURED, 1 full-suite run in 6: waiting here for the
-    // chrome to reappear times out on a healthy binary. Shrinking the grid to
-    // 80 columns truncates away the part of the boot frame the predicate was
-    // reading, so satisfying it needs a FULL repaint at the intermediate width
-    // — and the app is under no obligation to emit one before the next resize.
-    // Requiring it turned a survival check into a bet on the renderer's diff
-    // strategy. The chrome is asserted after the widen instead, where a repaint
-    // IS required and is separately observed.
+    // SURVIVAL, asked of the process. A render-primitive panic on tight rows
+    // kills the child, and no screen predicate can tell you that.
     std::thread::sleep(Duration::from_millis(300));
     assert!(
         h.is_running(),
         "the binary died on an aggressive narrow resize — a render primitive \
          panicked on tight rows"
+    );
+
+    // ...and COHERENCE AT THE NARROW WIDTH, asked of the frame. core#336 c2:
+    // "the post-resize predicate can only be satisfied by a frame that is
+    // actually 80 columns wide".
+    //
+    // Why this is not the 5-second chrome wait that flaked (536fbfbe): that
+    // one required a specific STRING to reappear inside 5s, on a budget 12x
+    // tighter than the same harness grants the identical class of event at
+    // boot. This one requires the weakest possible evidence of a repaint —
+    // ONE cell blanked at the new edge — on the full PAINT_BUDGET. Measured
+    // on a healthy binary: the relayout lands within 500ms.
+    h.wait_for_narrower_relayout(NARROW_COLS as usize - 1, &edge_before, PAINT_BUDGET);
+
+    // The frame the app painted at 80 columns is a WHOLE frame, not a corrupt
+    // one. This is the coherence half the shrink leg lost when the chrome wait
+    // was removed: a surface that garbles at 80 and recovers on widening used
+    // to pass. It is safe to assert rather than wait on, because the relayout
+    // above has already been observed.
+    //
+    // The anchors are deliberately NOT the boot ones. At 80 columns the tab
+    // labels are ellipsized — `Workspace` comes back as `Workspa…` — which is
+    // precisely why the old 5-second `contains("Workspace")` wait could not be
+    // satisfied at this width and had to be a bet on the renderer instead of an
+    // observation. These three are stable at every width the test uses, and
+    // they sit in three different regions of the surface: top chrome, the input
+    // affordance in the middle, and the footer hint row.
+    let narrow = h.screen_text();
+    for anchor in ["WAYLAND", "type / for commands", "Tab next tab"] {
+        assert!(
+            narrow.contains(anchor),
+            "the chrome did not survive the narrow re-layout: the app repainted for \
+             {NARROW_COLS} columns and `{anchor}` is not in the frame.\n{narrow}"
+        );
+    }
+    // ...and the frame reaches its own right-hand edge. Grid geometry already
+    // caps ink at column 79; this is the other half — that the 80-column layout
+    // actually fills the width rather than painting a 40-column frame into an
+    // 80-column grid.
+    assert!(
+        !h.rows_painted_at_column(NARROW_COLS as usize - 1)
+            .is_empty(),
+        "the frame the app painted at {NARROW_COLS} columns puts no ink on column {}, \
+         so it is not {NARROW_COLS} columns wide.\n{narrow}",
+        NARROW_COLS - 1
     );
 
     // Restoring width must keep the chrome coherent — the symmetric half of
