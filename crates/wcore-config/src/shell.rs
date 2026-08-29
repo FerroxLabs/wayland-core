@@ -91,7 +91,7 @@ pub fn shell_info() -> ShellInfo {
 /// the resolved-bash default.
 ///
 /// The choice resolves with precedence **`WAYLAND_BASH_SHELL` env (runtime
-/// override) > `[tools] windows_shell` config > default `cmd`**. The config key
+/// override) > `[tools] windows_shell` config > the resolved default**. The config key
 /// is the path the desktop app writes; the env var is the runtime escape hatch.
 ///
 /// Scope is deliberately the BashTool only — the hook, MCP-stdio, and skill
