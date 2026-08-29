@@ -438,6 +438,62 @@ not restrict who can then use it within that session.
 > should agree is an open question — see
 > `.planning/ANSWER-desktop-mcp-scoping-2026-08-08.md`.
 
+## Supply-chain malware gate — `[mcp] malware_gate`
+
+A stdio entry with `command = "npx"`, `"uvx"`, `"pipx"`, `"bunx"`, `"pnpm dlx"`
+(and the other package runners listed in `wcore_mcp::malware_gate`) makes Core
+**fetch a package from a public registry and execute it** with your ambient
+authority, at connect time. Every stdio launch is therefore queried against the
+[OSV](https://osv.dev) malware feed *before the child process exists*.
+
+Three of the four answers are the same in every configuration:
+
+| Answer | What happens |
+|--------|--------------|
+| Not a package runner | Nothing is fetched, nothing is queried, the server launches |
+| Queried, no malware advisories | The server launches |
+| Known malware advisories | **Refused** — `MalwareBlocked`, before exec |
+| A package runner whose argv names no readable package | **Refused** — the check could not run, and "the check did not happen" is not a pass. Name it explicitly (`npx --package <pkg>`, `uvx --from <pkg>`, `pipx --spec <pkg>`) |
+
+The fourth case is the one you can configure: **the check could not be
+performed at all** — `api.osv.dev` is unreachable, times out, returns an HTTP
+error or unparseable JSON, or the configured endpoint fails the SSRF safety
+check and is never contacted.
+
+```toml
+[mcp]
+# "permissive" (default) | "strict"
+malware_gate = "permissive"
+```
+
+- **`permissive`** (the default, and the behaviour of every release before this
+  key existed) — the failure is logged at `ERROR`, the only level that reaches
+  you with `RUST_LOG` unset, and the server launches anyway. Refusing every MCP
+  server the moment your machine goes offline is a worse day than an unchecked
+  launch you were told about, so this is what you get by default.
+- **`strict`** — a check that could not be performed is not a pass, and the
+  launch is refused with `MalwareBlocked` before the child exists. Choose this
+  where an unreachable malware feed is more likely to be an attacker holding
+  the feed down than a flaky café network. Note the cost honestly: with
+  `strict`, no network means no `npx`/`uvx` MCP servers at all.
+
+Both failure paths — the backend error and the SSRF short-circuit — follow the
+same mode. There is no way to have one strict and the other permissive.
+
+**Cascading.** This key is a security posture, so it does **not** follow the
+usual "project overrides global" rule: the **stricter** of the two layers wins.
+A project `config.toml` can tighten a global `permissive` to `strict`; it can
+never loosen a global `strict` back to `permissive`.
+
+**Checking which mode you are on.** `wayland --doctor` prints it in the MCP
+section, whether or not any server is declared:
+
+```
+MCP servers (declared):
+  [config] filesystem           stdio          npx
+  [mcp] malware_gate = "permissive" — an OSV malware check that cannot be performed LOGS at ERROR and the server still launches (default)
+```
+
 ## Tool Naming
 
 - MCP tool names are used directly when there's no conflict

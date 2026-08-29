@@ -9966,6 +9966,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "wcore-config",
  "wcore-egress",
  "wcore-mcp",

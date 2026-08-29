@@ -569,6 +569,10 @@ async fn print_mcp_section(probe: bool, cli_args: &wcore_config::config::CliArgs
                     println!("  [config] {name:<20} {transport:<14} {target}");
                 }
             }
+            // wayland-core#354 — the launch gate's posture, printed whether or
+            // not any server is declared: a fresh config with no servers yet
+            // is exactly when an operator wants to see which mode they are on.
+            println!("{}", malware_gate_line(cfg.mcp.malware_gate));
         }
         Err(e) => println!("  (config not loaded: {e})"),
     }
@@ -1117,6 +1121,27 @@ fn wlrctl_hints() -> Vec<String> {
     ]
 }
 
+/// wayland-core#354 — the `/doctor` face of `[mcp] malware_gate`.
+///
+/// A security posture that is only visible by reading `config.toml` is a
+/// posture nobody audits, and the permissive default is exactly the one an
+/// operator would want to discover they still have. Kept as a pure function
+/// so the line itself is graded, not just the fact that something printed.
+pub(crate) fn malware_gate_line(mode: wcore_config::config::McpMalwareGateMode) -> String {
+    use wcore_config::config::McpMalwareGateMode as Mode;
+    let consequence = match mode {
+        Mode::Permissive => {
+            "an OSV malware check that cannot be performed LOGS at ERROR and the server \
+             still launches (default)"
+        }
+        Mode::Strict => "an OSV malware check that cannot be performed REFUSES the launch",
+    };
+    format!(
+        "  [mcp] malware_gate = \"{}\" — {consequence}",
+        mode.as_str()
+    )
+}
+
 fn grim_hints() -> Vec<String> {
     vec![
         "apt install grim                (Debian/Ubuntu)".into(),
@@ -1129,6 +1154,52 @@ fn grim_hints() -> Vec<String> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    // -- wayland-core#354: the malware-gate mode has a `/doctor` face ------
+
+    /// Both modes must name the config key AND state the consequence. A line
+    /// that only echoes `permissive` tells an operator nothing about what
+    /// their machine does when `api.osv.dev` is unreachable, which is the
+    /// entire reason the key exists.
+    #[test]
+    fn doctor_names_the_malware_gate_mode_and_what_it_does() {
+        use wcore_config::config::McpMalwareGateMode as Mode;
+
+        let permissive = malware_gate_line(Mode::Permissive);
+        assert!(
+            permissive.contains("malware_gate") && permissive.contains("\"permissive\""),
+            "the line must name the config key and its value: {permissive}"
+        );
+        assert!(
+            permissive.contains("still launches"),
+            "permissive must say the launch goes ahead: {permissive}"
+        );
+
+        let strict = malware_gate_line(Mode::Strict);
+        assert!(
+            strict.contains("malware_gate") && strict.contains("\"strict\""),
+            "the line must name the config key and its value: {strict}"
+        );
+        assert!(
+            strict.contains("REFUSES"),
+            "strict must say the launch is refused: {strict}"
+        );
+        assert_ne!(
+            permissive, strict,
+            "one line for both modes would report nothing"
+        );
+    }
+
+    /// The default posture a fresh install reports is the permissive one --
+    /// this is the row that would catch a change of default slipping in.
+    #[test]
+    fn doctor_reports_permissive_for_a_default_config() {
+        let cfg = wcore_config::config::Config::default();
+        assert_eq!(
+            malware_gate_line(cfg.mcp.malware_gate),
+            malware_gate_line(wcore_config::config::McpMalwareGateMode::Permissive)
+        );
+    }
 
     // -- `br-default`: the browser-policy row ----------------------------
     //
