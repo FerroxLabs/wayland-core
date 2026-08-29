@@ -435,9 +435,9 @@ pub enum ProtocolCommand {
         /// Only a RUNTIME-declared server may be replaced — a config-declared
         /// name is refused by the existing collision check, and a server that
         /// is still connecting or stopping is refused rather than interrupted.
-        /// `skip_serializing_if` keeps a command that does not ask for it
-        /// byte-identical to the pre-#1165 wire.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        /// `serde(default)` keeps an existing host's bytes decoding exactly as
+        /// they did before #1165.
+        #[serde(default)]
         replace: bool,
     },
     /// Remove a server previously introduced by [`ProtocolCommand::AddMcpServer`]
@@ -1048,10 +1048,10 @@ mod tests {
         }
     }
 
-    /// wayland#1165 — the destructive reconfigure is OPT-IN and must be
-    /// legible on the wire in both directions: absent decodes to `false`, an
-    /// explicit `true` decodes to `true`, and a command that does not ask for
-    /// it re-serializes without the key at all (byte-identical to pre-#1165).
+    /// wayland#1165 — the destructive reconfigure is OPT-IN. This wire is
+    /// inbound-only (`ProtocolCommand` derives `Deserialize`, not `Serialize`),
+    /// so the property that matters is what an EXISTING host's bytes decode to:
+    /// a command that says nothing about `replace` must never get one.
     #[test]
     fn add_mcp_server_replace_is_opt_in_and_absent_by_default() {
         fn replace_of(json: &str) -> bool {
@@ -1070,13 +1070,6 @@ mod tests {
             "an explicit false is still the safe default"
         );
         assert!(replace_of(&format!("{{{base},\"replace\":true}}")));
-
-        let quiet: ProtocolCommand = serde_json::from_str(&format!("{{{base}}}")).expect("decode");
-        let round = serde_json::to_value(&quiet).expect("encode");
-        assert!(
-            round.get("replace").is_none(),
-            "a command that does not ask to replace must not grow the key: {round}"
-        );
     }
 
     #[test]
