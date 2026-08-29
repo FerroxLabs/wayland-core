@@ -624,6 +624,13 @@ async fn print_mcp_section(probe: bool, cli_args: &wcore_config::config::CliArgs
         println!("Probing config-declared MCP servers (connect-test)...");
         match wcore_config::config::Config::resolve(cli_args) {
             Ok(cfg) if !cfg.mcp.servers.is_empty() => {
+                // wayland-core#354 c7. Installed here as well as beside the
+                // printed posture above, and not only for symmetry: the
+                // install must not be a side effect of a PRINT that a later
+                // refactor could move or drop while this launch stays. The
+                // install is one-shot, so this is a no-op whenever the block
+                // above already ran.
+                wcore_mcp::malware_gate::install_mode(cfg.mcp.malware_gate);
                 // #111 note: this deliberately connect-tests ALL config servers,
                 // INCLUDING any marked `only_for_assistant` — the per-assistant
                 // scoping filter (`servers_for_assistant`) is intentionally NOT
