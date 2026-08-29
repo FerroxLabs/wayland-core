@@ -67,3 +67,27 @@ connector.
 
 The umbrella feature request (#253) stays open and unscheduled - see Q6 in
 `.planning/DECISIONS.md`. This file tracks only the defect.
+
+## Re-graded at HEAD by lane f13-u-flake-chan, 2026-08-29
+
+OWNED ELSEWHERE, NOT DUPLICATED. c6 is closed on
+`lane/f13-fin-hetzner-residuals` (`d35ac0a0c` writes the two Discord connector
+tests, `a612b07e3` grades the row). That branch is not merged into
+`origin/integ/f13`, so the row above still reads `not-met` on THIS tree.
+
+Independently re-checked here rather than taken on the note's word, on the
+product code rather than on the test:
+`crates/wcore-channel-discord/src/lib.rs::post_message` builds
+`rest::MessageReference` from `msg.reply_to` and from nothing else -- there is
+no `.or(msg.thread_id)` and no second construction site in the crate (one
+`message_reference:` assignment at lib.rs:176, one field at rest.rs:43, one
+`None` at rest.rs:608). The upstream halves hold too:
+`channel_send_transport.rs:242` routes `target.thread_id` into
+`OutgoingMessage::thread_id` and leaves `reply_to` empty, and
+`channel_inbound.rs::outbound_reply_target` no longer falls back to the thread
+(its doc comment names the Discord consequence explicitly). So c6 holds in code
+on this tree; what was missing, and what that lane supplied, is a test that
+grades the CONNECTOR instead of inferring it from the shared transport.
+
+No work taken here: duplicating that test would race a lane that has already
+measured its red arm.
