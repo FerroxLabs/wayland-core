@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "SECURITY: the @-ref secret guard is lexical, so a symlink bypasses it"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: 9de21aa1
 criteria:
   - id: c1
     text: "The secret guard and the read observe the same resolved file identity, so a symlink cannot be graded as one thing and read as another"
@@ -14,10 +14,10 @@ criteria:
     note: "admit() opens the path ONCE (same_file::Handle - device+inode on Unix, volume-serial+file-index on Windows), canonicalizes, re-opens the canonical name and refuses when the two identities disagree. The guard runs on Admitted::canonical and Admitted::read_to_string consumes that same handle, so nothing re-opens by path after the check."
   - id: c2
     text: "The @dir walk decides recursion on symlink_metadata and computes rel_to_root from the canonical path"
-    state: met
+    state: not-met
     evidence: "test:crates/wcore-cli/src/tui/commands/at_ref_resolve.rs::at_dir_never_walks_a_symlink_into_a_credential_store"
     owner: core
-    note: "MECHANISM SUBSTITUTED, deliberately. The criterion named symlink_metadata plus a canonical rel_to_root; the walk instead canonicalizes each entry and skips anything not under root_canonical (at_ref_resolve.rs:353-365), with a visited set. That permits an in-root dir symlink, which a bare symlink_metadata refusal would have broken - the fix the issue explicitly rejected. The escape is closed and tested; see c6 for the residual the lexical half leaves."
+    note: "MECHANISM SUBSTITUTED, deliberately. The criterion named symlink_metadata plus a canonical rel_to_root; the walk instead canonicalizes each entry and skips anything not under root_canonical (at_ref_resolve.rs:353-365), with a visited set. That permits an in-root dir symlink, which a bare symlink_metadata refusal would have broken - the fix the issue explicitly rejected. The escape is closed and tested; see c6 for the residual the lexical half leaves. REFUTED 2026-08-29 by the 0.13.12 close-sweep, recorded verbatim: Two halves. The second half ('computes rel_to_root from the canonical path') IS met — at_ref_resolve.rs:374 and :412 both call rel_to_root against root_canonical. The first half ('decides recursion on symlink_metadata') is NOT met; the ledger says so openly ('MECHANISM SUBSTITUTED, deliberately') and the substitution is defensible, because the ticket explicitly forbids the blanket symlink refusal symlink_metadata would produce. The finding is that the SUBSTITUTE is completely ungraded. I mutated the substitute away twice in the scratch copy and nothing noticed: M5, at_ref_resolve.rs:357 'if !canonical.starts_with(root_canonical) {' -> 'if false {' gave 'test result: ok. 65 passed; 0 failed'; M6, at_ref_resolve.rs:400 'if !admitted.canonical.starts_with(root_canonical)' -> 'if false' also gave 'test result: ok. 65 passed; 0 failed'. The cited evidence test at_dir_never_walks_a_symlink_into_a_credential_store survives both because its fixture target is NAMED .git-credentials, so is_secret_path(&admitted.canonical) alone satisfies it — the test grades the name denylist, not the scope confinement the ledger's own note points at ('skips anything not under root_canonical'). I confirmed the guard does work at HEAD with a throwaway probe (in the scratch copy, deleted after): an in-root symlink notes.txt -> <outside>/taxes.txt containing PRIVATE-OUTSIDE-PAYLOAD printed 'PROBE_ESCAPE leaked=false files=['ok.txt']'. So the behaviour is correct and the code is right; what is missing is any test that would go red if someone deleted either scope line. Remainder: one test — @dir must not inline an out-of-workspace, non-denylisted file reached through an in-root symlink."
   - id: c3
     text: "read_def_snippet, the fourth read site on this surface, is guarded too"
     state: met

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Turn-1 transient injection poisons the prompt-cache prefix: both fixes (system-prefix date / trailing transient message) have measured collisions"
 status: closed
-last_verified_commit: 43848f75
+last_verified_commit: 9de21aa1
 criteria:
   - id: c1
     text: "The turn-1 transient no longer lands at messages[1]; it moves into the cached system prefix"
@@ -22,7 +22,7 @@ criteria:
     text: "The skill-router hint and PrePrompt hook contributions no longer land at messages[1] on turn 1"
     state: superseded
     owner: core
-    note: "same shape as the 26-byte date that dominated the measured collapse, much smaller, not closed by this change. Carried as a criterion on #559, which is the open ticket that owns the cache-prefix outcome"
+    note: "same shape as the 26-byte date that dominated the measured collapse, much smaller, not closed by this change. Carried as a criterion on #559, which is the open ticket that owns the cache-prefix outcome REFUTED 2026-08-29 by the 0.13.12 close-sweep, recorded verbatim: The MECHANICAL condition holds; the SUBSTANTIVE handover does not. Mechanically: c3's note names #559, `gh issue view 559` returns state OPEN, and `scripts/check-criteria-ledger.py:387-392` only requires that the note match `#(/d+)` and that the issue exist and be open — so the gate is satisfied. Substantively the residual is closed nowhere. #559's c6 carries the criterion text VERBATIM ('The skill-router hint and PrePrompt hook contributions no longer land at messages[1] on turn 1') and is already graded `met` — against a different property, which its own note states openly: 'Closed as a cache-boundary fact, not a positional one, and the difference is deliberate... The transient still sits inside the turn-1 user message.' I confirmed the substituted property is real code, not vapour (`wcore-observability/src/cache.rs:62` stamps MessageCacheHint::Transient, `wcore-providers/src/anthropic.rs:312` declares request_has_transient_tail, and the three prompt_cache_prefix_test.rs tests it cites are declared at :280/:300/:351), so the harm IS mitigated on explicit-breakpoint providers — but the criterion as written is false and is marked met. That defeats the exact safeguard #1168's closing note relied on ('the gate refuses a superseded whose successor does not exist or is already closed', and #559's ledger adds 'the gate refuses that handover if this ticket ever closes with c6 unmet'): c6 says met, so nothing will refuse. The gate cannot catch it either — its own docstring says 'It does not judge whether a criterion is a GOOD criterion.' Remedy belongs on #559, not #1168: re-grade c6 as not-met against its own text, or rewrite its text to the boundary property it actually closed. State kept `superseded` because #559 exists and is open, which is all the gate checks. The remedy belongs on FerroxLabs/wayland#559 c6, which is re-graded `not-met` in .planning/ledger/wayland-559.md by this same sweep."
 ---
 
 Closed in v0.13.10 with a residual stated out loud.

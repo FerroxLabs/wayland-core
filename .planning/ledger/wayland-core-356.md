@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Two path resolvers with different escape properties 70 lines apart, and the weaker one guards the skill-source write refusal"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: 9de21aa1
 criteria:
   - id: c1
     text: "is_skill_source_path is graded against dotdot-after-a-missing-component and the dangling-symlink hop, the two escapes #1097 was written for"
@@ -26,10 +26,10 @@ criteria:
     note: "Both controls the ticket names are present and green; the sibling is an_ordinary_project_directory_named_skills_stays_writable in the same file. They stayed green through the resolver swap, and skill_source_write_refusal.rs gained two more end-to-end arms (a_traversal_through_a_directory_that_does_not_exist_yet_is_refused, a_dangling_symlink_into_a_skill_source_dir_is_refused)."
   - id: c4
     text: "If both resolvers remain, the reason each call site picked one is stated AT the call site"
-    state: met
+    state: not-met
     evidence: "symbol:crates/wcore-tools/src/workspace_policy.rs::canon_existing_ancestor"
     owner: core
-    note: "The conditional does not arise: canon_deep is deleted, so ONE resolver remains and there is no choice for a later reader to make blind. The commit body records that the reason each call site picked its resolver is stated at the call site, and is_repo_control_path's own doc claim (a benign-named symlink resolves before the prefix match) is now true as written rather than true only of a link whose target exists."
+    note: "The conditional does not arise: canon_deep is deleted, so ONE resolver remains and there is no choice for a later reader to make blind. The commit body records that the reason each call site picked its resolver is stated at the call site, and is_repo_control_path's own doc claim (a benign-named symlink resolves before the prefix match) is now true as written rather than true only of a link whose target exists. REFUTED 2026-08-29 by the 0.13.12 close-sweep (worklist defect D11, now FerroxLabs/wayland-core#383). Both resolvers DO remain, and the reason is not stated at the call site that matters: is_project_secret (workspace_policy.rs:903) still resolves with canon_for_scope, and this entry's own prose asserts the file now holds one resolver. Measured on hetzner at origin/integ/f13 with a probe: with <root>/.env absent and <root>/notes.txt a dangling symlink to it, policy.is_project_secret(&notes.txt) returns FALSE, while the same .env named directly returns TRUE and a link to an EXISTING .env returns TRUE -- verbatim: 'PROBE live-link-to-existing-env: true' / 'PROBE dangling-link-to-missing-env: false' / 'PROBE same-under-canon_existing_ancestor-shape: true'. The same weaker resolver is also at :936 (is_vcs_content_store), :1688, :1694 and :852. The class the ticket describes is narrowed to two predicates, not closed."
 ---
 
 Found while grading the superseded `lane/finish-criteria` orphan branches. Not a
