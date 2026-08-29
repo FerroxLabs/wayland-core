@@ -28,10 +28,38 @@
 #                   exiting 4 -- and the file-count form of this gate accepted
 #                   that as evidence, which is wayland#1115 again one layer
 #                   down.
+#   REQUIRE_LEGS    optional space/comma separated list of artifact directory
+#                   names directly under EVIDENCE_DIR, each of which must
+#                   contribute at least one coverage report. See the per-leg
+#                   note below.
 #   HINT            optional extra sentence appended to the failure annotation
 #
-# Exit 0 when at least EXPECTED_MIN reports exist AND they carry at least
-# MIN_TESTS test cases between them, 1 otherwise.
+# ── A PER-LEG FLOOR, BECAUSE A REPO-WIDE ONE CANNOT SEE A MISSING LEG ──────
+#
+# EXPECTED_MIN is counted across every leg aggregated into EVIDENCE_DIR, so one
+# leg uploading a report satisfies it even when the leg that runs the FULL
+# workspace suite uploaded nothing -- and `if-no-files-found: ignore` on every
+# upload step makes that silent. That is wayland#1115 one level finer: a green
+# `report` over a suite that never ran, per leg rather than per repo. Measured
+# instance: on run 33227927478 the whole `ci-linux` leg died before nextest and
+# produced zero XML while `report` still had macOS reports to count.
+#
+# REQUIRE_LEGS names the legs whose absence is not survivable. It is opt-in
+# because the `ci` matrix legs are conditioned per platform and a blanket
+# per-leg floor would be a different, riskier gate.
+#
+# ── PRESERVED FAILURES ARE NOT COVERAGE ───────────────────────────────────
+#
+# `outer-attempt-<N>.xml` (wayland#1177) is a copy of a FAILED attempt's report,
+# preserved so the retry-flake grader can see it. It lands inside the same
+# artifact and matches the same `*.xml` glob, so counting it toward EXPECTED_MIN
+# or MIN_TESTS lets a leg's preserved failures stand in for the coverage they
+# are evidence of losing. They are excluded from both counts here and read only
+# by grade-retry-flakes.sh, which is the file that is actually about them.
+#
+# Exit 0 when at least EXPECTED_MIN coverage reports exist, they carry at least
+# MIN_TESTS test cases between them, and every leg named in REQUIRE_LEGS
+# contributed at least one of them; 1 otherwise.
 set -euo pipefail
 
 : "${EVIDENCE_DIR:?EVIDENCE_DIR is required}"
@@ -39,21 +67,31 @@ set -euo pipefail
 : "${LABEL:?LABEL is required}"
 UPSTREAM_RESULT="${UPSTREAM_RESULT:-unknown}"
 MIN_TESTS="${MIN_TESTS:-1}"
+REQUIRE_LEGS="${REQUIRE_LEGS:-}"
 HINT="${HINT:-}"
 
 mkdir -p "$EVIDENCE_DIR"
-FOUND=$(find "$EVIDENCE_DIR" -type f -name "*.xml" | sort)
+# `! -name outer-attempt-*.xml`: a preserved failed attempt is not coverage.
+# See the note above.
+coverage_reports() { # coverage_reports [root]
+  find "${1:-$EVIDENCE_DIR}" -type f -name "*.xml" ! -name "outer-attempt-*.xml" | sort
+}
+FOUND=$(coverage_reports)
 COUNT=$(printf "%s" "$FOUND" | grep -c . || true)
+PRESERVED=$(find "$EVIDENCE_DIR" -type f -name "outer-attempt-*.xml" | sort)
+PRESERVED_COUNT=$(printf "%s" "$PRESERVED" | grep -c . || true)
 # A REPORT IS NOT A TEST. `grep -c` exits 1 when no report holds a test case,
 # which is exactly the state this gate exists to fail on, so `|| true` keeps
 # `pipefail` from turning that into a bare script error instead of the named
 # annotation below.
-TESTS=$({ find "$EVIDENCE_DIR" -type f -name "*.xml" -exec grep -oh "<testcase" {} + 2>/dev/null || true; } | grep -c . || true)
+TESTS=$({ find "$EVIDENCE_DIR" -type f -name "*.xml" ! -name "outer-attempt-*.xml" -exec grep -oh "<testcase" {} + 2>/dev/null || true; } | grep -c . || true)
 
 echo "suite              : $LABEL"
 echo "upstream result    : $UPSTREAM_RESULT"
 echo "junit report count : $COUNT (need at least $EXPECTED_MIN)"
 echo "test case count    : $TESTS (need at least $MIN_TESTS)"
+echo "preserved attempts : $PRESERVED_COUNT (wayland#1177; not counted as coverage)"
+echo "required legs      : ${REQUIRE_LEGS:-<none>}"
 printf "%s\n" "$FOUND"
 
 if [ "$COUNT" -lt "$EXPECTED_MIN" ]; then
@@ -65,6 +103,21 @@ if [ "$TESTS" -lt "$MIN_TESTS" ]; then
   echo "::error title=NO TEST SIGNAL ($LABEL)::${LABEL} produced ${COUNT} JUnit report(s) holding ${TESTS} test case(s), fewer than the ${MIN_TESTS} expected. The files exist and certify NOTHING: nextest writes a junit.xml with tests=0 for a run whose filter matched no test at all (an unset cargo feature, a renamed test, a typo in -E), so an artifact proves the command ran, never that a test did. The upstream job result was '${UPSTREAM_RESULT}'. ${HINT}"
   exit 1
 fi
+
+# ── EVERY NAMED LEG MUST HAVE CONTRIBUTED (wayland#1177 c2 / D34) ──────────
+#
+# The two gates above are counted across all legs, so they cannot notice that
+# one particular leg contributed nothing. This one can.
+for leg in ${REQUIRE_LEGS//,/ }; do
+  leg_dir="$EVIDENCE_DIR/$leg"
+  leg_reports=$(coverage_reports "$leg_dir" 2>/dev/null || true)
+  leg_count=$(printf "%s" "$leg_reports" | grep -c . || true)
+  echo "leg $leg: $leg_count coverage report(s)"
+  if [ "$leg_count" -lt 1 ]; then
+    echo "::error title=NO TEST SIGNAL ($leg)::The '${leg}' leg contributed ZERO JUnit coverage reports to ${LABEL}, so nothing it was supposed to run is certified by this check. The other legs' reports satisfied the aggregate count, which is exactly why this per-leg floor exists (wayland#1177 c2). Its artifact uploads with 'if-no-files-found: ignore', so a leg that dies before its test step -- or a wrapper that dies before invoking nextest -- disappears silently. The upstream job result was '${UPSTREAM_RESULT}'. ${HINT}"
+    exit 1
+  fi
+done
 
 # ── A RETRIED FAILURE IS A SIGNAL, NOT SILENCE (wayland#1169) ───────────────
 #

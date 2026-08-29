@@ -21,9 +21,9 @@ criteria:
   - id: c3
     text: "The test no longer needs its entry in .config/flaky-allowlist.txt under the #1169 retry-flake gate"
     state: met
-    evidence: "commit:c461293fdd39849da0d0b93c224d7219ba5b334d"
+    evidence: "file:.config/flaky-allowlist.txt:78:retired: wcore-tools::workspace_policy::tests::contained_construction_does_not_walk_the_workspace"
     owner: core
-    note: "Deleted as the entry itself instructed rather than renewed; the allowlist is now three entries. Absence verified with a known-positive control in the same command: grep for this test name returns nothing while grep -c crucible_council returns 1."
+    note: "THE DELETION WAS UNDONE AND NOBODY SAW IT. c461293f really did remove the line, but merge 9c9f27b0 ('Merge origin/lane/f13-fix-shared-lib') put it back: the lane branch predated the deletion and its side won the resolution for this one line while the two dangerous_lease deletions either side of it survived. `git log -S` skips merges by default, which is why the search used to confirm the deletion could not see the resurrection, and the verifier's own known-positive control (grep -c crucible_council == 1) passed while the thing it controlled was false. Now: the line is deleted again AND the retirement is recorded in the file as `# retired: <key> gh#1182 <why>`; grade-retry-flakes.sh -- which runs in the required report job -- reds the run if any live entry names a retired key, so a merge that resurrects it fails CI on the next run instead of silently restoring an exemption. Graded in outer-retry-evidence.test.sh with three arms: the resurrected entry reds and is named as such, the same entry without a retirement record still covers its flake, and a retirement for a different key leaves it alone."
 ---
 
 `contained_construction_does_not_walk_the_workspace` in

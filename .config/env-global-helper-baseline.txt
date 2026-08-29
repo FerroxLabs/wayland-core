@@ -1,0 +1,36 @@
+# HELPER-MEDIATED ENV-GLOBAL HAZARDS, DATED AND OWNED. FerroxLabs/wayland#1134.
+#
+# `scripts/check-test-env-globals.py` used to classify a `set_var` inside a
+# non-test helper as `helper` and explicitly not audit it -- 153 sites, and the
+# gate said so on every run. #1134 c3's criterion is that a lint catches the
+# CLASS, and it did not: the helper the issue opens with,
+# `PinnedRetryBudget::pin`, was not merely unaudited but invisible, because a
+# test-support module under `src/` carries no `#[cfg(test)]` and the span walk
+# skipped every line of it. MEASURED: removing `#[serial_test::serial]` from its
+# caller made `cargo test -p wcore-agent --lib` fail with the original 3-vs-11
+# signature while the lint emitted byte-identical counts.
+#
+# Teaching the gate to resolve a helper write through the calling test made
+# seven existing hazards visible at once. They are the same class the gate
+# already fails on, and fixing them means changing test-support APIs across five
+# crates -- the shape 9c3d79f7 used for the eighth ("state the container image
+# instead of writing a process global"), applied five more times.
+#
+# They are held HERE rather than silently reclassified, so that:
+#   * the gate is armed against the NEXT one from today,
+#   * every one of these is named, owned and dated in the tree, and
+#   * the list cannot outlive the work: an expired entry FAILS the gate.
+#
+# Only a pair whose unserialized writers are ALL reached through a helper may be
+# listed. A write sitting directly in an unserialized test is the original
+# defect and is refused here.
+#
+# Format: <YYYY-MM-DD expiry>  <VAR>  <test-binary>  <gh#NNNN>  <reason>
+
+2026-11-15  WAYLAND_CAMOUFOX_URL  wcore-agent::capability_liveness_narrowing  gh#1134  `fn install` (tests/capability_liveness_narrowing.rs:76) sets it for the caller; wcore-browser production reads it in the same binary. Fix is to state the URL on the capability rather than publish it to the process.
+2026-11-15  WAYLAND_HOME  wcore-agent::skill_source_write_refusal  gh#1134  `fn wayland_home` (tests/skill_source_write_refusal.rs:62) points WAYLAND_HOME at a tempdir for callers that are not serialized; nine crates in this binary read it in production.
+2026-11-15  PATH  wcore-browser::sidecar_npm_install_wiring_test  gh#1134  `fn stub_npm_on_path` (tests/sidecar_npm_install_wiring_test.rs:90) prepends a stub npm to PATH for unserialized callers; wcore-config and wcore-tools resolve programs from PATH in the same process.
+2026-11-15  WAYLAND_HOME  wcore-channel-telegram  gh#1134  `fn cfg` (src/lib.rs:587) sets WAYLAND_HOME while building a test config; wcore-config reads it in production in the same lib binary.
+2026-11-15  WAYLAND_EXEC_BACKEND_STATE_DIR  wcore-exec-backend::conformance_matrix  gh#1134  `fn temp_state` (tests/conformance_matrix.rs:15) publishes the state dir to the process; wcore-exec-backend production reads it. Same fix shape as 9c3d79f7 (`with_image`): take the state dir explicitly.
+2026-11-15  WAYLAND_EXEC_BACKEND_STATE_DIR  wcore-exec-backend::container_wedge  gh#1134  `fn temp_state` (tests/container_wedge.rs:24), same helper and same fix as the conformance_matrix entry; this is the binary 9c3d79f7 already fixed the OTHER global in.
+2026-11-15  WAYLAND_EXEC_BACKEND_STATE_DIR  wcore-exec-backend::live_equivalence  gh#1134  `fn temp_state` (tests/live_equivalence.rs:13), same helper and same fix as the two entries above.

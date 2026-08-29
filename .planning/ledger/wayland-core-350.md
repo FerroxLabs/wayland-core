@@ -27,7 +27,7 @@ criteria:
   - id: c4
     text: "The retries=0 override on this test survives the fix"
     state: met
-    evidence: "file:.config/nextest.toml:599"
+    evidence: "file:.config/nextest.toml:599:retries = 0"
     owner: core
     note: "the override naming this test by literal operand is correct and should be kept - the failure must not become retryable. A separate script fails if any of the three named tests stops being a literal operand of a retries=0 predicate"
   - id: c5

@@ -9,19 +9,19 @@ criteria:
   - id: c1
     text: "A failure on attempt 1 followed by a pass on attempt 2 leaves evidence the required report check can read"
     state: met
-    evidence: "file:.github/scripts/run-tests-with-attempt-evidence.sh:90"
+    evidence: "test:crates/wcore-protocol/tests/contract_gate_topology.rs::the_outer_retry_evidence_tree_is_reserved_before_any_container_mounts_the_workspace"
     owner: core
-    note: "Each outer attempt's junit.xml is copied to outer-attempt-<n>.xml; wired at ci.yml:1657 under nick-fields/retry max_attempts: 2, uploaded at ci.yml:2005-2007 and read by grade-retry-flakes.sh:168 inside the required report job. The outer retry was PRESERVED, not dropped: the script also removes the stale report before each attempt and writes final-status.txt so 'retried into green' is distinguishable from 'red on the final attempt'."
+    note: "THE PRESERVATION WAS CORRECT AND NEVER RAN. On run 33227927478 job 99035159787 the wrapper died on BOTH attempts at `mkdir -p $ATTEMPT_DIR` with `Permission denied` before invoking nextest -- no test ran, no junit.xml existed, and the required report check received zero evidence from the leg that carries the whole workspace suite. Cause: $DOCKER_RUN has no `-u`, so a root container step creates target/ while the wrapper runs on the host as uid 1001. The first repair (e7144c30) added a bare `mkdir -p` AFTER the corpus pre-flight hint -- itself a `docker run ... cargo run` -- so on every pull_request run it died with the identical error one step earlier, and the self-test graded it with a grep for the mkdir string, which a wrongly-ordered step satisfies exactly as well as a correct one. REPRODUCED outside CI 2026-08-29: root container creates target/, uid 1001 gets `mkdir: cannot create directory 'target/nextest': Permission denied`. Now: the step runs FIRST in the job and goes through reserve-attempt-evidence-tree.sh, which repairs the owner if the ordering is ever wrong again (verified in a uid-1001-with-sudo container: bare mkdir exit 1, script exit 0, tree writable, junit removable); the ORDERING is asserted by the named test, which fails on a clean checkout of the pre-fix ci.yml."
   - id: c2
     text: "A test demonstrates that visibility and fails against today's workflow"
     state: met
-    evidence: "file:.github/scripts/tests/outer-retry-evidence.test.sh:84"
+    evidence: "file:.github/scripts/tests/outer-retry-evidence.test.sh:501:THE ASK: attempt-1 failure retried green is visible to the report check"
     owner: core
-    note: "Three parts: grade-retry-flakes.sh on fixture evidence, the writer against a stub that fails then passes, and a grep of the ci.yml wiring. Two negative controls (a clean suite stays green; an ordinary red is not re-reported) plus the agent-crash shape where no JUnit is written. It grades the scripts and the wiring, not a live CI replay."
+    note: "PART E replaces the grep. The wrapper is RUN twice against a stub that fails then passes, its outputs are assembled into the exact layout download-artifact produces from ci.yml's two upload paths, and the REAL assert-test-evidence.sh -- the script the required report step invokes -- is then run over it with that step's own environment; it exits 1 and names probe::races_under_load. Anti-vacuity: the identical pipeline for a leg that passed first time exits 0. The earlier version was 19/19 green on a tree where the mechanism was 100% inoperative on the runner, which is what a piecewise grade buys. Two further arms close the report gate's own blind spot (D34): report now `needs: ci-linux` -- it did not, and the ci matrix has no Linux entry, so it never even waited for the leg that runs the workspace suite -- and REQUIRE_LEGS gives the aggregate EXPECTED_MIN a per-leg floor, with preserved outer-attempt-*.xml excluded from the coverage count so a leg's failures cannot stand in for its coverage. 40/40 green; 30/40 on a clean checkout of the pre-fix scripts."
   - id: c3
     text: "The #1169 retry-flake grader keeps working on the nextest layer it already covers"
     state: met
-    evidence: "file:.github/scripts/grade-retry-flakes.sh:119"
+    evidence: "file:.github/scripts/grade-retry-flakes.sh:119:-print0 2>/dev/null |"
     owner: core
     note: "The #1169 nextest-layer scan is intact at :119; the outer-attempt scan at :168 is an ADDITIONAL pass keyed on outer-attempt-*.xml plus final-status.txt, with an absent status graded fail-closed."
 ---

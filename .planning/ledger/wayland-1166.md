@@ -9,7 +9,7 @@ criteria:
   - id: c1
     text: "A flat cache_read is reported rather than falling through to Healthy — an absolute floor, not only a ratio"
     state: met
-    evidence: "file:crates/wcore-agent/src/cache_diagnostics.rs:326"
+    evidence: "file:crates/wcore-agent/src/cache_diagnostics.rs:326:&& self.seen_cache_tokens"
     owner: core
   - id: c2
     text: "The alert names a cause instead of defaulting to TTL expiry"
@@ -25,13 +25,13 @@ criteria:
   - id: c4
     text: "The snapshot describes the request actually dispatched — taken after the tier swap and transient injections"
     state: met
-    evidence: "file:crates/wcore-agent/src/engine.rs:13213"
+    evidence: "file:crates/wcore-agent/src/engine.rs:13213:}"
     owner: core
     note: "RE-ANCHORED 2026-08-29: the old anchor engine.rs:13108 still resolved but had drifted onto an unrelated max_tokens sizing block. The record_request site is now at :13213, and the comment immediately above it at :13207-13212 states that the snapshot is taken after the tier swap and the transient tail injections, which is the claim."
   - id: c5
     text: "The detector can still report Healthy when the cache genuinely is — a positive control that passes in every mutation arm"
     state: met
-    evidence: "file:crates/wcore-agent/src/cache_diagnostics.rs:346"
+    evidence: "file:crates/wcore-agent/src/cache_diagnostics.rs:346:if prev.model_hash != current.model_hash {"
     owner: core
     note: "healthy-trace control; ModelChanged arm is what distinguishes it from a detector stuck on unhealthy"
 ---

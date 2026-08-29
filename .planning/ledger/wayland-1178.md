@@ -27,7 +27,7 @@ criteria:
   - id: c4
     text: "A test covers the trailing-slash spelling"
     state: met
-    evidence: "file:crates/wcore-config/src/compat.rs:1772"
+    evidence: "file:crates/wcore-config/src/compat.rs:1772:http://127.0.0.1:11434/"
     owner: core
     note: "The trailing-slash spelling, inside the c3 test's spelling loop; the /v1/ form is the next entry at :1774. Both resolve to the single-/v1 endpoint."
   - id: c5

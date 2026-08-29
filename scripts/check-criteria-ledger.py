@@ -45,15 +45,28 @@ WHAT A LEDGER FILE IS
     `evidence` is ONE machine-resolvable token, never prose:
         test:<path>::<test name>   file exists AND declares `fn <name>`
         symbol:<path>::<name>      file exists AND declares that item
-        file:<path>:<line>         file exists AND has at least <line> lines
+        file:<path>:<line>:<text>  file exists AND line <line> contains <text>
         file:<path>                file exists
         commit:<sha>               resolves to a commit object
 
-    Prefer `test:` and `symbol:` over `file:<path>:<line>`. A line number is
-    the weakest anchor here: it survives an edit that moves the code it names,
-    so it can go on pointing at nothing in particular while staying green.
-    `file:` with a line is for evidence that is genuinely positional -- a
-    workflow step, a table row -- and the prose should say what is there.
+    Prefer `test:` and `symbol:` over `file:<path>:<line>:<text>`.
+
+    A BARE LINE NUMBER IS REFUSED, and that is a fix rather than a style rule.
+    `file:<path>:<line>` used to be checked as "the file exists and has at
+    least <line> lines" -- any number below the file length passed forever, so a
+    positional anchor rotted silently the moment anyone edited the file, which
+    for a 2,600-line ci.yml is every lane. This is the OFFLINE arm of the gate
+    that exists to stop a `met` claim drifting away from its evidence, and for
+    `file:` anchors it could not detect drift at all: a gate that cannot fail on
+    the failure mode it was built for. Measured when this was found: both of
+    wayland#1134's anchors already pointed at the wrong lines -- 1806 at an
+    unrelated `voice suite` step, 1888 in the wrong one of the two legs it
+    distinguishes -- and one of them was already wrong at the commit recorded as
+    `last_verified_commit`.
+
+    So a positional anchor must now carry what is supposed to BE there. The
+    fragment is matched against that line only, so an edit that moves the step
+    reds the ledger instead of quietly re-pointing it at whatever moved in.
     A criterion needing two pieces of evidence is two criteria. That is
     deliberate: "evidence: see the PR" is how a ledger rots into a narrative.
 
@@ -248,7 +261,7 @@ def parse_ledger(path):
 TEST_EV = re.compile(r"^test:(?P<p>[^:]+(?::[^:]+)*?)::(?P<n>[A-Za-z0-9_]+)$")
 SYM_EV = re.compile(r"^symbol:(?P<p>[^:]+(?::[^:]+)*?)::(?P<n>[A-Za-z0-9_]+)$")
 DECL = r"\b(?:fn|struct|enum|union|const|static|type|trait|mod|def|class|macro_rules!)\s+%s\b"
-FILE_EV = re.compile(r"^file:(?P<p>.+?)(?::(?P<l>\d+))?$")
+FILE_EV = re.compile(r"^file:(?P<p>.+?)(?::(?P<l>\d+)(?::(?P<frag>.*))?)?$")
 COMMIT_EV = re.compile(r"^commit:(?P<s>[0-9a-f]{7,40})$")
 SLUG = re.compile(r"^(?P<slug>[a-z0-9][a-z0-9-]*?)-(?P<num>\d+)\.md$")
 
@@ -307,10 +320,30 @@ def resolve_evidence(root, ev, git, shallow=False):
         if not os.path.isfile(p):
             return "no such file: %s" % m.group("p")
         if m.group("l"):
-            n = sum(1 for _ in open(p, encoding="utf-8", errors="replace"))
-            if int(m.group("l")) > n:
+            lines = open(p, encoding="utf-8", errors="replace").read().split("\n")
+            want = int(m.group("l"))
+            if want > len(lines):
                 return "%s has %d lines; evidence cites line %s" % (
-                    m.group("p"), n, m.group("l"))
+                    m.group("p"), len(lines), m.group("l"))
+            frag = m.group("frag")
+            if frag is None or not frag.strip():
+                return (
+                    "%s:%s is a BARE line anchor. A line number alone is checked "
+                    "only against the file's length, so it passes forever and "
+                    "cannot notice the line moving -- which is the one thing a "
+                    "positional anchor exists to catch. Write "
+                    "`file:%s:%s:<text on that line>` instead (the line today "
+                    "reads: %r)."
+                    % (m.group("p"), m.group("l"), m.group("p"), m.group("l"),
+                       lines[want - 1].strip()[:80])
+                )
+            if frag.strip() not in lines[want - 1]:
+                return (
+                    "%s:%s does not contain %r -- it reads %r. The evidence has "
+                    "drifted off the line it names."
+                    % (m.group("p"), m.group("l"), frag.strip(),
+                       lines[want - 1].strip()[:120])
+                )
         return None
     m = COMMIT_EV.match(ev)
     if m:
@@ -328,8 +361,8 @@ def resolve_evidence(root, ev, git, shallow=False):
             return "%s does not resolve to a commit in this tree" % m.group("s")
         return None
     return ("%r is not a machine-resolvable evidence token. Use "
-            "test:<path>::<name>, symbol:<path>::<name>, file:<path>[:<line>] "
-            "or commit:<sha>." % ev)
+            "test:<path>::<name>, symbol:<path>::<name>, file:<path>, "
+            "file:<path>:<line>:<text on that line> or commit:<sha>." % ev)
 
 
 def validate_record(root, rec, git, shallow=False):
@@ -765,6 +798,23 @@ def self_test():
          lambda b: b.replace('"test:src/t.rs::the_boundary_is_probed"',
                              '"file:src/t.rs:9000"'), True,
          expect="evidence cites line 9000")
+    # THE DEFECT THIS GRAMMAR CLOSES. A bare in-range line number passed
+    # forever, so a positional anchor could rot the moment the file was edited
+    # and the gate could not tell. Three arms: the bare form is refused, a
+    # fragment that is not on the line is refused, and the correct anchor is
+    # still green -- without that last one the first two are satisfied by a
+    # check that refuses every `file:` anchor.
+    case("met criterion cites a BARE in-range line number",
+         lambda b: b.replace('"test:src/t.rs::the_boundary_is_probed"',
+                             '"file:src/t.rs:1"'), True,
+         expect="is a BARE line anchor")
+    case("met criterion cites a line that no longer says what it claims",
+         lambda b: b.replace('"test:src/t.rs::the_boundary_is_probed"',
+                             '"file:src/t.rs:2:pub struct Boundary"'), True,
+         expect="has drifted off the line it names")
+    case("met criterion cites a line by what is actually on it",
+         lambda b: b.replace('"test:src/t.rs::the_boundary_is_probed"',
+                             '"file:src/t.rs:1:pub struct Boundary"'), False)
     case("met criterion with no evidence at all",
          lambda b: b.replace('    evidence: "test:src/t.rs::the_boundary_is_probed"\n',
                              ""), True, expect="is `met` with no evidence")

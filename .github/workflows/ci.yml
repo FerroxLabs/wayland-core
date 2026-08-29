@@ -1330,6 +1330,35 @@ jobs:
           # here is what actually arms it.
           fetch-depth: 0
 
+      # ── RESERVE THE OUTER-RETRY EVIDENCE TREE (wayland#1177 c1) ───────
+      #
+      # FIRST, and the position is the whole point. The outer-retry wrapper at
+      # the test step below runs on the HOST as uid 1001, but every container
+      # step in this job runs as root (there is no `-u` on $DOCKER_RUN; see the
+      # note on it above), so the first container step that compiles anything
+      # creates `target/` root-owned. The wrapper then dies at
+      # `mkdir -p "$ATTEMPT_DIR"` with `Permission denied` BEFORE it invokes
+      # nextest -- nextest never runs, no junit.xml is written, and the required
+      # `report` check receives ZERO evidence from this leg while the step
+      # reports only "Child_process exited with error code 2". Measured on run
+      # 33227927478, both attempts, 2026-08-29T02:33:48Z.
+      #
+      # This first shipped as a bare `mkdir -p` placed AFTER the Desktop
+      # contract corpus pre-flight hint -- which is `docker run ... cargo run`,
+      # a compile -- so on every `pull_request` run target/ was already
+      # root-owned and the reserve step itself died with the identical
+      # `Permission denied`, one step earlier than before. Reproduced outside CI
+      # 2026-08-29: a root container creates target/, uid 1001 then gets
+      # `mkdir: cannot create directory 'target/nextest': Permission denied`.
+      #
+      # So: here, ahead of everything, and through a script that repairs the
+      # owner if the ordering is ever wrong again. The ordering is asserted by
+      # `contract_gate_topology.rs::the_outer_retry_evidence_tree_is_reserved_\
+      # before_any_container_mounts_the_workspace`; the repair is self-tested in
+      # `.github/scripts/tests/outer-retry-evidence.test.sh` PART D.
+      - name: Reserve the outer-retry evidence tree for the runner user
+        run: bash .github/scripts/reserve-attempt-evidence-tree.sh
+
       # ── anti-vacuity gate ─────────────────────────────────────────────
       # THIS STEP USED TO BE DEAD, TWICE, IN TWO DIFFERENT WAYS.
       #
@@ -1636,27 +1665,6 @@ jobs:
           fi
           docker run --rm -i -v "${{ github.workspace }}:/work" -w /work "$CI_IMAGE" \
             cargo run -q -p wcore-protocol --bin wcore-contract -- preflight < "$list"
-
-      # wayland#1177 c1. The outer-retry wrapper at the test step below runs on
-      # the HOST as uid 1001, but every `$DOCKER_RUN` step in this job runs as
-      # root (there is no `-u`; see the DOCKER_RUN note above), so the first
-      # `cargo build` creates `target/` root-owned. The wrapper then died at
-      # `mkdir -p "$ATTEMPT_DIR"` with `Permission denied` BEFORE it invoked
-      # nextest -- nextest never ran, no junit.xml was written, and the required
-      # `report` check received ZERO evidence from this leg while the step
-      # reported only "Child_process exited with error code 2". Measured on run
-      # 33227927478, both attempts, 2026-08-29T02:33:48Z.
-      #
-      # Creating the tree here -- as the runner user, before anything root
-      # touches target/ -- is sufficient and cheap: root can still write INTO a
-      # 1001-owned directory, and delete permission on the junit report comes
-      # from the containing directory, which the runner now owns.
-      #
-      # A recursive `chown` of target/ was rejected: it is the same full-tree
-      # walk that makes a cold workspace slow, and it would run on every job to
-      # repair a directory that need never have been root-owned.
-      - name: Reserve the outer-retry evidence tree for the runner user
-        run: mkdir -p target/nextest/ci/outer-attempts
 
       - name: Pre-build tool_token_bench
         run: $DOCKER_RUN "$CI_IMAGE" cargo build -p wcore-agent --bin tool_token_bench --features test-utils
@@ -2589,7 +2597,19 @@ jobs:
     # contributed to a green. `if: always()` below already carries `report`
     # through a skipped dependency, so nothing about WHEN this job runs changes;
     # what changes is that it can now say so out loud.
-    needs: [ci, ci-windows-hosted]
+    # `ci-linux` is listed because it was NOT, and that was the largest hole in
+    # this gate (wayland#1177 c2). The `ci` matrix is macOS + self-hosted
+    # Windows only -- it has no Linux entry -- so `ci-linux` is the sole
+    # producer of Linux test evidence AND the leg that runs the full ~12,775
+    # test workspace suite, the swarm dispatch certification, the corpus drift
+    # check and the release-binary smoke. Without it in `needs:` this job did
+    # not even WAIT for that leg: `download-artifact` collected whatever
+    # existed at the moment it ran, so the linux report could simply not be
+    # there yet, and `report` -- a required context -- concluded on the macOS
+    # leg alone. `if: always()` still carries this job through a failed or
+    # skipped dependency, so adding it changes what is MEASURED, not when this
+    # runs.
+    needs: [ci, ci-windows-hosted, ci-linux]
     if: always()
     runs-on: ubuntu-latest
     # gh#1072. Pure aggregation — measures under a minute in every sampled
@@ -2689,11 +2709,23 @@ jobs:
       # "zero reports is a failure" rule this step has always enforced; the ci
       # matrix legs are conditioned per platform, so a per-leg count would be a
       # different (and riskier) gate than the one being preserved here.
+      # `needs.ci` alone was the guard, and `ci` is SKIPPED on any lane push
+      # that opted into neither platform -- which skipped the whole evidence
+      # gate, including the Linux floor, on exactly the pushes where Linux is
+      # the only leg running at all. Cancelled still exempts both: a run the
+      # user or the concurrency gate stopped was never going to produce
+      # evidence.
       - name: Assert test evidence exists (a skipped test step is not a pass)
-        if: ${{ needs.ci.result != 'cancelled' && needs.ci.result != 'skipped' }}
+        if: ${{ needs.ci.result != 'cancelled' && needs.ci-linux.result != 'cancelled' && !(needs.ci.result == 'skipped' && needs.ci-linux.result == 'skipped') }}
         env:
           EVIDENCE_DIR: junit-reports
           EXPECTED_MIN: 1
+          # The aggregate count above cannot notice that ONE leg contributed
+          # nothing, and the leg that matters most is the one that runs the full
+          # workspace suite. Named here so its absence is a red rather than a
+          # silence (wayland#1177 c2; the artifact name is set at the
+          # `ci-linux` upload step).
+          REQUIRE_LEGS: nextest-junit-linux-containerized
           LABEL: ci matrix (unit + integration)
           UPSTREAM_RESULT: ${{ needs.ci.result }}
           HINT: >-

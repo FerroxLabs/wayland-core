@@ -9,25 +9,25 @@ criteria:
   - id: c1
     text: "The tracker close is gated on the result of every job in the run, not on one job's step-level success()"
     state: met
-    evidence: "file:.github/workflows/nightly-windows-soak.yml:676"
+    evidence: "file:.github/workflows/nightly-windows-soak.yml:676:needs: [windows-soak, keyring-blob-size, windows-live-acceptance]"
     owner: core
     note: "A new terminal job soak-tracker: needs [windows-soak, keyring-blob-size, windows-live-acceptance] with if: always(). The close step is gated on the decision from .github/scripts/soak-tracker-decision.sh, which closes only when EVERY roster entry is success. Fail-closed extras: an empty or incomplete roster, or an uninterpretable needs.<id>.result, exits 1 and closes nothing; the soak job no longer holds issues: write."
   - id: c2
     text: "A run whose sibling job failed posts a red report instead of closing the tracker green"
     state: met
-    evidence: "file:.github/scripts/tests/soak-tracker-truth.test.sh:65"
+    evidence: "file:.github/scripts/tests/soak-tracker-truth.test.sh:65:soak green + live-acceptance red -> report, never close"
     owner: core
     note: "Replays the exact shape of run 33053333326 as a unit case - soak green, keyring green, live-acceptance red -> report, never close - with a negative control at :59 (all three green -> close) so the guard cannot be one that never PASSes. Shell script, so file: rather than symbol:. This is the red arm replayed, not a re-run of the historical workflow."
   - id: c3
     text: "windows-live-acceptance and keyring-blob-size are inside the tracker's sight, not just windows-soak"
     state: met
-    evidence: "file:.github/workflows/nightly-windows-soak.yml:692"
+    evidence: "file:.github/workflows/nightly-windows-soak.yml:692:windows-soak keyring-blob-size windows-live-acceptance"
     owner: core
     note: "REQUIRED_JOBS names all three; a job id missing from the roster exits 1 with 'Incomplete soak roster'. soak-tracker-truth.test.sh:162-201 derives the scheduled-job set from the YAML and reddens if REQUIRED_JOBS or needs: drifts from it, so a fourth job cannot narrow the view silently."
   - id: c4
     text: "The existing label and title-prefix narrowing survives, so the reporter still cannot touch a human-filed issue"
     state: met
-    evidence: "file:.github/workflows/nightly-windows-soak.yml:723"
+    evidence: "file:.github/workflows/nightly-windows-soak.yml:723:const existing = issues.find(i => i.title.startsWith('[nightly-windows"
     owner: core
     note: "labels: ['windows-soak','test-debt'] plus a title startsWith('[nightly-windows-soak] FAIL') narrowing, repeated on the report step. PRESERVED BUT STILL UNTESTED: nothing under .github/scripts/ grades the label or title narrowing, so a later edit could widen what the bot may close without reddening anything."
 ---

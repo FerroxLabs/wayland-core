@@ -213,6 +213,194 @@ def enclosing(t, pos, fns=None):
     return last.group(1), "\n".join(attrs), t[last.start() : j if j > 0 else last.end()]
 
 
+CALL = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+IMPL = re.compile(r"^[ \t]*impl(?:<[^>]*>)?\s+(?:.+?\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*)", re.M)
+
+
+def impl_spans(t):
+    """[(start, end, type name)] for every `impl ... { }` block in the file."""
+    out = []
+    for m in IMPL.finditer(t):
+        i = t.find("{", m.end())
+        if i < 0:
+            continue
+        d, j = 0, i
+        while j < len(t):
+            if t[j] == "{":
+                d += 1
+            elif t[j] == "}":
+                d -= 1
+                if d == 0:
+                    break
+            j += 1
+        out.append((m.start(), j, m.group(1)))
+    return out
+
+
+def fn_records(t, fns, spans, impls=None):
+    """[(name, attrs, body, start)] for every fn whose body overlaps `spans`.
+
+    The same walk `enclosing` does, once per file instead of once per write
+    site, because the helper closure below needs EVERY function and not just
+    the ones that happen to contain a write.
+    """
+    out = []
+    for i, m in enumerate(fns):
+        stop = fns[i + 1].start() if i + 1 < len(fns) else len(t)
+        attrs = []
+        for line in reversed(t[: m.start()].rstrip("\n").split("\n")):
+            s = line.strip()
+            if s.startswith("#[") or s.endswith("]") or s.endswith("],"):
+                attrs.append(s)
+            elif s == "":
+                continue
+            else:
+                break
+        j0 = t.find("{", m.end())
+        d, j = 0, j0
+        while j0 >= 0 and j < len(t):
+            if t[j] == "{":
+                d += 1
+            elif t[j] == "}":
+                d -= 1
+                if d == 0:
+                    break
+            j += 1
+        end = j if j0 >= 0 and j < len(t) else stop
+        if not any(a <= m.start() <= b for a, b in spans):
+            continue
+        owner = None
+        for a, b, ty in impls or ():
+            if a <= m.start() <= b:
+                owner = ty
+        node = "%s::%s" % (owner, m.group(1)) if owner else m.group(1)
+        out.append((node, "\n".join(attrs), t[m.start(): end], owner))
+    return out
+
+
+def unserialized_test_callers(fn_table, target, ambiguous=frozenset()):
+    """Names of UNSERIALIZED TEST functions that transitively call `target`.
+
+    ── WHY THIS EXISTS (wayland#1134 c3) ──────────────────────────────────
+    The classifier buckets a write by the function it sits in, so a write inside
+    a non-test HELPER was labelled `helper` and explicitly not audited. A helper
+    is safe only if EVERY caller is serialized, which is what reachability
+    answers -- one hop or ten.
+
+    ── HOW A CALL IS RESOLVED, AND WHY IT IS BY QUALIFIED NAME ────────────
+    This is a text scan. Nodes are `Type::method` where the function sits in an
+    `impl`, and the bare name otherwise:
+
+      * `Type::method` matches a call written `Type::method(` (any path prefix,
+        so `crate::test_utils::PinnedRetryBudget::pin(` resolves). This is what
+        makes the helper wayland#1134 OPENS WITH reachable at all: `pin` is not
+        a unique bare name in wcore-agent, so a name-only graph drops it.
+      * a free function matches a bare `name(` only when that name is unique
+        across every function in the binary. `new`, `drop`, `empty`, `install`
+        and `cfg` are not, and a name-keyed graph merged them: measured, one
+        test containing `SpawnTaskSet::drop(` was reported as an unserialized
+        caller of THREE unrelated guards' `Drop::drop` in three different files.
+
+    Method calls written `x.method(` are deliberately NOT edges: the receiver
+    type is not recoverable from text. Nor is an implicit `Drop::drop` at end of
+    scope. Both losses are stated in the unaudited-helper residue the gate
+    prints on every run rather than hidden.
+    """
+    callers, by_node = {}, {}
+    for node, attrs, body, _ in fn_table:
+        by_node.setdefault(node, []).append((attrs, body))
+
+    bare = {n for n, v in by_node.items() if "::" not in n and len(v) == 1} - ambiguous
+    qualified = {}
+    for node in by_node:
+        if "::" in node:
+            ty, method = node.split("::", 1)
+            qualified[node] = (
+                method,
+                re.compile(r"\b%s\s*::\s*%s\s*\(" % (re.escape(ty), re.escape(method))),
+            )
+
+    for node, attrs, body, _ in fn_table:
+        seen_calls = set(CALL.findall(body))
+        for callee in seen_calls & bare:
+            if callee != node:
+                callers.setdefault(callee, set()).add(node)
+        for callee, (method, pattern) in qualified.items():
+            if callee != node and method in seen_calls and pattern.search(body):
+                callers.setdefault(callee, set()).add(node)
+
+    seen, stack, out = set(), [target], set()
+    while stack:
+        cur = stack.pop()
+        for up in callers.get(cur, ()):
+            if up in seen:
+                continue
+            seen.add(up)
+            for attrs, body in by_node.get(up, ()):
+                if TESTATTR.search(attrs) and "serial" not in attrs and ".lock()" not in body:
+                    out.add(up)
+            stack.append(up)
+    return out
+
+
+BASELINE_PATH = os.path.join(".config", "env-global-helper-baseline.txt")
+
+
+def read_baseline(root, today):
+    """-> ({(var, binary): line-no}, [complaints])
+
+    ── WHY A BASELINE, AND WHY ONLY FOR HELPER-MEDIATED PAIRS ─────────────
+    Teaching this gate to follow a write through a helper into its callers
+    (wayland#1134 c3) made it see seven hazards it had been structurally blind
+    to. They are real -- same shape as the one the gate already caught -- and
+    fixing them means changing test-support APIs in five crates. Landing them as
+    a hard failure would red a REQUIRED context on work nobody has done yet, so
+    the pairs are listed here, dated and owned, and REPORTED loudly instead.
+
+    Two rules stop it becoming a permanent exemption, and both are enforced:
+      * every entry EXPIRES. A stale line fails the gate, so the list cannot
+        outlive the work without somebody deciding to renew it and saying why.
+      * only a pair whose unserialized writers are ALL reached through a helper
+        may be listed. A write sitting directly in an unserialized test is the
+        original defect and is never baselineable -- an entry claiming one is
+        refused, and the pair still fails.
+    """
+    path = os.path.join(root, BASELINE_PATH)
+    entries, bad = {}, []
+    if not os.path.isfile(path):
+        return entries, bad
+    for n, raw in enumerate(open(path, encoding="utf-8", errors="replace"), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            bad.append("%s:%d is malformed. Format: <YYYY-MM-DD expiry> <VAR> "
+                       "<test-binary> <gh#NNNN> <reason>." % (BASELINE_PATH, n))
+            continue
+        expiry, var, binary, issue, reason = parts
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", expiry):
+            bad.append("%s:%d does not start with a YYYY-MM-DD expiry (got %r)."
+                       % (BASELINE_PATH, n, expiry))
+            continue
+        if not re.match(r"^(gh)?#\d+$", issue):
+            bad.append("%s:%d names no owning issue (got %r). An entry nobody "
+                       "owns is an exemption nobody will remove."
+                       % (BASELINE_PATH, n, issue))
+            continue
+        if not reason.strip():
+            bad.append("%s:%d states no reason." % (BASELINE_PATH, n))
+            continue
+        if expiry < today:
+            bad.append("%s:%d expired on %s (today is %s): %s in %s (%s). Fix "
+                       "the hazard, or renew with a fresh date and a reason that "
+                       "is still true."
+                       % (BASELINE_PATH, n, expiry, today, var, binary, issue))
+            continue
+        entries[(var, binary)] = n
+    return entries, bad
+
+
 def discover(root):
     """{crate: {"dir":…, "deps":{…}}} from Cargo.toml text alone (no toolchain)."""
     pkgs = {}
@@ -233,6 +421,19 @@ def discover(root):
     return pkgs
 
 
+# A module under `src/` that exists only to support tests. It carries no
+# `#[cfg(test)]` -- it is compiled behind a feature so INTEGRATION tests can use
+# it too -- so the `#[cfg(test)]` span walk skipped every line of it.
+#
+# MEASURED (wayland#1134 c3): `crates/wcore-agent/src/test_utils/mod.rs` writes
+# `WAYLAND_MAX_STREAM_RETRIES` three times, at lines 387, 398 and 399 --
+# `PinnedRetryBudget::pin` and its `Drop`, the helper the issue OPENS WITH --
+# and the scanner recorded ZERO write sites in that file. Not "classified as an
+# unaudited helper": not seen at all. The gate reported `OK` on the shape it was
+# written for.
+TEST_SUPPORT = re.compile(r"(^|/)(test_utils|test_support|testing|test_helpers)(/|\.rs$)")
+
+
 def units(pkgs):
     """[(binary, crate, [(path, whole_file_is_test)])] -- one entry per test binary.
 
@@ -247,7 +448,8 @@ def units(pkgs):
             for f in fs:
                 if f.endswith(".rs"):
                     srcfiles.append(os.path.join(dp, f))
-        out.append((c, c, [(p, False) for p in sorted(srcfiles)]))
+        out.append((c, c, [(p, TEST_SUPPORT.search(p.replace(os.sep, "/")) is not None)
+                           for p in sorted(srcfiles)]))
 
         tdir = os.path.join(info["dir"], "tests")
         if not os.path.isdir(tdir):
@@ -303,6 +505,7 @@ def scan(pkgs):
 
     writers, readers, sites = {}, {}, {}
     kinds, ntests, crate_of = {}, {}, {}
+    fn_tables, via, impl_index = {}, {}, {}
     for binary, c, files in us:
         crate_of[binary] = c
         ntests.setdefault(binary, 0)
@@ -327,7 +530,40 @@ def scan(pkgs):
                 elif TESTATTR.search(attrs):
                     kind = "UNSERIALIZED-TEST"
                 else:
-                    kind = "helper"
+                    # A helper is safe only if EVERY caller is serialized, so
+                    # ASK, instead of declaring the whole bucket unauditable
+                    # (wayland#1134 c3). The call graph is per BINARY, which is
+                    # also the scope a process global has.
+                    if binary not in fn_tables:
+                        table, seen_names = [], {}
+                        for q, qwhole in files:
+                            qt = stripped[q]
+                            qsp = [(0, len(qt))] if qwhole else test_spans(qt)
+                            table += fn_records(qt, fn_index[q], qsp, impl_spans(qt))
+                            for fm in fn_index[q]:
+                                seen_names[fm.group(1)] = seen_names.get(fm.group(1), 0) + 1
+                        fn_tables[binary] = (
+                            table,
+                            frozenset(n for n, k in seen_names.items() if k > 1),
+                        )
+                    table, ambiguous = fn_tables[binary]
+                    if p not in impl_index:
+                        impl_index[p] = impl_spans(t)
+                    holder = None
+                    for a, b, ty in impl_index[p]:
+                        if a <= m.start() <= b:
+                            holder = ty
+                    node = "%s::%s" % (holder, fn) if holder and fn else fn
+                    reached = (
+                        unserialized_test_callers(table, node, ambiguous) if fn else set()
+                    )
+                    if reached:
+                        kind = "UNSERIALIZED-TEST"
+                        via.setdefault((binary, v), {})[
+                            (p, t[: m.start()].count("\n") + 1)
+                        ] = (fn, sorted(reached))
+                    else:
+                        kind = "helper"
                 kinds[kind] = kinds.get(kind, 0) + 1
                 sites.setdefault((binary, v), []).append(
                     (p, t[: m.start()].count("\n") + 1, kind, fn)
@@ -362,7 +598,7 @@ def scan(pkgs):
             rc = sorted(x for x in linked_cache[c] if v in readers.get(x, ()))
             if rc:
                 pairs.append((v, binary, rc))
-    return pairs, sites, kinds, ntests
+    return pairs, sites, kinds, ntests, via
 
 
 # ── self-test ────────────────────────────────────────────────────────────────
@@ -390,6 +626,49 @@ _INT_SERIAL = (
     'fn a() { unsafe { std::env::set_var("SHARED_V", "x") }; }\n'
     "#[test]\nfn b() { assert!(demo::f().is_empty() || true); }\n"
 )
+# ── HELPER CASES (wayland#1134 c3) ────────────────────────────────────────
+#
+# The gap D14 named: all seven original fixtures write DIRECTLY inside a test
+# fn, so the `--self-test` could not expose the classifier's blindness to a
+# write inside a helper in either direction. These four can.
+#
+# `stub_env` is a free function with a unique name -- the bare-name edge.
+# `Pinned::pin` is a method -- the qualified edge, which is how the helper the
+# issue opens with is reachable at all.
+_INT_HELPER_UNSERIAL = (
+    'fn stub_env() { unsafe { std::env::set_var("SHARED_V", "x") }; }\n'
+    "#[test]\nfn a() { stub_env(); }\n"
+    "#[test]\nfn b() { assert!(demo::f().is_empty() || true); }\n"
+)
+_INT_HELPER_SERIAL = (
+    'fn stub_env() { unsafe { std::env::set_var("SHARED_V", "x") }; }\n'
+    "#[test]\n#[serial_test::serial]\nfn a() { stub_env(); }\n"
+    "#[test]\nfn b() { assert!(demo::f().is_empty() || true); }\n"
+)
+_INT_METHOD_UNSERIAL = (
+    "struct Pinned;\n"
+    "impl Pinned {\n"
+    '    fn pin() -> Self { unsafe { std::env::set_var("SHARED_V", "x") }; Pinned }\n'
+    "}\n"
+    "#[test]\nfn a() { let _g = Pinned::pin(); }\n"
+    "#[test]\nfn b() { assert!(demo::f().is_empty() || true); }\n"
+)
+_INT_METHOD_SERIAL = (
+    "struct Pinned;\n"
+    "impl Pinned {\n"
+    '    fn pin() -> Self { unsafe { std::env::set_var("SHARED_V", "x") }; Pinned }\n'
+    "}\n"
+    "#[test]\n#[serial_test::serial]\nfn a() { let _g = Pinned::pin(); }\n"
+    "#[test]\nfn b() { assert!(demo::f().is_empty() || true); }\n"
+)
+# Two hops: the test calls a wrapper, the wrapper calls the writer. A one-level
+# check would pass this and it is the same hazard.
+_INT_HELPER_INDIRECT = (
+    'fn stub_env() { unsafe { std::env::set_var("SHARED_V", "x") }; }\n'
+    "fn arrange_world() { stub_env(); }\n"
+    "#[test]\nfn a() { arrange_world(); }\n"
+    "#[test]\nfn b() { assert!(demo::f().is_empty() || true); }\n"
+)
 _INT_SOLE = '#[test]\nfn a() { unsafe { std::env::set_var("SHARED_V", "x") }; }\n'
 # tokio's attribute takes arguments; the classifier must still see a test.
 _INT_TOKIO = (
@@ -399,39 +678,81 @@ _INT_TOKIO = (
 )
 
 
-def _tree(root, lib_body=None, int_body=None):
+# A test-support module under `src/` with no `#[cfg(test)]` -- the shape of
+# `crates/wcore-agent/src/test_utils/mod.rs`, whose three writes the scanner
+# recorded as ZERO sites before this.
+_SUPPORT = (
+    "pub struct Pinned;\n"
+    "impl Pinned {\n"
+    '    pub fn pin() -> Self { unsafe { std::env::set_var("SHARED_V", "x") }; Pinned }\n'
+    "}\n"
+)
+_SUPPORT_CALLER_UNSERIAL = "    #[test]\n    fn t() { let _g = crate::test_utils::Pinned::pin(); }\n" + _SIBLING
+_SUPPORT_CALLER_SERIAL = (
+    "    #[test]\n    #[serial_test::serial]\n"
+    "    fn t() { let _g = crate::test_utils::Pinned::pin(); }\n" + _SIBLING
+)
+
+
+def _tree(root, lib_body=None, int_body=None, support=None):
     d = os.path.join(root, "crates", "demo")
     os.makedirs(os.path.join(d, "src"))
     open(os.path.join(d, "Cargo.toml"), "w").write('[package]\nname = "demo"\n')
     open(os.path.join(d, "src", "lib.rs"), "w").write(
         _PROD + (_TEST_HEAD + lib_body + "}\n" if lib_body else "")
     )
+    if support is not None:
+        os.makedirs(os.path.join(d, "src", "test_utils"))
+        open(os.path.join(d, "src", "test_utils", "mod.rs"), "w").write(support)
     if int_body is not None:
         os.makedirs(os.path.join(d, "tests"))
         open(os.path.join(d, "tests", "it.rs"), "w").write(int_body)
     return root
 
 
-def _live(root):
+def triage(root, pairs, sites, ntests, via, baseline):
+    """-> (live, sole, held, complaints). The gate's whole decision, in one
+    place so `--self-test` grades what `main()` runs and not a copy of it."""
+    live, sole, held, complaints = [], [], [], []
+    for v, c, rc in pairs:
+        bad = [x for x in sites.get((c, v), []) if x[2] == "UNSERIALIZED-TEST"]
+        if not bad:
+            continue
+        if ntests.get(c, 0) < 2:
+            sole.append((v, c, rc, bad))
+            continue
+        if (v, c) in baseline:
+            # Only if EVERY unserialized writer for this pair is helper-mediated.
+            # `via` holds exactly the sites the helper closure reclassified.
+            reached = via.get((c, v), {})
+            direct = [x for x in bad if (x[0], x[1]) not in reached]
+            if direct:
+                complaints.append(
+                    "%s:%d claims %s in %s, but that pair has %d write(s) sitting "
+                    "DIRECTLY in an unserialized test -- the original defect, which "
+                    "is never baselineable: %s"
+                    % (BASELINE_PATH, baseline[(v, c)], v, c, len(direct),
+                       ", ".join("%s:%d" % (os.path.relpath(x[0], root), x[1])
+                                 for x in direct)))
+            else:
+                held.append((v, c, rc, bad, reached))
+                continue
+        live.append((v, c, rc, bad))
+    return live, sole, held, complaints
+
+
+def _live(root, baseline=None):
     """Binaries the GATE would fail on -- an unserialized write with a sibling."""
-    pairs, sites, _, ntests = scan(discover(root))
-    return [
-        (v, b)
-        for v, b, _ in pairs
-        if ntests.get(b, 0) >= 2
-        and any(s[2] == "UNSERIALIZED-TEST" for s in sites.get((b, v), []))
-    ]
+    pairs, sites, _, ntests, via = scan(discover(root))
+    live, _, _, complaints = triage(root, pairs, sites, ntests, via, baseline or {})
+    return [(v, b) for v, b, _, _ in live] + complaints
 
 
 def _sole(root):
     """Findings held back only because their binary has no sibling test."""
-    pairs, sites, _, ntests = scan(discover(root))
-    return [
-        (v, b)
-        for v, b, _ in pairs
-        if ntests.get(b, 0) < 2
-        and any(s[2] == "UNSERIALIZED-TEST" for s in sites.get((b, v), []))
-    ]
+    pairs, sites, _, ntests, via = scan(discover(root))
+    _, sole, _, _ = triage(root, pairs, sites, ntests, via, {})
+    return [(v, b) for v, b, _, _ in sole]
 
 
 def self_test():
@@ -443,8 +764,28 @@ def self_test():
         ("tests/: unserialized writer + sibling", None, _INT_UNSERIAL, True),
         ("tests/: the same writer, serialized", None, _INT_SERIAL, False),
         ("tests/: #[tokio::test(args)] writer", None, _INT_TOKIO, True),
+        ("tests/: writer in a HELPER an unserialized test calls", None, _INT_HELPER_UNSERIAL, True),
+        ("tests/: the same helper, every caller serialized", None, _INT_HELPER_SERIAL, False),
+        ("tests/: writer in a METHOD an unserialized test calls", None, _INT_METHOD_UNSERIAL, True),
+        ("tests/: the same method, every caller serialized", None, _INT_METHOD_SERIAL, False),
+        ("tests/: writer two hops below an unserialized test", None, _INT_HELPER_INDIRECT, True),
+    ]
+    # (label, src #[cfg(test)] body, src/test_utils/mod.rs body, must FIRE)
+    support_cases = [
+        ("src/test_utils/: writer an unserialized test calls", _SUPPORT_CALLER_UNSERIAL, _SUPPORT, True),
+        ("src/test_utils/: the same writer, caller serialized", _SUPPORT_CALLER_SERIAL, _SUPPORT, False),
     ]
     ok = True
+    for label, lib_body, support, must_fire in support_cases:
+        with tempfile.TemporaryDirectory() as td:
+            fired = bool(_live(_tree(td, lib_body, None, support)))
+        good = fired == must_fire
+        ok &= good
+        print(
+            "  %-42s expected %-6s got %-6s  %s"
+            % (label, "FIRE" if must_fire else "quiet", "FIRE" if fired else "quiet",
+               "ok" if good else "SELF-TEST FAILED")
+        )
     for label, lib_body, int_body, must_fire in cases:
         with tempfile.TemporaryDirectory() as td:
             fired = bool(_live(_tree(td, lib_body, int_body)))
@@ -455,6 +796,51 @@ def self_test():
             % (label, "FIRE" if must_fire else "quiet", "FIRE" if fired else "quiet",
                "ok" if good else "SELF-TEST FAILED")
         )
+
+    # ── THE BASELINE, BOTH DIRECTIONS ─────────────────────────────────────
+    #
+    # A held entry must silence a helper-mediated pair AND must not be able to
+    # silence a write sitting directly in an unserialized test, which is the
+    # original defect. An expired or unowned entry must fail rather than hold.
+    HELD = {("SHARED_V", "demo::it")}
+    baseline_cases = [
+        ("baseline: a live entry holds a helper-mediated pair",
+         _INT_HELPER_UNSERIAL, {("SHARED_V", "demo::it"): 1}, False),
+        ("baseline: the same entry cannot hold a DIRECT write",
+         _INT_UNSERIAL, {("SHARED_V", "demo::it"): 1}, True),
+        ("baseline: no entry, the helper pair still fails",
+         _INT_HELPER_UNSERIAL, {}, True),
+    ]
+    for label, int_body, baseline, must_fire in baseline_cases:
+        with tempfile.TemporaryDirectory() as td:
+            fired = bool(_live(_tree(td, None, int_body), baseline))
+        good = fired == must_fire
+        ok &= good
+        print("  %-42s expected %-6s got %-6s  %s"
+              % (label, "FIRE" if must_fire else "quiet",
+                 "FIRE" if fired else "quiet", "ok" if good else "SELF-TEST FAILED"))
+
+    # And the file parser, which is what turns a rotted list back into a red.
+    with tempfile.TemporaryDirectory() as td:
+        os.makedirs(os.path.join(td, ".config"))
+        open(os.path.join(td, BASELINE_PATH), "w").write(
+            "# comment\n"
+            "2099-01-01  V_OK  demo::it  gh#1134  a real reason\n"
+            "2000-01-01  V_OLD  demo::it  gh#1134  expired\n"
+            "2099-01-01  V_UNOWNED  demo::it  nobody  no issue\n"
+            "2099-01-01 V_SHORT\n")
+        entries, complaints = read_baseline(td, "2026-08-29")
+        parsed = (
+            list(entries) == [("V_OK", "demo::it")]
+            and len(complaints) == 3
+            and any("expired" in c for c in complaints)
+            and any("owning issue" in c for c in complaints)
+            and any("malformed" in c for c in complaints)
+        )
+    ok &= parsed
+    print("  %-42s expected %-6s got %-6s  %s"
+          % ("baseline: expired / unowned / malformed lines", "RED",
+             "RED" if parsed else "?", "ok" if parsed else "SELF-TEST FAILED"))
 
     # The sole-test carve-out is the one place this gate deliberately does NOT
     # fail, so it is proven in BOTH directions too: held back with no sibling,
@@ -567,7 +953,7 @@ def format_targets(selected):
 def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     pkgs = discover(root)
-    pairs, sites, kinds, ntests = scan(pkgs)
+    pairs, sites, kinds, ntests, via = scan(pkgs)
 
     selected = shared_process_targets(pkgs)
     skip_complaints = validate_skips(selected)
@@ -607,12 +993,12 @@ def main():
               "exact blind spot this scanner was widened to close.")
         return 2
 
-    live, sole = [], []
-    for v, c, rc in pairs:
-        bad = [s for s in sites.get((c, v), []) if s[2] == "UNSERIALIZED-TEST"]
-        if not bad:
-            continue
-        (live if ntests.get(c, 0) >= 2 else sole).append((v, c, rc, bad))
+    today = os.environ.get("ENV_GLOBAL_GATE_TODAY") or __import__(
+        "datetime").datetime.utcnow().strftime("%Y-%m-%d")
+    baseline, baseline_complaints = read_baseline(root, today)
+
+    live, sole, held, more = triage(root, pairs, sites, ntests, via, baseline)
+    baseline_complaints += more
 
     print("control ok: %s found in %s (production readers: %s)"
           % (control[0][0], control[0][1], ",".join(control[0][2])))
@@ -631,11 +1017,25 @@ def main():
     for (c, t), tests in sorted(SHARED_PROCESS_SKIPS.items()):
         for name in sorted(tests):
             print("      excluded: %s --test %s :: %s" % (c, t, name))
-    if skip_complaints:
+    if skip_complaints or baseline_complaints:
         print()
-        for c in skip_complaints:
+        for c in skip_complaints + baseline_complaints:
             print("FAIL: %s" % c)
         return 1
+
+    if held:
+        print("\nBASELINED, not failed: %d helper-mediated pair(s) listed in %s "
+              "with an expiry and an owning issue. These are REAL hazards of the "
+              "same class the gate fails on; they were invisible until the helper "
+              "closure landed (wayland#1134 c3) and are held only until their "
+              "dated entries expire." % (len(held), BASELINE_PATH))
+        for v, c, _, bad, reached in held:
+            print("  %s  written by test binary %s (%d tests in that process)"
+                  % (v, c, ntests.get(c, 0)))
+            for site, (fn, callers) in sorted(reached.items()):
+                print("      %s:%d  fn %s  <- unserialized test(s): %s"
+                      % (os.path.relpath(site[0], root), site[1], fn,
+                         ", ".join(callers[:4])))
 
     if sole:
         print("\nREPORTED, not failed: %d pair(s) whose only unserialized writer "

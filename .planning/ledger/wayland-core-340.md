@@ -9,7 +9,7 @@ criteria:
   - id: c1
     text: "The malware gate's doc comment states the coverage the gate actually has, rather than asserting every stdio launch is checked before execution"
     state: met
-    evidence: "file:crates/wcore-mcp/src/malware_gate.rs:23"
+    evidence: "file:crates/wcore-mcp/src/malware_gate.rs:23://! # What this gate covers, exactly (FerroxLabs/wayland-core#340)"
     owner: core
     note: "The 'every stdio launch is checked before execution' claim is gone. malware_gate.rs:23-69 is an explicit covered / NOT covered / fails-open section naming the five uncovered shapes. Q2 in .planning/DECISIONS.md is the decision behind it: do NOT try to detect indirect runners by spelling, say so in the doc instead."
   - id: c2

@@ -27,13 +27,13 @@ criteria:
   - id: c4
     text: "The replacement treats output equal to context as models.dev saying unknown, never as a ceiling"
     state: met
-    evidence: "file:scripts/check-model-limits-freshness.py:781"
+    evidence: "file:scripts/check-model-limits-freshness.py:781:# P7. NEGATIVE CONTROL: output == context is UNKNOWN, never a ceiling."
     owner: core
     note: "Enforcement at scan_passthrough:288 treats output == context as models.dev saying UNKNOWN; the control at :781-787 requires the grok-4.6 degenerate row to PASS rather than be graded."
   - id: c5
     text: "The third preserved rule holds: no static arm is added for an open-weights family served at wildly different limits by different hosts"
     state: met
-    evidence: "file:scripts/check-model-limits-freshness.py:156"
+    evidence: "file:scripts/check-model-limits-freshness.py:156:PASSTHROUGH_IN_SCOPE = {"
     owner: core
     note: "Added 2026-08-29; the acceptance text names three preserved rules and the ledger claimed only two. PASSTHROUGH_IN_SCOPE at :156 narrows qwen to qwen3.N-(max|plus|flash) and llama to llama-4-maverick/scout and llama-3.3-, and PASSTHROUGH_VENDORS lists only vendor-operated hosts, so the qwen3.6-27b shape cannot acquire an arm."
 ---

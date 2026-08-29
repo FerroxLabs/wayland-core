@@ -211,6 +211,32 @@ ALLOWED_TEST_IDS=""
 BAD_ENTRIES=0
 EXPIRED_ENTRIES=0
 
+# ── RETIRED ENTRIES MUST NOT COME BACK (FerroxLabs/wayland#1182) ───────────
+#
+# An allowlist line is deleted when the defect behind it is fixed, and that
+# deletion is a decision with the same weight as the addition was. It is also
+# trivially reversible by accident: on wayland#1182 the line for
+# `contained_construction_does_not_walk_the_workspace` was deliberately removed
+# in c461293f once the test's liveness control stopped being a wall-clock ratio,
+# and a later MERGE put it straight back -- a lane branch that predated the
+# deletion won the resolution for that one line, while the two deletions either
+# side of it survived. Nothing noticed for weeks. The verification missed it
+# too: `git log -S` skips merges by default, so the resurrection is invisible to
+# the obvious search.
+#
+# So retirement is recorded IN THE FILE, as `# retired: <key> <gh#NNNN>
+# <reason>`, and a live entry matching a retired key is a hard error. A merge
+# that resurrects a line now reds the required `report` check on the next run
+# rather than silently restoring an exemption.
+#
+# To genuinely re-allow a retired test, delete its `# retired:` line in the same
+# commit, with a reason. That is deliberate friction, and it is the point.
+RETIRED_KEYS=""
+if [ -f "$ALLOWLIST" ]; then
+  RETIRED_KEYS=$(sed -n 's/^[[:space:]]*#[[:space:]]*retired:[[:space:]]*//p' "$ALLOWLIST" |
+    awk '{print $1}' | grep . || true)
+fi
+
 if [ ! -f "$ALLOWLIST" ]; then
   echo "allowlist file absent - grading with an EMPTY allowlist (fail-closed)."
 else
@@ -239,6 +265,11 @@ else
     fi
     if [ -z "$(printf '%s' "$reason" | tr -d '[:space:]')" ]; then
       echo "::error title=Unjustified flake allowlist entry::${ALLOWLIST}:${lineno} states no reason. The justification is the point of the file."
+      BAD_ENTRIES=$((BAD_ENTRIES + 1)); continue
+    fi
+
+    if printf '%s\n' "$RETIRED_KEYS" | grep -qxF -- "$key"; then
+      echo "::error title=Retired flake allowlist entry is back::${ALLOWLIST}:${lineno} allows ${key} (${issue}), but that key is recorded RETIRED in this same file -- it was deliberately removed once the defect behind it was fixed. An entry that comes back after retirement is almost always a merge resolving in favour of a branch that predated the deletion (wayland#1182), and it silently restores an exemption nobody decided to restore. Delete this line. If the test is genuinely flaky again, delete its '# retired:' line in the same commit and say why."
       BAD_ENTRIES=$((BAD_ENTRIES + 1)); continue
     fi
 

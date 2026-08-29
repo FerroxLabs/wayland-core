@@ -9,7 +9,7 @@ criteria:
   - id: c1
     text: "An unpriceable model reports its saving as unknown instead of manufacturing a zero baseline"
     state: met
-    evidence: "file:crates/wcore-agent/src/cache_ledger.rs:174"
+    evidence: "file:crates/wcore-agent/src/cache_ledger.rs:174:pub uncached_equivalent_usd: Option<f64>,"
     owner: core
     note: "uncached_equivalent_usd is Option<f64>"
   - id: c2

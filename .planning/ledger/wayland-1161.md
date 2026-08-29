@@ -9,7 +9,7 @@ criteria:
   - id: c1
     text: "Resuming a session restores the persisted conversation id instead of minting a new one"
     state: met
-    evidence: "file:crates/wcore-agent/src/engine.rs:4875"
+    evidence: "file:crates/wcore-agent/src/engine.rs:4875:// flips at runtime; caching here saves a per-turn config"
     owner: core
     note: "resume_with_provider_parts reads the persisted id; line-anchored because the change is a statement, not a named item"
   - id: c2

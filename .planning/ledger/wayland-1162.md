@@ -9,7 +9,7 @@ criteria:
   - id: c1
     text: "A user-chosen session id resolves against a ledger keyed by the internal conversation UUID"
     state: met
-    evidence: "file:crates/wcore-cli/src/cache_cmd.rs:440"
+    evidence: "file:crates/wcore-cli/src/cache_cmd.rs:440:fn resolve("
     owner: core
     note: "cache_cmd::resolve tries the ledger key first, then bridges via Session::conversation_id"
   - id: c2

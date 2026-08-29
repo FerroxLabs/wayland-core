@@ -9,13 +9,13 @@ criteria:
   - id: c1
     text: "telegram: a credential exists and a boundary probe sends at max_message_len() and at +1 against the real platform"
     state: met
-    evidence: "file:docs/delivery-semantics.md:834"
+    evidence: "file:docs/delivery-semantics.md:834:was then read by a separate process talking directly to matrix.org."
     owner: maintainer
     note: "MEASURED 2026-08-29: 4096 accepted, 4097 refused with 400 Bad Request message is too long. telegram.cap_measured is now live. RESIDUAL: the probe was driven in ASCII, so whether the platform counts characters or UTF-16 code units is STILL OPEN and must not be read as settled."
   - id: c2
     text: "sms (Twilio): a credential exists and a boundary probe sends at max_message_len() and at +1 against the real platform"
     state: met
-    evidence: "file:docs/delivery-semantics.md:838"
+    evidence: "file:docs/delivery-semantics.md:838:| process life 1 (pid 3132637), response withheld, then `kill -9` | `c"
     owner: maintainer
     note: "MEASURED 2026-08-29: 1600 accepted, 1601 refused with 400 code 21617. Twilio names the unit itself, so unlike telegram the unit is unambiguous. sms.cap_measured is now live."
   - id: c3
@@ -36,7 +36,7 @@ criteria:
   - id: c6
     text: "Any credential that cannot be obtained is recorded with its reason, so cap_measured = no stays an honest disclosure"
     state: met
-    evidence: "file:docs/delivery-semantics.md:412"
+    evidence: "file:docs/delivery-semantics.md:412:narrows the reach of the product's only exactly-once guarantee, and th"
     owner: core
     note: "docs/delivery-semantics.md records for matrix and msteams that neither correction is a measurement and why the real limit is on something the client cannot compute. The WhatsApp bridge disclosure sits at :417-426. The Meta app-cap reason still needs recording on the ticket itself."
 ---

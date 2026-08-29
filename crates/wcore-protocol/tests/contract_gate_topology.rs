@@ -417,3 +417,156 @@ fn the_corpus_drift_step_is_a_gate_and_carries_nothing_that_could_silence_it() {
         );
     }
 }
+
+/// wayland#1177 c1. The outer-retry evidence wrapper runs on the HOST as the
+/// runner user; every container step in `ci-linux` runs as ROOT against the same
+/// bind-mounted workspace and no `-u`. So the first container step that compiles
+/// anything creates `target/` root-owned, and from that moment the wrapper's
+/// `mkdir -p "$ATTEMPT_DIR"` fails with `Permission denied` before nextest is
+/// ever invoked -- no test runs, no junit.xml is written, and the required
+/// `report` check gets nothing from the leg that carries the whole workspace
+/// suite. Measured on run 33227927478, both attempts.
+///
+/// THE FIRST FIX FOR IT SHIPPED IN THE WRONG PLACE and this test is the reason
+/// that is now catchable: a bare `mkdir -p target/nextest/ci/outer-attempts`
+/// was inserted AFTER the Desktop contract corpus pre-flight hint, which is a
+/// `docker run ... cargo run` -- a compile -- so on every `pull_request` run
+/// target/ was already root-owned and the reserve step died with the identical
+/// error one step earlier. The self-test that was supposed to grade it was a
+/// `grep` for the mkdir string, which a wrongly-ordered step satisfies exactly
+/// as well as a correctly-ordered one.
+///
+/// Ordering is the property, so ordering is what is asserted.
+#[test]
+fn the_outer_retry_evidence_tree_is_reserved_before_any_container_mounts_the_workspace() {
+    let workflow = read(".github/workflows/ci.yml");
+    let lines = workflow.lines().collect::<Vec<_>>();
+    let owners = owning_jobs(&workflow);
+
+    let hits = executable_hits(&workflow, "reserve-attempt-evidence-tree.sh", "#");
+    assert_eq!(
+        hits.len(),
+        1,
+        "exactly one step may reserve the evidence tree; found {} (ci.yml lines {:?})",
+        hits.len(),
+        hits.iter().map(|i| i + 1).collect::<Vec<_>>()
+    );
+    let job = owners[hits[0]]
+        .clone()
+        .expect("the reserve step must live inside a job");
+    assert_eq!(
+        job, "ci-linux",
+        "the wrapper it protects runs in `ci-linux`; reserving the tree in `{job}` protects nothing"
+    );
+    let reserve = step_start(&lines, hits[0]);
+
+    // Every step in this job that runs a container against the WORKSPACE. The
+    // two env aliases cover the compile/lint/test steps; the bare `docker run`
+    // with an explicit bind mount covers the pre-flight hint, which is the step
+    // that actually defeated the first fix.
+    //
+    // `$DOCKER_RUN` and `$DOCKER_RUN_SANDBOX` are also DEFINED in this job's
+    // `env:` block, which is not inside any step, so `step_start` walks back
+    // past `steps:` into the previous job. Requiring the resolved step to be
+    // owned by this job too drops those definitions and keeps the uses.
+    let mut mounts: Vec<usize> = Vec::new();
+    for needle in ["$DOCKER_RUN", "github.workspace }}:/work"] {
+        for index in executable_hits(&workflow, needle, "#") {
+            if owners[index].as_deref() != Some(job.as_str()) {
+                continue;
+            }
+            let start = step_start(&lines, index);
+            if owners[start].as_deref() == Some(job.as_str()) {
+                mounts.push(start);
+            }
+        }
+    }
+    mounts.retain(|&start| start != reserve);
+    mounts.sort_unstable();
+    mounts.dedup();
+    assert!(
+        !mounts.is_empty(),
+        "control failed: `{job}` runs every compile, lint and test step inside a container \
+         bind-mounting the workspace, so finding none means this search is broken"
+    );
+    // The pre-flight hint must be among them, by name -- it is the step whose
+    // `cargo run` creates target/ as root on every pull_request run, and a
+    // search that missed it would pass this test while the defect stood.
+    let hint = executable_hits(&workflow, "wcore-contract -- preflight", "#")
+        .into_iter()
+        .find(|&index| owners[index].as_deref() == Some(job.as_str()))
+        .map(|index| step_start(&lines, index))
+        .expect("control failed: the pre-flight hint must live in this job");
+    assert!(
+        mounts.contains(&hint),
+        "control failed: the pre-flight hint (ci.yml:{}) compiles inside a container against the \
+         workspace and must be one of the steps this ordering is measured against",
+        hint + 1
+    );
+
+    let first = *mounts.iter().min().expect("non-empty");
+    assert!(
+        reserve < first,
+        "the outer-retry evidence tree is reserved at ci.yml:{} but a container step already \
+         mounts the workspace at ci.yml:{}. That step runs as root, creates target/ root-owned, \
+         and the reserve then fails with `mkdir: cannot create directory 'target/nextest': \
+         Permission denied` -- the wrapper never invokes nextest and the required `report` check \
+         receives no evidence from this leg (wayland#1177 c1).",
+        reserve + 1,
+        first + 1
+    );
+}
+
+/// The other half of wayland#1177 c1: preserving evidence is worthless if the
+/// job that reads it never waits for the leg that produces it.
+///
+/// `report` is the required aggregate context, and it listed `needs: [ci,
+/// ci-windows-hosted]`. The `ci` matrix is macOS + self-hosted Windows -- it has
+/// NO Linux entry -- so `ci-linux` is the sole producer of Linux test evidence
+/// and the only leg running the full workspace suite, and `report` neither
+/// waited for it nor required anything from it. `download-artifact` collected
+/// whatever happened to exist when it ran.
+#[test]
+fn the_report_gate_waits_for_and_requires_the_containerized_linux_leg() {
+    let workflow = read(".github/workflows/ci.yml");
+    let lines = workflow.lines().collect::<Vec<_>>();
+    let owners = owning_jobs(&workflow);
+
+    let needs = lines
+        .iter()
+        .enumerate()
+        .find(|(index, line)| {
+            owners[*index].as_deref() == Some("report") && line.trim_start().starts_with("needs:")
+        })
+        .map(|(_, line)| line.to_string())
+        .expect("the `report` job must declare `needs:`");
+    assert!(
+        needs.contains("ci-linux"),
+        "`report` does not wait for `ci-linux` ({}). The `ci` matrix has no Linux entry, so that \
+         leg is the sole producer of Linux evidence and of the full workspace suite; without it \
+         here, `report` concludes on whatever artifacts happen to exist (wayland#1177 c2).",
+        needs.trim()
+    );
+
+    let uploaded = executable_hits(&workflow, "name: nextest-junit-linux-containerized", "#");
+    assert_eq!(
+        uploaded.len(),
+        1,
+        "control failed: the linux leg must upload exactly one named artifact"
+    );
+    let required = lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| owners[*index].as_deref() == Some("report"))
+        .any(|(_, line)| {
+            !line.trim_start().starts_with('#')
+                && line.contains("REQUIRE_LEGS:")
+                && line.contains("nextest-junit-linux-containerized")
+        });
+    assert!(
+        required,
+        "`report` does not name `nextest-junit-linux-containerized` in REQUIRE_LEGS, so the \
+         aggregate evidence floor (EXPECTED_MIN: 1, counted across every leg) is satisfied by the \
+         macOS leg alone and cannot notice that the containerized Linux leg contributed nothing."
+    );
+}

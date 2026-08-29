@@ -15,7 +15,7 @@ criteria:
   - id: c2
     text: "The shortfall is named to the user, and says the HEAD of the prompt is what was lost"
     state: met
-    evidence: "file:crates/wcore-agent/src/engine.rs:15348"
+    evidence: "file:crates/wcore-agent/src/engine.rs:15348:assistant_text.push_str(&block);"
     owner: core
     note: "Upgraded from the corpus test, which evidences DETECTION rather than the user-facing notice this criterion is about. engine.rs:15348-15351 is the emit_info site that names the shortfall and says the HEAD of the prompt is what was lost. SOFT SPOT: no test asserts the notice STRING - grep for the phrase returns the production site only."
   - id: c3

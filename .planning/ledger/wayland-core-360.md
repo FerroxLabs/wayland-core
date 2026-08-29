@@ -21,7 +21,7 @@ criteria:
   - id: c3
     text: "If the cap genuinely cannot be measured, that is recorded as a stated NOT-MEASURABLE with the reason, the way Matrix and MS Teams are"
     state: met
-    evidence: "file:docs/delivery-semantics.md:418"
+    evidence: "file:docs/delivery-semantics.md:418:is the serialized Activity including @-mentions and attachment JSON."
     owner: core
     note: "The prose at docs/delivery-semantics.md:417-426 states the number is UNVERIFIED and cannot be sourced, and says why. This is a disclosure, NOT a substitute for c1 or c2 - it is the honest interim only."
   - id: c4

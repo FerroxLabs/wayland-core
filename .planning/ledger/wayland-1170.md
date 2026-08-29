@@ -9,7 +9,7 @@ criteria:
   - id: c1
     text: "The round-trip test destructures LlmRequest with no `..`, so a new field is a compile error rather than silent coverage loss"
     state: met
-    evidence: "file:crates/wcore-agent/tests/session_journal_test/foundation_cases.rs:189"
+    evidence: "file:crates/wcore-agent/tests/session_journal_test/foundation_cases.rs:189:// as its default and the comparison fails."
     owner: core
   - id: c2
     text: "Every field is asserted BY VALUE, and the assertion itself fails if the expected value equals Default"
