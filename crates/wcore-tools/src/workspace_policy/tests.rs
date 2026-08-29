@@ -722,7 +722,7 @@ fn is_project_secret_is_scoped_to_workspace_root() {
 /// #667: `is_project_secret` catches a project `.env` even when it did not
 /// exist at construction time (lexical name-match, no TOCTOU gap), and the
 /// under-root scope still resolves for a not-yet-created target (the
-/// `canon_for_scope` parent fallback normalizes `/var`→`/private/var`).
+/// `canon_existing_ancestor` walk normalizes `/var`→`/private/var`).
 #[test]
 fn is_project_secret_has_no_toctou_gap() {
     let dir = tempfile::tempdir().unwrap();
@@ -2003,7 +2003,7 @@ fn every_auto_run_list_entry_is_refused_in_both_directions() {
          with no home it silently stops applying altogether, so a host without \
          one must FAIL here rather than skip",
     );
-    let home = canon_for_scope(&home);
+    let home = canon_existing_ancestor(&home);
 
     // Both directions, and they fail differently: the location itself hands
     // over the auto-run directory, a parent hands over a directory that

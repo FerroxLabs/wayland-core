@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::workspace_policy::{WorkspacePolicy, WorkspaceTrust, canon_for_scope};
+use crate::workspace_policy::{WorkspacePolicy, WorkspaceTrust, canon_existing_ancestor};
 
 /// Tools whose named path is a pure READ, and the input key that carries it.
 ///
@@ -88,7 +88,7 @@ pub fn read_path_boundary(
     } else {
         policy.root().join(requested)
     };
-    let target = canon_for_scope(&resolved);
+    let target = canon_existing_ancestor(&resolved);
 
     if policy.is_read_reachable(&target) {
         return None;

@@ -843,21 +843,6 @@ impl WorkspacePolicy {
         self.fs_confinement_backend.as_deref()
     }
 
-    /// True when `path` is inside a standing grant that confers WRITE.
-    ///
-    /// The write sibling of
-    /// [`is_session_read_granted`](Self::is_session_read_granted), and the
-    /// predicate `SandboxedFs`'s mutating operations ask.
-    pub fn is_session_write_granted(&self, path: &Path) -> bool {
-        let canon = canon_for_scope(path);
-        let now = SystemTime::now();
-        self.session_path_grants
-            .read()
-            .iter()
-            .filter(|grant| grant.confers(now, true))
-            .any(|grant| canon.starts_with(&grant.root))
-    }
-
     /// Override the network posture. Used at bootstrap to grant `Inherit` to a
     /// genuinely-local session (see [`local_bash_network`]); the bare
     /// constructors stay on the fail-safe Deny default.
@@ -900,7 +885,7 @@ impl WorkspacePolicy {
     /// exactly the canonical path the Workspace jail already feeds in, so the
     /// Contained deployment is unchanged.
     pub fn is_project_secret(&self, path: &Path) -> bool {
-        let canon = canon_for_scope(path);
+        let canon = canon_existing_ancestor(path);
         is_secret_path_static(&canon) && canon.starts_with(&self.root)
     }
 
@@ -933,7 +918,7 @@ impl WorkspacePolicy {
     /// `crates/wcore-tools/tests/vfs_secret_deny_backend_independent.rs` pins:
     /// this refusal is enforced by THIS process.
     pub fn is_vcs_content_store(&self, path: &Path) -> bool {
-        let canon = canon_for_scope(path);
+        let canon = canon_existing_ancestor(path);
         if canon.starts_with(&self.root) && inside_vcs_store(&canon) {
             return true;
         }
@@ -962,9 +947,10 @@ impl WorkspacePolicy {
     /// business, and a benign-named symlink into the control surface resolves
     /// before the prefix match so it cannot be used to smuggle a write through.
     pub fn is_repo_control_path(&self, path: &Path) -> bool {
-        // `canon_existing_ancestor`, not `canon_for_scope`: the root is
+        // `canon_existing_ancestor`: the root is
         // canonicalized at construction, so a candidate that resolves to
-        // something shallower never matches it. `canon_for_scope` resolves only
+        // something shallower never matches it. The retired `canon_for_scope`
+        // resolved only
         // the IMMEDIATE parent and returns the RAW path when that parent is
         // missing — which is exactly the shape of a NEW control file
         // (`.wayland-core/skills/<new>/SKILL.md`, `.git/<new>/hook`), and
@@ -1685,13 +1671,13 @@ impl WorkspacePolicy {
     /// the layer that will actually do the refusing: a prompt keyed to the
     /// wider list would stay silent for a path the tool then refuses anyway.
     pub fn is_read_reachable(&self, path: &Path) -> bool {
-        let canon = canon_for_scope(path);
+        let canon = canon_existing_ancestor(path);
         canon.starts_with(&self.root) || self.is_session_read_granted(&canon)
     }
 
     /// True when `path` is inside a standing read grant.
     pub fn is_session_read_granted(&self, path: &Path) -> bool {
-        let canon = canon_for_scope(path);
+        let canon = canon_existing_ancestor(path);
         let now = SystemTime::now();
         self.session_path_grants
             .read()
@@ -1814,7 +1800,7 @@ impl WorkspacePolicy {
             return Err(PathGrantError::FilesystemRoot);
         }
         if let Some(home) = dirs::home_dir() {
-            let home = canon_for_scope(&home);
+            let home = canon_existing_ancestor(&home);
             // `$HOME` itself, and anything containing it, reach everything the
             // sandbox exists to stand between the agent and.
             if home.starts_with(&dir) {
@@ -1965,7 +1951,7 @@ fn auto_run_overlap(dir: &Path) -> Option<PathBuf> {
     }
     let mut known: Vec<PathBuf> = AUTO_RUN_SYSTEM_DIRS.iter().map(PathBuf::from).collect();
     if let Some(home) = dirs::home_dir() {
-        let home = canon_for_scope(&home);
+        let home = canon_existing_ancestor(&home);
         known.extend(
             AUTO_RUN_HOME_DIRS
                 .iter()
@@ -2133,7 +2119,7 @@ fn credential_store_is_under(dir: &Path) -> bool {
     let Some(home) = dirs::home_dir() else {
         return false;
     };
-    let home = canon_for_scope(&home);
+    let home = canon_existing_ancestor(&home);
     CREDENTIAL_STORES
         .iter()
         .any(|relative| home.join(relative).starts_with(dir))
@@ -2794,7 +2780,7 @@ const VCS_CONTENT_STORES: &[(&str, &str)] = &[
 /// and `.../refs/heads/main` are not stores and stay readable, mirroring the
 /// `git rev-parse` carve-out [`vcs_content_stores`] documents for the root
 /// repository.
-fn is_vcs_store_dir(path: &Path) -> bool {
+pub(crate) fn is_vcs_store_dir(path: &Path) -> bool {
     use std::path::Component;
     let mut rev = path.components().rev();
     let (Some(Component::Normal(leaf)), Some(Component::Normal(parent))) = (rev.next(), rev.next())
@@ -2832,7 +2818,13 @@ pub fn is_vcs_store_or_control_dir(path: &Path) -> bool {
 
 /// [`is_vcs_store_dir`] applied to `path` and every ancestor of it: true when
 /// `path` IS a content store or lives inside one.
-fn inside_vcs_store(path: &Path) -> bool {
+///
+/// Public because the in-process VFS is not the only thing that reaches these
+/// bytes: `GrepTool` spawns its own `rg`/`grep`/`findstr`, outside both
+/// `SecretDenyFs` and the OS sandbox, so `grep_policy` has to ask the same
+/// question this crate's deny already asks (D1). Purely lexical — the caller
+/// hands it an already-resolved path.
+pub fn inside_vcs_store(path: &Path) -> bool {
     path.ancestors().any(is_vcs_store_dir)
 }
 
@@ -2927,23 +2919,6 @@ fn resolve_against(base: &Path, named: PathBuf) -> PathBuf {
     std::fs::canonicalize(&joined).unwrap_or(joined)
 }
 
-/// Best-effort canonicalization for the under-root scope check. Falls back to
-/// canonicalizing the parent + re-attaching the final component when `path`
-/// itself does not exist (e.g. a `Write` to a not-yet-created `.env`), so the
-/// `/var` → `/private/var` normalization still lands and the prefix match
-/// against the canonical root holds.
-pub(crate) fn canon_for_scope(path: &Path) -> PathBuf {
-    if let Ok(c) = std::fs::canonicalize(path) {
-        return c;
-    }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
-            .map(|p| p.join(name))
-            .unwrap_or_else(|_| path.to_path_buf()),
-        _ => path.to_path_buf(),
-    }
-}
-
 /// True when any ancestor of `path` is a `.wayland-core/skills` or
 /// `.wayland-core/commands` directory.
 ///
@@ -2975,10 +2950,17 @@ fn under_project_load_path(path: &Path) -> bool {
 /// Resolve `path` to where it would ACTUALLY land, component by component,
 /// without requiring any of it to exist yet.
 ///
-/// [`canon_for_scope`] resolves at most one missing component, which is enough
-/// for a leaf that does not exist yet but not for a target whose directories
-/// have not been created either (`<root>/.wayland-out/results/x.txt` on a fresh
-/// workspace, which is what every FIRST spill looks like).
+/// **The one resolver in this file** (#356, and D11 which found the claim was
+/// still false). It replaced `canon_for_scope`, which canonicalized the parent
+/// and re-attached the leaf: that resolves at most one missing component, and —
+/// the reason it is gone — `std::fs::canonicalize` FAILS on a dangling symlink,
+/// so a link whose target does not exist yet was judged where the LINK sits
+/// rather than where the operation lands. Measured escapes it left open:
+/// `is_project_secret` missed `<root>/notes.txt -> <root>/.env` (.env absent),
+/// `is_vcs_content_store` missed a dangling link into `.git/objects`, and
+/// `is_read_reachable` called a dangling link out of the workspace reachable.
+/// Two resolvers with different escape properties in one file is exactly the
+/// shape #356 was filed about, so there is now one.
 ///
 /// Walking DOWN and re-canonicalizing after every component — rather than
 /// canonicalizing the longest existing ancestor once and appending the rest
@@ -2993,7 +2975,7 @@ fn under_project_load_path(path: &Path) -> bool {
 ///
 /// A `..` is applied lexically (`pop`) because the prefix accumulated so far is
 /// already canonical, so there is no symlink left for it to traverse wrongly.
-fn canon_existing_ancestor(path: &Path) -> PathBuf {
+pub(crate) fn canon_existing_ancestor(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {

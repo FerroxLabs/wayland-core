@@ -2,7 +2,7 @@
 //!
 //! Found while closing FerroxLabs/wayland#1096 direction 2, in the predicate
 //! sitting one line above the new one. `WorkspacePolicy::root` is canonicalized
-//! at construction, but the CANDIDATE was normalized by `canon_for_scope`,
+//! at construction, but the CANDIDATE was normalized by the retired `canon_for_scope`,
 //! which resolves only the immediate parent and falls back to the raw path when
 //! that parent does not exist. A brand-new control file is precisely that shape
 //! — `.git/hooks/pre-commit` in a fresh clone-less tree, or

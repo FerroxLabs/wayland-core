@@ -45,7 +45,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::path_validation::lex_normalize;
-use crate::workspace_policy::is_secret_path_static;
+use crate::workspace_policy::{canon_existing_ancestor, is_secret_path_static, is_vcs_store_dir};
 
 /// Cap on the number of withheld filenames named in the footer. A name is not
 /// a secret — the model needs to know WHICH file it cannot see — but an
@@ -144,10 +144,39 @@ pub(crate) fn scope_for(resolved: &Path) -> GrepScope {
     // intent by the person whose directory this is, and honouring it should not
     // wait on `git init`. This errs toward not leaking, and it is never silent:
     // whatever it withholds is counted in the footer.
+    // D1 / core#244. The hidden-file filter above only covers a walk that
+    // STARTS above the control directory: searching `<root>` never reaches
+    // `.git/**` because `.git` is hidden, but naming `.git` (or `.svn`) as the
+    // search target makes it the walk ROOT, and the filter has nothing left to
+    // hide. `rg` then descends into `.git/lfs/objects/**` and
+    // `.svn/pristine/**`, which — unlike a zlib loose object — hold committed
+    // file content VERBATIM. MEASURED before this prune: `Grep(pattern=CANARY,
+    // path=".svn")` returned `.svn/pristine/aa/deadbeef.svn-base:1:SVN-CANARY
+    // ... AWS_SECRET_ACCESS_KEY=abc123`.
+    //
+    // Pruned at the STORE, not at the control directory, so `.git/HEAD` and
+    // `.git/refs` stay searchable — the same carve-out `vcs_content_stores`
+    // documents, for the same reason (a metadata question is not a content
+    // question).
+    //
+    // The candidate is rebuilt on the CANONICAL walk root, so a symlink
+    // spelling (`<root>/mygit -> <root>/.git`) is judged where it lands rather
+    // than by the name it was reached under. `follow_links(false)` means no
+    // component BELOW the root can be a traversed symlink, so the relative tail
+    // needs no further resolution.
+    let walk_root = resolved.to_path_buf();
+    let canonical_root = canon_existing_ancestor(resolved);
     for entry in ignore::WalkBuilder::new(resolved)
         .standard_filters(true)
         .require_git(false)
         .follow_links(false)
+        .filter_entry(move |entry| {
+            let candidate = match entry.path().strip_prefix(&walk_root) {
+                Ok(rel) => canonical_root.join(rel),
+                Err(_) => entry.path().to_path_buf(),
+            };
+            !is_vcs_store_dir(&candidate)
+        })
         .build()
         .flatten()
     {

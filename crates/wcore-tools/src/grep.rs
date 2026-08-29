@@ -11,7 +11,7 @@ use crate::Tool;
 use crate::context::ToolContext;
 use crate::grep_policy::{self, GrepScope};
 use crate::path_validation::validate_search_root;
-use crate::workspace_policy::is_secret_path_static;
+use crate::workspace_policy::{canon_existing_ancestor, inside_vcs_store, is_secret_path_static};
 
 /// The one string that means "the backend looked and found nothing". Shared so
 /// `run_grep` can tell it apart from a match list without a magic literal.
@@ -199,6 +199,23 @@ async fn run_grep(input: &Value, search_root: Option<&Path>) -> ToolResult {
         return ToolResult {
             content: format!(
                 "Refused to search {path}: it is a credential-bearing file \
+                 (Grep returns matched line content)"
+            ),
+            is_error: true,
+        };
+    }
+
+    // D1 / core#244. Grep spawns its own backend (`try_ripgrep` below), so
+    // neither `SecretDenyFs` nor the OS sandbox's `fs_read_deny` sees the
+    // traversal — the only gate on the non-`ctx` path is this function. A
+    // search target AT or INSIDE a VCS content store is the plaintext read
+    // `is_vcs_content_store` exists to refuse everywhere else, so refuse it
+    // here too rather than filtering the store's bytes out afterwards.
+    // Resolved first, so a symlink spelling is judged where it lands.
+    if inside_vcs_store(&canon_existing_ancestor(&resolved)) {
+        return ToolResult {
+            content: format!(
+                "Refused to search {path}: it is a VCS content store \
                  (Grep returns matched line content)"
             ),
             is_error: true,
