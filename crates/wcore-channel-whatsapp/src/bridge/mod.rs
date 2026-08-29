@@ -91,6 +91,34 @@ pub const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 20;
 /// Default seconds to wait for any other RPC reply.
 pub const DEFAULT_RPC_TIMEOUT_SECS: u64 = 60;
 
+/// Width the bridge chunks a single message at when the operator has not
+/// measured their own backend, in characters.
+///
+/// **This is a CHUNKING POLICY, not a platform limit, and the difference is the
+/// whole of [wayland-core#360](https://github.com/FerroxLabs/wayland-core/issues/360).**
+/// Until 2026-08-29 `max_message_len` returned a bare `Some(4096)` whose only
+/// justification was Meta's Cloud API `text.body` documentation. That page
+/// governs a surface this code never touches: the bridged backends speak the
+/// WhatsApp Web/multi-device protocol through `baileys` or `whatsapp-web.js`,
+/// and neither project nor WhatsApp publishes a body limit for it. A number
+/// borrowed from the wrong vendor reads exactly like a measured one.
+///
+/// So the number no longer claims to be WhatsApp's limit. It claims only what
+/// it can support: a width small enough that no plausible real limit is below
+/// it, chosen because the two directions are not symmetrical. Too high and
+/// `send_to_keyed` hands the backend a body it will reject or truncate and
+/// nothing re-sends it (HIGH-6). Too low and a reply is split into more pieces
+/// than it needed to be, which costs readability — the bridge transmits no
+/// idempotency key at any length, so unlike Matrix an unnecessary split costs
+/// no guarantee. `None` is the one option that is not available: it disables
+/// chunking and sends an unbounded body at a limit nobody knows.
+///
+/// An operator who HAS measured their own backend overrides it with
+/// [`WhatsappBridgeConfig::max_message_chars`], which is the honest shape for a
+/// number the programme cannot source: the product ships the cautious default
+/// and gets out of the way of somebody with evidence.
+pub const BRIDGE_UNMEASURED_CHUNK_WIDTH: usize = 4096;
+
 // ---------------------------------------------------------------------------
 // Backend selection
 // ---------------------------------------------------------------------------
@@ -254,6 +282,18 @@ pub struct WhatsappBridgeConfig {
     /// Seconds to wait for any other RPC reply.
     #[serde(default = "default_rpc_timeout_secs")]
     pub rpc_timeout_secs: u64,
+
+    /// Width to chunk a single message at, in characters. Absent means
+    /// [`BRIDGE_UNMEASURED_CHUNK_WIDTH`].
+    ///
+    /// Present because the default is a policy rather than a measurement: no
+    /// vendor documents a body limit for the WhatsApp Web protocol these
+    /// backends speak, so an operator who has driven their own bridge and found
+    /// the real boundary should not be held to our guess. Zero is rejected at
+    /// parse time by the schema; a value that is wrong in the high direction is
+    /// the operator's own measurement to defend.
+    #[serde(default)]
+    pub max_message_chars: Option<usize>,
 }
 
 fn default_handshake_timeout_secs() -> u64 {
@@ -575,26 +615,26 @@ impl Channel for WhatsappBridgeChannel {
         include_str!("../../schemas/whatsapp-bridge.json")
     }
 
-    /// 4096 characters, carried over from the Cloud API adapter — and for THIS
-    /// surface the number is **UNVERIFIED**.
+    /// The width this channel chunks a single message at.
     ///
-    /// Meta's 4096 is documented for the Cloud API `text.body` field
-    /// (<https://developers.facebook.com/docs/whatsapp/cloud-api/messages/text-messages>).
-    /// This channel does not talk to the Cloud API: it drives `baileys` or
-    /// `whatsapp-web.js` over the bridge's `sendText` RPC, and neither project
-    /// nor WhatsApp publishes a documented body limit for the Web/multi-device
-    /// protocol. So the citation above does not govern this code path, and no
-    /// other citation exists (wayland#934, 2026-08-28).
+    /// [`WhatsappBridgeConfig::max_message_chars`] when the operator set it,
+    /// [`BRIDGE_UNMEASURED_CHUNK_WIDTH`] otherwise — and that default is a
+    /// chunking policy, NOT a measured or documented WhatsApp limit. Read the
+    /// constant's own documentation before citing this number anywhere: the
+    /// `Some(4096)` this replaced was borrowed from Meta's Cloud API page,
+    /// which does not govern the `baileys` / `whatsapp-web.js` backends this
+    /// channel drives (wayland-core#360 c1).
     ///
-    /// It is kept rather than removed because dropping to `None` would disable
-    /// chunking entirely and send an unbounded body at a limit nobody knows,
-    /// which is the reject-and-drop direction. It carries no row in
-    /// `docs/delivery-semantics.md` §4.2 for the same reason it carries none in
-    /// §2 — the declaration test enumerates platforms the registry constructs
-    /// from a platform string, and the bridge adds none — so nothing outside
-    /// this file checks it.
+    /// `docs/delivery-semantics.md` §4.2 carries the row, reached by the
+    /// selector key `whatsapp+baileys` / `whatsapp+whatsapp-web` rather than by
+    /// a platform string — which is what made it reachable by the coverage
+    /// guard at all (wayland-core#360 c2/c4).
     fn max_message_len(&self) -> Option<usize> {
-        Some(4096)
+        Some(
+            self.config
+                .max_message_chars
+                .unwrap_or(BRIDGE_UNMEASURED_CHUNK_WIDTH),
+        )
     }
 
     // `supports_outbound_idempotency` is deliberately NOT overridden. The
@@ -621,6 +661,7 @@ pub(crate) mod testing {
             default_recipient: String::new(),
             handshake_timeout_secs: 5,
             rpc_timeout_secs: 5,
+            max_message_chars: None,
         }
     }
 
@@ -693,6 +734,65 @@ mod tests {
             "a chunk of {widest} chars exceeds the {cap}-char cap the bridge declares"
         );
         assert_eq!(chunks.concat(), over, "the split must be lossless");
+    }
+
+    /// The default is a POLICY and the operator can replace it — which is the
+    /// half of wayland-core#360 c1 that a comment cannot deliver.
+    ///
+    /// Before this, the only way to change the width was to edit a literal in
+    /// this file. An operator who had actually driven their own `baileys`
+    /// bridge and found its real boundary had nowhere to put the finding, so
+    /// the borrowed number stayed load-bearing for everybody. Both directions
+    /// are exercised: absent means the documented default, present means the
+    /// operator's number and NOT the default.
+    #[test]
+    fn the_chunk_width_is_the_operators_when_they_set_one_and_the_policy_default_otherwise() {
+        let unset =
+            WhatsappBridgeChannel::new("wa", cfg(WhatsappBackend::Baileys, PathBuf::from("/nope")));
+        assert_eq!(
+            unset.max_message_len(),
+            Some(BRIDGE_UNMEASURED_CHUNK_WIDTH),
+            "an operator who set nothing must get the documented policy default"
+        );
+
+        let mut c = cfg(WhatsappBackend::Baileys, PathBuf::from("/nope"));
+        c.max_message_chars = Some(60_000);
+        let overridden = WhatsappBridgeChannel::new("wa", c);
+        assert_eq!(
+            overridden.max_message_len(),
+            Some(60_000),
+            "the operator's measured width must win over ours"
+        );
+        assert_ne!(
+            overridden.max_message_len(),
+            Some(BRIDGE_UNMEASURED_CHUNK_WIDTH),
+            "known-negative: the override must not be silently ignored back to the default"
+        );
+    }
+
+    /// The default must never be `None`, and must never be raised on the
+    /// strength of the citation it used to carry.
+    ///
+    /// `None` disables chunking in `ChannelManager::send_to_keyed` entirely and
+    /// hands the backend an unbounded body at a limit nobody has published,
+    /// which is the reject-and-drop direction (HIGH-6). The upper bound is
+    /// asserted too, because "make it bigger" is the change somebody reaches
+    /// for when a long reply gets split — and the number that would justify
+    /// doing that is a measurement against a real bridge, which nobody on this
+    /// programme has taken.
+    #[test]
+    fn the_unmeasured_default_stays_finite_and_conservative() {
+        assert!(
+            BRIDGE_UNMEASURED_CHUNK_WIDTH > 0,
+            "a zero width chunks forever"
+        );
+        assert!(
+            BRIDGE_UNMEASURED_CHUNK_WIDTH <= 4096,
+            "BRIDGE_UNMEASURED_CHUNK_WIDTH was raised to {BRIDGE_UNMEASURED_CHUNK_WIDTH}. The \
+             number is a policy, not a measurement: no vendor documents a body limit for the \
+             WhatsApp Web protocol these backends speak. Raising it needs a boundary run against \
+             a real paired bridge recorded in docs/delivery-semantics.md §4.2, not a wider guess."
+        );
     }
 
     #[test]
