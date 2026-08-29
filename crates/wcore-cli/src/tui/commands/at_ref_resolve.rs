@@ -366,7 +366,13 @@ fn walk_dir(
             // `wcore-tools`' deny walk uses — one list, one owner — and it is
             // asked about the RESOLVED path, so the entry's own name is
             // irrelevant.
-            if wcore_tools::workspace_policy::is_vcs_store_or_control_dir(&canonical) {
+            //
+            // The predicate tests the path AND its ancestors, because pruning
+            // alone does not cover this walk: a symlink aimed BELOW a store
+            // root is met at the top of the tree and never descended TO, so a
+            // self-only test admitted `.git/objects/aa` and inlined the
+            // objects under it.
+            if wcore_tools::workspace_policy::is_within_vcs_store_or_control_dir(&canonical) {
                 continue;
             }
             // core#339 c6: `.gitignore` is judged on where the entry resolves,
@@ -400,6 +406,13 @@ fn walk_dir(
             if !admitted.canonical.starts_with(root_canonical)
                 || is_secret_path(&path)
                 || is_secret_path(&admitted.canonical)
+                // core#322 c4: the same reach on the FILE arm. `is_secret_path`
+                // matches secret NAMES and an object file is named after its
+                // hash, so a link straight at `.git/objects/aa/deadbeef` was
+                // read and inlined without any store predicate being consulted.
+                || wcore_tools::workspace_policy::is_within_vcs_store_or_control_dir(
+                    &admitted.canonical,
+                )
             {
                 *skipped += 1;
                 continue;
@@ -1103,6 +1116,66 @@ mod tests {
         assert!(
             payload.files.iter().any(|f| f.content == "safe\n"),
             "control: an ordinary file must still be attached"
+        );
+    }
+
+    /// core#322 c4 — THE TIEBREAK. The lane graded c4 met on a parity claim: the
+    /// walk asks [`wcore_tools::workspace_policy::is_within_vcs_store_or_control_dir`],
+    /// which tests the path ITSELF, and the deny walk asks `inside_vcs_store`,
+    /// which tests the path and every ANCESTOR. The lane's defence was that a
+    /// walk PRUNES at the control directory and therefore can never stand
+    /// inside a store, making the two equivalent in effect.
+    ///
+    /// Pruning only governs paths the walk DESCENDS to. A symlink is an entry
+    /// the walk meets at the top of the tree, and one aimed BELOW a store's own
+    /// root — `.git/objects/aa`, not `.git` and not `.git/objects` — resolves to
+    /// a path that is neither a store shape (`objects/aa` is not a
+    /// (control, store) pair) nor a control-directory leaf. The self-test says
+    /// walk it; the ancestor test says deny it; the difference is a committed
+    /// object in the payload.
+    #[cfg(unix)]
+    #[test]
+    fn at_dir_prunes_a_path_that_resolves_below_a_store_root() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join(".git/objects/aa")).expect("mkdir git store");
+        fs::write(root.join(".git/objects/aa/deadbeef"), COMMITTED_OBJECT).expect("write object");
+
+        // Aimed below the store root — the input on which the two predicates
+        // disagree.
+        std::os::unix::fs::symlink(root.join(".git/objects/aa"), root.join("shortcut"))
+            .expect("symlink dir");
+        // The same reach on the FILE arm, which never consulted a store
+        // predicate at all: `is_secret_path` matches secret NAMES, and an
+        // object file is named after its hash.
+        std::os::unix::fs::symlink(root.join(".git/objects/aa/deadbeef"), root.join("blob.txt"))
+            .expect("symlink file");
+
+        // Wrong-refusal controls, so the fix cannot be "prune every link".
+        fs::write(root.join("ok.txt"), "safe\n").expect("write ok");
+        std::os::unix::fs::symlink(root.join("ok.txt"), root.join("alias.txt"))
+            .expect("symlink ok");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
+        let leaked: Vec<String> = payload
+            .files
+            .iter()
+            .filter(|f| f.content.contains("COMMITTED-OBJECT"))
+            .map(|f| f.path.display().to_string())
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "a path resolving BELOW a VCS store root was attached — the walk's \
+             self-test is not the deny walk's ancestor test: {leaked:?}"
+        );
+        assert_eq!(
+            payload
+                .files
+                .iter()
+                .filter(|f| f.content == "safe\n")
+                .count(),
+            2,
+            "control: an ordinary file and an ordinary link to it must both stay attached"
         );
     }
 }
