@@ -10,10 +10,10 @@
 | Q5 / core#238 | bare-`NUL` guard | **BUILD THE NARROW GUARD** | Bare `NUL` only. Record the Win11-26200 measurement on the issue |
 | Q2 / core#340 D | refuse indirect runners (`sh -c "npx …"`)? | **NO — and say so in the doc** | Also fix the reachability understatement |
 | Q3 / core#340 B | how the fail-open notice reaches a user | **A typed protocol frame, not a log level** | Ship doc-honesty now; frame lands with Q4 |
-| Q4 / core#314 D-2 | typed protocol refusals | **YES — contract minor bump, with Desktop** | Open on FerroxLabs/wayland#1099 |
+| Q4 / core#314 D-2 | typed protocol refusals | **YES — contract minor bump, with Desktop** | Core work, tracked as core#314 c5. Corrected 2026-08-29: FerroxLabs/wayland#1099 is CLOSED and is a different subject |
 | Q6 / core#253 | the umbrella | **Keep open + unscheduled; split the Telegram defect out now** | Do NOT ship slice 2's breaking migration |
 | Q7 | Windows merge freeze for Lane W | **YES — a declared window, opened after Lane 0.1 is read** | Serializes the single Windows box |
-| Q-113 | core#113 | **CLOSE AS REFUTED**, recording deny-by-default as the decision | Maintainer performs the close |
+| Q-113 | core#113 | **CLOSE AS REFUTED**, recording deny-by-default as the decision | Record posted on #113 2026-08-29; the close is queued on FerroxLabs/wayland#1229, with wayland-core#364 filed independently for the same act -- both open, maintainer to dedupe |
 | Q-338c4 | core#338 credential surface | **Deny `/dev/tty` via `setsid`, in the SAME change as layer 1** | Layer 1 alone makes the test green while `credential.helper` stays open |
 
 ## D-SECRET-2 — REFUTED 2026-08-29. Do not build this.

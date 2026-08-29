@@ -125,6 +125,7 @@ jobs:
       - name: Self-test the CI evidence gates
         run: |
           bash .github/scripts/tests/assert-test-evidence.test.sh
+          bash .github/scripts/tests/failing-set.test.sh
           bash .github/scripts/tests/report-gate-wiring.test.sh
           bash .github/scripts/tests/outer-retry-evidence.test.sh
           bash .github/scripts/tests/soak-tracker-truth.test.sh

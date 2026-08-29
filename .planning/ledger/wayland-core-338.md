@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Untrusted plugin install can make Wayland prompt the user for credentials via /dev/tty"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: 9de21aa1
 criteria:
   - id: c1
     text: "A quarantine clone of untrusted plugin content cannot open /dev/tty to prompt the user directly"
@@ -14,10 +14,10 @@ criteria:
     note: "The test re-execs itself inside a real PTY so the probe HAS a controlling terminal, then asserts PLAIN=OPEN as negative control, PRODUCTION_GIT=DENIED through build_git_command, HARDENED=DENIED and GIT_STILL_RUNS=true as liveness. The fix is setsid(2) in pre_exec on unix / DETACHED_PROCESS on windows, quarantine.rs:334-368."
   - id: c2
     text: "Any prompt raised inside a quarantine operation is distinguishable by the user from a prompt raised by Wayland itself"
-    state: met
+    state: not-met
     evidence: "symbol:crates/wcore-cli/src/plugin/quarantine.rs::build_git_command"
     owner: core
-    note: "Satisfied by ELIMINATION, not by labelling. build_git_command is the sole Command::new in the file and it both redirects stdio away from the terminal and removes the ctty, so no quarantine-originated prompt can reach the user at all. The criterion asked for distinguishability; the chosen policy makes the ambiguous prompt unreachable. Wording deviation flagged rather than papered over."
+    note: "Satisfied by ELIMINATION, not by labelling. build_git_command is the sole Command::new in the file and it both redirects stdio away from the terminal and removes the ctty, so no quarantine-originated prompt can reach the user at all. The criterion asked for distinguishability; the chosen policy makes the ambiguous prompt unreachable. Wording deviation flagged rather than papered over. REFUTED 2026-08-29 by the 0.13.12 close-sweep, recorded verbatim: The evidence symbol resolves (quarantine.rs:374) and the elimination argument is genuinely true ON UNIX: build_git_command sets stdin(null)/stdout(piped)/stderr(piped) AND removes the ctty, so no quarantine-originated prompt reaches the user at all. But the criterion as written is 'ANY prompt raised inside a quarantine operation', and it is not platform-scoped. Two problems. (a) NO RUNTIME EVIDENCE ON WINDOWS: the acceptance test carries `#![cfg(unix)]` at line 30, the Windows arm is `#[cfg(windows)]` DETACHED_PROCESS at quarantine.rs:358-366, and there is no Windows test anywhere (`grep -rn harden_against_credential_prompt crates/` returns exactly one call site outside the source: the cfg(unix) test). Per the platform rule that is needs-platform-run, not met. (b) Worse than untested, the Windows primitive is NOT equivalent. setsid makes the child a session leader with no ctty and it cannot reacquire the parent's terminal (TIOCSCTTY refuses a tty that is already another session's ctty). DETACHED_PROCESS only withholds the parent's console at creation; Win32 explicitly allows the child to call AllocConsole() afterwards, and AttachConsole(ATTACH_PARENT_PROCESS) reattaches a console-less process to its parent's console. A third-party credential helper on Windows can therefore still put an unattributable prompt on the user's console. The ledger note flags the Windows half as 'unexercised' but grades c2 met anyway; unexercised AND weaker is not met. The ledger is honest that this criterion is satisfied by elimination rather than by labelling, which I accept as within the issue's own menu of options, but the elimination is only demonstrated on one of the two platforms the product ships on."
   - id: c3
     text: "The fix reasons about /dev/tty access rather than about inherited stdio or GIT_TERMINAL_PROMPT"
     state: met

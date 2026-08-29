@@ -58,7 +58,7 @@ fn await_gone(pid: u32, budget: Duration) -> bool {
 
 #[test]
 fn dropping_the_guard_kills_a_detached_grandchild_on_windows() {
-    let (guard, grandchild) = spawn_detaching_parent();
+    let (guard, grandchild) = spawn_detaching_parent().into_parts();
     let direct = guard.id();
 
     // Not vacuous. Both processes are alive, and the grandchild really is

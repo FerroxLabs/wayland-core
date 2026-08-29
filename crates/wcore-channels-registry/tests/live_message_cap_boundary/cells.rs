@@ -309,14 +309,18 @@ pub const CELLS: &[Cell] = &[
             // where the boundary is 4,040 against a 4,000 cap.
             accepts_up_to: 4_096,
             above: Above::Refused("400: Bad Request: message is too long"),
-            unit: CapUnit::UnsettledAsciiOnly {
-                needs: "an astral-plane run, and this is the one that MATTERS. Telegram's \
-                        sendMessage says \"1-4096 characters after entities parsing\" while \
-                        MessageEntity on the same page indexes in UTF-16 code units. If the \
-                        limit is code units then a 4,096-scalar astral body is 8,192 code units \
-                        and the platform refuses it AT THE CAP WE SHIP — send_to_keyed would \
-                        hand it over whole and nothing re-sends it. Drive \
-                        live_boundary_at_real_telegram with WL_LIVE_CAP_TELEGRAM_ASTRAL=1",
+            unit: CapUnit::MeasuredScalars {
+                on: "2026-08-29",
+                evidence: "driven at the real bot and the real chat with U+1F600 as the fill. \
+                           4,096 astral scalars — 8,192 UTF-16 code units, 16,384 UTF-8 bytes — \
+                           were ACCEPTED as one message; 4,097 were refused with the same \"400: \
+                           Bad Request: message is too long\" the ASCII arm saw. Both rival \
+                           readings die on the PAIR of runs rather than on either alone: a \
+                           4,096 CODE-UNIT limit would have refused the 8,192-unit body that \
+                           was accepted, and a 16,384-BYTE budget would have accepted the 4,097 \
+                           ASCII characters the ASCII arm saw refused. The boundary sits at the \
+                           same SCALAR count in both encodings, so the shipped 4,096 is safe \
+                           for non-BMP text and does not drop to 2,048",
             },
             on: "2026-08-29",
         },

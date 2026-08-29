@@ -2,7 +2,7 @@
 issue: 368
 repo: FerroxLabs/wayland-core
 kind: defect
-title: "AppContainer deny is categorical: a deny identity strips a concurrent identity's grant"
+title: "AppContainer deny is categorical: a deny identity strips a concurrent identity's grant, and a grant cannot reach an already-protected object"
 status: open
 last_verified_commit: b52fb934
 criteria:
@@ -53,3 +53,4 @@ rather than a tightening of the existing code. It wants its own review.
 
 It is the SOLE remaining blocker on core#350 c5 (a green nightly-windows-soak),
 now that core#374 is closed.
+||||||| merged common ancestors

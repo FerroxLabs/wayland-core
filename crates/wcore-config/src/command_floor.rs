@@ -891,6 +891,18 @@ fn deobfuscate(command: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Every WAYLAND_HOME-mutating test below names the `wayland_home_env`
+    // group, NOT a bare `#[serial]`. serial_test's groups are INDEPENDENT
+    // locks: the default group does not exclude `#[serial(wayland_home_env)]`,
+    // which is where all ~21 of this lib binary's other WAYLAND_HOME mutators
+    // live (`config.rs`, `env_file.rs`). These eleven sat in the default group
+    // and therefore ran CONCURRENTLY with every one of them while looking
+    // protected — see the same diagnosis on
+    // `env_file::tests::load_wayland_env_file_applies_without_overriding`.
+    // The victim was `the_yield_recognises_the_workspace_under_a_second_
+    // spelling`, whose anti-vacuity control went red in the shared-process
+    // `--lib` leg when a neighbour reset WAYLAND_HOME between its `set_var`
+    // and its `floor_refusal` calls.
     use super::*;
 
     #[test]
@@ -1040,7 +1052,7 @@ mod tests {
     /// Built from a symlink so the two spellings differ on any Unix, rather
     /// than relying on a platform quirk only one runner has.
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(wayland_home_env)]
     fn both_spellings_of_the_profile_home_are_refused() {
         let root = tempfile::tempdir().unwrap();
         let real = root.path().join("real");
@@ -1108,7 +1120,7 @@ mod tests {
     /// the suite did not show it, because every test spelled the command the
     /// one way a shell would not run.
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(wayland_home_env)]
     fn a_protected_path_with_a_space_is_refused_in_the_spellings_a_shell_runs() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("Application Support").join("wayland-core");
@@ -1200,7 +1212,7 @@ mod tests {
     /// `~/.wayland/permissions.toml` and proved nothing: rule 2a caught it on
     /// the basename.
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(wayland_home_env)]
     fn a_stray_quote_does_not_swallow_a_protected_path() {
         let home = tempfile::tempdir().unwrap();
         let target = home.path().join("notes.txt");
@@ -1259,7 +1271,7 @@ mod tests {
     /// still be refused, and the grant store must still be refused by name
     /// inside the yield.
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(wayland_home_env)]
     fn the_yield_recognises_the_workspace_under_a_second_spelling() {
         let root = tempfile::tempdir().unwrap();
         let real = root.path().join("real");
@@ -1319,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(wayland_home_env)]
     fn every_protected_base_is_already_normalized() {
         let prior = std::env::var_os("WAYLAND_HOME");
         // A home whose spelling normalization would change: a redundant `.`
@@ -1362,7 +1374,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(wayland_home_env)]
     fn a_glob_that_names_no_directory_is_not_refused() {
         // Known-positive control in the same test: the glob arm of rule 2b IS
         // live here. The decoy home matters — every `~/.way*` spelling is also
@@ -1441,7 +1453,7 @@ mod tests {
     /// every component is ordinary. Splitting an attack across two tool calls
     /// is free, so the second call is where this has to be caught.
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(wayland_home_env)]
     #[cfg(unix)]
     fn a_symlink_does_not_manufacture_a_new_name_for_the_store() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1501,7 +1513,7 @@ mod tests {
     /// `WAYLAND_HOME` says otherwise. Delete the candidate rule and this test
     /// fails with the component rule fully intact.
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(wayland_home_env)]
     fn a_cd_into_an_authority_directory_that_is_not_named_wayland() {
         let prior = std::env::var_os("WAYLAND_HOME");
         // SAFETY: test-only env mutation, serialized against this crate's
@@ -1601,7 +1613,7 @@ mod tests {
     // `rule_2b_yields_where_the_workspace_is_inside_the_authority_directory`:
     // `wayland_config_dir()` / `profile_home()` read `WAYLAND_HOME`.
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(wayland_home_env)]
     fn the_resolved_config_dir_is_protected_without_the_bare_name_rule() {
         // `config.toml` is Cargo's own basename, so it is protected by
         // RESOLVED PATH only. This is the arm that grades rule 2b on its own:
@@ -1638,7 +1650,7 @@ mod tests {
     // `cargo nextest` process-isolates every test and cannot see this, so the
     // gate is green while plain `cargo test` fails intermittently.
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(wayland_home_env)]
     fn rule_2b_yields_where_the_workspace_is_inside_the_authority_directory() {
         // The migrate-quarantine live legs put the session workspace INSIDE the
         // per-run profile home, because the sandbox only grants writes inside
@@ -1715,7 +1727,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(wayland_home_env)]
     fn a_root_wayland_home_cannot_brick_every_command() {
         // `WAYLAND_HOME` may only ADD to the protected set. Pointed at a
         // filesystem root it would otherwise refuse every command on the

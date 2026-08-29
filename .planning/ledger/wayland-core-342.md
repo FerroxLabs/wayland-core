@@ -63,3 +63,35 @@ knows which (c5).
 Also tracked as #1155 on the wayland tracker, which describes the same defect
 from the other side. Criteria come from the cluster E verification note of
 2026-08-29.
+
+## Re-graded at HEAD by lane f13-u-flake-chan, 2026-08-29
+
+OWNED ELSEWHERE, NOT DUPLICATED. The Windows half is worked on
+`lane/f13-fin-windows-runs` (`bd1845638` grades ten Windows criteria on
+SEANDESKTOP, `5ddea3e7e` corrects the retries claim on c5). On that lane c5 is
+`met` from a measured Windows rate and c3 is `superseded` with a handoff to
+`FerroxLabs/wayland-core#370`. Neither commit is in `origin/integ/f13`, so the
+rows above still read `not-met` on THIS tree.
+
+Two of that lane's load-bearing claims were re-checked here against the tree
+rather than accepted:
+
+* `retries are ruled out` -- TRUE at this commit. `.config/nextest.toml:626-628`
+  carries `[[profile.ci.overrides]] filter = 'binary(=inv2_round5_adversarial_test)'`
+  with `retries = 0`, so the Windows CI leg already runs these arms with no
+  retry. A Windows CI leg that is green while the same tree is 11-of-24 red on a
+  Windows workstation at the same retry setting is therefore a HOST difference,
+  which is what #370 carries.
+* `every ReplaceFileW failure degrades silently` -- TRUE at this commit.
+  `crates/wcore-config/src/atomic_io.rs` ends its Windows `publish_displacing`
+  with `Ok(Swap::Unsupported)` after binding `err` and using it only to test for
+  `ERROR_FILE_NOT_FOUND`; the sharing violation an open editor produces is not
+  distinguished, and there is no log, counter or returned reason on that path.
+
+The Linux/macOS half (c1, c2, c4) was re-checked at HEAD by symbol:
+`atomic_io::atomic_write_checked`, `unsaved_work::pre_image_matches` (:1504) and
+`changed_under_write` (:1518) are present, and the three arms named by the rows
+(`inv2_round5_adversarial_test.rs:630`, `:680`, `:1051`) all exist.
+
+No work taken here: the remainder is #370's contract, which is filed with its own
+gradeable acceptance, and duplicating it would race that lane.
