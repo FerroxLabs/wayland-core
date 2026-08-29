@@ -3818,6 +3818,15 @@ impl ReplayProtectionLoss {
 /// #174 — an unrestricted, in-memory spend guard for the hand-built
 /// `AgentEngine` literals in this test module. The constructors install a real
 /// one; these literals bypass the constructors, so they need their own.
+///
+/// The baseline is deliberately `Unpriced`, which is the only billing that
+/// imposes NO escalation ceiling (see `EscalationGate::is_escalation` rule 3:
+/// a ceiling nobody could read cannot be exceeded). A `Free` baseline is not
+/// unrestricted — it refuses every uncatalogued model name as an escalation,
+/// which is correct in production and pure noise for a literal whose model is
+/// a placeholder like `"new-model"`. Tests that mean to exercise the gate
+/// build their own guard with a real baseline; this one must stay out of the
+/// way of the hook, compaction and plan-mode plumbing it exists to support.
 #[cfg(test)]
 fn test_spend_guard() -> Arc<crate::spend_guard::SpendGuard> {
     Arc::new(crate::spend_guard::SpendGuard::new(
@@ -3826,7 +3835,7 @@ fn test_spend_guard() -> Arc<crate::spend_guard::SpendGuard> {
         wcore_budget::ModelSpendProfile::new(
             "test",
             "test-model",
-            wcore_budget::ModelBilling::Free,
+            wcore_budget::ModelBilling::Unpriced,
             0.0,
         ),
         Arc::new(wcore_budget::MemorySpendAuditSink::default()),
