@@ -345,11 +345,6 @@ fn walk_dir(
             continue;
         }
         if is_dir {
-            // `.git` is always skipped — it is never useful context and
-            // can be enormous.
-            if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
-                continue;
-            }
             // An entry the walk cannot resolve is not descended into: without
             // a resolved location there is nothing to judge scope by.
             let Ok(canonical) = fs::canonicalize(&path) else {
@@ -360,6 +355,25 @@ fn walk_dir(
             // user asked for, and reaching through one is how `@./` walks into
             // `$HOME`.
             if !canonical.starts_with(root_canonical) {
+                *skipped += 1;
+                continue;
+            }
+            // core#322 c4: a VCS control directory or content store is never
+            // useful context, can be enormous, and reconstructs committed
+            // secrets through its own porcelain. This was a literal `.git`
+            // NAME test, which missed `.hg`/`.svn`/`.bzr` outright and missed
+            // a `.git` reached under any other name. The shape test is the one
+            // `wcore-tools`' deny walk uses — one list, one owner — and it is
+            // asked about the RESOLVED path, so the entry's own name is
+            // irrelevant.
+            if wcore_tools::workspace_policy::is_vcs_store_or_control_dir(&canonical) {
+                continue;
+            }
+            // core#339 c6: `.gitignore` is judged on where the entry resolves,
+            // for the same reason the secret guard is.
+            if rel_to_root(&canonical, root_canonical)
+                .is_some_and(|rel| ignore.is_ignored(&rel, true))
+            {
                 *skipped += 1;
                 continue;
             }
@@ -386,6 +400,17 @@ fn walk_dir(
             if !admitted.canonical.starts_with(root_canonical)
                 || is_secret_path(&path)
                 || is_secret_path(&admitted.canonical)
+            {
+                *skipped += 1;
+                continue;
+            }
+            // core#339 c6: the `rel` above is the LEXICAL entry, so an in-root
+            // link named `notes.txt` at an in-root `deploy.log` was judged as
+            // `notes.txt` and no `*.log` rule ever saw it. Judge the rule on
+            // what the entry RESOLVES to, as `resolve_file` already does
+            // (core#335).
+            if rel_to_root(&admitted.canonical, root_canonical)
+                .is_some_and(|rel| ignore.is_ignored(&rel, false))
             {
                 *skipped += 1;
                 continue;
@@ -493,6 +518,29 @@ impl Admitted {
                 message: e.to_string(),
             })
     }
+}
+
+/// Read one file for a `@`-surface read site under the secret guard: resolve
+/// once, decide on the resolved name, and return the bytes of the very handle
+/// that was decided on.
+///
+/// core#339 c3: three of the four read sites on this surface got the
+/// resolved-path guard and the fourth — `at_ref_send::read_def_snippet`, the
+/// `@symbol` preview — was missed, still calling `fs::read_to_string` on a
+/// repomap-supplied path. The guard lives HERE rather than being copied there,
+/// because two copies of a guard that must agree are how this surface grew four
+/// read sites with three answers in the first place.
+pub(super) fn read_guarded(path: &Path) -> Result<String, AtRefError> {
+    // The lexical floor first, so a denylisted NAME is refused loudly even when
+    // the path does not resolve — see `resolve_file` for why that order matters.
+    if is_secret_path(path) {
+        return Err(AtRefError::SecretBlocked(display(path)));
+    }
+    let admitted = admit(path, path)?;
+    if is_secret_path(&admitted.canonical) {
+        return Err(AtRefError::SecretBlocked(display(path)));
+    }
+    admitted.read_to_string(path)
 }
 
 /// Open `full` once and resolve what it names, refusing the reference when the

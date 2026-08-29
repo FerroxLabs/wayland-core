@@ -32,8 +32,8 @@ use wcore_agent::tool_backends::http_fetch::HttpFetchBackend;
 use wcore_config::shell::shell_command_argv;
 use wcore_tools::web_fetch::{FetchOutcome, WEB_FETCH_DEFAULT_TIMEOUT_MS, WebFetchTool};
 
-use super::at_ref_parse::AtRef;
-use super::at_ref_resolve::{AtPayload, resolve};
+use super::at_ref_parse::{AtRef, AtRefError};
+use super::at_ref_resolve::{AtPayload, read_guarded, resolve};
 
 /// Header that separates the user's text from the auto-resolved context.
 const CONTEXT_HEADER: &str = "─── Referenced context (auto-resolved from @-mentions) ───";
@@ -393,8 +393,16 @@ fn render_symbol_blocking(name: &str, root: &Path) -> String {
 /// The repomap records only the start line, so this is a preview, not the
 /// exact definition span.
 fn read_def_snippet(path: &Path, start_line: usize) -> String {
-    let content = match std::fs::read_to_string(path) {
+    // core#339 c3: guarded exactly like the other three read sites on this
+    // surface — the RESOLVED name decides, and the bytes come from the handle
+    // that was decided on. The repomap supplies this path, so nothing the user
+    // typed constrains it: a symlinked source file anywhere in an indexed tree
+    // reaches a credential store without the user ever naming one.
+    let content = match read_guarded(path) {
         Ok(c) => c,
+        Err(AtRefError::SecretBlocked(_)) => {
+            return "(definition withheld: the file is on the secret denylist)".to_string();
+        }
         Err(e) => return format!("(could not read definition: {e})"),
     };
     let lines: Vec<&str> = content.lines().collect();

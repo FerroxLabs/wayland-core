@@ -2806,6 +2806,30 @@ fn is_vcs_store_dir(path: &Path) -> bool {
     })
 }
 
+/// True when `path` IS a VCS content store, or the control directory that owns
+/// one (`.git`, `.hg`, `.svn`, `.bzr`), at ANY depth.
+///
+/// FerroxLabs/wayland-core#322 c4: the composer's `@dir` walk needs the same
+/// any-depth treatment the deny walk gives, but it PRUNES rather than denies —
+/// so it must stop at the control directory too, which is the only thing
+/// standing between a tree walk and every object underneath. Both halves read
+/// [`VCS_CONTENT_STORES`], so the walk and the deny list cannot drift apart.
+///
+/// Purely lexical, like [`is_vcs_store_dir`]; the caller is responsible for
+/// handing it an already-resolved path, which is what makes a store reached
+/// under another name answer the same as one reached by its own.
+pub fn is_vcs_store_or_control_dir(path: &Path) -> bool {
+    if is_vcs_store_dir(path) {
+        return true;
+    }
+    let Some(leaf) = path.file_name() else {
+        return false;
+    };
+    VCS_CONTENT_STORES
+        .iter()
+        .any(|(dir, _)| leaf == std::ffi::OsStr::new(dir))
+}
+
 /// [`is_vcs_store_dir`] applied to `path` and every ancestor of it: true when
 /// `path` IS a content store or lives inside one.
 fn inside_vcs_store(path: &Path) -> bool {
