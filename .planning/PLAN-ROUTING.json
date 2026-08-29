@@ -257,6 +257,36 @@
       "lane": "flake-584",
       "phase": "1-build"
     },
+    "core#363 c1": {
+      "host": "hetzner",
+      "lane": "telegram-topic",
+      "phase": "1-build"
+    },
+    "core#363 c2": {
+      "host": "hetzner",
+      "lane": "telegram-topic",
+      "phase": "1-build"
+    },
+    "core#363 c3": {
+      "host": "hetzner",
+      "lane": "telegram-topic",
+      "phase": "1-build"
+    },
+    "core#363 c4": {
+      "host": "hetzner",
+      "lane": "telegram-topic",
+      "phase": "1-build"
+    },
+    "core#363 c5": {
+      "host": "hetzner",
+      "lane": "telegram-topic",
+      "phase": "1-build"
+    },
+    "core#363 c6": {
+      "host": "hetzner",
+      "lane": "telegram-topic",
+      "phase": "1-build"
+    },
     "wl#1088 c2": {
       "host": "gh",
       "lane": "decompose",
@@ -545,6 +575,11 @@
       "host": "hetzner",
       "phase": "1-build",
       "title": "Prompt-cache collapse and re-billed context"
+    },
+    "telegram-topic": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Telegram forum-topic target sent as reply_to_message_id, never message_thread_id"
     },
     "win-bash": {
       "host": "hetzner",

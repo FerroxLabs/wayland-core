@@ -5,29 +5,20 @@
 > verification) and `PLAN-ROUTING.json` (assignment). If this disagrees with anyone's
 > recollection, this is right and the recollection is wrong — that is the entire point.
 
-Rendered 2026-08-29 11:38 UTC
+Rendered 2026-08-29 13:28 UTC
 
 ## VERDICT: BLOCKED
 
-**78 criteria block the 0.13.12 release.** Full list in §3.
+**37 criteria block the 0.13.12 release.** Full list in §3.
 
 | state | count | means |
 |---|---:|---|
 | DONE | 0 | met, evidence resolves, independently verified |
-| CLAIMED | 174 | met but NOT yet independently verified — never report as done |
-| OPEN | 87 | outstanding work |
+| CLAIMED | 227 | met but NOT yet independently verified — never report as done |
+| OPEN | 40 | outstanding work |
 | HANDOFF | 0 | another team's half, with a filed ticket carrying it |
 
 ## §3 BLOCKING — the definition of done for 0.13.12
-
-### `acp-mcp` — ACP MCP surface and alias resolution
-
-Runs on: **hetzner**  ·  1-build
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c2` | wl#434 | The gap is closed for the turn on which the alias first resolves, not only for turn N+1 |
-| `c6` | wl#998 | The ACP backend has an MCP surface for the switches to act on |
 
 ### `atref-residuals` — @-ref secret guard: the residuals #339 shipped past
 
@@ -36,20 +27,6 @@ Runs on: **hetzner**  ·  1-build
 | criterion | issue | what must become true |
 |---|---|---|
 | `c4` | core#322 | The TUI @-ref directory walk gives the same treatment to a store reached under another name |
-| `c3` | core#339 | read_def_snippet, the fourth read site on this surface, is guarded too |
-| `c6` | core#339 | The @dir walk judges gitignore on the resolved path, so an in-root symlink to an in-root gitignored file is not attached |
-
-### `bookkeeping` — Orphan branch outcomes, VFS shell reach, misfiled defect
-
-Runs on: **hetzner**  ·  1-build
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c3` | core#244 | The store is also unreachable to a shell subprocess, not only to the in-process VFS |
-| `c1` | wl#1181 | lane/walk-parallel has a recorded outcome: rebased and merged, superseded by a named commit, or closed as obsolete |
-| `c2` | wl#1181 | lane/winpath has a recorded outcome: rebased and merged, superseded by a named commit, or closed as obsolete |
-| `c3` | wl#1181 | lane/tools-bash has a recorded outcome: rebased and merged, superseded by a named commit, or closed as obsolete |
-| `c4` | wl#1181 | lane/win-fix has a recorded outcome: rebased and merged, superseded by a named commit, or closed as obsolete |
 
 ### `browser-revive` — Browser tool non-functional by default
 
@@ -65,11 +42,6 @@ Runs on: **hetzner**  ·  1-build
 
 | criterion | issue | what must become true |
 |---|---|---|
-| `c1` | core#360 | The bridge's cap is measured against a real baileys or whatsapp-web.js backend, or the borrowed Some(4096) is replaced by something honest |
-| `c2` | core#360 | The coverage guard reaches backends selected by a CONFIG KEY, not only by platform string, so a ninth adapter in this shape cannot appear unprobed |
-| `c4` | core#360 | A section 4.2 declaration row exists for the bridge, or the reason it cannot have one is enforced by a test rather than by a comment |
-| `c5` | core#360 | A red arm is quoted verbatim |
-| `c7` | wl#934 | matrix and msteams: the two-point boundary probe is made capable of deciding a byte-budget cap, or the adapters are recorded NOT-MEASURABLE by constru |
 | `c8` | wl#934 | Telegram's unit question is settled: the cap is characters or UTF-16 code units, measured rather than assumed |
 
 ### `decompose` — File each cross-team remainder as its OWN ticket with a contract
@@ -106,17 +78,6 @@ Runs on: **hetzner**  ·  1-build
 | `c5` | core#361 | A red arm is quoted verbatim: the fixture failing before the change, from a real run |
 | `c6` | core#361 | After the fix, cargo test --workspace --lib --no-fail-fast passes N>=10 consecutive times on the build host, and the run count is recorded |
 
-### `floor-disclosure` — Command-floor refusal reaches the user, not model improvisation
-
-Runs on: **hetzner**  ·  1-build
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c1` | core#355 | A floor refusal is distinguishable by the model from a transient tool failure, carrying a marker that says this is a policy decision |
-| `c2` | core#355 | The refusal instructs the model to surface it to the user rather than work around it, and says so in the PAYLOAD rather than a log line |
-| `c3` | core#355 | A test drives a real floor refusal end to end and asserts the USER-VISIBLE output names the refusal |
-| `c4` | core#355 | A red arm is quoted verbatim, reproducing the improvisation |
-
 ### `flux-contract` — Anvil/Elevation loop-ownership contract
 
 Runs on: **hetzner**  ·  3-unrouted-pickup
@@ -133,14 +94,7 @@ Runs on: **hetzner**  ·  1-build
 
 | criterion | issue | what must become true |
 |---|---|---|
-| `c3` | core#336 | Making PtyHarness::resize a no-op turns the test red |
-| `c4` | core#336 | The flake rate is re-measured at retries=0 over N of at least 20 with a known-positive control in the same run |
-| `c2` | core#337 | A mutation that stops lease expiry cancelling the process tree still turns the test red |
-| `c3` | core#337 | Artificially delaying pid publication no longer turns the test red |
-| `c3` | core#350 | A positive control on a fine-tick host still turns red when the manifest build is moved back outside the timeout scope |
 | `c5` | core#352 | A red arm is quoted verbatim for each platform arm |
-| `c5` | core#353 | A red arm is quoted verbatim |
-| `c4` | wl#1155 | A regression of this race cannot be retried into a green board: the adversarial test runs at retries=0 |
 
 ### `macos-ci` — macOS arms via the lane/** CI wildcard
 
@@ -165,36 +119,15 @@ Runs on: **hetzner**  ·  1-build
 
 | criterion | issue | what must become true |
 |---|---|---|
-| `c1` | core#354 | A config key selects the malware-gate mode, permissive or strict, defaulting to today's permissive behaviour |
-| `c2` | core#354 | Under strict, a backend error from check_package_for_malware refuses with McpError::MalwareBlocked instead of returning Allowed |
-| `c3` | core#354 | The SSRF short-circuit, where is_safe_url fails, follows the same mode as the backend-error path |
-| `c4` | core#354 | A test per mode drives StdioTransport::spawn against an unreachable backend: permissive launches and logs at ERROR, strict refuses and never reaches e |
-| `c5` | core#354 | A negative control shows a clean package launches in BOTH modes |
-| `c6` | core#354 | The mode is documented in docs/mcp.md and surfaced in /doctor |
 | `c7` | core#354 | The already-shipping non-session MCP launch path reads the operator's chosen mode, not the uninstalled permissive default |
 
-### `prompt-cache` — Prompt-cache collapse and re-billed context
+### `telegram-topic` — Telegram forum-topic target sent as reply_to_message_id, never message_thread_id
 
 Runs on: **hetzner**  ·  1-build
 
 | criterion | issue | what must become true |
 |---|---|---|
-| `c4` | wl#1150 | Accumulated prior tool RESULTS are not re-sent whole on every turn, and prompt/KV cache is reused where possible |
-| `c3` | wl#559 | Ask 1 — enable prompt caching where it was off |
-| `c5` | wl#559 | Ask 2's second half — the sub-call count is reduced, or shown not to need reducing |
-| `c6` | wl#559 | The skill-router hint and PrePrompt hook contributions no longer land at messages[1] on turn 1 |
-
-### `win-bash` — Windows: resolve a real bash, never System32\\bash.exe
-
-Runs on: **hetzner**  ·  1-build
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c2` | wl#1151 | A real bash is used when one is present, resolved explicitly and never System32\\bash.exe |
-| `c1` | wl#1164 | Git Bash is resolved by known install location rather than by a bare PATH lookup for bash.exe |
-| `c2` | wl#1164 | System32 bash.exe and the WindowsApps shim are explicitly refused as bash candidates |
-| `c3` | wl#1164 | The selection is a pure function over an injected candidate list, unit-testable from any host |
-| `c4` | wl#1164 | With no acceptable bash found, execution falls back to cmd and the #1151 disclosure names cmd to the model |
+| `c6` | core#363 | Discord does not regress: a thread channel id never reaches message_reference |
 
 ### `win-owned-tree` — OwnedTree kills the process tree on Windows, not the leaf
 
@@ -202,8 +135,6 @@ Runs on: **hetzner**  ·  1-build
 
 | criterion | issue | what must become true |
 |---|---|---|
-| `c1` | core#358 | OwnedTree kills the process TREE on Windows, not just the direct child |
-| `c4` | core#358 | A negative control passes in both arms, so a change that kills too much fails here |
 | `c6` | core#358 | clippy --target x86_64-pc-windows-msvc -p wcore-cli --all-targets -D warnings is clean |
 
 ### `win-runs` — Windows measurement arms - serialize, ONE box
@@ -232,7 +163,7 @@ it appears in §3 as blocking, because that is what it is.
 
 _None recorded yet._
 
-## §5 CLAIMED BUT UNVERIFIED — 174
+## §5 CLAIMED BUT UNVERIFIED — 227
 
 Marked `met` with resolving evidence, but no independent verifier has confirmed the lane.
 Historically this is exactly where a partial hides: a criterion written thin reads `met`
@@ -240,43 +171,48 @@ while the reported bug is still live. Do not report these as done.
 
 - **core#113** — c1, c2, c3, c4
 - **core#238** — c1, c2, c3, c5, c6
-- **core#244** — c1, c2
-- **core#253** — c1, c2, c3, c5, c6, c7
+- **core#244** — c1, c2, c3
+- **core#253** — c1, c2, c3, c4, c5, c6, c7
 - **core#314** — c1, c2, c3, c4
 - **core#322** — c1, c2, c3
 - **core#323** — c1, c2, c3, c4
 - **core#325** — c1, c2, c3, c4
 - **core#335** — c1, c2, c3, c4
-- **core#336** — c1, c2
-- **core#337** — c1, c4
+- **core#336** — c1, c2, c3, c4
+- **core#337** — c1, c2, c3, c4
 - **core#338** — c1, c2, c3, c4
-- **core#339** — c1, c2, c4, c5
+- **core#339** — c1, c2, c3, c4, c5, c6
 - **core#340** — c1, c2, c3, c4, c5
 - **core#342** — c1, c2, c4
-- **core#350** — c1, c2, c4
+- **core#350** — c1, c2, c3, c4
 - **core#352** — c1, c2, c3
-- **core#353** — c1, c2, c3, c4
+- **core#353** — c1, c2, c3, c4, c5
+- **core#354** — c1, c2, c3, c4, c5, c6
+- **core#355** — c1, c2, c3, c4
 - **core#356** — c1, c2, c3, c4
-- **core#360** — c3
-- **wl#174** — c1
+- **core#358** — c1, c4
+- **core#360** — c1, c2, c3, c4, c5
+- **core#363** — c1, c2, c3, c4, c5
+- **wl#174** — c1, c2, c3, c4, c5
 - **wl#305** — c1
 - **wl#388** — c1, c2, c3
-- **wl#434** — c1
-- **wl#559** — c1, c2
+- **wl#434** — c1, c2
+- **wl#559** — c1, c2, c3, c5, c6
 - **wl#863** — c1, c2
 - **wl#908** — c1, c2, c3
-- **wl#934** — c1, c2, c3, c4, c6
-- **wl#998** — c1, c2, c3, c4
+- **wl#934** — c1, c2, c3, c4, c6, c7
+- **wl#998** — c1, c2, c3, c4, c6
 - **wl#1088** — c1
 - **wl#1134** — c1, c2, c3, c4, c5
-- **wl#1150** — c1, c2, c3
-- **wl#1151** — c1
-- **wl#1155** — c1, c2, c3
+- **wl#1150** — c1, c2, c3, c4
+- **wl#1151** — c1, c2
+- **wl#1155** — c1, c2, c3, c4
 - **wl#1156** — c1, c2
 - **wl#1161** — c1, c2
 - **wl#1162** — c1, c2
 - **wl#1163** — c1, c2, c3
-- **wl#1165** — c2
+- **wl#1164** — c1, c2, c3, c4
+- **wl#1165** — c1, c2
 - **wl#1166** — c1, c2, c3, c4, c5
 - **wl#1168** — c1, c2, c3
 - **wl#1170** — c1, c2, c3, c4
@@ -290,7 +226,7 @@ while the reported bug is still live. Do not report these as done.
 - **wl#1178** — c1, c2, c3, c4, c5
 - **wl#1179** — c1, c2, c3, c4, c5
 - **wl#1180** — c1, c2, c3, c4
-- **wl#1181** — c5
+- **wl#1181** — c1, c2, c3, c4, c5
 - **wl#1182** — c1, c2, c3
 - **wl#1186** — c1, c2, c3, c4, c6
 
@@ -299,9 +235,6 @@ while the reported bug is still live. Do not report these as done.
 Excluded by explicit instruction: defects ship, feature requests wait. The work still
 gets built and its branch pushed; it just does not gate this release.
 
-- **core#253** — [Feature]: Bind conversation topics and threads to authorized agents
-- **wl#1165** — Opt-in: /mcp add --replace to deliberately reconfigure a connected server
-- **wl#174** — [Feature]: prevent runaway token spend with budget guards and spend audits
 - **wl#305** — [Feature]: improve Win/WSL interop
 
 ## §7 DONE — verified
