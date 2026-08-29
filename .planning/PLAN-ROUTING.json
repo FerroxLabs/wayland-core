@@ -1,0 +1,525 @@
+{
+  "_comment": [
+    "Assignment for every outstanding criterion: which lane owns it and which machine it needs.",
+    "The plan render FAILS if an outstanding criterion is missing here. That is deliberate:",
+    "core#113 and wayland#863 sat outside every lane this cycle purely because nothing forced",
+    "them to be assigned. An unrouted criterion is how work goes missing.",
+    "kind_overrides marks feature-request issues, which do not gate a defect release."
+  ],
+  "criteria": {
+    "core#113 c5": {
+      "host": "hetzner",
+      "lane": "browser-revive",
+      "phase": "3-unrouted-pickup"
+    },
+    "core#238 c4": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "note": "probe AUTHORED by bookkeeping lane; this criterion is the RUN",
+      "phase": "2-platform"
+    },
+    "core#244 c3": {
+      "host": "hetzner",
+      "lane": "bookkeeping",
+      "phase": "1-build"
+    },
+    "core#253 c4": {
+      "host": "hetzner",
+      "lane": "bookkeeping",
+      "note": "issue is a feature, but c4 is defect hygiene - extract the Telegram defect to its own ticket",
+      "phase": "1-build"
+    },
+    "core#314 c5": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "core#322 c4": {
+      "host": "hetzner",
+      "lane": "atref-residuals",
+      "phase": "1-build"
+    },
+    "core#324 c1": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#324 c2": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#324 c3": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#336 c3": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#336 c4": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#337 c2": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#337 c3": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#339 c3": {
+      "host": "hetzner",
+      "lane": "atref-residuals",
+      "phase": "1-build"
+    },
+    "core#339 c6": {
+      "host": "hetzner",
+      "lane": "atref-residuals",
+      "phase": "1-build"
+    },
+    "core#342 c3": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#342 c5": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#350 c3": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#350 c5": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "note": "issue's own close condition: a green nightly-windows-soak against this tree",
+      "phase": "2-platform"
+    },
+    "core#352 c4": {
+      "host": "macOS CI",
+      "lane": "macos-ci",
+      "note": "the only prior macOS run FAILED and its branch was deleted - do not cite it",
+      "phase": "2-platform"
+    },
+    "core#352 c5": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#353 c5": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "core#354 c1": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#354 c2": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#354 c3": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#354 c4": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#354 c5": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#354 c6": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
+    "core#355 c1": {
+      "host": "hetzner",
+      "lane": "floor-disclosure",
+      "phase": "1-build"
+    },
+    "core#355 c2": {
+      "host": "hetzner",
+      "lane": "floor-disclosure",
+      "phase": "1-build"
+    },
+    "core#355 c3": {
+      "host": "hetzner",
+      "lane": "floor-disclosure",
+      "phase": "1-build"
+    },
+    "core#355 c4": {
+      "host": "hetzner",
+      "lane": "floor-disclosure",
+      "phase": "1-build"
+    },
+    "core#358 c1": {
+      "host": "hetzner",
+      "lane": "win-owned-tree",
+      "phase": "1-build"
+    },
+    "core#358 c2": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#358 c3": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "note": "red arm must be quoted verbatim from a real Windows run",
+      "phase": "2-platform"
+    },
+    "core#358 c4": {
+      "host": "hetzner",
+      "lane": "win-owned-tree",
+      "phase": "1-build"
+    },
+    "core#358 c5": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "core#358 c6": {
+      "host": "hetzner",
+      "lane": "win-owned-tree",
+      "phase": "1-build"
+    },
+    "core#360 c1": {
+      "host": "hetzner",
+      "lane": "channel-caps",
+      "phase": "1-build"
+    },
+    "core#360 c2": {
+      "host": "hetzner",
+      "lane": "channel-caps",
+      "phase": "1-build"
+    },
+    "core#360 c4": {
+      "host": "hetzner",
+      "lane": "channel-caps",
+      "phase": "1-build"
+    },
+    "core#360 c5": {
+      "host": "hetzner",
+      "lane": "channel-caps",
+      "phase": "1-build"
+    },
+    "wl#1088 c2": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "wl#1150 c4": {
+      "host": "hetzner",
+      "lane": "prompt-cache",
+      "phase": "1-build"
+    },
+    "wl#1151 c2": {
+      "host": "hetzner",
+      "lane": "win-bash",
+      "phase": "1-build"
+    },
+    "wl#1151 c3": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "wl#1155 c4": {
+      "host": "hetzner",
+      "lane": "instrument-integrity",
+      "phase": "1-build"
+    },
+    "wl#1164 c1": {
+      "host": "hetzner",
+      "lane": "win-bash",
+      "phase": "1-build"
+    },
+    "wl#1164 c2": {
+      "host": "hetzner",
+      "lane": "win-bash",
+      "phase": "1-build"
+    },
+    "wl#1164 c3": {
+      "host": "hetzner",
+      "lane": "win-bash",
+      "phase": "1-build"
+    },
+    "wl#1164 c4": {
+      "host": "hetzner",
+      "lane": "win-bash",
+      "phase": "1-build"
+    },
+    "wl#1164 c5": {
+      "host": "SeanDesktop",
+      "lane": "win-runs",
+      "phase": "2-platform"
+    },
+    "wl#1165 c1": {
+      "host": "hetzner",
+      "lane": "acp-mcp",
+      "phase": "1-build"
+    },
+    "wl#1181 c1": {
+      "host": "hetzner",
+      "lane": "bookkeeping",
+      "phase": "1-build"
+    },
+    "wl#1181 c2": {
+      "host": "hetzner",
+      "lane": "bookkeeping",
+      "phase": "1-build"
+    },
+    "wl#1181 c3": {
+      "host": "hetzner",
+      "lane": "bookkeeping",
+      "phase": "1-build"
+    },
+    "wl#1181 c4": {
+      "host": "hetzner",
+      "lane": "bookkeeping",
+      "phase": "1-build"
+    },
+    "wl#1186 c5": {
+      "host": "Sean",
+      "lane": "maintainer",
+      "phase": "2-maintainer"
+    },
+    "wl#174 c2": {
+      "host": "hetzner",
+      "lane": "budget-guards",
+      "phase": "1-build"
+    },
+    "wl#174 c3": {
+      "host": "hetzner",
+      "lane": "budget-guards",
+      "phase": "1-build"
+    },
+    "wl#174 c4": {
+      "host": "hetzner",
+      "lane": "budget-guards",
+      "phase": "1-build"
+    },
+    "wl#174 c5": {
+      "host": "hetzner",
+      "lane": "budget-guards",
+      "phase": "1-build"
+    },
+    "wl#305 c2": {
+      "host": "hetzner",
+      "lane": "approvals-rest",
+      "phase": "1-build"
+    },
+    "wl#305 c3": {
+      "host": "hetzner",
+      "lane": "approvals-rest",
+      "phase": "1-build"
+    },
+    "wl#305 c4": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "wl#388 c4": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "wl#434 c2": {
+      "host": "hetzner",
+      "lane": "acp-mcp",
+      "phase": "1-build"
+    },
+    "wl#434 c3": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "wl#559 c3": {
+      "host": "hetzner",
+      "lane": "prompt-cache",
+      "phase": "1-build"
+    },
+    "wl#559 c4": {
+      "host": "Desktop app",
+      "lane": "desktop-run",
+      "note": "ticket's own close condition: ONE real 26-turn Desktop team run showing non-zero cache_read",
+      "phase": "2-platform"
+    },
+    "wl#559 c5": {
+      "host": "hetzner",
+      "lane": "prompt-cache",
+      "phase": "1-build"
+    },
+    "wl#559 c6": {
+      "host": "hetzner",
+      "lane": "prompt-cache",
+      "phase": "1-build"
+    },
+    "wl#863 c3": {
+      "host": "hetzner",
+      "lane": "flux-contract",
+      "phase": "3-unrouted-pickup"
+    },
+    "wl#863 c4": {
+      "host": "hetzner",
+      "lane": "flux-contract",
+      "phase": "3-unrouted-pickup"
+    },
+    "wl#863 c5": {
+      "host": "hetzner",
+      "lane": "flux-contract",
+      "phase": "3-unrouted-pickup"
+    },
+    "wl#934 c5": {
+      "host": "Sean",
+      "lane": "maintainer",
+      "phase": "2-maintainer"
+    },
+    "wl#934 c7": {
+      "host": "hetzner",
+      "lane": "channel-caps",
+      "phase": "1-build"
+    },
+    "wl#934 c8": {
+      "host": "hetzner",
+      "lane": "channel-caps",
+      "phase": "1-build"
+    },
+    "wl#998 c5": {
+      "host": "gh",
+      "lane": "decompose",
+      "phase": "2-decompose"
+    },
+    "wl#998 c6": {
+      "host": "hetzner",
+      "lane": "acp-mcp",
+      "phase": "1-build"
+    }
+  },
+  "kind_overrides": {
+    "core#253": "feature",
+    "wl#1165": "feature",
+    "wl#174": "feature",
+    "wl#305": "feature"
+  },
+  "lanes": {
+    "acp-mcp": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "ACP MCP surface and alias resolution"
+    },
+    "approvals-rest": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "REST approvals allowlist + timeout  [FEATURE -> 0.13.13]"
+    },
+    "atref-residuals": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "@-ref secret guard: the residuals #339 shipped past"
+    },
+    "bookkeeping": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Orphan branch outcomes, VFS shell reach, misfiled defect"
+    },
+    "browser-revive": {
+      "host": "hetzner",
+      "phase": "3-unrouted-pickup",
+      "title": "Browser tool non-functional by default"
+    },
+    "budget-guards": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Runaway token spend guards  [FEATURE -> 0.13.13]"
+    },
+    "channel-caps": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Message caps: matrix/msteams probe shape, Telegram UTF-16, WhatsApp"
+    },
+    "decompose": {
+      "host": "gh",
+      "phase": "2-decompose",
+      "title": "File each cross-team remainder as its OWN ticket with a contract"
+    },
+    "desktop-contract": {
+      "host": "hetzner",
+      "phase": "3-unrouted-pickup",
+      "title": "Published desktop contract schema gaps"
+    },
+    "desktop-run": {
+      "host": "Desktop app",
+      "phase": "2-platform",
+      "title": "Live Desktop session measurement"
+    },
+    "floor-disclosure": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Command-floor refusal reaches the user, not model improvisation"
+    },
+    "flux-contract": {
+      "host": "hetzner",
+      "phase": "3-unrouted-pickup",
+      "title": "Anvil/Elevation loop-ownership contract"
+    },
+    "instrument-integrity": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Prove the instruments can fail: mutation + measurement arms"
+    },
+    "macos-ci": {
+      "host": "macOS CI",
+      "phase": "2-platform",
+      "title": "macOS arms via the lane/** CI wildcard"
+    },
+    "maintainer": {
+      "host": "Sean",
+      "phase": "2-maintainer",
+      "title": "Sean-only: credentials and platform accounts"
+    },
+    "mcp-gate-mode": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "MCP malware gate: explicit permissive/strict operator choice"
+    },
+    "prompt-cache": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Prompt-cache collapse and re-billed context"
+    },
+    "win-bash": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Windows: resolve a real bash, never System32\\\\bash.exe"
+    },
+    "win-owned-tree": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "OwnedTree kills the process tree on Windows, not the leaf"
+    },
+    "win-runs": {
+      "host": "SeanDesktop",
+      "phase": "2-platform",
+      "title": "Windows measurement arms - serialize, ONE box"
+    }
+  }
+}

@@ -486,3 +486,29 @@ smoke:
 proving-ground:
     vx cargo nextest run -p wcore-cli --test proving_ground --test build_provenance
     vx cargo nextest run -p wcore-providers --test detection_registry
+
+# ── THE PLAN ───────────────────────────────────────────────────────────
+# `.planning/THE-PLAN.md` is GENERATED, never written by hand. Every handoff this
+# project produced was a narrative of what somebody did rather than a record of
+# what is true, so each session re-derived "what is done" from prose and got a
+# different answer: v0.13.10 shipped claiming 22 issues closed and grading found
+# 9. A hand-maintained plan is that same failure with better formatting.
+#
+# It joins three sources and has no facts of its own: `.planning/ledger/` for
+# criterion STATE, `plan-verification.json` for INDEPENDENT verification, and
+# `PLAN-ROUTING.json` for ASSIGNMENT.
+#
+# `plan-check` FAILS on an unrouted criterion. That is the point: core#113 and
+# wayland#863 sat outside every lane in this cycle purely because nothing forced
+# them to be assigned, and an unrouted criterion is how work goes missing.
+#
+# `met` is NOT `done`. A criterion is DONE only when an independent adversarial
+# verifier confirmed the lane; until then it renders CLAIMED, because a
+# criterion written thin reads `met` while the reported bug is still live.
+# Run: `just plan`
+plan:
+    python3 scripts/render-plan.py
+
+# Run: `just plan-check` — fails on an unrouted criterion or outstanding defect work
+plan-check:
+    python3 scripts/render-plan.py --check
