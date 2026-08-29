@@ -370,6 +370,18 @@ impl PtyHarness {
         );
     }
 
+    /// True while the spawned binary is still running.
+    ///
+    /// core#336: what the SHRINK leg of the resize test uniquely guards is that
+    /// the live binary survives an aggressive narrow resize — a render-primitive
+    /// panic on tight rows kills the child. That is a process fact, and asking
+    /// the process is how to establish it. The leg used to ask the SCREEN
+    /// instead, which conflates "did not die" with "repainted the chrome", and
+    /// only the first of those is promised at an intermediate width.
+    fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
     /// Block until the child exits or `timeout` elapses. Returns the
     /// child's exit status, or `None` on timeout (the caller decides
     /// whether to fail).
@@ -609,18 +621,21 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
     // canonical "narrow terminal" size. A render-primitive panic on tight
     // rows would crash the child here.
     h.resize(NARROW_COLS, HARNESS_ROWS);
-    h.wait_for(
-        |s| s.contains("WAYLAND") && s.contains("Workspace"),
-        PAINT_BUDGET,
-        "the chrome to REPAINT after shrinking to 80 cols",
-    );
 
-    // Sanity: the screen is still coherent — the surface didn't panic and
-    // the tabs are still painted.
-    let screen = h.screen_text();
+    // What this leg promises is SURVIVAL, and it is asked of the process, not
+    // of the screen. MEASURED, 1 full-suite run in 6: waiting here for the
+    // chrome to reappear times out on a healthy binary. Shrinking the grid to
+    // 80 columns truncates away the part of the boot frame the predicate was
+    // reading, so satisfying it needs a FULL repaint at the intermediate width
+    // — and the app is under no obligation to emit one before the next resize.
+    // Requiring it turned a survival check into a bet on the renderer's diff
+    // strategy. The chrome is asserted after the widen instead, where a repaint
+    // IS required and is separately observed.
+    std::thread::sleep(Duration::from_millis(300));
     assert!(
-        screen.contains("Workspace"),
-        "Workspace tab vanished after resize — surface state corrupt.\n{screen}"
+        h.is_running(),
+        "the binary died on an aggressive narrow resize — a render primitive \
+         panicked on tight rows"
     );
 
     // Restoring width must keep the chrome coherent — the symmetric half of
@@ -634,6 +649,14 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
         |s| s.contains("WAYLAND") && s.contains("Workspace"),
         PAINT_BUDGET,
         "the chrome to REPAINT after resizing out to 140 cols",
+    );
+    // The coherence half, read off the frame the app painted AFTER both
+    // resizes: the surface came back from 80 columns intact.
+    let screen = h.screen_text();
+    assert!(
+        screen.contains("Workspace"),
+        "Workspace tab vanished across the resize cycle — surface state \
+         corrupt.\n{screen}"
     );
 
     // THE observation. A glyph past column 120 is beyond the right-hand edge of
