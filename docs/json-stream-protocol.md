@@ -979,6 +979,16 @@ After any `grant_path` or `revoke_path`, Core re-emits
 event is the authoritative answer to "what can this chat actually reach" — prefer
 it over tracking grants host-side.
 
+**Including a refused one.** A `grant_path` that is refused — by the missing
+launch opt-in or by a §2.3.2 rule — emits the receipt too, unchanged, ahead of
+the `info` that names the reason. So does `revoke_path` for a `grant_id` it does
+not hold, and so does `grant_workspace_capability` (§2.7a). The receipt is
+therefore emitted on **every** exit of all three commands, which is what makes
+the sentence above literally true rather than true-on-the-happy-path. A host
+must not read the ABSENCE of a receipt as a refusal: an absent frame is
+indistinguishable from one that has not arrived yet. Read the `info` for the
+reason and the receipt for the state.
+
 ### 2.4 `tool_deny`
 
 Deny a pending tool execution.
@@ -1088,9 +1098,11 @@ Core accepts this command only when all of these are true:
    stores.
 
 Success emits an updated `workspace_policy` receipt followed by an `info`
-event. Refusal emits an `info` event explaining the failed condition. The
-command never adds writable roots, changes approval posture, or disables the OS
-sandbox. Hosts should expose it only behind an explicit local approval UI.
+event. **Refusal emits the same pair**: the (unchanged) receipt, then an `info`
+explaining the failed condition — see the receipt rule under `grant_path`
+(§2.3.3). The command never adds writable roots, changes approval posture, or
+disables the OS sandbox. Hosts should expose it only behind an explicit local
+approval UI.
 
 ### 2.7b `continue_with_budget`
 

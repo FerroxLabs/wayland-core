@@ -4185,7 +4185,7 @@ fn emit_path_grant(
     policy: &wcore_tools::workspace_policy::WorkspacePolicy,
     receipt: &mut wcore_types::workspace_trust::WorkspacePolicyReceipt,
     request: PathGrantRequest,
-    writer: &ProtocolWriter,
+    writer: &dyn ProtocolEmitter,
 ) {
     let PathGrantRequest {
         grant_id,
@@ -4194,6 +4194,16 @@ fn emit_path_grant(
         expires_at_ms,
     } = request;
     if !launch_authorized {
+        // #314 D-1. The receipt is documented as unconditional after a
+        // `grant_path` (json-stream-protocol.md 2.3.3) and `emit_path_revoke`
+        // already emits it in BOTH its arms. Skipping it here made ABSENCE the
+        // only refusal signal a host had, and an absent frame is
+        // indistinguishable from a slow or dropped one -- so the host cannot
+        // tell "refused" from "not yet". Emitting an unchanged receipt costs
+        // one frame and makes the documented invariant true: after any
+        // grant/revoke, `workspace_policy` is the authoritative answer to
+        // "what can this chat reach".
+        emit_workspace_policy_receipt(policy, receipt, writer);
         let _ = writer.emit(&ProtocolEvent::Info {
             msg_id: String::new(),
             message: "path grant refused: the local launcher did not opt in with --allow-host-path-grants".to_string(),
@@ -4220,6 +4230,8 @@ fn emit_path_grant(
             });
         }
         Err(error) => {
+            // #314 D-1 -- see the launcher-refusal arm above.
+            emit_workspace_policy_receipt(policy, receipt, writer);
             let _ = writer.emit(&ProtocolEvent::Info {
                 msg_id: String::new(),
                 message: format!("path grant refused: {error}"),
@@ -4232,7 +4244,7 @@ fn emit_path_revoke(
     policy: &wcore_tools::workspace_policy::WorkspacePolicy,
     receipt: &mut wcore_types::workspace_trust::WorkspacePolicyReceipt,
     grant_id: &str,
-    writer: &ProtocolWriter,
+    writer: &dyn ProtocolEmitter,
 ) {
     // Deliberately NOT gated on the launcher opt-in. Taking authority away is
     // always allowed; requiring permission to revoke would mean a host that
@@ -4253,7 +4265,7 @@ fn emit_path_revoke(
 fn emit_workspace_policy_receipt(
     policy: &wcore_tools::workspace_policy::WorkspacePolicy,
     receipt: &mut wcore_types::workspace_trust::WorkspacePolicyReceipt,
-    writer: &ProtocolWriter,
+    writer: &dyn ProtocolEmitter,
 ) {
     receipt.readable_roots = policy
         .readable_roots()
@@ -4271,9 +4283,11 @@ fn emit_workspace_capability_grant(
     policy: &wcore_tools::workspace_policy::WorkspacePolicy,
     receipt: &mut wcore_types::workspace_trust::WorkspacePolicyReceipt,
     executable: &str,
-    writer: &ProtocolWriter,
+    writer: &dyn ProtocolEmitter,
 ) {
     if !launch_authorized {
+        // #314 D-1 -- same reasoning as `emit_path_grant`.
+        emit_workspace_policy_receipt(policy, receipt, writer);
         let _ = writer.emit(&ProtocolEvent::Info {
             msg_id: String::new(),
             message: "workspace capability grant refused: the local launcher did not opt in with --allow-host-workspace-grants".to_string(),
@@ -4282,15 +4296,9 @@ fn emit_workspace_capability_grant(
     }
     match policy.grant_session_capability(executable) {
         Ok(capability) => {
-            receipt.readable_roots = policy
-                .readable_roots()
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect();
-            receipt.capabilities = policy.developer_capabilities();
-            let _ = writer.emit(&ProtocolEvent::WorkspacePolicy {
-                policy: receipt.clone(),
-            });
+            // Same receipt shape as every other grant/revoke exit -- built by
+            // one helper so the four paths cannot drift apart.
+            emit_workspace_policy_receipt(policy, receipt, writer);
             let _ = writer.emit(&ProtocolEvent::Info {
                 msg_id: String::new(),
                 message: format!(
@@ -4300,6 +4308,8 @@ fn emit_workspace_capability_grant(
             });
         }
         Err(error) => {
+            // #314 D-1 -- see `emit_path_grant`.
+            emit_workspace_policy_receipt(policy, receipt, writer);
             let _ = writer.emit(&ProtocolEvent::Info {
                 msg_id: String::new(),
                 message: format!("workspace capability grant refused: {error}"),
@@ -6089,7 +6099,7 @@ async fn run_json_stream_mode(
                                             &workspace_policy,
                                             &mut workspace_policy_receipt,
                                             &executable,
-                                            &writer,
+                                            writer.as_ref(),
                                         );
                                     }
                                     ProtocolCommand::GrantPath {
@@ -6108,7 +6118,7 @@ async fn run_json_stream_mode(
                                                 access,
                                                 expires_at_ms,
                                             },
-                                            &writer,
+                                            writer.as_ref(),
                                         );
                                     }
                                     ProtocolCommand::RevokePath { grant_id } => {
@@ -6116,7 +6126,7 @@ async fn run_json_stream_mode(
                                             &workspace_policy,
                                             &mut workspace_policy_receipt,
                                             &grant_id,
-                                            &writer,
+                                            writer.as_ref(),
                                         );
                                     }
                                     ProtocolCommand::SessionResync(command) => {
@@ -6632,7 +6642,7 @@ async fn run_json_stream_mode(
                     &workspace_policy,
                     &mut workspace_policy_receipt,
                     &executable,
-                    &writer,
+                    writer.as_ref(),
                 );
             }
             ProtocolCommand::GrantPath {
@@ -6651,7 +6661,7 @@ async fn run_json_stream_mode(
                         access,
                         expires_at_ms,
                     },
-                    &writer,
+                    writer.as_ref(),
                 );
             }
             ProtocolCommand::RevokePath { grant_id } => {
@@ -6659,7 +6669,7 @@ async fn run_json_stream_mode(
                     &workspace_policy,
                     &mut workspace_policy_receipt,
                     &grant_id,
-                    &writer,
+                    writer.as_ref(),
                 );
             }
             ProtocolCommand::Ping => {
@@ -7318,6 +7328,239 @@ mod tests {
                 RecoveryLifecycle::ReconciliationRequired,
                 Some(RecoveryReconcileReason::ToolOutcomeUnknown),
             )
+        );
+    }
+
+    // --- #314 D-1: the workspace_policy receipt on the REFUSAL paths ------
+    //
+    // `docs/json-stream-protocol.md` 2.3.3 promises the receipt after ANY
+    // grant_path / revoke_path, and `emit_path_revoke` already honours that in
+    // both its found and not-found arms. `emit_path_grant` and
+    // `emit_workspace_capability_grant` skipped it on their two refusal exits
+    // each, so a host could only detect a refusal by the ABSENCE of a frame --
+    // which is indistinguishable from a frame that has not arrived yet.
+
+    fn grant_test_receipt() -> wcore_types::workspace_trust::WorkspacePolicyReceipt {
+        use wcore_types::workspace_trust::{
+            AuthoritySource, EffectiveWorkspaceTrust, WorkspaceSandboxProfile,
+        };
+        wcore_types::workspace_trust::WorkspacePolicyReceipt {
+            trust: EffectiveWorkspaceTrust::untrusted(
+                AuthoritySource::LocalSession,
+                "test-fingerprint",
+                "test",
+            ),
+            profile: WorkspaceSandboxProfile::Strict,
+            backend: "test".to_string(),
+            writable_roots: Vec::new(),
+            readable_roots: Vec::new(),
+            capabilities: Vec::new(),
+        }
+    }
+
+    fn receipt_count(writer: &CapturingProtocolEmitter) -> usize {
+        writer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, ProtocolEvent::WorkspacePolicy { .. }))
+            .count()
+    }
+
+    fn info_messages(writer: &CapturingProtocolEmitter) -> Vec<String> {
+        writer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                ProtocolEvent::Info { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Refusal 1 of 2: the launcher never opted in. The host still gets the
+    /// receipt, so "what can this chat reach" stays answerable.
+    #[test]
+    fn path_grant_refused_by_the_launcher_still_emits_the_policy_receipt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        emit_path_grant(
+            false,
+            &policy,
+            &mut receipt,
+            PathGrantRequest {
+                grant_id: "g1".to_string(),
+                root: dir.path().to_string_lossy().into_owned(),
+                access: wcore_protocol::commands::PathGrantAccess::Read,
+                expires_at_ms: None,
+            },
+            &writer,
+        );
+
+        assert_eq!(
+            receipt_count(&writer),
+            1,
+            "a launcher-refused grant_path must still publish workspace_policy"
+        );
+        assert!(
+            info_messages(&writer)
+                .iter()
+                .any(|m| m.contains("--allow-host-path-grants")),
+            "the refusal reason must still be named: {:?}",
+            info_messages(&writer)
+        );
+        // The receipt is the FIRST frame, matching the success path's order, so
+        // a host that reads state-then-message sees them in one order always.
+        assert!(matches!(
+            writer.events.lock().unwrap().first(),
+            Some(ProtocolEvent::WorkspacePolicy { .. })
+        ));
+    }
+
+    /// Refusal 2 of 2: the launcher opted in but the POLICY refused the folder.
+    #[test]
+    fn path_grant_refused_by_policy_still_emits_the_policy_receipt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        // A path that cannot be canonicalized -> PathGrantError::Resolve.
+        let missing = dir.path().join("no-such-folder");
+        emit_path_grant(
+            true,
+            &policy,
+            &mut receipt,
+            PathGrantRequest {
+                grant_id: "g2".to_string(),
+                root: missing.to_string_lossy().into_owned(),
+                access: wcore_protocol::commands::PathGrantAccess::Read,
+                expires_at_ms: None,
+            },
+            &writer,
+        );
+
+        assert!(
+            info_messages(&writer)
+                .iter()
+                .any(|m| m.starts_with("path grant refused:")),
+            "expected a policy refusal, got {:?}",
+            info_messages(&writer)
+        );
+        assert_eq!(
+            receipt_count(&writer),
+            1,
+            "a policy-refused grant_path must still publish workspace_policy"
+        );
+    }
+
+    /// The capability grant has the same two exits and the same defect.
+    #[test]
+    fn workspace_capability_grant_refused_by_the_launcher_still_emits_the_receipt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        emit_workspace_capability_grant(false, &policy, &mut receipt, "cargo", &writer);
+
+        assert_eq!(receipt_count(&writer), 1);
+        assert!(
+            info_messages(&writer)
+                .iter()
+                .any(|m| m.contains("--allow-host-workspace-grants")),
+            "{:?}",
+            info_messages(&writer)
+        );
+    }
+
+    #[test]
+    fn workspace_capability_grant_refused_by_policy_still_emits_the_receipt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        emit_workspace_capability_grant(
+            true,
+            &policy,
+            &mut receipt,
+            "wayland-core-no-such-executable",
+            &writer,
+        );
+
+        assert!(
+            info_messages(&writer)
+                .iter()
+                .any(|m| m.starts_with("workspace capability grant refused:")),
+            "expected a policy refusal, got {:?}",
+            info_messages(&writer)
+        );
+        assert_eq!(receipt_count(&writer), 1);
+    }
+
+    /// NEGATIVE CONTROL -- passes in BOTH arms. A GRANTED path still emits
+    /// exactly one receipt: the fix must not double-publish on success.
+    #[test]
+    fn a_granted_path_still_emits_exactly_one_receipt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let grantable = dir.path().join("shared");
+        std::fs::create_dir_all(&grantable).expect("mkdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        emit_path_grant(
+            true,
+            &policy,
+            &mut receipt,
+            PathGrantRequest {
+                grant_id: "g3".to_string(),
+                root: grantable.to_string_lossy().into_owned(),
+                access: wcore_protocol::commands::PathGrantAccess::Read,
+                expires_at_ms: None,
+            },
+            &writer,
+        );
+
+        let msgs = info_messages(&writer);
+        assert!(
+            msgs.iter().any(|m| m.starts_with("folder granted")),
+            "expected a successful grant, got {msgs:?}"
+        );
+        assert_eq!(receipt_count(&writer), 1);
+    }
+
+    /// NEGATIVE CONTROL -- passes in BOTH arms. `revoke_path` was already
+    /// unconditional in both arms and must stay that way.
+    #[test]
+    fn revoke_emits_the_receipt_whether_or_not_the_grant_existed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        emit_path_revoke(&policy, &mut receipt, "never-granted", &writer);
+
+        assert_eq!(receipt_count(&writer), 1);
+        assert!(
+            info_messages(&writer)
+                .iter()
+                .any(|m| m.contains("no folder grant with id never-granted")),
+            "{:?}",
+            info_messages(&writer)
         );
     }
 
