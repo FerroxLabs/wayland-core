@@ -5,17 +5,17 @@
 > verification) and `PLAN-ROUTING.json` (assignment). If this disagrees with anyone's
 > recollection, this is right and the recollection is wrong — that is the entire point.
 
-Rendered 2026-08-29 17:12 UTC
+Rendered 2026-08-29 17:17 UTC
 
 ## VERDICT: BLOCKED
 
-**25 criteria block the 0.13.12 release.** Full list in §3.
+**16 criteria block the 0.13.12 release.** Full list in §3.
 
 | state | count | means |
 |---|---:|---|
 | DONE | 32 | met, evidence resolves, independently verified |
-| CLAIMED | 214 | met but NOT yet independently verified — never report as done |
-| OPEN | 33 | outstanding work |
+| CLAIMED | 223 | met but NOT yet independently verified — never report as done |
+| OPEN | 24 | outstanding work |
 | HANDOFF | 10 | another team's half, with a filed ticket carrying it |
 
 ### ⚠ 14 UNROUTED — nobody is doing these
@@ -95,22 +95,6 @@ Runs on: **hetzner**  ·  1-build
 |---|---|---|
 | `c4` | core#358 | A negative control passes in both arms, so a change that kills too much fails here |
 
-### `win-runs` — Windows measurement arms - serialize, ONE box
-
-Runs on: **SeanDesktop**  ·  2-platform
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c4` | core#238 | A Windows probe records whether bare NUL is a device on the build under test and whether fs::metadata reports is_file() true for it |
-| `c1` | core#324 | An instrumented run establishes whether the failure is a product race in AppContainer ACE application or a race in the test fixture |
-| `c2` | core#324 | concurrent_allow_and_deny_identities_do_not_interfere passes at retries=0 over N of at least 20 on the AppContainer-capable host |
-| `c3` | core#324 | Whichever arm the measurement indicts, the deny half of the test is still non-vacuous afterwards |
-| `c3` | core#342 | The same guarantee holds on Windows, where the product ships |
-| `c5` | core#342 | The two arms asserting a Unix-only guarantee state the Windows truth, from a measured Windows rate |
-| `c5` | core#350 | The issue's own close condition is met: a green nightly-windows-soak run against this tree |
-| `c5` | core#358 | The CI run that executed the Windows arm is cited by URL |
-| `c5` | wl#1164 | A live confirmation run on SeanDesktop is recorded before the change lands |
-
 ## §4 DECOMPOSED — another team's half, tracked
 
 These are NOT partials. Core's half is closed; the remainder is filed against a named
@@ -130,19 +114,20 @@ it appears in §3 as blocking, because that is what it is.
 | `c8` | wl#934 | maintainer | FerroxLabs/wayland#1228 |
 | `c5` | wl#998 | desktop | FerroxLabs/wayland#1225 |
 
-## §5 CLAIMED BUT UNVERIFIED — 214
+## §5 CLAIMED BUT UNVERIFIED — 223
 
 Marked `met` with resolving evidence, but no independent verifier has confirmed the lane.
 Historically this is exactly where a partial hides: a criterion written thin reads `met`
 while the reported bug is still live. Do not report these as done.
 
 - **core#113** — c1, c2, c3, c4
-- **core#238** — c1, c2, c3, c5, c6
+- **core#238** — c1, c2, c3, c4, c5, c6
 - **core#244** — c1, c2
 - **core#253** — c1, c2, c3, c5, c6, c7
 - **core#314** — c1, c2, c3, c4
 - **core#322** — c1, c2, c3, c4
 - **core#323** — c1, c2, c3, c4
+- **core#324** — c1, c2, c3
 - **core#325** — c1, c2, c3, c4
 - **core#335** — c1, c2, c3, c4
 - **core#336** — c1, c2
@@ -150,13 +135,13 @@ while the reported bug is still live. Do not report these as done.
 - **core#338** — c1, c2, c3, c4
 - **core#339** — c1, c2, c3, c4, c5, c6
 - **core#340** — c1, c2, c3, c4, c5
-- **core#342** — c1, c2, c4
-- **core#350** — c1, c2, c4
+- **core#342** — c1, c2, c3, c4, c5
+- **core#350** — c1, c2, c4, c5
 - **core#352** — c1, c2, c3, c5
 - **core#353** — c1, c2, c3, c4
 - **core#354** — c1, c2, c3, c4, c5, c6, c7
 - **core#356** — c1, c2, c3, c4
-- **core#358** — c1, c2, c3, c6
+- **core#358** — c1, c2, c3, c5, c6
 - **core#360** — c1, c3, c6
 - **core#361** — c1, c2, c3, c4, c5, c6
 - **core#363** — c1, c2, c3, c4, c5, c6
@@ -180,6 +165,7 @@ while the reported bug is still live. Do not report these as done.
 - **wl#1161** — c1, c2
 - **wl#1162** — c1, c2
 - **wl#1163** — c1, c2, c3
+- **wl#1164** — c5
 - **wl#1165** — c2
 - **wl#1166** — c1, c2, c3, c4, c5
 - **wl#1168** — c1, c2, c3

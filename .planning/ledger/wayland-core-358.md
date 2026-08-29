@@ -32,9 +32,10 @@ criteria:
     note: "DOWNGRADED FROM met. Split the criterion in two and the halves land in different places. (b) `a change that kills too much fails here` is now TRUE ON LINUX and deterministic. (a) `passes in BOTH arms` is NOT closable on Linux and never was: every line #358 changed in owned_tree.rs is cfg(windows) (the pre-fix file has 0 job_object occurrences), so the two arms compile to the SAME Linux binary and `both arms pass` on Linux is a tautology about one binary. It is needs-platform-run, and settles with c2/c3/c5/c6 on the same Windows host. WHAT WAS WRONG WITH THE OLD `met`. The control read process_is_alive(bystander_direct) in the statement after drop(victim). kill(pid, SIGKILL) returns while the signal is only PENDING, so an over-killed process still samples as live for a scheduling quantum, and the control missed the over-kill it exists to catch. MEASURED on hetzner-dsm (96 cores), --retries 0, guard mutated to start descendants() one level too high -- walk from the child's PPid so the guard reaps its sibling tree -- with an eprintln!(\"MUTATION-LIVE ...\") inside `pub fn descendants` proving the mutation was in the executed binary: sampled liveness sequential n=20 -> detected 19, MISSED 1 (5.0%); sampled liveness 8 concurrent n=80 -> detected 71, MISSED 9 (11.3%). At [profile.ci] retries = 2 an 11.3% per-attempt miss is a 30% chance the run CONCLUSION reports a detected over-kill as PASSED. THE FIX (commit f92d5007). The bystander is now PROBED, not sampled: the fixture parent answers `ack` to a line on stdin, and a task cannot return to user space with a pending SIGKILL, so an `ack` received after drop(victim) has returned proves no kill was ever aimed at the bystander whatever the scheduler did (support::process_tree_fixture::RunningProof). The grandchild is a `sleep` and cannot answer, so it keeps a liveness check, taken AFTER the round trip and required to hold across a 500ms settle window rather than at one instant; it is the second net -- every over-kill shape this control names reaps the bystander PARENT, which the round trip grades exactly. Anti-vacuity for the instrument itself: the same probe must return Ran BEFORE anything is dropped, so a mute fixture cannot masquerade as an over-broad kill. RE-MEASURED, --retries 0, same mutation, MUTATION-LIVE printed in 100 of 100 mutated runs: green arm n=20 sequential -> 20 PASS / 0 FAIL, n=80 at 8 concurrent -> 80 PASS / 0 FAIL; mutated arm n=20 sequential -> 0 PASS / 20 FAIL, n=80 at 8 concurrent -> 0 PASS / 80 FAIL. All 100 mutated failures fire the SAME assertion (harness_guard_kills_only_its_own_tree.rs:173, `left: Gone right: Ran`) -- never NoAnswer, so none of them is a wedged fixture read as a kill. RETRIES CANNOT LAUNDER IT ANY MORE. .config/nextest.toml gains `retries = 0` for the three binaries that render a RUNTIME process-containment verdict -- harness_guard_kills_only_its_own_tree (over-kill), harness_owns_spawned_trees and harness_owns_spawned_trees_windows (under-kill). Allowlisted by MECHANISM: every_spawn_site_owns_its_tree is deliberately excluded, it is a static source ratchet with no process in it. The override is MEASURED, not assumed -- a probe test in this binary that fails on attempt 1 and passes on any retry, --profile ci: WITH the block -> `error: test run failed`, exit 100; with the block deleted and nothing else changed -> `FLAKY 2/3`, exit 0. GATES on hetzner-dsm at f92d5007: cargo fmt --all --check clean; cargo check --workspace --all-targets --all-features --locked clean; cargo clippy -p wcore-cli --all-targets -- -D warnings clean; cargo clippy --target x86_64-pc-windows-gnu -p wcore-cli --all-targets -- -D warnings clean (gnu is NOT msvc -- see c6); cargo nextest run --profile ci --no-fail-fast -p wcore-cli -> 3693 passed, 20 skipped, three consecutive runs. WHAT IS STILL UNRUN. The Windows fixture gained the same probe/ack round trip (a ReadLine loop before the terminal Start-Sleep, falling through on stdin EOF exactly as before) and harness_owns_spawned_trees_windows.rs now calls spawn_detaching_parent().into_parts(). Neither has executed on a Windows host. It compiles for Windows (clippy -gnu, exit 0) and must be validated by the SAME run that settles c2/c3/c5."
   - id: c5
     text: "The CI run that executed the Windows arm is cited by URL"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/tests/harness_owns_spawned_trees_windows.rs::dropping_the_guard_kills_a_detached_grandchild_on_windows"
     owner: core
-    note: "No Windows run exists yet, so there is no URL. The route: push this branch with [ci-windows] in the commit subject (the lane/** wildcard is already wired), or run the c2 command directly on SeanDesktop. Cite the run here once c2 and c3 have output."
+    note: "https://github.com/FerroxLabs/wayland-core/actions/runs/33258852685 - job 99117201158, `CI (windows-latest, hosted)`, step `Run tests (nextest CI profile)`, on lane/f13-fin-windows-runs at bd184563. THE ARM EXECUTED AND PASSED, quoted from that job's log: `PASS [   0.406s] ( 7619/15962) wcore-cli::harness_owns_spawned_trees_windows dropping_the_guard_kills_a_detached_grandchild_on_windows`, with the four support::mock_llm self-tests in the same binary also PASS. `7619/15962` is the point: it ran as part of the ordinary workspace nextest, not a hand-picked invocation. THE JOB'S OVERALL CONCLUSION IS `failure` AND THAT IS NOT THIS ARM - stated plainly rather than left for a reader to trip over. Nine tests failed in that leg, all pre-existing at the branch point (this branch changed ZERO Rust code relative to ab6b602f - `git diff ab6b602f..HEAD -- \"*.rs\"` has no non-doc-comment line): two were desktop-contract-corpus staleness, since fixed on integ/f13 by e1f151a52 and green after merging it; one is FerroxLabs/wayland-core#374; three are FerroxLabs/wayland-core#387, the wl#1164 bash-resolution regression this same session found and A/B-proved. A criterion asking for the URL of the run that executed the arm is answered by the arm's own line, and the arm passed. Corroborated independently on hardware: c2 records the same test passing on a Windows 11 build 26200 workstation, and c3 the red arm on the same box."
   - id: c6
     text: "clippy --target x86_64-pc-windows-msvc -p wcore-cli --all-targets -D warnings is clean"
     state: met
@@ -125,3 +126,30 @@ git show integ/f13-base:crates/wcore-cli/tests/support/owned_tree.rs \
     > crates/wcore-cli/tests/support/owned_tree.rs
 touch crates/wcore-cli/tests/support/owned_tree.rs   # else cargo measures the OLD binary
 ```
+
+
+## A SECOND, INDEPENDENT Windows run corroborates c2, c3 and c6
+
+`lane/f13-fin-windows-runs` executed the same three criteria again on
+SEANDESKTOP (Windows 11 build 26200, toolchain `1.95.0-x86_64-pc-windows-msvc`,
+cargo-nextest 0.9.138) from a DIFFERENT tree — `ab6b602f` in `D:\wf13w`, where
+the notes above are `d35ac0a0` in `D:\resid358`. Two operators, two checkouts,
+same verdicts:
+
+* **c2 green** — `PASS [   0.361s] (5/5) ... dropping_the_guard_kills_a_detached_grandchild_on_windows`,
+  `5 tests run: 5 passed, 0 skipped`, kernel-side anti-vacuity reached.
+* **c3 red** — `the grandchild 33688 outlived the guard`, `FAIL [  10.169s] (1/1)`,
+  `1 test run: 0 passed, 1 failed, 4 skipped`. The DIRECT-CHILD assertion did not
+  fire, only the grandchild one, and the 10.169s red against a 0.149s green is
+  the `await_gone` budget expiring, so the arms differ by wall clock too.
+* **c6 clean** — `cargo clippy --target x86_64-pc-windows-msvc -p wcore-cli --all-targets -- -D warnings`,
+  EXIT=0, no warning line.
+
+The c3 notes are kept as the primary record and the second run is corroboration,
+not a substitute, for one stated reason: that run built its red arm by restoring
+the pre-fix guard AND DELETING the test's kernel-side anti-vacuity block (it
+calls `guard.job()`, which the pre-fix guard does not have — the E0599 the c3
+note records). A red arm without its own anti-vacuity cannot distinguish a
+leaked tree from a fixture whose grandchild was never in the job. The primary
+arm kept that block by withdrawing only the job's reach at kill time. Both reds
+land on the same assertion, which is why the second is worth recording.
