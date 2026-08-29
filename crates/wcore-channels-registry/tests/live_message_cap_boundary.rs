@@ -257,7 +257,12 @@ fn shipped_caps() -> Vec<(String, usize)> {
             &fixture_options(&selector),
             Arc::new(MemStore),
         )
-        .unwrap_or_else(|e| panic!("could not construct {:?} from its fixture: {e}", selector.key));
+        .unwrap_or_else(|e| {
+            panic!(
+                "could not construct {:?} from its fixture: {e}",
+                selector.key
+            )
+        });
         if let Some(cap) = ch.max_message_len() {
             out.push((selector.key, cap));
         }
@@ -796,7 +801,10 @@ async fn send_and_clean(
         .await;
     let outcome = match &sent {
         Ok(r) => {
-            println!("{label} scalars={scalars} utf8_bytes={utf8} utf16_units={utf16} accepted id={}", r.id);
+            println!(
+                "{label} scalars={scalars} utf8_bytes={utf8} utf16_units={utf16} accepted id={}",
+                r.id
+            );
             Ok(r.id.clone())
         }
         Err(e) => {
@@ -826,7 +834,9 @@ async fn drive_boundary(key: &str, to: &str, astral: bool) {
         panic!("{key} declares no cap; there is no boundary to probe and chunking is off")
     });
     let at = c.probe_at(declared);
-    println!("LIVE_CAP_PROBE selector={key} shipped_cap={declared} probing_at={at} astral={astral}");
+    println!(
+        "LIVE_CAP_PROBE selector={key} shipped_cap={declared} probing_at={at} astral={astral}"
+    );
 
     // ASCII: one char is one scalar is one byte is one UTF-16 code unit, so a
     // refusal is readable but the UNIT is not. Astral: one scalar is four UTF-8
@@ -984,10 +994,7 @@ async fn drive_saturating(key: &str, to: &str, b: ByteBudget) {
                 on,
                 evidence,
             },
-            Saturating::Driven {
-                accepted: now,
-                ..
-            },
+            Saturating::Driven { accepted: now, .. },
         ) => {
             assert_eq!(
                 now, recorded,

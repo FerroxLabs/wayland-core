@@ -315,7 +315,12 @@ fn measured_capabilities() -> BTreeMap<String, Measured> {
             &fixture_options(&selector),
             creds(),
         )
-        .unwrap_or_else(|e| panic!("could not construct {:?} from its fixture: {e}", selector.key));
+        .unwrap_or_else(|e| {
+            panic!(
+                "could not construct {:?} from its fixture: {e}",
+                selector.key
+            )
+        });
         out.insert(
             selector.key,
             Measured {

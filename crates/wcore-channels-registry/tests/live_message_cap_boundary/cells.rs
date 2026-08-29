@@ -463,9 +463,11 @@ pub fn derivation_faults(cap: usize, b: &ByteBudget) -> Vec<String> {
     let mut out = Vec::new();
     let worst = b.worst_case_bytes_per_scalar;
     if worst == 0 {
-        out.push("worst_case_bytes_per_scalar is zero, which would make every cap admissible and \
+        out.push(
+            "worst_case_bytes_per_scalar is zero, which would make every cap admissible and \
                   this checker vacuous"
-            .to_string());
+                .to_string(),
+        );
         return out;
     }
     let spend = cap.saturating_mul(worst);
