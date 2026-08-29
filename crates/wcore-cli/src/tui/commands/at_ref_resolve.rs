@@ -1178,4 +1178,267 @@ mod tests {
             "control: an ordinary file and an ordinary link to it must both stay attached"
         );
     }
+
+    // ── D3 / core#335 c3 / D7 / core#339 c2: the escaping spellings, the
+    //    blocking open, and the two scope lines nothing graded ─────────────
+
+    /// An ordinary, non-denylisted body planted OUTSIDE the workspace, so a
+    /// test can assert it never reached a payload without printing it.
+    const OUTSIDE_BODY: &str = "PRIVATE-OUTSIDE-PAYLOAD 42\n";
+
+    /// `mkfifo(3)`. There is no std equivalent and `libc` is already in this
+    /// crate's graph (it is a dev-dependency on every platform).
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let c = CString::new(path.as_os_str().as_bytes()).expect("a path with no NUL");
+        // SAFETY: `c` is a NUL-terminated path in a fresh temp directory.
+        let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
+        assert_eq!(
+            rc,
+            0,
+            "mkfifo {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+
+    /// D3 — every `@dir` spelling the workspace root cannot lexically NAME
+    /// resolved to a silently empty payload. `walk_dir` stripped each entry
+    /// against `root`, got `None`, and `continue`d without even counting a
+    /// skip, so the composer showed a successful chip carrying nothing. This
+    /// `..` spelling names the workspace itself, so the workspace
+    /// `.gitignore` still has jurisdiction — the core#335 property, for the
+    /// walk rather than for `resolve_file`.
+    #[test]
+    fn a_dotdot_at_dir_attaches_the_tree_and_still_obeys_the_gitignore() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("repo");
+        fs::create_dir_all(root.join("build")).expect("mkdir");
+        fs::write(root.join(".gitignore"), "*.log\n").expect("write gitignore");
+        fs::write(root.join("ok.txt"), "safe\n").expect("write ok");
+        fs::write(root.join("build/out.log"), "build log\n").expect("write log");
+
+        // Control: the plain spelling attaches the tree and honours the rule,
+        // so neither assertion below can pass by the fixture being empty.
+        let plain = resolve(&AtRef::parse("@./").expect("parse"), &root).expect("resolve");
+        assert!(
+            plain.files.iter().any(|f| f.content == "safe\n"),
+            "fixture check: {plain:?}"
+        );
+        assert!(
+            !plain.files.iter().any(|f| f.content == "build log\n"),
+            "fixture check: {plain:?}"
+        );
+
+        let payload =
+            resolve(&AtRef::parse("@../repo/").expect("parse"), &root).expect("resolve dir");
+        assert!(
+            payload.files.iter().any(|f| f.content == "safe\n"),
+            "an escaping `@dir` spelling resolved to a silently empty payload: {payload:?}"
+        );
+        assert!(
+            !payload.files.iter().any(|f| f.content == "build log\n"),
+            "a spelling that resolves back into the workspace must still obey its \
+             .gitignore: {payload:?}"
+        );
+    }
+
+    /// D3, the absolute half. `@/abs/dir/` is the `@dir` twin of
+    /// `an_absolute_path_outside_the_workspace_still_attaches` — the
+    /// documented out-of-workspace attach — and it returned nothing at all,
+    /// with no error and no warning. The walk is confined to the directory the
+    /// reference NAMES, so core#339's scope guarantee still holds; it just
+    /// holds about that directory rather than about a workspace the reference
+    /// never mentioned.
+    #[test]
+    fn an_absolute_at_dir_outside_the_workspace_attaches_its_files() {
+        let outside = TempDir::new().expect("tempdir");
+        fs::write(outside.path().join("a.txt"), "alpha\n").expect("write a");
+        fs::write(outside.path().join("b.txt"), "bravo\n").expect("write b");
+
+        let tmp = TempDir::new().expect("tempdir");
+        // The workspace's own rules have no jurisdiction out there — the same
+        // answer `resolve_file` already gives for an absolute `@file`.
+        fs::write(tmp.path().join(".gitignore"), "*.txt\n").expect("write gitignore");
+
+        let payload = resolve(&AtRef::Dir(outside.path().to_path_buf()), tmp.path())
+            .expect("an explicit absolute attach is a capability, not a bypass");
+        let bodies: Vec<&str> = payload.files.iter().map(|f| f.content.as_str()).collect();
+        assert!(
+            bodies.contains(&"alpha\n") && bodies.contains(&"bravo\n"),
+            "an absolute `@dir` outside the workspace resolved to an empty payload: {payload:?}"
+        );
+    }
+
+    /// D7 — the walk OPENS every non-directory entry (`admit` →
+    /// `same_file::Handle::from_path`), and opening a named pipe blocks until
+    /// a writer appears. `@./` in any tree containing a FIFO — build systems,
+    /// editors and language servers all leave them — wedged the turn forever
+    /// inside a blocking syscall on the spawned turn task, where cancellation
+    /// cannot reach it. `resolve_file` has always had the `is_file()` filter
+    /// the walk lacked.
+    #[cfg(unix)]
+    #[test]
+    fn the_at_dir_walk_does_not_block_on_a_fifo() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        fs::write(root.join("ok.txt"), "safe\n").expect("write ok");
+        make_fifo(&root.join("pipe"));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let got = resolve(&AtRef::parse("@./").expect("parse"), &root);
+            let _ = tx.send(got.map(|p| p.files.iter().any(|f| f.content == "safe\n")));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(saw_ok)) => assert!(
+                saw_ok,
+                "the ordinary file next to the FIFO must still be attached"
+            ),
+            Ok(Err(e)) => panic!("the walk failed instead of skipping the FIFO: {e:?}"),
+            Err(_) => panic!(
+                "the @dir walk BLOCKED for 10s on a FIFO in the workspace — \
+                 the turn is wedged, not slow"
+            ),
+        }
+    }
+
+    /// The sibling read site of the same class: `read_guarded` (the `@symbol`
+    /// preview) also went straight to `admit` with no file-type filter, so a
+    /// repomap-supplied path that happens to be a FIFO blocks the same way.
+    /// A fix applied only to the walk leaves this one open.
+    #[cfg(unix)]
+    #[test]
+    fn read_guarded_does_not_block_on_a_fifo() {
+        let tmp = TempDir::new().expect("tempdir");
+        let fifo = tmp.path().join("pipe");
+        make_fifo(&fifo);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_guarded(&fifo).is_err());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(refused) => assert!(refused, "a FIFO is not a readable @-reference target"),
+            Err(_) => panic!(
+                "read_guarded BLOCKED for 10s opening a FIFO — the same wedge as the @dir walk"
+            ),
+        }
+    }
+
+    /// core#335 c3, the ABSOLUTE half. `resolve_file` strips the resolved path
+    /// against `canonical_root(root)`, not against `root`. When the workspace
+    /// is reached through a link — a checkout under a symlinked path, a bind
+    /// mount, macOS's `/var` -> `/private/var` — the two are different strings
+    /// for the same directory, and stripping against the raw `root` returns
+    /// `None` for every absolute spelling: the gitignore guard is never
+    /// consulted and #335 reopens. The shipped suite had only a wrong-refusal
+    /// control here, which passes on both arms.
+    #[cfg(unix)]
+    #[test]
+    fn an_absolute_spelling_is_judged_against_the_canonical_workspace_root() {
+        let tmp = TempDir::new().expect("tempdir");
+        let parent = fs::canonicalize(tmp.path()).expect("canonicalize");
+        let real = parent.join("real");
+        fs::create_dir_all(real.join("build")).expect("mkdir");
+        fs::write(real.join(".gitignore"), "*.log\n").expect("write gitignore");
+        fs::write(real.join("ok.txt"), "safe\n").expect("write ok");
+        fs::write(real.join("build/out.log"), "build log\n").expect("write log");
+        // The workspace is handed to the resolver under a link, so `root` and
+        // its canonical form differ.
+        let link = parent.join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        // Control: an ordinary file under the same root still attaches, so a
+        // refusal below cannot be "this fixture root is unusable".
+        let ok = resolve(&AtRef::File(real.join("ok.txt")), &link).expect("control attach");
+        assert_eq!(ok.files[0].content, "safe\n");
+
+        for spelled in [real.join("build/out.log"), link.join("build/out.log")] {
+            let got = resolve(&AtRef::File(spelled.clone()), &link);
+            assert!(
+                matches!(got, Err(AtRefError::GitIgnored(_))),
+                "an absolute spelling of a git-ignored workspace file must stay refused \
+                 when the root is reached through a link ({}): got {got:?}",
+                spelled.display()
+            );
+        }
+    }
+
+    /// core#339 c2 — the file arm of the scope check the ledger substituted for
+    /// `symlink_metadata`, and which nothing graded. This is the mirror image
+    /// of `at_dir_never_walks_a_symlink_into_a_credential_store`: the target is
+    /// outside the workspace and its NAME is on no denylist, so
+    /// `is_secret_path` cannot save it. Deleting
+    /// `!admitted.canonical.starts_with(root_canonical)` left the whole suite
+    /// green because every other symlink fixture points at a denylisted name.
+    #[cfg(unix)]
+    #[test]
+    fn at_dir_never_inlines_an_ordinary_file_from_outside_the_workspace() {
+        let outside = TempDir::new().expect("tempdir");
+        let private = outside.path().join("taxes.txt");
+        fs::write(&private, OUTSIDE_BODY).expect("write");
+
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("ok.txt"), "safe\n").expect("write ok");
+        std::os::unix::fs::symlink(&private, root.join("notes.txt")).expect("symlink");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
+        assert!(
+            !payload
+                .files
+                .iter()
+                .any(|f| f.content.contains("PRIVATE-OUTSIDE-PAYLOAD")),
+            "the @dir walk inlined a file from outside the workspace through an in-root link"
+        );
+        assert!(
+            payload.files.iter().any(|f| f.content == "safe\n"),
+            "control: the ordinary file in the same directory must still be attached"
+        );
+    }
+
+    /// core#339 c2 — the DIRECTORY arm of the same substitute, one line up the
+    /// file. Its effect is not a leak (the file arm above catches the bytes);
+    /// it is that the walk never LEAVES the workspace at all. The tell is the
+    /// skip count: the link is one skipped entry, not the N files behind it.
+    #[cfg(unix)]
+    #[test]
+    fn at_dir_does_not_descend_through_a_link_out_of_the_workspace() {
+        let outside = TempDir::new().expect("tempdir");
+        for i in 0..6 {
+            fs::write(outside.path().join(format!("f{i}.txt")), OUTSIDE_BODY).expect("write");
+        }
+
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("ok.txt"), "safe\n").expect("write ok");
+        std::os::unix::fs::symlink(outside.path(), root.join("docs")).expect("symlink");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
+        let skipped = payload.warnings.iter().find_map(|w| match w {
+            AtWarning::SkippedFiles { count } => Some(*count),
+            _ => None,
+        });
+        assert_eq!(
+            skipped,
+            Some(1),
+            "the walk descended through a link out of the workspace — it weighed the six \
+             files behind the link instead of skipping the link itself: {payload:?}"
+        );
+        assert!(
+            !payload
+                .files
+                .iter()
+                .any(|f| f.content.contains("PRIVATE-OUTSIDE-PAYLOAD")),
+            "an out-of-workspace file was attached: {payload:?}"
+        );
+        assert!(
+            payload.files.iter().any(|f| f.content == "safe\n"),
+            "control: the ordinary file must still be attached"
+        );
+    }
 }
