@@ -49,6 +49,33 @@ on:
       # because GitHub exposes it only for workflows present on the DEFAULT
       # branch and ci.yml on `main` has no such trigger.
       - 'lane/**'
+      # 2026-08-29. THE INTEGRATION BRANCH HAD NEVER RUN CI. NOT ONCE.
+      #
+      # The matrix note above states that "`main`, the integration branch and
+      # every pull_request keep the full matrix". That was true of the MATRIX
+      # but not of the TRIGGER: `integ/**` matches neither `push` (main,
+      # lane/**) nor `pull_request` (base main), and the integration branch has
+      # no open PR while it is being assembled. Measured 2026-08-29:
+      # `gh run list --branch integ/f13 --workflow CI` returned EMPTY for the
+      # entire life of the branch, while six lane branches each burned a full
+      # ~67-minute matrix that day.
+      #
+      # So the branch that gets merged, released and tagged was the ONE branch
+      # with no cross-platform coverage, and every lane paid for coverage of a
+      # tree that would never ship in that shape. Exactly inverted.
+      #
+      # A draft PR would also have armed `pull_request` and needs no workflow
+      # change, but opening a PR on this repo is the maintainer's action, not
+      # an agent's. Naming the ref here is the route that does not take a
+      # decision that is not ours.
+      #
+      # This does NOT double-run: the `plan/f20-unified-audit-repair` entry
+      # above was removed because an open PR made every push fire BOTH `push`
+      # and `pull_request` under different concurrency groups. That risk
+      # returns the moment a PR opens from `integ/**` — when the release PR
+      # opens, REMOVE this entry, because the PR then provides exactly the
+      # coverage it was added for.
+      - 'integ/**'
 
 permissions:
   contents: read
