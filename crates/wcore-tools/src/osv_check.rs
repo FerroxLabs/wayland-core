@@ -388,7 +388,7 @@ fn shell_wrapped_invocations(command: &str, args: &[String]) -> Vec<(String, Vec
         return Vec::new();
     };
     script
-        .split(|c| matches!(c, ';' | '&' | '|' | '\n' | '\r' | '(' | ')'))
+        .split([';', '&', '|', '\n', '\r', '(', ')'])
         .filter_map(|segment| {
             let mut tokens = segment
                 .split_whitespace()
