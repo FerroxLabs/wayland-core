@@ -22,7 +22,9 @@ use wcore_channels::{Channel, ChannelConfig};
 use wcore_channels_registry::channel_factory_for;
 use wcore_config::credentials::{CredentialsStore, PlaintextCredentialsStore};
 
-use super::cells::{Above, Boundary, ByteBudget, Cell, Saturating, cell, derivation_faults};
+use super::cells::{
+    Above, Boundary, ByteBudget, CapUnit, Cell, Saturating, cell, derivation_faults,
+};
 
 /// One astral-plane character: U+1F600, four bytes in UTF-8 and a surrogate
 /// pair — two code units — in UTF-16. The one body that tells a character limit
@@ -170,6 +172,57 @@ async fn drive_boundary(key: &str, to: &str, astral: bool) {
             first.is_ok(),
             second.is_ok()
         );
+        // A DISCOVERY run prints and stops: there is no recorded verdict to
+        // disagree with, and deriving one from the cell would only make the run
+        // agree with itself. Once a verdict IS recorded, the same arm must be
+        // able to go RED — a settled claim whose live arm only ever prints is a
+        // claim nothing can refute, which is the shape this file exists to
+        // remove.
+        match c.boundary {
+            Boundary::Measured {
+                unit: CapUnit::MeasuredScalars { on, .. },
+                ..
+            } => {
+                assert!(
+                    first.is_ok(),
+                    "{key}: the {on} run recorded a SCALAR limit, so {at} astral scalars must \
+                     still be accepted — they were refused. Either the platform now counts \
+                     UTF-16 code units, in which case the shipped cap of {declared} is unsafe \
+                     for non-BMP text and must drop to {}, or the credential is dead and this is \
+                     an INSTRUMENT_FAULT. The platform's own diagnostic above tells them apart.",
+                    declared / 2
+                );
+                assert!(
+                    second.is_err(),
+                    "{key}: the {on} run put the boundary at {at} scalars in BOTH encodings, but \
+                     {} astral scalars were accepted. The boundary has MOVED; re-measure it \
+                     before raising the shipped cap.",
+                    at + 1
+                );
+                println!(
+                    "LIVE_CAP_VERDICT selector={key} unit=scalars boundary_at={at} \
+                     (re-confirmed; recorded {on})"
+                );
+            }
+            Boundary::Measured {
+                unit: CapUnit::MeasuredUtf16CodeUnits { on, .. },
+                ..
+            } => {
+                assert!(
+                    first.is_err(),
+                    "{key}: the {on} run recorded a UTF-16 CODE-UNIT limit, so {at} astral \
+                     scalars ({} code units) must be refused — they were accepted. The recorded \
+                     verdict is wrong or the platform has changed; re-measure before trusting \
+                     either number.",
+                    at * 2
+                );
+                println!(
+                    "LIVE_CAP_VERDICT selector={key} unit=utf16_code_units (re-confirmed; \
+                     recorded {on})"
+                );
+            }
+            _ => {}
+        }
         return;
     }
 
