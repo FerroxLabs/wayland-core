@@ -5183,14 +5183,27 @@ impl AgentEngine {
     ///
     /// Without it the engine still runs; it simply never notices a server
     /// that changes its tool list after connect.
+    ///
+    /// wayland#1174: installed UNCONDITIONALLY, including when the refresh is
+    /// empty. It used to return early on `is_empty()`, which is exactly the
+    /// state `defer_config_mcp` produces — the mode the desktop host runs in —
+    /// so that session got no refresher at all and `tools/list_changed` was
+    /// invisible for every server for the life of the session. An empty
+    /// refresh is not "nothing to do"; it is "nothing to do YET", because the
+    /// deferred connect and `/mcp add` both admit managers into it later.
     pub fn set_mcp_catalog_refresh(
         &mut self,
         refresh: Arc<wcore_mcp::tool_proxy::McpCatalogRefresh>,
     ) {
-        if refresh.is_empty() {
-            return;
-        }
         self.mcp_catalog_refresh = Some(refresh);
+    }
+
+    /// The live catalogue refresh, for hosts that attach an MCP server after
+    /// boot. wayland#1175: every runtime-add path builds a NEW `McpManager`,
+    /// and a manager that never reaches this handle is a server whose
+    /// `tools/list_changed` is silently ignored for the rest of the session.
+    pub fn mcp_catalog_refresh(&self) -> Option<Arc<wcore_mcp::tool_proxy::McpCatalogRefresh>> {
+        self.mcp_catalog_refresh.clone()
     }
 
     /// Pick up any MCP server that announced `notifications/tools/list_changed`

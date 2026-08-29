@@ -3832,6 +3832,12 @@ fn integrate_deferred_mcp(
 ) -> bool {
     let builtin_names = engine.tool_names();
     let defer_cold = engine.defer_cold_config();
+    // wayland#1174 — this is the ONLY manager a `defer_config_mcp` session
+    // ever has for its config-declared servers. Boot left the refresh empty,
+    // so without this the whole session runs with `tools/list_changed`
+    // ignored for every one of them. Taken before `registry_mut` borrows the
+    // engine.
+    let catalog_refresh = engine.mcp_catalog_refresh();
     let Some(reg) = engine.registry_mut() else {
         return false;
     };
@@ -3876,6 +3882,9 @@ fn integrate_deferred_mcp(
             prompt_updated = report.prompt_updated,
             "deferred config MCP: late-bound skills into the live session"
         );
+    }
+    if let Some(refresh) = catalog_refresh {
+        refresh.register_runtime_server(&mgr, resolved_servers);
     }
     dynamic_managers.push(mgr);
     true
@@ -5675,6 +5684,13 @@ async fn run_json_stream_mode(
                             }
                         }
                         let tool_names = registered_mcp_tool_names(&engine.tools(), &name);
+                        // wayland#1175 — join the live catalogue refresh, with
+                        // this server's config, so a `tools/list_changed` from
+                        // a runtime-added server is honoured and the operator's
+                        // per-tool allowlist (#998) is carried across it.
+                        if let Some(refresh) = engine.mcp_catalog_refresh() {
+                            refresh.register_runtime_server(&mgr_arc, &single_configs);
+                        }
                         dynamic_managers.push(mgr_arc);
                         reservation.complete_ready();
                         let _ = writer.emit(&ProtocolEvent::McpReady {
@@ -8814,6 +8830,77 @@ mod tests {
     /// W6 B.7: we never call into the transport because the helper
     /// under test (`mcp_ready_events_for`) only reads pre-discovered
     /// tools — no JSON-RPC traffic is involved.
+    /// A server whose advertised tool list grows once, announced by raising
+    /// the `tools/list_changed` flag the real stdio reader raises off the
+    /// wire. wayland#1174 / #1175.
+    struct GrowingTestTransport {
+        tools: std::sync::Mutex<Vec<String>>,
+        tools_changed: std::sync::atomic::AtomicBool,
+    }
+
+    impl GrowingTestTransport {
+        fn new(initial: &[&str]) -> Self {
+            Self {
+                tools: std::sync::Mutex::new(initial.iter().map(|n| n.to_string()).collect()),
+                tools_changed: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn register_and_announce(&self, name: &str) {
+            self.tools.lock().unwrap().push(name.to_string());
+            self.tools_changed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl McpTransport for GrowingTestTransport {
+        async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            let tools: Vec<Value> = self
+                .tools
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|name| json!({"name": name, "description": name, "inputSchema": {}}))
+                .collect();
+            Ok(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: req.id,
+                result: Some(json!({ "tools": tools })),
+                error: None,
+            })
+        }
+        async fn notify(&self, _req: &JsonRpcRequest) -> Result<(), McpError> {
+            Ok(())
+        }
+        async fn close(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+        fn take_tools_changed(&self) -> bool {
+            self.tools_changed
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// Lets the test keep observing the fixture the manager owns.
+    struct SharedTransport(Arc<GrowingTestTransport>);
+
+    #[async_trait]
+    impl McpTransport for SharedTransport {
+        async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            self.0.request(req).await
+        }
+        async fn notify(&self, req: &JsonRpcRequest) -> Result<(), McpError> {
+            self.0.notify(req).await
+        }
+        async fn close(&self) -> Result<(), McpError> {
+            self.0.close().await
+        }
+        fn take_tools_changed(&self) -> bool {
+            self.0.take_tools_changed()
+        }
+    }
+
     struct NoopTransport;
 
     #[async_trait]
@@ -10478,5 +10565,200 @@ mod tests {
 
         let cli = Cli::parse_from(["wayland-core", "hello"]);
         assert!(!cli.search, "--search defaults to false when omitted");
+    }
+
+    /// wayland#1174 — the `defer_config_mcp` path, which is the mode the
+    /// Wayland Desktop host runs in.
+    ///
+    /// Boot leaves `McpCatalogRefresh` EMPTY under that flag (no config MCP is
+    /// dialled), and `set_mcp_catalog_refresh` used to return early on
+    /// `is_empty()`. The session therefore had no refresher at all and a
+    /// `notifications/tools/list_changed` from ANY server was ignored for its
+    /// whole life. This drives the real `integrate_deferred_mcp` and asserts a
+    /// tool the server registers afterwards becomes callable.
+    #[tokio::test]
+    async fn deferred_config_mcp_still_honours_a_late_tools_list_changed() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+
+        // Exactly what bootstrap installs when `defer_config_mcp` is set:
+        // no managers, no server configs.
+        let refresh = Arc::new(wcore_mcp::tool_proxy::McpCatalogRefresh::new(
+            Vec::new(),
+            engine.tool_names(),
+            HashMap::new(),
+        ));
+        engine.set_mcp_catalog_refresh(refresh);
+        assert!(
+            engine.mcp_catalog_refresh().is_some(),
+            "an empty refresh must still be installed: the deferred connect fills it later"
+        );
+
+        let fixture = Arc::new(GrowingTestTransport::new(&["warehouse_reserve"]));
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "warehouse",
+            false,
+            Box::new(SharedTransport(fixture.clone())) as Box<dyn McpTransport>,
+            vec![tool("warehouse_reserve")],
+        )]));
+        let resolved = HashMap::from([(
+            "warehouse".to_string(),
+            to_mcp_server_config(
+                "stdio",
+                Some("unused-test-command".to_string()),
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+            )
+            .expect("valid test server config"),
+        )]);
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        let mut reservations = lifecycle_reservations(&resolved);
+        assert!(integrate_deferred_mcp(
+            &mut engine,
+            manager.clone(),
+            &resolved,
+            &mut reservations,
+            &writer,
+            &mut dynamic_managers,
+            &mut inert_late_binder(),
+            &mut Vec::new(),
+        ));
+        assert!(engine.tools().get("warehouse_reserve").is_some());
+        assert!(engine.tools().get("warehouse_audit_export").is_none());
+
+        // The server registers a tool mid-session and says so.
+        fixture.register_and_announce("warehouse_audit_export");
+
+        let refresh = engine
+            .mcp_catalog_refresh()
+            .expect("the deferred connect must leave a live refresh behind");
+        let registry = engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable");
+        let refreshed = refresh.apply(registry, &defer_cold).await;
+        assert_eq!(
+            refreshed,
+            vec!["warehouse".to_string()],
+            "a deferred-config server's tools/list_changed must be honoured"
+        );
+        assert!(
+            engine.tools().get("warehouse_audit_export").is_some(),
+            "the late tool must be callable"
+        );
+    }
+
+    /// Negative control for the test above, and the #998 guard on the new
+    /// door: an operator allowlist of `Some([])` means "disable every tool on
+    /// this server" — and must still mean that after a `list_changed` on the
+    /// deferred-config path. A manager admitted WITHOUT its config would hit
+    /// the `config == None -> allow-all` read in `tool_proxy` and restore the
+    /// server's full tool set.
+    #[tokio::test]
+    async fn a_deferred_servers_empty_allowlist_survives_the_refresh() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine.set_mcp_catalog_refresh(Arc::new(wcore_mcp::tool_proxy::McpCatalogRefresh::new(
+            Vec::new(),
+            engine.tool_names(),
+            HashMap::new(),
+        )));
+
+        let fixture = Arc::new(GrowingTestTransport::new(&["locked_tool"]));
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "locked",
+            false,
+            Box::new(SharedTransport(fixture.clone())) as Box<dyn McpTransport>,
+            vec![tool("locked_tool")],
+        )]));
+        let mut server_config = to_mcp_server_config(
+            "stdio",
+            Some("unused-test-command".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("valid test server config");
+        server_config.allowed_tools = Some(Vec::new());
+        let resolved = HashMap::from([("locked".to_string(), server_config)]);
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        let mut reservations = lifecycle_reservations(&resolved);
+        assert!(integrate_deferred_mcp(
+            &mut engine,
+            manager.clone(),
+            &resolved,
+            &mut reservations,
+            &writer,
+            &mut dynamic_managers,
+            &mut inert_late_binder(),
+            &mut Vec::new(),
+        ));
+        assert!(
+            engine.tools().get("locked_tool").is_none(),
+            "boot: an empty allowlist disables every tool"
+        );
+
+        fixture.register_and_announce("locked_late_tool");
+        let refresh = engine.mcp_catalog_refresh().expect("refresh installed");
+        let registry = engine.registry_mut().expect("registry must be mutable");
+        assert_eq!(
+            refresh.apply(registry, &defer_cold).await,
+            vec!["locked".to_string()]
+        );
+        assert!(
+            engine.tools().get("locked_late_tool").is_none(),
+            "the refresh must not restore a tool the operator disabled"
+        );
+        assert!(engine.tools().get("locked_tool").is_none());
+    }
+
+    /// The wiring, counted. A helper nothing calls is not a fix, and the
+    /// failure this guards is specifically a runtime-add site left bare —
+    /// which is what #1175 reports for all three of them.
+    #[test]
+    fn every_runtime_mcp_add_joins_the_catalog_refresh() {
+        let main_src = include_str!("main.rs");
+        let tui_src = include_str!("tui/engine_bridge.rs");
+        let engine_src = include_str!("../../wcore-agent/src/engine.rs");
+
+        // Known-positive control: the strings this test searches for exist.
+        assert!(main_src.contains("fn integrate_deferred_mcp"));
+        assert!(tui_src.contains("register_single_server_tools"));
+
+        // Built from fragments so this file does not match its own needle.
+        let needle = concat!("refresh.register_runtime_", "server(");
+        assert_eq!(
+            main_src.matches(needle).count(),
+            2,
+            "main.rs has exactly two runtime-add paths (AddMcpServer and the \
+             #551 deferred config connect); both must join the refresh"
+        );
+        assert_eq!(
+            tui_src.matches("register_runtime_server(").count(),
+            1,
+            "the TUI `/mcp add` path must join the refresh"
+        );
+        assert!(
+            tui_src.contains("forget_runtime_server("),
+            "a rolled-back /mcp add must leave nothing in the refresh"
+        );
+        assert!(
+            !engine_src.contains("if refresh.is_empty() {"),
+            "set_mcp_catalog_refresh must not skip an empty refresh again (#1174): \
+             empty is the state defer_config_mcp produces, and the deferred connect \
+             fills it afterwards"
+        );
     }
 }
