@@ -1,6 +1,0 @@
-error: unexpected argument 'discord_still' found
-
-Usage: cargo test [OPTIONS] [TESTNAME] [-- [ARGS]...]
-
-For more information, try '--help'.
-DONE
