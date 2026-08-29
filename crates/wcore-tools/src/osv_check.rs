@@ -10,6 +10,10 @@
 //! steady stream of low-severity informational CVEs that would
 //! otherwise create noise and pressure to override the gate.
 //!
+//! `wcore_mcp::malware_gate` documents the exact coverage boundary — which
+//! runner forms are checked and which launch shapes run unchecked. Keep the two
+//! in step: this module's `runner_forms` table IS that boundary.
+//!
 //! Wayland's engine MUST NOT initiate raw HTTP from inside
 //! `wcore-tools` (HTTP belongs to the host / `wcore-providers` /
 //! plugin layer), so the actual HTTP query is dispatched through a
@@ -178,18 +182,227 @@ impl OsvBackend for CapturingOsvBackend {
 /// aren't recognized package runners — the caller treats that as
 /// "skip the check".
 pub fn infer_ecosystem(command: &str) -> Option<Ecosystem> {
-    // Take the basename and lowercase — `/usr/local/bin/npx` and
-    // `NPX.CMD` both map to `npx`.
+    runner_forms(&runner_basename(command)).map(|forms| forms[0].ecosystem)
+}
+
+/// Extensions Windows resolves through `PATHEXT`. Node ships `npx` as
+/// `npx.cmd` / `npx.ps1` and pnpm/yarn/uv ship `.cmd` shims too, so a table
+/// keyed on the bare name is a table the same `config.toml` walks straight
+/// past on Windows.
+const EXECUTABLE_EXTENSIONS: [&str; 4] = [".exe", ".cmd", ".bat", ".ps1"];
+
+/// Basename of `command`, lowercased, with any Windows executable extension
+/// removed: `/usr/local/bin/npx`, `NPX.CMD` and `npx.exe` all yield `npx`.
+pub fn runner_basename(command: &str) -> String {
     let base = std::path::Path::new(command)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(command)
         .to_ascii_lowercase();
-    match base.as_str() {
-        "npx" | "npx.cmd" => Some(Ecosystem::Npm),
-        "uvx" | "uvx.cmd" | "pipx" => Some(Ecosystem::PyPI),
+    for ext in EXECUTABLE_EXTENSIONS {
+        if let Some(stripped) = base.strip_suffix(ext) {
+            return stripped.to_string();
+        }
+    }
+    base
+}
+
+/// One shape in which a command fetches a package from a public registry and
+/// executes it.
+struct RunnerForm {
+    ecosystem: Ecosystem,
+    /// Sub-command words that must appear, consecutively, before the package
+    /// arguments. Empty means the runner takes package arguments directly.
+    subcommand: &'static [&'static str],
+    /// When set, ONLY a token carrying this prefix names a fetched package.
+    /// `deno run ./server.ts` runs a local file and fetches nothing; `deno run
+    /// npm:evil` fetches from the npm registry.
+    require_prefix: Option<&'static str>,
+}
+
+const fn direct(ecosystem: Ecosystem) -> RunnerForm {
+    RunnerForm {
+        ecosystem,
+        subcommand: &[],
+        require_prefix: None,
+    }
+}
+
+const fn sub(ecosystem: Ecosystem, subcommand: &'static [&'static str]) -> RunnerForm {
+    RunnerForm {
+        ecosystem,
+        subcommand,
+        require_prefix: None,
+    }
+}
+
+/// Every command form the gate knows fetches-and-executes from a registry.
+///
+/// The list is the gate's coverage, verbatim. Anything absent from it is
+/// permitted as `NotApplicable`, which is why adding a runner here is the fix
+/// for "the gate did not see it" and why the module doc enumerates the list
+/// rather than claiming completeness.
+fn runner_forms(basename: &str) -> Option<&'static [RunnerForm]> {
+    // npm's own runner and the drop-in replacements that speak the same argv.
+    const NPX: &[RunnerForm] = &[direct(Ecosystem::Npm)];
+    const UVX: &[RunnerForm] = &[direct(Ecosystem::PyPI)];
+    const PIPX: &[RunnerForm] = &[
+        sub(Ecosystem::PyPI, &["run"]),
+        sub(Ecosystem::PyPI, &["install"]),
+    ];
+    const NPM: &[RunnerForm] = &[sub(Ecosystem::Npm, &["exec"]), sub(Ecosystem::Npm, &["x"])];
+    const PNPM: &[RunnerForm] = &[sub(Ecosystem::Npm, &["dlx"])];
+    const YARN: &[RunnerForm] = &[sub(Ecosystem::Npm, &["dlx"])];
+    const BUN: &[RunnerForm] = &[sub(Ecosystem::Npm, &["x"])];
+    const UV: &[RunnerForm] = &[
+        sub(Ecosystem::PyPI, &["tool", "run"]),
+        sub(Ecosystem::PyPI, &["tool", "install"]),
+    ];
+    // `deno run npm:pkg` resolves through the npm registry; `deno run ./x.ts`
+    // does not, which is what `require_prefix` distinguishes.
+    const DENO: &[RunnerForm] = &[
+        RunnerForm {
+            ecosystem: Ecosystem::Npm,
+            subcommand: &["run"],
+            require_prefix: Some("npm:"),
+        },
+        RunnerForm {
+            ecosystem: Ecosystem::Npm,
+            subcommand: &["install"],
+            require_prefix: Some("npm:"),
+        },
+    ];
+    match basename {
+        "npx" | "bunx" => Some(NPX),
+        "uvx" => Some(UVX),
+        "pipx" => Some(PIPX),
+        "npm" => Some(NPM),
+        "pnpm" => Some(PNPM),
+        "yarn" => Some(YARN),
+        "bun" => Some(BUN),
+        "uv" => Some(UV),
+        "deno" => Some(DENO),
         _ => None,
     }
+}
+
+/// Position of the first occurrence of `words` as consecutive tokens, or
+/// `None`.
+///
+/// The scan runs over the WHOLE argv rather than requiring the sub-command to
+/// be the first token, because a runner-level flag that takes a value
+/// (`pnpm -C /srv dlx evil`) would otherwise push `dlx` out of first position
+/// and the launch would be waved through unchecked. Over-detecting costs a
+/// wasted OSV query; under-detecting costs the check.
+fn find_subcommand(args: &[String], words: &[&str]) -> Option<usize> {
+    if words.is_empty() {
+        return Some(0);
+    }
+    args.windows(words.len())
+        .position(|window| window.iter().zip(words).all(|(a, w)| a == w))
+        .map(|start| start + words.len())
+}
+
+/// An `npm:` specifier may carry an entry-point sub-path
+/// (`npm:@scope/pkg@1.2.3/bin`). Cut it so the version parser sees the
+/// package token alone.
+fn strip_specifier_subpath(token: &str) -> &str {
+    if token.starts_with('@') {
+        let mut slashes = token.match_indices('/');
+        slashes.next();
+        match slashes.next() {
+            Some((idx, _)) => &token[..idx],
+            None => token,
+        }
+    } else {
+        match token.find('/') {
+            Some(idx) => &token[..idx],
+            None => token,
+        }
+    }
+}
+
+/// Resolve `(command, args)` to the registry fetch it performs, if any.
+///
+/// Returns the ecosystem plus the argv slice that names the package, with any
+/// runner sub-command already consumed. `None` means this command fetches
+/// nothing from a public registry.
+fn classify_runner(command: &str, args: &[String]) -> Option<(Ecosystem, Vec<String>)> {
+    let forms = runner_forms(&runner_basename(command))?;
+    for form in forms {
+        let Some(start) = find_subcommand(args, form.subcommand) else {
+            continue;
+        };
+        let rest = &args[start..];
+        match form.require_prefix {
+            None => return Some((form.ecosystem, rest.to_vec())),
+            Some(prefix) => {
+                let specifier = rest.iter().find_map(|a| a.strip_prefix(prefix));
+                // No registry specifier under this sub-command: a local script.
+                let specifier = specifier?;
+                return Some((
+                    form.ecosystem,
+                    vec![strip_specifier_subpath(specifier).to_string()],
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Shell interpreters whose `-c` argument is a script, not a program name.
+const SHELL_INTERPRETERS: [&str; 8] = [
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "cmd",
+    "pwsh",
+    "powershell",
+];
+
+/// Command words that prefix another command without being one.
+const COMMAND_PREFIXES: [&str; 4] = ["exec", "env", "command", "nohup"];
+
+/// Decompose `sh -c "<script>"` into the invocations the script runs.
+///
+/// `command = "sh", args = ["-c", "npx evil-pkg"]` is a package-runner launch
+/// wearing a shell costume: the classifier sees `sh`, finds no runner, and the
+/// launch proceeds unchecked. This splits the script on the separators that
+/// start a new command and hands each segment back as `(program, args)`.
+///
+/// It is deliberately a TOKENISER, not a shell parser: it does not expand
+/// variables, resolve quotes beyond stripping them, or follow `$( )`. A script
+/// that hides its runner behind any of those is still not covered, and the
+/// module doc says so.
+fn shell_wrapped_invocations(command: &str, args: &[String]) -> Vec<(String, Vec<String>)> {
+    if !SHELL_INTERPRETERS.contains(&runner_basename(command).as_str()) {
+        return Vec::new();
+    }
+    let script_flags = ["-c", "/c", "/C", "-command", "-Command"];
+    let Some(idx) = args.iter().position(|a| script_flags.contains(&a.as_str())) else {
+        return Vec::new();
+    };
+    let Some(script) = args.get(idx + 1) else {
+        return Vec::new();
+    };
+    script
+        .split(|c| matches!(c, ';' | '&' | '|' | '\n' | '\r' | '(' | ')'))
+        .filter_map(|segment| {
+            let mut tokens = segment
+                .split_whitespace()
+                .map(|t| t.trim_matches(['"', '\'']).to_string())
+                .filter(|t| !t.is_empty());
+            let mut head = tokens.next()?;
+            // `exec npx …`, `env FOO=1 npx …` — step over the prefix words and
+            // any leading VAR=value assignments.
+            while COMMAND_PREFIXES.contains(&head.as_str()) || head.contains('=') {
+                head = tokens.next()?;
+            }
+            Some((head, tokens.collect::<Vec<String>>()))
+        })
+        .collect()
 }
 
 /// What a launcher argv names, or that it names nothing readable.
@@ -458,17 +671,60 @@ pub async fn check_package_for_malware(
     endpoint: &str,
     backend: &dyn OsvBackend,
 ) -> MalwareCheckOutcome {
-    let Some(ecosystem) = infer_ecosystem(command) else {
+    // The literal invocation, plus every command a shell wrapper would run on
+    // its behalf (two levels — `sh -c "sh -c '…'"` is the last shape worth the
+    // walk; deeper nesting is uncovered and the module doc says so).
+    let mut invocations: Vec<(String, Vec<String>)> = vec![(command.to_string(), args.to_vec())];
+    let mut frontier = shell_wrapped_invocations(command, args);
+    for _ in 0..2 {
+        if frontier.is_empty() {
+            break;
+        }
+        let next = frontier
+            .iter()
+            .flat_map(|(c, a)| shell_wrapped_invocations(c, a))
+            .collect::<Vec<_>>();
+        invocations.append(&mut frontier);
+        frontier = next;
+    }
+
+    let mut checked_a_runner = false;
+    for (program, argv) in &invocations {
+        match check_one_invocation(program, argv, endpoint, backend).await {
+            MalwareCheckOutcome::NotApplicable => continue,
+            MalwareCheckOutcome::Allowed => checked_a_runner = true,
+            // A single blocked or unreadable runner condemns the whole launch:
+            // the shell would run it.
+            refusal => return refusal,
+        }
+    }
+    if checked_a_runner {
+        MalwareCheckOutcome::Allowed
+    } else {
+        MalwareCheckOutcome::NotApplicable
+    }
+}
+
+async fn check_one_invocation(
+    command: &str,
+    args: &[String],
+    endpoint: &str,
+    backend: &dyn OsvBackend,
+) -> MalwareCheckOutcome {
+    let Some((ecosystem, package_args)) = classify_runner(command, args) else {
         return MalwareCheckOutcome::NotApplicable;
     };
     if !is_safe_url(endpoint) {
-        // Logged at WARN so operators see SSRF attempts at default log levels —
-        // an endpoint that fails the SSRF gate is always operator-visible
-        // misconfiguration or an active attack, never normal traffic.
-        tracing::warn!(target: "wcore::osv_check", endpoint, "refusing to query unsafe OSV endpoint (SSRF gate)");
+        // Logged at ERROR, not WARN. The CLI caps its stderr writer at
+        // `Level::ERROR` (`wcore-cli/src/main.rs`), so with `RUST_LOG` unset a
+        // `warn!` reaches the log file and nobody else — the same trap #928
+        // documents. An endpoint that fails the SSRF gate is always operator-
+        // visible misconfiguration or an active attack, never normal traffic.
+        tracing::error!(target: "wcore::osv_check", endpoint, "refusing to query unsafe OSV endpoint (SSRF gate)");
         return MalwareCheckOutcome::Allowed;
     }
-    let PackageRef::Identified { package, version } = parse_package_from_args(args, ecosystem)
+    let PackageRef::Identified { package, version } =
+        parse_package_from_args(&package_args, ecosystem)
     else {
         return MalwareCheckOutcome::Unidentified;
     };
@@ -485,10 +741,17 @@ pub async fn check_package_for_malware(
             }
         }
         Err(exc) => {
-            // Fail OPEN, and say so at WARN rather than DEBUG: `warn!` is the
-            // lowest level that reaches a user with no RUST_LOG set, and "the
-            // malware gate did not run" is exactly the thing they must be told.
-            tracing::warn!(
+            // Fail OPEN, and say so at ERROR.
+            //
+            // This used to read "warn! is the lowest level that reaches a user
+            // with no RUST_LOG set". That was false: `wcore-cli` builds its
+            // stderr writer as `stderr.with_max_level(tracing::Level::ERROR)`,
+            // so with `RUST_LOG` unset ERROR is the ONLY level that reaches the
+            // person launching the server. A `warn!` here meant the fail-open
+            // was invisible — which is the whole defect #340 reports, because
+            // blocking `api.osv.dev` is then enough to get a known-malicious
+            // package executed with nobody told the check did not run.
+            tracing::error!(
                 target: "wcore::osv_check",
                 error = %exc,
                 ecosystem = ecosystem.as_str(),
@@ -800,5 +1063,256 @@ mod tests {
         // 100 x's, not 200.
         assert!(msg.contains(&"x".repeat(100)));
         assert!(!msg.contains(&"x".repeat(101)));
+    }
+
+    // ---------------------------------------------------------------------
+    // #340 — runner coverage. One test per runner FORM, plus the negative
+    // controls that must hold in both the broken and the fixed tree.
+    // ---------------------------------------------------------------------
+
+    /// Run the gate against a backend that reports the package clean, and
+    /// return the package names the gate actually asked OSV about.
+    async fn queried_packages(command: &str, args: &[&str]) -> Vec<String> {
+        let backend = CapturingOsvBackend::with_response(vec![]);
+        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let _ = check_package_for_malware(command, &owned, TEST_OSV_ENDPOINT, &backend).await;
+        let calls = backend.calls.lock();
+        calls.iter().map(|c| c.package.clone()).collect()
+    }
+
+    async fn outcome(
+        command: &str,
+        args: &[&str],
+        advisories: Vec<OsvAdvisory>,
+    ) -> MalwareCheckOutcome {
+        let backend = CapturingOsvBackend::with_response(advisories);
+        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        check_package_for_malware(command, &owned, TEST_OSV_ENDPOINT, &backend).await
+    }
+
+    fn mal() -> Vec<OsvAdvisory> {
+        vec![OsvAdvisory {
+            id: "MAL-2024-0001".into(),
+            summary: "malware".into(),
+        }]
+    }
+
+    #[tokio::test]
+    async fn pipx_run_queries_the_package_not_the_subcommand() {
+        assert_eq!(
+            queried_packages("pipx", &["run", "evil-pkg"]).await,
+            vec!["evil-pkg"]
+        );
+        assert_eq!(
+            queried_packages("pipx", &["install", "evil-pkg"]).await,
+            vec!["evil-pkg"]
+        );
+        assert_eq!(
+            queried_packages("pipx", &["run", "--spec", "evil-pkg", "entry"]).await,
+            vec!["evil-pkg"]
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_executable_extensions_are_the_same_runner() {
+        for command in ["npx.cmd", "npx.exe", "NPX.CMD", "npx.ps1", "npx.bat"] {
+            assert_eq!(
+                queried_packages(command, &["evil-pkg"]).await,
+                vec!["evil-pkg"],
+                "{command} must be recognised as npx"
+            );
+        }
+        assert_eq!(
+            queried_packages("uvx.exe", &["evil-pkg"]).await,
+            vec!["evil-pkg"]
+        );
+        assert_eq!(
+            queried_packages("pipx.exe", &["run", "evil-pkg"]).await,
+            vec!["evil-pkg"]
+        );
+    }
+
+    #[tokio::test]
+    async fn every_registry_runner_form_is_checked() {
+        let cases: Vec<(&str, Vec<&str>)> = vec![
+            ("npx", vec!["-y", "evil-pkg"]),
+            ("bunx", vec!["evil-pkg"]),
+            ("bun", vec!["x", "evil-pkg"]),
+            ("pnpm", vec!["dlx", "evil-pkg"]),
+            ("yarn", vec!["dlx", "evil-pkg"]),
+            ("npm", vec!["exec", "evil-pkg"]),
+            ("npm", vec!["x", "evil-pkg"]),
+            ("uvx", vec!["evil-pkg"]),
+            ("uv", vec!["tool", "run", "evil-pkg"]),
+            ("deno", vec!["run", "-A", "npm:evil-pkg"]),
+        ];
+        for (command, args) in cases {
+            assert_eq!(
+                queried_packages(command, &args).await,
+                vec!["evil-pkg"],
+                "{command} {args:?} must reach OSV"
+            );
+            assert!(
+                matches!(
+                    outcome(command, &args, mal()).await,
+                    MalwareCheckOutcome::Blocked(_)
+                ),
+                "{command} {args:?} must be BLOCKED when the package is known malware"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shell_wrapped_runner_is_not_a_free_pass() {
+        for args in [
+            vec!["-c", "npx evil-pkg"],
+            vec!["-c", "cd /srv && npx -y evil-pkg"],
+            vec!["-c", "exec npx evil-pkg"],
+            vec!["-c", "env FOO=1 npx evil-pkg"],
+            vec!["-c", "pipx run evil-pkg"],
+        ] {
+            assert!(
+                matches!(
+                    outcome("sh", &args, mal()).await,
+                    MalwareCheckOutcome::Blocked(_)
+                ),
+                "sh {args:?} must be BLOCKED"
+            );
+        }
+        assert!(matches!(
+            outcome("cmd", &["/C", "npx evil-pkg"], mal()).await,
+            MalwareCheckOutcome::Blocked(_)
+        ));
+    }
+
+    // --- NEGATIVE CONTROLS: these must pass in BOTH arms ------------------
+
+    #[tokio::test]
+    async fn ordinary_launch_commands_are_still_not_applicable() {
+        for (command, args) in [
+            ("node", vec!["/opt/server/index.js"]),
+            ("python3", vec!["-m", "my_server"]),
+            ("/usr/local/bin/my-mcp-server", vec!["--port", "0"]),
+            ("deno", vec!["run", "-A", "./server.ts"]),
+            ("sh", vec!["-c", "exec /usr/local/bin/my-mcp-server"]),
+            ("sh", vec!["-c", "echo hello"]),
+        ] {
+            assert_eq!(
+                outcome(command, &args, mal()).await,
+                MalwareCheckOutcome::NotApplicable,
+                "{command} {args:?} fetches nothing from a registry"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_clean_runner_package_is_still_allowed() {
+        assert_eq!(
+            outcome(
+                "npx",
+                &["-y", "@modelcontextprotocol/server-filesystem"],
+                vec![]
+            )
+            .await,
+            MalwareCheckOutcome::Allowed
+        );
+        assert_eq!(
+            outcome("pipx", &["run", "mcp-server-git"], vec![]).await,
+            MalwareCheckOutcome::Allowed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_runner_with_no_readable_package_is_still_unidentified() {
+        assert_eq!(
+            outcome("npx", &["--userconfig", "/tmp/x"], vec![]).await,
+            MalwareCheckOutcome::Unidentified
+        );
+    }
+
+    /// #340 — the fail-open must be VISIBLE. `wcore-cli` builds its stderr
+    /// writer as `stderr.with_max_level(tracing::Level::ERROR)`, so ERROR is
+    /// the only level a user with no `RUST_LOG` set ever sees. This asserts on
+    /// the recorded level rather than the message so a downgrade back to
+    /// `warn!` — which still "logs the failure" — reddens it.
+    #[tokio::test]
+    async fn fail_open_is_visible_at_default_log_levels() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<tracing::Level>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.lock().unwrap().push(*event.metadata().level());
+            }
+        }
+
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::registry::Registry::default().with(captured.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let backend = CapturingOsvBackend::with_error(OsvBackendError::Network(
+            "api.osv.dev is unreachable".into(),
+        ));
+        let args = vec!["-y".to_string(), "some-pkg".to_string()];
+        assert_eq!(
+            check_package_for_malware("npx", &args, TEST_OSV_ENDPOINT, &backend).await,
+            MalwareCheckOutcome::Allowed,
+            "an unreachable OSV endpoint must still fail OPEN"
+        );
+        drop(guard);
+
+        let levels = captured.0.lock().unwrap().clone();
+        assert_eq!(
+            levels,
+            vec![tracing::Level::ERROR],
+            "the launch went ahead unchecked; at RUST_LOG-unset the user only \
+             ever sees ERROR, so anything quieter tells them nothing"
+        );
+    }
+
+    /// The SSRF refusal is the other fail-open, and it is invisible for the
+    /// same reason if it is not ERROR.
+    #[tokio::test]
+    async fn ssrf_refusal_is_visible_at_default_log_levels() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<tracing::Level>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.lock().unwrap().push(*event.metadata().level());
+            }
+        }
+
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::registry::Registry::default().with(captured.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let backend = CapturingOsvBackend::with_response(vec![]);
+        let args = vec!["some-pkg".to_string()];
+        assert_eq!(
+            check_package_for_malware("npx", &args, "http://169.254.169.254/v1/query", &backend)
+                .await,
+            MalwareCheckOutcome::Allowed
+        );
+        drop(guard);
+
+        assert_eq!(
+            captured.0.lock().unwrap().clone(),
+            vec![tracing::Level::ERROR]
+        );
     }
 }

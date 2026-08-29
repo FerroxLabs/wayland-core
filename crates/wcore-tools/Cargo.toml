@@ -181,6 +181,11 @@ criterion.workspace = true
 # R2 fix A2: debug_helpers tests mutate process-wide env vars; serialize
 # against other crates that also touch env (auto_memorize, skills_lifecycle).
 serial_test.workspace = true
+# #340 — `fail_open_is_visible_at_default_log_levels` asserts on the recorded
+# tracing LEVEL of the fail-open notice, not on its text. A downgrade to
+# `warn!` re-hides it (the CLI stderr writer caps at ERROR) while still
+# "logging the failure", so the level is the thing under test.
+tracing-subscriber.workspace = true
 
 [[bench]]
 name    = "registry_dispatch_bench"
