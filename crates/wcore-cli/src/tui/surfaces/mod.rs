@@ -1921,32 +1921,52 @@ impl Router {
                         let _verb = parts.next(); // "/mcp"
                         match parts.next() {
                             Some("add") => {
-                                let server = parts.next();
-                                let target = line
-                                    .split_whitespace()
-                                    .skip(3)
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                match (server, target.is_empty()) {
-                                    (Some(server), false) => match self.engine.as_ref() {
-                                        Some(engine) => {
-                                            engine
-                                                .add_mcp_server(server.to_string(), target.clone());
+                                // wayland#1165 — `--replace` is the EXPLICIT
+                                // opt-in to tear a connected server down and
+                                // re-establish it. Without it a duplicate add
+                                // of a ready server leaves the live connection
+                                // and its configuration untouched (#605).
+                                match (
+                                    crate::tui::engine_bridge::parse_mcp_add(line),
+                                    self.engine.as_ref(),
+                                ) {
+                                    (Some(req), Some(engine)) => {
+                                        if req.replace {
+                                            engine.replace_mcp_server(
+                                                req.name.clone(),
+                                                req.target,
+                                            );
                                             push_system(
                                                 app,
-                                                format!("Connecting MCP server '{server}'…"),
+                                                format!(
+                                                    "Replacing MCP server '{}' — tearing the \
+                                                     current connection down first…",
+                                                    req.name
+                                                ),
+                                            );
+                                        } else {
+                                            engine
+                                                .add_mcp_server(req.name.clone(), req.target);
+                                            push_system(
+                                                app,
+                                                format!(
+                                                    "Connecting MCP server '{}'…",
+                                                    req.name
+                                                ),
                                             );
                                         }
-                                        None => push_system(
-                                            app,
-                                            "No engine attached. /mcp add needs a live session."
-                                                .to_string(),
-                                        ),
-                                    },
-                                    _ => push_system(
+                                    }
+                                    (Some(_), None) => push_system(
                                         app,
-                                        "Usage: /mcp add <name> <url-or-command>  \
-                                         (e.g. /mcp add docs https://mcp.example.com/sse)"
+                                        "No engine attached. /mcp add needs a live session."
+                                            .to_string(),
+                                    ),
+                                    (None, _) => push_system(
+                                        app,
+                                        "Usage: /mcp add [--replace] <name> <url-or-command>  \
+                                         (e.g. /mcp add docs https://mcp.example.com/sse). \
+                                         --replace tears down a server already connected \
+                                         under that name and re-establishes it."
                                             .to_string(),
                                     ),
                                 }

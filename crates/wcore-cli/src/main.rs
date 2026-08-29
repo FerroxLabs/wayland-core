@@ -3633,6 +3633,94 @@ fn mcp_removal_cleanup_outcome(cleanup_failures: &[String]) -> McpRemovalOutcome
     }
 }
 
+/// wayland#1165 — the teardown half of `AddMcpServer { replace: true }`.
+///
+/// wayland#605 deliberately made a duplicate add of a READY server a no-op:
+/// re-adding must never silently mutate a live connection, because a retry, a
+/// reconnect or two hosts racing the same add would then tear a working server
+/// down as a side effect. That guarantee is unchanged and is still the default.
+/// This is the path for the operator who genuinely wants the new configuration
+/// and said so, and it works by RELEASING the name — the caller then reserves a
+/// fresh generation through the ordinary [`McpLifecycleCatalog::reserve`], so
+/// the catalog's "a ready name keeps its generation" invariant is never
+/// weakened, only routed around by an explicit remove-then-add.
+///
+/// Returns `Ok(())` when the name is free to reserve again — including when
+/// there was nothing to tear down, which makes `replace` on an unknown name a
+/// plain add. Returns `Err(reason)` when the caller must refuse the add
+/// instead: a connect or a removal already in flight is interrupted by nobody,
+/// and an unverified prior cleanup still owns the name.
+async fn teardown_runtime_mcp_for_replace(
+    name: &str,
+    runtime_diagnostics: &mut RuntimeDiagnosticsState,
+    lifecycle: &McpLifecycleCatalog,
+    engine: &mut wcore_agent::engine::AgentEngine,
+    dynamic_managers: &mut Vec<Arc<McpManager>>,
+) -> Result<(), String> {
+    // Nothing this process introduced is under this name: the add that follows
+    // is an ordinary first connect.
+    if !runtime_diagnostics.has_runtime_declaration(name) {
+        return Ok(());
+    }
+    match lifecycle.snapshot(name) {
+        None => return Ok(()),
+        Some(snapshot) => match snapshot.state {
+            McpLifecycleState::Ready | McpLifecycleState::Failed { .. } => {}
+            McpLifecycleState::Connecting => {
+                return Err(
+                    "server is still connecting; replace would race the dial in flight"
+                        .to_string(),
+                );
+            }
+            McpLifecycleState::Stopping => {
+                return Err("server is stopping; retry the replace once it has".to_string());
+            }
+            McpLifecycleState::CleanupUnverified { .. } => {
+                return Err(
+                    "prior transport cleanup is unverified; retry remove before replacing"
+                        .to_string(),
+                );
+            }
+        },
+    }
+
+    let defer_cold = engine.defer_cold_config();
+    let Some(registry) = engine.registry_mut() else {
+        return Err("registry busy".to_string());
+    };
+    let _ = lifecycle.mark_stopping(name);
+    let _removed_tools = registry.remove_mcp_server(name);
+    registry.refresh_tool_search_catalog(&defer_cold);
+
+    let matching: Vec<_> = dynamic_managers
+        .iter()
+        .filter(|manager| manager.hosts_server(name) || manager.health().contains_key(name))
+        .cloned()
+        .collect();
+    let mut cleanup_failures = Vec::new();
+    for manager in &matching {
+        if let Err(error) = manager.close_server(name).await {
+            cleanup_failures.push(error.to_string());
+        }
+    }
+    if !cleanup_failures.is_empty() {
+        // The old transport may still be alive, so the name stays reserved and
+        // the replace is refused rather than connecting a second child beside a
+        // process nobody proved dead.
+        let reason = format!(
+            "MCP transport cleanup could not be verified: {}",
+            cleanup_failures.join("; ")
+        );
+        let _ = lifecycle.mark_cleanup_unverified(name, reason.clone());
+        return Err(reason);
+    }
+    dynamic_managers
+        .retain(|manager| !(manager.hosts_server(name) || manager.health().contains_key(name)));
+    runtime_diagnostics.remove_runtime_declaration(name);
+    let _ = lifecycle.complete_stopping(name);
+    Ok(())
+}
+
 /// Remove only a server introduced through the current process's host command.
 /// Config/plugin declarations and profile-scoped OAuth state are outside this
 /// authority and are never touched.
@@ -5480,6 +5568,7 @@ async fn run_json_stream_mode(
                 headers,
                 allow_local,
                 allowed_tools,
+                replace,
             } => {
                 if let Some(reason) = mcp_add_request_rejection(
                     &name,
@@ -5557,6 +5646,37 @@ async fn run_json_stream_mode(
                         reason: "name collides with an effective config declaration".to_string(),
                     });
                     continue;
+                }
+
+                // wayland#1165 — the EXPLICIT opt-in. Without it the
+                // reservation below returns `Existing` for a ready name and the
+                // add is the #605 no-op; with it, release the name FIRST so the
+                // reservation mints a fresh generation for the new
+                // configuration. Refusing here (rather than reserving and then
+                // discovering the old transport is still up) keeps a failed
+                // replace from leaving two children under one name.
+                if replace {
+                    match teardown_runtime_mcp_for_replace(
+                        &name,
+                        &mut runtime_diagnostics,
+                        &mcp_lifecycle,
+                        &mut engine,
+                        &mut dynamic_managers,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            eprintln!("[mcp] replace: released '{name}' before reconnecting");
+                        }
+                        Err(reason) => {
+                            output.emit_error(
+                                &format!("AddMcpServer '{name}' (replace): {reason}"),
+                                false,
+                            );
+                            let _ = writer.emit(&ProtocolEvent::McpFailed { name, reason });
+                            continue;
+                        }
+                    }
                 }
 
                 let config_identity = McpConfigIdentity::for_server(&config);
