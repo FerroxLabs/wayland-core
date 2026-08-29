@@ -44,9 +44,19 @@ all, so "outside its jurisdiction" meant "unguarded" rather than "guarded
 elsewhere". Enumerating the model-facing tools that spawn a process, rather
 than the two named instances, is what found it.
 
-The enumeration was three tools, not one. `BashTool` was already covered on
-Linux by bash_vcs_store_deny_linux.rs. `GrepTool` and `GitTool` were not, and
-both leaked when measured:
+The enumeration is every tool in wcore-tools whose `execution_class_for`
+returns `ProcessSpawning`, which is seven:
+
+| tool | how it spawns | this criterion |
+|---|---|---|
+| `BashTool` | the immutable session sandbox | covered (Linux) by bash_vcs_store_deny_linux.rs |
+| `AwsCliTool`, `GcloudTool`, `KubectlTool` | the SAME session sandbox, explicitly "exactly as BashTool" per their module docs | inherit the same `fs_read_deny` |
+| `ScriptTool` | spawns nothing itself — dispatches other allow-listed built-ins | inherits whatever they enforce |
+| `GrepTool` | `shell_command_argv("rg"/"grep"/"findstr")`, NO sandbox | LEAKED |
+| `GitTool` | `shell_command_argv("git")`, NO sandbox | LEAKED |
+
+Two of the seven spawn outside the sandbox, and both were the two nobody had
+graded. They leaked when measured:
 
 * `GrepTool` — naming the control directory one component up. Closed by the
   walk prune and the store refusal; graded by grep_vcs_store_deny.rs.
