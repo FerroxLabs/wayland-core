@@ -5931,8 +5931,60 @@ mod tests {
         router.apply(SurfaceAction::Command("/mcp add docs".into()), &mut app);
         let last = app.session.turns.last().unwrap().text();
         assert!(
-            last.contains("Usage: /mcp add <name> <url-or-command>"),
+            last.contains("Usage: /mcp add [--replace] <name> <url-or-command>"),
             "an incomplete /mcp add must show usage, not connect nothing: {last}"
+        );
+        // wayland#1165 — the usage line is where an operator learns the opt-in
+        // exists at all, so it has to say what it does, not just that it is
+        // spellable.
+        assert!(
+            last.contains("--replace tears down"),
+            "the usage line must say what the opt-in does: {last}"
+        );
+    }
+
+    /// wayland#1165 — `--replace` reaches the REPLACE arm of the bridge, and a
+    /// plain add still reaches the ADD arm. The two confirmations differ, which
+    /// is the only externally visible difference at this layer and exactly what
+    /// an operator reads to know which one they got.
+    ///
+    /// Runs inside a runtime context because both arms spawn onto the bridge;
+    /// the runtime is dropped without being driven, so nothing dials.
+    #[test]
+    fn mcp_add_replace_reaches_the_replace_arm_not_the_add_arm() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = runtime.enter();
+
+        let mut app = App::new();
+        let mut router = router_with_inventory(&app, vec![], None);
+        router.apply(
+            SurfaceAction::Command("/mcp add --replace docs https://mcp.example.com/sse".into()),
+            &mut app,
+        );
+        let replaced = app.session.turns.last().unwrap().text();
+        assert!(
+            !replaced.contains("Usage:"),
+            "a complete --replace add must not be refused as malformed: {replaced}"
+        );
+        assert!(
+            replaced.contains("Replacing MCP server 'docs'"),
+            "the opt-in must reach the replace arm: {replaced}"
+        );
+
+        let mut app = App::new();
+        let mut router = router_with_inventory(&app, vec![], None);
+        router.apply(
+            SurfaceAction::Command("/mcp add docs https://mcp.example.com/sse".into()),
+            &mut app,
+        );
+        let added = app.session.turns.last().unwrap().text();
+        assert!(
+            added.contains("Connecting MCP server 'docs'"),
+            "CONTROL: without the flag the plain add arm still runs: {added}"
+        );
+        assert!(
+            !added.contains("Replacing"),
+            "a plain add must never take the teardown path: {added}"
         );
     }
 
