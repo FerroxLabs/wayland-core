@@ -1148,11 +1148,8 @@ mod tests {
         // The same reach on the FILE arm, which never consulted a store
         // predicate at all: `is_secret_path` matches secret NAMES, and an
         // object file is named after its hash.
-        std::os::unix::fs::symlink(
-            root.join(".git/objects/aa/deadbeef"),
-            root.join("blob.txt"),
-        )
-        .expect("symlink file");
+        std::os::unix::fs::symlink(root.join(".git/objects/aa/deadbeef"), root.join("blob.txt"))
+            .expect("symlink file");
 
         // Wrong-refusal controls, so the fix cannot be "prune every link".
         fs::write(root.join("ok.txt"), "safe\n").expect("write ok");
