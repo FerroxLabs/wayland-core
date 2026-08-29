@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The bridge-backed approval resume path in main.rs is untestable where it lives, and is the one approval seam still ungraded"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: cb2bf1a4
 criteria:
   - id: c1
     text: "A test drives the bridge-backed approval resume in the active-turn command handler, by extraction or as an integration test"
@@ -30,6 +30,12 @@ criteria:
     evidence: "test:crates/wcore-cli/src/main.rs::every_approval_resume_arm_routes_through_the_shared_handler"
     owner: core
     note: "Added 2026-08-29. A test of the extracted function alone cannot see main.rs dropping the call, and the issue's acceptance says the mutation IS the specification on the ACTIVE-TURN handler. A comment-stripped source scan with a positive control asserting exactly two arms are found."
+  - id: c5
+    text: "An egress consent prompt raised on the json-stream path reaches the host, and no doorbell is installed on a sink that cannot show one"
+    state: met
+    evidence: "test:crates/wcore-agent/tests/egress_consent_surface_test.rs::a_json_stream_egress_consent_prompt_is_put_on_the_wire"
+    owner: core
+    note: "Found while verifying c1-c4: the seam they graded was unreachable in production via the egress path on --json-stream, which is the same shape as the bug this ticket was filed for, one layer up. TWO causes, both fixed here. (1) ProtocolSink::emit_approval_required returned early unless hitl_suspend_enabled, and with_hitl_suspend(true) is called NOWHERE in the workspace (4 grep hits: the setter and three doc comments), so the json-stream sink built at main.rs:5202 never emitted the frame. REPRODUCED against the unmodified tree, building the sink exactly as main.rs does: `the host was never shown the egress consent prompt; frames: []`. The gate protected no host -- GatingProtocolWriter (main.rs:4256) synthesizes ApprovalRequired after every ToolRequest and engine.rs:17144/:26842 emit one straight on the writer -- so it is removed for this variant only; Suspend and ApprovalResume stay gated and capabilities.hitl_suspend still reports the builder flag (key-level corpus diff: source_inputs_digest and fixture_digest moved, nothing else). (2) bootstrap.rs installed BridgeConsentDoorbell on EVERY session with an egress policy, including sinks whose emit_approval_required is the trait no-op, contradicting both the doorbell own comment (bridge_doorbell.rs:88-91) and egress/consent.rs module docs. The doorbell BLOCKS on rx.await, so that is not `no prompt` but a 300s DEFAULT_APPROVAL_TTL stall ending in ConsentDecision::No, rendered by policy.rs:117 as `declined at the consent prompt`. install_consent_doorbell now refuses a sink whose new OutputSink::can_prompt_for_approval is false (default), restoring the documented no-doorbell fallback: Ask allows the data-less read, Exfil stays hard-denied, so it never widens the exfil boundary. CLASS ENUMERATED over every OutputSink impl -- true: ProtocolSink, the TUI ChannelSink (engine_bridge.rs), the ACP RelaySink; false by default: TerminalSink, NullSink, the channel-gateway ChannelSink, TestSink. RED ARM: deleting the guard from install_consent_doorbell reddens a_sink_that_cannot_prompt_is_never_given_a_doorbell (`a doorbell was installed on a sink that cannot show the prompt`); restored, 2/2 pass."
 ---
 
 `approval_bridge.resolve(...)` in the active-turn command handler in
