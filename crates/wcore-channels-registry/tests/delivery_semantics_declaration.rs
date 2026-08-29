@@ -741,10 +741,14 @@ fn no_cap_is_claimed_measured_at_a_real_platform_yet() {
         .filter(|&(_, &live)| live)
         .map(|(k, _)| k.as_str())
         .collect();
-    // wayland#934: slack and discord WERE boundary-probed at the real platform on
-    // 2026-08-27 (slack 4,040 intact / 4,041 splits; discord 2,000 ok / 2,001 refused
-    // 400 50035). The guard still holds the remaining five to the same bar, so it keeps
-    // its teeth: it reddens the moment a sixth platform claims `live` without evidence.
+    // wayland#934: slack, discord and telegram WERE boundary-probed at the real
+    // platform. slack 2026-08-27 (4,040 intact / 4,041 splits); discord 2026-08-27
+    // (2,000 ok / 2,001 refused 400 50035); telegram 2026-08-29 (4,096 accepted as
+    // one message / 4,097 refused `400: Bad Request: message is too long`).
+    // Telegram was probed in ASCII, so its cap is confirmed for ASCII text while the
+    // character-vs-UTF-16-code-unit question the cell was filed with is STILL OPEN.
+    // The guard still holds the remaining four to the same bar, so it keeps its
+    // teeth: it reddens the moment a fifth platform claims `live` without evidence.
     //
     // Those two numbers are no longer only a date in a comment. `tests/
     // live_message_cap_boundary.rs` carries them as a committed cell per platform,
@@ -756,7 +760,7 @@ fn no_cap_is_claimed_measured_at_a_real_platform_yet() {
     let unproven: Vec<&str> = claimed
         .iter()
         .copied()
-        .filter(|p| !matches!(*p, "slack" | "discord"))
+        .filter(|p| !matches!(*p, "slack" | "discord" | "telegram"))
         .collect();
     assert!(
         unproven.is_empty(),
