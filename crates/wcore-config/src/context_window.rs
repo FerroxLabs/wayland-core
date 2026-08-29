@@ -167,6 +167,29 @@ pub const SERVED_SHORTFALL_RATIO: f64 = 0.60;
 /// truncated turn was 6,371 tokens short.
 pub const MIN_SHORTFALL_TOKENS: u64 = 1_024;
 
+/// How many [`TruncationSignal::Regression`] verdicts one route must produce
+/// before its learned window may SIZE the session — FerroxLabs/wayland-core#353.
+///
+/// The `Regression` arm is the one with no absolute-magnitude requirement of
+/// its own. [`TruncationSignal::Shortfall`] must miss by at least
+/// [`MIN_SHORTFALL_TOKENS`] AND fall below [`SERVED_SHORTFALL_RATIO`], which is
+/// corroboration inside a single turn; a `Regression` fires on any backwards
+/// step past [`MIN_OBSERVABLE_INPUT_TOKENS`]. One anomalous report — a provider
+/// bug, a retried request billed oddly, a proxy that rewrites usage — produces
+/// it, and since #1172/#1179 the learned window no longer only produces a
+/// NOTICE: it moves the autocompact trigger and the pre-flight ceiling. A false
+/// positive there silently discards the user's conversation. The likelihood did
+/// not change; the blast radius did.
+///
+/// Two, not more. This is a truncating endpoint, so a genuine regression
+/// repeats on the very next turn — the `proxylog3` sequence #1172 was
+/// calibrated on regresses on every turn past the slot. A higher bar would
+/// delay a real narrowing without making a false one less likely.
+///
+/// A `Shortfall` on the same route also satisfies it — agreement with a second
+/// signal — because it carries the absolute magnitude this arm lacks.
+pub const REGRESSION_CORROBORATION_OBSERVATIONS: u32 = 2;
+
 /// Turns reporting fewer prompt tokens than this carry no usable evidence:
 /// integer noise dominates, and no real served slot is this small.
 pub const MIN_OBSERVABLE_INPUT_TOKENS: u64 = 512;
@@ -239,6 +262,13 @@ pub struct ServedWindowTracker {
     /// Set once truncation has been OBSERVED. `None` means "no evidence" —
     /// never "the window is fine".
     served_window: Option<u64>,
+    /// [`TruncationSignal::Regression`] verdicts seen on this route.
+    /// See [`REGRESSION_CORROBORATION_OBSERVATIONS`].
+    regressions: u32,
+    /// Whether the evidence is strong enough to SIZE the session on, as opposed
+    /// to strong enough to TELL the user about. See
+    /// [`ServedWindowTracker::sizing_window`].
+    corroborated: bool,
 }
 
 impl ServedWindowTracker {
@@ -292,6 +322,26 @@ impl ServedWindowTracker {
             return None;
         };
 
+        // #353 — CORROBORATION, decided here where the verdict is computed,
+        // and BEFORE the notice suppression below: a second regression at an
+        // unchanged ceiling is exactly what corroborates the first, and that
+        // early return would swallow it.
+        //
+        // This gates only what SIZES the session ([`Self::sizing_window`]).
+        // Everything the user is TOLD keeps its one-observation sensitivity —
+        // this function still returns evidence on the first qualifying turn and
+        // `served_window()` still answers from it. A notice on one observation
+        // is useful and cheap to be wrong about; a compaction is neither.
+        match signal {
+            TruncationSignal::Shortfall => self.corroborated = true,
+            TruncationSignal::Regression => {
+                self.regressions = self.regressions.saturating_add(1);
+                if self.regressions >= REGRESSION_CORROBORATION_OBSERVATIONS {
+                    self.corroborated = true;
+                }
+            }
+        }
+
         let served_window = self.max_reported;
         if self.served_window == Some(served_window) {
             // Already established and unchanged — the user has been told.
@@ -310,6 +360,19 @@ impl ServedWindowTracker {
     /// has seen no truncation. `None` is "no evidence", never "fine".
     pub fn served_window(&self) -> Option<u64> {
         self.served_window
+    }
+
+    /// The learned window, but only once the evidence for it is CORROBORATED —
+    /// FerroxLabs/wayland-core#353.
+    ///
+    /// The sizing figure, as against the telling figure
+    /// [`Self::served_window`] answers with. This is the only one allowed to
+    /// move the autocompact trigger and the pre-flight ceiling, which act on the
+    /// conversation rather than describe it. `None` here does not mean "no
+    /// truncation"; it means "not yet enough evidence to shrink the user's
+    /// context over". See [`REGRESSION_CORROBORATION_OBSERVATIONS`].
+    pub fn sizing_window(&self) -> Option<u64> {
+        self.corroborated.then_some(self.served_window).flatten()
     }
 }
 

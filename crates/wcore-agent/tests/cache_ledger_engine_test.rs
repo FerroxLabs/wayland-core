@@ -179,25 +179,27 @@ async fn a_real_run_writes_a_ledger_with_one_row_per_round_trip() {
     // A model the pricing catalog knows, so `priced` is true and the USD
     // figures are facts rather than floors.
     config.model = "claude-opus-4-7".to_string();
-    // #1179 — this case is about CACHE accounting, so the compactor is turned
-    // off rather than left to interact with it.
+    // #1179 / #353 — the compactor is LEFT ON here, deliberately.
     //
-    // Its scripted usage is not a physically possible sequence: round trip 1
-    // reports 40,000 total input (20,000 uncached + 20,000 cache WRITE) and
-    // round trip 2 reports 20,500, i.e. the prompt SHRANK by half while
-    // messages were appended. That is precisely the signature #1172's
+    // This fixture's scripted usage is not a physically possible sequence:
+    // round trip 1 reports 40,000 total input (20,000 uncached + 20,000 cache
+    // WRITE) and round trip 2 reports 20,500, i.e. the prompt SHRANK by half
+    // while messages were appended. That is precisely the signature #1172's
     // `ServedWindowTracker` reads as truncation, so it learns a served window
-    // of 40,000 from this fixture. Until #1179 that cost a spurious notice and
-    // nothing else; now that the learned window also moves the autocompact
-    // trigger (to 18,001 on a 40,000 window) the fixture's own round trip 2
-    // crosses it and round trip 3 arrives behind a real summarization —
-    // `HistoryRewritten`, zero cache read, and this test measuring compaction
-    // instead of the cache.
+    // of 40,000 from it. Until #1179 that cost a spurious notice and nothing
+    // else; once the learned window also moved the autocompact trigger (to
+    // 18,001 on a 40,000 window) the fixture's own round trip 2 crossed it and
+    // round trip 3 arrived behind a real summarization — `HistoryRewritten`,
+    // zero cache read, and this test measuring compaction instead of the cache.
+    // #1179 turned the compactor off to isolate the subject; #353 is the
+    // general defect that made that necessary.
     //
-    // The fixture is wrong and the detector is right, but rebalancing the
-    // scripted token buckets would move every cost and hit-ratio number this
-    // case exists to pin. Disabling the compactor isolates the subject instead.
-    config.compact.enabled = false;
+    // It is back on because this is the one place in the tree where the #353
+    // false positive is REAL rather than constructed: the anomaly is a single
+    // observation, `Regression` now requires corroboration before it may size
+    // the session, and so the trigger no longer moves. If that corroboration
+    // rule is ever weakened, this test fails — which is worth more than the
+    // isolation the disable bought.
 
     let mut engine = AgentEngine::new_with_provider(
         provider,
