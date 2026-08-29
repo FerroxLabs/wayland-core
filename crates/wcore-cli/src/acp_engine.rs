@@ -43,9 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 use wcore_acp::AcpError;
 use wcore_acp::a2a::{A2aCapabilities, A2aError, A2aHandler, A2aHandshake, A2aMessage};
-use wcore_acp::protocol::{
-    ErrorCode, JsonRpcError, MessageEvent, ToolCall, ToolDefinition, ToolResult,
-};
+use wcore_acp::protocol::{ErrorCode, JsonRpcError, McpToolSelection, MessageEvent, ToolCall, ToolDefinition, ToolResult};
 use wcore_acp::turn::{TurnEngine, TurnRequest};
 
 use wcore_agent::bootstrap::AgentBootstrap;
@@ -696,6 +694,10 @@ pub struct EngineSession {
     /// for its lifetime (the engine and its history are pooled per session id),
     /// so this is what a later turn's selection is checked against.
     bound_tools: Vec<String>,
+    /// #998 c6 — the per-tool MCP switches this session's engine was BUILT
+    /// with. Held so a later turn carrying a different selection is refused
+    /// rather than silently served by a registry narrowed to something else.
+    bound_mcp_servers: Vec<McpToolSelection>,
 }
 
 impl EngineSession {
@@ -708,6 +710,7 @@ impl EngineSession {
         approval_manager: Arc<ToolApprovalManager>,
         relay: RelayHandle,
         bound_tools: Vec<String>,
+        bound_mcp_servers: Vec<McpToolSelection>,
     ) -> Self {
         let tool_names = engine.tools().tool_names();
         let approval_bridge = engine.approval_bridge().clone();
@@ -718,6 +721,7 @@ impl EngineSession {
             relay,
             tool_names,
             bound_tools,
+            bound_mcp_servers,
         }
     }
 
@@ -730,6 +734,29 @@ impl EngineSession {
     /// "no per-call override" and always passes. A non-empty one must name the
     /// SAME set the session was built with; anything else is refused rather
     /// than silently ignored, which is the exact failure this issue is about.
+    /// #998 c6 — reject a turn whose per-tool MCP switches this session cannot
+    /// honour.
+    ///
+    /// Same one-way door as [`Self::check_tool_selection`]: the MCP narrowing is
+    /// applied to the config the engine was BUILT from, so the servers were
+    /// dialled and their tools registered once, under that selection. An empty
+    /// `requested` is "no selection carried on this turn" and always passes
+    /// (the A2A bridge drives the same pool and carries none). A non-empty one
+    /// must be the SAME selection the session was created with; anything else
+    /// is refused rather than silently ignored, because silently ignoring it is
+    /// precisely the failure #998 is about.
+    fn check_mcp_selection(&self, requested: &[McpToolSelection]) -> Result<(), AcpError> {
+        if requested.is_empty() || requested == self.bound_mcp_servers.as_slice() {
+            return Ok(());
+        }
+        Err(AcpError::Session(
+            "session MCP tool selection is fixed for the session's lifetime: the \
+             engine's MCP servers were dialled and registered under the selection \
+             supplied at session/create. Open a new session to use a different one."
+                .to_string(),
+        ))
+    }
+
     fn check_tool_selection(&self, requested: &[String]) -> Result<(), AcpError> {
         if requested.is_empty() || requested == self.bound_tools.as_slice() {
             return Ok(());
@@ -901,6 +928,50 @@ pub fn narrow_tool_allowlist(persona: Vec<String>, requested: &[String]) -> Vec<
     }
 }
 
+/// #998 c6 — apply a session's per-tool MCP switches to the config its engine
+/// will be built from.
+///
+/// This is the ACP backend's MCP surface, and it is deliberately the SMALLEST
+/// one that makes the Desktop MCP Library's switches real: it can only NARROW
+/// what the operator's own config already declared.
+///
+///   * A named server that is not configured here is skipped. That is
+///     fail-SAFE, not a silent failure: an unconfigured server contributes no
+///     tools at all, so every tool the switch would have turned off is already
+///     absent, and the selection can never make one appear.
+///   * `allowed_tools: None` is "no selection made" and is a no-op, matching
+///     [`McpServerConfig::allowed_tools`] exactly.
+///   * `Some(list)` INTERSECTS with whatever the config already allowed. A
+///     config that allowed everything (`None`) becomes exactly the list; a
+///     config that already had a list keeps only the names in both. A client
+///     therefore cannot hand itself a tool the operator's config withheld,
+///     which is the property that makes accepting this over a network-exposed
+///     ACP endpoint safe at all.
+///   * `Some([])` is "disable all", and it survives the intersection as the
+///     empty list — NOT as `None`. Folding the two together would enable every
+///     tool at exactly the moment the operator asked for none.
+///
+/// Two selections for one server compose by intersecting in turn, so a repeated
+/// entry can only narrow further.
+pub fn narrow_mcp_tool_selection(config: &mut Config, selection: &[McpToolSelection]) {
+    for entry in selection {
+        let Some(list) = entry.allowed_tools.as_ref() else {
+            continue;
+        };
+        let Some(server) = config.mcp.servers.get_mut(&entry.server) else {
+            continue;
+        };
+        server.allowed_tools = Some(match server.allowed_tools.as_ref() {
+            None => list.clone(),
+            Some(existing) => existing
+                .iter()
+                .filter(|name| list.contains(name))
+                .cloned()
+                .collect(),
+        });
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // EngineTurnEngine — the TurnEngine impl (ACP transport)
 // ─────────────────────────────────────────────────────────────────────────
@@ -1052,6 +1123,7 @@ impl EngineTurnEngine {
         session_id: &str,
         agent: Option<&str>,
         requested_tools: &[String],
+        mcp_selection: &[McpToolSelection],
     ) -> Result<Arc<EngineSession>, AcpError> {
         {
             let pool = self.sessions.lock().await;
@@ -1092,7 +1164,13 @@ impl EngineTurnEngine {
         // persona-profiles PR-4': resolve this session's persona (if any) to its
         // config overlay + declared tool allowlist. Fails CLOSED — an id that is
         // not in the authorized roster yields the base config and no allowlist.
-        let (session_config, persona_tools) = self.engine_inputs_for(agent);
+        let (mut session_config, persona_tools) = self.engine_inputs_for(agent);
+        // #998 c6 — the ACP backend's MCP surface. Apply the session's per-tool
+        // switches to the config this engine is built from, BEFORE bootstrap
+        // dials the servers, so a tool the operator switched off is never
+        // registered rather than merely hidden. Strictly narrowing: see
+        // `narrow_mcp_tool_selection`.
+        narrow_mcp_tool_selection(&mut session_config, mcp_selection);
         // Network sessions never inherit the local CLI's convenience grants.
         // `force_tools` is the only authority that enables unattended tools;
         // persona_tools narrows registry visibility and is not an approval ACL.
@@ -1137,6 +1215,7 @@ impl EngineTurnEngine {
             approval_manager,
             relay,
             requested_tools.to_vec(),
+            mcp_selection.to_vec(),
         ));
 
         let mut pool = self.sessions.lock().await;
@@ -1166,11 +1245,18 @@ impl TurnEngine for EngineTurnEngine {
         let requested_tools = requested_tool_names(&req.tools);
         // persona-profiles PR-4': bind THIS session's authorized persona (None = none).
         let session = self
-            .session_for(&req.session_id, req.agent.as_deref(), &requested_tools)
+            .session_for(
+                &req.session_id,
+                req.agent.as_deref(),
+                &requested_tools,
+                &req.mcp_servers,
+            )
             .await?;
         // A session already in the pool was built with its own selection and
         // cannot be re-narrowed; refuse loudly rather than ignore silently.
         session.check_tool_selection(&requested_tools)?;
+        // #998 c6 — same one-way door for the MCP switches.
+        session.check_mcp_selection(&req.mcp_servers)?;
         let msg_id = uuid::Uuid::new_v4().to_string();
         Ok(session.run_turn(req.text, msg_id).await)
     }
@@ -1338,7 +1424,7 @@ impl EngineA2aHandler {
     /// registered tools.
     async fn tool_catalog(&self) -> Vec<String> {
         // A2A federation carries no ACP persona selector — no overlay.
-        match self.inner.session_for(&self.agent_id, None, &[]).await {
+        match self.inner.session_for(&self.agent_id, None, &[], &[]).await {
             Ok(session) => session.tool_names(),
             Err(_) => Vec::new(),
         }
@@ -1387,7 +1473,7 @@ impl A2aHandler for EngineA2aHandler {
         };
         let session = self
             .inner
-            .session_for(&session_id, None, &[])
+            .session_for(&session_id, None, &[], &[])
             .await
             .map_err(|e| A2aError::HandlerError(e.to_string()))?;
         let msg_id = uuid::Uuid::new_v4().to_string();
@@ -1968,6 +2054,117 @@ mod tests {
         assert!(handler.inner.force_tools);
     }
 
+    // ── #998 c6: the ACP MCP surface narrows, and only narrows ───────────
+
+    fn config_with_server(allowed: Option<Vec<String>>) -> Config {
+        let mut config = Config::default();
+        config.mcp.servers.insert(
+            "library".to_string(),
+            wcore_config::config::McpServerConfig {
+                transport: wcore_config::config::TransportType::Stdio,
+                command: Some("srv".to_string()),
+                args: None,
+                env: None,
+                url: None,
+                headers: None,
+                deferred: Some(false),
+                allow_local: false,
+                only_for_assistant: None,
+                allowed_tools: allowed,
+            },
+        );
+        config
+    }
+
+    fn selection(server: &str, tools: Option<&[&str]>) -> McpToolSelection {
+        McpToolSelection {
+            server: server.to_string(),
+            allowed_tools: tools.map(|t| t.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    #[test]
+    fn a_selection_narrows_a_config_that_allowed_everything() {
+        let mut config = config_with_server(None);
+        narrow_mcp_tool_selection(&mut config, &[selection("library", Some(&["read"]))]);
+        let server = &config.mcp.servers["library"];
+        assert!(server.allows_tool("read"));
+        assert!(
+            !server.allows_tool("delete"),
+            "a tool the selection omits must be denied"
+        );
+    }
+
+    #[test]
+    fn an_empty_selection_denies_every_tool_and_is_not_folded_into_absent() {
+        let mut config = config_with_server(None);
+        narrow_mcp_tool_selection(&mut config, &[selection("library", Some(&[]))]);
+        let server = &config.mcp.servers["library"];
+        assert_eq!(
+            server.allowed_tools,
+            Some(Vec::new()),
+            "disable-all must survive as an empty list, never as None"
+        );
+        assert!(!server.allows_tool("read"));
+    }
+
+    #[test]
+    fn a_selection_can_never_widen_the_configs_own_allowlist() {
+        let mut config = config_with_server(Some(vec!["read".to_string()]));
+        narrow_mcp_tool_selection(
+            &mut config,
+            &[selection("library", Some(&["read", "delete"]))],
+        );
+        let server = &config.mcp.servers["library"];
+        assert!(server.allows_tool("read"));
+        assert!(
+            !server.allows_tool("delete"),
+            "the client must not be able to re-enable what the operator withheld"
+        );
+    }
+
+    #[test]
+    fn an_absent_selection_is_a_no_op() {
+        let mut config = config_with_server(None);
+        narrow_mcp_tool_selection(&mut config, &[selection("library", None)]);
+        assert_eq!(
+            config.mcp.servers["library"].allowed_tools, None,
+            "no selection means no change, exactly as before #998"
+        );
+        assert!(config.mcp.servers["library"].allows_tool("anything"));
+    }
+
+    #[test]
+    fn an_unconfigured_server_is_skipped_and_never_conjured() {
+        let mut config = config_with_server(None);
+        narrow_mcp_tool_selection(&mut config, &[selection("ghost", Some(&["read"]))]);
+        assert!(
+            !config.mcp.servers.contains_key("ghost"),
+            "a selection must never introduce a server"
+        );
+        assert_eq!(config.mcp.servers["library"].allowed_tools, None);
+        assert_eq!(config.mcp.servers.len(), 1);
+    }
+
+    #[test]
+    fn repeated_selections_for_one_server_compose_by_narrowing() {
+        let mut config = config_with_server(None);
+        narrow_mcp_tool_selection(
+            &mut config,
+            &[
+                selection("library", Some(&["read", "write"])),
+                selection("library", Some(&["write", "delete"])),
+            ],
+        );
+        let server = &config.mcp.servers["library"];
+        assert!(server.allows_tool("write"));
+        assert!(!server.allows_tool("read"));
+        assert!(
+            !server.allows_tool("delete"),
+            "a second entry may narrow further, never re-widen"
+        );
+    }
+
     /// A minimal `Config` for tests that never reach an engine build. Mirrors
     /// the fields populated by `Config::resolve` defaults closely enough for
     /// the handshake-redaction path (which short-circuits before any build).
@@ -2021,6 +2218,7 @@ mod tests {
             engine,
             approval_manager,
             relay,
+            Vec::new(),
             Vec::new(),
         ))
     }

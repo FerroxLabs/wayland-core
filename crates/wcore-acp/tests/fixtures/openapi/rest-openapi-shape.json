@@ -20,6 +20,19 @@
   ],
   "_measured": "2026-07-29, live curl against `wayland-core 0.12.25` acp serve on hetzner-dsm; 18286 bytes, 8 paths, 10 operations.",
 
+  "_amended": [
+    "2026-08-29 (wayland#998 c6): one site ADDED -",
+    "/components/schemas/McpToolSelection/properties/allowed_tools.",
+    "Can our consumers absorb it? Yes. It is a NEW optional schema, reachable only from the",
+    "new optional `mcp_servers` array on SessionCreateRequest, which is itself omitted from",
+    "the serialized request when empty (`session_create_without_mcp_selection_is_byte_identical`).",
+    "No existing path, operation, schema or property changed shape, and no field became",
+    "nullable that was not. A client that ignores unknown schemas is unaffected; a client that",
+    "validates strictly sees an added definition, never an altered one.",
+    "The nullable ENCODING is unchanged: the new site uses the same 3.1 `type: [T, \"null\"]`",
+    "form as the nine already listed, so `nullable_keyword_sites` stays empty."
+  ],
+
   "openapi_version": "3.1.0",
   "nullable_encoding": "type-array",
 
@@ -28,6 +41,7 @@
     "/components/schemas/ApprovalResolveRequest/properties/answer",
     "/components/schemas/ApprovalResolveRequest/properties/prefix",
     "/components/schemas/ApprovalResolveRequest/properties/resume_token",
+    "/components/schemas/McpToolSelection/properties/allowed_tools",
     "/components/schemas/SessionCreateRequest/properties/agent",
     "/components/schemas/SessionCreateRequest/properties/model",
     "/components/schemas/SessionCreateRequest/properties/system_prompt",

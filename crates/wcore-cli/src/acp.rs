@@ -219,6 +219,19 @@ pub enum AcpRequestOp {
     CreateSession {
         #[arg(long)]
         model: Option<String>,
+        /// #998 — the per-tool MCP switches for this session, as
+        /// `<server>=<tool>[,<tool>…]`. Repeatable, once per server.
+        ///
+        /// `--mcp-tools fs=read,list` registers ONLY `read` and `list` from the
+        /// configured server `fs`. `--mcp-tools fs=` (an empty list) is
+        /// "disable all" for that server. A server not named here is left
+        /// exactly as the server's own config has it.
+        ///
+        /// Strictly narrowing: it can only reduce what the SERVER already has
+        /// configured, and it can never declare a server, a command or a
+        /// credential. See `wcore_acp::McpToolSelection`.
+        #[arg(long = "mcp-tools", value_name = "SERVER=TOOL,TOOL")]
+        mcp_tools: Vec<String>,
     },
     /// `session/list`. Prints one session_id per line.
     ListSessions,
@@ -229,6 +242,47 @@ pub enum AcpRequestOp {
     /// `message/send :id <text>`. Streams events to stdout, one per
     /// line, JSON-encoded. Exits when the stream ends.
     Send { session_id: String, text: String },
+}
+
+/// #998 — parse `--mcp-tools <server>=<tool>[,<tool>…]` into the wire selection.
+///
+/// The `=` is mandatory, because the two sides of it are the two states that
+/// must never be confused: `fs=read` is "only read", `fs=` is "disable all",
+/// and a bare `fs` would be neither — it would have to mean "no selection",
+/// which is what omitting the flag already means. Rejecting it is the honest
+/// answer, since a host that typed it meant one of the two and we cannot tell
+/// which.
+///
+/// Empty tool names (`fs=read,,list`) are dropped rather than registered as a
+/// tool called "": no MCP server advertises one, so keeping it could only ever
+/// deny a real tool by accident.
+fn parse_mcp_tool_selections(
+    raw: &[String],
+) -> anyhow::Result<Vec<wcore_acp::protocol::McpToolSelection>> {
+    raw.iter()
+        .map(|entry| {
+            let (server, tools) = entry.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--mcp-tools expects <server>=<tool,tool>; got {entry:?}. Use                      `<server>=` to disable every tool on that server, and omit the                      flag entirely to leave a server's tools as configured."
+                )
+            })?;
+            let server = server.trim();
+            if server.is_empty() {
+                anyhow::bail!("--mcp-tools {entry:?} names no server");
+            }
+            Ok(wcore_acp::protocol::McpToolSelection {
+                server: server.to_string(),
+                allowed_tools: Some(
+                    tools
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                ),
+            })
+        })
+        .collect()
 }
 
 /// Dispatch the parsed `acp` subcommand.
@@ -850,13 +904,15 @@ async fn request(args: AcpRequestArgs) -> anyhow::Result<()> {
     let client =
         AcpClient::new(&args.base_url).map_err(|e| anyhow::anyhow!("build client: {e}"))?;
     match args.op {
-        AcpRequestOp::CreateSession { model } => {
+        AcpRequestOp::CreateSession { model, mcp_tools } => {
+            let mcp_servers = parse_mcp_tool_selections(&mcp_tools)?;
             let resp = client
                 .create_session(SessionCreateRequest {
                     model,
                     tools: Vec::new(),
                     system_prompt: None,
                     agent: None,
+                    mcp_servers,
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("create_session: {e}"))?;
@@ -909,6 +965,40 @@ async fn request(args: AcpRequestArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// #998 — `--mcp-tools` is the production caller for the ACP MCP surface,
+    /// and the two states it can express must stay distinguishable.
+    #[test]
+    fn mcp_tools_flag_parses_named_and_disable_all() {
+        let parsed = super::parse_mcp_tool_selections(&[
+            "fs=read, list".to_string(),
+            "shell=".to_string(),
+        ])
+        .expect("both forms parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].server, "fs");
+        assert_eq!(
+            parsed[0].allowed_tools.as_deref(),
+            Some(&["read".to_string(), "list".to_string()][..])
+        );
+        assert_eq!(
+            parsed[1].allowed_tools,
+            Some(Vec::new()),
+            "`server=` is DISABLE ALL, not absent"
+        );
+    }
+
+    /// A bare `fs` is ambiguous between "only nothing" and "no selection", and
+    /// the second is already spelled by omitting the flag. Refuse rather than
+    /// guess which one the operator meant.
+    #[test]
+    fn mcp_tools_flag_refuses_a_form_it_cannot_read() {
+        assert!(super::parse_mcp_tool_selections(&["fs".to_string()]).is_err());
+        assert!(super::parse_mcp_tool_selections(&["=read".to_string()]).is_err());
+        assert!(
+            super::parse_mcp_tool_selections(&[]).expect("no flags is no selection").is_empty()
+        );
+    }
+
     use super::*;
     use serial_test::serial;
     use std::time::Duration;
@@ -1043,6 +1133,7 @@ mod tests {
             base_url: base.clone(),
             op: AcpRequestOp::CreateSession {
                 model: Some("opus".to_string()),
+                mcp_tools: Vec::new(),
             },
         };
         request(create_args).await.unwrap();

@@ -150,6 +150,7 @@ fn create_req() -> SessionCreateRequest {
         tools: Vec::new(),
         system_prompt: None,
         agent: None,
+        mcp_servers: Vec::new(),
     }
 }
 

@@ -114,6 +114,7 @@ async fn a_selected_tool_set_narrows_what_the_engine_offers() {
             text: "hi".to_string(),
             tools: vec![tool_def("Read")],
             agent: None,
+            mcp_servers: Vec::new(),
         })
         .await
         .expect("run_turn establishes a stream");
@@ -154,6 +155,7 @@ async fn an_empty_selection_leaves_the_full_registry_intact() {
             text: "hi".to_string(),
             tools: Vec::new(),
             agent: None,
+            mcp_servers: Vec::new(),
         })
         .await
         .expect("run_turn establishes a stream");
@@ -188,6 +190,7 @@ async fn a_later_turn_cannot_silently_change_the_selection() {
             text: "hi".to_string(),
             tools: vec![tool_def("Read")],
             agent: None,
+            mcp_servers: Vec::new(),
         })
         .await
         .expect("the first turn binds the selection");
@@ -201,6 +204,7 @@ async fn a_later_turn_cannot_silently_change_the_selection() {
                 text: "again".to_string(),
                 tools: vec![tool_def("Read")],
                 agent: None,
+                mcp_servers: Vec::new(),
             })
             .await
             .is_ok(),
@@ -214,6 +218,7 @@ async fn a_later_turn_cannot_silently_change_the_selection() {
             text: "now with bash".to_string(),
             tools: vec![tool_def("Bash")],
             agent: None,
+            mcp_servers: Vec::new(),
         })
         .await;
     let message = match outcome {
@@ -289,6 +294,7 @@ async fn hallucinated_bash_under(
             text: "hi".to_string(),
             tools: selection,
             agent: None,
+            mcp_servers: Vec::new(),
         })
         .await
         .expect("run_turn establishes a stream");

@@ -80,6 +80,13 @@ struct SessionRecord {
     /// no persona overlay is applied to the engine yet, so selecting an agent
     /// does NOT change turn behaviour or cross any credential boundary.
     agent: Option<String>,
+    /// #998 — the per-tool MCP switches supplied at `session/create`.
+    ///
+    /// Stored on the record for the same reason `agent` is: it is bound at
+    /// create and read from HERE on every turn, so a per-message body can
+    /// neither introduce a selection the session was not created with nor widen
+    /// one it was. Empty = no selection.
+    mcp_servers: Vec<crate::protocol::McpToolSelection>,
 }
 
 /// Minimal ACP server with in-memory session storage.
@@ -331,6 +338,20 @@ impl AcpServer {
     /// the session exists and selected one. Parallels [`Self::session_tools`].
     /// A later per-session persona binding (PR-4) reads this to resolve the
     /// overlay; in PR-2 it is a read-only record of the validated selector.
+    /// #998 — the per-tool MCP switches bound to `session_id` at create-time.
+    ///
+    /// Empty for a session that made no selection, and for an unknown session:
+    /// "no narrowing" is the only safe reading of "no record", and an unknown
+    /// session is refused by the caller before a turn can run anyway.
+    pub async fn session_mcp_servers(&self, session_id: &str) -> Vec<crate::protocol::McpToolSelection> {
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .map(|r| r.mcp_servers.clone())
+            .unwrap_or_default()
+    }
+
     pub async fn session_agent(&self, session_id: &str) -> Option<String> {
         self.sessions
             .read()
@@ -553,6 +574,7 @@ impl HttpHandler for AcpServer {
             system_prompt: req.system_prompt.clone(),
             tools: req.tools.clone(),
             agent: req.agent.clone(),
+            mcp_servers: req.mcp_servers.clone(),
         };
         self.sessions.write().await.insert(id.clone(), record);
         // Open the session's event stream at create, not lazily at first send.
@@ -615,6 +637,11 @@ impl HttpHandler for AcpServer {
             protocol_version: ACP_PROTOCOL_VERSION.to_string(),
             capabilities: ServerCapabilities {
                 agent_selection: true,
+                // #998: a compile-time property of this build, exactly like
+                // `agent_selection`. It tells a client the `mcp_servers` key
+                // will be parsed and applied rather than hard-rejected; it
+                // grants nothing, since a selection can only narrow.
+                mcp_tool_selection: true,
             },
         })
     }
@@ -692,6 +719,12 @@ impl HttpHandler for AcpServer {
         // body can never smuggle in a persona that was not authorized at create.
         let agent = self.session_agent(&req.session_id).await;
 
+        // #998: likewise read the session's per-tool MCP switches from the
+        // RECORD. A per-message body carries no MCP field at all, so there is
+        // no path by which a later message can widen what `session/create`
+        // narrowed.
+        let mcp_servers = self.session_mcp_servers(&req.session_id).await;
+
         // persona-profiles PR-7: a `profile:<name>` session is served by its own
         // child process — forward the message to that child instead of the
         // in-process turn engine. The persona/tools overlay is the CHILD's
@@ -731,6 +764,7 @@ impl HttpHandler for AcpServer {
                                 text: req.text,
                                 tools,
                                 agent,
+                                mcp_servers,
                             })
                             .await?
                     }
@@ -886,6 +920,7 @@ mod tests {
             tools: Vec::new(),
             system_prompt: None,
             agent: None,
+            mcp_servers: Vec::new(),
         }
     }
 
@@ -898,6 +933,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: None,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -1052,6 +1088,7 @@ mod tests {
                 tools: tools.clone(),
                 system_prompt: Some("be terse".to_string()),
                 agent: None,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -1104,6 +1141,7 @@ mod tests {
                 tools: vec![stored_tool],
                 system_prompt: None,
                 agent: None,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -1118,6 +1156,94 @@ mod tests {
         let seen = engine.last_req.lock().unwrap().clone().unwrap();
         assert_eq!(seen.tools.len(), 1);
         assert_eq!(seen.tools[0].name, "Bash", "per-call tools win");
+    }
+
+    /// #998 c6 — the per-tool MCP switches supplied at `session/create` reach
+    /// the turn engine, and they come from the SESSION RECORD.
+    ///
+    /// `MessageSendRequest` carries no MCP field at all, so this is also the
+    /// proof that a per-message body has no way to introduce a selection the
+    /// session was not created with, or to widen one it was.
+    #[tokio::test]
+    async fn session_create_mcp_switches_reach_the_turn_engine() {
+        let engine = Arc::new(MockTurnEngine::new(vec![MessageEvent::Done {
+            stop_reason: "end_turn".to_string(),
+            turn_id: String::new(),
+        }]));
+        let server = AcpServer::new().with_turn_engine(engine.clone());
+        let selection = crate::protocol::McpToolSelection {
+            server: "library".to_string(),
+            allowed_tools: Some(vec!["safe_read".to_string()]),
+        };
+        let resp = server
+            .create_session(SessionCreateRequest {
+                model: None,
+                tools: Vec::new(),
+                system_prompt: None,
+                agent: None,
+                mcp_servers: vec![selection.clone()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            server.session_mcp_servers(&resp.session_id).await,
+            vec![selection.clone()],
+            "the selection is bound to the session record at create"
+        );
+
+        let _ = server
+            .send_message(MessageSendRequest {
+                session_id: resp.session_id,
+                text: "go".to_string(),
+                tools: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let seen = engine.last_req.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            seen.mcp_servers,
+            vec![selection],
+            "the turn must carry the session's switches to the engine"
+        );
+    }
+
+    /// CONTROL: a session created with no selection carries none, so the
+    /// pre-#998 behaviour of every existing ACP session is unchanged.
+    #[tokio::test]
+    async fn a_session_with_no_mcp_switches_carries_none() {
+        let engine = Arc::new(MockTurnEngine::new(vec![MessageEvent::Done {
+            stop_reason: "end_turn".to_string(),
+            turn_id: String::new(),
+        }]));
+        let server = AcpServer::new().with_turn_engine(engine.clone());
+        let resp = server
+            .create_session(SessionCreateRequest {
+                model: None,
+                tools: Vec::new(),
+                system_prompt: None,
+                agent: None,
+                mcp_servers: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let _ = server
+            .send_message(MessageSendRequest {
+                session_id: resp.session_id,
+                text: "go".to_string(),
+                tools: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            engine
+                .last_req
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap()
+                .mcp_servers
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1272,6 +1398,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: Some("architect".to_string()),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -1295,6 +1422,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: Some("root".to_string()),
+                mcp_servers: Vec::new(),
             })
             .await
             .expect_err("unauthorized agent must be rejected");
@@ -1382,6 +1510,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: Some("profile:work".to_string()),
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
@@ -1440,6 +1569,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: Some("profile:ghost".to_string()),
+                mcp_servers: Vec::new(),
             })
             .await
             .expect_err("a child that cannot open must fail the create");
@@ -1465,6 +1595,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: Some("profile:work".to_string()),
+                mcp_servers: Vec::new(),
             })
             .await
             .expect_err("profile agent with no supervisor must fail closed");
@@ -1483,6 +1614,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: Some("architect".to_string()),
+                mcp_servers: Vec::new(),
             })
             .await
             .expect_err("no roster ⇒ cannot authorize any selector");
@@ -1526,6 +1658,7 @@ mod tests {
                 tools,
                 system_prompt: None,
                 agent: None,
+                mcp_servers: Vec::new(),
             })
             .await
             .unwrap();
