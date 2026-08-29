@@ -1,0 +1,94 @@
+   Compiling wcore-cli v0.13.11 (/root/w-f13/fin-hetzner-residuals/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.20s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/doctor_probe_mcp_honours_the_gate_mode.rs (target/debug/deps/doctor_probe_mcp_honours_the_gate_mode-1a8c7df5698c5ccc)
+
+running 1 test
+test doctor_probe_mcp_launches_under_the_operators_gate_mode ... FAILED
+
+failures:
+
+---- doctor_probe_mcp_launches_under_the_operators_gate_mode stdout ----
+warning: /tmp/.tmpVaUkQR/config.toml has permissions 0o644; tightening to 0o600 on next write
+notice: crash replay protection is OFF for this run. This host has no usable OS keyring and no unlocked credentials vault, and sealing the exact provider request that automatic replay re-sends needs one. Durable sessions stay ON: the journal still records every turn, every provider attempt, every tool call, every approval and every delivery, so nothing executes unrecorded and conversation history is still saved. What is lost is automatic continuation — a turn interrupted mid-dispatch will ask you to resume, reconcile or cancel it rather than resuming itself. To restore replay, unlock the encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE. To refuse to run this way at all, set [session] require_durability = true.
+wayland-core doctor v0.13.11
+
+[PASS] binary version         v0.13.11 (matches expected)
+[PASS] browser backend        Camoufox sidecar -> /usr/local/bin/camofox-browser
+[WARN] browser policy         default_action=deny with no allowed_origins — every URL is refused
+       Hint: Browser tool is disabled by default. Add allowed domains to enable it.
+       Hint: Edit one of these files (the only ones the loader reads):
+       Hint:   - /tmp/.tmpVaUkQR/config.toml
+       Hint:   - <project dir>/.wayland-core.toml
+       Hint: A plain `config.toml` in the current working directory is NOT read (in a desktop session that is a throwaway workspace).
+       Hint: [browser.policy]
+       Hint: # Allow specific domains (glob patterns supported)
+       Hint: allowed_origins = ["example.com", "*.mysite.com"]
+       Hint: Alternatively, permit all origins — not recommended, exposes SSRF risk:
+       Hint: [browser.policy]
+       Hint: default_action = "allow"
+[FAIL] wlrctl                 NOT FOUND
+       Install: apt install wlrctl              (Debian/Ubuntu — may need PPA)
+       Install: pacman -S wlrctl                (Arch)
+       Install: nix-env -iA nixpkgs.wlrctl      (NixOS)
+       Install: or build from source: https://git.sr.ht/~brocellous/wlrctl
+[FAIL] grim                   NOT FOUND
+       Install: apt install grim                (Debian/Ubuntu)
+       Install: pacman -S grim                  (Arch)
+       Install: nix-env -iA nixpkgs.grim        (NixOS)
+[WARN] WAYLAND_DISPLAY        not set — Wayland CUA backend unavailable
+       Hint: log in to a Wayland session (Sway, GNOME on Wayland, KDE on Wayland)
+[WARN] X DISPLAY              not set — X11 CUA backend unavailable
+       Hint: log in to an X11 session, or start Xwayland
+[SKIP] macOS Accessibility    (non-macOS platform)
+[SKIP] macOS Screen Record    (non-macOS platform)
+[WARN] BROWSERBASE_API_KEY    not set — Browserbase cloud backend unavailable
+       Hint: export BROWSERBASE_API_KEY=<key>  (only if you use the cloud backend)
+[PASS] ollama                 binary at /usr/local/bin/ollama
+
+Summary: 3 passed, 2 missing, 4 warning, 2 skipped, 0 manual
+
+Provider (this invocation):
+  provider   anthropic                              (from --provider)
+  model      claude-sonnet-4-6                      (from config)
+  base url   https://api.anthropic.com              (from config)
+  api key    present                                (from --api-key)
+  credential NOT VALIDATED                       (run --doctor --probe-provider to authenticate it)
+
+Durable sessions:
+  ON       but crash replay is unavailable on this host
+           no usable OS keyring and no unlocked credentials vault were found
+           conversation history IS saved and every provider call, tool call,
+           approval and delivery is still recorded; what is missing is the
+           sealed copy of the exact provider request, so a turn interrupted
+           mid-dispatch asks you to resume, reconcile or cancel it instead
+           of resuming itself
+           to restore: set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file
+           descriptor, preferred) or WAYLAND_VAULT_PASSPHRASE
+           to refuse to run this way at all: set [session]
+           require_durability = true in config.toml
+
+MCP servers (declared):
+  [config] probe-target         stdio          wl354-no-such-mcp-server
+  [mcp] malware_gate = "strict" — an OSV malware check that cannot be performed REFUSES the launch
+
+Probing config-declared MCP servers (connect-test)...
+warning: no secure credential backend is available here — the OS keyring is not writable and the encrypted vault is locked. Existing secrets in /tmp/.tmpVaUkQR/credentials.toml remain readable, but saving a new credential will be REFUSED rather than written in cleartext. To store credentials, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ) to unlock the encrypted vault.
+  ✕ probe-target         failed: Transport error: MCP stdio server exited before responding
+  Note: plugin-declared servers are probed at session boot, not here.
+
+thread 'doctor_probe_mcp_launches_under_the_operators_gate_mode' (823191) panicked at crates/wcore-cli/tests/doctor_probe_mcp_honours_the_gate_mode.rs:134:5:
+assertion `left == right` failed: --doctor --probe-mcp reached the MCP launch path with the operator's strict mode uninstalled, so it probed under the permissive default (FerroxLabs/wayland-core#354 c7)
+  left: Permissive
+ right: Strict
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    doctor_probe_mcp_launches_under_the_operators_gate_mode
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p wcore-cli --test doctor_probe_mcp_honours_the_gate_mode`
+EXIT=101

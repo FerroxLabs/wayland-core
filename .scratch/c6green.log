@@ -1,0 +1,102 @@
+   Compiling smallvec v1.15.1
+   Compiling typenum v1.20.1
+   Compiling getrandom v0.2.17
+   Compiling cc v1.2.63
+   Compiling lock_api v0.4.14
+   Compiling errno v0.3.14
+   Compiling rand_core v0.6.4
+   Compiling parking_lot_core v0.9.12
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.4
+   Compiling mio v1.2.1
+   Compiling parking_lot v0.12.5
+   Compiling serde v1.0.228
+   Compiling zerocopy v0.8.50
+   Compiling generic-array v0.14.7
+   Compiling tokio v1.52.3
+   Compiling futures-util v0.3.32
+   Compiling indexmap v2.14.0
+   Compiling crypto-common v0.1.7
+   Compiling ring v0.17.14
+   Compiling block-buffer v0.10.4
+   Compiling digest v0.10.7
+   Compiling tracing-core v0.1.36
+   Compiling rustls v0.23.40
+   Compiling tracing v0.1.44
+   Compiling serde_json v1.0.150
+   Compiling bitflags v2.13.1
+   Compiling icu_normalizer v2.2.0
+   Compiling futures-channel v0.3.32
+   Compiling num-traits v0.2.19
+   Compiling libdbus-sys v0.2.7
+   Compiling idna_adapter v1.2.2
+   Compiling rustix v1.1.4
+   Compiling idna v1.1.0
+   Compiling linux-raw-sys v0.12.1
+   Compiling url v2.5.8
+   Compiling ppv-lite86 v0.2.21
+   Compiling rustls-webpki v0.103.13
+   Compiling rand_chacha v0.3.1
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling serde_urlencoded v0.7.1
+   Compiling h2 v0.4.16
+   Compiling inout v0.1.4
+   Compiling getrandom v0.4.2
+   Compiling cipher v0.4.4
+   Compiling chrono v0.4.44
+   Compiling tower-http v0.6.11
+   Compiling rand v0.8.6
+   Compiling getrandom v0.3.4
+   Compiling sha2 v0.10.9
+   Compiling universal-hash v0.5.1
+   Compiling dirs-sys v0.5.0
+   Compiling password-hash v0.5.0
+   Compiling poly1305 v0.8.0
+   Compiling rand_core v0.9.5
+   Compiling chacha20 v0.9.1
+   Compiling fd-lock v4.0.4
+   Compiling blake2 v0.10.6
+   Compiling aead v0.5.2
+   Compiling rtoolbox v0.0.5
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling argon2 v0.5.3
+   Compiling rpassword v7.5.2
+   Compiling hyper v1.10.1
+   Compiling tempfile v3.27.0
+   Compiling tokio-rustls v0.26.4
+   Compiling chacha20poly1305 v0.10.1
+   Compiling dbus v0.9.11
+   Compiling wcore-budget v0.13.11 (/root/w-f13/fin-hetzner-residuals/crates/wcore-budget)
+   Compiling rand_chacha v0.9.0
+   Compiling dirs v6.0.0
+   Compiling wcore-types v0.13.11 (/root/w-f13/fin-hetzner-residuals/crates/wcore-types)
+   Compiling wcore-compact v0.13.11 (/root/w-f13/fin-hetzner-residuals/crates/wcore-compact)
+   Compiling hyper-util v0.1.20
+   Compiling sha1 v0.10.6
+   Compiling serde_ignored v0.1.14
+   Compiling tungstenite v0.24.0
+   Compiling rand v0.9.4
+   Compiling dbus-secret-service v4.1.0
+   Compiling hyper-rustls v0.27.9
+   Compiling assert-json-diff v2.0.2
+   Compiling reqwest v0.12.28
+   Compiling keyring v3.6.3
+   Compiling mockito v1.7.2
+   Compiling tokio-tungstenite v0.24.0
+   Compiling wcore-config v0.13.11 (/root/w-f13/fin-hetzner-residuals/crates/wcore-config)
+   Compiling wcore-egress v0.13.11 (/root/w-f13/fin-hetzner-residuals/crates/wcore-egress)
+   Compiling wcore-channels v0.13.11 (/root/w-f13/fin-hetzner-residuals/crates/wcore-channels)
+   Compiling wcore-channel-discord v0.13.11 (/root/w-f13/fin-hetzner-residuals/crates/wcore-channel-discord)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.15s
+     Running unittests src/lib.rs (target/debug/deps/wcore_channel_discord-0aa466711333ea45)
+
+running 4 tests
+test gateway::tests::invalid_session_backoff_in_discord_window ... ok
+test tests::discord_sends_the_derived_nonce_but_must_not_claim_idempotency ... ok
+test tests::discord_never_sends_a_thread_destination_as_a_message_reference ... ok
+test tests::discord_still_quotes_a_genuine_reply_to_message ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 63 filtered out; finished in 0.00s
+
+DONE
