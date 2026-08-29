@@ -24,6 +24,7 @@ LANE = {
  "decompose":          ("File each cross-team remainder as its OWN ticket with a contract", "gh", "2-decompose"),
  "flake-584":          ("Shared-process lib suite: the #584 fixture misses its truncation boundary under load", "hetzner", "1-build"),
  "telegram-topic":     ("Telegram forum-topic target sent as reply_to_message_id, never message_thread_id", "hetzner", "1-build"),
+ "container-latch":    ("Container backend latches on a leftover name, and attests a run that never happened", "hetzner", "1-build"),
  "maintainer":         ("Sean-only: credentials and platform accounts", "Sean", "2-maintainer"),
 }
 
@@ -53,6 +54,7 @@ M = {
  "browser-revive":      [("core#113", "c5")],
  "flake-584":           [("core#361", "c1 c2 c3 c4 c5 c6")],
  "telegram-topic":      [("core#363", "c1 c2 c3 c4 c5 c6")],
+ "container-latch":     [("core#365", "c1 c2 c3 c4 c5 c6")],
  "maintainer":          [("wl#1186", "c5"), ("wl#934", "c5")],
 }
 NOTE = {

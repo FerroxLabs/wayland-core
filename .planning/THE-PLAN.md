@@ -5,18 +5,18 @@
 > verification) and `PLAN-ROUTING.json` (assignment). If this disagrees with anyone's
 > recollection, this is right and the recollection is wrong — that is the entire point.
 
-Rendered 2026-08-29 13:28 UTC
+Rendered 2026-08-29 14:26 UTC
 
 ## VERDICT: BLOCKED
 
-**37 criteria block the 0.13.12 release.** Full list in §3.
+**41 criteria block the 0.13.12 release.** Full list in §3.
 
 | state | count | means |
 |---|---:|---|
-| DONE | 0 | met, evidence resolves, independently verified |
-| CLAIMED | 227 | met but NOT yet independently verified — never report as done |
-| OPEN | 40 | outstanding work |
-| HANDOFF | 0 | another team's half, with a filed ticket carrying it |
+| DONE | 32 | met, evidence resolves, independently verified |
+| CLAIMED | 195 | met but NOT yet independently verified — never report as done |
+| OPEN | 45 | outstanding work |
+| HANDOFF | 1 | another team's half, with a filed ticket carrying it |
 
 ## §3 BLOCKING — the definition of done for 0.13.12
 
@@ -43,6 +43,19 @@ Runs on: **hetzner**  ·  1-build
 | criterion | issue | what must become true |
 |---|---|---|
 | `c8` | wl#934 | Telegram's unit question is settled: the cap is characters or UTF-16 code units, measured rather than assumed |
+
+### `container-latch` — Container backend latches on a leftover name, and attests a run that never happened
+
+Runs on: **hetzner**  ·  1-build
+
+| criterion | issue | what must become true |
+|---|---|---|
+| `c1` | core#365 | A container left in Created under the name a new task would take does not fail that task -- either the name carries the nonce, or the submit path clea |
+| `c2` | core#365 | A daemon-level refusal is not reported as a task exit: exit-125 from docker run produces a distinct outcome, never a receipt asserting the task ran an |
+| `c3` | core#365 | The daemon's stderr reaches the operator on a daemon-level failure rather than being captured into a receipt nobody reads |
+| `c4` | core#365 | A red arm is quoted verbatim: the new guard reverted, the test failing, restored and green, with the mutation shown to have landed on code |
+| `c5` | core#365 | conformance_matrix passes on a host that has run it before with a leftover container present -- the regression test creates the wedged container itsel |
+| `c6` | core#365 | The orphan-scan path is checked for the same latch: state whether docker ps -a --filter label=wayland.task.nonce= would have found these two, and if n |
 
 ### `decompose` — File each cross-team remainder as its OWN ticket with a contract
 
@@ -104,15 +117,6 @@ Runs on: **macOS CI**  ·  2-platform
 |---|---|---|
 | `c4` | core#352 | macOS: the pgrep arm is EXECUTED in CI at least once with the run cited, or deleted as unreachable |
 
-### `maintainer` — Sean-only: credentials and platform accounts
-
-Runs on: **Sean**  ·  2-maintainer
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c5` | wl#1186 | whatsapp (Meta Cloud API): a credential exists and a boundary probe sends at cap and at +1 |
-| `c5` | wl#934 | Every adapter's declared cap is verified against the real platform limit |
-
 ### `mcp-gate-mode` — MCP malware gate: explicit permissive/strict operator choice
 
 Runs on: **hetzner**  ·  1-build
@@ -161,9 +165,11 @@ These are NOT partials. Core's half is closed; the remainder is filed against a 
 owner with its own contract. A blocked criterion with no ticket does not appear here —
 it appears in §3 as blocking, because that is what it is.
 
-_None recorded yet._
+| criterion | issue | owner | carried by |
+|---|---|---|---|
+| `c5` | wl#934 | maintainer | FerroxLabs/wayland#1186 |
 
-## §5 CLAIMED BUT UNVERIFIED — 227
+## §5 CLAIMED BUT UNVERIFIED — 195
 
 Marked `met` with resolving evidence, but no independent verifier has confirmed the lane.
 Historically this is exactly where a partial hides: a criterion written thin reads `met`
@@ -171,48 +177,46 @@ while the reported bug is still live. Do not report these as done.
 
 - **core#113** — c1, c2, c3, c4
 - **core#238** — c1, c2, c3, c5, c6
-- **core#244** — c1, c2, c3
-- **core#253** — c1, c2, c3, c4, c5, c6, c7
+- **core#244** — c1, c2
+- **core#253** — c1, c2, c3, c5, c6, c7
 - **core#314** — c1, c2, c3, c4
 - **core#322** — c1, c2, c3
 - **core#323** — c1, c2, c3, c4
 - **core#325** — c1, c2, c3, c4
 - **core#335** — c1, c2, c3, c4
-- **core#336** — c1, c2, c3, c4
-- **core#337** — c1, c2, c3, c4
+- **core#336** — c1, c2
+- **core#337** — c1, c4
 - **core#338** — c1, c2, c3, c4
 - **core#339** — c1, c2, c3, c4, c5, c6
 - **core#340** — c1, c2, c3, c4, c5
 - **core#342** — c1, c2, c4
-- **core#350** — c1, c2, c3, c4
+- **core#350** — c1, c2, c4
 - **core#352** — c1, c2, c3
-- **core#353** — c1, c2, c3, c4, c5
+- **core#353** — c1, c2, c3, c4
 - **core#354** — c1, c2, c3, c4, c5, c6
-- **core#355** — c1, c2, c3, c4
 - **core#356** — c1, c2, c3, c4
 - **core#358** — c1, c4
-- **core#360** — c1, c2, c3, c4, c5
+- **core#360** — c1, c3
 - **core#363** — c1, c2, c3, c4, c5
 - **wl#174** — c1, c2, c3, c4, c5
 - **wl#305** — c1
 - **wl#388** — c1, c2, c3
-- **wl#434** — c1, c2
-- **wl#559** — c1, c2, c3, c5, c6
+- **wl#434** — c1
+- **wl#559** — c1, c2, c6
 - **wl#863** — c1, c2
 - **wl#908** — c1, c2, c3
-- **wl#934** — c1, c2, c3, c4, c6, c7
-- **wl#998** — c1, c2, c3, c4, c6
+- **wl#934** — c1, c2, c3, c4, c6
+- **wl#998** — c1, c2, c3, c4
 - **wl#1088** — c1
 - **wl#1134** — c1, c2, c3, c4, c5
-- **wl#1150** — c1, c2, c3, c4
-- **wl#1151** — c1, c2
-- **wl#1155** — c1, c2, c3, c4
+- **wl#1150** — c1, c2, c3
+- **wl#1151** — c1
+- **wl#1155** — c1, c2, c3
 - **wl#1156** — c1, c2
 - **wl#1161** — c1, c2
 - **wl#1162** — c1, c2
 - **wl#1163** — c1, c2, c3
-- **wl#1164** — c1, c2, c3, c4
-- **wl#1165** — c1, c2
+- **wl#1165** — c2
 - **wl#1166** — c1, c2, c3, c4, c5
 - **wl#1168** — c1, c2, c3
 - **wl#1170** — c1, c2, c3, c4
@@ -226,7 +230,7 @@ while the reported bug is still live. Do not report these as done.
 - **wl#1178** — c1, c2, c3, c4, c5
 - **wl#1179** — c1, c2, c3, c4, c5
 - **wl#1180** — c1, c2, c3, c4
-- **wl#1181** — c1, c2, c3, c4, c5
+- **wl#1181** — c5
 - **wl#1182** — c1, c2, c3
 - **wl#1186** — c1, c2, c3, c4, c6
 
@@ -242,5 +246,22 @@ gets built and its branch pushed; it just does not gate this release.
 Every criterion met, evidence resolves in the tree, and an independent adversarial
 verifier re-ran the gate and confirmed it.
 
-_Nothing verified yet this cycle._
+- **core#244** — c3
+- **core#253** — c4
+- **core#336** — c3, c4
+- **core#337** — c2, c3
+- **core#350** — c3
+- **core#353** — c5
+- **core#355** — c1, c2, c3, c4
+- **core#360** — c2, c4, c5
+- **wl#434** — c2
+- **wl#559** — c3, c5
+- **wl#934** — c7
+- **wl#998** — c6
+- **wl#1150** — c4
+- **wl#1151** — c2
+- **wl#1155** — c4
+- **wl#1164** — c1, c2, c3, c4
+- **wl#1165** — c1
+- **wl#1181** — c1, c2, c3, c4
 

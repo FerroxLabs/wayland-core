@@ -289,11 +289,58 @@ pub struct WhatsappBridgeConfig {
     /// Present because the default is a policy rather than a measurement: no
     /// vendor documents a body limit for the WhatsApp Web protocol these
     /// backends speak, so an operator who has driven their own bridge and found
-    /// the real boundary should not be held to our guess. Zero is rejected at
-    /// parse time by the schema; a value that is wrong in the high direction is
-    /// the operator's own measurement to defend.
-    #[serde(default)]
+    /// the real boundary should not be held to our guess. A value that is wrong
+    /// in the high direction is the operator's own measurement to defend.
+    ///
+    /// **Zero is rejected here, by [`reject_zero_chunk_width`] — not by the
+    /// JSON schema.** `schemas/whatsapp-bridge.json` does carry `"minimum": 1`
+    /// for this key, and an earlier revision of this comment claimed that was
+    /// the enforcement. It was not: `Channel::config_schema` hands the schema
+    /// out as a `&str` for a host to display, nothing in this workspace
+    /// validates a config against it, and no JSON-Schema validator is a
+    /// dependency of this build. The schema documents the bound; the
+    /// deserializer is what makes it true.
+    #[serde(default, deserialize_with = "reject_zero_chunk_width")]
     pub max_message_chars: Option<usize>,
+}
+
+/// Refuse `max_message_chars = 0` while the operator's file is being parsed.
+///
+/// Zero is not a small cap; it is the ABSENCE of one.
+/// [`ChannelManager::chunks_for`](wcore_channels::manager::ChannelManager::chunks_for)
+/// matches `Some(max) if max > 0` and falls through to `vec![text.to_string()]`
+/// otherwise, so a zero here does not chunk at every character — it disables
+/// chunking entirely and hands the bridge one unbounded body at a limit nobody
+/// has published. That is the reject-and-drop direction (HIGH-6), reached
+/// through the very knob that exists to avoid it.
+///
+/// Rejected rather than silently reinterpreted, and the choice is not
+/// arbitrary. A zero has three candidate readings:
+///
+/// * **"no cap"** — sends the unbounded body. This is what the code did before
+///   this guard, and it is the reading that loses a message.
+/// * **"use the default"** — safe on the wire, but it discards an explicit
+///   operator instruction without saying so, and the next thing that operator
+///   does is trust a width that is not in effect.
+/// * **reject at parse** — the channel does not load, the operator is told
+///   which key and why, and nothing is ever sent under a cap nobody chose.
+///
+/// Only the third can neither drop a message nor lie about what is in effect,
+/// so that is the one taken. Deleting the key is how you ask for the default.
+fn reject_zero_chunk_width<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let width = Option::<usize>::deserialize(deserializer)?;
+    if width == Some(0) {
+        return Err(serde::de::Error::custom(
+            "max_message_chars must be at least 1. Zero does not mean a narrow cap: it \
+             disables chunking and sends the whole body as one message at a limit no vendor \
+             publishes for the WhatsApp Web protocol, which is how a long reply gets rejected \
+             and dropped. Remove the key to take the built-in 4096-character policy default.",
+        ));
+    }
+    Ok(width)
 }
 
 fn default_handshake_timeout_secs() -> u64 {
@@ -633,6 +680,15 @@ impl Channel for WhatsappBridgeChannel {
         Some(
             self.config
                 .max_message_chars
+                // Belt to [`reject_zero_chunk_width`]'s braces. That guard closes
+                // the operator's path — a config file carrying zero never
+                // finishes parsing. This closes the in-process one:
+                // `WhatsappBridgeConfig` is a public struct any caller can build
+                // field by field, and a zero arriving that way would reach
+                // `chunks_for`, match its `_ =>` arm and send the body whole.
+                // There is no operator to tell at that point, so the safe
+                // reading is the documented default rather than no cap at all.
+                .filter(|width| *width > 0)
                 .unwrap_or(BRIDGE_UNMEASURED_CHUNK_WIDTH),
         )
     }
@@ -769,6 +825,91 @@ mod tests {
             Some(BRIDGE_UNMEASURED_CHUNK_WIDTH),
             "known-negative: the override must not be silently ignored back to the default"
         );
+    }
+
+    /// A zero chunk width must not survive parsing, and the whole reason is
+    /// what a zero does downstream rather than what it looks like.
+    ///
+    /// `ChannelManager::chunks_for` reads `Some(max) if max > 0`. A cap of zero
+    /// misses that arm, falls through to `vec![text.to_string()]`, and the body
+    /// goes to the bridge WHOLE — so the knob added to protect an operator from
+    /// HIGH-6 was, at one particular value, the fastest way to reach it. The
+    /// comment on the field used to say the schema rejected zero at parse time.
+    /// It did not: `config_schema()` is handed out as a `&str`, nothing in this
+    /// workspace validates a config against it, and there is no JSON-Schema
+    /// validator in the dependency graph. This is that enforcement, in the one
+    /// place a TOML file actually passes through.
+    ///
+    /// Both directions, because a guard that refuses everything proves as
+    /// little as one that refuses nothing: `1` is the smallest legal width and
+    /// must still be accepted.
+    #[test]
+    fn a_zero_chunk_width_is_refused_while_the_operators_file_is_parsed() {
+        let toml_with = |width: &str| {
+            format!(
+                "backend = \"baileys\"\nbridge_path = \"/nope/bridge.js\"\n\
+                 max_message_chars = {width}\n"
+            )
+        };
+
+        let err = toml::from_str::<WhatsappBridgeConfig>(&toml_with("0"))
+            .expect_err("max_message_chars = 0 must not parse: it disables chunking entirely")
+            .to_string();
+        assert!(
+            err.contains("max_message_chars"),
+            "the refusal must name the key the operator has to change; got: {err}"
+        );
+        assert!(
+            err.contains("at least 1"),
+            "the refusal must say what a legal value is, not only that this one is wrong; got: {err}"
+        );
+
+        // Known-positive: the bound is `>= 1`, not `> 1`, and the guard must not
+        // have quietly become a rejection of every explicit width.
+        let one = toml::from_str::<WhatsappBridgeConfig>(&toml_with("1"))
+            .expect("1 is the smallest legal width and must still parse");
+        assert_eq!(one.max_message_chars, Some(1));
+
+        let unset = toml::from_str::<WhatsappBridgeConfig>(
+            "backend = \"baileys\"\nbridge_path = \"/nope/bridge.js\"\n",
+        )
+        .expect("an absent key is how an operator asks for the policy default");
+        assert_eq!(unset.max_message_chars, None);
+    }
+
+    /// The adapter never declares a zero cap, even built field by field in
+    /// process where no deserializer runs.
+    ///
+    /// `WhatsappBridgeConfig` is `pub` with `pub` fields, so
+    /// `reject_zero_chunk_width` is not on every path that can reach
+    /// `max_message_len`. A zero arriving through Rust rather than through TOML
+    /// would land in `chunks_for`'s `_ =>` arm exactly as an operator's would,
+    /// and there is nobody to hand a parse error to at that point — so the
+    /// adapter falls back to the documented policy width instead of reporting
+    /// no cap at all.
+    #[test]
+    fn an_in_process_zero_cap_falls_back_to_the_policy_width_rather_than_no_cap() {
+        let mut c = cfg(WhatsappBackend::Baileys, PathBuf::from("/nope"));
+        c.max_message_chars = Some(0);
+        let ch = WhatsappBridgeChannel::new("wa", c);
+
+        assert_eq!(
+            ch.max_message_len(),
+            Some(BRIDGE_UNMEASURED_CHUNK_WIDTH),
+            "a zero built in process must not reach the chunker as a declared cap"
+        );
+
+        // The property that actually matters is not the number, it is that a
+        // long body still SPLITS. Read it the way `send_to_keyed` does.
+        let body = "x".repeat(BRIDGE_UNMEASURED_CHUNK_WIDTH * 3);
+        let chunks =
+            wcore_channels::manager::ChannelManager::chunks_for(ch.max_message_len(), &body);
+        assert!(
+            chunks.len() > 1,
+            "a {}-char body went to the bridge as ONE unchunked message",
+            body.chars().count()
+        );
+        assert_eq!(chunks.concat(), body, "the split must be lossless");
     }
 
     /// The default must never be `None`, and must never be raised on the

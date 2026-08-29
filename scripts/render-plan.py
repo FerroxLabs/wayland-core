@@ -85,9 +85,18 @@ def load_ledger():
     return recs
 
 
-def classify(rec, crit, verified_lanes, route):
+def classify(rec, crit, verified_lanes, route, ckey=None):
     st = crit["state"]
     if st in ("met", "superseded"):
+        # PER-CRITERION verdict wins over the lane's. A verifier that returns
+        # PARTIAL is saying "some of this lane holds and some does not", and it
+        # says WHICH -- so demoting the whole lane discards the half it checked
+        # and confirmed. That under-reports, and under-reporting sends the next
+        # session re-verifying settled work. A criterion key here must come from
+        # a verifier that named that criterion explicitly; absence still falls
+        # back to the lane, and absence of both is still CLAIMED.
+        if ckey and ckey in verified_lanes:
+            return DONE if verified_lanes[ckey] == "CONFIRMED" else CLAIMED
         lane = route.get("lane") if route else None
         return DONE if (lane and verified_lanes.get(lane) == "CONFIRMED") else CLAIMED
     if st == "blocked":
@@ -359,7 +368,7 @@ def main():
         for c in r["crits"]:
             ck = "%s %s" % (r["key"], c["id"])
             route = routes.get(ck)
-            state = classify(r, c, verified, route)
+            state = classify(r, c, verified, route, ck)
             kind = r["kind"] or routing.get("kind_overrides", {}).get(r["key"], "")
             row = dict(key=r["key"], title=r["title"], cid=c["id"], text=c["text"],
                        owner=c["owner"], state=state, raw=c["state"], kind=kind,
@@ -373,7 +382,12 @@ def main():
             if state == OPEN:
                 if not route:
                     unrouted.append(row)
-                if kind != "feature":
+                # Must match check-release-readiness.py's exclusion exactly, or
+                # the board and the gate report two different numbers and the
+                # reader has to guess which one is the release. `feature` is an
+                # unshipped roadmap item; `task` is a ticket whose remaining
+                # criteria are all credentials or accounts a human must obtain.
+                if kind not in ("feature", "task"):
                     blocking.append(row)
 
     n = lambda s: sum(1 for r in rows if r["state"] == s)

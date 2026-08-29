@@ -29,7 +29,12 @@ WHAT IS IN SCOPE, AND HOW IT IS DECIDED
     live on GitHub, and the offline arm must work with no network -- so the
     classification is a first-class field in the ledger file itself:
 
-        kind: defect      # or: feature
+        kind: defect      # or: feature, task
+
+    `task` = every remaining criterion is a credential, an account or a
+    platform a human must obtain; there is no code behind it. Excluded from
+    blocking for the same reason `feature` is, and held to the same
+    corroboration rule: a `task` the tracker labels `bug` is a hard failure.
 
     It is REQUIRED. A missing `kind` is a hard failure, not a default,
     because a default is a bypass: whichever way it defaulted, the next
@@ -45,7 +50,7 @@ WHAT IS IN SCOPE, AND HOW IT IS DECIDED
 
 WHAT IT FAILS ON
     * a ledger entry with no `kind:`, or a `kind:` that is not
-      `defect` / `feature`                                    (unclassified)
+      `defect` / `feature` / `task`                           (unclassified)
     * `kind: defect` with a criterion `state: not-met, owner: core`
       -- core still owes work on a defect                       (OUTSTANDING)
     * `kind: defect` with a criterion owned by desktop/flux/maintainer/
@@ -93,7 +98,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-KINDS = ("defect", "feature")
+KINDS = ("defect", "feature", "task")
 # Owners that are NOT core. A criterion in one of these hands work out of the
 # lane, and handing work out is exactly the moment a remainder goes invisible.
 FOREIGN_OWNERS = ("desktop", "flux", "maintainer", "reporter")
@@ -211,9 +216,10 @@ def classify(rec, problems):
     kind = (rec.get("kind") or "").strip()
     if not kind:
         problems.append(
-            "%s: no `kind:` field. Every ledger entry must say `kind: defect` "
-            "or `kind: feature` -- defects block a release, feature requests "
-            "do not, and a field that defaults is a field nobody ever types."
+            "%s: no `kind:` field. Every ledger entry must say `kind: defect`, "
+            "`kind: feature` or `kind: task` -- defects block a release, the "
+            "other two do not, and a field that defaults is a field nobody "
+            "ever types."
             % rec["path"])
         return None
     if kind not in KINDS:
@@ -270,10 +276,11 @@ def run(root, offline=False, injected=None):
 
     ndefect = sum(1 for k in kinds.values() if k == "defect")
     nfeature = sum(1 for k in kinds.values() if k == "feature")
-    say("ledger files: %d   criteria: %d   defect %d / feature %d / "
+    ntask = sum(1 for k in kinds.values() if k == "task")
+    say("ledger files: %d   criteria: %d   defect %d / feature %d / task %d / "
         "unclassified %d"
-        % (len(files), ncrit, ndefect, nfeature,
-           len(kinds) - ndefect - nfeature))
+        % (len(files), ncrit, ndefect, nfeature, ntask,
+           len(kinds) - ndefect - nfeature - ntask))
 
     if ndefect == 0 and not problems:
         # Sixty files, none of them a defect, and therefore nothing this gate
@@ -291,6 +298,19 @@ def run(root, offline=False, injected=None):
     handoffs = set()
 
     for rec in records:
+        # Only `defect` blocks. `feature` is an unshipped roadmap item; `task`
+        # is a ticket whose every remaining criterion is an account, a token or
+        # a platform a human must obtain, with no code change behind it. Neither
+        # is something a user is living with in what we are about to publish.
+        #
+        # `task` exists because without it this gate could never go green. A
+        # credentials shopping list that nobody may ever be able to buy would
+        # block every release forever, and a gate that cannot PASS is worth as
+        # little as one that cannot fail. It is NOT an escape hatch: a `task`
+        # that GitHub labels `bug` is a hard failure below, exactly as a
+        # `feature` is, and the DEFECT a task was split out of keeps blocking on
+        # its own row -- wayland#1186 is the credentials list, wayland#934 is the
+        # defect, and #934 does not stop blocking because #1186 was filed.
         if kinds.get(rec["path"]) != "defect":
             continue
         for c in rec["criteria"]:
@@ -350,18 +370,25 @@ def run(root, offline=False, injected=None):
             repo, num = rec.get("repo"), rec.get("issue")
             got = labels.get(repo, {}).get(int(num)) if str(num).isdigit() else None
             if got is None:
-                if kind == "feature":
+                if kind in ("feature", "task"):
                     uncorroborated.append("%s#%s (not found on the tracker)"
                                           % (repo, num))
                 continue
-            if kind == "feature" and (got & BUG_LABELS):
+            if kind in ("feature", "task") and (got & BUG_LABELS):
                 problems.append(
-                    "MISCLASSIFIED: %s says `kind: feature`, but %s#%s is "
+                    "MISCLASSIFIED: %s says `kind: %s`, but %s#%s is "
                     "labelled %s on GitHub. A defect filed out of scope is the "
                     "one direction of misclassification that shrinks this "
                     "gate's blocking set."
-                    % (rec["path"], repo, num,
+                    % (rec["path"], kind, repo, num,
                        "/".join(sorted(got & BUG_LABELS))))
+            elif kind == "task":
+                # A `task` is never corroborated by a label -- no tracker has a
+                # "this is a shopping list" label -- so every one is a judgement
+                # call and every one shrinks the blocking set. Name them all.
+                uncorroborated.append("%s#%s [kind: task] (labels: %s)"
+                                      % (repo, num,
+                                         ", ".join(sorted(got)) or "none"))
             elif kind == "feature" and not (got & FEATURE_LABELS):
                 uncorroborated.append("%s#%s (labels: %s)"
                                       % (repo, num,
@@ -398,8 +425,8 @@ def run(root, offline=False, injected=None):
             # all. But a `feature` is the classification that removes work
             # from the blocking set, so every one nothing corroborates is
             # named here rather than absorbed into a green line.
-            say("NOTE: %d `kind: feature` classification(s) that no tracker "
-                "label corroborates -- each of these is a judgement call, and "
+            say("NOTE: %d `kind: feature`/`kind: task` classification(s) that no "
+                "tracker label corroborates -- each of these is a judgement call, and "
                 "each one shrinks the blocking set:" % len(uncorroborated))
             for u in uncorroborated:
                 say("        " + u)
@@ -607,13 +634,41 @@ def self_test():
          expect="no `kind:` field")
     case("a `kind:` that is neither defect nor feature", True,
          defect=_DEFECT.replace("kind: defect", "kind: chore"),
-         expect="must be one of defect/feature")
+         expect="must be one of defect/feature/task")
     case("`kind: feature` on an issue GitHub labels `bug`", True,
          feature=_FEATURE.replace("kind: feature", "kind: feature"),
          inj={"labels": {"FerroxLabs/wayland#7": ["bug"],
                          "FerroxLabs/wayland#8": ["bug", "area:core"]},
               "issues": {"FerroxLabs/wayland#11": "open"}},
          expect="MISCLASSIFIED")
+    # ── `kind: task`: excluded from blocking, and NOT an escape hatch ───
+    # A task is a ticket whose every remaining criterion is a credential or an
+    # account a human must obtain. It must be excluded (or the gate can never
+    # go green), and it must be impossible to abuse (or every awkward defect
+    # becomes a task). Both directions are proven here.
+    case("`kind: task` with a not-met CORE criterion does not block", False,
+         feature=_FEATURE.replace("kind: feature", "kind: task").replace(
+             '  - id: c1\n',
+             '  - id: c0\n    text: "a credential nobody can issue"\n'
+             '    state: not-met\n    owner: core\n  - id: c1\n'),
+         inj={"labels": {"FerroxLabs/wayland#7": ["bug"],
+                         "FerroxLabs/wayland#8": []},
+              "issues": {"FerroxLabs/wayland#11": "open"}},
+         expect="OK: every `kind: defect` entry")
+    case("`kind: task` on an issue GitHub labels `bug` is MISCLASSIFIED", True,
+         feature=_FEATURE.replace("kind: feature", "kind: task"),
+         inj={"labels": {"FerroxLabs/wayland#7": ["bug"],
+                         "FerroxLabs/wayland#8": ["bug", "area:core"]},
+              "issues": {"FerroxLabs/wayland#11": "open"}},
+         expect="MISCLASSIFIED")
+    case("every `kind: task` is NAMED, because none can be corroborated",
+         False,
+         feature=_FEATURE.replace("kind: feature", "kind: task"),
+         inj={"labels": {"FerroxLabs/wayland#7": ["bug"],
+                         "FerroxLabs/wayland#8": ["area:core"]},
+              "issues": {"FerroxLabs/wayland#11": "open"}},
+         expect="[kind: task]")
+
     case("`kind: feature` that no label corroborates is NAMED, not failed",
          False,
          inj={"labels": {"FerroxLabs/wayland#7": ["bug"],
