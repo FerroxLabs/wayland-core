@@ -230,6 +230,68 @@ const AUTHORITY_REFUSAL: &str = "Refused by the command floor: this command refe
      replaces that state revokes the guard it is running under, so it is refused below \
      approval and --force alike. Ask the user to edit those files directly.";
 
+/// #355 — the marker every command-floor refusal carries in the PAYLOAD the
+/// model reads.
+///
+/// Without it a refusal is indistinguishable from a missing binary, a
+/// permission error or a flaky sandbox, and a model that cannot tell those
+/// apart does the reasonable thing for a transient failure: it tries another
+/// route. That is the reported incident exactly — the work was staged under a
+/// temporary directory, written at the destination and reported as finished,
+/// and the user was never told a policy had fired at all.
+///
+/// It lives in the payload and NOT in a log line on purpose. `RUST_LOG` is
+/// unset on a default install, so only `ERROR` reaches stderr and a `warn!`
+/// reaches nobody; and the model never reads the log under any setting.
+pub const POLICY_REFUSAL_MARKER: &str = "[POLICY-REFUSAL: command-floor]";
+
+/// The instruction half of the disclosure: what the model must DO about it.
+///
+/// Naming the rule was never the gap — the shipped refusal already did that.
+/// The gap was that nothing told the model this outcome is terminal, so
+/// "try it a different way" stayed the obvious next move.
+const DISCLOSURE_DIRECTIVE: &str = "This is a policy decision, not a transient tool failure. \
+     Retrying it, respelling or quoting the path, staging the work in a temporary directory and \
+     moving it into place, or reaching the same destination by any other route will be refused \
+     identically — the floor answers below approval mode, --force and every environment \
+     override. Do NOT work around it and do NOT continue as though the step had succeeded. Stop \
+     this line of work and tell the user, in your reply, that the command was blocked by the \
+     Wayland command floor and which rule it hit, so they can decide what to do.";
+
+/// Compose the refusal payload: the rule that fired, then the policy marker
+/// and the instruction to surface it.
+fn disclose(reason: &str) -> String {
+    format!("{reason}\n\n{POLICY_REFUSAL_MARKER} {DISCLOSURE_DIRECTIVE}")
+}
+
+/// True when `text` is a command-floor refusal rather than a tool failure.
+///
+/// The one predicate every surface that wants to treat a policy refusal
+/// differently from a failed command asks. Matching the marker, not the
+/// refusal prose, is the point: the prose is written for the model and is
+/// free to change.
+pub fn is_policy_refusal(text: &str) -> bool {
+    text.contains(POLICY_REFUSAL_MARKER)
+}
+
+/// The USER-facing notice for a refusal payload, or `None` when the payload is
+/// an ordinary tool failure.
+///
+/// The payload directive asks the model to disclose the refusal; this is the
+/// disclosure that does not depend on it complying. `disclose` puts the rule
+/// on the payload's first line precisely so this can quote it verbatim
+/// instead of paraphrasing a policy.
+pub fn policy_refusal_notice(tool_name: &str, payload: &str) -> Option<String> {
+    if !is_policy_refusal(payload) {
+        return None;
+    }
+    let rule = payload.lines().next().unwrap_or_default().trim();
+    Some(format!(
+        "Blocked by policy, not by a failure — `{tool_name}` was refused before it ran. {rule} \
+         The agent has been told to stop and report this rather than route around it."
+    ))
+}
+
 /// Returns `Some(reason)` when `command` must be refused before any shell is
 /// spawned. `None` means the floor has no opinion — every other guard still
 /// applies.
@@ -263,7 +325,9 @@ pub fn floor_refusal(command: &str, cwd: Option<&Path>) -> Option<String> {
         let cwds = candidate_cwds(text, cwd.as_deref());
         for token in path_tokens(text) {
             if let Some(reason) = token_refusal(&token, &cwds, &protected, dir_components) {
-                return Some(reason.to_string());
+                // #355 — never the bare rule. Every refusal leaves here
+                // carrying the policy marker and the stop instruction.
+                return Some(disclose(reason));
             }
         }
     }
@@ -1797,6 +1861,75 @@ mod tests {
                 floor_refusal(command, Some(Path::new("/work"))).is_some(),
                 "must be refused: {command}"
             );
+        }
+    }
+
+    // ── #355 — disclosure ──────────────────────────────────────────────────
+
+    /// The spelling of the marker is duplicated in
+    /// `crates/wcore-agent/tests/floor_refusal_reaches_the_user.rs`, which
+    /// spells it locally so its red arm compiles against a tree without the
+    /// fix. This pins the two together; if the constant is renamed, this
+    /// fails rather than the e2e test going quietly vacuous.
+    #[test]
+    fn the_policy_marker_spelling_is_pinned_to_its_e2e_test() {
+        assert_eq!(POLICY_REFUSAL_MARKER, "[POLICY-REFUSAL: command-floor]");
+    }
+
+    #[test]
+    fn every_refusal_carries_the_marker_and_the_stop_instruction() {
+        for command in [
+            "echo x > .git/hooks/pre-commit",
+            "cat .wayland-core/config.toml",
+            "cp /tmp/evil ~/.wayland/permissions.toml",
+        ] {
+            let refusal = floor_refusal(command, Some(Path::new("/work")))
+                .unwrap_or_else(|| panic!("must be refused: {command}"));
+            assert!(
+                refusal.contains(POLICY_REFUSAL_MARKER),
+                "no policy marker in the payload for {command}: {refusal}"
+            );
+            assert!(
+                refusal.contains("Do NOT work around it"),
+                "no stop instruction in the payload for {command}: {refusal}"
+            );
+            assert!(
+                is_policy_refusal(&refusal),
+                "the predicate must recognise its own payload: {refusal}"
+            );
+        }
+    }
+
+    /// The rule stays the FIRST line, because `policy_refusal_notice` quotes
+    /// that line verbatim to the user rather than paraphrasing a policy.
+    #[test]
+    fn the_rule_is_the_first_line_and_the_notice_quotes_it() {
+        let refusal =
+            floor_refusal("echo x > .git/hooks/pre-commit", Some(Path::new("/work"))).unwrap();
+        let first = refusal.lines().next().unwrap();
+        assert!(first.starts_with("Refused by the command floor:"));
+        assert!(first.contains("repository control surface"));
+
+        let notice = policy_refusal_notice("Bash", &refusal).expect("a policy refusal");
+        assert!(notice.contains("Blocked by policy"), "{notice}");
+        assert!(notice.contains("`Bash`"), "{notice}");
+        assert!(
+            notice.contains(first),
+            "the notice must quote the rule: {notice}"
+        );
+    }
+
+    /// The polarity that makes the marker mean anything: an ordinary tool
+    /// failure is not a policy refusal and raises no notice.
+    #[test]
+    fn a_transient_failure_is_not_a_policy_refusal() {
+        for text in [
+            "bash: wl: command not found",
+            "error: exit code 1",
+            "Refused by the credential denylist: this command reads a secret",
+        ] {
+            assert!(!is_policy_refusal(text), "{text}");
+            assert!(policy_refusal_notice("Bash", text).is_none(), "{text}");
         }
     }
 }

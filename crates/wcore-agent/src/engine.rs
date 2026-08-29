@@ -16205,6 +16205,25 @@ impl AgentEngine {
 
                     self.output.emit_tool_result(tool_name, *is_error, content);
 
+                    // #355 — a command-floor refusal is a POLICY decision, and
+                    // the user has to be told even when the model decides not
+                    // to tell them. The payload carries the stop instruction
+                    // (`command_floor::disclose`), but a payload is only ever
+                    // as good as the model's compliance, and the reported
+                    // incident is exactly the case where it improvised instead.
+                    // This is the half that does not depend on it: `emit_info`
+                    // is the sink the user reads — the terminal formatter's
+                    // session line, and `ProtocolEvent::Info` for the TUI and
+                    // json-stream hosts. A `warn!` here would reach nobody:
+                    // `RUST_LOG` is unset on a default install, so only ERROR
+                    // makes it to stderr.
+                    if *is_error
+                        && let Some(notice) =
+                            wcore_config::command_floor::policy_refusal_notice(tool_name, content)
+                    {
+                        self.output.emit_info(&notice);
+                    }
+
                     // Layer D1 follow-up (hydrated-tool admission): a
                     // successful ToolSearch teaches the model a tool's
                     // schema. Record the returned names so the curation/cap
