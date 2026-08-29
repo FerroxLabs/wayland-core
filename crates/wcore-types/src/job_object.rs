@@ -59,8 +59,9 @@
 //! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, `CREATE_SUSPENDED`,
 //! `resume_only_thread`, its own `unsafe impl Send` and `Drop`, and its own
 //! `Win32_System_Diagnostics_ToolHelp` dependency). Folding it in is a
-//! deliberate separate change — it also owns `IsProcessInJob` /
-//! `QueryInformationJobObject` membership assertions this type does not have.
+//! deliberate separate change — it also owns a `QueryInformationJobObject`
+//! process-id-list assertion this type does not have. (Its `IsProcessInJob`
+//! half is no longer unique to it: see [`WindowsJobObject::contains`].)
 //!
 //! Nor are there only two consumers. `attach` has two DIRECT callers
 //! (`wcore-mcp`'s stdio transport and `wcore-sandbox`'s `ProcessTreeGuard`),
@@ -118,6 +119,32 @@ impl WindowsJobObject {
     /// both shapes — but must not read this as "the child is always still
     /// alive to be killed".
     pub fn attach(pid: u32) -> std::io::Result<Self> {
+        let job = Self::attach_running(pid)?;
+        Self::resume_process_threads(pid)?;
+        Ok(job)
+    }
+
+    /// Create a kill-on-close job and assign the ALREADY-RUNNING process `pid`
+    /// to it, without touching its threads.
+    ///
+    /// # The window this variant does not close — read before choosing it
+    ///
+    /// [`attach`](Self::attach) is the race-free constructor and is what any
+    /// caller that controls the `Command` must use: a `CREATE_SUSPENDED` child
+    /// has provably executed no instruction, so EVERY descendant it will ever
+    /// have is created after the assignment and is therefore inside the job.
+    ///
+    /// This variant is for the callers that do not hold the `Command` — they
+    /// are handed an already-spawned handle. The kernel puts a process's
+    /// FUTURE descendants in the job, never its existing ones, so anything the
+    /// process managed to spawn between `CreateProcess` returning and the
+    /// assignment landing stays outside the job forever and this type will
+    /// never kill it. That window is a handful of microseconds during which
+    /// the child has not finished loading its own image, so in practice
+    /// nothing escapes through it — but "in practice" is the whole caveat, and
+    /// a caller that needs a proof rather than a probability must restructure
+    /// to use [`attach`](Self::attach).
+    pub fn attach_running(pid: u32) -> std::io::Result<Self> {
         use std::mem;
         use std::ptr;
         use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
@@ -163,8 +190,50 @@ impl WindowsJobObject {
             if let Some(error) = assign_error {
                 return Err(error);
             }
-            Self::resume_process_threads(pid)?;
             Ok(job)
+        }
+    }
+
+    /// Is `pid` a member of THIS job?
+    ///
+    /// The membership question the type could not answer before: every other
+    /// method here acts on the job, so a test that wanted to know whether a
+    /// descendant had actually landed inside it had to infer that from the
+    /// descendant dying — which is the thing under test, and therefore no
+    /// evidence at all. `IsProcessInJob` asks the kernel directly, so an
+    /// ownership test can prove it is not vacuous BEFORE it kills anything.
+    ///
+    /// Answers only about this handle's job. A process in a PARENT job and not
+    /// in this one reports `false`, which is the reading callers want: this
+    /// type only ever terminates its own job.
+    pub fn contains(&self, pid: u32) -> std::io::Result<bool> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        // SAFETY: a null return is checked before use, and the handle is
+        // closed on every path out.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut member: windows_sys::Win32::Foundation::BOOL = 0;
+        // SAFETY: `process` is a live handle opened with the query right,
+        // `self.0` is a live job handle, and `member` is a valid out-pointer.
+        let ok = unsafe { IsProcessInJob(process, self.0, &raw mut member) };
+        // Captured before `CloseHandle`, which overwrites the last-error slot.
+        let error = if ok == 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        // SAFETY: `process` was returned by OpenProcess and is not used after.
+        unsafe { CloseHandle(process) };
+        match error {
+            Some(error) => Err(error),
+            None => Ok(member != 0),
         }
     }
 
