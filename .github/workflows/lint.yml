@@ -126,6 +126,8 @@ jobs:
         run: |
           bash .github/scripts/tests/assert-test-evidence.test.sh
           bash .github/scripts/tests/report-gate-wiring.test.sh
+          bash .github/scripts/tests/outer-retry-evidence.test.sh
+          bash .github/scripts/tests/soak-tracker-truth.test.sh
 
       # Same disk reclaim the ci.yml Linux legs use — a full --all-targets
       # clippy of this 54-crate workspace does not fit in the default free space.
