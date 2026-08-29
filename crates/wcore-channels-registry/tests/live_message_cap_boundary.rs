@@ -480,14 +480,23 @@ fn a_byte_budget_cell_states_why_the_two_point_probe_cannot_decide_it() {
     );
 }
 
-/// **wayland#934 c8.** A settled UTF-16 verdict must be enforced against the
-/// shipped cap, not merely recorded beside it.
+/// **wayland#934 c8.** A settled verdict must be enforced against the shipped
+/// cap and must not silently un-settle, not merely be recorded beside it.
 ///
-/// No cell has settled one yet, so this test is green today by having nothing
-/// to enforce — which is exactly the state that makes a rule rot. The
-/// enforcement is therefore exercised in the same run by
+/// Two jobs. First, `unit_safety_faults` over every cell: no cell has settled a
+/// UTF-16 verdict yet, so that half is green today by having nothing to
+/// enforce — exactly the state that makes a rule rot, which is why the
+/// enforcement is exercised in the same run by
 /// [`the_unit_rule_refuses_a_cap_a_utf16_verdict_makes_unsafe`] over the same
-/// function, and the census below keeps the owed runs visible.
+/// function.
+///
+/// Second, the census is a RATCHET rather than a print. Telegram's unit was
+/// settled by an astral-plane run on 2026-08-29 — it counts scalars, so the
+/// shipped 4,096 stands — and that settlement lives in a cell a later edit
+/// could quietly revert to `UnsettledAsciiOnly`, which would look like
+/// housekeeping and would silently withdraw the only credentialled unit
+/// measurement the programme has. A key may leave [`STILL_UNSETTLED`] when a
+/// run settles it; nothing may join it.
 #[test]
 fn a_settled_unit_verdict_is_enforced_against_the_shipped_cap() {
     let caps = shipped_caps();
@@ -521,7 +530,32 @@ fn a_settled_unit_verdict_is_enforced_against_the_shipped_cap() {
         };
         println!("  UNSETTLED {key} needs: {needs}");
     }
+
+    let regressed: Vec<&str> = unsettled
+        .iter()
+        .copied()
+        .filter(|k| !STILL_UNSETTLED.contains(k))
+        .collect();
+    assert!(
+        regressed.is_empty(),
+        "{regressed:?}: settled by a real run and now recorded UnsettledAsciiOnly again. A \
+         verdict that took a credential and a destination to obtain must not be withdrawn by an \
+         edit to a literal — re-drive the arm or take the key out of STILL_UNSETTLED on purpose"
+    );
 }
+
+/// The cells whose unit question is still OPEN, and the only ones allowed to be.
+///
+/// A key leaves this list when a run settles it. Nothing joins it: see
+/// [`a_settled_unit_verdict_is_enforced_against_the_shipped_cap`]. Telegram was
+/// on it until 2026-08-29 and is the reason the list exists — it was the sharp
+/// case, because `sendMessage` documents "characters" while `MessageEntity` on
+/// the same page indexes in UTF-16 code units. Measured: it counts scalars.
+///
+/// Matrix and MS Teams are absent for a different reason and never appear here:
+/// they are byte-budget cells, so their boundary is `Derived` and the loop above
+/// never reaches a `CapUnit` for them at all.
+const STILL_UNSETTLED: &[&str] = &["slack", "discord"];
 
 /// **Can it fail** — the unit rule, driven over a settled verdict.
 ///
