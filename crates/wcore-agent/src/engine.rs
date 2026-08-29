@@ -37173,6 +37173,237 @@ mod retry_wedge_protection_tests {
         );
     }
 
+    // --- #388: the clean retry and the progress gate on a DURABLE session ---
+
+    /// A scripted provider that goes through a real physical send boundary
+    /// first, which a durable session requires before any scripted event
+    /// becomes visible, and counts the sends it was asked for.
+    struct DurableScriptedProvider {
+        scripts: Mutex<std::collections::VecDeque<Vec<LlmEvent>>>,
+        sends: Arc<std::sync::atomic::AtomicUsize>,
+        url: Option<String>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for DurableScriptedProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.sends
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(url) = self.url.as_deref() {
+                let client = wcore_egress::EgressClient::new()
+                    .with_policy(Arc::new(wcore_egress::AllowAllPolicy));
+                let response = wcore_providers::retry::scope_max_retries(
+                    0,
+                    wcore_providers::retry::builder_send_with_retry(client.get(url)),
+                )
+                .await?;
+                if !response.status().is_success() {
+                    return Err(ProviderError::Api {
+                        status: response.status().as_u16(),
+                        message: "fixture".into(),
+                    });
+                }
+            }
+            let script = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                for ev in script {
+                    let _ = tx.send(ev).await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    /// The same history shape as [`failed_tool_round_history`], with the tool
+    /// round's outcome as the only variable. `is_error = false` is the arm the
+    /// retry stub does not touch.
+    fn tool_round_history(body: &str, is_error: bool) -> Vec<Message> {
+        vec![
+            Message::now(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "do the thing".into(),
+                }],
+            ),
+            Message::now(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "BigTool".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::now(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: body.into(),
+                    is_error,
+                }],
+            ),
+        ]
+    }
+
+    struct RetryArm {
+        result: String,
+        sends: usize,
+    }
+
+    async fn drive_retry_arm(
+        scripts: Vec<Vec<LlmEvent>>,
+        history: Vec<Message>,
+        durable: Option<&str>,
+    ) -> RetryArm {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Held for the lifetime of the run: dropping the server or the session
+        // root mid-run would fail the arm for a reason that is not the subject.
+        let (server, dir) = if durable.is_some() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            (Some(server), Some(dir))
+        } else {
+            (None, None)
+        };
+        let provider = Arc::new(DurableScriptedProvider {
+            scripts: Mutex::new(scripts.into_iter().collect()),
+            sends: Arc::clone(&sends),
+            url: server.as_ref().map(|s| s.uri()),
+        });
+        let mut engine = wedge_engine(provider);
+        engine.output = Arc::new(TestSink::new());
+        if let (Some(sid), Some(dir)) = (durable, dir.as_ref()) {
+            let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+            let active = manager.create_for_run("test", "m", "/tmp", Some(sid)).unwrap();
+            engine.session_manager = Some(manager);
+            engine.current_session = Some(active.session);
+            engine.session_journal = Some(active.journal);
+        }
+        engine.messages = history;
+        let result = engine.run("try again", "m-388-retry").await;
+        let rendered = match &result {
+            Ok(ok) => format!("Ok({:?}/{:?})", ok.stop_reason, ok.finish_reason),
+            Err(e) => format!("Err({e})"),
+        };
+        drop(engine);
+        drop(server);
+        drop(dir);
+        RetryArm {
+            result: rendered.chars().take(300).collect(),
+            sends: sends.load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+
+    /// #388 — a stream failure on a turn whose last tool round FAILED must
+    /// still retry on a durable session.
+    ///
+    /// `stub_failed_tool_results_for_retry` rewrites that failed tool-result
+    /// body in the OUTBOUND copy of the request. On the next attempt
+    /// `commit_provider_recovery_checkpoint` proves the prepared request
+    /// against the durable conversation, and a rewritten `ToolResult` body is
+    /// exactly what that proof refuses — so on every durable session the retry
+    /// never leaves the engine. The run dies with an internal journal-authority
+    /// error instead of the provider's own failure, and the output-stall
+    /// progress gate written for this scenario is never reached.
+    ///
+    /// Two controls, and neither is decoration. Control A changes ONE bit of
+    /// the history — the tool round succeeded — so the stub does not fire; it
+    /// passing proves the durable retry path is otherwise sound and that a red
+    /// subject is the stub, not the journal. Control B runs the subject's exact
+    /// scripts with no journal at all; it passing proves the gate is alive off
+    /// the durable path, so this is a durable-session defect and not a broken
+    /// harness.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_failed_tool_round_still_retries_on_a_durable_session() {
+        let body = format!("CONTAMINATED-MARKER {}", "x".repeat(1_000));
+
+        let subject = drive_retry_arm(
+            vec![
+                vec![LlmEvent::Error("boom".into())],
+                vec![
+                    LlmEvent::TextDelta("recovered".into()),
+                    done(StopReason::EndTurn, FinishReason::Stop, 10),
+                ],
+            ],
+            tool_round_history(&body, true),
+            Some("38800000c6a1"),
+        )
+        .await;
+
+        let control_a = drive_retry_arm(
+            vec![
+                vec![LlmEvent::Error("boom".into())],
+                vec![
+                    LlmEvent::TextDelta("recovered".into()),
+                    done(StopReason::EndTurn, FinishReason::Stop, 10),
+                ],
+            ],
+            tool_round_history(&body, false),
+            Some("38800000c6b2"),
+        )
+        .await;
+
+        let control_b = drive_retry_arm(
+            vec![
+                vec![LlmEvent::Error("boom".into())],
+                vec![
+                    LlmEvent::TextDelta("recovered".into()),
+                    done(StopReason::EndTurn, FinishReason::Stop, 10),
+                ],
+            ],
+            tool_round_history(&body, true),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            control_a.sends, 2,
+            "CONTROL A: a durable session whose last tool round SUCCEEDED must \
+             retry a failed stream — if this is 1 the durable retry path is \
+             broken for a reason that is not the subject: {}",
+            control_a.result
+        );
+        assert!(
+            control_a.result.starts_with("Ok("),
+            "CONTROL A must recover on the retry: {}",
+            control_a.result
+        );
+        assert_eq!(
+            control_b.sends, 2,
+            "CONTROL B: with no journal the same scripts must retry — if this \
+             is 1 the harness never reached the retry at all: {}",
+            control_b.result
+        );
+
+        assert!(
+            !subject.result.contains("changes durable content"),
+            "#388: the clean-retry stub rewrites a durable ToolResult body in \
+             the outbound request, and the provider-dispatch checkpoint refuses \
+             it — so on a durable session a stream failure after a FAILED tool \
+             round cannot retry, and the user is handed an internal journal \
+             error in place of the provider's. Got: {}",
+            subject.result
+        );
+        assert_eq!(
+            subject.sends, 2,
+            "#388: the retry must reach the provider on a durable session too. \
+             sends={} result={}",
+            subject.sends, subject.result
+        );
+    }
+
     // --- B: clean-retry stub + progress gate (spec v1 Task 5) --------------
 
     /// History whose most recent tool round FAILED with a huge error body.
