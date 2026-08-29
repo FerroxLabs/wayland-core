@@ -103,6 +103,42 @@ jobs:
           python3 scripts/check-criteria-ledger.py --self-test
           python3 scripts/check-criteria-ledger.py
 
+      # ── release-readiness gate ────────────────────────────────────────
+      # The step above checks that the LEDGER is honest. This one checks
+      # that the WORK is done. They are not the same question, and until
+      # this step existed only the first one could ever go red: on the tree
+      # this was added to, 67 criteria were `not-met` and owned by `core`
+      # while `just ledger-check` was completely green. Nothing in this
+      # repository has ever refused a release for being incomplete.
+      #
+      # It fails while any `kind: defect` ledger entry still carries a
+      # criterion that is `not-met` and owned by `core`, and while any
+      # criterion handed to desktop/flux/maintainer names no `handoff:`
+      # ticket that exists and is open. Feature requests are out of scope
+      # by design — an unshipped feature is a roadmap item; an unfixed
+      # defect is something a user is living with in what we are about to
+      # publish.
+      #
+      # HERE, and not in the CI matrix, for a reason the other two gates on
+      # this job do not share: this one is red BY DESIGN for as long as any
+      # defect is open, which mid-cycle is always. In `check-all` it would
+      # be red on every in-progress lane, and a gate everyone bypasses is a
+      # gate nobody reads. `check-all` runs its SELF-TEST instead, so the
+      # checker cannot rot between releases; the gate itself runs here,
+      # where every publishing job depends on `prepare-release` and a FAIL
+      # actually stops the release.
+      #
+      # Same token as the step above: `LEDGER_ISSUES_TOKEN` needs issue-read
+      # on BOTH repositories. The repo-scoped GITHUB_TOKEN cannot see the
+      # second tracker, and if it is what ends up being used this step says
+      # so by failing rather than by quietly corroborating nothing.
+      - name: No in-scope defect still owes core work
+        env:
+          GH_TOKEN: ${{ secrets.LEDGER_ISSUES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/check-release-readiness.py --self-test
+          python3 scripts/check-release-readiness.py
+
       - name: Extract version from tag
         id: metadata
         shell: bash
