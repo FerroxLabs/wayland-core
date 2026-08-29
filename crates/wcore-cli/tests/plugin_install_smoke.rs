@@ -121,3 +121,38 @@ fn default_registry_loads_all_v0_6_entries() {
     // appear in the embedded install catalog.
     assert!(!names.contains(&"wayland-ijfw"));
 }
+
+/// Issue #113 — the catalog `wayland plugin list` prints must not advertise a
+/// backend that does not exist.
+///
+/// The embedded description read "Camoufox / chromiumoxide / Browserbase".
+/// There is no chromiumoxide backend in this workspace and there never was;
+/// `wcore-browser` ships `CamoufoxBackend` and `BrowserbaseBackend` only. This
+/// is the user-facing half of the same false claim the report in #113 was
+/// built on, so it is guarded on the same terms.
+#[test]
+fn the_browser_plugin_description_names_only_real_backends() {
+    let reg = wcore_cli::plugin::registry::Registry::load_default().unwrap();
+    let entries = reg.list_available();
+    let browser = entries
+        .iter()
+        .find(|m| m.name == "wayland-browser")
+        .expect("wayland-browser is in the embedded catalog");
+
+    assert!(
+        !browser
+            .description
+            .to_ascii_lowercase()
+            .contains("chromiumoxide"),
+        "the catalog advertises a chromiumoxide backend that does not exist: {}",
+        browser.description
+    );
+    // POSITIVE CONTROL: the description is still a real description naming the
+    // backends that DO exist, not an empty string the assertion above would
+    // pass on for the wrong reason.
+    assert!(
+        browser.description.contains("Camoufox") && browser.description.contains("Browserbase"),
+        "the two real backends must still be named: {}",
+        browser.description
+    );
+}
