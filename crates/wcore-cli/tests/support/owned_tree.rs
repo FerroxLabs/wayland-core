@@ -27,6 +27,32 @@
 //! supervisor's group never reaches it. Descendants are therefore enumerated
 //! explicitly and killed by pid.
 //!
+//! ## Why Windows is a Job Object and not a parent-pid walk
+//!
+//! Windows has no process group and no `/proc`. It also does not reparent an
+//! orphan, so a parent-pid walk is *possible* there — but it is the weaker
+//! mechanism: it races pid reuse, it can only ever kill what it managed to
+//! observe, and a descendant created between the snapshot and the kill is
+//! missed. The kernel-backed equivalent of `kill(-pgid)` is a Job Object with
+//! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, which a descendant cannot leave the
+//! way a Unix child can `setsid` out of its group. The workspace already owns
+//! exactly that primitive — [`wcore_types::job_object::WindowsJobObject`],
+//! used by `wcore-mcp`'s stdio transport and `wcore-sandbox`'s
+//! `ProcessTreeGuard` — so this guard uses it rather than growing a second
+//! mechanism (FerroxLabs/wayland-core#358).
+//!
+//! The two arms are therefore NOT the same shape, and the fields say so:
+//! `known` (the snapshotted descendant pid list) is a Unix-only concept and is
+//! always empty on Windows, where the job — not a list — is what owns the
+//! tree.
+//!
+//! What the Windows arm still cannot promise: [`OwnedTree::new`] is handed a
+//! process that is ALREADY RUNNING, so it assigns it to the job after the
+//! fact. Descendants created in the microseconds between `CreateProcess`
+//! returning and the assignment landing are outside the job forever. See
+//! [`wcore_types::job_object::WindowsJobObject::attach_running`] for the
+//! precise statement of that window and the constructor that closes it.
+//!
 //! ## Why this does not shell out to `pgrep` on Linux
 //!
 //! It must not. The `CI (linux-containerized)` job's image ships without
@@ -89,18 +115,15 @@ pub fn child_pids(parent: u32) -> Vec<u32> {
         .collect()
 }
 
-/// Windows has no cheap parent-pid walk without a `windows`/`sysinfo`
-/// dependency this crate does not carry, so the guard degrades to killing the
-/// direct child only — exactly what the leaking sites already did there. The
-/// leak this module closes was measured on Linux; the Windows tree case is
-/// NOT covered here and is deliberately left visible rather than faked.
-#[cfg(windows)]
-pub fn child_pids(_parent: u32) -> Vec<u32> {
-    Vec::new()
-}
-
 /// Every descendant of `root`, breadth-first. Bounded by a visited set so a
 /// pid that is somehow its own ancestor cannot loop forever.
+///
+/// Unix-only, and deliberately not stubbed out on Windows: a `Vec::new()`
+/// Windows arm is a walk that reports no descendants for a tree that has
+/// them, which is how the guard came to look present there while owning
+/// nothing. The Windows arm owns the tree through a Job Object instead — see
+/// the module docs.
+#[cfg(unix)]
 pub fn descendants(root: u32) -> Vec<u32> {
     let mut seen = vec![root];
     let mut queue = vec![root];
@@ -126,10 +149,47 @@ fn sigkill(pid: u32) {
     unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
 }
 
-/// Never reached in practice: `child_pids` is empty on Windows, so the
-/// descendant list this would be called over is always empty there.
+/// SIGKILL every pid in `known`.
+///
+/// Windows has no arm here and does not need one: `known` is always empty
+/// there (see the field docs), and the job — not this list — is what kills the
+/// descendants. The `debug_assert` is the guard against that invariant
+/// quietly changing and this becoming a silent no-op over a non-empty list.
+#[cfg(unix)]
+fn kill_all(known: &[u32]) {
+    for pid in known {
+        sigkill(*pid);
+    }
+}
+
 #[cfg(windows)]
-fn sigkill(_pid: u32) {}
+fn kill_all(known: &[u32]) {
+    debug_assert!(
+        known.is_empty(),
+        "the descendant pid list must stay empty on Windows — the Job Object \
+         owns the tree there, and a non-empty list means some walk is filling \
+         it that nothing acts on"
+    );
+}
+
+/// Put `pid` in a fresh kill-on-close Job Object, or fail the test loudly.
+///
+/// There is deliberately no fallback. The Linux arm has none either: it reads
+/// `/proc` and refuses to degrade to `pgrep`. A Windows arm that swallowed
+/// this error would hand back a guard that owns the leaf and silently leaks
+/// every descendant — the exact state FerroxLabs/wayland-core#358 was filed
+/// about, and one that no assertion anywhere can see.
+#[cfg(windows)]
+fn own_windows_tree(pid: u32) -> wcore_types::job_object::WindowsJobObject {
+    wcore_types::job_object::WindowsJobObject::attach_running(pid).unwrap_or_else(|error| {
+        panic!(
+            "could not assign child pid {pid} to a kill-on-close Job Object ({error}); \
+             on Windows that job is the ONLY thing this guard has that reaches a \
+             descendant, so continuing would leak the process TREE \
+             (FerroxLabs/wayland-core#358)"
+        )
+    })
+}
 
 /// A spawned process this harness can kill and reap.
 ///
@@ -207,16 +267,50 @@ pub struct OwnedTree<C: Reapable> {
     /// Descendants observed at any point in this guard's life. Snapshotted
     /// BEFORE the direct child is killed, because a descendant reparents to
     /// init the instant its parent dies and the parent link is then gone.
+    ///
+    /// Unix only. On Windows it is constructed empty and never written to:
+    /// the job below is what owns the tree there, and a pid list that is
+    /// always empty must not be mistaken for one that found nothing.
     known: Vec<u32>,
+    /// The kill-on-close Job Object holding the direct child and every
+    /// descendant it goes on to create.
+    ///
+    /// `None` only when the handle had no pid to assign — a process that had
+    /// already exited and been reaped before the guard was built, which owns
+    /// nothing by definition. Any other failure to create the job PANICS in
+    /// [`OwnedTree::new`] rather than degrading quietly.
+    #[cfg(windows)]
+    job: Option<wcore_types::job_object::WindowsJobObject>,
 }
 
 impl<C: Reapable> OwnedTree<C> {
     /// Take ownership of an already-spawned process.
+    ///
+    /// On Windows this is also where the tree becomes owned: the child is
+    /// assigned to a fresh kill-on-close Job Object, so every process it
+    /// creates from here on is inside that job and dies with it. See the
+    /// module docs for the one window this cannot close.
     pub fn new(child: C) -> Self {
+        #[cfg(windows)]
+        let job = child.pid().map(own_windows_tree);
         Self {
             child: Some(child),
             known: Vec::new(),
+            #[cfg(windows)]
+            job,
         }
+    }
+
+    /// The Job Object owning this guard's tree.
+    ///
+    /// Exposed so an ownership test can ask the KERNEL whether a descendant
+    /// actually landed inside the job before it kills anything — without it,
+    /// the only available evidence that the job contains the grandchild is the
+    /// grandchild dying, which is the claim under test and therefore not
+    /// evidence.
+    #[cfg(windows)]
+    pub fn job(&self) -> Option<&wcore_types::job_object::WindowsJobObject> {
+        self.job.as_ref()
     }
 
     /// The direct child's pid.
@@ -247,6 +341,7 @@ impl<C: Reapable> OwnedTree<C> {
     /// Record the current descendant set, unioned with everything already
     /// recorded. Called before every kill so the list survives the moment the
     /// parent link disappears.
+    #[cfg(unix)]
     pub fn snapshot(&mut self) {
         let Some(pid) = self.child.as_ref().and_then(Reapable::pid) else {
             return;
@@ -257,6 +352,13 @@ impl<C: Reapable> OwnedTree<C> {
             }
         }
     }
+
+    /// No-op on Windows, and not a degradation: the job already holds every
+    /// descendant, so there is nothing to record and no moment at which the
+    /// membership could be lost. Kept as a method so the call sites below read
+    /// the same on both platforms.
+    #[cfg(windows)]
+    pub fn snapshot(&mut self) {}
 
     /// Kill and reap the DIRECT child only, leaving its descendants running.
     ///
@@ -280,8 +382,13 @@ impl<C: Reapable> OwnedTree<C> {
         if let Some(child) = self.child.as_mut() {
             child.kill_direct();
         }
-        for pid in &self.known {
-            sigkill(*pid);
+        kill_all(&self.known);
+        // Windows: the job is what reaches the descendants, and it reaches the
+        // ones no walk could have seen. Idempotent, so a second `reap` and the
+        // `Drop` that follows are both harmless.
+        #[cfg(windows)]
+        if let Some(job) = self.job.as_ref() {
+            job.terminate();
         }
         // Reap, so the direct child does not linger as a zombie.
         if let Some(child) = self.child.as_mut() {
@@ -335,9 +442,7 @@ impl OwnedTree<Child> {
     pub fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
         let (child, known) = self.take_for_output();
         let out = child.wait_with_output();
-        for pid in &known {
-            sigkill(*pid);
-        }
+        kill_all(&known);
         out
     }
 }
@@ -348,9 +453,7 @@ impl OwnedTree<tokio::process::Child> {
     pub async fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
         let (child, known) = self.take_for_output();
         let out = child.wait_with_output().await;
-        for pid in &known {
-            sigkill(*pid);
-        }
+        kill_all(&known);
         out
     }
 }
