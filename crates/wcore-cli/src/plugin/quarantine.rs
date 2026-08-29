@@ -317,9 +317,26 @@ fn normalize_copy(src: &Path, dst: &Path, copied: &mut u64, cap: u64) -> Result<
 /// controlling terminal away rather than to ask the child not to use it:
 /// `setsid(2)` between fork and exec puts the child in a fresh session with no
 /// ctty, `open("/dev/tty")` then fails with `ENXIO`, and every descendant the
-/// child spawns — helpers included — inherits that session. On Windows the
-/// analogue is `DETACHED_PROCESS`, which denies the child the parent's console
-/// and so `CONIN$`/`CONOUT$` with it.
+/// child spawns — helpers included — inherits that session.
+///
+/// **Windows is NOT the same guarantee, and the difference is measured.**
+/// `DETACHED_PROCESS` denies the child the parent's console, so `CONIN$` /
+/// `CONOUT$` fail — that much is real and graded by
+/// `crates/wcore-cli/tests/quarantine_terminal_authority_windows.rs`. What it
+/// does NOT do is make the child unable to obtain a console: Win32 offers
+/// `AllocConsole()` to a console-less process and
+/// `AttachConsole(ATTACH_PARENT_PROCESS)` to reach the parent's, where
+/// `setsid` has no equivalent (`TIOCSCTTY` refuses a tty that is already
+/// another session's ctty). MEASURED on Windows 11 26200, 2026-08-29, through
+/// the production `build_git_command`: an UNHARDENED child's
+/// `GetConsoleProcessList` contains this process's pid, a hardened `cmd` child
+/// is DENIED `CONOUT$`, and a hardened `git` running a `!`-alias reports a
+/// console that does NOT contain our pid — three pids of its own, allocated by
+/// the MSYS2 `sh` Git for Windows runs aliases through. So on Windows the
+/// property is "the child does not end up on the USER'S console", not "the
+/// child can have no console at all". A prompt is still possible in a console
+/// the child made for itself; it just cannot land on the terminal the install
+/// was launched from.
 ///
 /// `credential.helper` is deliberately NOT cleared. Clearing it would break
 /// installs from private plugin sources, which is a real product cost, and
