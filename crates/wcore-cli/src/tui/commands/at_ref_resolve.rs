@@ -1373,6 +1373,14 @@ mod tests {
             matches!(missing, Err(AtRefError::SecretBlocked(_))),
             "a denylisted name that does not exist must be refused loudly, got {missing:?}"
         );
+        // `read_guarded` — the shared helper behind the `@symbol` preview —
+        // states the same contract in its own comment and had the same gap.
+        let previewed = read_guarded(&root.join("nope").join(".env"));
+        assert!(
+            matches!(previewed, Err(AtRefError::SecretBlocked(_))),
+            "the @symbol preview must refuse a denylisted name loudly even when it \
+             does not resolve, got {previewed:?}"
+        );
 
         let payload = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
         let names: Vec<String> = payload
