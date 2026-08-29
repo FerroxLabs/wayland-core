@@ -14,19 +14,24 @@
 //! real PTY (which makes it a session leader with that PTY as its ctty) and
 //! runs both arms there:
 //!
-//! * `PLAIN=OPEN`     — an UNHARDENED child reaches `/dev/tty`. This is the
-//!                      negative control. It must hold in both mutation arms;
-//!                      if it ever reports `DENIED` the environment cannot
-//!                      exhibit the defect and the other arm proves nothing.
+//! * `PLAIN=OPEN` — an UNHARDENED child reaches `/dev/tty`. This is the
+//!   negative control. It must hold in both mutation arms; if it ever reports
+//!   `DENIED` the environment cannot exhibit the defect and the other arms
+//!   prove nothing.
 //! * `HARDENED=DENIED` — the same child, spawned through
-//!                      `harden_against_credential_prompt`, cannot.
+//!   `harden_against_credential_prompt`, cannot.
+//! * `PRODUCTION_GIT=DENIED` — a real `git` built by `build_git_command`, the
+//!   builder every quarantine spawn uses, cannot either. This one grades the
+//!   wiring.
+//! * `GIT_STILL_RUNS=true` — liveness control, also required in both arms: a
+//!   guard that refuses everything is not a fix.
 
 #![cfg(unix)]
 
 use std::io::Read;
 use std::process::{Command, Stdio};
 
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 /// Set on the re-executed copy of this binary; its presence switches this test
 /// from driver to probe.
@@ -61,10 +66,8 @@ fn probe(harden: bool) -> String {
 /// so the wiring is graded and not only the hardening function.
 fn probe_through_production_git() -> String {
     let alias = format!("alias.ttyprobe=!{TTY_PROBE}");
-    let mut cmd = wcore_cli::plugin::quarantine::build_git_command(
-        &["-c", alias.as_str(), "ttyprobe"],
-        None,
-    );
+    let mut cmd =
+        wcore_cli::plugin::quarantine::build_git_command(&["-c", alias.as_str(), "ttyprobe"], None);
     match cmd.output() {
         Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
         Err(e) => format!("SPAWN_FAILED({e})"),

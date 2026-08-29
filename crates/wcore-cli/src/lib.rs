@@ -3,6 +3,7 @@
 // so the plugin marketplace module — and now the ratatui TUI — are
 // reachable from integration tests under `tests/`.
 
+pub mod approval_resume;
 pub mod plugin;
 
 // Shared packaged-process execution-policy and static-plugin link seam.
