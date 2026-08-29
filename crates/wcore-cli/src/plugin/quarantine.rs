@@ -435,8 +435,10 @@ pub fn build_git_command(args: &[&str], cwd: Option<&Path>) -> std::process::Com
 /// session `wayland-core` does not own — no group signal of ours reaches them,
 /// and a terminal hangup no longer reaps them either. Killing the direct pid
 /// leaves them running with no owner after the install has already reported an
-/// error. MEASURED on hetzner before this type existed: SIGKILL to a `setsid`'d
-/// shell left its backgrounded grandchild alive in the detached session.
+/// error. MEASURED, not modelled: the three regression tests below, grafted
+/// onto a clean pre-fix checkout, fail 3/3 there — "the background worker N
+/// that the timed-out git spawned is STILL ALIVE" — while the two pre-existing
+/// quarantine tests stay green.
 ///
 /// # What each platform can own
 ///
@@ -446,9 +448,10 @@ pub fn build_git_command(args: &[&str], cwd: Option<&Path>) -> std::process::Com
 /// signalling a group we do not lead would signal `wayland-core` itself.
 ///
 /// Windows has no process group. The workspace primitive is a kill-on-close Job
-/// Object — [`wcore_types::job_object::WindowsJobObject`] — the same one the MCP
-/// stdio transport and the sandbox `ProcessTreeGuard` use, so there is one
-/// definition of "own this tree" and not a third copy.
+/// Object — `wcore_types::job_object::WindowsJobObject`, not linked because that
+/// module is `#![cfg(windows)]` and the link would not resolve in a unix build —
+/// the same one the MCP stdio transport and the sandbox `ProcessTreeGuard` use,
+/// so there is one definition of "own this tree" and not a third copy.
 struct GitProcessTree {
     #[cfg(unix)]
     process_group: Option<libc::pid_t>,
@@ -547,7 +550,8 @@ fn spawn_owned(cmd: &mut std::process::Command) -> Result<(std::process::Child, 
             let _ = child.kill();
             let _ = child.wait();
             return Err(PluginCliError::Git(format!(
-                "quarantine git child {pid} is not the leader of its own process group                  (pgid {pgid}); refusing to run a git whose helpers could not be reaped"
+                "quarantine git child {pid} is not the leader of its own process group \
+                 (pgid {pgid}); refusing to run a git whose helpers could not be reaped"
             )));
         }
         Ok((
