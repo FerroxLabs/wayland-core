@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "[Bug]: Clean install of 0.12.4 / core 0.13.6 — the Bash tool is cmd.exe, and the transcript still assembles out of order"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: be4467ed
 criteria:
   - id: c1
     text: "The Bash tool discloses which shell it really runs, and the disclosure reaches the model"
@@ -22,7 +22,8 @@ criteria:
     text: "The transcript stops assembling out of order"
     state: blocked
     owner: desktop
-    note: "no commit in this release touches ordering or assembly, and the symbols involved do not exist under crates/ at all — this half was never core's"
+    handoff: "FerroxLabs/wayland#1143"
+    note: "AUDITED 2026-08-29 and CONFIRMED cross-team, on the REPORTER's own attribution rather than on ours: #1151's body says 'The second is #1088 / #1143, still open, and I mention it here only because both were sitting in the very first conversation of a clean install.' #1143 is that ticket -- open, needs:desktop, split out of #1000 when the engine defect under it was fixed -- and its stated ask is to reproduce on 0.12.4, decide whether the ordering is fixed at stream-assembly or at render time, and pin the correct interleaving with a test. No commit in this release touches ordering or assembly and the symbols involved do not exist under crates/, so this half was never core's"
 ---
 
 One of three sub-asks met in v0.13.10.

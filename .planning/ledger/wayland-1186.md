@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: task
 title: "[Credentials request] Five platform credentials needed to measure adapter message caps (#934 c5)"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: be4467ed
 criteria:
   - id: c1
     text: "telegram: a credential exists and a boundary probe sends at max_message_len() and at +1 against the real platform"
@@ -32,7 +32,8 @@ criteria:
     text: "whatsapp (Meta Cloud API): a credential exists and a boundary probe sends at cap and at +1"
     state: blocked
     owner: maintainer
-    note: "BLOCKED on Meta's 15-app-per-developer cap; the account already carries 44 apps. This is not a credential anyone can hand us without deleting apps, so it is a maintainer account decision rather than a shopping-list item."
+    handoff: "FerroxLabs/wayland-core#364"
+    note: "AUDITED 2026-08-29 and CONFIRMED a genuine maintainer item -- unlike two of the six this audit checked, this one holds. Meta's 15-app-per-developer cap against an account already holding 44 apps is not a token anybody can issue; it needs slots freed, a separate developer account, or a decision that the row stays unmeasured permanently. #1186 is itself the credentials ticket, so handing this to #1186 would have been self-referential; the carrier is wayland-core#364, filed 2026-08-29, which states the three outcomes and what each obliges -- outcome 3 is not 'do nothing', it obliges core to change the docs/delivery-semantics.md wording from 'not yet obtained' to 'not obtainable', the way the two QR-paired bridge backends are already worded. The Meta reason is now recorded on this ticket too, which c6's note said was still owed"
   - id: c6
     text: "Any credential that cannot be obtained is recorded with its reason, so cap_measured = no stays an honest disclosure"
     state: met

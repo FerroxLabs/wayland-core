@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "grant_path, revoke_path and grant_workspace_capability are missing from the published desktop contract schema"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: be4467ed
 criteria:
   - id: c1
     text: "Every ProtocolCommand variant is published with a schema branch and a fixture, enforced by an exhaustive match that fails to compile when a variant is added"
@@ -32,9 +32,9 @@ criteria:
     note: "d3660467. emit_workspace_policy_receipt now precedes the refusal Info on all FOUR refusal exits (main.rs:4215 launcher-refused, :4243 policy-refused, plus the two capability-grant arms). Four refusal tests plus two must-pass-in-both-arms controls. The emitters now take &dyn ProtocolEmitter, which is what made them testable at all. docs/json-stream-protocol.md:982-990 states the every-exit rule and tells hosts not to read an absent receipt as a refusal."
   - id: c5
     text: "A grant refusal is machine-readable rather than untyped English prose in an Info frame"
-    state: blocked
-    owner: maintainer
-    note: "STALE NOTE CORRECTED 2026-08-29: the previous note pointed at FerroxLabs/wayland#1099, which is CLOSED and is a different subject (an escalation prompt for an out-of-workspace path), so there is NO open cross-lane thread carrying this. Refusals are still untyped English prose - main.rs:4218 and :4246 emit ProtocolEvent::Info with an empty msg_id, no grant_id echo, no machine-readable reason. Q4 in .planning/DECISIONS.md takes the decision (yes, as a contract minor bump with Desktop); what is now owed is a NEW Desktop-facing issue to carry it."
+    state: not-met
+    owner: core
+    note: "OWNER CORRECTED 2026-08-29: this was never a maintainer item. It was labelled maintainer while the decision was open; the decision has been TAKEN -- Q4 in .planning/DECISIONS.md, 'YES, contract minor bump, with Desktop' -- so the label was a parking artifact that outlived what it was parking. That row's Obliges cell pointed at FerroxLabs/wayland#1099, which is CLOSED and is a different subject; it has been corrected to name this criterion. The work itself is core's: main.rs emits ProtocolEvent::Info with an empty msg_id, no grant_id echo and no machine-readable reason at all four grant/revoke refusal exits, and the typed event, its schema branch, its fixture and the corpus regeneration are all produced in this repo. Desktop consuming it is a separate, later, additive change and is NOT a precondition. Deliberately not attempted in the handoff-audit lane: it is a contract minor bump whose corpus regeneration is serialized against every other lane touching SOURCE_INPUTS, and integ/f13 has just taken one. Needs a core lane, and should be taken together with wayland#388 c7, which is the same untyped-Info defect on the error path"
 ---
 
 The headline claim - three grant and revoke commands missing from the published

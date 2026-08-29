@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "CONTRACT: Loop ownership between Anvil (wayland-core) and Elevation (Flux) — anti-collision invariants"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: be4467ed
 criteria:
   - id: c1
     text: "F2 client half: core marks driver-seat requests with loop_owner on the wire, on a concrete model id"
@@ -22,17 +22,20 @@ criteria:
     text: "F1 confirmed for the current deployment: Elevation is unreachable by default from flux-fast, flux-standard, flux-reasoning and flux-auto"
     state: blocked
     owner: flux
-    note: "Flux replied that F1 holds with flux-auto elevated only via explicit per-request opt-in, but core has no way to verify a server-side deployment and later recorded F1 as unconfirmed"
+    handoff: "FerroxLabs/wayland#1183"
+    note: "AUDITED 2026-08-29. #863 is itself the two-party contract, so a handoff naming #863 would have been self-referential and worthless; the carrier is #1183, a SEPARATE flux-owned ticket the core lane filed for exactly F1/F3/F4, open and needs:flux. Flux replied that F1 holds with flux-auto elevated only by explicit per-request opt-in, and core later recorded F1 as unconfirmed because it cannot verify a server-side deployment. #1183 asks for the observable that makes it checkable: a per-alias capability endpoint declaring off/opt-in/always, or, if that is refused, a dated versioned statement of deployed config that core pins in docs/providers.md and re-checks each release. The reason a bare probe is not accepted is stated there -- a probe that never elevates is consistent with 'elevation is off' AND with 'elevation is on but rare'"
   - id: c4
     text: "F3 server half: requests carrying loop_owner or a client nonce bypass or vary the Flux semantic cache"
     state: blocked
     owner: flux
-    note: "Flux reports this shipped; the behaviour lives entirely on their side and core cannot observe a cache bypass from the client"
+    handoff: "FerroxLabs/wayland#1183"
+    note: "AUDITED 2026-08-29; carried by #1183, the flux-owned split of this contract, open and needs:flux. Flux reports F3 shipped and core cannot observe a cache bypass from the client, which is why the ask is an observable rather than a re-test: X-Flux-Cache: hit|miss|bypass (and/or response.flux.cache), with bypass distinct from miss. The ticket also demands the POSITIVE CONTROL, which is the part that makes it honest -- the same prompt sent twice WITHOUT loop_owner must read miss then hit, because a header that always says bypass and a cache that is simply switched off are indistinguishable, and so are 'we bypass for loop_owner' and 'we bypass for everything'"
   - id: c5
     text: "F4: the bandit routes loop_owner requests to a tool-calling-capable arm, or a flux-agentic alias with that guarantee exists"
     state: blocked
     owner: flux
-    note: "Flux deferred F4 explicitly and disclosed it; Elevation hard-skips tool turns so there is no collision exposure, but the routing floor is still absent"
+    handoff: "FerroxLabs/wayland#1183"
+    note: "AUDITED 2026-08-29; carried by #1183, open and needs:flux. Flux deferred F4 explicitly and disclosed it, and core accepted that there is no collision exposure today because Elevation hard-skips tool turns -- so this is the routing FLOOR only and is the lowest-urgency of the three. #1183 offers two acceptable shapes: a flux-agentic alias whose documented guarantee is that every served arm supports tool calling, or a published tool-capable arm set that core checks x-flux-routed-model against; either way the floor must state what happens when no tool-capable arm is available rather than leaving it to observation"
 ---
 
 This is a two-party contract between wayland-core's client-side Anvil climb and

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Per-tool switches in the MCP Library are inert on Wayland Core and ACP backends"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: be4467ed
 criteria:
   - id: c1
     text: "A tool the operator switched off is not registered at boot"
@@ -31,7 +31,8 @@ criteria:
     text: "Desktop sends the per-tool field on the ACP path"
     state: blocked
     owner: desktop
-    note: "Desktop's wire types drop the field before it reaches core, so core cannot honour a selection it never receives"
+    handoff: "FerroxLabs/wayland#1167"
+    note: "AUDITED 2026-08-29 and CONFIRMED cross-team; carrier already filed. #1167 is open, needs:desktop, and is load-bearing for the whole ticket: allowedTools is dropped at all THREE Desktop->Core boundaries -- the ACP session injection and the wcore-core stdio spawn in mcpSessionConfig.ts, and the [mcp.servers] table in WCoreMcpAgent.ts -- so core cannot honour a selection it never receives, and a fix to fewer than three makes the feature work on some backends and silently not others. Core's side of the wire exists and is graded as c6. The ticket also spells out the polarity trap that makes this dangerous rather than merely broken: allowedTools: [] means the user disabled EVERY tool, so any encoder that collapses an empty array to absent enables every tool at exactly the moment none was asked for"
   - id: c6
     text: "The ACP backend has an MCP surface for the switches to act on"
     state: met
