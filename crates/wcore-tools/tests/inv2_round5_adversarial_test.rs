@@ -629,11 +629,11 @@ async fn interleave(during: bool) -> (usize, usize, std::time::Duration) {
 /// # The Windows truth, measured
 ///
 /// This arm is NOT gated to Unix and never was — it runs on the Windows CI leg
-/// like everywhere else. Until 2026-08-29 nobody had watched it do so at
-/// `--retries 0`, so "it is green on Windows" was a statement about the retry
-/// policy, not about the platform. Measured on SEANDESKTOP (Windows 11 build
-/// 26200) at this tree, `cargo nextest run -p wcore-tools --retries 0` twelve
-/// times:
+/// like everywhere else, and `.config/nextest.toml` already pins this whole
+/// binary to `retries = 0` under `profile.ci`, so CI is not absorbing anything.
+/// Until 2026-08-29 nobody had watched it run on a Windows host. Measured on a
+/// Windows 11 build 26200 workstation at this tree,
+/// `cargo nextest run -p wcore-tools --retries 0` twelve times:
 ///
 /// * **6 of 12** executions green, 0 lost.
 /// * **5 of 12** RED on real loss — 2 of 18, 1 of 5, 2 of 10, 1 of 13 and
@@ -646,6 +646,15 @@ async fn interleave(during: bool) -> (usize, usize, std::time::Duration) {
 ///   That is not noise, it is the other half of the Windows truth: while the
 ///   guard holds the destination open, an editor's atomic save over that name
 ///   is REFUSED by the OS rather than silently lost.
+///
+/// LOAD MATTERS, AND THE NUMBERS ARE NOT LOAD-FREE — said here rather than
+/// discovered later. The six slow executions (40–97 s wall, cold tree) carried
+/// four of the five loss failures; the six fast ones (15–18 s, warm) carried
+/// one. So the rate above is an upper bound for a warm host and a lower bound
+/// for a loaded one — but loss is NOT purely a load artefact: the 1-of-17 came
+/// from a 17.0 s warm execution, and one of the rename refusals from a 14.9 s
+/// one. This is the same cold-tree sensitivity the workspace-size latency work
+/// recorded, and it is why a clean small temp dir would have hidden all of it.
 ///
 /// So the guarantee this arm asserts does not hold on Windows, and the arm is
 /// deliberately left ungated so it keeps saying so. The residual is tracked as
