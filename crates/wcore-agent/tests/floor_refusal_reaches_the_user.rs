@@ -25,15 +25,17 @@
 //! without the fix reproduces the incident rather than merely failing an
 //! assertion.
 //!
-//! Why the `tool_result` frame does not settle it on its own: asserting the
+//! Why the relayed tool result does not settle it on its own. Asserting the
 //! refusal string is present in the tool result is what the shipped tree
-//! already did, and it is what failed to prevent the incident. That frame is
-//! the model's input. It renders as one more red error line among the other
-//! red error lines of an ordinary build-fix loop, is truncated at 500
-//! characters by the terminal formatter, sits inside a collapsed card in the
-//! TUI — and is then contradicted by the assistant's own confident closing
-//! answer. The `info` frame is the transcript-level statement that a policy
-//! fired, in the same channel the final answer arrives on.
+//! already did, and it is what failed to prevent the incident. That text is
+//! the model's own input echoed back for display — `ProtocolSink` relays it as
+//! `[Bash error] <payload>` — and it renders as one more red error line among
+//! the red error lines of an ordinary build-fix loop: truncated at 500
+//! characters by the terminal formatter, folded into a collapsed card in the
+//! TUI, and then contradicted by the assistant's own confident closing answer.
+//! So [`WireRecorder::user_visible`] holds it apart, and c3 is graded on the
+//! session's own account of what happened: the notices and the assistant's
+//! words, in the channel the final answer arrives on.
 
 mod common;
 
