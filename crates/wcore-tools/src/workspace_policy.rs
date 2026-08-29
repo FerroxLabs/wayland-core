@@ -79,11 +79,44 @@ const SECRET_DIR_SEGMENTS: &[&str] = &["/.ssh/", "/.gnupg/", "/.aws/", "/.azure/
 /// a floor underneath the sandbox, not a substitute for one.
 const REPO_CONTROL_DIRS: &[&str] = &[".git", ".wayland-core"];
 
-const SECRET_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "tfstate"];
+/// Secret file EXTENSIONS, matched case-insensitively on the effective final
+/// component. `keystore` / `jks` (Java + Android signing stores) arrived with
+/// core#323 — see [`SECRET_BASENAMES`] for why they were somewhere else.
+const SECRET_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "tfstate", "keystore", "jks"];
 
-/// Extension-less secret basenames (SSH keys), matched on the final path
-/// component.
-const SECRET_BASENAMES: &[&str] = &["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"];
+/// Secret basenames matched on the final path component, case-insensitively.
+///
+/// ONE LIST, ONE OWNER (FerroxLabs/wayland-core#323). The eleven names below
+/// the SSH keys used to live in a SECOND denylist, `wcore-cli`'s `@`-attach
+/// guard, and the two drifted apart in both directions. #323's first cut taught
+/// the `@` surface to consult BOTH lists — which closed the `@` half and left
+/// the more dangerous half open: a user typing `@.pgpass` was refused while the
+/// MODEL could read the same file through `Read` / `Grep` / `Bash cat`, because
+/// those consult this predicate alone. Two lists that must agree drift again,
+/// so the file-name rules moved HERE and the `@` guard now delegates. The only
+/// thing it still contributes is a leading separator, because a user types a
+/// relative path and the fragment rules below need an anchored one.
+const SECRET_BASENAMES: &[&str] = &[
+    // SSH private keys.
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    // core#323 — folded in from the `@`-attach guard.
+    ".envrc",
+    ".pgpass",
+    "credentials",
+    "credentials.json",
+    "secrets.json",
+    "secrets.yaml",
+    "secrets.yml",
+];
+
+/// File-name SUFFIXES that mark a secret whatever the stem: the conventional
+/// spelling of a NAMED SSH key (`deploy_rsa`, `ci_ed25519`), which
+/// [`SECRET_BASENAMES`] cannot express because it matches the whole name.
+/// core#323, folded in from the `@`-attach guard alongside the basenames above.
+const SECRET_NAME_SUFFIXES: &[&str] = &["_rsa", "_ed25519"];
 
 /// Cache vars redirected into `<root>/.wcache/<tool>` in `Contained` mode.
 const CACHE_ENV_DIRS: &[(&str, &str)] = &[
@@ -2198,6 +2231,10 @@ pub fn is_secret_path_static(path: &Path) -> bool {
             .iter()
             .any(|b| name.eq_ignore_ascii_case(b))
         {
+            return true;
+        }
+        // A named SSH key (`deploy_rsa`) — the stem varies, the tail does not.
+        if SECRET_NAME_SUFFIXES.iter().any(|s| ends_with_ci(name, s)) {
             return true;
         }
         // service-account*.json, bare key.json, and separator-bounded *-key.json / *_key.json.

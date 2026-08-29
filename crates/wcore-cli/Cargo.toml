@@ -265,6 +265,12 @@ sha2          = { workspace = true }
 #   download path can stage artifacts in a scratch dir.
 # - `tar`/`flate2`/`zip` extract the verified release archive
 #   (.tar.gz on macOS/Linux, .zip on Windows) before the swap.
+# core#339: `Handle` answers "are these two paths the same FILE?" with one
+# portable primitive (device+inode on Unix, volume-serial + file-index on
+# Windows), so the `@`-attach guard can prove the handle it read from is the
+# file it guarded without a `cfg`-split of its own. Already in the lock via
+# `walkdir`/`ignore` — this compiles nothing new.
+same-file = "1"
 self-replace = "1"
 futures-util = "0.3"
 tempfile     = { workspace = true }

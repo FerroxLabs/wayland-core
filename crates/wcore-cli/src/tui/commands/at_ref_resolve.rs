@@ -8,8 +8,10 @@
 //! `@symbol`, `@diff`) resolve to deferred placeholders whose real work
 //! happens behind the protocol bridge. Split out of `at_refs.rs` (W3-B).
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
 use super::at_ref_guard::{GitIgnore, is_secret_path};
@@ -185,25 +187,42 @@ pub fn resolve(at: &AtRef, root: &Path) -> Result<AtPayload, AtRefError> {
 }
 
 /// Resolve `@file`: read one file, honoring the secret + gitignore guards.
+///
+/// Both guards decide on the RESOLVED location, and the bytes returned come
+/// from the handle whose identity was checked against it — see [`admit`].
 fn resolve_file(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     let full = resolve_under_root(path, root);
 
+    // The lexical floor, kept FIRST so `@.env` is refused loudly even when no
+    // such file exists — a name on the denylist must not degrade to
+    // "not found", which reads as "you may retry with a better spelling".
     if is_secret_path(&full) {
         return Err(AtRefError::SecretBlocked(display(path)));
-    }
-    if let Some(rel) = rel_to_root(&full, root)
-        && GitIgnore::load(root).is_ignored(&rel, false)
-    {
-        return Err(AtRefError::GitIgnored(display(path)));
     }
     if !full.is_file() {
         return Err(AtRefError::NotFound(display(path)));
     }
 
-    let content = fs::read_to_string(&full).map_err(|e| AtRefError::Io {
-        path: display(path),
-        message: e.to_string(),
-    })?;
+    let admitted = admit(&full, path)?;
+
+    // core#339: the authoritative check is on what the path RESOLVES to.
+    // `ln -s ~/.git-credentials notes.txt` clears the lexical floor above and
+    // is caught here.
+    if is_secret_path(&admitted.canonical) {
+        return Err(AtRefError::SecretBlocked(display(path)));
+    }
+    // core#335: the workspace `.gitignore`'s jurisdiction follows the resolved
+    // location, not the spelling. `@../<repo>/build/out.log` and a symlink into
+    // the workspace both name workspace files and are judged as such; a path
+    // that genuinely resolves OUTSIDE the workspace stays attachable and out of
+    // the workspace gitignore's reach, which is the documented capability.
+    if let Some(rel) = rel_to_root(&admitted.canonical, &canonical_root(root))
+        && GitIgnore::load(root).is_ignored(&rel, false)
+    {
+        return Err(AtRefError::GitIgnored(display(path)));
+    }
+
+    let content = admitted.read_to_string(path)?;
 
     Ok(AtPayload {
         kind: PayloadKind::File,
@@ -230,11 +249,15 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     let mut warnings = Vec::new();
     let mut skipped = 0usize;
     let mut truncated = false;
+    let root_canonical = canonical_root(root);
+    let mut visited = HashSet::new();
 
     walk_dir(
         &full,
         root,
+        &root_canonical,
         &ignore,
+        &mut visited,
         &mut files,
         &mut skipped,
         &mut truncated,
@@ -276,10 +299,20 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
 }
 
 /// Depth-first directory walk for `@dir`, applying both guardrails.
+///
+/// `root_canonical` and `visited` exist for core#339. The walk is the call site
+/// that matters most there: it pulls a link in without the user ever naming it,
+/// so a `notes.txt -> ~/.git-credentials` planted in a cloned repo was inlined
+/// by `@./` alone. Every entry is therefore judged by what it RESOLVES to —
+/// which also means a directory can be reached twice, so `visited` keeps a
+/// link back into the tree from recursing until the stack runs out.
+#[allow(clippy::too_many_arguments)]
 fn walk_dir(
     dir: &Path,
     root: &Path,
+    root_canonical: &Path,
     ignore: &GitIgnore,
+    visited: &mut HashSet<PathBuf>,
     out: &mut Vec<ResolvedFile>,
     skipped: &mut usize,
     truncated: &mut bool,
@@ -317,15 +350,49 @@ fn walk_dir(
             if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
                 continue;
             }
-            walk_dir(&path, root, ignore, out, skipped, truncated)?;
+            // An entry the walk cannot resolve is not descended into: without
+            // a resolved location there is nothing to judge scope by.
+            let Ok(canonical) = fs::canonicalize(&path) else {
+                *skipped += 1;
+                continue;
+            };
+            // A link OUT of the workspace is not part of the directory the
+            // user asked for, and reaching through one is how `@./` walks into
+            // `$HOME`.
+            if !canonical.starts_with(root_canonical) {
+                *skipped += 1;
+                continue;
+            }
+            // Reached twice (a link back into the tree) is walked once.
+            if !visited.insert(canonical) {
+                continue;
+            }
+            walk_dir(
+                &path,
+                root,
+                root_canonical,
+                ignore,
+                visited,
+                out,
+                skipped,
+                truncated,
+            )?;
         } else {
-            if is_secret_path(&path) {
+            // Resolve once; guard the resolved name; read the same handle.
+            let Ok(admitted) = admit(&path, &path) else {
+                *skipped += 1;
+                continue;
+            };
+            if !admitted.canonical.starts_with(root_canonical)
+                || is_secret_path(&path)
+                || is_secret_path(&admitted.canonical)
+            {
                 *skipped += 1;
                 continue;
             }
             // Read text files only; a binary file is skipped silently
             // rather than corrupting the payload with lossy bytes.
-            match fs::read_to_string(&path) {
+            match admitted.read_to_string(&path) {
                 Ok(content) => out.push(ResolvedFile {
                     path: PathBuf::from(&rel),
                     content,
@@ -391,6 +458,78 @@ fn resolve_deferred(kind: PayloadKind, target: &str) -> AtPayload {
 // ─────────────────────────────────────────────────────────────────────────
 // Path helpers
 // ─────────────────────────────────────────────────────────────────────────
+
+/// One file, opened ONCE, together with the symlink-free location the guards
+/// must decide on.
+///
+/// core#339: the guard matched the LEXICAL path while the read followed the
+/// link, so `ln -s ~/.git-credentials notes.txt` made `@notes.txt` inline a
+/// credential store. Deciding on the resolved path is only half the answer —
+/// canonicalizing and then RE-OPENING BY PATH reintroduces the race the link
+/// was planted for, because the link can be repointed in between. So the handle
+/// below is the one the caller reads from, and nothing re-opens the path after
+/// the guards have run.
+struct Admitted {
+    /// The open handle whose identity was matched against `canonical`. The
+    /// bytes read come from HERE, never from a second open.
+    handle: same_file::Handle,
+    /// Where the reference actually resolves — symlinks and `..` removed.
+    /// Both guards run against this.
+    canonical: PathBuf,
+}
+
+impl Admitted {
+    /// Read the admitted file. Consumes the handle, so no path is re-opened
+    /// between the guard and the bytes. `spelled` names the file in errors —
+    /// the user's own spelling, not the resolved one.
+    fn read_to_string(mut self, spelled: &Path) -> Result<String, AtRefError> {
+        let mut content = String::new();
+        self.handle
+            .as_file_mut()
+            .read_to_string(&mut content)
+            .map(|_| content)
+            .map_err(|e| AtRefError::Io {
+                path: display(spelled),
+                message: e.to_string(),
+            })
+    }
+}
+
+/// Open `full` once and resolve what it names, refusing the reference when the
+/// two answers describe different files.
+///
+/// `same_file::Handle` is device+inode on Unix and volume-serial + file-index
+/// on Windows, so this is one portable identity question rather than a
+/// `cfg`-split of two. An attacker who repoints the link between the open and
+/// the `canonicalize` makes the identities disagree, and the reference is
+/// refused instead of being guarded under one name and read from another.
+fn admit(full: &Path, spelled: &Path) -> Result<Admitted, AtRefError> {
+    let io = |e: std::io::Error| AtRefError::Io {
+        path: display(spelled),
+        message: e.to_string(),
+    };
+    let handle = same_file::Handle::from_path(full).map_err(io)?;
+    let canonical = fs::canonicalize(full).map_err(io)?;
+    let named = same_file::Handle::from_path(&canonical).map_err(io)?;
+    if handle != named {
+        return Err(AtRefError::Io {
+            path: display(spelled),
+            message: "the path changed while it was being resolved".to_string(),
+        });
+    }
+    Ok(Admitted { handle, canonical })
+}
+
+/// The workspace root with symlinks resolved, so scope decisions compare like
+/// with like (core#335 / core#339).
+///
+/// Falls back to the root as given when it cannot be canonicalized: a root that
+/// does not resolve cannot contain anything, and every path is then simply
+/// treated as outside it — the conservative direction for a guard whose "inside"
+/// answer only ever ADDS a check.
+fn canonical_root(root: &Path) -> PathBuf {
+    fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
 
 /// Join `path` under `root` if it is relative; an absolute `path` is taken
 /// as-is.

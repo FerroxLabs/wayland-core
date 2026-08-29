@@ -102,10 +102,23 @@ fn complete_paths(body: &str, root: &Path) -> Vec<Completion> {
             continue;
         }
         let path = entry.path();
-        if is_secret_path(&path) {
+        let file_type = entry.file_type().ok();
+        // core#339: a benign-named symlink to a credential store clears the
+        // lexical name check, and accepting the completion then inlines the
+        // store. Judge the RESOLVED target too.
+        //
+        // Only for a symlink: for every other entry the name IS the target, and
+        // this loop runs on each keystroke over a whole directory, so the
+        // syscall is spent exactly where it can change the answer.
+        let resolved = if file_type.is_some_and(|t| t.is_symlink()) {
+            fs::canonicalize(&path).ok()
+        } else {
+            None
+        };
+        if is_secret_path(&path) || resolved.as_deref().is_some_and(is_secret_path) {
             continue;
         }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let is_dir = file_type.map(|t| t.is_dir()).unwrap_or(false);
         let rel = if dir_part.is_empty() {
             name.to_string()
         } else {

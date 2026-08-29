@@ -9602,6 +9602,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
+ "same-file",
  "self-replace",
  "serde",
  "serde_json",

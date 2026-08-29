@@ -15,70 +15,33 @@ use std::path::Path;
 // Secret denylist
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Exact file names that are always treated as secrets, regardless of
-/// directory.
-const SECRET_FILENAMES: &[&str] = &[
-    ".env",
-    ".envrc",
-    ".netrc",
-    ".npmrc",
-    ".pypirc",
-    ".pgpass",
-    "credentials",
-    "credentials.json",
-    "secrets.json",
-    "secrets.yaml",
-    "secrets.yml",
-    "id_rsa",
-    "id_ed25519",
-    "id_ecdsa",
-    "id_dsa",
-];
-
-/// File-name prefixes that mark a secret (`.env.local`, `.env.production`).
-const SECRET_PREFIXES: &[&str] = &[".env."];
-
-/// File-name suffixes that mark a secret regardless of stem.
-const SECRET_SUFFIXES: &[&str] = &[
-    ".pem",
-    ".key",
-    ".p12",
-    ".pfx",
-    ".keystore",
-    ".jks",
-    "_rsa",
-    "_ed25519",
-];
-
-/// True if `path` is on EITHER secret denylist. UX doc §3b: `@` "respects
-/// the gitignore + a denylist (`.env`, key files) — never silently attach a
+/// True if `path` is on the secret denylist. UX doc §3b: `@` "respects the
+/// gitignore + a denylist (`.env`, key files) — never silently attach a
 /// secret."
 ///
-/// The union is the whole point. This module's file-name rules and
-/// [`wcore_tools::workspace_policy::is_secret_path_static`] — the list
-/// `Read`, `Grep` and `SecretDenyFs` enforce — had drifted apart in BOTH
-/// directions, so neither is a superset of the other: nineteen credential
-/// paths (`.git-credentials`, `.kube/config`, `.ssh/*`, `terraform.tfstate`,
-/// …) were denied to the file tools yet attachable by `@`, and ten
-/// (`.pgpass`, `.envrc`, `secrets.yml`, `*.jks`, …) only ever appeared here.
-/// Consulting one list would have re-opened whichever half it dropped.
+/// ONE list, ONE owner (core#323): every rule lives in
+/// [`wcore_tools::workspace_policy::is_secret_path_static`], the predicate
+/// `Read`, `Grep`, `SecretDenyFs` and the Bash deny walk already enforce. This
+/// module used to keep a parallel copy; the two drifted in BOTH directions, and
+/// #323's first cut only taught the `@` surface to consult both — which closed
+/// the `@` half and left eleven credential names readable by the MODEL. Two
+/// lists that must agree drift again, so the file-name rules moved into the
+/// shared list and this function contributes the one thing the `@` surface
+/// genuinely needs: a leading separator.
 ///
-/// Two rule shapes, so two matching scopes:
+/// The shared rules match separator-anchored PATH FRAGMENTS (`/.ssh/`,
+/// `/.git-credentials`), so a bare relative path — exactly what a user types
+/// after `@` — misses every one of them. Anchoring uses a synthetic root rather
+/// than the process CWD: it only ever adds the separator the fragment rules
+/// need, and cannot import an ambient directory that would deny an unrelated
+/// file.
 ///
-/// * this module's rules match the FILE NAME (case-insensitively), so they
-///   hold wherever the file lives;
-/// * the shared list matches separator-anchored PATH FRAGMENTS (`/.ssh/`,
-///   `/.git-credentials`), so a bare relative path misses every one of them.
-///   Fourteen of the nineteen need the anchoring below to match at all.
-///
-/// Anchoring uses a synthetic root rather than the process CWD: it only ever
-/// adds the leading separator the fragment rules need, and cannot import an
-/// ambient directory that would deny an unrelated file. Purely lexical — this
-/// runs inside the completion loop, on paths that need not exist.
+/// Purely lexical, deliberately — this runs inside the completion loop, on
+/// paths that need not exist. That makes it a FLOOR, not the decision: a
+/// lexical name and the bytes behind it are not the same file when a symlink is
+/// in the way, so the authoritative check runs against the RESOLVED path in
+/// [`super::at_ref_resolve`] (core#339).
 pub fn is_secret_path(path: &Path) -> bool {
-    if is_secret_file_name(path) {
-        return true;
-    }
     let anchored;
     let for_fragments = if path.is_absolute() {
         path
@@ -87,28 +50,6 @@ pub fn is_secret_path(path: &Path) -> bool {
         anchored.as_path()
     };
     wcore_tools::workspace_policy::is_secret_path_static(for_fragments)
-}
-
-/// This module's own half of the union: the file-name rules
-/// ([`SECRET_FILENAMES`] / [`SECRET_PREFIXES`] / [`SECRET_SUFFIXES`]).
-/// Kept separate so the two halves stay individually readable — and so a
-/// change to one is visibly a change to one.
-fn is_secret_file_name(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return false;
-    };
-    let lower = name.to_ascii_lowercase();
-
-    if SECRET_FILENAMES.iter().any(|s| *s == lower) {
-        return true;
-    }
-    if SECRET_PREFIXES.iter().any(|p| lower.starts_with(p)) {
-        return true;
-    }
-    if SECRET_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
-        return true;
-    }
-    false
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -309,18 +250,19 @@ mod tests {
     }
 
     /// Every path on which the `@`-attach denylist and the `wcore-tools`
-    /// workspace-policy denylist DIVERGED before they were unioned.
+    /// workspace-policy denylist DIVERGED while there were two of them.
     ///
-    /// Nineteen are carried only by `workspace_policy::is_secret_path_static`
-    /// — the list `Read`, `Grep` and `SecretDenyFs` already enforce — and were
-    /// invisible to this module's file-name rules. Ten are carried only by
-    /// this module's rules. Neither list is a superset of the other, which is
-    /// exactly why the guard has to consult BOTH.
+    /// Nineteen were carried only by
+    /// `workspace_policy::is_secret_path_static` — the list `Read`, `Grep` and
+    /// `SecretDenyFs` enforce — and were invisible to this module's file-name
+    /// rules. Eleven were carried only by this module. Neither list was a
+    /// superset of the other, which is how a `@`-attach could inline a file
+    /// `Read` refused and vice versa.
     ///
-    /// Every entry here is denied by exactly ONE of the two lists, so this
-    /// table goes red if EITHER of them loses an entry. No single-list test
-    /// can have that property, and its absence is what let the two lists
-    /// drift apart in the first place.
+    /// core#323 closed that by DELETING this module's list rather than syncing
+    /// it: the rules now live in one place with one owner. The table stays as a
+    /// regression pin — it goes red if the merged list loses any entry either
+    /// half used to carry, which is the failure the drift produced.
     const DIVERGENT_SECRET_PATHS: &[&str] = &[
         // ── carried only by wcore-tools' workspace policy ────────────────
         ".git-credentials",
