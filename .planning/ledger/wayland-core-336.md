@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Flaky: harness_tui_flow narrow_terminal_resize_stays_coherent_without_panicking times out under parallel load"
 status: open
-last_verified_commit: 9de21aa1
+last_verified_commit: ca4aab8b
 criteria:
   - id: c1
     text: "PtyHarness::resize resizes the vt100 parser as well as the PTY master"
