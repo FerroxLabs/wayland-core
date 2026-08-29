@@ -2174,6 +2174,10 @@ mod tests {
 
         let first = bound_accumulated_tool_results(&mut msgs, &config);
 
+        assert!(
+            first.cleared_count > 0,
+            "non-vacuity: the ceiling must have bitten for the batch size to mean anything"
+        );
         assert_eq!(
             first.cleared_count % epoch,
             0,
