@@ -54,15 +54,17 @@ relying on it, because that scope is narrower than "one message".
 | **MS Teams** (Bot Framework) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Teams | **NOT MEASURED** |
 | **WhatsApp bridge** (`backend = "baileys"` / `"whatsapp-web"`) | none — the bridge's `sendText` RPC carries no key and neither backend accepts one | **at-most-once** | **abandoned** | zero or one message — unknowable without checking WhatsApp | **NOT MEASURED, and no replay has been driven at all** — see the note below |
 
-**The WhatsApp bridge row is weaker still, and is labelled rather than filled in.** The other
-ten rows describe adapters the registry constructs from a platform string alone. The bridge is
-an eleventh `Channel` reached through the *same* platform string (`whatsapp`) with an opt-in
-`backend` key, so it is not covered by
-`crates/wcore-channels-registry/tests/delivery_semantics_declaration.rs` — that harness
-enumerates platforms, and this adapter adds none. Its row is derived from source only: the
-bridge's `sendText` RPC transmits no idempotency token, so
-`supports_outbound_idempotency()` is left at the trait's `false` default. Treat the row as a claim
-about our code and as no evidence whatever about WhatsApp's behaviour. See
+**The WhatsApp bridge row is COVERED as of 2026-08-29, and is still weaker than the rest.** It
+was uncovered until then, and structurally so: the other ten rows describe adapters the registry
+constructs from a platform string alone, while the bridge is reached through the *same* platform
+string (`whatsapp`) with an opt-in `backend` key, so
+`crates/wcore-channels-registry/tests/delivery_semantics_declaration.rs` could not see it. That
+harness now walks `wcore_channels_registry::constructible_selectors()` and the row is keyed
+`whatsapp+baileys` / `whatsapp+whatsapp-web` (wayland-core#360). What the coverage buys is that
+the row cannot silently disagree with the adapter any more. What it does NOT buy is evidence
+about WhatsApp: the guarantee column is still derived from source only — the bridge's `sendText`
+RPC transmits no idempotency token, so `supports_outbound_idempotency()` is left at the trait's
+`false` default — and no replay of any kind has been driven. See
 [whatsapp-bridge.md](whatsapp-bridge.md).
 
 **Update 2026-07-30 — a message HAS now been sent, and the scope of that is narrow.** A real
@@ -348,7 +350,7 @@ evidence about arrival counts, and it is not counted as any.
 The run wrote nothing to the room — it failed on the baseline read, which precedes the first
 send, and neither `MCR_CTRL_RECEIPTS` nor `MCR_SUBJ_RECEIPTS` was ever printed.
 
-### 4.2 The message cap, per adapter — four measured live, every one now sourced
+### 4.2 The message cap, per implementation — four measured live, two not decidable by that probe
 
 **Generalised 2026-08-26, [FerroxLabs/wayland#934](https://github.com/FerroxLabs/wayland/issues/934).**
 Until then exactly one cap in the product was bound to anything outside its own function.
@@ -372,12 +374,13 @@ of a conditional guarantee"; it means "this adapter's `max_message_len()`".
 | Adapter | Declared cap (chars) | What the vendor documents | Measured at the real platform? |
 |---|---|---|---|
 | **Slack** | 4,000 | **Quoted.** [`chat.postMessage`](https://docs.slack.dev/reference/methods/chat.postMessage), "Truncating content": *"For best results, limit the number of characters in the `text` field to 4,000 characters"*, and separately *"Slack will truncate messages containing more than 40,000 characters"*. 4,000 is advisory and is also the split point; 40,000 is silent truncation, not a catchable rejection. | **MEASURED 2026-08-27** — 4,040 is the largest single message; at 4,041 the API splits into 4,000-char messages. Was declared 39,000: the manager chunks on this value, so one 39,000-char send arrived as ten messages while `chunks_for(..).len() <= 1` marked it single-delivery. |
-| **Matrix** | 16,384 | **Derived — the platform limit is BYTES.** [Client-Server API, Size limits](https://spec.matrix.org/latest/client-server-api/#size-limits): *"The complete event MUST NOT be larger than 65536 bytes … encoded as Canonical JSON."* Synapse enforces exactly that (`MAX_PDU_SIZE = 65536`); nothing documents a limit on `body` itself. `65536 / 4` is the largest scalar count whose UTF-8 encoding cannot exceed it. | **NOT MEASURED** |
+| **Matrix** | 16,384 | **Derived — the platform limit is BYTES.** [Client-Server API, Size limits](https://spec.matrix.org/latest/client-server-api/#size-limits): *"The complete event MUST NOT be larger than 65536 bytes … encoded as Canonical JSON."* Synapse enforces exactly that (`MAX_PDU_SIZE = 65536`); nothing documents a limit on `body` itself. `65536 / 4` is the largest scalar count whose UTF-8 encoding cannot exceed it. | **NOT MEASURED — and the two-point probe cannot measure it.** The derivation IS checked, hermetically and on every build, by `a_derived_cap_is_exactly_what_its_budget_admits`. The live arm owed is a SATURATING one: 16,384 astral-plane scalars, 65,536 UTF-8 bytes, the budget exactly. See the byte-budget note below. |
 | **Discord** | 2,000 | **Quoted.** [Create Message](https://docs.discord.com/developers/resources/message): *"content?* — string — Message contents (up to 2000 characters)"*. The 25 MiB on the same page is the whole request. | **MEASURED 2026-08-27** — 2,000 accepted; 2,001 refused by the platform with HTTP 400 `50035 Invalid Form Body`. |
-| **Telegram** | 4,096 | **Quoted.** [`sendMessage`](https://core.telegram.org/bots/api#sendmessage): *"text — String — Yes — Text of the message to be sent, 1-4096 characters after entities parsing"*. Unit unstated; `MessageEntity` on the same page indexes in UTF-16 code units. | **MEASURED 2026-08-29** — 4,096 accepted as one message, 4,097 refused `400: Bad Request: message is too long`. Probed in ASCII, so the cap is confirmed for ASCII text; the character-vs-UTF-16 question is still open and needs an astral-plane body to settle. |
+| **Telegram** | 4,096 | **Quoted.** [`sendMessage`](https://core.telegram.org/bots/api#sendmessage): *"text — String — Yes — Text of the message to be sent, 1-4096 characters after entities parsing"*. Unit unstated; `MessageEntity` on the same page indexes in UTF-16 code units. | **MEASURED 2026-08-29** — 4,096 accepted as one message, 4,097 refused `400: Bad Request: message is too long`. Probed in ASCII, so the cap is confirmed for ASCII text; the character-vs-UTF-16 question is still open. The arm that settles it is committed — `live_boundary_at_real_telegram` with `WL_LIVE_CAP_TELEGRAM_ASTRAL=1` — and if the answer is code units then the shipped 4,096 is UNSAFE for non-BMP text and must drop to 2,048. |
 | **Twilio SMS** | 1,600 | **Quoted.** [Message resource](https://www.twilio.com/docs/messaging/api/message-resource): *"The text content of the outgoing message. Can be up to 1,600 characters in length."* The GSM-7/UCS-2 split in the same sentence governs segmentation and billing, not the maximum. | **MEASURED 2026-08-29** — 1,600 accepted as one concatenated message, 1,601 refused by Twilio before it reached a carrier: `400 code 21617, The concatenated message body exceeds the 1600 character limit`. Twilio's own error names the unit, so unlike Telegram this is unambiguously a CHARACTER limit and holds for either encoding. Probed in ASCII/GSM-7 at 11 segments. |
 | **WhatsApp** | 4,096 | **Quoted.** [Cloud API text messages](https://developers.facebook.com/docs/whatsapp/cloud-api/messages/text-messages): *"Body text. … Maximum 4096 characters."* Unit unstated. | **NOT MEASURED** |
-| **MS Teams** | 20,480 | **Derived — the platform limit is a UTF-16 PAYLOAD budget, and no character limit is documented at all.** [Format your bot messages](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages): *"The agent message size limit is 100 KB … it's recommended to ensure that the size of the message itself is within 80 KB … the agent receives a `413` status code (`RequestEntityTooLarge`) … `MessageSizeTooBig`."* `81920 / 4` (a scalar costs at most two UTF-16 code units). | **NOT MEASURED** |
+| **WhatsApp bridge** (`backend = "baileys"` / `"whatsapp-web"`) | 4,096 | **NOT a vendor figure — a POLICY.** Neither `baileys` nor `whatsapp-web.js` nor WhatsApp publishes a body limit for the Web/multi-device protocol these backends speak, so there is no page to quote. `BRIDGE_UNMEASURED_CHUNK_WIDTH` in `crates/wcore-channel-whatsapp/src/bridge/mod.rs` is a chunking width chosen for safety, and `cap_source` points at the decision rather than at a vendor: [wayland-core#360](https://github.com/FerroxLabs/wayland-core/issues/360). Overridable per channel with `max_message_chars`. | **NOT MEASURED** — it needs a running bridge (Node, an operator's own `bridge.js`, a QR-paired number), not a credential; nobody can issue one for a backend that authenticates by pairing. |
+| **MS Teams** | 20,480 | **Derived — the platform limit is a UTF-16 PAYLOAD budget, and no character limit is documented at all.** [Format your bot messages](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages): *"The agent message size limit is 100 KB … it's recommended to ensure that the size of the message itself is within 80 KB … the agent receives a `413` status code (`RequestEntityTooLarge`) … `MessageSizeTooBig`."* `81920 / 4` (a scalar costs at most two UTF-16 code units). | **NOT MEASURED — and the two-point probe cannot measure it.** Same shape as Matrix: the derivation is checked hermetically on every build, and the live arm owed is 20,480 astral-plane scalars — 40,960 UTF-16 code units, 81,920 bytes. See the byte-budget note below. |
 | **Email** | none | n/a | n/a — no cap to be wrong about |
 | **Signal** | none | n/a | n/a — no cap to be wrong about |
 | **iMessage** | none | n/a | n/a — no cap to be wrong about |
@@ -414,16 +417,33 @@ upper bound on the BODY, and each platform's real limit is on something the clie
 compute: Matrix's is the complete signed PDU the homeserver assembles after the `PUT`; Teams's
 is the serialized Activity including @-mentions and attachment JSON.
 
-The **WhatsApp bridge** declares `Some(4096)` in
-`crates/wcore-channel-whatsapp/src/bridge/mod.rs` and has no row above, for the same reason it
-has no row in §2: the declaration test enumerates platforms the registry constructs from a
-platform string, and the bridge adds none. **Its number is UNVERIFIED and cannot be sourced.**
-Meta's 4096 is documented for the Cloud API `text.body`; this channel drives `baileys` or
-`whatsapp-web.js` over the bridge's `sendText` RPC, and neither project nor WhatsApp publishes a
-body limit for the Web/multi-device protocol. The value is kept because `None` would disable
-chunking entirely and send an unbounded body at a limit nobody knows. It gained its first test of
-any kind on 2026-08-28 (`a_body_over_the_bridge_cap_splits_into_pieces_within_it`), which checks
-that the number is load-bearing and explicitly does not check that it is right.
+#### The WhatsApp bridge now has a row, because the guard can now reach it (2026-08-29, wayland-core#360)
+
+Until this date the **WhatsApp bridge** had no row here and none in §2's machine-readable block,
+and the reason was structural rather than an oversight: every gate enumerated PLATFORM STRINGS,
+and the bridge is reached through the `whatsapp` platform string plus a `backend` key. It was the
+eighth `max_message_len` in the product and the only one no test and no declaration row could
+touch. Measuring its number without widening the guard would only have moved the blind spot to
+the ninth adapter of the same shape.
+
+So the guard was widened first. `wcore_channels_registry::constructible_selectors()` enumerates
+what the registry can BUILD — nine implementations, not seven platforms — and both
+`delivery_semantics_declaration.rs` and `live_message_cap_boundary.rs` walk that instead. Rows
+are keyed by SELECTOR: the bare platform tag for a platform's default implementation, and
+`platform+<backend>` where a config key selects a different one. Every row written before this
+change keeps the name it had. The WhatsApp arm is derived from `WhatsappBackend::ALL_WIRE_NAMES`,
+so a fourth backend appears in every gate downstream without a second list to remember.
+
+**The number itself stopped borrowing.** It was `Some(4096)`, carried over from Meta's Cloud API
+`text.body` documentation — a surface this code never touches, since the bridged backends speak
+the WhatsApp Web/multi-device protocol through `baileys` or `whatsapp-web.js` and no vendor
+publishes a body limit for it. It is now `BRIDGE_UNMEASURED_CHUNK_WIDTH`, documented in code as a
+CHUNKING POLICY rather than a platform limit, with the safety argument that chose it: too high
+loses messages (HIGH-6), too low only splits a reply that need not have been split, and `None` is
+not available because it disables chunking and sends an unbounded body at a limit nobody knows.
+An operator who has driven their own bridge overrides it per channel with `max_message_chars`,
+which is the honest shape for a number the programme cannot source: ship the cautious default and
+get out of the way of somebody with evidence.
 
 #### What "NOT MEASURED" costs, and it is not symmetric
 
@@ -444,10 +464,70 @@ Being wrong is not cosmetic, and the two directions differ by platform:
   `at-most-once` at every length already, so an unnecessary split costs readability and
   nothing else.
 
-Only a live boundary probe answers it: send a body of exactly `cap` chars and expect the
-platform to accept it, then send `cap + 1` chars **unchunked** and expect the platform's own
-rejection. Both halves are needed — an accept at `cap` alone is equally well explained by a cap
-that is far higher than we think.
+For a CHARACTER cap, a live boundary probe answers it: send a body of exactly `cap` chars and
+expect the platform to accept it, then send `cap + 1` chars **unchunked** and expect the
+platform's own rejection. Both halves are needed — an accept at `cap` alone is equally well
+explained by a cap that is far higher than we think.
+
+#### Two of the caps are not character caps, and that probe cannot decide them (2026-08-29, wayland#934 c7)
+
+**Matrix and MS Teams were listed as blocked on a credential. They were not.** Both caps are
+derived from a payload BUDGET — Matrix's 65,536-byte Canonical-JSON PDU, Teams's 80 KB UTF-16
+Activity — divided by the worst-case cost of one Unicode scalar. An ASCII body of `cap`
+characters therefore spends a QUARTER of the budget, and `cap + 1` spends a quarter plus one
+byte. Both arms land deep inside the accepted region, both come back accepted, and the probe
+learns nothing. `enum Above` in `crates/wcore-channels-registry/tests/live_message_cap_boundary/cells.rs`
+did not even have a variant for "accepted, normally, with no error" — the two-point shape had
+no way to write down what these two platforms would actually have done. Issuing a Matrix token
+would have bought two green arms and no measurement.
+
+Two things replace it, and the first needs no credential at all:
+
+- **The derivation is checked, on every build.** `derivation_faults` asserts that `cap`
+  scalars spend at most the budget at the worst-case encoding, AND that `cap + 1` would exceed
+  it — so the shipped number is exactly the derivation, not merely below it. Both of the
+  mistakes recorded above fail it: 32,768 Matrix scalars cost 131,072 bytes against a 65,536
+  budget, and 28,000 Teams scalars cost 112,000 against 81,920. Neither was visible to a
+  cap-versus-document comparison, because in both cases the document and the adapter agreed
+  with each other perfectly. `the_derivation_checker_rejects_the_two_caps_that_actually_shipped_wrong`
+  drives the same checker over those exact numbers, so the rule has a red arm rather than only
+  a clean input.
+- **The live arm owed is a SATURATING one, not a boundary search.** One send of `cap`
+  astral-plane scalars — the largest body the derivation claims is safe, and the one that
+  spends the budget exactly. If the platform takes it, the derivation holds at its worst case;
+  if it refuses, the refusal names the budget. An ASCII control at `cap + 1` runs beside it and
+  its job is to be ACCEPTED, which is how "the two-point probe cannot decide this" becomes an
+  observation in the run instead of an argument in a comment.
+
+Even an accepted saturating arm is an **upper bound on the body, not the boundary**: Matrix's
+budget covers the complete signed PDU the homeserver assembles after the `PUT`, and Teams's
+covers the serialized Activity including @-mentions and attachment JSON. Neither is something
+the client can size. That is recorded in each cell's `unmodelled` field rather than left for
+the next reader to rediscover.
+
+#### The unit question, and why an ASCII run cannot settle it (wayland#934 c8)
+
+Every boundary this programme has driven was driven in ASCII, where one character is one
+Unicode scalar is one UTF-16 code unit. So none of the four runs can tell a CHARACTER limit
+from a CODE-UNIT limit, and those differ by a factor of two for astral-plane text — in the
+dangerous direction. Telegram is the sharp case: `sendMessage` says *"1-4096 characters after
+entities parsing"* while `MessageEntity` on the same page indexes in UTF-16 code units. If the
+limit is code units, a 4,096-scalar emoji reply is 8,192 code units, the platform refuses it
+**at the cap we ship**, and `send_to_keyed` does not re-send it.
+
+`CapUnit` records which of the two each cell has settled, and `unit_safety_faults` refuses a
+scalar cap above `limit / 2` once a UTF-16 verdict is recorded. No cell has settled one yet, so
+that rule has nothing to enforce today — which is precisely the state in which a rule rots, so
+`the_unit_rule_refuses_a_cap_a_utf16_verdict_makes_unsafe` constructs the verdict a Telegram
+astral run would produce and requires the checker to refuse today's 4,096. The run itself is
+one command against a credential the programme already holds, plus a destination chat:
+
+```text
+WL_LIVE_CAP_TELEGRAM_HOME=… WL_LIVE_CAP_TELEGRAM_CHANNEL=… WL_LIVE_CAP_TELEGRAM_TO=… \
+WL_LIVE_CAP_TELEGRAM_ASTRAL=1 \
+  cargo test -p wcore-channels-registry --test live_message_cap_boundary \
+  -- --ignored --nocapture live_boundary_at_real_telegram
+```
 
 #### Which probe is blocked on which credential
 
@@ -460,15 +540,20 @@ skip** when that configuration is absent.
 |---|---|---|
 | **Slack** | `WL_LIVE_SLACK_HOME` (bot token with `chat:write`) + `WL_SLACK_CHANNEL` | **Yes** — `live_slack_actions.rs` drives a real workspace today |
 | **Discord** | `WL_LIVE_DISCORD_HOME` (bot token) + `WL_LIVE_DISCORD_CHANNEL` (a real snowflake in a guild the bot has joined) | **Yes** — `live_discord_actions.rs` drives a real guild today |
-| **Matrix** | `MATRIX_HOMESERVER` + `MATRIX_ACCESS_TOKEN` + `MATRIX_USER_ID` + `MATRIX_ROOM_ID` | **Token is DEAD.** matrix.org answered `M_UNKNOWN_TOKEN — "Token is not active"` on 2026-07-31 and it has not been replaced. A working token is a Sean-only input |
+| **Matrix** | `MATRIX_HOMESERVER` + `MATRIX_ACCESS_TOKEN` + `MATRIX_USER_ID` + `MATRIX_ROOM_ID`, and the SATURATING arm — 16,384 astral scalars — not the two-point probe | **Token is DEAD.** matrix.org answered `M_UNKNOWN_TOKEN — "Token is not active"` on 2026-07-31 and it has not been replaced. A working token is a Sean-only input. Note the token was never the whole blocker: the probe SHAPE was wrong too, and that half is fixed in-tree |
 | **Telegram** | a `TELEGRAM_BOT_TOKEN` from BotFather + a chat id the bot may post to | **No.** Measured: the only hits for that name in `crates/` are the redaction pattern in `wcore-safety/src/pii.rs` |
 | **Twilio SMS** | `WL_LIVE_TWILIO_HOME` (a `credentials.toml` carrying an account SID + auth token) + `WL_LIVE_TWILIO_TO`, and a Twilio-provisioned `from_number`. Costs real money per send | **No.** We hold no Twilio credential — see the 2026-07-30 correction in §2 |
 | **WhatsApp** (Meta Cloud) | `WL_LIVE_WHATSAPP_HOME` (a Meta business app's access token + `phone_number_id`) + `WL_LIVE_WHATSAPP_TO`, with the recipient inside the 24-hour customer-service window | **No.** We hold no Meta credential |
-| **MS Teams** | a Bot Framework app id + app password, a bot registered in a tenant, and a `serviceUrl`/conversation id from a real Teams conversation | **No.** No test in `crates/` references one |
+| **WhatsApp bridge** | `WL_LIVE_CAP_WHATSAPP_BAILEYS_{HOME,CHANNEL,TO}` (or `…_WHATSAPP_WEB_…`), a Node runtime, the operator's own `bridge.js` with the backend package installed, and a WhatsApp number QR-paired to it | **No.** And not obtainable as a credential at all: both bridged backends authenticate by QR pairing, so there is nothing anybody can issue — it needs a running bridge and a real paired account |
+| **MS Teams** | a Bot Framework app id + app password, a bot registered in a tenant, a `serviceUrl`/conversation id from a real Teams conversation, and the SATURATING arm — 20,480 astral scalars — not the two-point probe | **No.** No test in `crates/` references one. As with Matrix, the credential was never the whole blocker |
 
-Two of the seven are runnable today with credentials the programme already holds; one needs a
-token refresh; four need a credential nobody here has. That is the whole of what remains, and
-it is a procurement list rather than an engineering estimate.
+Four of the nine have been driven. Of the five that have not: two (Matrix, MS Teams) are
+byte-budget shapes whose derivation is already checked in-tree and whose remaining arm is a
+single saturating send; two (the bridge backends) cannot be unblocked by procurement at all,
+because a QR-paired account is not a credential anybody issues; and one (Meta Cloud) is a
+genuine procurement item. Telegram is separately owed an ASTRAL run on a credential the
+programme already holds — that one is neither a shape problem nor a procurement item, only a
+destination chat.
 
 ---
 
@@ -798,7 +883,15 @@ body fits in one platform message. A row declaring it MUST also carry a `<platfo
 Conversely a row declaring bare `exactly-once` MUST have `max_message_len() == None`: a finite
 cap with an unconditional claim is the drift this vocabulary exists to make unsayable.
 
-`<platform>.cap` is that adapter's `max_message_len()` in chars, for EVERY adapter that
+Rows are keyed by SELECTOR, not by platform (wayland-core#360, 2026-08-29). A selector key is
+the bare platform tag for a platform's default implementation and `platform+<value>` where a
+config key selects a different one, exactly as `ChannelSelector::key` renders it. Nine of the
+eleven rows are bare platform tags and are unchanged; `whatsapp+baileys` and
+`whatsapp+whatsapp-web` are the WhatsApp bridge, which the platform-keyed harness could not
+reach at all. The gates walk `wcore_channels_registry::constructible_selectors()`, so a further
+implementation reached by a config key appears here without a second list to update.
+
+`<selector>.cap` is that implementation's `max_message_len()` in chars, for EVERY one that
 declares one — not only the conditional row. Generalised 2026-08-26 (wayland#934) from the
 Matrix-only meaning it had before, because a cap is a fact about the adapter rather than the
 boundary of a guarantee, and it is load-bearing on every platform: `send_to_keyed` chunks on
@@ -811,9 +904,12 @@ adapter, which is a drift check and not a measurement. `live` may be written onl
 platform whose boundary probe (a send at the cap, and a send one char over it) has actually
 run against a real destination. §4.2 names what each `no` row is waiting for.
 
-`<platform>.cap_source` is REQUIRED beside every cap row too, and must be a URL. It names the
+`<selector>.cap_source` is REQUIRED beside every cap row too, and must be a URL. It names the
 vendor page the number is derived from, so the number is checkable by a reader rather than
-being an assertion about itself. Added 2026-08-28 (wayland#934); reading these pages is what
+being an assertion about itself. Where no vendor page governs the surface — the two bridge rows,
+whose backends speak a protocol nobody documents a body limit for — it names the decision that
+chose the number instead, which is the accountable answer available: an unsourceable number
+must say so at a URL a reader can open, not carry a citation from the wrong vendor. Added 2026-08-28 (wayland#934); reading these pages is what
 found `msteams.cap` taken from the Incoming Webhook surface and misread from KB into
 characters, and `matrix.cap` computed at two UTF-8 bytes per character instead of four. The
 adapter caps are declared in `crates/wcore-channel-<platform>/src/lib.rs` in every case.
@@ -841,6 +937,14 @@ whatsapp = at-most-once
 whatsapp.cap = 4096
 whatsapp.cap_measured = no
 whatsapp.cap_source = https://developers.facebook.com/docs/whatsapp/cloud-api/messages/text-messages
+whatsapp+baileys = at-most-once
+whatsapp+baileys.cap = 4096
+whatsapp+baileys.cap_measured = no
+whatsapp+baileys.cap_source = https://github.com/FerroxLabs/wayland-core/issues/360
+whatsapp+whatsapp-web = at-most-once
+whatsapp+whatsapp-web.cap = 4096
+whatsapp+whatsapp-web.cap_measured = no
+whatsapp+whatsapp-web.cap_source = https://github.com/FerroxLabs/wayland-core/issues/360
 email = at-most-once
 signal = at-most-once
 imessage = at-most-once
