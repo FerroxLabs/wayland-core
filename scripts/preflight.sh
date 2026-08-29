@@ -25,6 +25,8 @@ GATES=(
   "python3 scripts/check-no-personal-identifiers.py"
   "python3 scripts/check-test-env-globals.py --self-test"
   "python3 scripts/check-test-env-globals.py"
+  "python3 scripts/check-message-whitespace.py --self-test"
+  "python3 scripts/check-message-whitespace.py crates"
   "python3 scripts/check-criteria-ledger.py --self-test"
   "python3 scripts/check-criteria-ledger.py --offline"
   "python3 scripts/check-release-readiness.py --self-test"
