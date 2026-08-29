@@ -71,6 +71,38 @@ jobs:
           python3 scripts/check-model-limits-freshness.py --self-test
           python3 scripts/check-model-limits-freshness.py
 
+      # ── criteria-ledger COVERAGE gate ─────────────────────────────────
+      # v0.13.10 shipped claiming 22 issues closed; grading them against
+      # their own stated criteria found 9. The single largest contributor was
+      # structural: the sweep that produced 0.13.9 filtered
+      # `FerroxLabs/wayland` on `area:core`, and the entire second tracker
+      # (`FerroxLabs/wayland-core`) was invisible for a full release. Nothing
+      # went red, because nothing could.
+      #
+      # This is the arm that can. It fails when an open issue in EITHER
+      # tracker has no ledger file, when a ledger marks every criterion met
+      # while GitHub still has the issue open (or the reverse), or when a
+      # ledger names an issue that does not exist. The structural half runs
+      # on every CI run (ci.yml), so the checker cannot rot between releases.
+      #
+      # HERE, and not in the CI matrix, for the same two reasons as the
+      # model-limits gate above: it needs the network, and every publishing
+      # job depends on `prepare-release`, so a FAIL stops the release instead
+      # of being advisory.
+      #
+      # It FAILS CLOSED on an unreachable tracker rather than degrading to a
+      # structural check -- a query that reaches nothing is a broken query,
+      # not a clean tracker, which is the exact shape of the original miss.
+      # `LEDGER_ISSUES_TOKEN` is a PAT with issue-read on BOTH repositories;
+      # the repo-scoped GITHUB_TOKEN cannot see the second tracker, and if it
+      # is what ends up being used this step will say so by failing.
+      - name: Criteria ledger covers both trackers
+        env:
+          GH_TOKEN: ${{ secrets.LEDGER_ISSUES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/check-criteria-ledger.py --self-test
+          python3 scripts/check-criteria-ledger.py
+
       - name: Extract version from tag
         id: metadata
         shell: bash
