@@ -2976,6 +2976,24 @@ fn under_project_load_path(path: &Path) -> bool {
 /// A `..` is applied lexically (`pop`) because the prefix accumulated so far is
 /// already canonical, so there is no symlink left for it to traverse wrongly.
 pub(crate) fn canon_existing_ancestor(path: &Path) -> PathBuf {
+    // Fast path, and the ONLY thing that keeps this affordable on the
+    // `SecretDenyFs::guard` hot path — that guard runs on every vfs read,
+    // write, exists, list and metadata call, and asks two predicates that both
+    // resolve. The component walk below costs one `canonicalize` PER COMPONENT;
+    // this costs one, total.
+    //
+    // It is not a behavioural shortcut. For a path that fully exists,
+    // `std::fs::canonicalize` IS the authoritative resolution — it follows
+    // every symlink and applies `..` against the real filesystem — and the walk
+    // converges on the same answer, because the walk re-canonicalizes its
+    // prefix after every component and only ever applies `..` to an
+    // already-canonical prefix. What the walk exists for is the case
+    // `canonicalize` cannot answer AT ALL, because it FAILS: a component that
+    // does not exist yet, and the dangling symlink that #356 and D11 are about.
+    // Those fall straight through.
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return resolved;
+    }
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {

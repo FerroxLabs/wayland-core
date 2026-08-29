@@ -44,9 +44,28 @@ all, so "outside its jurisdiction" meant "unguarded" rather than "guarded
 elsewhere". Enumerating the model-facing tools that spawn a process, rather
 than the two named instances, is what found it.
 
-Two subprocess-spawning tools in wcore-tools remain to be graded against this
-criterion and are NOT claimed closed here: `BashTool` (covered, on Linux, by
-bash_vcs_store_deny_linux.rs) and `GitTool`, whose `diff` op accepts a
-revision and therefore reconstructs committed content from the object store by
-design - a deliberate escape hatch under the STRICT sandbox per its module
-doc, but one nobody has graded against this criterion's wording.
+The enumeration was three tools, not one. `BashTool` was already covered on
+Linux by bash_vcs_store_deny_linux.rs. `GrepTool` and `GitTool` were not, and
+both leaked when measured:
+
+* `GrepTool` — naming the control directory one component up. Closed by the
+  walk prune and the store refusal; graded by grep_vcs_store_deny.rs.
+* `GitTool` — `Git{op: diff, rev: HEAD~1, path: ".env"}` returned
+  `-AWS_SECRET_ACCESS_KEY=PROBE-GIT-9931` with `.env` deleted from the working
+  tree, so its bytes lived only in the object store. `blame` returned the same
+  line. Closed by a secret-path refusal on both ops plus per-file section
+  withholding on a whole-tree `diff`; graded by
+  crates/wcore-tools/tests/git_secret_content_test.rs. Its red arm ran: with
+  crates/wcore-tools/src/git.rs at the pre-fix e7cb6679b and touched, 4/4 fail
+  quoting the leaks; restored, touched, 4/4 pass.
+
+Two of those four GitTool arms were VACUOUS when first written and passed
+against the pre-fix tree — `blame` failed for "no such path" because the
+fixture had deleted the file, and a pure rename emits no content hunk to
+withhold. Both were rewritten so the op would otherwise succeed, and only then
+did the red arm grade the guard. That correction is recorded because the same
+mistake is what this criterion's history is made of.
+
+What is still NOT graded here: the whole class is Linux/unix-measured. The
+GrepTool and GitTool guards are platform-independent (in-process, no
+`cfg` split), but no macOS or Windows run has exercised them.
