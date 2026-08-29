@@ -648,11 +648,21 @@ pub enum MalwareCheckOutcome {
     /// helper could read. Nothing was queried. An argv the gate cannot read is
     /// an argv it cannot clear.
     Unidentified,
-    /// Either the query came back with no malware advisories, or the query
-    /// itself failed. A malware feed that cannot be reached must not wedge the
-    /// user's MCP servers, so a backend error fails OPEN — and ONLY a backend
-    /// error does.
+    /// The query came back with no malware advisories. The package was
+    /// actually checked and actually cleared.
     Allowed,
+    /// `command` IS a package runner naming a readable package, but the check
+    /// could not be PERFORMED: the OSV backend errored (network, HTTP,
+    /// timeout, parse), or the endpoint failed the [`is_safe_url`] SSRF gate
+    /// so it was never queried. The payload is the operator-facing reason.
+    ///
+    /// This used to be folded into [`Allowed`](Self::Allowed), which made the
+    /// fail-open a property of this function that no caller could opt out of.
+    /// It is a distinct answer precisely so the caller owns the policy —
+    /// `wcore_mcp::malware_gate` maps it through the operator's
+    /// `[mcp] malware_gate` mode (wayland-core#354). Either way the failure is
+    /// already logged at ERROR here, so a permissive caller stays loud.
+    Unavailable(String),
     /// Known malware advisories, with the operator-facing message.
     Blocked(String),
 }
@@ -661,10 +671,13 @@ pub enum MalwareCheckOutcome {
 /// advisories.
 ///
 /// `endpoint` is the OSV endpoint URL (typically [`DEFAULT_OSV_ENDPOINT`]).
-/// If the endpoint fails [`is_safe_url`] (SSRF gate), the check short-circuits
-/// to [`MalwareCheckOutcome::Allowed`] — there is no legitimate reason for the
-/// OSV endpoint to point at an internal address, and refusing every MCP server
-/// over one misconfigured URL is a worse failure than the check not running.
+/// If the endpoint fails [`is_safe_url`] (SSRF gate) the query is never sent,
+/// and if the backend errors the answer never arrives; both short-circuit to
+/// [`MalwareCheckOutcome::Unavailable`], NOT to `Allowed`. Whether an
+/// unperformable check permits the launch is the caller's policy — see
+/// `wcore_mcp::malware_gate` and the `[mcp] malware_gate` config key
+/// (wayland-core#354). This function only reports what it could establish, and
+/// logs the failure at ERROR on the way out.
 pub async fn check_package_for_malware(
     command: &str,
     args: &[String],
@@ -689,16 +702,27 @@ pub async fn check_package_for_malware(
     }
 
     let mut checked_a_runner = false;
+    let mut unavailable: Option<String> = None;
     for (program, argv) in &invocations {
         match check_one_invocation(program, argv, endpoint, backend).await {
             MalwareCheckOutcome::NotApplicable => continue,
             MalwareCheckOutcome::Allowed => checked_a_runner = true,
+            // Indeterminate, not clean. Remembered rather than returned, so a
+            // second invocation that IS determinately bad still wins below.
+            MalwareCheckOutcome::Unavailable(reason) => {
+                checked_a_runner = true;
+                unavailable.get_or_insert(reason);
+            }
             // A single blocked or unreadable runner condemns the whole launch:
             // the shell would run it.
             refusal => return refusal,
         }
     }
-    if checked_a_runner {
+    if let Some(reason) = unavailable {
+        // One unperformable check taints the launch even if a sibling runner
+        // cleared: the untested one is still going to be fetched and run.
+        MalwareCheckOutcome::Unavailable(reason)
+    } else if checked_a_runner {
         MalwareCheckOutcome::Allowed
     } else {
         MalwareCheckOutcome::NotApplicable
@@ -721,7 +745,15 @@ async fn check_one_invocation(
         // documents. An endpoint that fails the SSRF gate is always operator-
         // visible misconfiguration or an active attack, never normal traffic.
         tracing::error!(target: "wcore::osv_check", endpoint, "refusing to query unsafe OSV endpoint (SSRF gate)");
-        return MalwareCheckOutcome::Allowed;
+        // Unavailable, not Allowed: nothing was queried, so nothing cleared.
+        // wayland-core#354 c3 — this path and the backend-error path below now
+        // report the SAME answer, so the operator's mode governs both. They
+        // used to diverge only by accident of both spelling themselves
+        // `Allowed`.
+        return MalwareCheckOutcome::Unavailable(format!(
+            "the OSV endpoint {endpoint} failed the SSRF safety check, so the malware check \
+             was never sent"
+        ));
     }
     let PackageRef::Identified { package, version } =
         parse_package_from_args(&package_args, ecosystem)
@@ -741,7 +773,11 @@ async fn check_one_invocation(
             }
         }
         Err(exc) => {
-            // Fail OPEN, and say so at ERROR.
+            // Report the failure as UNAVAILABLE, and say so at ERROR.
+            //
+            // Whether unavailable means "launch anyway" is the caller's
+            // choice now (wayland-core#354); the ERROR is unconditional
+            // because a permissive caller must still be told.
             //
             // This used to read "warn! is the lowest level that reaches a user
             // with no RUST_LOG set". That was false: `wcore-cli` builds its
@@ -756,9 +792,12 @@ async fn check_one_invocation(
                 error = %exc,
                 ecosystem = ecosystem.as_str(),
                 package = %package,
-                "OSV malware check could not be performed; allowing the launch",
+                "OSV malware check could not be performed",
             );
-            MalwareCheckOutcome::Allowed
+            MalwareCheckOutcome::Unavailable(format!(
+                "the OSV malware check for {} package '{package}' could not be performed: {exc}",
+                ecosystem.as_str()
+            ))
         }
     }
 }
@@ -1007,10 +1046,9 @@ mod tests {
             backend.as_ref(),
         )
         .await;
-        assert_eq!(
-            outcome,
-            MalwareCheckOutcome::Allowed,
-            "network errors must fail open"
+        assert!(
+            matches!(outcome, MalwareCheckOutcome::Unavailable(_)),
+            "a network error is an unperformable check, not a clean package; got {outcome:?}"
         );
         assert_eq!(backend.calls.lock().len(), 1);
     }
@@ -1029,7 +1067,10 @@ mod tests {
             backend.as_ref(),
         )
         .await;
-        assert_eq!(outcome, MalwareCheckOutcome::Allowed);
+        assert!(
+            matches!(outcome, MalwareCheckOutcome::Unavailable(_)),
+            "an SSRF-refused endpoint never sent the query, so nothing cleared; got {outcome:?}"
+        );
         // Backend MUST NOT be called when endpoint is unsafe.
         assert!(backend.calls.lock().is_empty());
     }
@@ -1261,10 +1302,12 @@ mod tests {
             "api.osv.dev is unreachable".into(),
         ));
         let args = vec!["-y".to_string(), "some-pkg".to_string()];
-        assert_eq!(
-            check_package_for_malware("npx", &args, TEST_OSV_ENDPOINT, &backend).await,
-            MalwareCheckOutcome::Allowed,
-            "an unreachable OSV endpoint must still fail OPEN"
+        assert!(
+            matches!(
+                check_package_for_malware("npx", &args, TEST_OSV_ENDPOINT, &backend).await,
+                MalwareCheckOutcome::Unavailable(_)
+            ),
+            "an unreachable OSV endpoint must report the check as unperformable"
         );
         drop(guard);
 
@@ -1303,11 +1346,11 @@ mod tests {
 
         let backend = CapturingOsvBackend::with_response(vec![]);
         let args = vec!["some-pkg".to_string()];
-        assert_eq!(
+        assert!(matches!(
             check_package_for_malware("npx", &args, "http://169.254.169.254/v1/query", &backend)
                 .await,
-            MalwareCheckOutcome::Allowed
-        );
+            MalwareCheckOutcome::Unavailable(_)
+        ));
         drop(guard);
 
         assert_eq!(

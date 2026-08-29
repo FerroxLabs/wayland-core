@@ -807,6 +807,12 @@ impl AgentBootstrap {
 
     /// Build the fully-initialized engine.
     pub async fn build(mut self) -> anyhow::Result<BootstrapResult> {
+        // wayland-core#354 — the MCP malware gate's posture is process-wide
+        // and `StdioTransport::spawn` has no config handle, so the operator's
+        // `[mcp] malware_gate` is installed here, at the one seam every agent
+        // session passes through before any MCP server is connected. The
+        // install is one-shot; the first session's posture holds.
+        wcore_mcp::malware_gate::install_mode(self.config.mcp.malware_gate);
         let policy = crate::egress::policy_from_config(&self.config);
         self.session_egress_policy = Some(policy.clone());
         let shared: wcore_egress::SharedPolicy = Arc::new(policy);

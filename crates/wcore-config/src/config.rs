@@ -290,6 +290,12 @@ pub struct McpConfig {
     /// `wcore_agent::mcp_curator::McpCurator`. Default `TopK(15)`.
     #[serde(default)]
     pub curation: McpCurationPolicy,
+    /// wayland-core#354 -- posture of the pre-spawn OSV malware gate when the
+    /// check cannot be performed (backend error, or an OSV endpoint that
+    /// fails the SSRF gate). Defaults to [`McpMalwareGateMode::Permissive`],
+    /// which is the behaviour every existing install already has.
+    #[serde(default)]
+    pub malware_gate: McpMalwareGateMode,
 }
 
 impl McpConfig {
@@ -306,6 +312,53 @@ impl McpConfig {
             .filter(|(_, cfg)| cfg.is_visible_to_assistant(active))
             .map(|(name, cfg)| (name.clone(), cfg.clone()))
             .collect()
+    }
+}
+
+/// wayland-core#354 — what the pre-spawn MCP malware gate does when the OSV
+/// check **could not be performed**.
+///
+/// This is only about the indeterminate answer. A package with known malware
+/// advisories is refused in both modes, and an argv the gate cannot read is
+/// refused in both modes; neither is a "check failure", both are answers.
+///
+/// * [`Permissive`](Self::Permissive) — the default, and the behaviour of
+///   every release before this key existed. An unreachable OSV endpoint logs
+///   at ERROR and the server still launches. Refusing every MCP server the
+///   moment the machine goes offline is a real product regression for anyone
+///   working on a plane, so this stays the default.
+/// * [`Strict`](Self::Strict) — a check that could not run is not a pass. The
+///   launch is refused with `McpError::MalwareBlocked`. Choose this where an
+///   unreachable malware feed is more likely to be an attacker holding the
+///   feed down than a flaky cafe network.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpMalwareGateMode {
+    /// Fail OPEN on an unperformable check, loudly (today's behaviour).
+    #[default]
+    Permissive,
+    /// Fail CLOSED on an unperformable check.
+    Strict,
+}
+
+impl McpMalwareGateMode {
+    /// The operator-facing spelling, matching the `config.toml` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Permissive => "permissive",
+            Self::Strict => "strict",
+        }
+    }
+
+    /// The stricter of two layers. Used when a project config is merged over
+    /// the global one: a project file may TIGHTEN the gate but must never be
+    /// able to loosen an operator's `strict` back to `permissive` -- the same
+    /// asymmetry `trust_project_hooks` already applies to hook dispatch.
+    pub fn stricter_of(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Strict, _) | (_, Self::Strict) => Self::Strict,
+            _ => Self::Permissive,
+        }
     }
 }
 
@@ -5662,6 +5715,14 @@ fn merge_config_files_with_trust(
     let mcp = McpConfig {
         servers: mcp_servers,
         curation: project.mcp.curation,
+        // wayland-core#354 — security posture, so NOT a plain project-wins
+        // override: the stricter layer wins. A checked-out repo must not be
+        // able to hand itself back the fail-open by writing
+        // `malware_gate = "permissive"` into its own config.
+        malware_gate: global
+            .mcp
+            .malware_gate
+            .stricter_of(project.mcp.malware_gate),
     };
 
     // Plan: project overrides global if any field differs from default
@@ -8808,6 +8869,83 @@ gate = ["attacker-command"]
         );
         assert!(!merged.anvil.enabled);
         assert!(merged.anvil.gate.is_empty());
+    }
+
+    // -- wayland-core#354: the malware-gate mode is a config key ---------
+
+    /// c1. The key exists, both spellings parse, and OMITTING it leaves an
+    /// existing install exactly where it was. A default that silently became
+    /// `strict` would refuse every MCP server on any machine that cannot
+    /// reach `api.osv.dev`.
+    #[test]
+    fn malware_gate_defaults_to_permissive_and_parses_both_modes() {
+        let omitted: ConfigFile = toml::from_str(
+            r#"
+[mcp.servers.local]
+transport = "stdio"
+command = "local-mcp"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            omitted.mcp.malware_gate,
+            McpMalwareGateMode::Permissive,
+            "omitting the key must not change behaviour for an existing user"
+        );
+        assert_eq!(
+            McpConfig::default().malware_gate,
+            McpMalwareGateMode::Permissive
+        );
+
+        let strict: ConfigFile = toml::from_str("[mcp]\nmalware_gate = \"strict\"\n").unwrap();
+        assert_eq!(strict.mcp.malware_gate, McpMalwareGateMode::Strict);
+
+        let permissive: ConfigFile =
+            toml::from_str("[mcp]\nmalware_gate = \"permissive\"\n").unwrap();
+        assert_eq!(permissive.mcp.malware_gate, McpMalwareGateMode::Permissive);
+
+        // A value that is neither must be a load error, not a silent default:
+        // a typo'd `malware_gate = "strcit"` that quietly means permissive is
+        // the fail-open wearing a different hat.
+        assert!(toml::from_str::<ConfigFile>("[mcp]\nmalware_gate = \"strcit\"\n").is_err());
+    }
+
+    /// c1. The posture round-trips through serialization, so a config the CLI
+    /// writes back does not lose an operator's `strict`.
+    #[test]
+    fn malware_gate_survives_a_serialize_round_trip() {
+        let mut cfg = ConfigFile::default();
+        cfg.mcp.malware_gate = McpMalwareGateMode::Strict;
+        let text = toml::to_string(&cfg).unwrap();
+        let back: ConfigFile = toml::from_str(&text).unwrap();
+        assert_eq!(back.mcp.malware_gate, McpMalwareGateMode::Strict);
+    }
+
+    /// c1. The cascade is asymmetric on purpose. A project file may TIGHTEN
+    /// the gate; it must never be able to hand a checked-out repository the
+    /// fail-open back by writing `permissive` over the operator's `strict`.
+    #[test]
+    fn a_project_config_cannot_loosen_the_malware_gate() {
+        let mut global = ConfigFile::default();
+        global.mcp.malware_gate = McpMalwareGateMode::Strict;
+        let project: ConfigFile = toml::from_str("[mcp]\nmalware_gate = \"permissive\"\n").unwrap();
+
+        let merged = merge_config_files_with_trust(global, project, true);
+        assert_eq!(
+            merged.mcp.malware_gate,
+            McpMalwareGateMode::Strict,
+            "a project file loosened the operator's malware gate"
+        );
+
+        // ...and the other direction still works: tightening is allowed.
+        let global = ConfigFile::default();
+        let project: ConfigFile = toml::from_str("[mcp]\nmalware_gate = \"strict\"\n").unwrap();
+        assert_eq!(
+            merge_config_files_with_trust(global, project, true)
+                .mcp
+                .malware_gate,
+            McpMalwareGateMode::Strict
+        );
     }
 
     #[test]
