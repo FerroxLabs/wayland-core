@@ -328,3 +328,53 @@ async fn the_bootstrap_prompt_uses_the_real_window_derived_skill_budget() {
     // comparison above is the portable form of the same claim, and it is the one
     // the defect actually breaks.
 }
+
+/// #1150 D16 — the UNKNOWN-window path, which the guard above never touches.
+///
+/// `the_bootstrap_prompt_uses_the_real_window_derived_skill_budget` boots BOTH
+/// arms with an explicit window (`Some(1_000_000)` / `Some(2_000)`), so the
+/// `None` arm — the reporter's exact configuration, an unlisted model with no
+/// `[compact] context_window` — is the one case it cannot see. And that is the
+/// case where the fabricated 200,000 survived: `get_char_budget`'s `None` arm
+/// returned `DEFAULT_CHAR_BUDGET = 8_000`, whose own source comment read
+/// "1% of 200k x 4", while every other boundary in the same session was sized
+/// against `UNVERIFIED_CONTEXT_WINDOW` = 32,768.
+///
+/// Asserted as an IDENTITY against the window the session actually assumes, so
+/// it cannot be satisfied by any other 1,310-character coincidence, and so it
+/// keeps tracking `UNVERIFIED_CONTEXT_WINDOW` if that constant ever moves.
+#[tokio::test]
+async fn an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes() {
+    let (_infos, unknown) = boot(UNLISTED_MODEL, None).await;
+    let (_infos, assumed) = boot(
+        UNLISTED_MODEL,
+        Some(wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW),
+    )
+    .await;
+    let (_infos, old_fabrication) = boot(
+        UNLISTED_MODEL,
+        Some(wcore_config::compact::DEFAULT_CONTEXT_WINDOW),
+    )
+    .await;
+
+    assert!(
+        unknown.contains("issue-1150"),
+        "precondition: the planted skill never reached the unknown-window prompt"
+    );
+    assert_eq!(
+        unknown.len(),
+        assumed.len(),
+        "an unknown window must budget the skills listing against the same \
+         {} tokens the rest of the session is sized against, not against a \
+         200,000-token window nothing else believes in",
+        wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW,
+    );
+    assert!(
+        old_fabrication.len() > unknown.len(),
+        "precondition: a 200,000-token window really does buy a longer listing \
+         here, or this test could pass on a catalogue with no skills in it \
+         (200k = {} bytes, unknown = {} bytes)",
+        old_fabrication.len(),
+        unknown.len(),
+    );
+}

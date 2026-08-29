@@ -225,6 +225,15 @@ pub struct ServedWindowEvidence {
     /// Best LOWER BOUND on the served slot: the largest prompt the endpoint
     /// has been observed to actually process on this route.
     pub served_window: u64,
+    /// Whether this figure is now CORROBORATED, i.e. whether
+    /// [`ServedWindowTracker::sizing_window`] answers with it.
+    ///
+    /// wayland-core#353 split telling from sizing and left the notice claiming
+    /// the sizing half unconditionally, so on every first `Regression` — the
+    /// only turn the notice ever fires for that arm — the user was told "core
+    /// is now sizing this session against N" at the one moment it was not.
+    /// The caller picks its wording from this.
+    pub corroborated: bool,
 }
 
 /// Learns an endpoint's SERVED context window from the `usage` it already
@@ -332,6 +341,7 @@ impl ServedWindowTracker {
         // this function still returns evidence on the first qualifying turn and
         // `served_window()` still answers from it. A notice on one observation
         // is useful and cheap to be wrong about; a compaction is neither.
+        let was_corroborated = self.corroborated;
         match signal {
             TruncationSignal::Shortfall => self.corroborated = true,
             TruncationSignal::Regression => {
@@ -341,18 +351,27 @@ impl ServedWindowTracker {
                 }
             }
         }
+        let newly_corroborated = !was_corroborated && self.corroborated;
 
         let served_window = self.max_reported;
-        if self.served_window == Some(served_window) {
+        if self.served_window == Some(served_window) && !newly_corroborated {
             // Already established and unchanged — the user has been told.
             return None;
         }
+        // wayland-core#353 — a second observation at an UNCHANGED figure is the
+        // one that flips this route from telling to sizing, and it used to be
+        // swallowed by the line above. That made the notice's sizing sentence
+        // unfalsifiable: it was emitted on the first observation (when sizing
+        // had NOT moved) and never again (when it had). Corroboration is a
+        // state change the caller must be able to announce, so it re-opens the
+        // gate exactly once.
         self.served_window = Some(served_window);
         Some(ServedWindowEvidence {
             signal,
             sent_estimate,
             reported_input,
             served_window,
+            corroborated: self.corroborated,
         })
     }
 
