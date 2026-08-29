@@ -829,7 +829,7 @@ fn downgrade_powershell_swaps_to_cmd_when_blocked() {
         "-Command".to_string(),
         "echo hello".to_string(),
     ];
-    downgrade_powershell_for_sandbox(&mut argv, true);
+    downgrade_unsupported_shell_for_sandbox(&mut argv, true);
     // `/S` comes with the prefix: the payload is quoted as one outer pair on the
     // spawn path, and only `/S` makes cmd strip exactly that pair (#943).
     assert_eq!(argv, vec!["cmd", "/S", "/C", "echo hello"]);
@@ -843,7 +843,7 @@ fn downgrade_powershell_handles_pwsh_and_exe_suffix() {
         "-Command".to_string(),
         "ls -la".to_string(),
     ];
-    downgrade_powershell_for_sandbox(&mut argv, true);
+    downgrade_unsupported_shell_for_sandbox(&mut argv, true);
     assert_eq!(argv, vec!["cmd", "/S", "/C", "ls -la"]);
 }
 
@@ -856,7 +856,7 @@ fn downgrade_powershell_noop_when_sandbox_allows_powershell() {
         "echo hi".to_string(),
     ];
     let before = argv.clone();
-    downgrade_powershell_for_sandbox(&mut argv, false);
+    downgrade_unsupported_shell_for_sandbox(&mut argv, false);
     assert_eq!(
         argv, before,
         "must not rewrite when backend allows powershell"
@@ -868,7 +868,7 @@ fn downgrade_powershell_noop_for_cmd_prefix() {
     let mut argv = wcore_config::shell::windows_cmd_payload_prefix();
     argv.push("echo hi".to_string());
     let before = argv.clone();
-    downgrade_powershell_for_sandbox(&mut argv, true);
+    downgrade_unsupported_shell_for_sandbox(&mut argv, true);
     assert_eq!(argv, before, "cmd prefix is already sandbox-compatible");
 }
 
@@ -907,7 +907,7 @@ async fn live_413_powershell_shell_falls_back_to_cmd() {
         "expected powershell prefix, got {:?}",
         cmd.argv
     );
-    downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
+    downgrade_unsupported_shell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
     assert_eq!(cmd.argv.first().map(|s| s.as_str()), Some("cmd"));
 
     let out = backend.execute(&manifest, cmd).await.unwrap();
@@ -3451,4 +3451,91 @@ fn shell_disclosure_still_disclaims_bash_for_an_unrecognized_shell() {
     let prefix = vec!["zsh".to_string(), "-c".to_string()];
     let disclosure = shell_disclosure(&prefix, "macos");
     assert!(disclosure.contains("`zsh`, NOT bash"), "{disclosure}");
+}
+
+// ── #1164: a real bash on Windows, and the disclosure that follows it ──
+
+/// The Windows interpreter is now named by ABSOLUTE PATH when a real bash was
+/// resolved, so the disclosure must read the final path component. Reading the
+/// whole string (which is what it did) made the program `c:\program
+/// files\git\bin\bash` and fell through to the generic "the interpreter is
+/// `<x>`, NOT bash" arm — telling the model bash is not bash.
+#[test]
+fn shell_disclosure_names_a_resolved_windows_bash_as_bash() {
+    for program in [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\BASH.EXE",
+        "C:/Program Files/Git/bin/bash.exe",
+    ] {
+        let prefix = vec![program.to_string(), "-c".to_string()];
+        let disclosure = shell_disclosure(&prefix, "windows");
+        assert!(
+            disclosure.contains(&format!("`{program} -c`")),
+            "the disclosure must name the exact interpreter spawned:\n{disclosure}"
+        );
+        assert!(
+            disclosure.contains("This is a real bash"),
+            "{program} must be disclosed as bash:\n{disclosure}"
+        );
+        assert!(
+            !disclosure.contains("NOT bash"),
+            "a real bash must not be disclaimed as not-bash:\n{disclosure}"
+        );
+    }
+}
+
+/// #1164 c4 — with no acceptable bash the prefix is the cmd one, and the
+/// disclosure built from THAT prefix names cmd to the model. Both halves in one
+/// test so the fallback cannot be quietly split from its disclosure.
+#[test]
+fn no_acceptable_bash_falls_back_to_cmd_and_the_disclosure_says_so() {
+    let prefix = wcore_config::shell::windows_cmd_payload_prefix();
+    assert_eq!(prefix.first().map(String::as_str), Some("cmd"));
+    let disclosure = shell_disclosure(&prefix, "windows");
+    assert!(disclosure.contains("`cmd /S /C`"), "{disclosure}");
+    assert!(disclosure.contains("cmd.exe, NOT bash"), "{disclosure}");
+}
+
+/// The AppContainer sandbox runs `cmd.exe` and nothing else — git-bash needs
+/// `msys-2.0.dll` from `Program Files` and fails DLL init under the Low-IL
+/// restricted token. Without this arm, resolving a real bash would have turned
+/// EVERY Bash command into a hard spawn failure on an AppContainer host.
+#[test]
+fn a_resolved_bash_is_downgraded_to_cmd_under_the_appcontainer_sandbox() {
+    for program in [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        "sh",
+        "powershell",
+        "pwsh.exe",
+    ] {
+        let mut argv = vec![program.to_string(), "-c".to_string(), "echo hi".to_string()];
+        downgrade_unsupported_shell_for_sandbox(&mut argv, true);
+        assert_eq!(
+            argv,
+            {
+                let mut expected = wcore_config::shell::windows_cmd_payload_prefix();
+                expected.push("echo hi".to_string());
+                expected
+            },
+            "{program} must be downgraded to the canonical cmd prefix, command intact"
+        );
+    }
+
+    // Untouched when the backend imposes no such limit, and cmd is never
+    // rewritten into itself.
+    let mut argv = vec![
+        r"C:\Program Files\Git\bin\bash.exe".to_string(),
+        "-c".to_string(),
+        "echo hi".to_string(),
+    ];
+    let unchanged = argv.clone();
+    downgrade_unsupported_shell_for_sandbox(&mut argv, false);
+    assert_eq!(argv, unchanged);
+
+    let mut cmd_argv = wcore_config::shell::windows_cmd_payload_prefix();
+    cmd_argv.push("echo hi".to_string());
+    let before = cmd_argv.clone();
+    downgrade_unsupported_shell_for_sandbox(&mut cmd_argv, true);
+    assert_eq!(cmd_argv, before);
 }
