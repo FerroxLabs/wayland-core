@@ -365,12 +365,33 @@ def validate_record(root, rec, git, shallow=False):
     if not re.fullmatch(r"[0-9a-f]{7,40}", sha or ""):
         bad.append("%s: last_verified_commit %r is not a sha" % (p, sha))
     elif git and not shallow:
+        # ANCESTRY, not existence. `cat-file -t` only asks whether the object is
+        # in this repo, and a working checkout accumulates objects from every
+        # lane branch it has ever fetched. So a sha that is on NO branch at all
+        # -- a remnant of a rebased or abandoned lane -- resolves locally and is
+        # absent in CI, which checks out only the branch under test.
+        #
+        # Measured 2026-08-30: twelve entries cited `be4467ed`. `cat-file -t`
+        # said `commit` on hetzner, `git branch -a --contains` listed NOTHING,
+        # and CI failed all twelve. The local gate was weaker than the CI gate
+        # in exactly the direction that lets a bad pointer ship.
+        #
+        # A `last_verified_commit` names the tree an entry was graded against.
+        # If it is not reachable from HEAD, that tree is not this one and the
+        # grading cannot be re-derived by anyone reading the release.
         r = subprocess.run(["git", "-C", root, "cat-file", "-t", sha],
                            capture_output=True, text=True)
         if r.stdout.strip() != "commit":
             bad.append("%s: last_verified_commit %s is not a commit in this "
                        "tree -- the entry was verified against something that "
                        "is not here" % (p, sha))
+        elif subprocess.run(["git", "-C", root, "merge-base",
+                             "--is-ancestor", sha, "HEAD"]).returncode != 0:
+            bad.append("%s: last_verified_commit %s is not an ANCESTOR of HEAD "
+                       "-- the object exists in this checkout (a fetched lane "
+                       "branch, or a remnant of a rebased one) but is not in "
+                       "the history being shipped, so nobody reading the "
+                       "release can re-derive the grading" % (p, sha))
     if len(rec.get("prose", "").strip()) < 40:
         bad.append("%s: no prose body. The file must be readable by a human "
                    "with no context; frontmatter alone is not." % p)

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Per-tool switches in the MCP Library are inert on Wayland Core and ACP backends"
 status: open
-last_verified_commit: be4467ed
+last_verified_commit: f0060a2e8
 criteria:
   - id: c1
     text: "A tool the operator switched off is not registered at boot"

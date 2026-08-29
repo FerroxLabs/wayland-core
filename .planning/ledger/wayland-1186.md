@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: task
 title: "[Credentials request] Five platform credentials needed to measure adapter message caps (#934 c5)"
 status: open
-last_verified_commit: be4467ed
+last_verified_commit: f0060a2e8
 criteria:
   - id: c1
     text: "telegram: a credential exists and a boundary probe sends at max_message_len() and at +1 against the real platform"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Flux tier-alias -> strict-reasoner: #417 replay gap (engine keys off request.model, alias resolves server-side)"
 status: open
-last_verified_commit: be4467ed
+last_verified_commit: f0060a2e8
 criteria:
   - id: c1
     text: "The replay socket is populated, so the engine has somewhere to learn the served model from"
