@@ -20,6 +20,15 @@ import sys
 COND_RE = re.compile(
     r"\$\{\{ fromJSON\(\((?P<cond>.+?)\) && '(?P<full>.+?)' \|\| '(?P<nomac>.+?)'\) \}\}"
 )
+
+# The `ci` job's os matrix nests darwin admission inside a windows-admission
+# expression. Its DARWIN condition is the same clause-group; only the shape
+# around it differs. Matching it here is what keeps this gate covering the
+# matrix that actually schedules the macOS test leg.
+NESTED_RE = re.compile(
+    r"os: \$\{\{ fromJSON\(\(\((?P<cond>.+?)\) && \(.+?\)\) && '(?P<full>.+?)' "
+    r"\|\| \(\(.+?\) && '.+?' \|\| '(?P<nomac>.+?)'\)\) \}\}"
+)
 REPORT_RE = re.compile(r"DARWIN: \$\{\{ \((?P<cond>.+?)\) && 'true' \|\| 'false' \}\}")
 
 
@@ -27,6 +36,9 @@ def extract(text):
     """Return (list_of_condition_strings, [(full,nomac), ...])."""
     conds, literals = [], []
     for m in COND_RE.finditer(text):
+        conds.append(m.group("cond"))
+        literals.append((m.group("full"), m.group("nomac")))
+    for m in NESTED_RE.finditer(text):
         conds.append(m.group("cond"))
         literals.append((m.group("full"), m.group("nomac")))
     for m in REPORT_RE.finditer(text):
@@ -58,6 +70,11 @@ def evaluate(cond, event_name, ref_name, head_msg, commit_msgs):
             if m.group(1).lower() in haystack.lower():
                 return True
             continue
+        m = re.fullmatch(r"startsWith\((\S+), '([^']*)'\)", clause)
+        if m:
+            if (ctx.get(m.group(1)) or "").startswith(m.group(2)):
+                return True
+            continue
         raise AssertionError("gate cannot parse clause: %r" % clause)
     return False
 
@@ -72,6 +89,10 @@ CASES = [
     ("lane push, hostile message", "push", "lane/x", '"; rm -rf /; #',    ['"; rm -rf /; #'],              False),
     ("integration branch push",    "push", "plan/f20-unified-audit-repair", "merge", ["merge"],            True),
     ("main push",                  "push", "main",   "release",           ["release"],                     True),
+    ("integ branch push",          "push", "integ/f13", "merge lane",     ["merge lane"],                  True),
+    ("integ, any suffix",          "push", "integ/x",   "wip",            ["wip"],                         True),
+    ("NEG: integration-notes",     "push", "integration-notes", "x",      ["x"],                           False),
+    ("NEG: integ, no slash",       "push", "integ",     "x",              ["x"],                           False),
     ("pull_request",               "pull_request", "main", None, None,                                     True),
 ]
 

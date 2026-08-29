@@ -280,7 +280,7 @@ jobs:
       # hosted-`windows-latest` workflows remain the cheaper route for a
       # narrow proof.
       matrix:
-        os: ${{ fromJSON(((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && (github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))) && '["macos-latest",["self-hosted","Windows","X64","msvc"]]' || ((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '["macos-latest"]' || '[["self-hosted","Windows","X64","msvc"]]')) }}
+        os: ${{ fromJSON(((github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && (github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))) && '["macos-latest",["self-hosted","Windows","X64","msvc"]]' || ((github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '["macos-latest"]' || '[["self-hosted","Windows","X64","msvc"]]')) }}
         # 2026-08-04 — an `appcontainer` label requirement was added here and
         # then REVERTED the same day. Recording why, so it is not re-attempted.
         #
@@ -1276,7 +1276,7 @@ jobs:
       # condition in the two `strategy.matrix` expressions.
       - name: Report macOS runner budget (DARWIN_REQUESTED / DARWIN_SKIPPED)
         env:
-          DARWIN: ${{ (github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && 'true' || 'false' }}
+          DARWIN: ${{ (github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && 'true' || 'false' }}
         run: |
           set -euo pipefail
           {
@@ -1464,6 +1464,23 @@ jobs:
       # defect class and stays silent on the control, with every red arm
       # asserting the message it fired on, so an arm whose mutation stopped
       # applying fails loudly instead of reading as a pass.
+      # The macOS/Windows admission condition is duplicated across the `ci` os
+      # matrix, the `build` matrix and the reporting step, because GitHub Actions
+      # supports neither YAML anchors nor the `env` context inside `strategy`.
+      # gate.py asserts those copies stay byte-identical and evaluates the
+      # condition against a truth table.
+      #
+      # It was never wired to anything. It went RED when the `[ci-windows]`
+      # opt-in nested the `ci` matrix into a shape its regex no longer matched --
+      # so it silently stopped covering the matrix that schedules the macOS test
+      # leg, reported "found 2, expected 3", and nobody saw. A gate nothing runs
+      # is a gate that cannot fail.
+      - name: macOS/Windows admission control is consistent
+        run: |
+          set -euo pipefail
+          python3 .planning/evidence/ci-macos-budget/gate.py --self-test .github/workflows/ci.yml
+          python3 .planning/evidence/ci-macos-budget/gate.py .github/workflows/ci.yml
+
       - name: Criteria ledger is anchored and parseable
         run: |
           python3 scripts/check-criteria-ledger.py --self-test
@@ -2235,7 +2252,7 @@ jobs:
       # only job that UPLOADS the arm64 binary (ci.yml:600 below) and it does so
       # independently of whether the test suite passed, which is exactly when a
       # lane needs a binary most. The saving would have been ~1.2% of pool load.
-      matrix: ${{ fromJSON((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"},{"os":"macos-latest","target":"x86_64-apple-darwin"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]}' || '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"}]}') }}
+      matrix: ${{ fromJSON((github.event_name == 'pull_request' || github.ref_name == 'main' || startsWith(github.ref_name, 'integ/') || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"},{"os":"macos-latest","target":"x86_64-apple-darwin"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]}' || '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"}]}') }}
 
     steps:
       # Which Windows executor served this job (gh#1146). Fails closed: a job

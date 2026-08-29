@@ -31,6 +31,8 @@ GATES=(
   "python3 scripts/check-windows-attribution.py --self-test"
   "python3 scripts/check-windows-attribution.py"
   "python3 scripts/flake-ledger.py --self-test"
+  "python3 .planning/evidence/ci-macos-budget/gate.py --self-test .github/workflows/ci.yml"
+  "python3 .planning/evidence/ci-macos-budget/gate.py .github/workflows/ci.yml"
 )
 
 # ── DRIFT GUARD ────────────────────────────────────────────────────────────
@@ -50,8 +52,12 @@ if start is None or stop is None:
     print("PREFLIGHT DRIFT GUARD: could not locate the ci-linux host-side region "
           "in ci.yml. The job or the image step was renamed; fix this script.")
     sys.exit(2)
-in_ci = set(re.findall(r"scripts/[A-Za-z0-9_.-]+\.py", "\n".join(lines[start:stop])))
-mine  = set(re.findall(r"scripts/[A-Za-z0-9_.-]+\.py", open("scripts/preflight.sh").read()))
+# Any .py gate, not only scripts/ -- the macOS admission gate lives under
+# .planning/evidence/, and a guard that only looks in one directory is exactly
+# how that gate stayed uncovered while it was red.
+PAT = r"(?:scripts|\.planning/evidence)/[A-Za-z0-9_./-]+\.py"
+in_ci = set(re.findall(PAT, "\n".join(lines[start:stop])))
+mine  = set(re.findall(PAT, open("scripts/preflight.sh").read()))
 missing = in_ci - mine
 if missing:
     print("PREFLIGHT DRIFT GUARD: ci.yml runs host-side gate(s) this pre-flight "
