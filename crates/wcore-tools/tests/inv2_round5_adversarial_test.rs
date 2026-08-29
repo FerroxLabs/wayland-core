@@ -626,6 +626,42 @@ async fn interleave(during: bool) -> (usize, usize, std::time::Duration) {
 // guard verdict — writing it would destroy whatever arrived, so it is refused
 // like any other stale write.
 // ===========================================================================
+/// # The Windows truth, measured
+///
+/// This arm is NOT gated to Unix and never was — it runs on the Windows CI leg
+/// like everywhere else, and `.config/nextest.toml` already pins this whole
+/// binary to `retries = 0` under `profile.ci`, so CI is not absorbing anything.
+/// Until 2026-08-29 nobody had watched it run on a Windows host. Measured on a
+/// Windows 11 build 26200 workstation at this tree,
+/// `cargo nextest run -p wcore-tools --retries 0` twelve times:
+///
+/// * **6 of 12** executions green, 0 lost.
+/// * **5 of 12** RED on real loss — 2 of 18, 1 of 5, 2 of 10, 1 of 13 and
+///   1 of 17 interleavings lost. Aggregated over the eleven executions that
+///   measured anything: **7 saves lost out of 169 that landed inside the
+///   window (4.1%)**.
+/// * **1 of 12** never got to measure: the FIXTURE's own saver failed at
+///   [`save`] — `std::fs::rename` returned
+///   `Os { code: 5, kind: PermissionDenied, message: "Access is denied." }`.
+///   That is not noise, it is the other half of the Windows truth: while the
+///   guard holds the destination open, an editor's atomic save over that name
+///   is REFUSED by the OS rather than silently lost.
+///
+/// LOAD MATTERS, AND THE NUMBERS ARE NOT LOAD-FREE — said here rather than
+/// discovered later. The six slow executions (40–97 s wall, cold tree) carried
+/// four of the five loss failures; the six fast ones (15–18 s, warm) carried
+/// one. So the rate above is an upper bound for a warm host and a lower bound
+/// for a loaded one — but loss is NOT purely a load artefact: the 1-of-17 came
+/// from a 17.0 s warm execution, and one of the rename refusals from a 14.9 s
+/// one. This is the same cold-tree sensitivity the workspace-size latency work
+/// recorded, and it is why a clean small temp dir would have hidden all of it.
+///
+/// So the guarantee this arm asserts does not hold on Windows, and the arm is
+/// deliberately left ungated so it keeps saying so. The residual is tracked as
+/// `#342` c3; the cause is that `atomic_io::publish_displacing` has no
+/// exchange primitive on Win32 — `ReplaceFileW` is a two-step rename with an
+/// instant at which the destination name does not resolve, and EVERY failure
+/// of it degrades silently to the old re-check-then-rename fallback.
 #[tokio::test]
 async fn a_save_during_an_edit_is_not_lost() {
     let (lost, interleaved, window) = edit_interleave(Saver::Rename, None).await;
@@ -1047,6 +1083,21 @@ unsafe extern "C" {
 // the filesystem path alone would close the race nobody runs and leave the
 // one everybody runs open.
 // ===========================================================================
+/// # The Windows truth, measured
+///
+/// Same measurement as [`a_save_during_an_edit_is_not_lost`], same host, same
+/// twelve `--retries 0` executions on 2026-08-29:
+///
+/// * **7 of 12** green, 0 lost.
+/// * **1 of 12** RED on real loss — 1 of 22 interleavings. Aggregated over the
+///   eight executions that measured anything: **1 save lost out of 144 that
+///   landed inside the window (0.7%)**.
+/// * **3 of 12** never measured — the fixture's saver hit the same
+///   `Os { code: 5, kind: PermissionDenied }` rename refusal.
+/// * **1 of 12** timed out.
+///
+/// The vfs path loses less often than the filesystem path but is not exempt:
+/// it publishes through the same `atomic_io` primitive. Tracked as `#342` c3.
 #[tokio::test]
 async fn a_save_during_an_edit_is_not_lost_on_the_vfs_path() {
     let ctx = ToolContext::test_default();
