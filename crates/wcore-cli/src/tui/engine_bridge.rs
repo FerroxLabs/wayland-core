@@ -3021,6 +3021,8 @@ impl TuiEngine {
         let mut guard = engine.lock().await;
         let builtin_names = guard.tool_names();
         let defer_cold = guard.defer_cold_config();
+        // wayland#1175 — taken before `registry_mut` borrows the engine.
+        let catalog_refresh = guard.mcp_catalog_refresh();
         let (message, tool_names) = match guard.registry_mut() {
             Some(reg) => {
                 wcore_mcp::tool_proxy::register_single_server_tools(
@@ -3032,6 +3034,14 @@ impl TuiEngine {
                     config.allowed_tools.as_deref(),
                     &defer_cold,
                 );
+                // wayland#1175 — a server added with `/mcp add` must not be
+                // opted out of `tools/list_changed`. Its config goes in with
+                // it so the #998 per-tool allowlist survives a refresh.
+                if let Some(refresh) = catalog_refresh.as_ref() {
+                    let mut single = std::collections::HashMap::new();
+                    single.insert(name.clone(), config.clone());
+                    refresh.register_runtime_server(&manager, &single);
+                }
                 let mut tool_names: Vec<String> = reg
                     .to_tool_defs()
                     .into_iter()
@@ -3100,6 +3110,12 @@ impl TuiEngine {
             reservation.complete_ready()
         };
         if !published {
+            // Roll the refresh admission back with the registration, so a
+            // withdrawn server cannot be polled and cannot leave a stale
+            // config behind for a later re-add to inherit.
+            if let Some(refresh) = catalog_refresh.as_ref() {
+                refresh.forget_runtime_server(&name);
+            }
             if let Some(registry) = guard.registry_mut() {
                 registry.remove_mcp_server(&name);
                 registry.refresh_tool_search_catalog(&defer_cold);

@@ -279,6 +279,208 @@ async fn a11_a_removed_tool_stops_being_dispatchable() {
     assert!(registry.get("inventory_reserve").is_some());
 }
 
+// ---------------------------------------------------------------------------
+// FerroxLabs/wayland#1174 + #1175 — a catalog refresh that starts empty (the
+// `defer_config_mcp` mode the desktop host runs in) and a server attached
+// after boot must BOTH honour `tools/list_changed`.
+// ---------------------------------------------------------------------------
+
+fn growing_manager(
+    server: &'static str,
+    initial: &[&str],
+) -> (Arc<GrowingTransport>, Arc<McpManager>) {
+    let transport = Arc::new(GrowingTransport::new(initial));
+    let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+        server,
+        false,
+        Box::new(ArcTransport(transport.clone())) as Box<dyn McpTransport>,
+        initial.iter().map(|n| tool_def(n)).collect(),
+    )]));
+    (transport, manager)
+}
+
+/// #1174. Under `defer_config_mcp` the boot-time refresh has no managers at
+/// all, so the engine used to install nothing and every server in the session
+/// lost `tools/list_changed`. The refresh must survive being empty and pick up
+/// the manager the deferred connect produces.
+#[tokio::test]
+async fn a_refresh_that_started_empty_serves_the_deferred_config_connect() {
+    let defer_cold = wcore_config::tools::DeferColdConfig::default();
+    let mut registry = wcore_tools::registry::ToolRegistry::new();
+
+    // Exactly what bootstrap builds when `defer_config_mcp` is set.
+    let refresh = wcore_mcp::tool_proxy::McpCatalogRefresh::new(
+        Vec::new(),
+        vec!["Read".to_string()],
+        HashMap::new(),
+    );
+    assert!(refresh.apply(&mut registry, &defer_cold).await.is_empty());
+
+    // …and now the deferred connect lands.
+    let (transport, manager) = growing_manager("warehouse", &["inventory_reserve"]);
+    let mut configs = HashMap::new();
+    configs.insert("warehouse".to_string(), stdio_config(false));
+    wcore_mcp::tool_proxy::register_mcp_tools(
+        &mut registry,
+        &manager,
+        &["Read".to_string()],
+        &configs,
+        &defer_cold,
+    );
+    refresh.register_runtime_server(&manager, &configs);
+
+    transport.register_and_announce("inventory_audit_export");
+    assert_eq!(
+        refresh.apply(&mut registry, &defer_cold).await,
+        vec!["warehouse".to_string()],
+        "a deferred-config server must have its tools/list_changed honoured"
+    );
+    assert!(
+        registry.get("inventory_audit_export").is_some(),
+        "the late tool must be callable"
+    );
+}
+
+/// #1175. `/mcp add` builds a brand-new manager; it must join the refresh.
+#[tokio::test]
+async fn a_runtime_added_server_is_refreshed_alongside_the_boot_servers() {
+    let defer_cold = wcore_config::tools::DeferColdConfig::default();
+    let builtin: Vec<String> = vec!["Read".to_string()];
+    let mut registry = wcore_tools::registry::ToolRegistry::new();
+
+    let (boot_tx, boot_mgr) = growing_manager("boot", &["boot_tool"]);
+    let mut boot_configs = HashMap::new();
+    boot_configs.insert("boot".to_string(), stdio_config(false));
+    wcore_mcp::tool_proxy::register_mcp_tools(
+        &mut registry,
+        &boot_mgr,
+        &builtin,
+        &boot_configs,
+        &defer_cold,
+    );
+    let refresh = wcore_mcp::tool_proxy::McpCatalogRefresh::new(
+        vec![boot_mgr.clone()],
+        builtin.clone(),
+        boot_configs,
+    );
+
+    let (live_tx, live_mgr) = growing_manager("live", &["live_tool"]);
+    let mut live_configs = HashMap::new();
+    live_configs.insert("live".to_string(), stdio_config(false));
+    wcore_mcp::tool_proxy::register_single_server_tools(
+        &mut registry,
+        &live_mgr,
+        "live",
+        &builtin,
+        true,
+        None,
+        &defer_cold,
+    );
+    refresh.register_runtime_server(&live_mgr, &live_configs);
+
+    live_tx.register_and_announce("live_late_tool");
+    boot_tx.register_and_announce("boot_late_tool");
+    let mut refreshed = refresh.apply(&mut registry, &defer_cold).await;
+    refreshed.sort();
+    assert_eq!(refreshed, vec!["boot".to_string(), "live".to_string()]);
+    assert!(
+        registry.get("live_late_tool").is_some(),
+        "a server added with /mcp add must not be opted out of tool updates"
+    );
+    // Negative control: the boot server is not broken by the runtime add.
+    assert!(registry.get("boot_late_tool").is_some());
+    assert!(registry.get("boot_tool").is_some());
+}
+
+/// #998 must not regress through the new door. An operator allowlist of
+/// `Some([])` means "disable every tool on this server" — at boot, on the
+/// live add, AND after a `list_changed`. Registering the manager without its
+/// config would reach the `config == None -> allow-all` read in
+/// `tool_proxy.rs`, which is why `register_runtime_server` takes the configs.
+#[tokio::test]
+async fn a_runtime_added_servers_empty_allowlist_survives_a_refresh() {
+    let defer_cold = wcore_config::tools::DeferColdConfig::default();
+    let builtin: Vec<String> = Vec::new();
+    let mut registry = wcore_tools::registry::ToolRegistry::new();
+
+    let (transport, manager) = growing_manager("locked", &["locked_tool"]);
+    let mut configs = HashMap::new();
+    let mut config = stdio_config(false);
+    config.allowed_tools = Some(Vec::new());
+    configs.insert("locked".to_string(), config);
+
+    wcore_mcp::tool_proxy::register_single_server_tools(
+        &mut registry,
+        &manager,
+        "locked",
+        &builtin,
+        true,
+        Some(&[]),
+        &defer_cold,
+    );
+    assert!(
+        registry.get("locked_tool").is_none(),
+        "boot: allowlist is empty"
+    );
+
+    let refresh =
+        wcore_mcp::tool_proxy::McpCatalogRefresh::new(Vec::new(), builtin, HashMap::new());
+    refresh.register_runtime_server(&manager, &configs);
+
+    transport.register_and_announce("locked_late_tool");
+    assert_eq!(
+        refresh.apply(&mut registry, &defer_cold).await,
+        vec!["locked".to_string()]
+    );
+    assert!(
+        registry.get("locked_late_tool").is_none(),
+        "an empty allowlist must still mean 'no tools' after a list_changed"
+    );
+    assert!(registry.get("locked_tool").is_none());
+}
+
+/// The structural guard behind that: a manager offered with no config for the
+/// server it serves is REFUSED, not silently admitted as allow-all.
+#[tokio::test]
+async fn a_runtime_manager_with_no_config_is_refused() {
+    let defer_cold = wcore_config::tools::DeferColdConfig::default();
+    let mut registry = wcore_tools::registry::ToolRegistry::new();
+    let (transport, manager) = growing_manager("orphan", &["orphan_tool"]);
+
+    let refresh =
+        wcore_mcp::tool_proxy::McpCatalogRefresh::new(Vec::new(), Vec::new(), HashMap::new());
+    assert!(
+        !refresh.register_runtime_server(&manager, &HashMap::new()),
+        "a manager with no server config must not enter the refresh"
+    );
+
+    transport.register_and_announce("orphan_late_tool");
+    assert!(
+        refresh.apply(&mut registry, &defer_cold).await.is_empty(),
+        "a refused manager must not be polled"
+    );
+}
+
+/// A runtime add that is rolled back (the TUI's `!published` path) must leave
+/// nothing behind: neither the manager nor its config.
+#[tokio::test]
+async fn a_withdrawn_runtime_server_stops_being_refreshed() {
+    let defer_cold = wcore_config::tools::DeferColdConfig::default();
+    let mut registry = wcore_tools::registry::ToolRegistry::new();
+    let (transport, manager) = growing_manager("transient", &["transient_tool"]);
+    let mut configs = HashMap::new();
+    configs.insert("transient".to_string(), stdio_config(false));
+
+    let refresh =
+        wcore_mcp::tool_proxy::McpCatalogRefresh::new(Vec::new(), Vec::new(), HashMap::new());
+    assert!(refresh.register_runtime_server(&manager, &configs));
+    refresh.forget_runtime_server("transient");
+
+    transport.register_and_announce("transient_late_tool");
+    assert!(refresh.apply(&mut registry, &defer_cold).await.is_empty());
+    assert!(registry.get("transient_late_tool").is_none());
+}
+
 /// Lets one fixture be observed by the test while the manager owns a
 /// `Box<dyn McpTransport>`.
 struct ArcTransport(Arc<GrowingTransport>);

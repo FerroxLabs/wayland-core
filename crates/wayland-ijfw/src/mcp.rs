@@ -151,6 +151,30 @@ pub async fn register(ctx: &mut PluginContext<'_>) -> PluginResult<()> {
     Ok(())
 }
 
+/// `true` if `command` fetches a package from a public registry and executes
+/// it.
+///
+/// wayland-core#340. Kept in step with
+/// `wcore_tools::osv_check::runner_forms`, which is the authoritative table —
+/// this plugin cannot depend on a `wcore-*` core crate (audit F2), so the
+/// names are mirrored. Over-inclusion is the safe direction here: it only
+/// costs a skipped smoke test, where under-inclusion costs an ungated fetch.
+fn is_package_runner(command: &str) -> bool {
+    let base = std::path::Path::new(command)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    let base = [".exe", ".cmd", ".bat", ".ps1"]
+        .iter()
+        .find_map(|ext| base.strip_suffix(ext))
+        .unwrap_or(base.as_str());
+    matches!(
+        base,
+        "npx" | "bunx" | "uvx" | "pipx" | "npm" | "pnpm" | "yarn" | "bun" | "uv" | "deno"
+    )
+}
+
 /// Synchronous two-stage reachability probe. Safe to run on a blocking
 /// thread only (it spawns child processes and sleeps). Returns `true` iff
 /// `npx` is present AND the server smoke-test passes.
@@ -236,6 +260,27 @@ fn mcp_server_is_reachable(spec: &wcore_plugin_api::mcp_server_spec::McpServerSp
                     );
                     return false;
                 }
+                return true;
+            }
+
+            // wayland-core#340: a package runner is NOT smoke-tested here.
+            //
+            // `npx -y --package=@ijfw/memory-server ijfw-memory --help`
+            // DOWNLOADS AND EXECUTES the package. This probe runs at plugin
+            // registration, long before `StdioTransport::spawn_…` reaches
+            // `wcore_mcp::malware_gate`, so it was a production pre-exec
+            // bypass: the registry fetch, and any install-time code in it,
+            // ran before OSV was ever queried. A reachability probe is not
+            // worth executing ungated code for.
+            //
+            // The #928 failure this probe was added to catch — a spec whose
+            // argv `npx` cannot resolve to an executable — is a property of a
+            // CONSTANT (`default_server_spec`), not of the machine, so it is
+            // graded by `default_spec_names_the_bin_explicitly` at build time
+            // instead of by spawning the package at every startup. Stage 1
+            // (`npx --version`) still runs: it names no package, so it fetches
+            // nothing.
+            if is_package_runner(command) {
                 return true;
             }
 
@@ -601,5 +646,106 @@ mod tests {
         // asserts is that the spawn_blocking offload joins cleanly on a
         // single-threaded runtime (no reactor starvation / deadlock).
         assert!(!reachable);
+    }
+
+    // ---------------------------------------------------------------------
+    // wayland-core#340 — the reachability probe must not execute a registry
+    // package before the malware gate has seen it.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn package_runners_are_recognised_including_windows_shims() {
+        for command in [
+            "npx",
+            "npx.cmd",
+            "NPX.EXE",
+            "/usr/local/bin/uvx",
+            "pipx",
+            "pnpm",
+            "yarn",
+            "bunx",
+            "bun",
+            "uv",
+            "npm",
+            "deno",
+            "npx.ps1",
+        ] {
+            assert!(
+                is_package_runner(command),
+                "{command} fetches from a registry"
+            );
+        }
+        // Negative controls: these execute something already on disk.
+        for command in ["node", "python3", "/opt/mcp/my-server", "sh", "docker"] {
+            assert!(!is_package_runner(command), "{command} fetches nothing");
+        }
+    }
+
+    /// The probe used to spawn `npx … --help`, which DOWNLOADS AND RUNS the
+    /// package — before `wcore_mcp::malware_gate` sees the launch. A runner
+    /// spec must now be reported reachable without any spawn at all.
+    ///
+    /// `npx.cmd` cannot be executed on Unix, so if the smoke test still ran
+    /// for a runner this would spawn-error and return `false`.
+    #[test]
+    #[cfg(unix)]
+    fn a_package_runner_spec_is_never_spawned_by_the_probe() {
+        use wcore_plugin_api::mcp_server_spec::{McpServerSpec, McpTransport};
+        let spec = McpServerSpec {
+            name: "probe".into(),
+            transport: McpTransport::Stdio {
+                command: "npx.cmd".into(),
+                args: vec![
+                    "-y".into(),
+                    "--package=@ferroxlabs/nonexistent-340".into(),
+                    "nonexistent-bin".into(),
+                ],
+            },
+            env: std::collections::HashMap::new(),
+        };
+        assert!(
+            mcp_server_is_reachable(&spec),
+            "a package runner must be registered without executing the package"
+        );
+    }
+
+    /// Negative control for the test above: the smoke test still runs — and
+    /// still rejects — for a command that is NOT a package runner. Without
+    /// this, `mcp_server_is_reachable` returning `true` would prove nothing.
+    #[test]
+    fn a_non_runner_command_that_cannot_start_is_still_rejected() {
+        use wcore_plugin_api::mcp_server_spec::{McpServerSpec, McpTransport};
+        let spec = McpServerSpec {
+            name: "probe".into(),
+            transport: McpTransport::Stdio {
+                command: "ferroxlabs-no-such-binary-340".into(),
+                args: vec!["--serve".into()],
+            },
+            env: std::collections::HashMap::new(),
+        };
+        assert!(!mcp_server_is_reachable(&spec));
+    }
+
+    /// #928 used to be caught by spawning the package at every startup. It is
+    /// a property of a constant, so it is graded here instead: `npx` only
+    /// resolves a bin whose name equals the package's unscoped name, and
+    /// `@ijfw/memory-server` ships no `memory-server` bin.
+    #[test]
+    fn default_spec_names_the_bin_explicitly() {
+        use wcore_plugin_api::mcp_server_spec::McpTransport;
+        let McpTransport::Stdio { command, args } = default_server_spec().transport else {
+            panic!("the default IJFW MCP spec must be stdio");
+        };
+        assert_eq!(command, "npx");
+        assert!(
+            args.iter()
+                .any(|a| a == &format!("--package={MEMORY_SERVER_PACKAGE}")),
+            "the package must be passed with --package= (#928): {args:?}"
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some(MEMORY_SERVER_BIN),
+            "the bin must be named explicitly (#928): {args:?}"
+        );
     }
 }
