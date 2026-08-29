@@ -133,7 +133,9 @@ impl LlmProvider for CohereProvider {
         &self,
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-        let url = format!("{}/chat", self.base_url);
+        // #1178: Cohere's default base already ends in `/v1`, so a user who
+        // writes it with a trailing slash built `//chat`. Join instead.
+        let url = wcore_config::compat::join_endpoint(&self.base_url, "/chat");
         let model = self.resolved_model(request);
         let body = build_cohere_body(request, &model);
 

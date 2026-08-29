@@ -154,9 +154,13 @@ impl GeminiProvider {
         // (it moved to the `x-goog-api-key` header in `build_headers`). The
         // model segment is percent-encoded so an exotic model id cannot inject
         // extra path/query structure into the URL.
+        // #1178: join the `/v1beta/models` prefix on whole path segments so a
+        // base_url copied out of Google's own docs (which prints the `/v1beta`)
+        // does not build `/v1beta/v1beta/models/...`. The model segment is
+        // appended after the join and stays percent-encoded.
         format!(
-            "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
-            self.base_url.trim_end_matches('/'),
+            "{}/{}:streamGenerateContent?alt=sse",
+            wcore_config::compat::join_endpoint(&self.base_url, "/v1beta/models"),
             encode_path_segment(model),
         )
     }
@@ -698,7 +702,8 @@ impl LlmProvider for GeminiProvider {
     /// /v1beta/models` endpoint. On any HTTP/parse failure we fall back to the
     /// static alias catalog — `/model` must never hard-fail.
     async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
-        let url = format!("{}/v1beta/models", self.base_url.trim_end_matches('/'));
+        // #1178: same join as `build_url`.
+        let url = wcore_config::compat::join_endpoint(&self.base_url, "/v1beta/models");
         // H-2 / secrets-26: the API key rides in the `x-goog-api-key` header,
         // NOT the `?key=` query string, so it cannot leak into a URL-bearing
         // error, the `[retry]` trace, or across a 302. `build_headers` is the

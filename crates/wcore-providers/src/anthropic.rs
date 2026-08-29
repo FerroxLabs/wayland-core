@@ -151,7 +151,17 @@ impl AnthropicProvider {
         body: &Value,
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-        let url = format!("{}/v1/messages", base_url);
+        // #1178 (Anthropic wire) -- JOIN, do not concatenate. `--base-url`
+        // and `[providers.anthropic].base_url` reach here verbatim, and every
+        // Anthropic-compatible endpoint publishes itself WITH the `/v1` in it
+        // (Anthropic's own docs, and MiniMax ships
+        // `https://api.minimax.io/anthropic` by default). A bare `format!`
+        // built `/v1/v1/messages` for the documented spelling and `//v1/messages`
+        // for a trailing slash; MEASURED live against api.anthropic.com, the
+        // correct path returns 401 (routed) and BOTH of those return a bare 404
+        // that names nothing. `join_endpoint` collapses the overlap on whole
+        // path segments, so all four spellings reach one endpoint.
+        let url = wcore_config::compat::join_endpoint(base_url, "/v1/messages");
         // #863 F2 — loop-ownership marking on the Anthropic Messages
         // translation. HEADER ONLY, deliberately: the Anthropic `metadata`
         // object accepts `user_id` and rejects arbitrary keys, so the
@@ -673,7 +683,9 @@ impl LlmProvider for AnthropicProvider {
     /// HTTP/parse failure we fall back to the static alias catalog — `/model`
     /// must never hard-fail.
     async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
-        let url = format!("{}/v1/models", self.base_url.trim_end_matches('/'));
+        // #1178: same join as `try_stream` -- `trim_end_matches` alone
+        // fixed only the trailing-slash half, not the doubled `/v1`.
+        let url = wcore_config::compat::join_endpoint(&self.base_url, "/v1/models");
         let headers = match self.select_key().and_then(|key| self.build_headers(&key)) {
             Ok(h) => h,
             Err(_) => return Ok(alias_models(self.alias_key())),
