@@ -25,11 +25,11 @@ criteria:
     owner: core
     note: "includes notes/turnkey.json and docs/monkey.json to pin the separator boundary of the *-key.json rule, so the table cannot be satisfied by a guard that denies everything"
   - id: c4
-    text: "A rule added to the @-ref guard's own file-name check is also honoured by the tools deny walk"
+    text: "Every name the @-ref attach guard refuses is carried by the shared denylist the file tools walk, so a name refused to @name is never readable to the model through Read/Grep/Bash"
     state: met
     evidence: "test:crates/wcore-tools/src/workspace_policy/tests.rs::the_shared_denylist_carries_every_name_the_at_attach_guard_denies"
     owner: core
-    note: "TEXT REWRITTEN 2026-08-29: the old wording presupposed the guard keeps its own file-name check, and 6d130a62 deleted it. Closed by ELIMINATION - the eleven CLI-only names moved into SECRET_BASENAMES / SECRET_NAME_SUFFIXES / SECRET_EXTENSIONS. The dangerous direction is closed too: those names were previously refused to @name and readable to the model through Read/Grep/Bash. Wrong-refusal control: the_shared_denylist_still_admits_ordinary_files."
+    note: "TEXT ACTUALLY REWRITTEN 2026-08-29 (lane f13-n-atref). The previous rewrite was claimed in this note but never performed: the text: field still read 'A rule added to the @-ref guard's own file-name check is also honoured by the tools deny walk', which 6d130a62 made UNFALSIFIABLE by deleting that check - no rule can be added to a check that does not exist, so the criterion could never go red. The text above is now the property the cited test actually pins, which is the stronger one. Closed by ELIMINATION - the eleven CLI-only names moved into SECRET_BASENAMES / SECRET_NAME_SUFFIXES / SECRET_EXTENSIONS. The dangerous direction is closed too: those names were previously refused to @name and readable to the model through Read/Grep/Bash. Wrong-refusal control: the_shared_denylist_still_admits_ordinary_files."
 ---
 
 The issue reports two secret denylists that had drifted: the composer's @-ref
@@ -44,7 +44,9 @@ loses an entry - which is precisely the property whose absence let them diverge
 - plus a real set of attachable controls so it cannot be passed by refusing
 everything.
 
-The honest residual is the reverse direction, recorded as c4: the guard still
-owns a local file-name rule the tools do not see. Criteria come from the
-cluster A verification note of 2026-08-29; every cited symbol and test was
-re-checked in this tree.
+c4 records the reverse direction, and it is closed rather than residual: the
+guard owns no local file-name rule any more (6d130a62 deleted it), and the
+eleven CLI-only names it used to carry live in the shared list, pinned by an
+11-row AT_ATTACH_ONLY_SECRETS table. Criteria come from the cluster A
+verification note of 2026-08-29; every cited symbol and test was re-checked in
+this tree.

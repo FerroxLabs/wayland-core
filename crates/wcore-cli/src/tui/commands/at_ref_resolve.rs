@@ -362,7 +362,7 @@ impl WalkScope<'_> {
 
 /// Depth-first directory walk for `@dir`, applying both guardrails.
 ///
-/// `root_canonical` and `visited` exist for core#339. The walk is the call site
+/// [`WalkScope`] and `visited` exist for core#339. The walk is the call site
 /// that matters most there: it pulls a link in without the user ever naming it,
 /// so a `notes.txt -> ~/.git-credentials` planted in a cloned repo was inlined
 /// by `@./` alone. Every entry is therefore judged by what it RESOLVES to —
