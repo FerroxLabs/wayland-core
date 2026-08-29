@@ -37,10 +37,18 @@
 //!    argument INSIDE a store, but `.git` and `<vendor>/.git` are not
 //!    themselves stores — so naming the directory one component up walked
 //!    into `.git/objects` and `.git/lfs` in plaintext. The predicate is
-//!    `workspace_policy::is_vcs_content_store_static`, the same lexical arm
-//!    `WorkspacePolicy::is_vcs_content_store` uses, not a second copy.
-//!    `.git/HEAD` and `.git/refs` are NOT stores and stay searchable, matching
-//!    the `git rev-parse` carve-out the OS deny list already makes.
+//!    The predicate is BOTH arms of `WorkspacePolicy::is_vcs_content_store`,
+//!    not a second copy of either: `is_vcs_content_store_static` per path for
+//!    the lexical arm, and `vcs_content_stores(dir)` for the arm that RESOLVES
+//!    the stores a `.git` merely NAMES — a gitfile's `gitdir:`/`commondir` and
+//!    an `objects/info/alternates` borrow. Asking only the lexical arm was a
+//!    measured plaintext leak on `Grep(".")` itself: `git init
+//!    --separate-git-dir mygit` and `git clone --reference` both put a real
+//!    object store at an INSIDE-the-root path that is lexically ordinary, and
+//!    it came back while the in-process VFS refused the same bytes
+//!    (`tests/grep_vcs_named_store_deny.rs`). `.git/HEAD` and `.git/refs` are
+//!    NOT stores and stay searchable, matching the `git rev-parse` carve-out
+//!    the OS deny list already makes.
 //! 5. **Surviving match content is scrubbed** with `wcore_safety::PIIScrubber`.
 //!    This is not belt-and-braces: the engine's central `redact_tool_output`
 //!    ALREADY runs that scrubber over every tool result, but its
@@ -57,7 +65,9 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::path_validation::lex_normalize;
-use crate::workspace_policy::{is_secret_path_static, is_vcs_content_store_static};
+use crate::workspace_policy::{
+    is_secret_path_static, is_vcs_content_store_static, vcs_content_stores,
+};
 
 /// Cap on the number of withheld filenames named in the footer. A name is not
 /// a secret — the model needs to know WHICH file it cannot see — but an
@@ -66,7 +76,16 @@ const MAX_NAMED_WITHHELD: usize = 5;
 
 /// The reportable-file decision for one Grep invocation, computed before any
 /// backend runs.
-pub(crate) enum GrepScope {
+pub(crate) struct GrepScope {
+    target: ScopeTarget,
+    /// core#244 c3, arm 2 — content stores this search's directories NAME
+    /// rather than contain, already resolved and canonicalized. Empty for the
+    /// overwhelmingly common workspace, which is what keeps the extra check
+    /// free; see [`under_any`].
+    named_stores: Vec<PathBuf>,
+}
+
+enum ScopeTarget {
     /// An explicitly named single file. No traversal happened, so the ignore
     /// policy does not apply and every emitted line belongs to this file.
     File(PathBuf),
@@ -151,12 +170,24 @@ impl Filtered {
 /// Decide, from the filesystem, which files this search may report on.
 ///
 /// `resolved` is the already-validated, absolute, lexically normalized search
-/// target produced by `validate_search_root`.
-pub(crate) fn scope_for(resolved: &Path) -> GrepScope {
+/// target produced by `validate_search_root`. `base` is the search's anchor —
+/// the jail root for a sandboxed session, the process cwd otherwise — and is
+/// where arm-2 store resolution starts, because a `.git` ABOVE the search
+/// target can name a store INSIDE it.
+pub(crate) fn scope_for(resolved: &Path, base: &Path) -> GrepScope {
+    let mut named_stores = anchor_named_stores(resolved, base);
     if !resolved.is_dir() {
-        return GrepScope::File(lex_normalize(resolved));
+        named_stores.sort();
+        named_stores.dedup();
+        return GrepScope {
+            target: ScopeTarget::File(lex_normalize(resolved)),
+            named_stores,
+        };
     }
-    let mut allowed = HashSet::new();
+    // Two passes over ONE walk. A store is discovered from the directory that
+    // names it, which may be visited after files already admitted from inside
+    // it, so admission cannot be decided during the walk.
+    let mut candidates: Vec<PathBuf> = Vec::new();
     // `standard_filters(true)` is ripgrep's own default set: .gitignore,
     // .ignore, global gitignore, .git/ exclusion and hidden-file skipping.
     // Using ripgrep's crate rather than re-deriving the rules is what makes
@@ -177,7 +208,19 @@ pub(crate) fn scope_for(resolved: &Path) -> GrepScope {
         .build()
         .flatten()
     {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            // core#244 c3, arm 2. Two extra syscalls for a directory with no
+            // gitfile and no alternates — `metadata(<dir>/.git).is_file()` and
+            // one failed open — which is what makes resolving this at EVERY
+            // traversed depth affordable, and is why a VENDORED gitfile store
+            // is covered here where the root-only point-predicate misses it.
+            named_stores.extend(vcs_content_stores(entry.path()));
+            continue;
+        }
+        if !file_type.is_file() {
             continue;
         }
         let path = entry.path();
@@ -193,21 +236,73 @@ pub(crate) fn scope_for(resolved: &Path) -> GrepScope {
         if is_secret_path_static(path) || is_vcs_content_store_static(path) {
             continue;
         }
-        allowed.insert(lex_normalize(path));
+        candidates.push(lex_normalize(path));
     }
-    GrepScope::Dir(allowed)
+    named_stores.sort();
+    named_stores.dedup();
+    let allowed: HashSet<PathBuf> = candidates
+        .into_iter()
+        .filter(|p| !under_any(&named_stores, p))
+        .collect();
+    GrepScope {
+        target: ScopeTarget::Dir(allowed),
+        named_stores,
+    }
+}
+
+/// Arm-2 stores named by the search's own anchor and by every directory
+/// between it and the search target — the ones the walk below `resolved` will
+/// never visit. `<root>/.git` naming `<root>/mygit/objects` while the search
+/// target is `<root>/mygit` is exactly this case.
+fn anchor_named_stores(resolved: &Path, base: &Path) -> Vec<PathBuf> {
+    let mut out = vcs_content_stores(base);
+    for ancestor in resolved.ancestors() {
+        out.extend(vcs_content_stores(ancestor));
+        if ancestor == base {
+            break;
+        }
+    }
+    out
+}
+
+/// True when `path` is at or inside one of the already-canonicalized arm-2
+/// `stores`.
+///
+/// Returns on the empty set before touching the filesystem, so an ordinary
+/// workspace — no gitfile, no alternates — pays nothing. The lexical test is
+/// tried first and the canonicalizing one only as a fallback, because the walk
+/// hands us `lex_normalize`d paths while `push_store` canonicalizes, and the
+/// two differ exactly when a symlinked component sits above the store.
+fn under_any(stores: &[PathBuf], path: &Path) -> bool {
+    if stores.is_empty() {
+        return false;
+    }
+    if stores.iter().any(|store| path.starts_with(store)) {
+        return true;
+    }
+    match std::fs::canonicalize(path) {
+        Ok(canon) => stores.iter().any(|store| canon.starts_with(store)),
+        Err(_) => false,
+    }
 }
 
 impl GrepScope {
+    /// True when `path` lives in a VCS CONTENT store, by EITHER arm of
+    /// `WorkspacePolicy::is_vcs_content_store` — lexically, or because a `.git`
+    /// this search passed through names it.
+    fn is_store(&self, path: &Path) -> bool {
+        is_vcs_content_store_static(path) || under_any(&self.named_stores, path)
+    }
+
     /// True when this scope may report matches from `path`.
     fn admits(&self, path: &Path) -> bool {
-        match self {
+        match &self.target {
             // Rule 2 + rule 3: an explicitly named file is searched, unless it
             // is secret-shaped.
-            GrepScope::File(f) => {
-                path == f && !is_secret_path_static(path) && !is_vcs_content_store_static(path)
+            ScopeTarget::File(f) => {
+                path == f && !is_secret_path_static(path) && !self.is_store(path)
             }
-            GrepScope::Dir(allowed) => allowed.contains(path),
+            ScopeTarget::Dir(allowed) => allowed.contains(path),
         }
     }
 
@@ -239,7 +334,7 @@ impl GrepScope {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.to_string_lossy().into_owned());
                     out.secret_files.insert(name);
-                } else if is_vcs_content_store_static(&path) {
+                } else if self.is_store(&path) {
                     out.vcs_store += 1;
                 } else {
                     out.ignored += 1;
@@ -260,8 +355,8 @@ impl GrepScope {
     /// Work out which file a backend output line belongs to, and where that
     /// line's CONTENT starts.
     fn attribute(&self, line: &str, base: &Path) -> Option<(PathBuf, usize)> {
-        match self {
-            GrepScope::File(f) => {
+        match &self.target {
+            ScopeTarget::File(f) => {
                 // Backends disagree on whether a single-file search echoes the
                 // filename: `rg` and `findstr` (with an explicit spec) do,
                 // GNU `grep -rn` on one file does not — measured, it emits
@@ -280,7 +375,7 @@ impl GrepScope {
                 };
                 Some((f.clone(), content_start))
             }
-            GrepScope::Dir(_) => {
+            ScopeTarget::Dir(_) => {
                 let (path, content_start) = split_match_line(line)?;
                 Some((resolve_against(base, Path::new(path)), content_start))
             }
@@ -354,7 +449,10 @@ mod tests {
     #[test]
     fn file_scope_attributes_both_single_file_output_shapes() {
         let f = PathBuf::from("/tmp/w/.env");
-        let scope = GrepScope::File(f.clone());
+        let scope = GrepScope {
+            target: ScopeTarget::File(f.clone()),
+            named_stores: Vec::new(),
+        };
         let base = Path::new("/tmp/w");
 
         let (p1, s1) = scope.attribute("1:SECRET=x", base).expect("bare form");

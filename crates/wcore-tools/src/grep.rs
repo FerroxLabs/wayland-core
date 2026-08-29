@@ -208,11 +208,14 @@ async fn run_grep(input: &Value, search_root: Option<&Path>) -> ToolResult {
     // SR-04/SR-05. Decide what this search may report BEFORE choosing a
     // backend, so `rg`, `grep` and `findstr` are all held to the same answer.
     // See `grep_policy` for the rules and the reasoning.
-    let scope = grep_policy::scope_for(&resolved);
+    // `base` first: it is both the subprocess working directory and the anchor
+    // arm-2 store resolution starts from, because a `.git` ABOVE the search
+    // target can name a store INSIDE it (core#244 c3).
     let base = match search_root {
         Some(root) => root.to_path_buf(),
         None => std::env::current_dir().unwrap_or_else(|_| resolved.clone()),
     };
+    let scope = grep_policy::scope_for(&resolved, &base);
 
     // Try ripgrep first, fallback to grep.
     let raw = match try_ripgrep(pattern, path, glob_pattern, case_insensitive, search_root).await {

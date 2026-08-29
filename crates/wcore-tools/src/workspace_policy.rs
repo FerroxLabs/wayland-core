@@ -2161,7 +2161,15 @@ fn path_is_in_credential_store(path: &Path) -> bool {
 ///
 /// FerroxLabs/wayland-core#244 c3 asks that the VCS content store be
 /// "unreachable to a shell subprocess". `BashTool`'s subprocess is confined by
-/// the OS sandbox, which consumes [`vcs_content_stores`] as `fs_read_deny`.
+/// the OS sandbox, which consumes [`vcs_content_stores`] as `fs_read_deny` —
+/// WHERE THE BACKEND ENFORCES READ-DENY. Where it does not, the shell is
+/// refused outright, except for the local operator, who keeps an unconfined
+/// one; on the Windows job-object default that is the ordinary interactive
+/// user, and there the store IS readable to `Bash`. That is a decided
+/// position (`.planning/DECISIONS.md`, Q-391), measured and pinned by
+/// `crates/wcore-tools/tests/bash_vcs_store_local_operator_gap.rs`, and
+/// tracked as FerroxLabs/wayland-core#391 — not an oversight, and not
+/// something this predicate changes either way.
 /// `GrepTool` spawns its OWN subprocess (`rg` / `grep` / `findstr`) through
 /// `shell_command_argv`, OUTSIDE that sandbox, so none of that deny list ever
 /// reaches it — and its only other predicate, [`is_secret_path_static`],
@@ -2176,13 +2184,35 @@ fn path_is_in_credential_store(path: &Path) -> bool {
 /// `path` argument and `.git` is not itself a store, so naming the control
 /// directory ONE COMPONENT ABOVE it walked straight in.
 ///
-/// Deliberately the any-depth LEXICAL arm only ([`inside_vcs_store`]) — the
-/// same arm [`WorkspacePolicy::is_vcs_content_store`] tries first, so the two
-/// cannot answer differently on anything Grep can reach. Grep never sees the
-/// second arm's targets: a gitfile-pointed or `alternates`-borrowed store lives
-/// OUTSIDE the workspace root, the walk is `follow_links(false)`, and an
-/// absolute path outside the jail is refused by `ctx.vfs.exists()` before any
-/// backend is chosen.
+/// The any-depth LEXICAL arm only ([`inside_vcs_store`]) — the same arm
+/// [`WorkspacePolicy::is_vcs_content_store`] tries first. It is HALF of that
+/// predicate and must never be mistaken for all of it.
+///
+/// This doc previously claimed "Grep never sees the second arm's targets: a
+/// gitfile-pointed or `alternates`-borrowed store lives OUTSIDE the workspace
+/// root". That sentence was FALSE and the leak it excused is MEASURED in
+/// `crates/wcore-tools/tests/grep_vcs_named_store_deny.rs`. `git init
+/// --separate-git-dir mygit` and `git clone --reference ../shared` both resolve
+/// arm 2 to a directory INSIDE the root, where nothing is lexically a store:
+///
+/// ```text
+/// ./notes.txt:1:WLCANARY-CONTROL-OK
+/// ./mygit/objects/ab/cd1234:1:WLCANARY-GITFILE-244
+/// ./shared-objects/ab/cd1234:1:WLCANARY-ALTERNATES-244
+/// ```
+///
+/// — returned by `Grep(".")`, the whole-workspace search, in the same
+/// `Contained` posture whose in-process VFS refuses those exact bytes.
+///
+/// So `grep_policy` asks BOTH arms: this one per path, and
+/// [`vcs_content_stores`] resolved for the workspace root and for every
+/// directory the walk traverses. Grep may afford that discovery because it
+/// TRAVERSES, where a point-predicate answering one path at a time cannot —
+/// which makes Grep deliberately STRICTER than
+/// [`WorkspacePolicy::is_vcs_content_store`] on a VENDORED gitfile, whose store
+/// arm 2 (root's `.git` only) never sees. Denying a real object store is not a
+/// wrong refusal, so the strictness is safe in the one direction it goes; the
+/// VFS-side remainder is FerroxLabs/wayland-core#390.
 pub fn is_vcs_content_store_static(path: &Path) -> bool {
     inside_vcs_store(path)
 }
@@ -2783,7 +2813,7 @@ fn walk_root_is_covered(covering: &Path, candidate: &Path) -> bool {
 /// add`) and a submodule checkout both have one, and the store it names can sit
 /// OUTSIDE `root` — where `root.join(".git/objects")` does not exist, so the
 /// deny above silently covers nothing. See [`gitfile_content_stores`].
-fn vcs_content_stores(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn vcs_content_stores(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for (dir, store) in VCS_CONTENT_STORES {
         push_store(&mut out, root.join(dir).join(store));

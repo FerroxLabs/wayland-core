@@ -15,6 +15,7 @@
 | Q7 | Windows merge freeze for Lane W | **YES — a declared window, opened after Lane 0.1 is read** | Serializes the single Windows box |
 | Q-113 | core#113 | **CLOSE AS REFUTED**, recording deny-by-default as the decision | Record posted on #113 2026-08-29; the close is queued on FerroxLabs/wayland#1229, with wayland-core#364 filed independently for the same act -- both open, maintainer to dedupe |
 | Q-338c4 | core#338 credential surface | **Deny `/dev/tty` via `setsid`, in the SAME change as layer 1** | Layer 1 alone makes the test green while `credential.helper` stays open |
+| Q-391 / core#244 c4 | is the Windows local-operator shell expected to confine the VCS content store? | **NO — and say so everywhere the product speaks** | Rewrite #244 c4 to its true scope; keep the standing pin test; do not reopen AppContainer |
 
 ## D-SECRET-2 — REFUTED 2026-08-29. Do not build this.
 MASTER-PLAN.md §8 recommended splitting `reached` per tracker "to close the one hole in the
@@ -76,3 +77,30 @@ nothing in it describes broken behaviour. Its slice 2 carries a BREAKING migrati
 `acknowledge_open_admission` token an operator has written — every open-admission channel refuses to
 start until re-acknowledged. The buried Telegram defect needs none of that. Ship the defect, park the
 feature request, and be explicit that it is parked as a feature.
+
+## Why Q-391 is "no"
+core#244 c4 was graded on the unqualified sentence "a Bash subprocess cannot read the store".
+MEASURED FALSE on the Windows shipping default for the ordinary interactive user, twice and
+independently: on real Windows 10.0.26200.9168 (`ROOT_STORE_LEAKED=true`, `NESTED_STORE_LEAKED=true`,
+`RECURSIVE_LEAKED=true`) and on Linux against the same `WindowsJobObjectBackend`, which compiles and
+spawns on every target (`LOCAL_OPERATOR_STORE_READ: Exit code: 0 / STDOUT: ROOT-OBJECT-BYTES-244`).
+
+The gate is `shell_requires_os_read_deny()` = `secret_read_deny_required && !local_operator_principal`.
+On a backend that cannot enforce read-deny, a NON-local principal loses the shell entirely
+(fail-closed, reproduced first) and the LOCAL OPERATOR keeps an unconfined one.
+
+**Taken as "no", for a reason that is already settled elsewhere and is only being written down here:**
+delivering the confinement needs a Windows FILESYSTEM sandbox, and the standing ruling is that Windows
+gets none — AppContainer is closed and must not be reopened (see core#254's history and the #389 note
+carrying the same bar). The job-object default is intended. Removing the local-operator exemption
+instead is not an option either: it was added because refusing left every fresh Windows clone with no
+shell at all, and the product's own printed remedy `--trust-workspace` hands back the identical
+uncontained shell, so the refusal bought nothing and cost the whole tool.
+
+What IS in scope, and is delivered by the change that records this: the product stops claiming more
+than it delivers. #244 c4's text now states the scope at which the property holds; the
+`is_vcs_content_store_static` doc no longer says `BashTool`'s subprocess is confined full stop; and
+`bash_vcs_store_local_operator_gap.rs` asserts the gap IS there on every platform the build host runs,
+so the day it closes, someone re-grades instead of quietly agreeing. Scope of the "no": Linux (bwrap)
+and macOS (sandbox-exec) both enforce read-deny at their shipping default, so the exemption is inert
+there, and every non-local principal on Windows is still refused.

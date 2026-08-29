@@ -342,8 +342,13 @@ fn normalize_copy(src: &Path, dst: &Path, copied: &mut u64, cap: u64) -> Result<
 ///
 /// So on Windows this is a REDUCTION (the child is not created on the user's
 /// console, and never has it by default), not the elimination unix gets. #338
-/// c2 is scoped to unix in its own text and the Windows remainder is tracked
-/// as FerroxLabs/wayland-core#389. Do not restore the analogy sentence: an
+/// c2's own `text:` field opens `ON UNIX:` and names the Windows
+/// non-delivery — `.planning/ledger/wayland-core-338.md`, one `grep` away, so
+/// this sentence is checkable rather than asserted. It did not, when this
+/// comment first claimed it did: the field was byte-identical to base and only
+/// the criterion's STATE had moved, which is the same overstatement in a
+/// different file. The Windows remainder is tracked as
+/// FerroxLabs/wayland-core#389. Do not restore the analogy sentence: an
 /// overstated security guarantee is worse than an understated one, because it
 /// stops the next person looking.
 ///
