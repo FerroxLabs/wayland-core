@@ -151,9 +151,13 @@ fn spawn_http_server(
                                 b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n",
                             )
                             .await;
-                        let _ = socket.write_all(get_body.as_bytes()).await;
-                        let _ = socket.flush().await;
-                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        loop {
+                            if socket.write_all(get_body.as_bytes()).await.is_err() {
+                                return;
+                            }
+                            let _ = socket.flush().await;
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
                     } else {
                         let _ = socket
                             .write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
@@ -466,4 +470,69 @@ async fn the_manager_picks_up_a_tool_an_sse_server_registers_mid_session() {
         "the mid-session tool must now be advertised, or it stays uncallable \
          for the life of the session"
     );
+}
+
+/// The resurrection hazard named alongside the defect. With
+/// `take_tools_changed` now implemented for Streamable-HTTP, a transport that
+/// reported itself alive forever would let the manager re-list — and
+/// re-register — the tools of a server the operator had already removed, on
+/// that server's next `list_changed`. `refresh_signalled_tools` gates on
+/// `is_alive()`, so closing the transport has to be observable there.
+///
+/// The OPEN arm is the control and runs first: it proves the refresh really
+/// does fire for this server, so the closed arm's empty result cannot be an
+/// artefact of nothing ever being signalled.
+#[tokio::test]
+async fn a_closed_streamable_http_server_is_never_refreshed_again() {
+    use wcore_mcp::manager::McpManager;
+
+    let url = spawn_http_server(
+        concat!(
+            "data: ",
+            r#"{"jsonrpc":"2.0","id":10,"result":{"tools":[{"name":"alpha","description":"d","inputSchema":{"type":"object"}}]}}"#,
+            "\n\n"
+        ),
+        true,
+        concat!(
+            "data: ",
+            r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
+            "\n\n"
+        ),
+    );
+    let transport = StreamableHttpTransport::connect(&url, &HashMap::new(), true)
+        .await
+        .expect("streamable-http connect");
+    transport.start_notification_stream().await;
+
+    let manager = McpManager::new_for_test(vec![("removed", false, Box::new(transport))]);
+
+    // CONTROL — the server is announcing and the manager must act on it.
+    let mut refreshed = Vec::new();
+    for _ in 0..100 {
+        refreshed = manager.refresh_signalled_tools().await;
+        if !refreshed.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        refreshed,
+        vec!["removed".to_string()],
+        "precondition: an OPEN server that announces list_changed must be re-listed"
+    );
+
+    manager
+        .close_server("removed")
+        .await
+        .expect("close_server must succeed");
+
+    // The server goes on announcing regardless; the manager must stop caring.
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            manager.refresh_signalled_tools().await.is_empty(),
+            "a server whose transport was closed must never be re-listed, \
+             however loudly it goes on announcing tools/list_changed"
+        );
+    }
 }
