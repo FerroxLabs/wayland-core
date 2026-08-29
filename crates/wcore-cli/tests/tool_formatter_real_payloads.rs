@@ -102,11 +102,12 @@ fn render_real(tool: &dyn Tool, input: Value) -> (String, Vec<String>) {
 }
 
 /// The real shell these Bash cases drive, and why two expectations are
-/// platform-split.
+/// split by DIALECT rather than by platform.
 ///
 /// `BashTool` runs the command through `wcore_config::shell::
-/// bash_shell_argv_prefix` — `sh -c <cmd>` on Unix, `cmd /C <cmd>` on
-/// Windows. The formatter properties under test (real exit code, real byte
+/// bash_shell_argv_prefix` — `sh -c <cmd>` on Unix, and on Windows either a
+/// resolved `<git>\bash.exe -c <cmd>` or `cmd /S /C <cmd>`, whichever that
+/// host has (FerroxLabs/wayland#1164). The formatter properties under test (real exit code, real byte
 /// count, real stderr) are platform-neutral, but the *inputs that produce
 /// them* are not, and hard-coding the Unix answers made two of these cases
 /// assert something false on Windows:
@@ -127,21 +128,46 @@ fn render_real(tool: &dyn Tool, input: Value) -> (String, Vec<String>) {
 /// the fail-loud guarantee held. So the defect was in this file, not in the
 /// formatter.
 ///
-/// These stay hard-coded per platform rather than being derived from the
-/// observed output: an expectation computed from the result under test
-/// cannot fail, which is the exact disease this file was written to cure.
-#[cfg(unix)]
-const ECHO_STDOUT_BYTES: usize = 15; // "HELLO_FROM_UAT\n"
-#[cfg(windows)]
-const ECHO_STDOUT_BYTES: usize = 16; // "HELLO_FROM_UAT\r\n"
+/// UPDATED for FerroxLabs/wayland-core#387: on Windows the split is no longer
+/// by PLATFORM, because the platform no longer determines the interpreter.
+/// Since FerroxLabs/wayland#1164 a Windows host with Git for Windows installed
+/// drives a real `bash` and one without it still drives `cmd`, so both of the
+/// expectations below move within Windows. They are now selected from the
+/// product's own resolved prefix.
+///
+/// Each answer is still HARD-CODED per dialect, and deliberately: it is
+/// computed from an INPUT (which interpreter was selected) and never from the
+/// output under test. An expectation derived from the result cannot fail,
+/// which is the exact disease this file was written to cure.
+///
+/// Pinning these to `cmd` with `WAYLAND_BASH_SHELL=cmd` would also make them
+/// green, and would be worse than the failure: it tests an interpreter the
+/// product does not use on that host.
+fn posix_interpreter() -> bool {
+    wcore_config::shell::shell_prefix_is_posix(&wcore_config::shell::bash_shell_argv_prefix())
+}
 
-/// A command that writes to stderr AND exits non-zero, in each shell's own
-/// dialect. Both halves matter: the exit code proves the card cannot claim
+/// `echo HELLO_FROM_UAT` terminates its line with `\n` under a POSIX shell
+/// (15 bytes) and `\r\n` under `cmd` (16).
+fn echo_stdout_bytes() -> usize {
+    if posix_interpreter() { 15 } else { 16 }
+}
+
+/// A command that writes to stderr AND exits non-zero, in the resolved shell's
+/// own dialect. Both halves matter: the exit code proves the card cannot claim
 /// success on a failure, the stderr proves a failure still explains itself.
-#[cfg(unix)]
-const STDERR_THEN_FAIL: &str = "echo BOOM_TOKEN 1>&2; exit 1";
-#[cfg(windows)]
-const STDERR_THEN_FAIL: &str = "echo BOOM_TOKEN 1>&2 & exit /b 1";
+///
+/// `;` is a statement separator in a POSIX shell and ordinary text in `cmd`,
+/// whose unconditional separator is `&` and whose non-zero exit is `exit /b N`.
+/// `exit /b 1` handed to a real bash is `exit` with two arguments, which is a
+/// usage error exiting 2 — the shape #387 reported.
+fn stderr_then_fail() -> &'static str {
+    if posix_interpreter() {
+        "echo BOOM_TOKEN 1>&2; exit 1"
+    } else {
+        "echo BOOM_TOKEN 1>&2 & exit /b 1"
+    }
+}
 
 /// Assert the invariant that the whole defect class violated.
 fn assert_never_fabricates(summary: &str, detail: &[String], ctx: &str) {
@@ -165,13 +191,13 @@ fn bash_success_renders_the_real_exit_code_and_byte_count() {
 
     // The exact case the UAT reported as `Ran `?` · exit 0 · 0 bytes`.
     // The real payload is "HELLO_FROM_UAT" plus the shell's own line
-    // terminator — see `ECHO_STDOUT_BYTES`.
+    // terminator — see `echo_stdout_bytes`.
     assert!(
         summary.contains("exit 0"),
         "real exit code missing: {summary}"
     );
     assert!(
-        summary.contains(&format!("{ECHO_STDOUT_BYTES} bytes stdout")),
+        summary.contains(&format!("{} bytes stdout", echo_stdout_bytes())),
         "byte count still wrong (was always 0): {summary}"
     );
     assert!(
@@ -204,7 +230,7 @@ fn bash_failure_never_reports_exit_zero() {
 fn bash_stderr_is_surfaced() {
     let (summary, detail) = render_real(
         &wcore_tools::bash::BashTool,
-        serde_json::json!({ "command": STDERR_THEN_FAIL }),
+        serde_json::json!({ "command": stderr_then_fail() }),
     );
     assert!(summary.contains("exit 1"), "wrong exit code: {summary}");
     assert!(

@@ -593,6 +593,47 @@ jobs:
       - name: Run tests (nextest CI profile)
         run: vx just test-ci
 
+
+      # ── core#238 c4: PRINT the NUL-device measurement, do not just assert it ─
+      #
+      # `crates/wcore-tools/tests/windows_nul_device_probe.rs` is `#![cfg(windows)]`
+      # and carries no `#[ignore]`, so the step above ALREADY executes it and
+      # already asserts on it: a green Windows leg is the verdict arm. What that
+      # buys is the VERDICT, not the RECORD — nextest captures stdout for a
+      # PASSING test, so the measured table (kernel `GetFileType` for bare `NUL`
+      # and for `<dir>\NUL`, whether `fs::metadata` reports `is_file()`, the OS
+      # build string, and the liveness control on an ordinary file) is invisible
+      # on exactly the runs where it holds.
+      #
+      # core#238 c4 asks for the numbers on the build under test, on EVERY
+      # Windows run rather than once by hand, because the answer is a property of
+      # the Windows build and the fleet's builds move. Server 2019/2022
+      # (build 20348) is a known-open residual precisely because no such host has
+      # ever printed its row here.
+      #
+      # Cheap: the binary was compiled and run seconds ago by `just test-ci`, so
+      # this is a re-run of one already-built test. `if: !cancelled()` so the
+      # record still lands when some OTHER test failed the leg — a failing leg is
+      # when the measurement is most wanted.
+      - name: Record the Windows NUL-device measurement (core#238 c4)
+        if: ${{ runner.os == 'Windows' && !cancelled() }}
+        # `pwsh`, not `bash`: EVERY other `vx` invocation on a Windows leg in
+        # this file runs under the default pwsh shell, and none runs under bash.
+        # A record step that dies on a PATH difference records nothing.
+        shell: pwsh
+        run: |
+          vx cargo nextest run -p wcore-tools --no-capture `
+            -E 'binary(windows_nul_device_probe)' 2>&1 |
+            Tee-Object -FilePath nul-probe.log
+          $record = Get-Content nul-probe.log -Raw
+          @(
+            '### core#238 c4 - bare NUL on this Windows build',
+            '',
+            '```',
+            $record,
+            '```'
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+
       # PER-LEG test-signal gate. The `report` job at the bottom of this file
       # already refuses a run where NO leg produced JUnit, but it cannot see a
       # single leg going dark: macOS uploads a report, `COUNT` is non-zero, and
@@ -1011,6 +1052,32 @@ jobs:
       # FIRST, not after clippy — see the step-order note in this job's header.
       - name: Run tests (nextest CI profile)
         run: vx just test-ci
+
+      # core#238 c4, second Windows supplier. Same step as the matrix leg's:
+      # `just test-ci` above already RAN and asserted the probe, and this
+      # re-runs that one already-built binary with `--no-capture` so the
+      # measured table reaches the log and the step summary. This leg is
+      # `windows-latest` (a hosted image), so its build row is a DIFFERENT
+      # Windows build from the self-hosted msvc leg's — which is the reason
+      # both legs record rather than one.
+      - name: Record the Windows NUL-device measurement (core#238 c4)
+        if: ${{ !cancelled() }}
+        # `pwsh`, not `bash`: EVERY other `vx` invocation on a Windows leg in
+        # this file runs under the default pwsh shell, and none runs under bash.
+        # A record step that dies on a PATH difference records nothing.
+        shell: pwsh
+        run: |
+          vx cargo nextest run -p wcore-tools --no-capture `
+            -E 'binary(windows_nul_device_probe)' 2>&1 |
+            Tee-Object -FilePath nul-probe.log
+          $record = Get-Content nul-probe.log -Raw
+          @(
+            '### core#238 c4 - bare NUL on this Windows build',
+            '',
+            '```',
+            $record,
+            '```'
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY
 
       # Byte-identical intent to the matrix job's per-leg gate: a leg that ran
       # zero tests must be reported as an ABSENCE of signal, never as a pass.

@@ -723,11 +723,30 @@ async fn env_and_cwd_are_honored_through_sandbox() {
     }
     #[cfg(windows)]
     {
+        // The syntax that expands a variable is the ONE thing that differs
+        // between the two interpreters Windows can now resolve to, so it is
+        // read from the product's own resolution rather than assumed. Since
+        // FerroxLabs/wayland#1164 a host with Git for Windows drives a real
+        // bash, where `%VAR%` is literal text; a host without one still drives
+        // `cmd`, where `$VAR` is literal text. Hard-coding either one asserts
+        // something false on half the Windows fleet
+        // (FerroxLabs/wayland-core#387).
+        let prefix = wcore_config::shell::bash_shell_argv_prefix();
+        let command = if wcore_config::shell::shell_prefix_is_posix(&prefix) {
+            "echo \"[$S9_PASSTHROUGH_PROBE]\""
+        } else {
+            "echo %S9_PASSTHROUGH_PROBE%"
+        };
         let result = tool
-            .execute_with_ctx(json!({"command": "echo %S9_PASSTHROUGH_PROBE%"}), &ctx)
+            .execute_with_ctx(json!({ "command": command }), &ctx)
             .await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
-        assert!(result.content.contains("passed_through_99"));
+        assert!(
+            result.content.contains("passed_through_99"),
+            "a registered passthrough var must reach the child under {}: {}",
+            prefix.join(" "),
+            result.content
+        );
     }
 
     // SAFETY: test cleanup.
