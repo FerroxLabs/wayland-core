@@ -53,7 +53,19 @@ What did not travel with the fix is the refusal side. The docs tell hosts to
 wait for a workspace_policy receipt after any grant and then no receipt arrives
 when the grant is refused, which is the same published-contract-versus-wire
 contradiction #314 was about, just in prose instead of JSON Schema. These three
-emitters have zero test coverage of any kind, so for c4 the missing test is the
-deliverable and the one-line receipt move is secondary.
+emitters had zero test coverage of any kind, so for c4 the missing test was the
+deliverable and the one-line receipt move was secondary. c4 is now met: the
+receipt precedes the refusal on all four refusal exits, with four refusal tests
+and two must-pass-in-both-arms controls.
 
-Criteria come from the cluster D verification note of 2026-08-29.
+What is still owed is c5, and its OWNER was wrong. It was marked `maintainer`
+while the decision was open; the decision has since been taken (Q4 in
+`.planning/DECISIONS.md`, "YES — contract minor bump, with Desktop"), so the
+label was a parking artifact that outlived what it was parking. The work — a
+typed refusal event, its schema branch, its fixture, the corpus regeneration —
+is produced entirely in this repo, and Desktop consuming it is a later additive
+change rather than a precondition. It is core's, and it should be taken together
+with wayland#388 c7, which is the same untyped-`Info` defect on the error path.
+
+Criteria come from the cluster D verification note of 2026-08-29; c5's owner was
+corrected by the 2026-08-29 handoff audit.

@@ -56,6 +56,12 @@ half-built. The fourth claim - deny-by-default policy - is still accurate and
 still deliberate, but the opaque dead end it caused is gone: the refusal is
 routed by reason and carries a config snippet that is proven to work.
 
-What remains is a stale doc comment (c4) and a maintainer disposition (c5).
+What remains is the disposition, and only the disposition. The stale doc comment
+is fixed and guarded (c4), and the old c5 has been split: recording the
+deny-by-default decision on the issue was core's and is done (c5, posted
+2026-08-29), while the close itself is the maintainer's and is queued on
+wayland-core#364 (c6). There is no code owed on this issue.
+
 Criteria are transcribed from the cluster F verification note of 2026-08-29 and
-each evidence token was re-checked against this tree before being cited.
+each evidence token was re-checked against this tree before being cited; c5 was
+split by the 2026-08-29 handoff audit.

@@ -46,14 +46,24 @@ criteria:
     note: "MISLABELLED, corrected here -- also inside the old flux-owned c4. crates/wcore-protocol/src/events.rs:2290 is ErrorInfo { code: String, message: String, retryable: bool }: no typed category, no provider identity, no upstream status. Three of the five categories the ticket names -- context/token limit, tool/runtime failure, local Wayland error -- are decidable INSIDE core today and still reach the host as prose, so only the router-versus-provider split actually needs #1184. Note the overlap with wayland-core#314 c5, which is the same shape (an untyped Info frame where a typed one is owed) on the grant-refusal path; whoever takes either should look at both, since both are contract additions to the same event surface"
 ---
 
-Graded against this ticket's own Expected Behavior list: 3 of 7 bullets are
-met at v0.13.10, which is why it stays open.
+Graded against this ticket's own Expected Behavior list.
 
 Core's half was that output caps and reasoner replay were being decided from
 `request.model` — the alias the caller typed — rather than from the model the
-router actually served. `0cab1cf8` decides both from what is known.
+router actually served. `0cab1cf8` decides both from what is known. #1172 closed
+a third, independent cause of the same user-visible complaint (an endpoint
+silently discarding the prompt), which is worth reading alongside this before
+anyone re-grades it.
 
-The rest is the Free Models Router's side of the same symptom and is owned by
-the flux lane, not core. #1172 closed a third, independent cause of the same
-user-visible complaint (an endpoint silently discarding the prompt), which is
-worth reading alongside this before anyone re-grades it.
+**Re-graded 2026-08-29.** The old c4 said "the remaining four bullets are met"
+and gave all four to the flux lane. That was a partial nobody had split, and it
+was wrong in both directions: two of those bullets were already SHIPPED by core
+and going uncredited (the #388(b) length-cut gate, now c5), and two more are
+core work with no ticket anywhere (c6, c7). Only the failure-ORIGIN half is
+genuinely unobservable from this repo, and #1184 — which the core lane filed
+itself — says so in its own text, quoting Flux's reply that the router-side
+truncate/stall causes are fixed and "the remaining asks are harness-side, not
+Flux".
+
+So the ticket now stays open on core, not on flux. c6 and c7 are the work;
+neither is release-shaped and neither should be squeezed into 0.13.12 unscoped.

@@ -64,5 +64,16 @@ matters.
 The caps are now compared against a machine-readable declaration with a
 proven red arm, and each adapter says whether its number was measured or
 merely asserted. Visible-and-unmeasured is an improvement over
-presented-as-fact; it is not measured. c4 is the cheap unblocked half and
-should be done next; c5 needs credentials that are a maintainer decision.
+presented-as-fact; it is not measured.
+
+**Updated 2026-08-29.** Seven of the registry-constructible capped adapters now
+have a committed probe cell and four have been driven live. c8 — the unit
+question, and the one with a shipped HIGH-6 hiding behind it — is SETTLED: the
+Telegram astral arm was driven and the platform counts scalars, so the shipped
+4,096 stands. It had been recorded as blocked on a maintainer for a destination
+that already existed.
+
+What is left on c5 is three rows that still declare `cap_measured = no`, and all
+three are now credentials or an account rather than a probe shape: matrix and
+msteams owe one saturating send each, and whatsapp is blocked behind Meta's
+15-app-per-developer cap. #1186 carries them.
