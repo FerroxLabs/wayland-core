@@ -62,8 +62,77 @@ max_cost_usd          = 5.00
 | `[budget].max_tokens_out` | `Option<u64>` | `None` | Output-token cap for the tree |
 | `[budget].max_cost_usd` | `Option<f64>` | `None` | USD cost cap for the tree (checked last) |
 | `[budget].preset` | `Option<String>` | `None` | A named envelope to start from — see below |
+| `[budget].mode` | `Option<String>` | `None` | What the session may spend ON — see below |
 
 Every field is optional; leave one unset to leave that dimension uncapped.
+
+### Spend modes (`[budget].mode`)
+
+Every field above bounds how MUCH a session spends. None of them stops it
+reaching a hosted API at all. `mode` is the other axis:
+
+```toml
+[budget]
+mode = "local-only"
+```
+
+| Value | Admits | Refuses |
+|-------|--------|---------|
+| `unrestricted` (default) | anything the credentials reach | — |
+| `no-paid` | local models, and hosted models the pricing catalog lists at a real $0.00 | any metered model, and any model with **no known price** |
+| `local-only` | local inference only (an `ollama:` model id) | every hosted model, free ones included |
+
+Three things are worth knowing before you set one:
+
+* **It is enforced, not advertised.** The refusal happens in a provider
+  decorator wrapped around the engine's provider handle, before any request is
+  sent — the run stops with `Provider call not started`, and the inner provider
+  is never reached.
+* **An unpriced model counts as paid.** "We could not find a price" and "the
+  price is zero" are different facts. Collapsing them is how an unmetered
+  router alias would walk straight through `no-paid`.
+* **`local-only` is stronger than `no-paid`, not just cheaper.** A free hosted
+  model costs nothing and still ships the conversation to somebody else's
+  machine, which is the thing `local-only` exists to prevent.
+
+Where two config layers both name a mode, the **stricter** one wins — a
+repo-local `.wayland-core.toml` cannot relax a machine-owner's global
+`local-only`. This matches `max_daily_cost_usd`, and for the same reason.
+
+### Model escalation
+
+Several surfaces can move the live model mid-run: the smart-routing tier swap,
+a skill or hook `switch_model`, a configured provider fallback, the `/model`
+command. Moving DOWN the price ladder is free and unrecorded — that is what the
+cheap tier and the cheap compaction model are for.
+
+Moving UP it is an **escalation**, and an escalation nobody named a reason for
+is refused. An explicit operator `/model` pick supplies its own reason and is
+allowed; a hook cannot, so a hook-driven upgrade is blocked rather than
+recorded-and-allowed. A model with no known price always counts as an
+escalation: an unknown price cannot be shown to be cheaper.
+
+Every authorized escalation is written to disk the moment it is authorized. If
+that write fails, the escalation is reverted rather than left in force.
+
+### Per-task spend audit
+
+After **every** task — one user instruction and every provider call the agent
+made answering it, including its compaction calls and retries — one record is
+appended to:
+
+```
+<wayland config dir>/budget/spend-audit.jsonl
+```
+
+One JSON object per line. Task records carry `kind: "task_spend_audit"`;
+authorized escalations are written separately as `kind: "model_escalation"`, so
+an escalation survives a run that never reached a clean end.
+
+A task record names the models dispatched, the tokens in and out, the cost, and
+anything the guard refused. Read `unpriced_dispatches` before you read
+`cost_usd`: when it is non-zero, the total is a **lower bound**, because a
+dispatch at an unknown price is recorded as unknown rather than as $0.
 
 ### Presets
 
