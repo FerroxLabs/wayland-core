@@ -306,6 +306,43 @@ pub struct OrphanScan {
     pub enumerated: bool,
 }
 
+/// One surface an UNSCOPED sweep found, with the nonce it carries.
+///
+/// The nonce travels WITH the surface because it is what makes core#366 d3
+/// answerable: a leftover whose nonce no live registry entry claims is one this
+/// process did not create, which is the only kind a sweep needed to exist for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanSurface {
+    /// The surface's own name or id, as the platform reports it.
+    pub id: String,
+    /// The task nonce the surface carries. EMPTY when the platform reported the
+    /// surface but not its nonce — never a placeholder that could be mistaken
+    /// for a real one.
+    pub nonce: String,
+}
+
+/// The result of an UNSCOPED sweep: every surface this backend created, from
+/// ANY run, found by the PRESENCE of the wayland task marker rather than by its
+/// value.
+///
+/// Deliberately a separate type from [`OrphanScan`], which carries the `nonce`
+/// it was asked about. core#366 d2: the nonce-scoped scan keeps its exact
+/// meaning for the caller that genuinely wants one run's orphans, and the
+/// unscoped sweep is an addition beside it, not a widening of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanSweep {
+    pub backend_id: String,
+    pub kind: BackendKind,
+    /// The exact query that was issued, so a reader can re-run it by hand — or
+    /// the reason no query could be.
+    pub method: String,
+    pub found: Vec<OrphanSurface>,
+    /// False when the sweep could not actually enumerate. An unsweepable
+    /// surface must never be reported as zero leftovers, for the same reason
+    /// [`OrphanScan::enumerated`] exists.
+    pub enumerated: bool,
+}
+
 /// The provider-neutral execution backend.
 #[async_trait]
 pub trait ExecutionBackend: Send + Sync {
@@ -334,7 +371,45 @@ pub trait ExecutionBackend: Send + Sync {
     async fn health(&self) -> Result<Health>;
 
     /// Enumerate surfaces still carrying `nonce`.
+    ///
+    /// Answers "is anything left from the run whose nonce I am holding" and
+    /// nothing wider. Kept exactly as it was: `cancel()` re-enumerates by the
+    /// cancelled task's own nonce to verify its own removal, and a cancellation
+    /// that reported other tasks' surfaces as its residual would be wrong.
     async fn scan_orphans(&self, nonce: &str) -> Result<OrphanScan>;
+
+    /// Enumerate every surface this backend created, WITHOUT being given a
+    /// nonce (core#366).
+    ///
+    /// # Why this is a second method and not a wider first one
+    ///
+    /// In ordinary operation the nonce is fresh per run, so a scan for the
+    /// CURRENT nonce is structurally incapable of returning a PREVIOUS run's
+    /// leftover. The only two callers that can supply a real nonce make that
+    /// worse rather than better: `cancel()` reads it from the live registry, and
+    /// a leftover's own run already called `registry::forget`; the conformance
+    /// check supplies one chosen precisely so nothing ran under it. So a task
+    /// that runs once, wedges, and is never resubmitted leaks a surface that no
+    /// scan reports and no submit reclaims — the two leftovers in core#365 were
+    /// found by a human running `docker ps -a` by hand.
+    ///
+    /// # This REPORTS, it does not reclaim (core#366 d6)
+    ///
+    /// core#365's submit-path reclaim can prove removal is safe because it holds
+    /// the exact task id it is about to use, and no other process may hold that
+    /// id concurrently. A sweep holds no such claim over anything it finds: on a
+    /// shared daemon a labelled surface may belong to another tenant, or to a
+    /// LIVE task in a different process whose registry this one cannot see.
+    /// Reclaiming on that evidence would destroy running work to tidy a list, so
+    /// removal stays with the operator, who is shown the exact command.
+    ///
+    /// # Contract for an implementation
+    ///
+    /// A backend with no marker it can enumerate by MUST return
+    /// `enumerated: false` and name the reason in `method`. Returning an empty
+    /// `found` with `enumerated: true` is a positive claim that the surface is
+    /// clean, and a backend that never looked has not earned it.
+    async fn sweep_orphans(&self) -> Result<OrphanSweep>;
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {

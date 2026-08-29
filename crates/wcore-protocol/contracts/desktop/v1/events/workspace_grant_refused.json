@@ -1,0 +1,1 @@
+{"command":"grant_path","detail":"path grant refused: the local launcher did not opt in with --allow-host-path-grants","grant_id":"grant-001","reason":"launcher_opt_in_required","subject":"/Users/me/Downloads/Mortgage","type":"workspace_grant_refused"}

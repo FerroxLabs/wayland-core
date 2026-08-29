@@ -26,8 +26,8 @@ use serde::Deserialize;
 
 use crate::contract::{
     Availability, BackendCapabilities, BackendKind, CleanupObservation, ExecutionBackend,
-    ExecutionTask, Health, HibernationObservation, OrphanScan, ProbeBasis, ResourceBudget,
-    SecretChannel,
+    ExecutionTask, Health, HibernationObservation, OrphanScan, OrphanSurface, OrphanSweep,
+    ProbeBasis, ResourceBudget, SecretChannel,
 };
 use crate::error::{ExecError, Result};
 use crate::policy::{EffectivePolicy, declared_secret_exposure};
@@ -172,6 +172,11 @@ struct MachineSummary {
     name: String,
     #[serde(default)]
     state: String,
+    /// core#366: the nonce-scoped listing never read this, because the vendor
+    /// had already filtered on it. The unscoped sweep filters here instead, so
+    /// it needs the value.
+    #[serde(default)]
+    metadata: std::collections::BTreeMap<String, String>,
 }
 
 /// What the vendor's `exec` endpoint returns: the task's real output, produced
@@ -604,6 +609,30 @@ impl CloudBackend {
             .map(|m| format!("machine {} ({}) state={}", m.id, m.name, m.state))
             .collect())
     }
+
+    /// core#366 d1. Every machine in the app that carries the nonce metadata
+    /// key, whatever its value.
+    async fn machines_carrying_a_nonce(
+        credential: &CloudCredential,
+    ) -> std::result::Result<Vec<OrphanSurface>, String> {
+        let path = format!("/apps/{}/machines", credential.app);
+        let (status, body) = Self::api_get(credential, &path).await?;
+        if status != 200 {
+            return Err(format!("machine listing returned HTTP {status}: {body}"));
+        }
+        let machines: Vec<MachineSummary> =
+            serde_json::from_str(&body).map_err(|e| format!("unparseable machine listing: {e}"))?;
+        Ok(machines
+            .into_iter()
+            .filter_map(|m| {
+                let nonce = m.metadata.get(NONCE_METADATA_KEY)?;
+                Some(OrphanSurface {
+                    id: format!("machine {} ({}) state={}", m.id, m.name, m.state),
+                    nonce: nonce.clone(),
+                })
+            })
+            .collect())
+    }
 }
 
 /// Defence in depth against the token reaching a log through an error string
@@ -920,6 +949,49 @@ impl ExecutionBackend for CloudBackend {
                 backend_id: BACKEND_ID.into(),
                 kind: BackendKind::Cloud,
                 nonce: nonce.into(),
+                method: format!("vendor machine listing failed: {detail}"),
+                found: Vec::new(),
+                enumerated: false,
+            }),
+        }
+    }
+
+    /// core#366: the whole app listing, filtered on the metadata KEY rather
+    /// than on its value.
+    ///
+    /// The vendor filter is `metadata.<key>=<value>` and takes no key-presence
+    /// form, so the key-presence match happens here, in Rust, over the full
+    /// listing. That is the same reason `orphan::enumerate_process_table`
+    /// filters in Rust: a filter expressed in someone else's query language can
+    /// silently drop rows, and here a dropped row is a leaked machine that
+    /// still bills.
+    async fn sweep_orphans(&self) -> Result<OrphanSweep> {
+        let credential = match CloudCredential::from_env() {
+            Ok(credential) => credential,
+            Err(err) => {
+                return Ok(OrphanSweep {
+                    backend_id: BACKEND_ID.into(),
+                    kind: BackendKind::Cloud,
+                    method: err.to_string(),
+                    found: Vec::new(),
+                    enumerated: false,
+                });
+            }
+        };
+        match Self::machines_carrying_a_nonce(&credential).await {
+            Ok(found) => Ok(OrphanSweep {
+                backend_id: BACKEND_ID.into(),
+                kind: BackendKind::Cloud,
+                method: format!(
+                    "GET /apps/<app>/machines, filtered on metadata.{NONCE_METADATA_KEY} \
+                     being PRESENT"
+                ),
+                found,
+                enumerated: true,
+            }),
+            Err(detail) => Ok(OrphanSweep {
+                backend_id: BACKEND_ID.into(),
+                kind: BackendKind::Cloud,
                 method: format!("vendor machine listing failed: {detail}"),
                 found: Vec::new(),
                 enumerated: false,

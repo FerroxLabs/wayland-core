@@ -43,8 +43,8 @@ use async_trait::async_trait;
 
 use crate::contract::{
     Availability, BackendCapabilities, BackendKind, CleanupObservation, ExecutionBackend,
-    ExecutionTask, Health, HibernationObservation, OrphanScan, ProbeBasis, ResourceBudget,
-    SecretChannel, validate_identifier,
+    ExecutionTask, Health, HibernationObservation, OrphanScan, OrphanSweep, ProbeBasis,
+    ResourceBudget, SecretChannel, validate_identifier,
 };
 use crate::error::{ExecError, Result};
 use crate::policy::{EffectivePolicy, declared_secret_exposure};
@@ -454,6 +454,25 @@ impl ExecutionBackend for SshBackend {
                 enumerated: false,
             }),
         }
+    }
+
+    /// core#366: NOT ENUMERABLE, for the same reason as the local backend and
+    /// one more. The far end is swept with `ps -eo pid,args`, which shows argv
+    /// and not the environment the nonce travels in; and this backend has no
+    /// marker of its own on the remote host at all, so an unscoped query there
+    /// could not tell a wayland process from any other. Answering
+    /// `enumerated: false` is the whole point of that field.
+    async fn sweep_orphans(&self) -> Result<OrphanSweep> {
+        Ok(OrphanSweep {
+            backend_id: BACKEND_ID.into(),
+            kind: BackendKind::Ssh,
+            method: "NOT SWEPT: the far end carries no wayland marker an unscoped query could \
+                     match, and the remote process table is read for argv rather than for the \
+                     environment the nonce travels in."
+                .into(),
+            found: Vec::new(),
+            enumerated: false,
+        })
     }
 }
 

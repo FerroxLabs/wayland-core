@@ -120,8 +120,16 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // never in. The event is purely additive and nothing existing changes shape, so
 // `major` holds at 1 — but the minor has to move, because an added type is
 // undiscoverable to a host pinned below the version that introduced it.
-pub const CONTRACT_MINOR: u64 = 22;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/22";
+// 22 -> 23: core#314 c5 adds one event, `workspace_grant_refused`. A refused
+// `grant_path` / `grant_workspace_capability` emitted an UNCHANGED
+// `workspace_policy` receipt and an `info` frame of prose — both of which a
+// SUCCESSFUL grant also emits — so the only host-side tests for "was my grant
+// refused" were diffing two receipts or substring-matching our English. Purely
+// additive and nothing existing changes shape, so `major` holds at 1; the minor
+// has to move because an added type is undiscoverable to a host pinned below
+// the version that introduced it. Decision Q4 in .planning/DECISIONS.md.
+pub const CONTRACT_MINOR: u64 = 23;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/23";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases

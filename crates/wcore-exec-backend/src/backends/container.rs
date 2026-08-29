@@ -16,8 +16,8 @@ use async_trait::async_trait;
 
 use crate::contract::{
     Availability, BackendCapabilities, BackendKind, CleanupObservation, ExecutionBackend,
-    ExecutionTask, Health, HibernationObservation, OrphanScan, ProbeBasis, ResourceBudget,
-    SecretChannel, validate_identifier,
+    ExecutionTask, Health, HibernationObservation, OrphanScan, OrphanSurface, OrphanSweep,
+    ProbeBasis, ResourceBudget, SecretChannel, validate_identifier,
 };
 use crate::error::{ExecError, Result};
 use crate::policy::{EffectivePolicy, declared_secret_exposure};
@@ -837,6 +837,72 @@ impl ExecutionBackend for ContainerBackend {
             }),
         }
     }
+
+    async fn sweep_orphans(&self) -> Result<OrphanSweep> {
+        match sweep_containers().await {
+            Ok(found) => Ok(OrphanSweep {
+                backend_id: BACKEND_ID.into(),
+                kind: BackendKind::Container,
+                method: format!("docker ps -a --filter label={NONCE_LABEL} (key presence)"),
+                found,
+                enumerated: true,
+            }),
+            Err(detail) => Ok(OrphanSweep {
+                backend_id: BACKEND_ID.into(),
+                kind: BackendKind::Container,
+                method: format!("docker ps failed: {detail}"),
+                found: Vec::new(),
+                enumerated: false,
+            }),
+        }
+    }
+}
+
+/// core#366 d1: the key-PRESENCE query, which is the one nothing issued.
+///
+/// `--filter label=wayland.task.nonce` (no `=value`) matches on the label being
+/// present at all, so it returns every container this backend ever created,
+/// from any run. Measured while closing core#365 c6: labels are applied at
+/// CREATE time, so a container that never started still carries one and this
+/// query still finds it.
+///
+/// The nonce comes back beside the name via `{{.Label "…"}}` because the
+/// operator surface has to be able to say which of these THIS process created.
+async fn sweep_containers() -> std::result::Result<Vec<OrphanSurface>, String> {
+    let filter = format!("label={NONCE_LABEL}");
+    // Tab-separated, because a container name cannot contain a tab and a nonce
+    // is validated to `[A-Za-z0-9._-]`, so neither field can forge a separator.
+    let format = format!("{{{{.Names}}}}\t{{{{.Label \"{NONCE_LABEL}\"}}}}");
+    let mut command = wcore_config::shell::shell_command_argv(
+        "docker",
+        &["ps", "-a", "--filter", &filter, "--format", &format],
+    );
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| "docker ps did not answer within 10s".to_string())?
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(parse_sweep_rows(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Split out so the row parsing is testable without a daemon.
+fn parse_sweep_rows(stdout: &str) -> Vec<OrphanSurface> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (id, nonce) = line.split_once('\t').unwrap_or((line, ""));
+            OrphanSurface {
+                id: id.trim().to_string(),
+                nonce: nonce.trim().to_string(),
+            }
+        })
+        .collect()
 }
 
 async fn list_containers_with_nonce(nonce: &str) -> std::result::Result<Vec<String>, String> {
@@ -865,6 +931,27 @@ async fn list_containers_with_nonce(nonce: &str) -> std::result::Result<Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// core#366: the sweep's row parser, against the exact bytes docker
+    /// produces for the tab-separated format the sweep asks for.
+    #[test]
+    fn sweep_rows_split_name_from_nonce_and_survive_a_missing_label() {
+        let rows = parse_sweep_rows(
+            "wayland-f25-a\tnonce-one\n\
+             wayland-f25-b\tnonce-two\n\
+             \n\
+             wayland-f25-c\t\n",
+        );
+        assert_eq!(rows.len(), 3, "the blank line must be dropped: {rows:?}");
+        assert_eq!(rows[0].id, "wayland-f25-a");
+        assert_eq!(rows[0].nonce, "nonce-one");
+        assert_eq!(rows[1].nonce, "nonce-two");
+        // An empty label field stays EMPTY rather than becoming the name. A
+        // placeholder here would be indistinguishable from a real nonce, and
+        // `sweep_all` decides "no live task claims this" by nonce lookup.
+        assert_eq!(rows[2].id, "wayland-f25-c");
+        assert_eq!(rows[2].nonce, "");
+    }
 
     /// The exact stderr docker 29.2.1 produces for a name conflict, measured
     /// against a real daemon while diagnosing issue #365.

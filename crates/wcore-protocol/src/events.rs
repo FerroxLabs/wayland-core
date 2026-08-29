@@ -780,6 +780,38 @@ pub enum SetModeRefusalReason {
     LocalOptInRequired,
 }
 
+/// Which workspace-grant command a [`ProtocolEvent::WorkspaceGrantRefused`] is
+/// about, spelled exactly as that command's own wire `type`.
+///
+/// `revoke_path` is deliberately absent. Revocation is not gated and an
+/// unknown `grant_id` is a documented idempotent no-op (§2.3.3), not a
+/// refusal; typing it as one would tell a host that a successful
+/// clean-up-what-I-might-hold call had failed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceGrantCommand {
+    GrantPath,
+    GrantWorkspaceCapability,
+}
+
+/// Why a workspace grant was refused.
+///
+/// A typed vocabulary rather than a sentence, for the same reason
+/// [`SetModeRefusalReason`] is one: the prose that used to be the only signal
+/// is not something a host can match on without pinning our English.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceGrantRefusalReason {
+    /// The local launcher did not opt in — `--allow-host-path-grants` for
+    /// `grant_path`, `--allow-host-workspace-grants` for the capability grant.
+    /// Nothing the host can send changes this; the operator must relaunch.
+    LauncherOptInRequired,
+    /// The launcher DID opt in and the workspace policy refused the request
+    /// itself — an unresolvable root, a rule in §2.3.2, a target that is not an
+    /// executable regular file. A different request may still succeed.
+    PolicyRefused,
+}
+
 /// Events emitted by the agent to the client (Agent -> Client)
 ///
 /// `Clone` is derived (Wave 2) so the in-process TUI bridge can fan an
@@ -1339,6 +1371,38 @@ pub enum ProtocolEvent {
         /// The mode still in force — the refusal changes nothing.
         effective: crate::commands::SessionMode,
         reason: SetModeRefusalReason,
+    },
+    /// #314 c5 — a `grant_path` or `grant_workspace_capability` did NOT take
+    /// effect, as a frame a host can branch on.
+    ///
+    /// The refusal used to be reported ONLY as an `info` frame of English prose
+    /// with an empty `msg_id`, beside an UNCHANGED `workspace_policy` receipt.
+    /// Both frames also appear on success, so a host had exactly two ways to
+    /// tell a refused grant from a granted one: diff two receipts, or substring
+    /// match our English. That is the same published-contract-versus-wire
+    /// contradiction #314 is about, in prose instead of JSON Schema.
+    ///
+    /// Always-emitted forward-additive variant, on the same footing as
+    /// `set_mode_refused`: a host that does not know the type drops the line per
+    /// the W0 decoder contract, so no capability flag gates it. The `info` frame
+    /// is still emitted beside it — removing it would break every shipped
+    /// renderer to close a machine-readability gap.
+    WorkspaceGrantRefused {
+        command: WorkspaceGrantCommand,
+        /// The host's own `grant_id`, echoed so the refusal can be matched to
+        /// the request that caused it. EMPTY for `grant_workspace_capability`,
+        /// which carries no id on the wire — the same "empty means this shape
+        /// has none" convention `approval_required.resume_token` uses.
+        grant_id: String,
+        /// The `root` (`grant_path`) or `executable`
+        /// (`grant_workspace_capability`) the request named, as the host sent
+        /// it — NOT canonicalized, because a refused request may be refused
+        /// precisely because it could not be canonicalized.
+        subject: String,
+        reason: WorkspaceGrantRefusalReason,
+        /// The same English sentence the `info` frame beside this carries.
+        /// For display. Branch on `reason`, never on this.
+        detail: String,
     },
     /// W8a A.7: ExecutionBudget cap exceeded — singular event per
     /// session, fires once when the first cap trips. Always-emitted +

@@ -992,8 +992,14 @@ not hold, and so does `grant_workspace_capability` (§2.7a). The receipt is
 therefore emitted on **every** exit of all three commands, which is what makes
 the sentence above literally true rather than true-on-the-happy-path. A host
 must not read the ABSENCE of a receipt as a refusal: an absent frame is
-indistinguishable from one that has not arrived yet. Read the `info` for the
-reason and the receipt for the state.
+indistinguishable from one that has not arrived yet.
+
+**Read [`workspace_grant_refused`](#workspace_grant_refused) for the outcome**,
+the receipt for the state, and the `info` only for display. Because the receipt
+and the `info` are emitted on EVERY exit of these commands, neither one
+distinguishes a granted request from a refused one — the receipt is unchanged on
+refusal, and both frames carry the same `type` in either case. The typed event
+is the only signal that does, and it is emitted only on a refusal.
 
 ### 2.4 `tool_deny`
 
@@ -1104,9 +1110,11 @@ Core accepts this command only when all of these are true:
    stores.
 
 Success emits an updated `workspace_policy` receipt followed by an `info`
-event. **Refusal emits the same pair**: the (unchanged) receipt, then an `info`
-explaining the failed condition — see the receipt rule under `grant_path`
-(§2.3.3). The command never adds writable roots, changes approval posture, or
+event. **Refusal emits the same pair plus a typed
+[`workspace_grant_refused`](#workspace_grant_refused)**: the (unchanged)
+receipt, the typed refusal, then an `info` explaining the failed condition — see
+the receipt rule under `grant_path` (§2.3.3). Branch on the typed event; the
+pair alone cannot tell you which happened. The command never adds writable roots, changes approval posture, or
 disables the OS sandbox. Hosts should expose it only behind an explicit local
 approval UI.
 
@@ -2065,6 +2073,44 @@ auto-approves the built-in Write/Edit tools, so a wire peer that could set
 either would get write-without-consent — and a write is a write-to-RCE through a
 git hook, `.bashrc` or `authorized_keys` (GHSA-8r7g). The opt-in is `--force` or
 `WAYLAND_ALLOW_WIRE_FORCE=1` on the Core process, set by the local operator.
+
+### 1.N+4b workspace_grant_refused (core#314)
+
+<a id="workspace_grant_refused"></a>
+
+A [`grant_path`](#233-grant_path--revoke_path--the-flow-with-no-pending-call) or
+[`grant_workspace_capability`](#27a-grant_workspace_capability) did NOT take
+effect. Nothing changed: the `workspace_policy` receipt emitted beside this is
+the same one the session already had.
+
+```json
+{
+  "type": "workspace_grant_refused",
+  "command": "grant_path",
+  "grant_id": "3f2a…",
+  "subject": "/Users/me/Downloads/Mortgage",
+  "reason": "launcher_opt_in_required",
+  "detail": "path grant refused: the local launcher did not opt in with --allow-host-path-grants"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `command` | string | Which command was refused: `grant_path` or `grant_workspace_capability`. |
+| `grant_id` | string | The host's own `grant_id`, echoed back. EMPTY for `grant_workspace_capability`, which carries no id on the wire — correlate that one on `subject`. |
+| `subject` | string | The `root` or `executable` the request named, exactly as sent. NOT canonicalized: a request may be refused precisely because it could not be canonicalized. |
+| `reason` | string | `launcher_opt_in_required` — the operator must relaunch Core with `--allow-host-path-grants` / `--allow-host-workspace-grants`; nothing the host sends changes this. `policy_refused` — the opt-in is present and the workspace policy refused this particular request, so a different one may still succeed. |
+| `detail` | string | The same sentence the `info` frame beside this carries. For display. **Branch on `reason`, not on this.** |
+
+Always emitted; no capability flag gates it. `revoke_path` never produces this
+event: revocation is not gated, and an unknown `grant_id` is a documented
+idempotent no-op (§2.3.3), not a refusal.
+
+Why the event exists: a refused grant already emitted a `workspace_policy`
+receipt and an `info` frame, and so does a SUCCESSFUL one. A host had exactly
+two ways to tell them apart — diff two receipts, or substring-match Core's
+English — and the practical consequence was a persistent-folder list that could
+not report why a replayed grant had not landed.
 
 ### 1.N+5 provider_circuit_event (W7)
 

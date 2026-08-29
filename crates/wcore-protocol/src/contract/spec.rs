@@ -893,6 +893,19 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "session",
         "available"
     ),
+    // #314 c5 (decision Q4). Always-emitted forward-additive variant on the
+    // same footing as `set_mode_refused`, so `available` rather than a
+    // dedicated capability. `grant_id` is the correlation key because it is the
+    // host's OWN id for the request; it is empty on the capability-grant arm,
+    // which the wire type has no id for at all.
+    wire!(
+        "workspace_grant_refused",
+        "events/workspace_grant_refused.json",
+        ["command", "grant_id", "subject", "reason", "detail"],
+        Safety,
+        "grant_id",
+        "available"
+    ),
     wire!(
         "budget_exceeded",
         "events/budget_exceeded.json",
@@ -1284,6 +1297,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "suspend",
     "approval_resume",
     "set_mode_refused",
+    "workspace_grant_refused",
     "budget_exceeded",
     "budget_grant_result",
     "tool_panicked",
@@ -1981,6 +1995,18 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 requested: crate::commands::SessionMode::Force,
                 effective: crate::commands::SessionMode::Default,
                 reason: crate::events::SetModeRefusalReason::LocalOptInRequired,
+            },
+        ),
+        (
+            "events/workspace_grant_refused.json".into(),
+            ProtocolEvent::WorkspaceGrantRefused {
+                command: crate::events::WorkspaceGrantCommand::GrantPath,
+                grant_id: "grant-001".into(),
+                subject: "/Users/me/Downloads/Mortgage".into(),
+                reason: crate::events::WorkspaceGrantRefusalReason::LauncherOptInRequired,
+                detail: "path grant refused: the local launcher did not opt in \
+                         with --allow-host-path-grants"
+                    .into(),
             },
         ),
         (

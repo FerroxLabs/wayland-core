@@ -66,6 +66,19 @@ pub enum BackendCmd {
         #[arg(long)]
         nonce: String,
     },
+    /// core#366: enumerate every surface the backends created, from ANY run,
+    /// WITHOUT being given a nonce.
+    ///
+    /// `orphans --nonce X` can only answer "is anything left from the run whose
+    /// nonce I already hold", and in ordinary operation that nonce is fresh per
+    /// run — so it is structurally incapable of returning a PREVIOUS run's
+    /// leftover. This is the query that answers "are there wayland surfaces
+    /// left over from any run at all", and it marks the ones no live task
+    /// claims.
+    ///
+    /// REPORTS ONLY. It never removes anything: a labelled surface on a shared
+    /// host may belong to another tenant or to a live task in another process.
+    Sweep {},
     /// F25-05: scan every backend for orphaned execution left behind by a
     /// task, printing the RAW enumeration alongside the count and naming the
     /// reaping mechanism each backend actually relies on.
@@ -225,6 +238,7 @@ pub async fn run(args: BackendArgs) -> Result<()> {
         } => execute(&backend, task.as_deref(), &receipt_out).await,
         BackendCmd::Cancel { task_id, backend } => cancel(&task_id, backend.as_deref()).await,
         BackendCmd::Orphans { nonce } => orphans(&nonce).await,
+        BackendCmd::Sweep {} => sweep().await,
         BackendCmd::Scan {
             task_id,
             nonce,
@@ -446,6 +460,70 @@ async fn orphans(nonce: &str) -> Result<()> {
          un-enumerated surface is not a clean surface — a scan that could not run must never be \
          read as zero orphans."
     );
+    Ok(())
+}
+
+/// core#366 d1/d3/d6. Report every wayland-created surface, from any run.
+///
+/// The unclaimed ones are named first-class because they are the leftovers
+/// nobody could previously see: a run that ended called `registry::forget`, so
+/// no nonce-scoped scan has its nonce to ask with, and core#365's submit-path
+/// reclaim only fires if that exact task id is submitted again.
+///
+/// Nothing here removes anything (d6). The command an operator would run is
+/// PRINTED instead, because this process cannot prove a surface is safe to
+/// destroy: on a shared daemon it may be another tenant's, or a live task's in
+/// a different process whose registry this one cannot read.
+async fn sweep() -> Result<()> {
+    let sweeps = wcore_exec_backend::orphan::sweep_all(reference_budget()).await?;
+    let mut unswept = 0usize;
+    let mut unclaimed = 0usize;
+    let mut total = 0usize;
+    for (sweep, surfaces) in &sweeps {
+        println!(
+            "{:<10} enumerated={:<5} found={} via {}",
+            sweep.backend_id,
+            sweep.enumerated,
+            surfaces.len(),
+            sweep.method
+        );
+        for swept in surfaces {
+            let claim = if swept.unclaimed {
+                "UNCLAIMED by any live task"
+            } else {
+                "claimed by a live task"
+            };
+            let nonce = if swept.surface.nonce.is_empty() {
+                "<no nonce reported>"
+            } else {
+                &swept.surface.nonce
+            };
+            println!("           - {} [nonce {nonce}] {claim}", swept.surface.id);
+        }
+        if !sweep.enumerated {
+            unswept += 1;
+        }
+        total += surfaces.len();
+        unclaimed += surfaces.iter().filter(|s| s.unclaimed).count();
+    }
+    println!(
+        "\n{total} surface(s) found, {unclaimed} UNCLAIMED by any live task; {unswept} \
+         backend(s) could NOT be swept. A backend that could not be swept is not a clean \
+         backend."
+    );
+    if unclaimed > 0 {
+        println!(
+            "\nThis command REPORTS and never removes: a labelled surface may belong to \
+             another tenant on a shared host, or to a live task in another process whose \
+             registry this one cannot read. Remove one deliberately, by name, e.g. \
+             `docker rm -f <name>`."
+        );
+    }
+    // A found surface is a non-zero exit so this is scriptable as a gate, the
+    // same way `scan` already is.
+    if unclaimed > 0 {
+        bail!("{unclaimed} wayland surface(s) are left over and claimed by no live task");
+    }
     Ok(())
 }
 

@@ -23,8 +23,8 @@ use async_trait::async_trait;
 
 use crate::contract::{
     Availability, BackendCapabilities, BackendKind, CleanupObservation, ExecutionBackend,
-    ExecutionTask, Health, HibernationObservation, OrphanScan, ProbeBasis, ResourceBudget,
-    SecretChannel,
+    ExecutionTask, Health, HibernationObservation, OrphanScan, OrphanSweep, ProbeBasis,
+    ResourceBudget, SecretChannel,
 };
 use crate::error::{ExecError, Result};
 use crate::policy::{EffectivePolicy, declared_secret_exposure};
@@ -322,6 +322,37 @@ impl ExecutionBackend for LocalBackend {
             },
             found,
             enumerated,
+        })
+    }
+
+    /// core#366: NOT ENUMERABLE on this backend, and it says so rather than
+    /// returning a clean zero.
+    ///
+    /// The container and cloud backends can sweep because they stamp a MARKER
+    /// on the surface itself — a docker label, a machine metadata key — which
+    /// is queryable by key presence. This backend has no such marker: the nonce
+    /// reaches a child through `WAYLAND_TASK_NONCE` in its environment
+    /// (`execute`), and the process-table instrument reads `ps -eo …,args`,
+    /// which shows argv and never the environment. So the ONLY way this scan
+    /// ever matches is when the caller already knows the nonce string to look
+    /// for in a command line, which is precisely the nonce-scoped question.
+    ///
+    /// Reporting `enumerated: false` here is the honest answer and the one this
+    /// module is built around: "found nothing" and "could not look" are
+    /// different facts. Giving this arm a marker to sweep by is real work with
+    /// a cross-platform surface of its own, and it is NOT smuggled in here
+    /// behind a value that would read as measured.
+    async fn sweep_orphans(&self) -> Result<OrphanSweep> {
+        Ok(OrphanSweep {
+            backend_id: BACKEND_ID.into(),
+            kind: BackendKind::Local,
+            method: "NOT SWEPT: a local child carries its nonce in the environment \
+                     (WAYLAND_TASK_NONCE), and the process table is read for argv, so there \
+                     is no marker an unscoped query can match on. Use `scan_orphans` with a \
+                     known nonce, or `ps` by hand."
+                .into(),
+            found: Vec::new(),
+            enumerated: false,
         })
     }
 }

@@ -367,10 +367,13 @@ fn every_command_fixture_round_trips_to_the_variant_it_names() {
 // CONTRACT_MINOR bump it requires, rather than a number that drifts.
 // 67 -> 68 events: wayland#1088 adds `set_mode_refused`, the typed nack for a
 // wire `set_mode` the local-opt-in gate turns down.
+// 68 -> 69 events: core#314 c5 adds `workspace_grant_refused`, the typed nack
+// for a `grant_path` / `grant_workspace_capability` the launcher opt-in or the
+// workspace policy turns down.
 #[test]
-fn inventory_is_exactly_twenty_nine_commands_and_sixty_eight_events() {
+fn inventory_is_exactly_twenty_nine_commands_and_sixty_nine_events() {
     assert_eq!(COMMAND_SPECS.len(), 29);
-    assert_eq!(EVENT_SPECS.len(), 68);
+    assert_eq!(EVENT_SPECS.len(), 69);
     assert_eq!(
         COMMAND_SPECS
             .iter()
@@ -385,7 +388,7 @@ fn inventory_is_exactly_twenty_nine_commands_and_sixty_eight_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        68
+        69
     );
 }
 

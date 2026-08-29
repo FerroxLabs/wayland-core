@@ -14,6 +14,7 @@
 | Q6 / core#253 | the umbrella | **Keep open + unscheduled; split the Telegram defect out now** | Do NOT ship slice 2's breaking migration |
 | Q7 | Windows merge freeze for Lane W | **YES — a declared window, opened after Lane 0.1 is read** | Serializes the single Windows box |
 | Q-113 | core#113 | **CLOSE AS REFUTED**, recording deny-by-default as the decision | Maintainer performs the close |
+| Q-366d6 | core#366 d6: does an unscoped sweep RECLAIM? | **NO — report only, and print the command** | The operator surface names each leftover and the `docker rm -f` to run; nothing is destroyed automatically |
 | Q-338c4 | core#338 credential surface | **Deny `/dev/tty` via `setsid`, in the SAME change as layer 1** | Layer 1 alone makes the test green while `credential.helper` stays open |
 
 ## D-SECRET-2 — REFUTED 2026-08-29. Do not build this.
@@ -47,6 +48,24 @@ asserts `levels.len() == 1`; the target `refuse_if_malware` (`malware_gate.rs:15
 real HTTP backend, and `with_default` is THREAD-LOCAL, so under `flavor = "multi_thread"` it captures
 nothing. A test built that way is vacuous.
 See the standing note: a `warn!` never reaches the user when RUST_LOG is unset.
+
+## Why Q-366d6 is "report only"
+core#365's submit-path reclaim is safe for one specific reason: it holds the exact task id it is
+about to use, and no other process may hold that id concurrently, so a surface wearing that name
+is provably a dead predecessor of the run about to start. **An unscoped sweep holds no claim over
+anything it finds.** It matched on the presence of a label, not on an identity it owns. On a
+shared daemon — which is the normal case, `docker` on the build host is shared with other people —
+a labelled surface may be another tenant's, or a LIVE task's in a different process whose
+registry this one cannot read. Reclaiming on that evidence destroys running work to tidy a list.
+
+The `unclaimed` flag does NOT license removal either. It means "no entry in the registry THIS
+process can read carries that nonce", which is exactly as blind to another process's live task as
+the scan it replaces. Inheriting core#365's reclaim would be inheriting a guard whose premise
+(I own this id) does not hold here.
+
+So: the sweep reports, marks the unclaimed ones, exits non-zero so it is scriptable as a gate,
+and PRINTS the removal command rather than running it. That leaves the destroy decision with the
+one party that can see the whole host.
 
 ## Why Q2 is "no"
 "Detect a shell and refuse" is a game of spellings — `/bin/sh`, `env sh`, `busybox sh`, a wrapper

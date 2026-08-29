@@ -335,12 +335,28 @@ pub async fn run_conformance(
         )),
     }
 
-    // 5. An orphan scan for a nonce that never ran must return an empty,
-    //    ENUMERATED answer — not an empty answer because the scan failed.
+    // 5. THE LIMITS OF THIS CHECK, STATED (core#366 d4).
+    //
+    // The nonce below is chosen so that nothing can EVER have run under it, so
+    // the `found.is_empty()` half cannot fail on the orphan axis and this check
+    // is not evidence that the orphan scanner would find a real leftover. What
+    // it does prove, and what its name now says, is the OTHER half: that the
+    // backend reports `enumerated` truthfully rather than returning a clean
+    // zero it did not measure — which is the failure mode that made a scanner
+    // report 0 while `ps` showed the process (see `orphan.rs`).
+    //
+    // Coverage of "a scan actually FINDS a leftover" lives where it can create
+    // one: `tests/container_orphan_sweep.rs` plants a labelled container under
+    // a nonce this process has never used and requires the unscoped sweep to
+    // report it. That is deliberately NOT here, because this harness is
+    // backend-generic and planting a surface is not.
     let fresh_nonce = format!("{id_prefix}-nonce-never-used");
+    let scoped_check = "an orphan scan reports enumerated truthfully and fabricates nothing for an unused nonce \
+         (it CANNOT fail on whether a real leftover would be found -- nothing ever ran under \
+         this nonce; see tests/container_orphan_sweep.rs)";
     match backend.scan_orphans(&fresh_nonce).await {
         Ok(scan) => checks.push(check(
-            "an orphan scan enumerates rather than assuming, and finds nothing for an unused nonce",
+            scoped_check,
             scan.enumerated && scan.found.is_empty(),
             format!(
                 "enumerated={} found={} via {}",
@@ -349,11 +365,28 @@ pub async fn run_conformance(
                 scan.method
             ),
         )),
-        Err(e) => checks.push(check(
-            "an orphan scan enumerates rather than assuming, and finds nothing for an unused nonce",
-            false,
-            e.to_string(),
+        Err(e) => checks.push(check(scoped_check, false, e.to_string())),
+    }
+
+    // 5b. The UNSCOPED sweep must answer with a verdict, not an error, and must
+    //     never claim to have enumerated while naming no query (core#366 d1).
+    //     A backend with no marker to sweep by legitimately answers
+    //     `enumerated: false`; what it may not do is answer `enumerated: true`
+    //     with no method, which is the shape of an unmeasured clean zero.
+    let sweep_check =
+        "the backend answers an UNSCOPED sweep with an explicit verdict and names its query";
+    match backend.sweep_orphans().await {
+        Ok(sweep) => checks.push(check(
+            sweep_check,
+            !sweep.method.trim().is_empty() && (sweep.enumerated || sweep.found.is_empty()),
+            format!(
+                "enumerated={} found={} via {}",
+                sweep.enumerated,
+                sweep.found.len(),
+                sweep.method
+            ),
         )),
+        Err(e) => checks.push(check(sweep_check, false, e.to_string())),
     }
 
     // 6. Cancelling a task that does not exist must be an explicit error, not

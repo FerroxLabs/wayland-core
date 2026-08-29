@@ -35,7 +35,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::contract::{BackendKind, OrphanScan, ResourceBudget};
+use crate::contract::{BackendKind, OrphanScan, OrphanSurface, OrphanSweep, ResourceBudget};
 use crate::error::Result;
 
 /// What a backend relies on to take a process tree down with it.
@@ -231,6 +231,60 @@ pub async fn scan_all(nonce: &str, limits: ResourceBudget) -> Result<Vec<OrphanE
         out.push(OrphanEvidence::from_scan(&scan));
     }
     out.sort_by(|a, b| a.backend_id.cmp(&b.backend_id));
+    Ok(out)
+}
+
+/// One surface an unscoped sweep found, plus the one thing an operator needs to
+/// know about it that the platform cannot say: whether ANY live task claims it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweptSurface {
+    pub surface: OrphanSurface,
+    /// True when no entry in the live-task registry carries this surface's
+    /// nonce.
+    ///
+    /// core#366 d3. A run that ends calls `registry::forget`, so a leftover from
+    /// a FINISHED run has no entry and lands here as `true` — which is exactly
+    /// the leftover nobody could see: not reclaimed by core#365's submit path
+    /// (that task id may never be submitted again) and not reportable by any
+    /// nonce-scoped scan (nothing holds its nonce to ask with).
+    ///
+    /// `false` is not a promise the surface is healthy; it means a task in the
+    /// registry claims it, so it is somebody's live work and not yours to
+    /// remove.
+    pub unclaimed: bool,
+}
+
+/// Every surface a backend created, from ANY run, with the unclaimed ones
+/// marked (core#366 d1, d3).
+///
+/// Reports only. See [`crate::contract::ExecutionBackend::sweep_orphans`] for
+/// why removal is not done here.
+pub async fn sweep_all(limits: ResourceBudget) -> Result<Vec<(OrphanSweep, Vec<SweptSurface>)>> {
+    // Read the registry ONCE, before any sweep runs. Re-reading per surface
+    // would let a task that finished mid-sweep flip a surface from claimed to
+    // unclaimed inside one report, which is a difference an operator would
+    // read as two different kinds of leftover.
+    let live: std::collections::BTreeSet<String> = crate::registry::list()
+        .into_iter()
+        .map(|task| task.nonce)
+        .collect();
+    let mut out = Vec::new();
+    for reference in crate::reference_backends(limits)? {
+        let sweep = reference.backend.sweep_orphans().await?;
+        let marked = sweep
+            .found
+            .iter()
+            .map(|surface| SweptSurface {
+                surface: surface.clone(),
+                // An EMPTY nonce is not a nonce the registry can hold, so a
+                // surface whose nonce the platform would not report is
+                // unclaimed by construction rather than by lookup.
+                unclaimed: !live.contains(&surface.nonce),
+            })
+            .collect();
+        out.push((sweep, marked));
+    }
+    out.sort_by(|a, b| a.0.backend_id.cmp(&b.0.backend_id));
     Ok(out)
 }
 

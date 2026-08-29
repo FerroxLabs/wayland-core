@@ -4300,16 +4300,23 @@ fn emit_path_grant(
         // grant/revoke, `workspace_policy` is the authoritative answer to
         // "what can this chat reach".
         emit_workspace_policy_receipt(policy, receipt, writer);
-        let _ = writer.emit(&ProtocolEvent::Info {
-            msg_id: String::new(),
-            message: "path grant refused: the local launcher did not opt in with --allow-host-path-grants".to_string(),
-        });
+        emit_workspace_grant_refusal(
+            writer,
+            wcore_protocol::events::WorkspaceGrantCommand::GrantPath,
+            &grant_id,
+            &root,
+            wcore_protocol::events::WorkspaceGrantRefusalReason::LauncherOptInRequired,
+            "path grant refused: the local launcher did not opt in with --allow-host-path-grants"
+                .to_string(),
+        );
         return;
     }
     let write = matches!(access, wcore_protocol::commands::PathGrantAccess::Write);
     let expires_at =
         expires_at_ms.map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
-    match policy.grant_session_read_root_full(&root, write, Some(grant_id), expires_at) {
+    // Cloned because the refusal arm below echoes the host's own grant_id back
+    // in the typed refusal, so it has to outlive this call (core#314 c5).
+    match policy.grant_session_read_root_full(&root, write, Some(grant_id.clone()), expires_at) {
         Ok(granted) => {
             emit_workspace_policy_receipt(policy, receipt, writer);
             // #1104: the parenthetical is the grant's own access, not a fixed
@@ -4328,10 +4335,14 @@ fn emit_path_grant(
         Err(error) => {
             // #314 D-1 -- see the launcher-refusal arm above.
             emit_workspace_policy_receipt(policy, receipt, writer);
-            let _ = writer.emit(&ProtocolEvent::Info {
-                msg_id: String::new(),
-                message: format!("path grant refused: {error}"),
-            });
+            emit_workspace_grant_refusal(
+                writer,
+                wcore_protocol::events::WorkspaceGrantCommand::GrantPath,
+                &grant_id,
+                &root,
+                wcore_protocol::events::WorkspaceGrantRefusalReason::PolicyRefused,
+                format!("path grant refused: {error}"),
+            );
         }
     }
 }
@@ -4353,6 +4364,38 @@ fn emit_path_revoke(
     let _ = writer.emit(&ProtocolEvent::Info {
         msg_id: String::new(),
         message,
+    });
+}
+
+/// #314 c5. Announce a refused grant as a TYPED frame, then as the prose.
+///
+/// Every refusal exit of both grant commands goes through here, so the four of
+/// them cannot drift apart the way their receipts did (#314 c4). The `info`
+/// frame is emitted from this one place too: keeping the pair adjacent is what
+/// stops a later edit adding a refusal that types itself and forgets the prose,
+/// or the reverse.
+///
+/// Order is receipt -> typed refusal -> prose. The receipt stays FIRST so a
+/// host that reads state-then-message sees the same order on every exit,
+/// success and refusal alike.
+fn emit_workspace_grant_refusal(
+    writer: &dyn ProtocolEmitter,
+    command: wcore_protocol::events::WorkspaceGrantCommand,
+    grant_id: &str,
+    subject: &str,
+    reason: wcore_protocol::events::WorkspaceGrantRefusalReason,
+    detail: String,
+) {
+    let _ = writer.emit(&ProtocolEvent::WorkspaceGrantRefused {
+        command,
+        grant_id: grant_id.to_string(),
+        subject: subject.to_string(),
+        reason,
+        detail: detail.clone(),
+    });
+    let _ = writer.emit(&ProtocolEvent::Info {
+        msg_id: String::new(),
+        message: detail,
     });
 }
 
@@ -4384,10 +4427,14 @@ fn emit_workspace_capability_grant(
     if !launch_authorized {
         // #314 D-1 -- same reasoning as `emit_path_grant`.
         emit_workspace_policy_receipt(policy, receipt, writer);
-        let _ = writer.emit(&ProtocolEvent::Info {
-            msg_id: String::new(),
-            message: "workspace capability grant refused: the local launcher did not opt in with --allow-host-workspace-grants".to_string(),
-        });
+        emit_workspace_grant_refusal(
+            writer,
+            wcore_protocol::events::WorkspaceGrantCommand::GrantWorkspaceCapability,
+            "",
+            executable,
+            wcore_protocol::events::WorkspaceGrantRefusalReason::LauncherOptInRequired,
+            "workspace capability grant refused: the local launcher did not opt in with --allow-host-workspace-grants".to_string(),
+        );
         return;
     }
     match policy.grant_session_capability(executable) {
@@ -4406,10 +4453,14 @@ fn emit_workspace_capability_grant(
         Err(error) => {
             // #314 D-1 -- see `emit_path_grant`.
             emit_workspace_policy_receipt(policy, receipt, writer);
-            let _ = writer.emit(&ProtocolEvent::Info {
-                msg_id: String::new(),
-                message: format!("workspace capability grant refused: {error}"),
-            });
+            emit_workspace_grant_refusal(
+                writer,
+                wcore_protocol::events::WorkspaceGrantCommand::GrantWorkspaceCapability,
+                "",
+                executable,
+                wcore_protocol::events::WorkspaceGrantRefusalReason::PolicyRefused,
+                format!("workspace capability grant refused: {error}"),
+            );
         }
     }
 }
@@ -7674,6 +7725,240 @@ mod tests {
             "{:?}",
             info_messages(&writer)
         );
+    }
+
+    // --- #314 c5: the refusal as a frame a host can branch on ------------
+    //
+    // MEASURED before the fix, by panicking with the captured frames: a
+    // launcher-refused `grant_path` emitted exactly
+    //   {"type":"workspace_policy", ...}
+    //   {"type":"info","msg_id":"","message":"path grant refused: the local
+    //    launcher did not opt in with --allow-host-path-grants"}
+    // and nothing else. A SUCCESSFUL grant emits the same two types, so the
+    // only host-side test for "was I refused" was diffing two receipts or
+    // substring-matching our English.
+
+    fn refusals(
+        writer: &CapturingProtocolEmitter,
+    ) -> Vec<(
+        wcore_protocol::events::WorkspaceGrantCommand,
+        String,
+        String,
+        wcore_protocol::events::WorkspaceGrantRefusalReason,
+        String,
+    )> {
+        writer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                ProtocolEvent::WorkspaceGrantRefused {
+                    command,
+                    grant_id,
+                    subject,
+                    reason,
+                    detail,
+                } => Some((
+                    *command,
+                    grant_id.clone(),
+                    subject.clone(),
+                    *reason,
+                    detail.clone(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_launcher_refused_path_grant_is_typed_not_only_prose() {
+        use wcore_protocol::events::{WorkspaceGrantCommand, WorkspaceGrantRefusalReason};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        emit_path_grant(
+            false,
+            &policy,
+            &mut receipt,
+            PathGrantRequest {
+                grant_id: "g-launcher".to_string(),
+                root: dir.path().to_string_lossy().into_owned(),
+                access: wcore_protocol::commands::PathGrantAccess::Read,
+                expires_at_ms: None,
+            },
+            &writer,
+        );
+
+        let found = refusals(&writer);
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one typed refusal: {found:?}"
+        );
+        assert_eq!(found[0].0, WorkspaceGrantCommand::GrantPath);
+        assert_eq!(
+            found[0].1, "g-launcher",
+            "the host's own grant_id must be echoed"
+        );
+        assert_eq!(found[0].2, dir.path().to_string_lossy());
+        assert_eq!(
+            found[0].3,
+            WorkspaceGrantRefusalReason::LauncherOptInRequired
+        );
+        assert!(found[0].4.contains("--allow-host-path-grants"));
+        // The prose frame is NOT removed -- shipped renderers still read it.
+        assert!(
+            info_messages(&writer)
+                .iter()
+                .any(|m| m.contains("--allow-host-path-grants")),
+            "{:?}",
+            info_messages(&writer)
+        );
+    }
+
+    #[test]
+    fn a_policy_refused_path_grant_is_typed_with_a_distinct_reason() {
+        use wcore_protocol::events::{WorkspaceGrantCommand, WorkspaceGrantRefusalReason};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+        let missing = dir.path().join("no-such-folder");
+
+        emit_path_grant(
+            true,
+            &policy,
+            &mut receipt,
+            PathGrantRequest {
+                grant_id: "g-policy".to_string(),
+                root: missing.to_string_lossy().into_owned(),
+                access: wcore_protocol::commands::PathGrantAccess::Read,
+                expires_at_ms: None,
+            },
+            &writer,
+        );
+
+        let found = refusals(&writer);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].0, WorkspaceGrantCommand::GrantPath);
+        assert_eq!(found[0].1, "g-policy");
+        assert_eq!(found[0].2, missing.to_string_lossy());
+        // The DISTINCTION is the point: a host must be able to tell "relaunch
+        // with the flag" from "try a different folder" without reading prose.
+        assert_eq!(found[0].3, WorkspaceGrantRefusalReason::PolicyRefused);
+    }
+
+    #[test]
+    fn a_launcher_refused_capability_grant_is_typed() {
+        use wcore_protocol::events::{WorkspaceGrantCommand, WorkspaceGrantRefusalReason};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        emit_workspace_capability_grant(false, &policy, &mut receipt, "cargo", &writer);
+
+        let found = refusals(&writer);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].0, WorkspaceGrantCommand::GrantWorkspaceCapability);
+        // EMPTY, and deliberately: `grant_workspace_capability` carries no id
+        // on the wire, so there is none to echo. `subject` is the correlation
+        // a host has for this shape.
+        assert_eq!(found[0].1, "");
+        assert_eq!(found[0].2, "cargo");
+        assert_eq!(
+            found[0].3,
+            WorkspaceGrantRefusalReason::LauncherOptInRequired
+        );
+    }
+
+    #[test]
+    fn a_policy_refused_capability_grant_is_typed_with_a_distinct_reason() {
+        use wcore_protocol::events::{WorkspaceGrantCommand, WorkspaceGrantRefusalReason};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        emit_workspace_capability_grant(
+            true,
+            &policy,
+            &mut receipt,
+            "wayland-core-no-such-executable",
+            &writer,
+        );
+
+        let found = refusals(&writer);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].0, WorkspaceGrantCommand::GrantWorkspaceCapability);
+        assert_eq!(found[0].2, "wayland-core-no-such-executable");
+        assert_eq!(found[0].3, WorkspaceGrantRefusalReason::PolicyRefused);
+    }
+
+    /// NEGATIVE CONTROL -- passes in BOTH arms. A GRANTED path must not
+    /// announce a refusal. Without this the whole set is satisfied by emitting
+    /// the frame unconditionally, which is exactly as useless as the prose.
+    #[test]
+    fn a_granted_path_emits_no_refusal_frame() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let grantable = dir.path().join("shared");
+        std::fs::create_dir_all(&grantable).expect("mkdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        emit_path_grant(
+            true,
+            &policy,
+            &mut receipt,
+            PathGrantRequest {
+                grant_id: "g-ok".to_string(),
+                root: grantable.to_string_lossy().into_owned(),
+                access: wcore_protocol::commands::PathGrantAccess::Read,
+                expires_at_ms: None,
+            },
+            &writer,
+        );
+
+        assert!(
+            info_messages(&writer)
+                .iter()
+                .any(|m| m.starts_with("folder granted")),
+            "the control must actually exercise the SUCCESS arm: {:?}",
+            info_messages(&writer)
+        );
+        assert!(refusals(&writer).is_empty(), "{:?}", refusals(&writer));
+    }
+
+    /// NEGATIVE CONTROL -- passes in BOTH arms. `revoke_path` is not gated and
+    /// an unknown id is a documented idempotent no-op, so it must NOT be typed
+    /// as a refusal. See `WorkspaceGrantCommand`, which has no `RevokePath`.
+    #[test]
+    fn revoking_an_unknown_grant_is_not_a_refusal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        emit_path_revoke(&policy, &mut receipt, "never-granted", &writer);
+
+        assert!(
+            info_messages(&writer)
+                .iter()
+                .any(|m| m.contains("no folder grant with id never-granted")),
+            "{:?}",
+            info_messages(&writer)
+        );
+        assert!(refusals(&writer).is_empty());
     }
 
     #[derive(Default)]
