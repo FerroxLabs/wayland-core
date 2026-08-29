@@ -616,18 +616,22 @@ jobs:
       # when the measurement is most wanted.
       - name: Record the Windows NUL-device measurement (core#238 c4)
         if: ${{ runner.os == 'Windows' && !cancelled() }}
-        shell: bash
+        # `pwsh`, not `bash`: EVERY other `vx` invocation on a Windows leg in
+        # this file runs under the default pwsh shell, and none runs under bash.
+        # A record step that dies on a PATH difference records nothing.
+        shell: pwsh
         run: |
-          set -uo pipefail
-          vx cargo nextest run -p wcore-tools --no-capture \
-            -E 'binary(windows_nul_device_probe)' 2>&1 | tee nul-probe.log
-          {
-            echo '### core#238 c4 — bare NUL on this Windows build'
-            echo
-            echo '```'
-            cat nul-probe.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          vx cargo nextest run -p wcore-tools --no-capture `
+            -E 'binary(windows_nul_device_probe)' 2>&1 |
+            Tee-Object -FilePath nul-probe.log
+          $record = Get-Content nul-probe.log -Raw
+          @(
+            '### core#238 c4 - bare NUL on this Windows build',
+            '',
+            '```',
+            $record,
+            '```'
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY
 
       # PER-LEG test-signal gate. The `report` job at the bottom of this file
       # already refuses a run where NO leg produced JUnit, but it cannot see a
@@ -1057,18 +1061,22 @@ jobs:
       # both legs record rather than one.
       - name: Record the Windows NUL-device measurement (core#238 c4)
         if: ${{ !cancelled() }}
-        shell: bash
+        # `pwsh`, not `bash`: EVERY other `vx` invocation on a Windows leg in
+        # this file runs under the default pwsh shell, and none runs under bash.
+        # A record step that dies on a PATH difference records nothing.
+        shell: pwsh
         run: |
-          set -uo pipefail
-          vx cargo nextest run -p wcore-tools --no-capture \
-            -E 'binary(windows_nul_device_probe)' 2>&1 | tee nul-probe.log
-          {
-            echo '### core#238 c4 — bare NUL on this Windows build'
-            echo
-            echo '```'
-            cat nul-probe.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          vx cargo nextest run -p wcore-tools --no-capture `
+            -E 'binary(windows_nul_device_probe)' 2>&1 |
+            Tee-Object -FilePath nul-probe.log
+          $record = Get-Content nul-probe.log -Raw
+          @(
+            '### core#238 c4 - bare NUL on this Windows build',
+            '',
+            '```',
+            $record,
+            '```'
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY
 
       # Byte-identical intent to the matrix job's per-leg gate: a leg that ran
       # zero tests must be reported as an ABSENCE of signal, never as a pass.
