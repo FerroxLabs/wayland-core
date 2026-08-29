@@ -348,7 +348,7 @@ evidence about arrival counts, and it is not counted as any.
 The run wrote nothing to the room — it failed on the baseline read, which precedes the first
 send, and neither `MCR_CTRL_RECEIPTS` nor `MCR_SUBJ_RECEIPTS` was ever printed.
 
-### 4.2 The message cap, per adapter — three measured live, every one now sourced
+### 4.2 The message cap, per adapter — four measured live, every one now sourced
 
 **Generalised 2026-08-26, [FerroxLabs/wayland#934](https://github.com/FerroxLabs/wayland/issues/934).**
 Until then exactly one cap in the product was bound to anything outside its own function.
@@ -375,7 +375,7 @@ of a conditional guarantee"; it means "this adapter's `max_message_len()`".
 | **Matrix** | 16,384 | **Derived — the platform limit is BYTES.** [Client-Server API, Size limits](https://spec.matrix.org/latest/client-server-api/#size-limits): *"The complete event MUST NOT be larger than 65536 bytes … encoded as Canonical JSON."* Synapse enforces exactly that (`MAX_PDU_SIZE = 65536`); nothing documents a limit on `body` itself. `65536 / 4` is the largest scalar count whose UTF-8 encoding cannot exceed it. | **NOT MEASURED** |
 | **Discord** | 2,000 | **Quoted.** [Create Message](https://docs.discord.com/developers/resources/message): *"content?* — string — Message contents (up to 2000 characters)"*. The 25 MiB on the same page is the whole request. | **MEASURED 2026-08-27** — 2,000 accepted; 2,001 refused by the platform with HTTP 400 `50035 Invalid Form Body`. |
 | **Telegram** | 4,096 | **Quoted.** [`sendMessage`](https://core.telegram.org/bots/api#sendmessage): *"text — String — Yes — Text of the message to be sent, 1-4096 characters after entities parsing"*. Unit unstated; `MessageEntity` on the same page indexes in UTF-16 code units. | **MEASURED 2026-08-29** — 4,096 accepted as one message, 4,097 refused `400: Bad Request: message is too long`. Probed in ASCII, so the cap is confirmed for ASCII text; the character-vs-UTF-16 question is still open and needs an astral-plane body to settle. |
-| **Twilio SMS** | 1,600 | **Quoted.** [Message resource](https://www.twilio.com/docs/messaging/api/message-resource): *"The text content of the outgoing message. Can be up to 1,600 characters in length."* The GSM-7/UCS-2 split in the same sentence governs segmentation and billing, not the maximum. | **NOT MEASURED** |
+| **Twilio SMS** | 1,600 | **Quoted.** [Message resource](https://www.twilio.com/docs/messaging/api/message-resource): *"The text content of the outgoing message. Can be up to 1,600 characters in length."* The GSM-7/UCS-2 split in the same sentence governs segmentation and billing, not the maximum. | **MEASURED 2026-08-29** — 1,600 accepted as one concatenated message, 1,601 refused by Twilio before it reached a carrier: `400 code 21617, The concatenated message body exceeds the 1600 character limit`. Twilio's own error names the unit, so unlike Telegram this is unambiguously a CHARACTER limit and holds for either encoding. Probed in ASCII/GSM-7 at 11 segments. |
 | **WhatsApp** | 4,096 | **Quoted.** [Cloud API text messages](https://developers.facebook.com/docs/whatsapp/cloud-api/messages/text-messages): *"Body text. … Maximum 4096 characters."* Unit unstated. | **NOT MEASURED** |
 | **MS Teams** | 20,480 | **Derived — the platform limit is a UTF-16 PAYLOAD budget, and no character limit is documented at all.** [Format your bot messages](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages): *"The agent message size limit is 100 KB … it's recommended to ensure that the size of the message itself is within 80 KB … the agent receives a `413` status code (`RequestEntityTooLarge`) … `MessageSizeTooBig`."* `81920 / 4` (a scalar costs at most two UTF-16 code units). | **NOT MEASURED** |
 | **Email** | none | n/a | n/a — no cap to be wrong about |
@@ -650,8 +650,10 @@ equals the *platform's* real limit is unmeasured — which is why every row read
 `cap_measured = no` rather than being left to look verified.
 [§4.2](#42-the-message-cap-per-adapter--declared-by-us-measured-by-nobody) states what being
 wrong costs in each direction, and names, per platform, the exact credential the live boundary
-probe is waiting on. Three of the seven are now measured; one more is runnable today, one needs a token
-refresh, and three need a credential nobody on the programme holds.
+probe is waiting on. Four of the seven are now measured. One more (WhatsApp) needs a credential; Matrix and
+MS Teams CANNOT be measured by this two-point probe at all — see the note in the probe
+file — because their caps are derived from a byte budget and both arms land inside the
+accepted region.
 
 **The probe itself is committed**, at
 `crates/wcore-channels-registry/tests/live_message_cap_boundary.rs` (wayland#934 item 2). It
@@ -833,7 +835,7 @@ telegram.cap_measured = live
 telegram.cap_source = https://core.telegram.org/bots/api#sendmessage
 sms = at-most-once
 sms.cap = 1600
-sms.cap_measured = no
+sms.cap_measured = live
 sms.cap_source = https://www.twilio.com/docs/messaging/api/message-resource
 whatsapp = at-most-once
 whatsapp.cap = 4096

@@ -760,7 +760,7 @@ fn no_cap_is_claimed_measured_at_a_real_platform_yet() {
     let unproven: Vec<&str> = claimed
         .iter()
         .copied()
-        .filter(|p| !matches!(*p, "slack" | "discord" | "telegram"))
+        .filter(|p| !matches!(*p, "slack" | "discord" | "telegram" | "sms"))
         .collect();
     assert!(
         unproven.is_empty(),
