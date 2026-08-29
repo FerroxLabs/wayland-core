@@ -1105,4 +1105,147 @@ mod tests {
             "control: an ordinary file must still be attached"
         );
     }
+
+    /// core#335 — the ABSOLUTE escaping spelling, the one the issue is named
+    /// for, which nothing pinned. The `..`-relative arm above survives with
+    /// the root left uncanonicalized, so `canonical_root` — the whole
+    /// load-bearing half of the absolute case — could be deleted with every
+    /// shipped `at_ref_resolve` test still green.
+    ///
+    /// An absolute spelling only escapes when the ROOT's own spelling is not
+    /// canonical, which is ordinary rather than exotic: a symlinked checkout,
+    /// and every workspace under macOS's `/tmp` (`-> /private/tmp`) or `/var`
+    /// (`-> /private/var`), where the absolute path a user copies out of their
+    /// shell is spelled in the canonical form the root is not.
+    #[test]
+    fn an_absolute_spelling_does_not_escape_the_workspace_gitignore() {
+        // Portable arm: a root spelled out through a child and back. It names
+        // the same directory, and `strip_prefix` cannot see that it does.
+        let tmp = TempDir::new().expect("tempdir");
+        fs::create_dir_all(tmp.path().join("build")).expect("mkdir build");
+        fs::create_dir_all(tmp.path().join("sub")).expect("mkdir sub");
+        fs::write(tmp.path().join(".gitignore"), "*.log\n").expect("write gitignore");
+        fs::write(tmp.path().join("build/out.log"), "build log\n").expect("write log");
+        let root = tmp.path().join("sub").join("..");
+
+        // FIXTURE CONTROL, spelled against the CANONICAL root so it is
+        // insensitive to the property under test: the file really is ignored.
+        // Passes on BOTH arms.
+        let plain = resolve(&AtRef::parse("@build/out.log").expect("parse"), tmp.path());
+        assert!(
+            matches!(plain, Err(AtRefError::GitIgnored(_))),
+            "fixture check: the relative spelling must be refused, got {plain:?}"
+        );
+
+        // The same file, named by an absolute path whose place inside the root
+        // no lexical prefix test can see.
+        let absolute = tmp.path().join("build").join("out.log");
+        let got = resolve(&AtRef::File(absolute), &root);
+        assert!(
+            matches!(got, Err(AtRefError::GitIgnored(_))),
+            "an absolute spelling of an in-workspace ignored file must stay refused, got {got:?}"
+        );
+
+        // Unix arm: the same escape in its realistic shape, a symlinked root.
+        #[cfg(unix)]
+        {
+            let outer = TempDir::new().expect("tempdir");
+            let real = outer.path().join("real");
+            fs::create_dir_all(real.join("build")).expect("mkdir");
+            fs::write(real.join(".gitignore"), "*.log\n").expect("write gitignore");
+            fs::write(real.join("build/out.log"), "build log\n").expect("write log");
+            let linked_root = outer.path().join("workspace");
+            std::os::unix::fs::symlink(&real, &linked_root).expect("symlink root");
+
+            let got = resolve(
+                &AtRef::File(real.join("build").join("out.log")),
+                &linked_root,
+            );
+            assert!(
+                matches!(got, Err(AtRefError::GitIgnored(_))),
+                "a symlinked workspace root must still apply its own gitignore to an \
+                 absolute spelling, got {got:?}"
+            );
+
+            // WRONG-REFUSAL CONTROL, on the same fixture: a file that really is
+            // outside the workspace stays attachable — the behaviour core#335
+            // c1 decided to keep — so this cannot be satisfied by refusing
+            // every absolute path. Passes on BOTH arms.
+            let outside = outer.path().join("elsewhere.log");
+            fs::write(&outside, "outside content\n").expect("write outside");
+            let payload = resolve(&AtRef::File(outside), &linked_root)
+                .expect("an explicit absolute attach from outside is a capability");
+            assert_eq!(payload.files[0].content, "outside content\n");
+        }
+    }
+
+    /// core#339 — the walk's WORKSPACE CONFINEMENT, which replaced the
+    /// criterion's `symlink_metadata` mechanism (a blanket symlink refusal the
+    /// issue explicitly forbids) and was then graded by nothing: both scope
+    /// checks could be replaced by `if false` with all 65 `at_ref` tests still
+    /// green. The suite's only escape fixture is NAMED `.git-credentials`, so
+    /// `is_secret_path` alone satisfies it and the confinement is never asked.
+    ///
+    /// Nothing outside this fixture is on any denylist, so the scope check is
+    /// the only thing keeping it out of the payload.
+    #[cfg(unix)]
+    #[test]
+    fn at_dir_never_reaches_outside_the_workspace_through_a_symlink() {
+        const OUTSIDE: &str = "PRIVATE-OUTSIDE-PAYLOAD";
+
+        let elsewhere = TempDir::new().expect("tempdir");
+        fs::write(
+            elsewhere.path().join("taxes.txt"),
+            format!("{OUTSIDE} taxes\n"),
+        )
+        .expect("write outside file");
+        let archive = elsewhere.path().join("archive");
+        fs::create_dir_all(&archive).expect("mkdir archive");
+        fs::write(archive.join("notes.md"), format!("{OUTSIDE} notes\n"))
+            .expect("write outside notes");
+
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("ok.txt"), "safe\n").expect("write ok");
+        // A link OUT to an ordinary-looking file, and a link OUT to a whole
+        // directory. Neither name appears on any denylist.
+        std::os::unix::fs::symlink(elsewhere.path().join("taxes.txt"), root.join("notes.txt"))
+            .expect("symlink file");
+        std::os::unix::fs::symlink(&archive, root.join("escape")).expect("symlink dir");
+        // The observable for the DIRECTORY half. A file outside the root is
+        // refused by the FILE scope check even if the walk descends, so on its
+        // own an outside tree cannot tell the two checks apart. This link
+        // points back at an in-root file, so it clears the file check and is
+        // attached if and only if the walk descended through `escape`.
+        std::os::unix::fs::symlink(root.join("ok.txt"), archive.join("back.txt"))
+            .expect("symlink back");
+        // WRONG-REFUSAL CONTROL: an IN-root link must still be attached, so
+        // the fix cannot be "skip every symlink" — the shape core#339
+        // explicitly rejects. Passes on BOTH arms.
+        std::os::unix::fs::symlink(root.join("ok.txt"), root.join("alias.txt")).expect("symlink");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
+        let names: Vec<String> = payload
+            .files
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect();
+        assert!(
+            !payload.files.iter().any(|f| f.content.contains(OUTSIDE)),
+            "a file outside the workspace was inlined through an in-root symlink: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("escape/")),
+            "the walk descended through a symlink out of the workspace: {names:?}"
+        );
+        assert_eq!(
+            payload
+                .files
+                .iter()
+                .filter(|f| f.content == "safe\n")
+                .count(),
+            2,
+            "control: the in-root file and its in-root link must both stay attached: {names:?}"
+        );
+    }
 }
