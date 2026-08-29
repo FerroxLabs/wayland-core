@@ -26,9 +26,9 @@ criteria:
     note: "This is the arm that runs the controls through validate_user_path and requires Ok - CON, COM1, NUL.txt and aux.log are each written and re-validated. TWO CAVEATS: it is cfg(windows) so it is graded by CI's Windows job alone and is unrun against this tree; and of the five spellings the criterion names, con.json and nul.rs appear only in the all-host string predicate (as con.json and nul.log), so nul.rs is nowhere verbatim."
   - id: c4
     text: "A Windows probe records whether bare NUL is a device on the build under test and whether fs::metadata reports is_file() true for it"
-    state: blocked
-    owner: maintainer
-    note: "PROBE AUTHORED 2026-08-29, RUN OWED - needs-platform-run. crates/wcore-tools/tests/windows_nul_device_probe.rs::the_bare_nul_device_is_measured_on_the_build_under_test asks the KERNEL (GetFileType on a live handle, FILE_TYPE_CHAR vs FILE_TYPE_DISK) rather than the name, records BOTH facts the criterion names - is bare NUL a device, and does fs::metadata report is_file() true for it - for '<tempdir>\\NUL' and for bare 'NUL', plus the behavioural write/read-back half and the OS build string, as a paste-ready RECORD block. It has teeth in both directions: a LIVENESS CONTROL (an ordinary file must measure FILE_TYPE_DISK and is_file() true, so the probe cannot pass by calling everything a device); a hard failure if NUL is NOT a device on the build under test, because the #238 guard would then be refusing an addressable file - the data-destroying direction; and, when is_file() is true for the device, an assertion that validate_user_path refuses it with WindowsNullDevice, since that is the case where the NonRegularFile arm is structurally blind and the NAME guard is all that is left. Verified to COMPILE for Windows: cargo check -p wcore-tools --all-targets --target x86_64-pc-windows-gnu is clean on hetzner. It cannot be RUN from a Linux host - #[cfg(windows)], and a green from a host that cannot exhibit the property is worth nothing. THE RUN THAT SETTLES IT: on SeanDesktop (Win 11 26200) and, for the open residual, on a build-20348 host, 'cargo nextest run -p wcore-tools --no-capture -E \"binary(windows_nul_device_probe)\"'; paste the RECORD block into this note. WHAT CI ALREADY BUYS, so the ask is not overstated: the Windows leg of `CI (Array)` runs `just test-ci`, which is a workspace nextest, so this probe EXECUTES there on every run - a green Windows leg is already the assertion arm (NUL is still a device, and the name guard refuses it). What CI does NOT give is the RECORD: nextest captures stdout for a PASSING test, so the measured table only surfaces on failure or under --no-capture. So what is owed is the numbers, not the verdict. Blocked on maintainer because the Windows box is Sean-only infra."
+    state: not-met
+    owner: core
+    note: "RE-OWNED TO CORE 2026-08-29. The previous note blocked this on the maintainer because the Windows box is Sean-only infra. Measured against the workflow, that is refuted: the probe is #![cfg(windows)] and NOT #[ignore], the ci.yml Array matrix carries a self-hosted Windows/X64/msvc leg, and its test step runs vx just test-ci which on Windows is cargo nextest run --workspace (justfile:68-70). So the probe already EXECUTES and asserts on every Windows CI run -- the verdict arm is bought. What is missing is only the RECORD, because nextest captures stdout for a passing test, and that is closed by a core-owned change: a --no-capture step for binary(windows_nul_device_probe) on the Windows leg, or having the probe write its RECORD block to an uploaded artifact. No Sean-only infra is needed for the build under test. The genuinely unobtainable residual is a build-20348 host, which this criterion does not ask for."
   - id: c5
     text: "The scope is decided - narrow to bare NUL, or close as wont-fix with the 26200 measurement recorded"
     state: met
@@ -56,6 +56,14 @@ would refuse addressable user files - and this guard grades paths to the user's
 own data, where a false refusal loses something.
 
 So the residual is narrow: a Write to a bare NUL discards bytes and claims
-success. Everything here is not-met, and the scope question is deliberately
-parked with the maintainer rather than resolved by a lane. Criteria come from
-the cluster A verification note of 2026-08-29.
+success. Criteria come from the cluster A verification note of 2026-08-29.
+
+The last sentence of that note said the scope question is parked with the
+maintainer. It is not, any more: c5 was TAKEN as Q5 in .planning/DECISIONS.md
+and shipped in fcc152bf, and c4 was RE-GRADED 2026-08-29 from
+`blocked owner=maintainer` to `not-met owner=core`. The probe is not #[ignore],
+the ci.yml Array matrix carries a self-hosted Windows/X64/msvc leg, and its
+test step runs `vx just test-ci`, which on Windows is a `--workspace` nextest.
+The probe therefore already executes and asserts on every Windows CI run; what
+is missing is only the printed RECORD, because nextest captures stdout for a
+passing test. That is a core-owned workflow change, not Sean-only infra.

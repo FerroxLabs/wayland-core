@@ -22,16 +22,19 @@ criteria:
     text: "F1 confirmed for the current deployment: Elevation is unreachable by default from flux-fast, flux-standard, flux-reasoning and flux-auto"
     state: blocked
     owner: flux
+    handoff: "FerroxLabs/wayland#1227"
     note: "Flux replied that F1 holds with flux-auto elevated only via explicit per-request opt-in, but core has no way to verify a server-side deployment and later recorded F1 as unconfirmed"
   - id: c4
     text: "F3 server half: requests carrying loop_owner or a client nonce bypass or vary the Flux semantic cache"
     state: blocked
     owner: flux
+    handoff: "FerroxLabs/wayland#1227"
     note: "Flux reports this shipped; the behaviour lives entirely on their side and core cannot observe a cache bypass from the client"
   - id: c5
     text: "F4: the bandit routes loop_owner requests to a tool-calling-capable arm, or a flux-agentic alias with that guarantee exists"
     state: blocked
     owner: flux
+    handoff: "FerroxLabs/wayland#1227"
     note: "Flux deferred F4 explicitly and disclosed it; Elevation hard-skips tool turns so there is no collision exposure, but the routing floor is still absent"
 ---
 

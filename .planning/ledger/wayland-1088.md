@@ -16,6 +16,7 @@ criteria:
     text: "The user-visible half — the chat interface no longer reports Read/Glob/Write/Edit as restricted"
     state: blocked
     owner: desktop
+    handoff: "FerroxLabs/wayland#1223"
     note: "the surface that renders the restriction is Desktop's; core emits the typed event it needs. Ticket carries needs:desktop"
 ---
 

@@ -31,6 +31,7 @@ criteria:
     text: "Desktop sends the per-tool field on the ACP path"
     state: blocked
     owner: desktop
+    handoff: "FerroxLabs/wayland#1225"
     note: "Desktop's wire types drop the field before it reaches core, so core cannot honour a selection it never receives"
   - id: c6
     text: "The ACP backend has an MCP surface for the switches to act on"

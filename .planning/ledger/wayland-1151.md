@@ -22,6 +22,7 @@ criteria:
     text: "The transcript stops assembling out of order"
     state: blocked
     owner: desktop
+    handoff: "FerroxLabs/wayland#1224"
     note: "no commit in this release touches ordering or assembly, and the symbols involved do not exist under crates/ at all — this half was never core's"
 ---
 
