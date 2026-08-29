@@ -21,6 +21,7 @@ use crate::{
     reset_response_dump,
 };
 use wcore_config::compat::ProviderCompat;
+use wcore_config::compat::join_endpoint;
 use wcore_config::debug::DebugConfig;
 use wcore_config::self_hosted::is_self_hosted_base_url;
 
@@ -649,12 +650,14 @@ impl OpenAIProvider {
     /// has no such suffix (an unusual override) fall back to the canonical
     /// `/v1/models` under the base URL so the request is still well-formed.
     fn models_url(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
         let path = self.compat.api_path();
-        match path.strip_suffix("/chat/completions") {
-            Some(root) => format!("{base}{root}/models"),
-            None => format!("{base}/v1/models"),
-        }
+        let full = match path.strip_suffix("/chat/completions") {
+            Some(root) => format!("{root}/models"),
+            None => "/v1/models".to_string(),
+        };
+        // #1178: join, do not concatenate -- a base already spelled `.../v1`
+        // otherwise produced `/v1/v1/models`.
+        join_endpoint(&self.base_url, &full)
     }
 
     /// Derive the Responses endpoint URL (`/v1/responses`) from the configured
@@ -692,7 +695,10 @@ impl OpenAIProvider {
         if use_responses {
             self.responses_url_for(base_url)
         } else {
-            format!("{}{}", base_url, self.compat.api_path())
+            // #1178: `--base-url http://host:11434/v1` -- the spelling every
+            // OpenAI-compatible vendor prints in its own docs -- used to build
+            // `/v1/v1/chat/completions` and 404 with nothing naming the cause.
+            self.compat.endpoint_url(base_url)
         }
     }
 
@@ -783,12 +789,13 @@ impl OpenAIProvider {
     }
 
     fn responses_url_for(&self, base_url: &str) -> String {
-        let base = base_url.trim_end_matches('/');
         let path = self.compat.api_path();
-        match path.strip_suffix("/chat/completions") {
-            Some(root) => format!("{base}{root}/responses"),
-            None => format!("{base}/v1/responses"),
-        }
+        let full = match path.strip_suffix("/chat/completions") {
+            Some(root) => format!("{root}/responses"),
+            None => "/v1/responses".to_string(),
+        };
+        // #1178: see `models_url`.
+        join_endpoint(base_url, &full)
     }
 
     /// True when this request must be served via the OpenAI Responses API
@@ -3640,6 +3647,103 @@ mod tests {
             DebugConfig::default(),
         );
         assert_eq!(p.models_url(), "https://example.test/v1/models");
+    }
+
+    // --- #1178: base-URL spellings ----------------------------------------
+    //
+    // Three spellings of the same endpoint, two of which used to 404. The
+    // failure was silent: `openai_defaults()` appends `/v1/chat/completions`,
+    // so `--base-url http://127.0.0.1:11434/v1` -- the form Ollama, llama.cpp,
+    // vLLM, LM Studio and OpenAI print in their own docs -- built
+    // `/v1/v1/chat/completions` and the 404 named nothing.
+
+    /// The three spellings a user can reasonably type must all reach the SAME
+    /// endpoint. Bare root is the control: it worked before this fix and must
+    /// still produce a byte-identical URL.
+    #[test]
+    fn chat_url_is_identical_for_all_three_base_spellings() {
+        for base in [
+            "http://127.0.0.1:11434",
+            "http://127.0.0.1:11434/",
+            "http://127.0.0.1:11434/v1",
+            "http://127.0.0.1:11434/v1/",
+        ] {
+            let p = OpenAIProvider::new("key", base, openai_compat(), DebugConfig::default());
+            assert_eq!(
+                p.url_for(&p.base_url, false),
+                "http://127.0.0.1:11434/v1/chat/completions",
+                "base_url {base:?} must reach the single-/v1 chat endpoint"
+            );
+        }
+    }
+
+    /// The `/models` and `/responses` surfaces are derived from the same
+    /// `api_path`, so they carried the same doubling.
+    #[test]
+    fn models_and_responses_urls_survive_the_v1_base_suffix() {
+        for base in ["https://api.example.com", "https://api.example.com/v1"] {
+            let p = OpenAIProvider::new("key", base, openai_compat(), DebugConfig::default());
+            assert_eq!(
+                p.models_url(),
+                "https://api.example.com/v1/models",
+                "base_url {base:?}"
+            );
+            assert_eq!(
+                p.responses_url_for(&p.base_url),
+                "https://api.example.com/v1/responses",
+                "base_url {base:?}"
+            );
+        }
+    }
+
+    /// NEGATIVE CONTROL -- must hold in both arms. The overlap is matched on
+    /// whole path SEGMENTS, so a base whose last segment merely ENDS in `v1`
+    /// keeps the full `/v1/chat/completions` suffix. Collapsing this would
+    /// silently break a working deployment.
+    #[test]
+    fn base_path_ending_in_v1_substring_is_not_collapsed() {
+        let p = OpenAIProvider::new(
+            "key",
+            "https://api.example.com/apiv1",
+            openai_compat(),
+            DebugConfig::default(),
+        );
+        assert_eq!(
+            p.url_for(&p.base_url, false),
+            "https://api.example.com/apiv1/v1/chat/completions"
+        );
+    }
+
+    /// NEGATIVE CONTROL -- must hold in both arms. A HOST named `v1` is not a
+    /// path segment; only the base's path may overlap the api_path.
+    #[test]
+    fn host_named_v1_is_not_mistaken_for_a_path_segment() {
+        let p = OpenAIProvider::new("key", "https://v1", openai_compat(), DebugConfig::default());
+        assert_eq!(
+            p.url_for(&p.base_url, false),
+            "https://v1/v1/chat/completions"
+        );
+    }
+
+    /// NEGATIVE CONTROL -- must hold in both arms. The catalog shape (base
+    /// already `/v1`, `api_path` overridden to `/chat/completions`) has no
+    /// overlap at all and is unchanged.
+    #[test]
+    fn catalog_style_v1_base_with_overridden_api_path_is_unchanged() {
+        let compat = ProviderCompat {
+            api_path: Some("/chat/completions".into()),
+            ..Default::default()
+        };
+        let p = OpenAIProvider::new(
+            "key",
+            "https://api.together.xyz/v1",
+            compat,
+            DebugConfig::default(),
+        );
+        assert_eq!(
+            p.url_for(&p.base_url, false),
+            "https://api.together.xyz/v1/chat/completions"
+        );
     }
 
     // --- Responses API routing (gpt-5) ------------------------------------

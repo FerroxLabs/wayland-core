@@ -37,15 +37,34 @@ THREE OUTCOMES, AND THEY ARE NOT THE SAME THING
                     be mistaken for a pass. A skip that reads as a pass is the
                     exact defect class this gate exists to catch.
 
-WHAT IT DOES *NOT* CHECK -- STATED, NOT HIDDEN
-----------------------------------------------
-Only the ordered `CATALOGUE_CEILINGS` table (GLM / Qwen / Kimi / Mistral /
-Llama). The older `if`-chain families (Claude, GPT-4.x/5.x, Grok, Gemini,
-DeepSeek, MiniMax) carry conditional logic -- nested `!contains` guards, exact
-`==` matches -- that a text parser cannot evaluate, and a parser that silently
-MIS-evaluates them would be worse than this stated gap. Extending coverage there
-means exposing the real Rust lookup to this script, not teaching it to guess.
-The gap is printed on every run so it stays visible.
+WHAT IT CHECKS, AND THE GAP THAT USED TO BE HERE
+------------------------------------------------
+Two tables:
+
+  1. The ordered `CATALOGUE_CEILINGS` table (GLM / Qwen / Kimi / Mistral /
+     Llama), graded fragment-by-fragment against first-party rows.
+  2. `PASSTHROUGH_VENDOR_MODELS` (`crates/wcore-config/src/limits/passthrough.rs`)
+     -- the provider-native ids in the older `if`-chain families (Claude,
+     GPT-4.x/5.x, Grok, Gemini, DeepSeek, MiniMax) that reach users through
+     `--model` passthrough.
+
+(2) is #1176. Those `if` chains carry conditional logic -- nested `!contains`
+guards, exact `==` matches -- that a text parser cannot evaluate, and a parser
+that silently MIS-evaluated them would be worse than no coverage. So the chain
+is not parsed. It is EXPOSED: `PASSTHROUGH_VENDOR_MODELS` records what each
+passthrough id must resolve to, the Rust test
+`every_passthrough_vendor_model_resolves_its_arm` proves on every PR that the
+real `model_output_ceiling` returns exactly those figures, and this script
+grades the same rows against the live catalogue. Neither end can rot alone: the
+Rust test catches a deleted or wrong arm, this script catches the world moving
+on. Together they close the class that cost `claude-opus-5`,
+`gpt-4o-2024-05-13` and `gemini-flash-latest` last cycle -- all three found by
+hand, by neither guard.
+
+Still NOT checked, stated rather than hidden: ids OUTSIDE the in-scope patterns
+(older generations this table deliberately does not arm -- Claude 3.x, GPT-3.5,
+DeepSeek V3/R1, the Gemini specialty modalities), and any endpoint that is not
+vendor-operated. Both are printed on every run.
 
 Only ids OVER-claimed relative to first-party are failures. Under-claiming is
 this table's deliberate policy (see the `CATALOGUE_CEILINGS` doc comment): too
@@ -68,6 +87,9 @@ CATALOGUE_URL = "https://models.dev/api.json"
 # parse_table() fails CLOSED if this path stops holding the const, so a future
 # move breaks the release loudly rather than silently scanning nothing.
 DEFAULT_LIMITS = "crates/wcore-config/src/limits/catalogue.rs"
+# #1176: the passthrough coverage contract for the `if`-chain families. Same
+# fail-closed parse as the catalogue table.
+DEFAULT_PASSTHROUGH = "crates/wcore-config/src/limits/passthrough.rs"
 
 # Vendor-operated providers, per family. "First-party" means the vendor runs the
 # endpoint (or is a first-party tenant of it) -- these are the only rows allowed
@@ -92,6 +114,82 @@ IN_SCOPE = {
     "kimi": re.compile(r"^kimi-(k3|k2\.[5-9])(-|$|:|@)"),
     "mistral": re.compile(r"^(mistral-(large|medium|small)|magistral|codestral|devstral)"),
     "llama": re.compile(r"^(llama-4-(maverick|scout)|llama-3\.3-)"),
+}
+
+# --------------------------------------------------------------------------
+# #1176: provider-native passthrough coverage for the `if`-chain families.
+# --------------------------------------------------------------------------
+
+# VENDOR-OPERATED endpoints per family, per AGENTS.md. The vendor's own API,
+# plus the clouds that serve the vendor's models under a first-party
+# arrangement and republish the vendor's own spec (Bedrock/Vertex for Claude,
+# Vertex for Gemini, Azure for OpenAI, the Alibaba tenants for DeepSeek).
+# Aggregators and resellers are NOT here: they publish `ctx=0`, `out=1010000`
+# and dropped digits, and the same id at wildly different limits.
+#
+# The floor is the MINIMUM across these rows -- AGENTS.md's "when sources
+# disagree, take the lower value". Where a cloud republishes a STALE figure and
+# the vendor's own endpoint disagrees, that is recorded as a pin below, not
+# silently absorbed.
+PASSTHROUGH_VENDORS = {
+    "claude": ["anthropic", "google-vertex", "amazon-bedrock"],
+    "gpt": ["openai", "azure"],
+    "grok": ["xai", "amazon-bedrock"],
+    "gemini": ["google", "google-vertex"],
+    "deepseek": ["deepseek", "alibaba", "alibaba-cn", "alibaba-token-plan"],
+    "minimax": ["minimax", "minimax-cn", "minimax-coding-plan"],
+}
+
+# Which ids inside each family the `if` chain CLAIMS to size. Everything else
+# is a documented, deliberate exclusion (Claude 3.x, GPT-3.5 and the o-series,
+# DeepSeek V3/R1, Grok 2) and must not redden the release -- a gate that fires
+# on our own recorded decisions gets switched off within a week.
+#
+# Each pattern is a FLOOR ("this generation and everything above it"), never an
+# enumeration of the generations that exist today. An enumeration is blind to a
+# NEW generation inside a known family -- `claude-opus-6`, `gpt-6`,
+# `deepseek-v5` -- and that blindness IS #165: the REPORT arm below cannot see
+# it either, because the family key is already in KNOWN_FAMILIES. The floor is
+# set just above the last generation these tables deliberately leave unarmed
+# (Claude 3.x, GPT-4/4.5 and the o-series, Grok 2, Gemini 2.0, DeepSeek V3/R1,
+# MiniMax M1), so raising the floor is a decision someone has to write down.
+PASSTHROUGH_IN_SCOPE = {
+    "claude": re.compile(r"^claude-(opus|sonnet|haiku|fable)-(?:[4-9]|\d\d)"),
+    "gpt": re.compile(r"^gpt-(?:4o|4\.1|[5-9]|\d\d)"),
+    "grok": re.compile(r"^grok-(?:[3-9]|\d\d)"),
+    "gemini": re.compile(
+        r"^gemini-(?:(?:2\.5|[3-9](?:\.\d+)?|\d\d(?:\.\d+)?)-(?:pro|flash)"
+        r"|flash-(?:lite-)?latest)"
+    ),
+    "deepseek": re.compile(r"^deepseek-v(?:[4-9]|\d\d)"),
+    "minimax": re.compile(r"^minimax-m(?:[2-9]|\d\d)"),
+}
+
+# Specialty modalities the chain deliberately excludes: they are MUCH smaller
+# than the text tier and an over-claim would 400 them, so they fail open to the
+# unknown path on purpose.
+PASSTHROUGH_EXCLUDE = re.compile(r"-(image|tts|native-audio|live)")
+
+# models.dev id dressings that do not change which arm the substring lookup
+# hits: Bedrock region prefixes, Bedrock's vendor prefix, Vertex `@` revisions,
+# Bedrock `-v1:0` suffixes.
+_REGION_PREFIX = re.compile(r"^(us|eu|jp|au|apac|global)\.")
+_VENDOR_PREFIX = re.compile(r"^(anthropic|xai|meta|deepseek|mistral|amazon|cohere|ai21|qwen)\.")
+_ID_SUFFIX = re.compile(r"(@[^@]*|-v\d+(:\d+)?|:\d+)$")
+
+# Rows where a vendor-operated endpoint disagrees with ANOTHER vendor-operated
+# endpoint and we deliberately follow the model's OWN vendor. Keyed by the exact
+# four numbers involved, so this is a PIN and not a mute: if our figure changes
+# or the observed floor moves in either direction, the key stops matching and
+# the release goes red. Printed on every run.
+PASSTHROUGH_PINS = {
+    ("claude-sonnet-4-6", "output", 128_000, 64_000):
+        "amazon-bedrock still republishes Anthropic's OLD 64,000 output figure "
+        "for Sonnet 4.6, while `anthropic` -- the vendor that makes the model "
+        "-- and google-vertex both report 128,000, matching Anthropic's own "
+        "model overview and a Codex/Gemini cross-audit. Lowering the arm would "
+        "halve real output on the vendor's own endpoint to match a reseller's "
+        "lag.",
 }
 
 # Vendors we track closely enough that a brand-new family appearing there is
@@ -122,17 +220,17 @@ class Finding:
         self.text = text
 
 
-def parse_table(path: str) -> list[tuple[str, int, int]]:
-    """Extract the ordered CATALOGUE_CEILINGS entries from limits.rs."""
+def parse_table(path: str, const: str = "CATALOGUE_CEILINGS") -> list[tuple[str, int, int]]:
+    """Extract an ordered `&[(&str, u32, u32)]` table from a Rust source file."""
     src = open(path, encoding="utf-8").read()
     m = re.search(
-        r"const CATALOGUE_CEILINGS: &\[\(&str, u32, u32\)\] = &\[(.*?)\n\];",
+        rf"const {const}: &\[\(&str, u32, u32\)\] = &\[(.*?)\n\];",
         src,
         re.S,
     )
     if not m:
         raise SystemExit(
-            f"FATAL: could not locate `const CATALOGUE_CEILINGS` in {path}. "
+            f"FATAL: could not locate `const {const}` in {path}. "
             "The gate cannot verify a table it cannot read -- failing closed."
         )
     body = m.group(1)
@@ -143,8 +241,120 @@ def parse_table(path: str) -> list[tuple[str, int, int]]:
         )
     ]
     if not entries:
-        raise SystemExit(f"FATAL: CATALOGUE_CEILINGS in {path} parsed to ZERO entries.")
+        raise SystemExit(f"FATAL: {const} in {path} parsed to ZERO entries.")
     return entries
+
+
+def canonical(model_id: str) -> str:
+    """Strip the models.dev id dressings that do not change the matched arm."""
+    b = model_id.split("/")[-1].lower()
+    b = _REGION_PREFIX.sub("", b)
+    b = _VENDOR_PREFIX.sub("", b)
+    prev = None
+    while prev != b:
+        prev = b
+        b = _ID_SUFFIX.sub("", b)
+    return b
+
+
+def scan_passthrough(catalogue: dict, rows: list[tuple[str, int, int]]) -> list[Finding]:
+    """#1176 -- grade PASSTHROUGH_VENDOR_MODELS against vendor-operated rows.
+
+    Exact id match, not containment: a NEW passthrough id must get its own row
+    even when it happens to contain an older one, because that is exactly how a
+    frontier model silently inherits a stale window (#165).
+    """
+    table = {mid: (out, ctx) for mid, out, ctx in rows}
+    findings: list[Finding] = []
+
+    for family, providers in PASSTHROUGH_VENDORS.items():
+        rx = PASSTHROUGH_IN_SCOPE[family]
+        observed: dict[str, dict] = {}
+        for pid in providers:
+            prov = catalogue.get(pid)
+            if not prov:
+                continue
+            for mid, meta in (prov.get("models") or {}).items():
+                cid = canonical(mid)
+                if not rx.match(cid) or PASSTHROUGH_EXCLUDE.search(cid):
+                    continue
+                lim = meta.get("limit") or {}
+                ctx, out = lim.get("context"), lim.get("output")
+                if not ctx:
+                    continue  # ctx=0 / missing is catalogue junk, not signal
+                rec = observed.setdefault(cid, {"ctx": [], "out": [], "where": []})
+                rec["ctx"].append(ctx)
+                rec["where"].append(pid)
+                # output == context is models.dev saying UNKNOWN, never a
+                # ceiling. Dropping it here is what keeps grok-4.5/4.6 ungraded
+                # on output while their context stays graded.
+                if out and out != ctx:
+                    rec["out"].append(out)
+
+        for mid in sorted(observed):
+            rec = observed[mid]
+            where = sorted(set(rec["where"]))
+            floor_ctx = min(rec["ctx"])
+            if mid not in table:
+                out_note = (
+                    f", output={min(rec['out'])}" if rec["out"]
+                    else " (output UNKNOWN -- models.dev reports output == context)"
+                )
+                findings.append(Finding(
+                    "FAIL",
+                    f"[{family}] `{mid}` is served by vendor-operated {where} and "
+                    f"reaches users through provider-native --model passthrough, "
+                    f"but has NO row in PASSTHROUGH_VENDOR_MODELS. Nothing then "
+                    f"grades whether `model_output_ceiling` sizes it, which is "
+                    f"#165's exact shape. Vendor reports context={floor_ctx}"
+                    + out_note
+                    + ". Add the arm if it has none, then add the row."
+                ))
+                continue
+
+            our_out, our_ctx = table[mid]
+            if our_ctx > floor_ctx:
+                findings.append(_pinned_or_fail(
+                    mid, "context", our_ctx, floor_ctx,
+                    f"[{family}] `{mid}` is recorded at context {our_ctx}, but "
+                    f"vendor-operated {where} reports as low as {floor_ctx}. "
+                    f"OVER-claiming context is the fatal direction."
+                ))
+            elif our_ctx < floor_ctx * 0.9:
+                findings.append(_pinned_or_fail(
+                    mid, "context", our_ctx, floor_ctx,
+                    f"[{family}] `{mid}` is recorded at context {our_ctx} while "
+                    f"vendor-operated {where} serves {floor_ctx} -- a "
+                    f"{floor_ctx / our_ctx:.1f}x under-size (premature "
+                    f"compaction, #165)."
+                ))
+            if rec["out"]:
+                floor_out = min(rec["out"])
+                if our_out > floor_out:
+                    findings.append(_pinned_or_fail(
+                        mid, "output", our_out, floor_out,
+                        f"[{family}] `{mid}` is recorded at output {our_out}, but "
+                        f"vendor-operated {where} reports as low as {floor_out}. "
+                        f"An arm REVOKES `should_omit_max_tokens`, so an "
+                        f"over-claim is a hard 400 mid-run."
+                    ))
+
+    return [f for f in findings if f is not None]
+
+
+def _pinned_or_fail(mid: str, dim: str, ours: int, floor: int, text: str):
+    """A pin turns one exact disagreement into a printed note instead of a FAIL.
+
+    Keyed by all four numbers, so it cannot outlive the situation it describes.
+    """
+    reason = PASSTHROUGH_PINS.get((mid, dim, ours, floor))
+    if reason is None:
+        return Finding("FAIL", text)
+    return Finding(
+        "PINNED",
+        f"`{mid}` {dim} {ours} vs vendor floor {floor}: {reason} Pinned to these "
+        f"exact numbers -- if either moves, this becomes a FAIL.",
+    )
 
 
 def lookup(entries: list[tuple[str, int, int]], model: str):
@@ -275,15 +485,32 @@ def scan(catalogue: dict, entries: list[tuple[str, int, int]]) -> list[Finding]:
     return findings
 
 
-def report(findings: list[Finding], entries_count: int) -> int:
+def report(findings: list[Finding], entries_count: int,
+           passthrough_count: int = 0) -> int:
     fails = [f for f in findings if f.kind == "FAIL"]
     reports = [f for f in findings if f.kind == "REPORT"]
+    pinned = [f for f in findings if f.kind == "PINNED"]
 
     print(f"model-limits freshness: checked {entries_count} CATALOGUE_CEILINGS "
           f"arms against {len(FIRST_PARTY)} first-party families.")
-    print("NOT CHECKED (stated gap): the older `if`-chain families -- Claude, "
-          "GPT-4.x/5.x, Grok, Gemini, DeepSeek, MiniMax. Their conditional arms "
-          "cannot be evaluated by a text parser; verify those by hand.")
+    print(f"#1176: checked {passthrough_count} PASSTHROUGH_VENDOR_MODELS rows "
+          f"against {len(PASSTHROUGH_VENDORS)} `if`-chain families "
+          f"({', '.join(sorted(PASSTHROUGH_VENDORS))}) on vendor-operated "
+          f"endpoints only. The chain itself is graded by the Rust test "
+          f"`every_passthrough_vendor_model_resolves_its_arm`, which runs on "
+          f"every PR -- this half only asks whether the world moved.")
+    print("NOT CHECKED (stated gap): ids outside the in-scope patterns -- the "
+          "older generations these tables deliberately do not arm (Claude 3.x, "
+          "GPT-3.5 / o-series, DeepSeek V3+R1, the Gemini image/tts/live "
+          "modalities) -- and any endpoint that is not vendor-operated.")
+
+    if pinned:
+        print("\n" + "=" * 72)
+        print("PINNED -- vendor-operated endpoints disagree and we follow the "
+              "model's own vendor. NOT a failure, but read them.")
+        print("=" * 72)
+        for f in pinned:
+            print(f"  * {f.text}")
 
     if reports:
         print("\n" + "=" * 72)
@@ -322,6 +549,48 @@ const CATALOGUE_CEILINGS: &[(&str, u32, u32)] = &[
     ("kimi-k3", 128_000, 1_000_000),
 ];
 '''
+
+
+# #1176 fixtures. The table records ONE canonical spelling per model; the
+# catalogue below deliberately dresses the same models the way models.dev does.
+_FIXTURE_PASSTHROUGH = """
+pub(crate) const PASSTHROUGH_VENDOR_MODELS: &[(&str, u32, u32)] = &[
+    ("claude-opus-5", 128_000, 1_000_000),
+    ("claude-sonnet-4-5", 64_000, 200_000),
+    ("gpt-4o-2024-05-13", 4_096, 128_000),
+    ("grok-4.6", 500_000, 500_000),
+];
+"""
+
+
+def _fixture_passthrough_catalogue(**over):
+    cat = {
+        "anthropic": {"models": {
+            "claude-opus-5": {"limit": {"context": 1_000_000, "output": 128_000}},
+            "claude-sonnet-4-5": {"limit": {"context": 200_000, "output": 64_000}},
+            # Out of scope on purpose: the chain does not arm Claude 3.x.
+            "claude-3-opus": {"limit": {"context": 200_000, "output": 4_096}},
+        }},
+        "amazon-bedrock": {"models": {
+            # Every dressing of ONE model: region prefix, vendor prefix,
+            # `-v1:0`. All must canonicalize onto the single recorded row.
+            "us.anthropic.claude-opus-5": {"limit": {"context": 1_000_000, "output": 128_000}},
+            "anthropic.claude-sonnet-4-5-v1:0": {"limit": {"context": 200_000, "output": 64_000}},
+        }},
+        "google-vertex": {"models": {
+            "claude-opus-5@default": {"limit": {"context": 1_000_000, "output": 128_000}},
+        }},
+        "openai": {"models": {
+            "gpt-4o-2024-05-13": {"limit": {"context": 128_000, "output": 4_096}},
+        }},
+        "xai": {"models": {
+            # output == context: models.dev saying UNKNOWN, never a ceiling.
+            "grok-4.6": {"limit": {"context": 500_000, "output": 500_000}},
+        }},
+    }
+    for pid, models in over.items():
+        cat.setdefault(pid.replace("__", "-"), {"models": {}})["models"].update(models)
+    return cat
 
 
 def _fixture_catalogue(**over):
@@ -434,6 +703,135 @@ def self_test() -> int:
     if not ok:
         failures.append("offline skip banner")
 
+    # ---- #1176: the passthrough arm ------------------------------------
+    pt_path = os.path.join(tmp, "passthrough.rs")
+    with open(pt_path, "w", encoding="utf-8") as fh:
+        fh.write(_FIXTURE_PASSTHROUGH)
+    pt_rows = parse_table(pt_path, "PASSTHROUGH_VENDOR_MODELS")
+    assert len(pt_rows) == 4, pt_rows
+
+    def pcase(name, catalogue, want_fail, want_pinned=False):
+        found = scan_passthrough(catalogue, pt_rows)
+        got_fail = any(f.kind == "FAIL" for f in found)
+        got_pin = any(f.kind == "PINNED" for f in found)
+        ok = got_fail == want_fail and got_pin == want_pinned
+        print(f"  [{'ok' if ok else 'BROKEN'}] {name}: "
+              f"FAIL={got_fail} (want {want_fail}), "
+              f"PINNED={got_pin} (want {want_pinned})")
+        if not ok:
+            for f in found:
+                print(f"        -> {f.kind}: {f.text}")
+            failures.append(name)
+
+    print("\nself-test (#1176 passthrough): the arm must reach PASS and FAIL.")
+
+    # P1. Clean tree -> PASS. Also proves every models.dev dressing of a model
+    #     (us./anthropic./@default/-v1:0) folds onto its ONE recorded row --
+    #     without that, a clean tree would fail with four phantom "no row"s.
+    pcase("PASS when every vendor id has a matching row", _fixture_passthrough_catalogue(), False)
+
+    # P2. THE ACCEPTANCE CASE: a passthrough id served by the vendor with no
+    #     row. This is `claude-opus-5` last cycle -- a frontier model shipped,
+    #     nobody recorded it, and both old guards passed it over.
+    pcase(
+        "FAIL when a vendor passthrough id has no row (the #165 shape)",
+        _fixture_passthrough_catalogue(
+            anthropic={"claude-opus-6": {"limit": {"context": 2_000_000, "output": 256_000}}}),
+        True,
+    )
+
+    # P3. Over-claiming CONTEXT is the fatal direction.
+    over_ctx = _fixture_passthrough_catalogue()
+    over_ctx["anthropic"]["models"]["claude-opus-5"]["limit"]["context"] = 400_000
+    pcase("FAIL when a row over-claims CONTEXT vs the vendor", over_ctx, True)
+
+    # P4. Over-claiming OUTPUT is a hard 400, because an arm revokes omission.
+    over_out = _fixture_passthrough_catalogue()
+    over_out["openai"]["models"]["gpt-4o-2024-05-13"]["limit"]["output"] = 2_048
+    pcase("FAIL when a row over-claims OUTPUT vs the vendor", over_out, True)
+
+    # P5. A GROSS under-claim is staleness, not the table's few-percent policy.
+    stale = _fixture_passthrough_catalogue()
+    stale["anthropic"]["models"]["claude-opus-5"]["limit"]["context"] = 4_000_000
+    stale["amazon-bedrock"]["models"]["us.anthropic.claude-opus-5"]["limit"]["context"] = 4_000_000
+    stale["google-vertex"]["models"]["claude-opus-5@default"]["limit"]["context"] = 4_000_000
+    pcase("FAIL when a row is grossly stale vs the vendor", stale, True)
+
+    # P6. NEGATIVE CONTROL: a documented out-of-scope id (Claude 3.x) is in the
+    #     fixture catalogue throughout and must never redden anything. P1
+    #     passing already proves it; assert the boundary explicitly, in both
+    #     directions, so nobody widens the floor without noticing.
+    for out_of_scope in ["claude-3-opus", "claude-3-5-sonnet-20241022"]:
+        assert not PASSTHROUGH_IN_SCOPE["claude"].match(out_of_scope), out_of_scope
+    for in_scope in ["claude-opus-5", "claude-opus-6", "claude-sonnet-12-1"]:
+        assert PASSTHROUGH_IN_SCOPE["claude"].match(in_scope), in_scope
+    for out_of_scope in ["gpt-4", "gpt-4-turbo", "gpt-4.5-preview", "gpt-3.5-turbo", "o3-pro"]:
+        assert not PASSTHROUGH_IN_SCOPE["gpt"].match(out_of_scope), out_of_scope
+    for in_scope in ["gpt-4o", "gpt-4.1", "gpt-5.6-sol", "gpt-6", "gpt-10"]:
+        assert PASSTHROUGH_IN_SCOPE["gpt"].match(in_scope), in_scope
+    assert not PASSTHROUGH_IN_SCOPE["deepseek"].match("deepseek-v3.2")
+    assert PASSTHROUGH_IN_SCOPE["deepseek"].match("deepseek-v5")
+    assert not PASSTHROUGH_IN_SCOPE["grok"].match("grok-2-vision")
+    assert PASSTHROUGH_IN_SCOPE["grok"].match("grok-5")
+    assert not PASSTHROUGH_IN_SCOPE["gemini"].match("gemini-2.0-flash")
+    assert PASSTHROUGH_IN_SCOPE["gemini"].match("gemini-4-pro")
+    assert not PASSTHROUGH_IN_SCOPE["minimax"].match("minimax-m1")
+    assert PASSTHROUGH_IN_SCOPE["minimax"].match("minimax-m4")
+
+    # P7. NEGATIVE CONTROL: output == context is UNKNOWN, never a ceiling. The
+    #     grok-4.6 row records output 500,000 and the only vendor row is
+    #     degenerate; grading it would be inventing a figure.
+    degenerate = _fixture_passthrough_catalogue()
+    degenerate["xai"]["models"]["grok-4.6"]["limit"] = {"context": 500_000, "output": 500_000}
+    pcase("PASS when the vendor's output == context (UNKNOWN, not a ceiling)",
+          degenerate, False)
+
+    # P8. NEGATIVE CONTROL: an AGGREGATOR publishing junk for an in-scope id
+    #     must not touch the verdict. This is the rule that keeps `ctx=0`,
+    #     `out=1010000` and dropped digits out of the floor.
+    junk = _fixture_passthrough_catalogue()
+    junk["openrouter"] = {"models": {
+        "anthropic/claude-opus-5": {"limit": {"context": 8_192, "output": 8_192}},
+    }}
+    junk["poe"] = {"models": {"claude-opus-5": {"limit": {"context": 0, "output": 0}}}}
+    pcase("PASS when only a non-vendor aggregator disagrees", junk, False)
+
+    # P9. A pin suppresses ONE exact disagreement...
+    pinned = _fixture_passthrough_catalogue()
+    pinned["amazon-bedrock"]["models"]["claude-sonnet-4-6"] = {
+        "limit": {"context": 1_000_000, "output": 64_000}}
+    pinned["anthropic"]["models"]["claude-sonnet-4-6"] = {
+        "limit": {"context": 1_000_000, "output": 128_000}}
+    pin_rows = pt_rows + [("claude-sonnet-4-6", 128_000, 1_000_000)]
+    found = scan_passthrough(pinned, pin_rows)
+    ok = (not any(f.kind == "FAIL" for f in found)
+          and any(f.kind == "PINNED" for f in found))
+    print(f"  [{'ok' if ok else 'BROKEN'}] a recorded vendor-vs-vendor "
+          f"disagreement is PINNED, not FAILED")
+    if not ok:
+        failures.append("passthrough pin applies")
+
+    # P10. ...and the pin is NARROW: move the observed floor and it stops
+    #      applying. A pin that outlives its situation is a mute.
+    moved = pinned
+    moved["amazon-bedrock"]["models"]["claude-sonnet-4-6"]["limit"]["output"] = 32_000
+    found = scan_passthrough(moved, pin_rows)
+    ok = any(f.kind == "FAIL" for f in found)
+    print(f"  [{'ok' if ok else 'BROKEN'}] the pin stops applying when the "
+          f"observed floor moves")
+    if not ok:
+        for f in found:
+            print(f"        -> {f.kind}: {f.text}")
+        failures.append("passthrough pin is narrow")
+
+    # P11. The passthrough table must fail CLOSED too.
+    try:
+        parse_table(pt_path, "NO_SUCH_CONST")
+        print("  [BROKEN] a missing passthrough const did NOT fail closed")
+        failures.append("passthrough fail-closed")
+    except SystemExit:
+        print("  [ok] a missing passthrough const fails CLOSED")
+
     # 10. A table the parser cannot read must fail CLOSED, not scan nothing.
     broken = os.path.join(tmp, "broken.rs")
     open(broken, "w", encoding="utf-8").write("// no table here\n")
@@ -477,6 +875,8 @@ def main() -> int:
     ap.add_argument("--self-test", action="store_true",
                     help="prove the gate reaches PASS, FAIL, REPORT and SKIP (offline)")
     ap.add_argument("--limits", default=DEFAULT_LIMITS, help="path to limits.rs")
+    ap.add_argument("--passthrough", default=DEFAULT_PASSTHROUGH,
+                    help="path to limits/passthrough.rs (#1176)")
     ap.add_argument("--catalogue", help="read a models.dev snapshot from disk instead of the network")
     ap.add_argument("--timeout", type=int, default=30)
     args = ap.parse_args()
@@ -485,6 +885,7 @@ def main() -> int:
         return self_test()
 
     entries = parse_table(args.limits)
+    passthrough = parse_table(args.passthrough, "PASSTHROUGH_VENDOR_MODELS")
 
     if args.catalogue:
         catalogue = json.load(open(args.catalogue, encoding="utf-8"))
@@ -501,7 +902,8 @@ def main() -> int:
             "-- refusing to grade the table against it"
         )
 
-    return report(scan(catalogue, entries), len(entries))
+    findings = scan(catalogue, entries) + scan_passthrough(catalogue, passthrough)
+    return report(findings, len(entries), len(passthrough))
 
 
 if __name__ == "__main__":

@@ -1142,6 +1142,14 @@ impl ProviderCompat {
         self.api_path.as_deref().unwrap_or("/v1/chat/completions")
     }
 
+    /// Build the full request URL for this provider from a base URL and the
+    /// configured [`Self::api_path`], tolerating the base-URL spellings that
+    /// used to 404. See [`join_endpoint`] for the rules and the defect
+    /// (#1178) this closes.
+    pub fn endpoint_url(&self, base_url: &str) -> String {
+        join_endpoint(base_url, self.api_path())
+    }
+
     /// Whether to send the OpenAI `stop` parameter. Defaults to `true`; xAI
     /// sets it `false` because `grok-4.3` (a reasoning model) 400s on `stop`.
     pub fn supports_stop_param(&self) -> bool {
@@ -1329,6 +1337,76 @@ fn normalize_array_types(val: &mut Value) {
         for v in arr.iter_mut() {
             normalize_array_types(v);
         }
+    }
+}
+
+/// Join a provider `base_url` with an API path without producing a doubled or
+/// missing separator.
+///
+/// #1178. `openai_defaults()` sets `api_path = "/v1/chat/completions"` and the
+/// provider used to append it with a bare `format!("{base}{path}")`. So the
+/// spelling every vendor prints in its own docs --
+/// `--base-url http://127.0.0.1:11434/v1` -- built
+/// `http://127.0.0.1:11434/v1/v1/chat/completions` and returned 404, with
+/// nothing in the error naming the doubled path. The value that worked was the
+/// bare root, which is NOT how Ollama, llama.cpp, vLLM, LM Studio or OpenAI
+/// itself write it.
+///
+/// The rule is deliberately narrow so the many working configs that already
+/// pass a bare root are byte-for-byte unchanged:
+///
+///   1. A trailing `/` on the base is dropped
+///      (`http://h:1234/` behaves as `http://h:1234`).
+///   2. The longest run of whole path segments that is BOTH a suffix of the
+///      base's path and a prefix of `api_path` is counted once, not twice.
+///      Segment-wise, never substring-wise: a base ending in `/apiv1` must not
+///      swallow a leading `/v1`.
+///   3. Only the base's PATH participates. The scheme and authority are held
+///      aside first, so a host literally named `v1` cannot be mistaken for a
+///      path segment.
+///
+/// Rule 2 with no overlap reduces to the old concatenation, which is why the
+/// bare-root spelling cannot change behaviour.
+pub fn join_endpoint(base_url: &str, api_path: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if api_path.is_empty() {
+        return base.to_string();
+    }
+
+    // Hold the scheme + authority aside so a host named `v1` is never read as
+    // a path segment.
+    let (prefix, base_path) = split_authority(base);
+
+    let base_segs: Vec<&str> = base_path.split('/').filter(|s| !s.is_empty()).collect();
+    let path_segs: Vec<&str> = api_path.split('/').filter(|s| !s.is_empty()).collect();
+
+    let max_overlap = base_segs.len().min(path_segs.len());
+    let mut overlap = 0usize;
+    for k in (1..=max_overlap).rev() {
+        if base_segs[base_segs.len() - k..] == path_segs[..k] {
+            overlap = k;
+            break;
+        }
+    }
+
+    let mut out = String::from(prefix);
+    for seg in base_segs.iter().chain(path_segs[overlap..].iter()) {
+        out.push('/');
+        out.push_str(seg);
+    }
+    out
+}
+
+/// Split `base` into (scheme + authority, path). The path keeps its leading
+/// `/`; both halves are empty-safe.
+fn split_authority(base: &str) -> (&str, &str) {
+    let after_scheme = match base.find("://") {
+        Some(i) => i + 3,
+        None => 0,
+    };
+    match base[after_scheme..].find('/') {
+        Some(j) => base.split_at(after_scheme + j),
+        None => (base, ""),
     }
 }
 
@@ -1677,6 +1755,97 @@ strip_patterns = ["__REASONING__"]
 }
 
 // --- W1 Task 3: cache_message_breakpoints ---
+
+#[cfg(test)]
+mod endpoint_url_tests {
+    use super::*;
+
+    // --- #1178: base-URL / api_path joining -------------------------------
+
+    /// The defect, at the unit: the three spellings a user can reasonably type
+    /// must all resolve to ONE endpoint. Before this, `.../v1` produced
+    /// `/v1/v1/chat/completions` and 404'd with nothing naming the cause.
+    #[test]
+    fn join_endpoint_collapses_a_duplicated_v1_segment() {
+        for base in [
+            "http://127.0.0.1:11434",
+            "http://127.0.0.1:11434/",
+            "http://127.0.0.1:11434/v1",
+            "http://127.0.0.1:11434/v1/",
+        ] {
+            assert_eq!(
+                join_endpoint(base, "/v1/chat/completions"),
+                "http://127.0.0.1:11434/v1/chat/completions",
+                "base {base:?}"
+            );
+        }
+    }
+
+    /// NEGATIVE CONTROL. Segment-wise, never substring-wise: a base path whose
+    /// last segment merely ENDS in `v1` keeps the whole api_path.
+    #[test]
+    fn join_endpoint_does_not_collapse_a_substring_match() {
+        assert_eq!(
+            join_endpoint("https://h/apiv1", "/v1/chat/completions"),
+            "https://h/apiv1/v1/chat/completions"
+        );
+        assert_eq!(
+            join_endpoint("https://h/v10", "/v1/chat/completions"),
+            "https://h/v10/v1/chat/completions"
+        );
+    }
+
+    /// NEGATIVE CONTROL. Only the base's PATH may overlap; a host named `v1`
+    /// is an authority, not a segment.
+    #[test]
+    fn join_endpoint_never_reads_the_authority_as_a_path_segment() {
+        assert_eq!(
+            join_endpoint("https://v1", "/v1/chat/completions"),
+            "https://v1/v1/chat/completions"
+        );
+        assert_eq!(
+            join_endpoint("https://v1:8080", "/v1/chat/completions"),
+            "https://v1:8080/v1/chat/completions"
+        );
+    }
+
+    /// NEGATIVE CONTROL. With no overlap the join reduces to the old
+    /// concatenation, which is why every already-working config is untouched.
+    #[test]
+    fn join_endpoint_with_no_overlap_is_plain_concatenation() {
+        for (base, path) in [
+            ("https://api.openai.com", "/v1/chat/completions"),
+            ("https://api.together.xyz/v1", "/chat/completions"),
+            ("https://h/openai/deployments/x", "/chat/completions"),
+        ] {
+            assert_eq!(join_endpoint(base, path), format!("{base}{path}"));
+        }
+    }
+
+    /// A multi-segment overlap collapses as one unit -- a user who pasted the
+    /// complete endpoint gets the endpoint, not it twice.
+    #[test]
+    fn join_endpoint_collapses_a_multi_segment_overlap() {
+        assert_eq!(
+            join_endpoint("https://h/v1/chat/completions", "/v1/chat/completions"),
+            "https://h/v1/chat/completions"
+        );
+    }
+
+    /// An empty `api_path` (the catalog's "base_url IS the full endpoint"
+    /// encoding) yields the base, with any trailing slash normalised away.
+    #[test]
+    fn join_endpoint_with_empty_path_returns_the_base() {
+        assert_eq!(
+            join_endpoint("https://h/api/v3/chat", ""),
+            "https://h/api/v3/chat"
+        );
+        assert_eq!(
+            join_endpoint("https://h/api/v3/chat/", ""),
+            "https://h/api/v3/chat"
+        );
+    }
+}
 
 #[cfg(test)]
 mod cache_breakpoint_tests {
