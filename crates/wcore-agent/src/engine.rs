@@ -15895,6 +15895,22 @@ impl AgentEngine {
                     warn.routed_model,
                     alert.cause,
                 );
+
+                // #1166 Defect 5 — the warn above is a `tracing::warn!`, and
+                // with `RUST_LOG` unset the CLI sends everything under ERROR to
+                // a log file (TUI mode: to the file only). A verdict nobody is
+                // shown is a verdict nobody has. Say it on the OutputSink,
+                // ungated by `compact.cache_diagnostics`, exactly once per
+                // session — see `CacheBreakDetector::claim_health_notice`.
+                if self.cache_detector.claim_health_notice() {
+                    self.output.emit_info(&format!(
+                        "Prompt cache is not being reused: {:.0}% of this request came from \
+                         cache (cause: {:?}). Run `wayland-core cache report` for the \
+                         session's cache, invalidation and cost record.",
+                        alert.ratio * 100.0,
+                        alert.cause,
+                    ));
+                }
             }
 
             // ── F23-04 — record this round-trip into the cache/compaction

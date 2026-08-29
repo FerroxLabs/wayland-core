@@ -161,6 +161,195 @@ fn read_only_ledger(dir: &std::path::Path) -> CacheLedger {
     serde_json::from_slice(&raw).unwrap_or_else(|e| panic!("ledger is not decodable: {e}"))
 }
 
+/// Records every `emit_info` line the engine produces, so a test can assert on
+/// what the PERSON running the session was actually told — not on what a
+/// `tracing::warn!` put in a log file they never open.
+#[derive(Default)]
+struct RecordingSink {
+    info: Mutex<Vec<String>>,
+}
+
+impl RecordingSink {
+    fn info_lines(&self) -> Vec<String> {
+        self.info.lock().unwrap().clone()
+    }
+}
+
+impl OutputSink for RecordingSink {
+    fn emit_text_delta(&self, _text: &str, _msg_id: &str) {}
+    fn emit_thinking(&self, _text: &str, _msg_id: &str) {}
+    fn emit_tool_call(&self, _name: &str, _input: &str) {}
+    fn emit_tool_result(&self, _name: &str, _is_error: bool, _content: &str) {}
+    fn emit_stream_start(&self, _msg_id: &str) {}
+    fn emit_stream_end(
+        &self,
+        _msg_id: &str,
+        _turns: usize,
+        _input_tokens: u64,
+        _output_tokens: u64,
+        _cache_creation_tokens: u64,
+        _cache_read_tokens: u64,
+        _finish_reason: FinishReason,
+    ) {
+    }
+    fn emit_error(&self, _msg: &str, _retryable: bool) {}
+    fn emit_info(&self, msg: &str) {
+        self.info.lock().unwrap().push(msg.to_string());
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+
+/// #1166 follow-up, end to end: a warm turn carrying a large NEW input must not
+/// leave a durable `expired` invalidation in the ledger.
+///
+/// Three warm round-trips read a 40k prefix back in full, then the user pastes
+/// 150k of fresh text. `cache_read` does not move — the whole cached prefix is
+/// still served — but `cache_read / total_input` falls to 0.21, under the
+/// absolute floor. Before the fix the detector returned
+/// `PartialMiss { cause: TtlExpiry }` and the engine wrote
+/// `invalidation_cause: "expired"` for that round-trip, blaming the server's
+/// TTL for an invalidation that never happened. This asserts on the FILE,
+/// because that record is what `wayland-core cache report` renders back weeks
+/// later.
+#[tokio::test]
+#[serial_test::serial(wayland_cache_ledger_env)]
+async fn a_large_new_paste_is_not_recorded_as_a_server_side_expiry() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_turn("t1", usage(40_000, 300, 0, 40_000)),
+        tool_turn("t2", usage(500, 300, 40_000, 0)),
+        tool_turn("t3", usage(500, 300, 40_000, 0)),
+        // The paste: same 40k prefix served, 150k of new input alongside it.
+        text_turn("done", usage(150_000, 300, 40_000, 0)),
+    ]));
+
+    let mut config = test_config();
+    config.model = "claude-opus-4-7".to_string();
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config,
+        registry_with_mock_tool(),
+        silent_output(),
+    );
+    engine.set_cache_ledger_dir(dir.path());
+    engine.run("go", "m").await.expect("run should succeed");
+
+    let ledger = read_only_ledger(dir.path());
+    assert_eq!(ledger.turns.len(), 4, "four round-trips were scripted");
+    let paste = &ledger.turns[3];
+    assert_eq!(
+        paste.cache_read_tokens, 40_000,
+        "sanity: the whole cached prefix was still read back on this turn"
+    );
+    assert!(
+        paste.hit_ratio() < 0.3,
+        "sanity: the raw hit ratio IS under the floor ({}) — the fix must not \
+         work by keeping this turn away from the floor",
+        paste.hit_ratio()
+    );
+    assert_eq!(
+        paste.invalidation_cause, None,
+        "nothing was invalidated on this turn; recording `expired` fabricates a \
+         server-side fault that `cache report` then shows for ever"
+    );
+    assert!(
+        ledger.summarize().invalidation_causes.is_empty(),
+        "got {:?}",
+        ledger.summarize().invalidation_causes
+    );
+}
+
+/// #1166 Defect 5, end to end: a session whose prompt cache is genuinely dead
+/// must SAY SO to the user, at the default configuration, exactly once.
+///
+/// The ticket's Defect 5 is "off by default": `compact.cache_diagnostics`
+/// defaults to `false`, and the one ungated surface is a `tracing::warn!` that
+/// the CLI routes to a log file when `RUST_LOG` is unset. This test never
+/// touches `cache_diagnostics`, so it runs at the shipped default.
+#[tokio::test]
+#[serial_test::serial(wayland_cache_ledger_env)]
+async fn a_dead_prompt_cache_tells_the_user_once_at_the_default_config() {
+    let dir = tempfile::tempdir().unwrap();
+    // The #559 leader signature: `cache_read` pinned flat while input grows.
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_turn("t1", usage(3_225, 300, 0, 192)),
+        tool_turn("t2", usage(6_028, 300, 192, 0)),
+        tool_turn("t3", usage(6_256, 300, 192, 0)),
+        tool_turn("t4", usage(7_001, 300, 192, 0)),
+        text_turn("done", usage(7_400, 300, 192, 0)),
+    ]));
+
+    let mut config = test_config();
+    config.model = "claude-opus-4-7".to_string();
+    assert!(
+        !config.compact.cache_diagnostics,
+        "this test is only meaningful at the SHIPPED default"
+    );
+    let sink = Arc::new(RecordingSink::default());
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config,
+        registry_with_mock_tool(),
+        sink.clone() as Arc<dyn OutputSink>,
+    );
+    engine.set_cache_ledger_dir(dir.path());
+    engine.run("go", "m").await.expect("run should succeed");
+
+    let notices: Vec<String> = sink
+        .info_lines()
+        .into_iter()
+        .filter(|l| l.contains("Prompt cache is not being reused"))
+        .collect();
+    assert_eq!(
+        notices.len(),
+        1,
+        "exactly one notice per session — got {:?} out of {:?}",
+        notices,
+        sink.info_lines()
+    );
+    assert!(
+        notices[0].contains("cache report"),
+        "the notice must point at the surface that has the detail: {}",
+        notices[0]
+    );
+}
+
+/// Control for the notice above: a healthy session must stay quiet. A notice
+/// that fires on every session is not a signal.
+#[tokio::test]
+#[serial_test::serial(wayland_cache_ledger_env)]
+async fn a_healthy_session_is_told_nothing_about_its_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_turn("t1", usage(40_000, 300, 0, 40_000)),
+        tool_turn("t2", usage(500, 300, 40_000, 0)),
+        tool_turn("t3", usage(500, 300, 40_500, 0)),
+        text_turn("done", usage(500, 300, 41_000, 0)),
+    ]));
+
+    let mut config = test_config();
+    config.model = "claude-opus-4-7".to_string();
+    let sink = Arc::new(RecordingSink::default());
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config,
+        registry_with_mock_tool(),
+        sink.clone() as Arc<dyn OutputSink>,
+    );
+    engine.set_cache_ledger_dir(dir.path());
+    engine.run("go", "m").await.expect("run should succeed");
+
+    assert!(
+        !sink
+            .info_lines()
+            .iter()
+            .any(|l| l.contains("Prompt cache is not being reused")),
+        "a healthy session must not be warned: {:?}",
+        sink.info_lines()
+    );
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]

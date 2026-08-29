@@ -268,9 +268,18 @@ pub struct CompactConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Enable prompt cache diagnostics output to user.
-    /// When true, cache hit/miss info is shown via OutputSink.
-    /// Default: false.
+    /// Enable VERBOSE per-turn prompt-cache diagnostics on the OutputSink:
+    /// a `Cache: N% hit rate` line after every round-trip, healthy or not.
+    ///
+    /// **Default: false, deliberately.** #1166 Defect 5 asked to consider
+    /// defaulting this on, because "even a correct verdict is silent unless
+    /// explicitly enabled". The verdict is no longer silent — a warm session
+    /// whose cached prefix is not being read back now says so on the
+    /// OutputSink once, ungated by this flag
+    /// (`CacheBreakDetector::claim_health_notice`), and the full record is in
+    /// `wayland-core cache report`. What this flag still gates is the per-TURN
+    /// line, which on a healthy session is noise on every single turn. That is
+    /// why it stays off rather than being flipped.
     #[serde(default)]
     pub cache_diagnostics: bool,
 
@@ -821,6 +830,11 @@ context_window = 128000
         assert_eq!(cfg.enabled, default.enabled);
     }
 
+    #[test]
+    /// #1166 Defect 5 — this stays off ON PURPOSE, and the reason is recorded
+    /// on the field: the flag gates the per-TURN hit-rate line (noise on a
+    /// healthy session), not the cache-health verdict, which reaches the user
+    /// ungated via `CacheBreakDetector::claim_health_notice`.
     #[test]
     fn cache_diagnostics_defaults_to_false() {
         let cfg = CompactConfig::default();

@@ -162,6 +162,17 @@ pub struct CacheBreakDetector {
     /// `cache_health_warn` on every warm turn (mirrors the
     /// `openai_no_false_alarm` guard in [`Self::compute_diagnostic`]).
     seen_cache_tokens: bool,
+    /// Total input the turn BEFORE the one just recorded processed.
+    ///
+    /// [`Self::check_response`] overwrites `prev_stats` with the turn it is
+    /// checking, so by the time [`Self::check_cache_health`] runs for the same
+    /// turn there is no longer a handle on the preceding one. The coverage test
+    /// in [`Self::prefix_was_read_back`] needs exactly that number, so it is
+    /// kept separately rather than reconstructed.
+    prior_total_input_tokens: u64,
+    /// #1166 Defect 5 — has the user already been told, in this session, that
+    /// the prompt cache is not being reused? See [`Self::claim_health_notice`].
+    health_notice_emitted: bool,
 }
 
 impl CacheBreakDetector {
@@ -172,6 +183,8 @@ impl CacheBreakDetector {
             prev_stats: None,
             round_trips: 0,
             seen_cache_tokens: false,
+            prior_total_input_tokens: 0,
+            health_notice_emitted: false,
         }
     }
 
@@ -229,8 +242,53 @@ impl CacheBreakDetector {
         if stats.cache_read_tokens > 0 || stats.cache_creation_tokens > 0 {
             self.seen_cache_tokens = true;
         }
+        self.prior_total_input_tokens = self
+            .prev_stats
+            .as_ref()
+            .map_or(0, CacheStats::total_input_tokens);
         self.prev_stats = Some(stats);
         Some(diagnostic)
+    }
+
+    /// Was the prefix the provider had ALREADY processed read back out of the
+    /// cache on this turn?
+    ///
+    /// #1166 — the hit ratio `cache_read / total_input` charges this turn's
+    /// brand-new input against the cache, but new content was never written to
+    /// the cache and so cannot be read from it. A warm session where the user
+    /// pastes 150k of fresh text therefore scores `40_000 / 190_000 = 0.21`
+    /// and trips the absolute floor, even though the entire cached prefix came
+    /// back verbatim — a false `PartialMiss` that the engine then writes into
+    /// the durable ledger as an `expired` invalidation, blaming the server's
+    /// TTL for a turn on which nothing was invalidated at all.
+    ///
+    /// Measure coverage against what the PREVIOUS turn processed instead: that
+    /// is the part which could have been cached. This does not blunt the floor
+    /// the #559 leader session motivated — a `cache_read` pinned at 192 while
+    /// the conversation grows covers none of the previous turn either, so it
+    /// still fires.
+    fn prefix_was_read_back(&self, cache_read_tokens: u64, prior_total_input: u64) -> bool {
+        prior_total_input > 0
+            && cache_read_tokens as f64 >= CACHE_HEALTH_WARN_RATIO * prior_total_input as f64
+    }
+
+    /// `true` the FIRST time it is called in a session, `false` for ever after.
+    ///
+    /// #1166 Defect 5 — "even a correct verdict is silent unless explicitly
+    /// enabled". The three per-turn `emit_info` lines the engine has are gated
+    /// on `compact.cache_diagnostics`, which defaults to `false`; the
+    /// `cache_health_warn` that is NOT gated is a `tracing::warn!`, and with
+    /// `RUST_LOG` unset the CLI routes everything below ERROR to a log file
+    /// (and in TUI mode to the file only), so it never reaches the person
+    /// running the session. The ledger records it, but only an operator who
+    /// already knows to run `wayland-core cache report` will ever see that.
+    ///
+    /// So the verdict is surfaced without an opt-in — ONCE. Repeating it every
+    /// turn of a broken session is the noise that made `cache_diagnostics`
+    /// opt-in in the first place, and flipping that flag on by default would
+    /// print a hit-rate line on every healthy turn too.
+    pub fn claim_health_notice(&mut self) -> bool {
+        !std::mem::replace(&mut self.health_notice_emitted, true)
     }
 
     /// Layer E1 — warm-session cache-health probe. Call AFTER
@@ -254,6 +312,12 @@ impl CacheBreakDetector {
         }
         let ratio = stats.cache_read_tokens as f64 / total_input_tokens as f64;
         if ratio >= CACHE_HEALTH_WARN_RATIO {
+            return None;
+        }
+        // #1166 — same discriminator as the absolute floor, so the detecting
+        // half and the recording half cannot disagree about whether this turn
+        // was a break. See [`Self::prefix_was_read_back`].
+        if self.prefix_was_read_back(stats.cache_read_tokens, self.prior_total_input_tokens) {
             return None;
         }
         // #1166 — attribute, do not just report. `current_snapshot` is always
@@ -322,10 +386,18 @@ impl CacheBreakDetector {
         // the ratio against this turn's own input as well, behind the same
         // warm-session and provider-supports-caching gates
         // `check_cache_health` uses, so the two halves cannot disagree.
+        //
+        // #1166 (follow-up) — but a low ratio is only a FINDING when the
+        // already-processed prefix went unread. `prefix_was_read_back` is that
+        // discriminator; without it a warm turn carrying a large new paste is
+        // reported as `PartialMiss { cause: TtlExpiry }` and recorded in the
+        // ledger as a durable `expired` invalidation on a turn where the whole
+        // cached prefix was served.
         if self.round_trips >= CACHE_HEALTH_WARM_AFTER_ROUND_TRIPS
             && self.seen_cache_tokens
             && total_input_tokens > 0
             && hit_rate < CACHE_HEALTH_WARN_RATIO
+            && !self.prefix_was_read_back(stats.cache_read_tokens, prev.total_input_tokens())
         {
             let cause = self.attribute_cause(current);
             return CacheDiagnostic::PartialMiss { hit_rate, cause };
@@ -817,6 +889,109 @@ mod tests {
             !matches!(diag, CacheDiagnostic::Healthy { .. }),
             "a 3% hit ratio held flat for four turns is not Healthy, got {diag:?}"
         );
+    }
+
+    /// #1166 follow-up — the absolute floor must not manufacture an
+    /// `expired` finding on a turn where the cache worked perfectly.
+    ///
+    /// Three healthy warm turns read a 40k prefix back in full. On turn 4 the
+    /// user pastes 150k of new text. The SAME 40k prefix is still served — the
+    /// provider read back everything it had — but `cache_read / total_input`
+    /// falls to 0.21, under the 0.3 floor. Before this fix the detector
+    /// returned `PartialMiss { cause: TtlExpiry }`, `check_cache_health` fired
+    /// an alert with the same cause, and `cause_of_diagnostic` turned that into
+    /// a DURABLE `InvalidationCause::Expired` row in the on-disk cache ledger —
+    /// blaming the server's TTL for an invalidation that never happened.
+    ///
+    /// The positive control for this discriminator is
+    /// `flat_cache_read_on_warm_session_is_not_healthy` above: a `cache_read`
+    /// pinned at 192 covers none of the previous turn either, and must keep
+    /// firing.
+    #[test]
+    fn a_large_new_paste_does_not_fake_a_ttl_expiry() {
+        let mut detector = CacheBreakDetector::new();
+
+        // Turns 1-3: warm and healthy, 40k prefix read back against a small
+        // new input each turn.
+        for _ in 0..3 {
+            detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+            let stats = CacheStats {
+                input_tokens: 500,
+                cache_read_tokens: 40_000,
+                cache_creation_tokens: 0,
+            };
+            detector.check_response(stats.clone());
+            assert!(
+                detector.check_cache_health(&stats).is_none(),
+                "a warm turn at a 0.99 ratio must not warn"
+            );
+        }
+
+        // Turn 4: the whole 40k prefix is STILL read back — `cache_read` did
+        // not move — but 150k of brand-new input arrives with it.
+        detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+        let stats = CacheStats {
+            input_tokens: 150_000,
+            cache_read_tokens: 40_000,
+            cache_creation_tokens: 0,
+        };
+        let diag = detector.check_response(stats.clone()).expect("diagnostic");
+
+        assert!(
+            matches!(diag, CacheDiagnostic::Healthy { .. }),
+            "the full cached prefix was served; got {diag:?}"
+        );
+        assert_eq!(
+            crate::cache_ledger::cause_of_diagnostic(&diag),
+            None,
+            "#1166: nothing was invalidated, so nothing may be written to the \
+             ledger — least of all `expired`"
+        );
+        assert!(
+            detector.check_cache_health(&stats).is_none(),
+            "the detecting half must agree with the recording half"
+        );
+    }
+
+    /// The same shape one level up: whatever the diagnostic half decides, the
+    /// health probe must decide too. A turn that is graded `Healthy` may not
+    /// simultaneously fire a `cache_health_warn`, and a turn graded a miss must
+    /// fire one. Before #1166'"'"'s follow-up the two disagreed on exactly the
+    /// large-new-input shape.
+    #[test]
+    fn the_floor_and_the_health_probe_never_disagree() {
+        // (input_tokens, cache_read_tokens) for four warm turns, covering both
+        // polarities: a served prefix swamped by new input, and a dead cache.
+        for trace in [
+            [
+                (500u64, 40_000u64),
+                (500, 40_000),
+                (500, 40_000),
+                (150_000, 40_000),
+            ],
+            [(3_225, 192), (6_028, 192), (6_256, 192), (7_001, 192)],
+        ] {
+            let mut detector = CacheBreakDetector::new();
+            let mut last: Option<(CacheDiagnostic, Option<CacheHealthAlert>)> = None;
+            for (input_tokens, cache_read_tokens) in trace {
+                detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+                let stats = CacheStats {
+                    input_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens: 0,
+                };
+                let diag = detector.check_response(stats.clone()).expect("diagnostic");
+                let alert = detector.check_cache_health(&stats);
+                last = Some((diag, alert));
+            }
+            let (diag, alert) = last.expect("four turns were driven");
+            let diagnostic_says_broken = !matches!(diag, CacheDiagnostic::Healthy { .. });
+            assert_eq!(
+                diagnostic_says_broken,
+                alert.is_some(),
+                "diagnostic {diag:?} and health alert {alert:?} disagree for trace {trace:?}"
+            );
+        }
     }
 
     /// Control for the red arm above: a detector that always screams is as

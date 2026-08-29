@@ -69,9 +69,22 @@ use wcore_providers::cache_observation::{
 
 use crate::cache_diagnostics::{CacheBreakCause, CacheDiagnostic};
 
-/// On-disk schema version. Bumped when a field's meaning changes; readers
-/// refuse a version they do not understand rather than silently mis-reporting.
-pub const LEDGER_SCHEMA: u32 = 1;
+/// On-disk schema version this build WRITES. Bumped when a field's meaning
+/// changes; readers refuse a version they do not understand rather than
+/// silently mis-reporting.
+///
+/// * **1** — v0.13.9 and earlier. [`TurnSample::uncached_equivalent_usd`] was a
+///   bare `f64` whose `0.0` meant "nothing could price this counterfactual".
+/// * **2** — #1163. That field is `Option<f64>`: absent means unpriceable and
+///   `Some(0.0)` is a genuine priced zero. Reading a v1 `0.0` back as
+///   `Some(0.0)` reproduces #1163 verbatim off disk, so v1 rows are MIGRATED on
+///   load by [`migrate_to_current_schema`] rather than trusted.
+pub const LEDGER_SCHEMA: u32 = 2;
+
+/// The oldest on-disk schema this build can still READ. Anything between this
+/// and [`LEDGER_SCHEMA`] is brought up to current semantics by
+/// [`migrate_to_current_schema`] before a caller ever sees it.
+pub const LEDGER_SCHEMA_MIN_READ: u32 = 1;
 
 /// Directory name under the Wayland home holding one ledger per session.
 pub const LEDGER_DIR: &str = "cache-ledger";
@@ -167,9 +180,13 @@ pub struct TurnSample {
     /// provider×model — no catalog row and no user-supplied rate. A
     /// provider-family preset is deliberately not accepted here: it is a
     /// conservative ceiling, and subtracting a real billed figure from a
-    /// ceiling is not a measurement. Absent on the wire (#1163); a `0.0` read
-    /// back from a ledger an older build wrote decodes as `Some(0.0)`, which is
-    /// what that build meant by it.
+    /// ceiling is not a measurement. Absent on the wire (#1163).
+    ///
+    /// A v1 ledger (v0.13.9 and earlier) wrote this as a bare `f64` and used
+    /// `0.0` for "nothing could price it" — the OPPOSITE of what `Some(0.0)`
+    /// means here. Serde alone cannot tell those apart, which is why the schema
+    /// was bumped and [`migrate_to_current_schema`] maps a v1 `0.0` to `None` on
+    /// load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uncached_equivalent_usd: Option<f64>,
 
@@ -818,19 +835,41 @@ pub fn load(path: &Path) -> Result<CacheLedger, LedgerError> {
         path: path.to_path_buf(),
         source,
     })?;
-    let ledger: CacheLedger =
+    let mut ledger: CacheLedger =
         serde_json::from_slice(&raw).map_err(|source| LedgerError::Malformed {
             path: path.to_path_buf(),
             source,
         })?;
-    if ledger.schema != LEDGER_SCHEMA {
+    if ledger.schema > LEDGER_SCHEMA || ledger.schema < LEDGER_SCHEMA_MIN_READ {
         return Err(LedgerError::SchemaMismatch {
             path: path.to_path_buf(),
             found: ledger.schema,
             expected: LEDGER_SCHEMA,
         });
     }
+    migrate_to_current_schema(&mut ledger);
     Ok(ledger)
+}
+
+/// Bring a ledger read from an older on-disk schema up to [`LEDGER_SCHEMA`]
+/// semantics, in place.
+///
+/// #1163 — v1 stored `uncached_equivalent_usd` as a bare `f64` and wrote `0.0`
+/// exactly when nothing could price the no-cache counterfactual. Under the v2
+/// `Option<f64>`, `Some(0.0)` means a genuine priced zero, so decoding a v1 row
+/// unchanged republishes the original defect off disk: `saving_usd` comes back
+/// as `-cost_usd`, `saving_truth` grades it `priced`, and `verify` certifies the
+/// fabricated saving as trustworthy. A v1 `0.0` is therefore rewritten to
+/// `None`, which is what that build meant by it.
+pub fn migrate_to_current_schema(ledger: &mut CacheLedger) {
+    if ledger.schema < 2 {
+        for turn in &mut ledger.turns {
+            if turn.uncached_equivalent_usd == Some(0.0) {
+                turn.uncached_equivalent_usd = None;
+            }
+        }
+    }
+    ledger.schema = LEDGER_SCHEMA;
 }
 
 /// Every ledger in `dir`, newest `updated_at` first. A malformed or
@@ -1405,6 +1444,114 @@ mod tests {
         assert_eq!(back, l);
     }
 
+    /// #1163 — the ledger a v0.13.9 build left on disk must not republish the
+    /// defect when a fixed build reads it back.
+    ///
+    /// v1 wrote `uncached_equivalent_usd` as a bare `f64` and used `0.0` for
+    /// "nothing could price the counterfactual". Under the v2 `Option<f64>`
+    /// that decodes as `Some(0.0)` — a genuine priced zero — and the whole
+    /// #1163 report comes straight back out: `saving_usd = -cost_usd`, graded
+    /// `saving_truth = priced`, with no warning. Measured on the pre-fix build
+    /// against exactly this JSON:
+    /// `F23_CACHE=cost usd=0.061389 uncached_equivalent_usd=0.000000
+    ///  saving_usd=-0.061389 ... cost_truth=priced saving_truth=priced`.
+    ///
+    /// Written as raw v1 JSON rather than through `TurnSample`, because a
+    /// struct literal can only express the CURRENT field type — the bug lives
+    /// entirely in the decode of bytes an older build wrote.
+    #[test]
+    fn a_v1_ledgers_zero_counterfactual_is_unpriceable_not_a_priced_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("legacy-v1.json");
+        std::fs::write(
+            &path,
+            br#"{
+              "schema": 1,
+              "session_id": "038a2f83-legacy-0139",
+              "started_at": "2026-08-01T10:00:00.000Z",
+              "updated_at": "2026-08-01T10:05:00.000Z",
+              "session_complete": true,
+              "turns": [{
+                "turn": 0,
+                "round_trip": 1,
+                "ts": "2026-08-01T10:00:01.000Z",
+                "provider": "flux-router",
+                "model": "flux-reasoning",
+                "retention": "ephemeral5m",
+                "uncached_input_tokens": 3225,
+                "cache_read_tokens": 192,
+                "cache_write_tokens": 0,
+                "output_tokens": 400,
+                "cost_usd": 0.061389,
+                "cost_source": "provider_reported",
+                "uncached_equivalent_usd": 0.0,
+                "watermark_tokens": 3417,
+                "conservative_watermark_tokens": 3417,
+                "autocompact_threshold_tokens": 150000,
+                "emergency_limit_tokens": 197000
+              }],
+              "compactions": []
+            }"#,
+        )
+        .unwrap();
+
+        let ledger = load(&path).expect("a v1 ledger must still be READABLE, not orphaned");
+        assert_eq!(
+            ledger.turns[0].uncached_equivalent_usd, None,
+            "a v1 `0.0` meant `nothing could price this`, not a priced zero"
+        );
+
+        let s = ledger.summarize();
+        assert_eq!(
+            s.uncached_equivalent_usd, None,
+            "one unpriceable row makes the session counterfactual unknown"
+        );
+        assert_eq!(
+            s.cache_saving_usd(),
+            None,
+            "there is no saving to report when the counterfactual is unknown"
+        );
+        assert_eq!(
+            s.saving_truth(),
+            CostTruth::Unpriced,
+            "#1163: the fabricated -0.061389 saving must not be graded `priced`"
+        );
+        assert_eq!(
+            s.cost_truth(),
+            CostTruth::Priced,
+            "the BILLED half is provider-reported and stays trustworthy"
+        );
+    }
+
+    /// The migration must not be a one-way trip through `list`/`latest`: a v1
+    /// file has to keep showing up in the listing, migrated, rather than being
+    /// silently dropped as an unreadable schema.
+    #[test]
+    fn a_v1_ledger_survives_the_listing_and_is_migrated_in_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut v = serde_json::to_value(CacheLedger::new("v1-sess")).unwrap();
+        let mut turn = serde_json::to_value(sample(1, 1_000, 0, 0)).unwrap();
+        turn["uncached_equivalent_usd"] = serde_json::json!(0.0);
+        v["turns"] = serde_json::json!([turn]);
+        v["schema"] = serde_json::json!(1);
+        std::fs::write(
+            ledger_path(tmp.path(), "v1-sess"),
+            serde_json::to_vec(&v).unwrap(),
+        )
+        .unwrap();
+
+        let listed = list(tmp.path()).unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "a v1 ledger must not vanish from `cache list`"
+        );
+        assert_eq!(listed[0].1.schema, LEDGER_SCHEMA);
+        assert_eq!(listed[0].1.turns[0].uncached_equivalent_usd, None);
+    }
+
+    /// A schema this build predates is still refused — the reader accepts a
+    /// closed range, it does not accept anything.
     #[test]
     fn load_refuses_unknown_schema() {
         let tmp = tempfile::tempdir().unwrap();
