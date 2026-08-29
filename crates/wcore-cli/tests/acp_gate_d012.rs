@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 #[path = "support/mod.rs"]
 mod support;
+use support::owned_tree::OwnedTree;
 
 use support::mock_llm::MockLlm;
 use tempfile::TempDir;
@@ -111,13 +112,14 @@ fn drive_write_turn(extra_args: &[&str]) -> GateProbe {
     let mut cmd = std::process::Command::new(binary());
     cmd.args(&args).current_dir(home.path());
     let vault = harden_child_env(&mut cmd, home.path());
-    let child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+    let mut child = OwnedTree::new(
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn --json-stream"),
+    );
     drop(vault);
-    let mut child = child.expect("spawn --json-stream");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");

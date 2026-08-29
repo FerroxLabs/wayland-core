@@ -24,6 +24,7 @@ use tempfile::TempDir;
 
 #[path = "support/mod.rs"]
 mod support;
+use support::owned_tree::OwnedTree;
 
 /// The line every inert-key notice carries. Both arms key on this exact phrase
 /// so the control cannot pass by matching some other output.
@@ -38,10 +39,9 @@ fn stderr_of_headless_run(home: &Path) -> String {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let child = cmd.spawn();
+    let child = OwnedTree::new(cmd.spawn().expect("spawn wayland-core headless"));
     drop(vault);
     let out = child
-        .expect("spawn wayland-core headless")
         .wait_with_output()
         .expect("wait for wayland-core headless");
     String::from_utf8_lossy(&out.stderr).into_owned()
