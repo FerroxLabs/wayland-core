@@ -48,6 +48,13 @@ use wcore_agent::cache_ledger::{
 pub const EXIT_COST_NOT_TRUSTWORTHY: u8 = 7;
 /// Exit code: `verify` found no ledger to check.
 pub const EXIT_NO_LEDGER: u8 = 8;
+/// Exit code: wayland#1205 c3 — `verify` was handed a ledger written before
+/// [`wcore_agent::cache_ledger::LEDGER_SCHEMA`] 2, carrying at least one
+/// counterfactual whose meaning this build had to demote on load. Distinct
+/// from [`EXIT_COST_NOT_TRUSTWORTHY`]: the BILLED figure may be perfectly
+/// good, and the operator's remedy is different — a legacy file cannot be
+/// repaired by pricing anything, only by re-running the session.
+pub const EXIT_LEGACY_SCHEMA: u8 = 9;
 
 #[derive(Args, Debug)]
 pub struct CacheArgs {
@@ -200,12 +207,24 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 };
             let s = ledger.summarize();
             let truth = s.cost_truth();
+            // wayland#1205 c3 — a ledger an older build wrote is not
+            // certifiable, however good its BILLED figure is. v1 had no way to
+            // say "nothing could price this": it wrote a bare `0.0`, which this
+            // build has to demote on load because it cannot tell that apart
+            // from a genuine priced zero. `verify` is the certification
+            // surface, and certifying a file whose field meanings we had to
+            // guess at is the one place that must not happen. Narrow on
+            // purpose: it keys on rows actually demoted, so a v2 session on an
+            // unlisted model — merely unpriced, not laundered — still verifies.
+            let laundered = s.laundered_counterfactual_round_trips;
+            let trustworthy = truth.is_trustworthy() && laundered == 0;
             println!(
                 "F23_CACHE=verify trustworthy={} cost_truth={} saving_truth={} \
+                 laundered_counterfactual_round_trips={} \
                  provider_reported_round_trips={} catalog_priced_round_trips={} \
                  estimated_round_trips={} unpriced_round_trips={} cost_usd={} \
                  session_complete={} session={} path={}",
-                truth.is_trustworthy(),
+                trustworthy,
                 truth.as_str(),
                 // Reported, not enforced: `verify`'s documented contract and
                 // exit code 7 are about whether the BILLED figure is spend. A
@@ -213,6 +232,7 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 // price its counterfactual, so #1163 must not start failing CI
                 // for every session on an unlisted model.
                 s.saving_truth().as_str(),
+                laundered,
                 s.provider_reported_round_trips,
                 s.catalog_priced_round_trips,
                 s.estimated_round_trips,
@@ -222,8 +242,19 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 s.session_id,
                 path.display(),
             );
-            if truth.is_trustworthy() {
+            if trustworthy {
                 Ok(ExitCode::SUCCESS)
+            } else if laundered > 0 && truth.is_trustworthy() {
+                eprintln!(
+                    "wayland-core cache verify: {laundered} of {} round-trips were written by a \
+                     build older than ledger schema {} — their uncached-equivalent baseline was a \
+                     bare 0.0, which meant \"nothing could price this\" and cannot be told apart \
+                     from a real zero. The billed figure is {}, but this file is not certifiable.",
+                    s.round_trips,
+                    wcore_agent::cache_ledger::LEDGER_SCHEMA,
+                    truth.as_str(),
+                );
+                Ok(ExitCode::from(EXIT_LEGACY_SCHEMA))
             } else {
                 eprintln!(
                     "wayland-core cache verify: cost is {} — of {} round-trips, {} were priced \

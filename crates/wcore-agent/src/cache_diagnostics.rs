@@ -99,6 +99,30 @@ fn cache_read_dropped(current: u64, previous: u64) -> bool {
     previous > 0 && (1.0 - (current as f64 / previous as f64)) > CACHE_READ_DROP_TOLERANCE
 }
 
+/// wayland#1206 — keep the absolute floor's fall-through off the server.
+///
+/// [`CacheBreakDetector::attribute_cause`] ends in [`CacheBreakCause::TtlExpiry`]
+/// whenever nothing about the request diverged, so EVERY turn the #1166
+/// absolute floor catches on a stable prefix was being reported as a
+/// server-side expiry — and written durably into the cache ledger as
+/// `expired`. But a prefix that is identical turn over turn and whose
+/// `cache_read` did not fall did not expire: an expiry destroys cached tokens,
+/// so it shows up as a DROP. What actually happened is that the cache never
+/// covered the context in the first place — the #559 leader session read 192
+/// tokens back, flat, for its whole life while its input climbed.
+///
+/// Only the fall-through is rewritten. A real attribution — a changed system
+/// prompt, tools, model, or message prefix — is a positive finding about this
+/// turn and survives untouched, and so does a `TtlExpiry` on a turn where
+/// `cache_read` really did fall.
+fn floor_cause(attributed: CacheBreakCause, cache_read_fell: bool) -> CacheBreakCause {
+    if matches!(attributed, CacheBreakCause::TtlExpiry) && !cache_read_fell {
+        CacheBreakCause::PrefixNotCached
+    } else {
+        attributed
+    }
+}
+
 /// First index at which two turns' message arrays diverge, if any.
 ///
 /// Only the COMMON prefix is compared. Appending a message is the shape of
@@ -151,6 +175,12 @@ pub enum CacheBreakCause {
         first_divergent_index: usize,
     },
     TtlExpiry,
+    /// wayland#1206 — the absolute floor fired on a turn where NOTHING was
+    /// invalidated: the request is byte-identical to the previous one and
+    /// `cache_read` did not fall. The cache simply never covered the context.
+    /// This is the honest fall-through the floor needs; `TtlExpiry` names a
+    /// server-side event that would have shown up as a DROP.
+    PrefixNotCached,
     FirstRequest,
 }
 
@@ -330,10 +360,20 @@ impl CacheBreakDetector {
         // set on the engine path (`check_response` returns `None` without it);
         // an unrecorded request has no previous turn to diverge from, which is
         // exactly what `FirstRequest` means.
-        let cause = match self.current_snapshot.as_ref() {
-            Some(current) => self.attribute_cause(current),
-            None => CacheBreakCause::FirstRequest,
-        };
+        // wayland#1206 — the same fall-through rewrite the detecting half
+        // applies. `prior_cache_read_tokens` is the previous turn's figure:
+        // `check_response` has already rotated `prev_stats` onto THIS turn by
+        // the time the engine calls us.
+        let cause = floor_cause(
+            match self.current_snapshot.as_ref() {
+                Some(current) => self.attribute_cause(current),
+                None => CacheBreakCause::FirstRequest,
+            },
+            cache_read_dropped(
+                stats.cache_read_tokens,
+                self.prior_cache_read_tokens.unwrap_or(0),
+            ),
+        );
         Some(CacheHealthAlert {
             round_trip: self.round_trips,
             input_tokens: total_input_tokens,
@@ -402,7 +442,14 @@ impl CacheBreakDetector {
                 prev.total_input_tokens(),
             )
         {
-            let cause = self.attribute_cause(current);
+            // wayland#1206 — the floor may fire here, but it may not blame the
+            // server's TTL for it. The drop branch above already returned, so
+            // `cache_read` did not fall; the boolean is recomputed rather than
+            // assumed so a future reordering cannot silently make it a lie.
+            let cause = floor_cause(
+                self.attribute_cause(current),
+                cache_read_dropped(stats.cache_read_tokens, prev.cache_read_tokens),
+            );
             return CacheDiagnostic::PartialMiss { hit_rate, cause };
         }
 
@@ -996,6 +1043,136 @@ mod tests {
         );
     }
 
+    /// wayland#1206 c1/c2, in the criterion's own words: "a turn whose
+    /// `cache_read` is unchanged from the previous turn while total input
+    /// grows is not attributed to `TtlExpiry`", and "no
+    /// `InvalidationCause::Expired` is written to the cache ledger for such a
+    /// turn".
+    ///
+    /// The prior-context suppression shipped for #1206 does NOT cover this: it
+    /// is a ratio against the previous turn's total input, so it only quiets
+    /// the floor when the previous turn was itself well-covered. Here the
+    /// previous turn read 40_000 back out of a 240_000-token context — a ratio
+    /// of 0.167, below the threshold — so the suppression is disarmed and the
+    /// floor fires. The floor firing is CORRECT; 40k of coverage on a 240k
+    /// context is genuinely poor. What is not correct is the cause: nothing
+    /// expired, because an expiry destroys cached tokens and `cache_read` is
+    /// identical turn over turn.
+    #[test]
+    fn flat_cache_read_under_growing_input_is_not_attributed_to_expiry() {
+        let mut detector = CacheBreakDetector::new();
+        let trace = [
+            (200_000u64, 40_000u64),
+            (200_000, 40_000),
+            (300_000, 40_000),
+        ];
+        let mut last = None;
+        let mut last_stats = None;
+        for (input_tokens, cache_read_tokens) in trace {
+            detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+            let stats = CacheStats {
+                input_tokens,
+                cache_read_tokens,
+                cache_creation_tokens: 0,
+            };
+            last = detector.check_response(stats.clone());
+            last_stats = Some(stats);
+        }
+        let stats = last_stats.unwrap();
+
+        // Premises, asserted so this test cannot pass by drifting out of the
+        // shape it is about.
+        assert!(
+            !cached_prefix_covers_prior_context(40_000, 240_000),
+            "premise: the #1206 prior-context suppression must be DISARMED \
+             here, or this proves nothing about the floor's fall-through"
+        );
+        assert!(
+            !cache_read_dropped(40_000, 40_000),
+            "premise: cache_read is identical turn over turn, so nothing was \
+             invalidated"
+        );
+
+        let diag = last.expect("detector must produce a diagnostic");
+        assert!(
+            matches!(
+                diag,
+                CacheDiagnostic::PartialMiss {
+                    cause: CacheBreakCause::PrefixNotCached,
+                    ..
+                }
+            ),
+            "c1: cache_read was unchanged while total input grew -- the cache \
+             never covered this context, and blaming the server's TTL for it \
+             is #1166's own Defect 4. got {diag:?}"
+        );
+        assert_eq!(
+            crate::cache_ledger::cause_of_diagnostic(&diag),
+            Some(wcore_providers::cache_observation::InvalidationCause::PrefixNotCached),
+            "c2: the durable record must not say `expired` for a turn on which \
+             nothing was invalidated"
+        );
+
+        // Both halves apply one rule, or the ledger and the telemetry disagree.
+        let alert = detector
+            .check_cache_health(&stats)
+            .expect("the floor fired, so the alerting half must speak too");
+        assert_eq!(
+            alert.cause,
+            CacheBreakCause::PrefixNotCached,
+            "the detecting half stopped blaming the TTL and the alerting half \
+             did not -- that is #1166 Defect 2"
+        );
+    }
+
+    /// Known-positive control for the test above: a REAL expiry must still be
+    /// called `TtlExpiry` and still be written to the ledger as `expired`.
+    ///
+    /// Rewriting the fall-through is only a fix if it is narrow. An expiry is
+    /// visible precisely because it destroys cached tokens — `cache_read`
+    /// FALLS while the request itself is unchanged. Here the prefix is
+    /// identical and `cache_read` collapses 40_000 -> 0. If this ever reports
+    /// `PrefixNotCached`, wayland#1206's fix has blinded the detector to the
+    /// event it is named for.
+    #[test]
+    fn a_real_expiry_is_still_attributed_to_the_ttl() {
+        let mut detector = CacheBreakDetector::new();
+        for _ in 0..3 {
+            detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+            detector.check_response(CacheStats {
+                input_tokens: 500,
+                cache_read_tokens: 40_000,
+                cache_creation_tokens: 0,
+            });
+        }
+        detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+        let stats = CacheStats {
+            input_tokens: 40_500,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        };
+        assert!(
+            cache_read_dropped(0, 40_000),
+            "premise: this is a real drop, which is what an expiry looks like"
+        );
+        let diag = detector.check_response(stats).unwrap();
+        assert!(
+            matches!(
+                diag,
+                CacheDiagnostic::FullMiss {
+                    cause: CacheBreakCause::TtlExpiry
+                }
+            ),
+            "an unchanged request that stopped reading its cache back IS the \
+             TTL case; #1206 must not swallow it. got {diag:?}"
+        );
+        assert_eq!(
+            crate::cache_ledger::cause_of_diagnostic(&diag),
+            Some(wcore_providers::cache_observation::InvalidationCause::Expired),
+            "and it must still be recorded as `expired`"
+        );
+    }
+
     /// Control on the #1166 c5 suppression: it must not open a blind spot.
     ///
     /// The suppression fires when `cache_read / previous total input` is at or
@@ -1065,11 +1242,21 @@ mod tests {
         const ENGINE: &str = include_str!("engine.rs");
         const SWAP: &str = "request.model = tier_model.clone();";
         const HINT: &str = "Self::attach_transient_block(last, hint);";
+        // The THIRD transient injection. It was missing, so the lint said
+        // nothing about a hook contribution landing after the snapshot — the
+        // same defect it exists to catch, one injection over.
+        const PREPROMPT: &str =
+            "Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);";
         const RECORD: &str = "self.cache_detector.record_request(";
 
         // Controls: each marker must be present exactly once, so a rename
         // reddens this test instead of making it pass vacuously on an absence.
-        for (label, marker) in [("swap", SWAP), ("hint", HINT), ("record", RECORD)] {
+        for (label, marker) in [
+            ("swap", SWAP),
+            ("hint", HINT),
+            ("preprompt", PREPROMPT),
+            ("record", RECORD),
+        ] {
             assert_eq!(
                 ENGINE.matches(marker).count(),
                 1,
@@ -1080,8 +1267,36 @@ mod tests {
 
         let swap = ENGINE.find(SWAP).unwrap();
         let hint = ENGINE.find(HINT).unwrap();
+        let preprompt = ENGINE.find(PREPROMPT).unwrap();
         let record = ENGINE.find(RECORD).unwrap();
 
+        // A byte offset only stands in for execution order while all four
+        // markers share one function body — move `record_request` into a
+        // helper defined lower in the file but CALLED earlier and the offsets
+        // would still read in order while the snapshot ran first. Nothing
+        // between the first marker and the last may open a new `fn`.
+        let span = &ENGINE[hint.min(swap).min(preprompt)..record];
+        for boundary in [
+            "\n    fn ",
+            "\n    pub fn ",
+            "\n    async fn ",
+            "\n    pub async fn ",
+        ] {
+            assert!(
+                !span.contains(boundary),
+                "a `{}` boundary now sits between the transient injections and \
+                 the snapshot, so these byte offsets no longer imply execution \
+                 order and this lint cannot say anything about #1166 c4",
+                boundary.trim()
+            );
+        }
+
+        assert!(
+            record > preprompt,
+            "cache_detector.record_request runs BEFORE the PrePrompt hook \
+             contribution is applied, so a hook that mutates the prefix is \
+             invisible to attribution (#1166 Defect 3)"
+        );
         assert!(
             record > swap,
             "cache_detector.record_request runs BEFORE the smart-routing tier \

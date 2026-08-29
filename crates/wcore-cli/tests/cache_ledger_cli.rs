@@ -963,8 +963,10 @@ fn a_v0_13_9_ledger_does_not_render_a_negative_saving_or_certify_it() {
          total:\n{list}"
     );
 
-    // `verify` may still call the SPEND trustworthy — the provider reported it
-    // — but it must not call the SAVING priced.
+    // c3's SECOND conjunct, in the criterion's own words: "cache verify does
+    // not return trustworthy=true for it". Graded on the printed field and on
+    // the exit code, because a certification surface that says `false` and
+    // exits 0 has not refused anything.
     let verified = run(tmp.path(), &["verify"]);
     let v = stdout(&verified);
     assert_ne!(
@@ -973,7 +975,79 @@ fn a_v0_13_9_ledger_does_not_render_a_negative_saving_or_certify_it() {
         "verify is the certification surface; certifying a saving computed \
          against a baseline nobody wrote is the worst place to say it:\n{v}"
     );
+    assert_eq!(
+        field(&v, "verify", "trustworthy"),
+        "false",
+        "wayland#1205 c3: a ledger whose counterfactual meaning this build had \
+         to GUESS is not certifiable, however good its billed figure is:\n{v}"
+    );
+    assert_eq!(
+        code(&verified),
+        9,
+        "trustworthy=false must be an exit-code refusal, not a printed word \
+         beside exit 0:\n{v}"
+    );
+    // The spend itself is still reported as the fact it is — the refusal is
+    // about the file's provenance, not about the provider's number.
     assert_eq!(field(&v, "verify", "cost_truth"), "priced");
+    assert_eq!(
+        field(&v, "verify", "laundered_counterfactual_round_trips"),
+        "1",
+        "the reason for the refusal must be on the line, or an operator cannot \
+         tell it from an unpriced-model refusal:\n{v}"
+    );
+}
+
+/// Known-negative for the assertion above, and the guard the `verify` comment
+/// has always claimed: an ordinary CURRENT-schema session whose counterfactual
+/// simply has no catalog rate — an unlisted model — must still verify.
+///
+/// Without this, "trustworthy=false for a legacy 0.0" is indistinguishable
+/// from "trustworthy=false for every session on an unlisted model", which
+/// would fail CI for a large share of real runs and is exactly the regression
+/// wayland#1163's fix was written to avoid. The two cases differ only in
+/// whether the file's field MEANINGS predate this build.
+#[test]
+fn a_current_schema_session_with_an_unpriced_counterfactual_still_verifies() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut turn = turn_json(
+        1,
+        6_620,
+        7_232,
+        0,
+        0.061389,
+        0.0,
+        "provider_reported",
+        None,
+        14_752,
+    );
+    // v2's way of saying "nothing could price this": the field is ABSENT.
+    // That is the distinction v1 could not draw, and the whole of #1205.
+    turn.as_object_mut()
+        .unwrap()
+        .remove("uncached_equivalent_usd");
+    write_ledger(tmp.path(), "modern-sess", vec![turn], vec![]);
+
+    let verified = run(tmp.path(), &["verify"]);
+    let v = stdout(&verified);
+    assert_eq!(
+        field(&v, "verify", "saving_truth"),
+        "unpriced",
+        "premise: this session's counterfactual must really be unknown, or the \
+         control is not probing the case it claims to:\n{v}"
+    );
+    assert_eq!(
+        field(&v, "verify", "laundered_counterfactual_round_trips"),
+        "0",
+        "premise: nothing was migrated here — this is a current-schema file:\n{v}"
+    );
+    assert_eq!(
+        field(&v, "verify", "trustworthy"),
+        "true",
+        "an unlisted model is not a corrupt ledger; refusing it would make the \
+         #1205 fix a worse regression than the bug:\n{v}"
+    );
+    assert_eq!(code(&verified), 0, "and it must exit 0:\n{v}");
 }
 
 /// Known-negative for the test above: a REAL negative saving — a session that

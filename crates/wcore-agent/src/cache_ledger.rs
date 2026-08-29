@@ -293,6 +293,11 @@ pub fn invalidation_cause_of(cause: &CacheBreakCause) -> InvalidationCause {
         // log line renders.
         CacheBreakCause::MessagesChanged { .. } => InvalidationCause::HistoryRewritten,
         CacheBreakCause::TtlExpiry => InvalidationCause::Expired,
+        // wayland#1206 — the floor's fall-through. Kept OUT of `Expired` for
+        // the same reason `ModelChanged` was: `expired` is a claim about the
+        // provider's TTL, and this turn's prefix never expired because it was
+        // never cached that far.
+        CacheBreakCause::PrefixNotCached => InvalidationCause::PrefixNotCached,
         CacheBreakCause::FirstRequest => InvalidationCause::NoMarker,
     }
 }
@@ -424,6 +429,13 @@ pub struct CacheLedger {
     pub session_complete: bool,
     pub turns: Vec<TurnSample>,
     pub compactions: Vec<CompactionEvent>,
+    /// How many turns [`migrate_v1_counterfactual`] had to demote on load.
+    ///
+    /// wayland#1205 c3. Never serialized: it is a fact about THIS read of the
+    /// file, not about the file, and writing it back would make a v2 ledger
+    /// claim a history it does not have.
+    #[serde(skip)]
+    pub laundered_counterfactual_round_trips: u64,
 }
 
 impl CacheLedger {
@@ -437,6 +449,7 @@ impl CacheLedger {
             session_complete: false,
             turns: Vec::new(),
             compactions: Vec::new(),
+            laundered_counterfactual_round_trips: 0,
         }
     }
 
@@ -488,6 +501,7 @@ impl CacheLedger {
         };
 
         s.round_trips = self.turns.len() as u64;
+        s.laundered_counterfactual_round_trips = self.laundered_counterfactual_round_trips;
         // `None` the moment any round-trip's counterfactual is unknown; stays
         // `Some` only while every one of them priced.
         let mut counterfactual = Some(0.0f64);
@@ -634,6 +648,13 @@ pub struct LedgerSummary {
     pub warm_round_trips: u64,
     pub warm_cache_read_tokens: u64,
     pub warm_total_input_tokens: u64,
+
+    /// wayland#1205 c3 — round-trips whose counterfactual was written by a
+    /// build that had no way to say "unknown", so this build demoted it on
+    /// load. Non-zero means the file's field meanings predate this build and
+    /// `verify` must not certify it.
+    #[serde(default)]
+    pub laundered_counterfactual_round_trips: u64,
 
     // invalidation
     pub invalidation_causes: BTreeMap<String, u64>,
@@ -842,11 +863,17 @@ pub fn save(ledger: &CacheLedger, path: &Path) -> Result<(), LedgerError> {
 /// direction: an unknown saving renders as unknown, whereas a false zero
 /// renders as a confident negative number, which is the ticket.
 fn migrate_v1_counterfactual(ledger: &mut CacheLedger) {
+    let mut laundered = 0u64;
     for turn in &mut ledger.turns {
         if turn.uncached_equivalent_usd == Some(0.0) {
             turn.uncached_equivalent_usd = None;
+            laundered += 1;
         }
     }
+    // wayland#1205 c3 — count them. A demoted row is a figure this build had
+    // to GUESS the meaning of, and `verify` is the surface that must not
+    // certify a file carrying one.
+    ledger.laundered_counterfactual_round_trips = laundered;
     ledger.schema = LEDGER_SCHEMA;
 }
 
