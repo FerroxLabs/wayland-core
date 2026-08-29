@@ -49,14 +49,33 @@
 #
 # ── THE SET, TODAY: EMPTY ──────────────────────────────────────────────────
 #
-# NOT YET MEASURED ON THIS BRANCH — the file ships EMPTY, which is the
-# fail-closed state, and this paragraph is replaced by the workspace run that
-# settles it rather than by a guess. The "standing known failure" this repository
-# talks about —
+# MEASURED. `cargo nextest run --workspace --profile ci --no-fail-fast` on
+# hetzner-dsm at this branch's base (integ/f13, f0060a2e8):
+#
+#   Summary [727.847s] 17345 tests run: 17342 passed (2 slow, 6 flaky),
+#                      2 failed, 1 timed out, 97 skipped
+#
+# and the gate names all three rather than reporting "3":
+#
+#   wcore-agent::workflow_limits_test::fix1_dispatch_budget_aborts_with_partial_result
+#   wcore-exec-backend::container_wedge::a_task_that_exits_125_on_its_own_is_attested_as_a_real_run
+#   wcore-exec-backend::container_wedge::the_leftover_is_actually_reclaimed_and_not_merely_stepped_around
+#
+# NONE OF THE THREE IS SEEDED HERE, and the reasoning is the point of the file.
+# All three are host state on a shared 96-core box at load average 160-190: the
+# two `container_wedge` cases drive a Docker daemon this repository shares with
+# other tenants, and `fix1_dispatch_budget_aborts_with_partial_result` TIMED OUT
+# while three sibling worktrees on the same box were executing the identical
+# binary. They pass elsewhere, so a line here would be STALE on the next leg and
+# would red the gate for the wrong reason. An allowlist is for a failure that is
+# known to fail HERE, on the legs this gate reads, not for one host's weather.
+#
+# The run also settles the ticket's own premise empirically. The "standing known
+# failure" everyone reaches for —
 # `wcore-exec-backend::conformance_matrix::every_reference_backend_passes_the_same_harness_or_reports_why_it_did_not`
-# — did not fail in that run, and it is deliberately NOT seeded here as a hedge:
-# an entry for a test that passes is a STALE entry, the gate reds on it, and
-# seeding one would be the same "the count looked right" reasoning in a new
-# file. Add a line only when a run has actually named the failure.
+# — did NOT fail in this run: it failed on TRY 1, passed on TRY 2, and is one of
+# the six FLAKY. So the number a reader would have compared against was not even
+# stable, and three genuinely different tests failed instead. That is exactly
+# how `1 failed` came to be read as `the known 1 failed`.
 #
 # An empty list is the fail-closed state: every failing test is unexpected.
