@@ -173,13 +173,37 @@ async fn a_whole_tree_diff_withholds_only_the_secret_section() {
 
 /// `blame` returns one file's content with no sections to withhold, so the
 /// path check is the whole guard.
+///
+/// The secret is put BACK in the working tree first. `blame` has no `rev`
+/// parameter, so against a deleted path it fails with "no such path" and the
+/// refusal assertion is satisfied by an unrelated error — MEASURED: written
+/// that way, this test passed against the PRE-FIX tree. A guard is only graded
+/// where the op would otherwise succeed.
 #[tokio::test]
 async fn blame_pointed_at_a_secret_is_refused() {
     let dir = repo();
-    let cwd = dir.path().to_string_lossy().into_owned();
-    let ctx = ctx_for(dir.path());
+    let root = dir.path();
+    let cwd = root.to_string_lossy().into_owned();
+    std::fs::write(root.join(".env"), format!("{SECRET}\n")).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "restore the secret to the tree"]);
+    let ctx = ctx_for(root);
 
-    // The file is gone from the tree, so blame it at the commit that had it.
+    // CONTROL ON THE FIXTURE: git itself can blame this path now, so a refusal
+    // below is the product's and not git's.
+    let raw = std::process::Command::new("git")
+        .args(["blame", "-L", "1,1", "--", ".env"])
+        .current_dir(root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("git");
+    assert!(
+        raw.status.success() && String::from_utf8_lossy(&raw.stdout).contains("PROBE-GIT-9931"),
+        "fixture control: git blame must succeed and show the secret, else the \
+         refusal below grades nothing"
+    );
+
     let out = run(
         &ctx,
         json!({"op": "blame", "cwd": cwd, "path": ".env", "line": 1}),
@@ -213,10 +237,16 @@ async fn a_rename_into_a_secret_name_is_withheld_too() {
     let dir = repo();
     let root = dir.path();
     let cwd = root.to_string_lossy().into_owned();
-    std::fs::write(root.join("plain.txt"), format!("{SECRET}\n")).unwrap();
+    std::fs::write(root.join("plain.txt"), "placeholder\n").unwrap();
     git(root, &["add", "-A"]);
     git(root, &["commit", "-qm", "add plain"]);
+    // The SECRET arrives in the same commit as the rename. A pure rename emits
+    // `similarity index 100%` and NO hunk, so a test that renamed unchanged
+    // content would pass against the pre-fix tree with nothing to withhold —
+    // MEASURED, it did.
     git(root, &["mv", "plain.txt", "prod.pem"]);
+    std::fs::write(root.join("prod.pem"), format!("{SECRET}\n")).unwrap();
+    git(root, &["add", "-A"]);
     git(root, &["commit", "-qm", "rename into a secret name"]);
 
     let ctx = ctx_for(root);
@@ -225,6 +255,11 @@ async fn a_rename_into_a_secret_name_is_withheld_too() {
     assert!(
         !out.content.contains("PROBE-GIT-9931"),
         "a rename into a secret name leaked its content: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("withheld") && out.content.contains("prod.pem"),
+        "the withheld section must be reported and named: {}",
         out.content
     );
 }
