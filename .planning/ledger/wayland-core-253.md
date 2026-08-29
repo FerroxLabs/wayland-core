@@ -25,9 +25,10 @@ criteria:
     note: "Asserts on the serialized wire body with message_thread_id set and no reply_to_message_id, needing no live credential. channel_send_transport.rs:242 routes target.thread_id into thread_id and leaves reply_to empty; the red arm topic_destination_never_occupies_the_reply_quote_slot and its control threadless_target_still_delivers_with_no_reply_quote sit at the transport."
   - id: c4
     text: "The Telegram topic defect is filed as its own defect-labelled issue rather than living in a feature request comment thread"
-    state: not-met
+    state: met
+    evidence: "file:.planning/ledger/wayland-core-363.md"
     owner: core
-    note: "VERIFIED ABSENT against all 200 issues in the tracker: filtering every state on telegram, topic and thread returns only #253 itself (open, no labels), #210 and #110 (both closed, unrelated). The defect is FIXED in code but is still tracked only inside a feature request's comment thread, so it stays invisible to any defect-labelled query - which is exactly the condition this criterion names. Discord's message_reference carries the same class of bug and is likewise unfiled."
+    note: "FILED 2026-08-29 as FerroxLabs/wayland-core#363, '[Bug]: A Telegram forum-topic target is sent as reply_to_message_id, never as message_thread_id', labelled `bug` - so it now answers a defect-labelled query, which is the whole of what this criterion asks. It carries the mechanism (parse_target reads segment three as a thread, channel_send_transport put it in OutgoingMessage::reply_to, the Telegram adapter forwards reply_to as reply_to_message_id) and six acceptance criteria of its own; its ledger file is the evidence above. Cross-linked BOTH ways: the issue body references #253 as the umbrella and names the Q6 deferral, and a comment on #253 (issuecomment-5461685000) points at #363. The Discord half is carried as #363 c6 and is deliberately NOT claimed - the shared-transport test names no connector, and inferring a connector's behaviour from a shared helper is how the Telegram defect survived. #253 itself is untouched and stays open: only the maintainer closes issues here, and c1 keeps the umbrella open by decision anyway."
   - id: c5
     text: "The inbound and default-agent-reply arm inherits the thread as a DESTINATION and the quote separately"
     state: met
