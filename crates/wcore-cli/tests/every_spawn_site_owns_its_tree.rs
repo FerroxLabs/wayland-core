@@ -201,7 +201,10 @@ fn test_sources() -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).expect("read the test tree").flatten() {
+        for entry in std::fs::read_dir(&dir)
+            .expect("read the test tree")
+            .flatten()
+        {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
@@ -284,8 +287,7 @@ fn the_ratchet_detects_an_ungoverned_site_and_accepts_a_governed_one() {
         "an unwrapped spawn must be reported"
     );
 
-    let wrapped =
-        "fn t() { let mut c = OwnedTree::new(Command::new(binary()).spawn().unwrap()); }";
+    let wrapped = "fn t() { let mut c = OwnedTree::new(Command::new(binary()).spawn().unwrap()); }";
     assert!(
         ungoverned(&blank_noncode(wrapped)).is_empty(),
         "a wrapped spawn must be accepted"

@@ -2193,3 +2193,153 @@ fn an_unscannably_large_root_is_refused_not_waved_through() {
     // WRONG-REFUSAL CONTROL: the same tree, under a budget that covers it.
     scan_write_root_bounded(dir.path(), 5).expect("a root inside the budget is scanned and passes");
 }
+
+// ── FerroxLabs/wayland-core#356: the skill-source refusal, graded against the
+// two escapes #1097 rewrote `canon_existing_ancestor` for ──────────────────
+//
+// `is_skill_source_path` used `canon_deep` — the walk-UP-and-append-verbatim
+// shape `25b19d2d` argued is unsound and #1097 abandoned — while its neighbour
+// seventy lines away used the walk-DOWN form. Neither escape was graded on the
+// weaker one, so "does the refusal hold against the holes we already know
+// about?" had no answer either way. These two tests are that answer. Measured
+// on hetzner-dsm before the switch, resolving `<ws>/brief.html` where that name
+// is a DANGLING symlink into `<ws>/.wayland-core/skills/linked-skill/`:
+//
+//   canon_existing_ancestor -> .../.wayland-core/skills/linked-skill/brief.html
+//   canon_deep              -> .../ws/brief.html          <-- refusal missed
+//
+// The `..` case held on both; the symlink case did not, which is why the call
+// site moved rather than gaining a citation.
+
+/// ESCAPE 1 — a `..` that follows a component which does not exist yet.
+///
+/// The ordinary state of a write into a load path, not an edge case: a skill's
+/// first output creates its own directory on the way, so part of the path is
+/// always missing. Held on `canon_deep` too, for a reason that is not
+/// resolution — an unresolvable `..` stayed in the string, and a `..` kept
+/// verbatim still satisfies a PREFIX match. That is fail-safe for a deny and
+/// fail-open for the allow predicate next door, which is precisely why the two
+/// resolvers must not be chosen by whichever is nearer.
+#[test]
+fn a_parent_dir_after_a_missing_component_still_reaches_the_skill_load_path() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let load = root.join(".wayland-core").join("skills");
+    std::fs::create_dir_all(&load).unwrap();
+    let policy = WorkspacePolicy::trusted_local(&root);
+
+    let missing = load.join("not-yet");
+    assert!(
+        !missing.exists(),
+        "the point of this case is that this component is absent"
+    );
+    assert!(
+        policy.is_skill_source_path(&missing.join("..").join("report.html")),
+        "a `..` after a missing component walked back into the load path and the          refusal did not see it"
+    );
+
+    // Known-positive control: the identical shape landing somewhere ordinary is
+    // NOT refused, so this is not passing because every `..` is refused.
+    assert!(
+        !policy.is_skill_source_path(&root.join("nope").join("..").join("report.html")),
+        "an ordinary workspace write with a `..` in it must stay writable"
+    );
+}
+
+/// ESCAPE 2 — the dangling-symlink hop. THE case `canon_deep` missed.
+///
+/// `std::fs::canonicalize` fails on a link whose target does not exist yet, so
+/// a resolver that canonicalizes the longest EXISTING ancestor and appends the
+/// rest verbatim judges where the LINK sits instead of where the path leads.
+/// `is_repo_control_path`'s own doc comment claims a benign-named symlink
+/// "resolves before the prefix match so it cannot be used to smuggle a write
+/// through" — true only of the walk-DOWN resolver, which is the other half of
+/// why the switch covers both call sites.
+///
+/// The controls are carried IN this test so a change that refused every symlink
+/// (which would also satisfy the probe) fails here instead of looking green.
+#[test]
+#[cfg(unix)]
+fn a_dangling_symlink_into_the_skill_load_path_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let skill = root
+        .join(".wayland-core")
+        .join("skills")
+        .join("linked-skill");
+    std::fs::create_dir_all(&skill).unwrap();
+    let policy = WorkspacePolicy::trusted_local(&root);
+
+    // CONTROL: the same link shape with an EXISTING target was already refused
+    // before this change, so a green on the probe cannot come from this arm.
+    let live_target = skill.join("live.html");
+    std::fs::write(&live_target, b"x").unwrap();
+    let live_link = root.join("live-link.html");
+    std::os::unix::fs::symlink(&live_target, &live_link).unwrap();
+    assert!(
+        policy.is_skill_source_path(&live_link),
+        "CONTROL: a symlink with an existing target in the load path must be refused"
+    );
+
+    // THE DEFECT: the target does not exist yet, so the link dangles.
+    let dangling = root.join("brief.html");
+    std::os::unix::fs::symlink(skill.join("brief.html"), &dangling).unwrap();
+    assert!(
+        policy.is_skill_source_path(&dangling),
+        "a DANGLING symlink into a skill load path was not recognised — the          refusal judged where the LINK sits, not where the path leads"
+    );
+
+    // CONTROL: a dangling link landing somewhere ordinary stays writable. The
+    // fix RESOLVES links; it does not blanket-refuse unresolvable ones.
+    let ordinary_link = root.join("ordinary-link.txt");
+    std::os::unix::fs::symlink(root.join("not-yet.txt"), &ordinary_link).unwrap();
+    assert!(
+        !policy.is_skill_source_path(&ordinary_link),
+        "CONTROL: a dangling link landing outside every load path must stay writable"
+    );
+
+    // A symlink CYCLE must terminate rather than spin.
+    let a = root.join("cycle_a");
+    let b = root.join("cycle_b");
+    std::os::unix::fs::symlink(&b, &a).unwrap();
+    std::os::unix::fs::symlink(&a, &b).unwrap();
+    let _ = policy.is_skill_source_path(&a);
+}
+
+/// The SECOND call site the #356 switch covers.
+///
+/// `is_repo_control_path` used the same walk-up resolver and carries the same
+/// claim in its doc comment. Without this, that half of the change would be
+/// asserted and not graded: every existing repo-control test passes either way.
+#[test]
+#[cfg(unix)]
+fn a_dangling_symlink_into_the_repo_control_surface_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let hooks = root.join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let policy = WorkspacePolicy::trusted_local(&root);
+
+    // CONTROL: named directly, it was always refused.
+    assert!(
+        policy.is_repo_control_path(&hooks.join("pre-commit")),
+        "CONTROL: the hook path named directly must be refused"
+    );
+
+    // THE DEFECT: reached through a link whose target does not exist yet.
+    let link = root.join("notes.md");
+    std::os::unix::fs::symlink(hooks.join("pre-commit"), &link).unwrap();
+    assert!(
+        policy.is_repo_control_path(&link),
+        "a DANGLING symlink into `.git/hooks` was not recognised as a repo-control \
+         write — the doc comment above this predicate claims otherwise"
+    );
+
+    // CONTROL: an ordinary dangling link in the workspace stays writable.
+    let ordinary = root.join("draft.md");
+    std::os::unix::fs::symlink(root.join("not-yet.md"), &ordinary).unwrap();
+    assert!(
+        !policy.is_repo_control_path(&ordinary),
+        "CONTROL: a dangling link landing outside the control surface must stay writable"
+    );
+}
