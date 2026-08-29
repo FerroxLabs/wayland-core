@@ -343,7 +343,7 @@ fn normalize_copy(src: &Path, dst: &Path, copied: &mut u64, cap: u64) -> Result<
 /// So on Windows this is a REDUCTION (the child is not created on the user's
 /// console, and never has it by default), not the elimination unix gets. #338
 /// c2 is scoped to unix in its own text and the Windows remainder is tracked
-/// as FerroxLabs/wayland-core#380. Do not restore the analogy sentence: an
+/// as FerroxLabs/wayland-core#389. Do not restore the analogy sentence: an
 /// overstated security guarantee is worse than an understated one, because it
 /// stops the next person looking.
 ///

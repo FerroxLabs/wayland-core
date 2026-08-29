@@ -45,8 +45,9 @@
 //! * and the RESIDUAL, pinned as an assertion rather than as prose, so that
 //!   the day it stops holding this test says so instead of quietly agreeing.
 //!
-//! The residual is tracked as FerroxLabs/wayland-core#380; see the ledger
-//! entry for #338 c2.
+//! The residual is tracked as FerroxLabs/wayland-core#389 (core#380 asked
+//! for this measurement and is answered by it); see the ledger entry for
+//! #338 c2.
 
 #![cfg(windows)]
 
@@ -157,6 +158,25 @@ fn run_as_probe() {
     println!("CONOUT_AFTER_EXPLICIT={}", conout());
     println!(
         "SHARES_USER_CONSOLE_AFTER_EXPLICIT={}",
+        shares_console_with_driver()
+    );
+
+    // The third documented route the child has: make a console of its own.
+    // Measured here because #380 c1 asks for it by name, and because the
+    // answer is what separates it from `AttachConsole`: `AllocConsole`
+    // succeeds, but the console it makes is a NEW one, so the driver is not
+    // on it. A prompt written there lands in a window the operator did not
+    // have, which is a different (and lesser) harm than writing into the
+    // terminal they are already looking at.
+    // SAFETY: argument-free; both report failure through their return value.
+    unsafe { FreeConsole() };
+    let alloc = unsafe { AllocConsole() };
+    println!(
+        "ALLOC_CONSOLE={}",
+        if alloc != 0 { "SUCCEEDED" } else { "FAILED" }
+    );
+    println!(
+        "SHARES_USER_CONSOLE_AFTER_ALLOC={}",
         shares_console_with_driver()
     );
     let _ = std::io::stdout().flush();
@@ -333,13 +353,13 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
     // This is NOT an assertion that the product is correct. It records, as a
     // measurement the tree carries, that `DETACHED_PROCESS` is weaker than
     // `setsid` and that #338 c2 is therefore satisfied by elimination on unix
-    // ONLY. Tracked as FerroxLabs/wayland-core#380. If either of these ever
+    // ONLY. Tracked as FerroxLabs/wayland-core#389. If either of these ever
     // stops holding, the elimination argument has become true on Windows too —
     // at which point delete this block, invert it, and say so in the ledger.
     assert_eq!(
         field(&hardened, "ATTACH_PARENT_PROCESS"),
         Some("SUCCEEDED"),
-        "the Windows residual behind #338 c2 (core#380) appears to be CLOSED: \
+        "the Windows residual behind #338 c2 (core#389) appears to be CLOSED: \
          a DETACHED_PROCESS child could no longer AttachConsole to its parent. \
          That is good news, not a regression — re-grade c2 on Windows and \
          replace this pin. hardened report:\n{hardened}"
@@ -347,7 +367,7 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
     assert_eq!(
         field(&hardened, "SHARES_USER_CONSOLE_AFTER"),
         Some("true"),
-        "the Windows residual behind #338 c2 (core#380) appears to have \
+        "the Windows residual behind #338 c2 (core#389) appears to have \
          changed: the reattached child is no longer on the USER'S console. \
          Re-grade c2 on Windows and replace this pin. hardened \
          report:\n{hardened}"
@@ -355,11 +375,31 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
     assert_eq!(
         field(&hardened, "CONOUT_AFTER"),
         Some("OPEN"),
-        "the Windows residual behind #338 c2 (core#380) appears to have \
+        "the Windows residual behind #338 c2 (core#389) appears to have \
          changed: the reattached child could no longer write to the console. \
          Re-grade c2 on Windows and replace this pin. hardened \
          report:\n{hardened}"
     );
+    // `AllocConsole` is the other route #380 c1 names. It is NOT the bypass:
+    // the console it creates is a new one, so the child does not land on the
+    // operator's. Pinned in both directions — if `SHARES_USER_CONSOLE_AFTER_
+    // ALLOC` ever became `true`, `AllocConsole` would have joined
+    // `AttachConsole` as a way onto the user's terminal.
+    assert_eq!(
+        field(&hardened, "ALLOC_CONSOLE"),
+        Some("SUCCEEDED"),
+        "a console-less child is expected to be able to make its OWN console; \
+         if this now fails, the Win32 behaviour changed and the analysis in \
+         core#389 needs re-reading. hardened report:\n{hardened}"
+    );
+    assert_eq!(
+        field(&hardened, "SHARES_USER_CONSOLE_AFTER_ALLOC"),
+        Some("false"),
+        "AllocConsole must give the child a NEW console, never the operator's \
+         — if this is `true`, a second bypass exists alongside AttachConsole \
+         and core#389 understates the problem. hardened report:\n{hardened}"
+    );
+
     assert_eq!(
         field(&hardened, "ATTACH_BY_EXPLICIT_PID"),
         Some("SUCCEEDED"),
