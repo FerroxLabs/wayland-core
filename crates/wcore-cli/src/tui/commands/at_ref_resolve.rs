@@ -1296,4 +1296,47 @@ mod tests {
             "control: the ordinary file and its link must both stay attached: {names:?}"
         );
     }
+
+    /// core#339 c6, the DIRECTORY half. `at_dir_judges_gitignore_on_the_resolved_path`
+    /// covers the file branch only, so the dir branch's resolved-path rule
+    /// check could be deleted with every `at_ref` test green — and a
+    /// directory-only rule (`build/`) is skipped outright by the file check
+    /// (`is_ignored` returns early when `dir_only && !is_dir`), so nothing
+    /// downstream catches the entries either.
+    #[cfg(unix)]
+    #[test]
+    fn at_dir_judges_a_directory_gitignore_rule_on_the_resolved_path() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join(".gitignore"), "build/\n").expect("write gitignore");
+        fs::create_dir_all(root.join("build")).expect("mkdir build");
+        fs::write(root.join("build/out.txt"), "IGNORED-TREE\n").expect("write ignored");
+        // The same ignored directory under a name the rule does not match.
+        std::os::unix::fs::symlink(root.join("build"), root.join("docs")).expect("symlink");
+        // WRONG-REFUSAL CONTROL: an ordinary directory reached through a link
+        // is still walked, so the fix cannot be "skip every dir symlink".
+        // `visited` walks an aliased directory ONCE, hence `any` and not a
+        // count of two. Passes on BOTH arms.
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(root.join("src/main.rs"), "safe\n").expect("write src");
+        std::os::unix::fs::symlink(root.join("src"), root.join("lib")).expect("symlink src");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
+        let names: Vec<String> = payload
+            .files
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect();
+        assert!(
+            !payload
+                .files
+                .iter()
+                .any(|f| f.content.contains("IGNORED-TREE")),
+            "a git-ignored directory was walked through a link named around the rule: {names:?}"
+        );
+        assert!(
+            payload.files.iter().any(|f| f.content == "safe\n"),
+            "control: an ordinary directory reached through a link must still be walked: {names:?}"
+        );
+    }
 }
