@@ -609,6 +609,38 @@ impl CompactConfig {
         self.autocompact_threshold_for_window(window) > BASELINE_TURN_TOKENS
             && self.input_ceiling_for_window(window) > BASELINE_TURN_TOKENS
     }
+
+    /// #1179 — THE autocompact DECISION at `window`, refusal included.
+    ///
+    /// [`Self::autocompact_threshold_for_window`] stays a plain number because
+    /// the cache ledger and the context gauge report it. This is the decision,
+    /// and the decision carries [`Self::supports_compaction`] with it.
+    ///
+    /// # Why the gate lives here and not only where a learned window enters
+    ///
+    /// The refusal is a property of the WINDOW, not of the route the window
+    /// arrived by. #1179 first shipped it inside
+    /// `AgentEngine::narrow_to_served_window`, the single place #1172's LEARNED
+    /// figure is admitted, which left the CONFIGURED path — the one #1150's own
+    /// notice tells operators to use — running unguarded. A `[compact]
+    /// context_window` of 6,000 (a local Ollama `num_ctx` of 6,144 lands in the
+    /// same band) yields a threshold of 2,700 against a 3,118-token baseline
+    /// turn: the trigger is already true before the user has typed anything,
+    /// the summarizer cannot reclaim a system prompt or a tool schema, and the
+    /// next turn asks again. That is an LLM call at the top of every turn,
+    /// forever.
+    ///
+    /// Refusing is not compaction failing to fire. Below the crossover there is
+    /// no trigger value that both clears the baseline turn and stays under the
+    /// pre-flight ceiling, so firing is a loop and refusing is the only honest
+    /// answer — the same answer the learned path already gives at 4,096. The
+    /// emergency hard stop (`emergency_limit`) is untouched and still bounds the
+    /// run, and the operator is told at bootstrap rather than left to infer it.
+    pub fn should_autocompact_at(&self, window: usize, tokens: usize) -> bool {
+        self.enabled
+            && self.supports_compaction(window)
+            && tokens >= self.autocompact_threshold_for_window(window)
+    }
 }
 
 /// The reserve buffers as they apply at one particular window.

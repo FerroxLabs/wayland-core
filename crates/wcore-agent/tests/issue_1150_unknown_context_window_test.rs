@@ -208,6 +208,71 @@ async fn an_explicit_operator_window_silences_the_notice() {
     );
 }
 
+// -- #1179 c2: the window is KNOWN, and too small to compact inside ---------
+//
+// Same channel, same reason, adjacent branch in the same bootstrap `if`. It
+// lives in this file because `boot()` is the production path both notices are
+// emitted from and duplicating that harness would give the two notices two
+// different definitions of "the user was told".
+
+/// The phrase the #1179 c2 notice is keyed off.
+const TOO_SMALL_MARK: &str = "too small for automatic compaction";
+
+/// An operator who sets `[compact] context_window` below the window core can
+/// compact inside gets a SILENT refusal everywhere else — `should_autocompact_at`
+/// simply returns `false`, forever. A silent refusal on a window the operator
+/// chose is indistinguishable from compaction being broken, so the session says
+/// so once, at boot, on the channel the user reads.
+///
+/// 6,000 is not a made-up number: #1150's own notice tells operators to set
+/// `[compact] context_window`, and a local Ollama `num_ctx` of 6,144 lands in
+/// the same band.
+#[tokio::test]
+async fn a_configured_window_too_small_to_compact_in_is_announced() {
+    let (infos, _prompt) = boot(UNLISTED_MODEL, Some(6_000)).await;
+    let hits: Vec<&String> = infos
+        .iter()
+        .filter(|m| m.contains(TOO_SMALL_MARK))
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "compaction is off for the whole session at a 6,000-token window and the user \
+         was told nothing. Everything they WERE told: {infos:?}"
+    );
+    let notice = hits[0];
+    assert!(
+        notice.contains("6000"),
+        "the notice does not name the window it is refusing: {notice}"
+    );
+    assert!(
+        notice.contains("context_window"),
+        "the notice does not name the setting that fixes it: {notice}"
+    );
+    assert!(
+        notice.contains("emergency"),
+        "the notice must say which boundary DOES still apply, or it reads as \
+         'you are now unbounded': {notice}"
+    );
+}
+
+/// The other direction, and the reason the assertion above is `== 1`: a window
+/// compaction CAN work in must not be announced as too small. Without this,
+/// the notice would also pass by firing on every session.
+#[tokio::test]
+async fn a_workable_configured_window_is_not_announced_as_too_small() {
+    let (infos, _prompt) = boot(UNLISTED_MODEL, Some(32_768)).await;
+    let hits: Vec<&String> = infos
+        .iter()
+        .filter(|m| m.contains(TOO_SMALL_MARK))
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "32,768 is workable - threshold 14,748 against a 3,118-token baseline turn - \
+         yet the session announced compaction as off: {hits:?}"
+    );
+}
+
 // -- Bug 2: the dead skills prompt budget -----------------------------------
 
 /// THE #1150 Bug-2 guard, driven through the production

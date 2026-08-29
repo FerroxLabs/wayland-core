@@ -276,3 +276,118 @@ fn supports_compaction_switches_where_the_baseline_turn_stops_fitting() {
     assert!(!cfg.supports_compaction(4_096));
     assert!(cfg.supports_compaction(8_192));
 }
+
+// ── The CONFIGURED path (#1179 c2) ──────────────────────────────────────────
+
+/// #1179's acceptance sentence is "a learned **or configured** small window",
+/// and the configured half is the one an operator reaches on purpose: #1150's
+/// own notice tells them to set `[compact] context_window`, and a local Ollama
+/// `num_ctx` of 6,144 lands squarely inside this band.
+///
+/// The refusal must therefore be a property of the WINDOW, not of the route the
+/// window arrived by. It shipped inside `AgentEngine::narrow_to_served_window`
+/// — the one place #1172's LEARNED figure is admitted — which left the
+/// configured path unguarded: a `[compact] context_window = 6000` kept a
+/// 2,700-token threshold against core's own 3,118-token baseline turn, so
+/// `should_autocompact` was already true before the user had typed anything and
+/// stayed true after the summary came back, because a system prompt is not
+/// something a summarizer can reclaim.
+///
+/// Measured on the shipped arithmetic, every one of these windows has a
+/// threshold at or below the baseline turn, so every one of them is the
+/// "fires every turn" side of the c4 distinction.
+#[test]
+fn a_configured_window_too_small_to_work_in_never_fires() {
+    for window in [4_096usize, 5_000, 6_000, 6_144, 6_928] {
+        let cfg = pinned(window);
+        // Preconditions, asserted so nothing below can pass vacuously: this
+        // window really is in the refused band, and its threshold really is
+        // under the baseline turn.
+        assert!(
+            !cfg.supports_compaction(window),
+            "window {window} is not in the refused band, so this arm measures nothing"
+        );
+        let (threshold, _, _) = boundaries(window);
+        assert!(
+            threshold <= BASELINE_TURN_TOKENS,
+            "window {window}: threshold {threshold} already clears the \
+             {BASELINE_TURN_TOKENS}-token baseline turn, so this arm measures nothing"
+        );
+
+        assert!(
+            !should_autocompact(
+                BASELINE_TURN_TOKENS as u64,
+                &cfg,
+                UNKNOWN_PROVIDER,
+                UNKNOWN_MODEL
+            ),
+            "window {window}: an OPERATOR-CONFIGURED window core has already judged too \
+             small to compact in summarized a conversation that had not started - \
+             threshold {threshold}, baseline turn {BASELINE_TURN_TOKENS}"
+        );
+
+        // ...and the refusal is not a race the watermark can win. A threshold
+        // below the cost of existing is not a trigger, it is a loop, so no
+        // amount of pressure may turn it back on. The emergency hard stop is
+        // the boundary that still applies here, and it is untouched.
+        assert!(
+            !should_autocompact(u64::MAX, &cfg, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+            "window {window}: the refusal evaporated once the watermark grew"
+        );
+    }
+}
+
+/// The negative control for the arm above, at the first window that IS
+/// workable. Without it, "never fires" would also be satisfied by a change that
+/// simply switched autocompact off.
+#[test]
+fn the_first_workable_configured_window_still_fires_when_it_should() {
+    let cfg = pinned(6_929);
+    assert!(cfg.supports_compaction(6_929));
+    assert!(
+        !should_autocompact(
+            BASELINE_TURN_TOKENS as u64,
+            &cfg,
+            UNKNOWN_PROVIDER,
+            UNKNOWN_MODEL
+        ),
+        "3,118 is below the 3,119 threshold at 6,929 - by one token, which is the point"
+    );
+    assert!(
+        should_autocompact(3_119, &cfg, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        "a workable configured window must still compact when the watermark reaches \
+         its threshold, or the refusal has eaten the feature"
+    );
+    assert!(
+        should_autocompact(u64::MAX, &cfg, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        "a workable configured window under real pressure must compact"
+    );
+}
+
+/// The band the refusal is measured over, stated as a range rather than as five
+/// samples, and paired with its complement so the boundary itself is pinned.
+///
+/// This is also the regression #1179 introduced and c2 is about: below 6,929 a
+/// configured window fires on the baseline turn, and between 4,455 and 6,928 it
+/// did NOT before #1179 (the `MIN_AUTOCOMPACT_WINDOW_FRACTION = 0.70` fallback
+/// gave 4,200 at a 6,000 window). The band that went backwards is inside the
+/// sweep below.
+#[test]
+fn no_configured_window_anywhere_fires_on_the_baseline_turn() {
+    for window in 1_024usize..=16_384 {
+        let cfg = pinned(window);
+        let fires = should_autocompact(
+            BASELINE_TURN_TOKENS as u64,
+            &cfg,
+            UNKNOWN_PROVIDER,
+            UNKNOWN_MODEL,
+        );
+        assert!(
+            !fires,
+            "window {window}: a configured window fires an LLM summarization on core's \
+             own {BASELINE_TURN_TOKENS}-token baseline turn, before the user has typed \
+             anything - threshold {}",
+            boundaries(window).0
+        );
+    }
+}
