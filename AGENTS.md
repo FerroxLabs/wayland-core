@@ -289,6 +289,30 @@ vx just --list        # auto-installs rust + just on first run
 
 `vx.toml` only tracks Rust + just. **`just push` additionally needs `cargo-nextest`** — install once with `cargo install cargo-nextest --locked`. CI installs `cargo-nextest` and `cargo-audit` via `taiki-e/install-action` in the workflows.
 
+### Criteria ledger — what is TRUE, not what was done
+
+`.planning/ledger/<repo>-<number>.md` holds one entry per open issue, on
+**both** trackers (`FerroxLabs/wayland` filtered on `area:core`, and
+`FerroxLabs/wayland-core` in full). Each entry states what must be true for
+that issue to close, and anchors every `met` claim to something a machine can
+resolve — a test name that can be grepped, a symbol that is declared, a line
+that exists.
+
+**Do not re-derive "is this done?" from a handoff or a closing comment. Read
+the ledger entry, and if you change the answer, change the entry.** Handoffs
+are narratives of what was DONE; this is the record of what is TRUE. v0.13.10
+shipped claiming 22 issues closed and grading found 9, mostly because an
+entire tracker was invisible to the sweep that produced it.
+
+* `just ledger-check` — structural gate + self-test, no network. In `check-all`
+  and in CI on every run. Catches a `met` criterion whose evidence has rotted.
+* `just ledger-check-live` — adds tracker coverage and ledger/GitHub
+  divergence. Needs `gh` on both repos. Runs at release time; run it before
+  claiming a sweep is complete.
+
+An honest `not-met` is the point of the system. A `met` you cannot anchor is
+the thing it was built to stop.
+
 ### Code style
 
 - `cargo clippy` must pass without warnings; `cargo fmt` must pass without diffs.
