@@ -4,14 +4,14 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "A runtime-added MCP server's tools/list_changed is ignored for the life of the session"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: ca211126
 criteria:
   - id: c1
     text: "An MCP server attached at runtime has its tools/list_changed honoured, or the product plainly says it will not be"
     state: met
-    evidence: "test:crates/wcore-cli/src/main.rs::every_runtime_mcp_add_joins_the_catalog_refresh"
+    evidence: "test:crates/wcore-mcp/tests/list_changed_non_stdio_transports.rs::the_manager_picks_up_a_tool_an_sse_server_registers_mid_session"
     owner: core
-    note: "The outcome chosen is 'honoured', not 'say plainly it will not be'. A source lint over main.rs and tui/engine_bridge.rs asserting the register_runtime_server call count and the forget_runtime_server rollback. All three paths are wired: main.rs:3887 (deferred config), main.rs:5702 (AddMcpServer), tui/engine_bridge.rs:3043 (/mcp add), with :3117 forgetting on rollback."
+    note: "The outcome chosen is 'honoured', not 'say plainly it will not be'. The runtime-ADD wiring was already met (a source lint over main.rs and tui/engine_bridge.rs asserting the register_runtime_server call count and the forget_runtime_server rollback; all three paths wired at main.rs:3887, main.rs:5702, tui/engine_bridge.rs:3043 with :3117 forgetting on rollback), but the close-sweep found the criterion FALSE for two of three transports: take_tools_changed() defaulted to false and was overridden only by StdioTransport, so refresh_signalled_tools could never fire for an SSE or Streamable-HTTP server. Closed as a class: the predicate now lives once in transport/mod.rs, SseTransport raises it from its listener (which also now drains what the handshake already read -- an announcement in the same TCP segment as the endpoint event was parked unparsed forever), and StreamableHttpTransport raises it from BOTH its channels: a notification interleaved in a response stream, and the MCP spec's standalone GET SSE stream, opened via the new McpTransport::start_notification_stream hook that manager.rs calls after notifications/initialized. The evidence is the end-to-end proof through McpManager; it fails on the pre-fix tree with refresh_signalled_tools() returning []."
   - id: c2
     text: "A test adds a server at runtime, has it announce a new tool, and asserts that tool becomes callable"
     state: met
@@ -24,6 +24,12 @@ criteria:
     evidence: "symbol:crates/wcore-mcp/src/tool_proxy.rs::register_runtime_server"
     owner: core
     note: "McpCatalogRefresh's fields are now Mutex-wrapped (tool_proxy.rs:375-378), so the '&self methods only, no post-construction registration' obstacle the ticket named is gone. Returns bool and refuses on empty configs."
+  - id: c4
+    text: "Every transport that owns a server-to-client channel observes tools/list_changed, and none of them can be resurrected after close"
+    state: met
+    evidence: "test:crates/wcore-mcp/tests/list_changed_non_stdio_transports.rs::a_closed_streamable_http_server_is_never_refreshed_again"
+    owner: core
+    note: "The class criterion c1's original evidence could not carry: a source lint over main.rs counts registration call sites and says nothing about whether a transport can hear a notification. Positive arms: sse_transport_observes_tools_list_changed, streamable_http_observes_a_notification_inside_a_response_stream, streamable_http_observes_the_standalone_notification_stream. Negative controls that pass in BOTH arms: sse_transport_ignores_every_other_id_less_frame (a resources notification, an unrelated notification and a plain response must not raise the flag) and a_server_that_refuses_the_standalone_stream_still_works (a spec-legal 405 on the standalone GET must not break connect or requests). The resurrection half is the hazard named alongside the defect: StreamableHttpTransport inherited is_alive() -> true and its close() could not make it false, so implementing take_tools_changed there without also fixing is_alive would have let the manager re-register an operator-removed server's tools on its next list_changed. This test runs the OPEN arm first as a control, so the closed arm's empty result cannot be an artefact of nothing being signalled."
 ---
 
 Every runtime-add path builds a brand-new `McpManager` that never enters the

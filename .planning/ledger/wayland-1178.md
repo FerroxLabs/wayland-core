@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "A base_url with the conventional /v1 suffix builds /v1/v1/chat/completions and 404s"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: ca211126
 criteria:
   - id: c1
     text: "A base URL carrying the conventional /v1 suffix either reaches the endpoint or fails with an error naming the doubled path"
@@ -36,6 +36,12 @@ criteria:
     evidence: "test:crates/wcore-config/src/compat.rs::join_endpoint_with_no_overlap_is_plain_concatenation"
     owner: core
     note: "Asserts join_endpoint(base, path) equals plain concatenation byte for byte for api.openai.com, api.together.xyz/v1 plus /chat/completions, and an Azure-style deployment path. Mirrored at the provider by catalog_style_v1_base_with_overridden_api_path_is_unchanged."
+  - id: c6
+    text: "The same join is applied on every wire that concatenates a fixed API path onto a user-supplied base_url, not only the OpenAI-compat one"
+    state: met
+    evidence: "test:crates/wcore-providers/tests/provider_base_url_join.rs::anthropic_messages_path_is_identical_for_every_base_spelling"
+    owner: core
+    note: "Raised by the close-sweep as D35: the ANTHROPIC wire carried the identical defect, unfixed and untested. try_stream built its URL with a bare format!(\"{}/v1/messages\", base_url) -- no join, and unlike its neighbours not even a trim_end_matches('/') -- while --base-url and [providers.anthropic].base_url reach it verbatim. VERIFIED LIVE from hetzner on 2026-08-29 with the working spelling as the positive control: POST https://api.anthropic.com/v1/messages -> 401 (routed), /v1/v1/messages -> 404, //v1/messages -> 404. The trailing-slash arm is strictly worse here than on the OpenAI wire, which tolerates the double slash. Enumerated and joined: anthropic.rs:154 (messages) and :676 (models), cohere.rs:136 (untrimmed-slash half; Cohere's own default base already ends in /v1), gemini.rs:157 (generate) and :701 (models). openai_chatgpt.rs's base_url is a test-only override of a production constant and ollama_probe.rs strips /v1 deliberately, so neither is in the class. Negative control a_base_path_that_only_resembles_the_api_prefix_is_not_collapsed passes in both arms: /apiv1, /v10 and /anthropic keep their full prefix, so a working proxy deployment is not silently rewritten."
 ---
 
 `openai_defaults()` sets `api_path` to `/v1/chat/completions` and appends it to
