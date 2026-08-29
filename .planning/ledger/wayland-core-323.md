@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Two divergent secret denylists: at_ref_guard maintains its own copy, so @-refs miss entries the tools deny"
 status: open
-last_verified_commit: f05b9c9d
+last_verified_commit: 6b54e6c2
 criteria:
   - id: c1
     text: "The @-ref attach guard delegates to the shared secret predicate instead of maintaining a parallel copy of it"

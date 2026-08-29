@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "SECURITY: the @-ref secret guard is lexical, so a symlink bypasses it"
 status: open
-last_verified_commit: f05b9c9d
+last_verified_commit: 6b54e6c2
 criteria:
   - id: c1
     text: "The secret guard and the read observe the same resolved file identity, so a symlink cannot be graded as one thing and read as another"
@@ -54,6 +54,12 @@ criteria:
     evidence: "test:crates/wcore-cli/src/tui/commands/at_ref_resolve.rs::at_dir_judges_a_directory_gitignore_rule_on_the_resolved_path"
     owner: core
     note: "ADDED 2026-08-29 (lane f13-atref-guard). c6's test covers the FILE branch only; the DIRECTORY branch's rel_to_root(&canonical, root_canonical) check at :374 could be replaced by 'if false' with all 67 at_ref tests green, and nothing downstream catches the entries - is_ignored returns early for a dir_only rule asked about a file, so a 'build/' tree reached as 'docs' is walked and every file under it inlined. RED ARM, verbatim, mutation printed in context: 'a git-ignored directory was walked through a link named around the rule: [\".gitignore\", \"docs/out.txt\", \"lib/main.rs\"]'. Wrong-refusal control - an ordinary directory reached through a link is still walked, walked ONCE because of the visited set - passes on BOTH arms."
+  - id: c9
+    text: "The lexical floor holds where it diverges from the resolved answer - a denylisted or ignored NAME is refused however innocuous its target, and a denylisted name that does not resolve is refused loudly rather than as NotFound"
+    state: met
+    evidence: "test:crates/wcore-cli/src/tui/commands/at_ref_resolve.rs::the_lexical_floor_refuses_a_denylisted_or_ignored_name_whatever_it_resolves_to"
+    owner: core
+    note: "ADDED 2026-08-29 (lane f13-atref-guard). A mutation sweep over EVERY guard on this surface found four more ungraded, all on the lexical half: is_secret_path(&full) in resolve_file (:199), the walk's ignore.is_ignored(&rel, is_dir) (:343) and is_secret_path(&path) (:401), and read_guarded's own floor (:536). Each could be replaced by 'if false' with all 69-70 at_ref tests green, because for an ordinary entry the lexical and resolved names are the same and the resolved checks answer identically. They are NOT redundant: each is load-bearing exactly where the two answers diverge, and on the one case with no resolved path at all - a contract resolve_file and read_guarded both state in their own comments. FOUR RED ARMS, verbatim, each landing on its own assertion: ':199 -> a denylisted name that does not exist must be refused loudly, got Err(NotFound(\"nope/.env\"))'; ':343 -> an ignored NAME must not be attached however innocuous its target: [\".gitignore\", \"deploy.log\", \"ok.txt\"]'; ':401 -> a denylisted NAME must not be attached however innocuous its target: [\".env\", \".gitignore\", \"ok.txt\"]'; ':536 -> the @symbol preview must refuse a denylisted name loudly even when it does not resolve, got Err(Io { path: \"/tmp/.tmpP5Wf3W/nope/.env\", message: \"No such file or directory (os error 2)\" })'. Wrong-refusal control in the same test - the ordinary file stays attached - passes on BOTH arms. With this row every guard on the @-ref surface has a red arm: 12 enumerated, 12 armed (11 in this lane, plus c6's own recorded arm for the walk's file-branch resolved gitignore)."
 ---
 
 The composer's @-ref guard grades a path as a string. It never resolves it. So
