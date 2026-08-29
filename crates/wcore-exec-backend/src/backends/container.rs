@@ -394,16 +394,18 @@ impl ExecutionBackend for ContainerBackend {
             });
         }
 
-        let workdir = registry::state_dir().join("work").join(&task.task_id);
-        materialize_workspace(&workdir, task)?;
         let name = Self::container_name(&task.task_id);
         validate_identifier("container_name", &name)?;
         // Issue #365: `docker run --rm` removes on EXIT, so a container that
         // reached `Created` and never started is never removed and latches
         // this name forever. Clear it here, under the guards documented on
-        // `reclaim_container_name`, BEFORE the name is committed to the
-        // registry.
+        // `reclaim_container_name` — BEFORE the workspace is materialised and
+        // before the name is committed to the registry, so a refusal leaves
+        // neither a stray work directory nor a registry entry behind.
         reclaim_container_name(&name).await?;
+
+        let workdir = registry::state_dir().join("work").join(&task.task_id);
+        materialize_workspace(&workdir, task)?;
         let started = now_unix_ms();
 
         registry::record(&LiveTask {
