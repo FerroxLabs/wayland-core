@@ -96,19 +96,16 @@ fn process_running(pid: u32) -> bool {
 /// property. Taking a deadline instead of a duration is what lets the caller
 /// state every phase against one clock and make the phases SUM to the bound.
 async fn read_pid(path: &std::path::Path, deadline: Instant) -> u32 {
-    tokio::time::timeout(
-        deadline.saturating_duration_since(Instant::now()),
-        async {
-            loop {
-                if let Ok(raw) = std::fs::read_to_string(path)
-                    && let Ok(pid) = raw.trim().parse()
-                {
-                    break pid;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(path)
+                && let Ok(pid) = raw.trim().parse()
+            {
+                break pid;
             }
-        },
-    )
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
     .await
     .expect(
         "the Dangerous Bash process tree must be up before the lease expires — \
@@ -215,16 +212,14 @@ async fn dangerous_expiry_cancels_production_streaming_bash_process_tree() {
     // CANCELLATION_BUDGET OF EXPIRY, not within some duration of whenever the
     // fixture happened to finish setting up.
     let abort_by = granted + LEASE_TTL + CANCELLATION_BUDGET;
-    let (mut engine, outcome) = tokio::time::timeout(
-        abort_by.saturating_duration_since(Instant::now()),
-        run,
-    )
-    .await
-    .expect(
-        "lease expiry must stop the production Bash dispatch within its \
+    let (mut engine, outcome) =
+        tokio::time::timeout(abort_by.saturating_duration_since(Instant::now()), run)
+            .await
+            .expect(
+                "lease expiry must stop the production Bash dispatch within its \
          cancellation budget",
-    )
-    .expect("engine task must join");
+            )
+            .expect("engine task must join");
     assert!(
         matches!(outcome, Err(AgentError::UserAborted)),
         "Dangerous expiry must surface UserAborted, got {outcome:?}"
@@ -314,18 +309,34 @@ impl LlmProvider for SpawnThenBlockProvider {
     }
 }
 
+/// The Spawn sibling of the test above, and the SAME core#337 shape: budgets
+/// picked independently of the lease they have to fit inside.
+///
+/// Allowlisted at `.config/flaky-allowlist.txt` under gh#1169 with the measured
+/// mechanism — "production Spawn tool must start the child provider before
+/// expiry: Elapsed(())", TRY 1 FAIL at 9.167s, TRY 2 PASS at 3.257s. A 2s
+/// wall clock on child-provider startup, unrelated to the 3s lease it has to
+/// finish inside, is the thing that loses under contention. Stated on the
+/// lease's clock here for the same reason as its sibling.
 #[tokio::test]
 async fn dangerous_expiry_reaches_bootstrapped_spawn_child() {
+    /// See the sibling above; the same three budgets, on the same clock.
+    const LEASE_TTL: Duration = Duration::from_secs(6);
+    const CHILD_UP_BUDGET: Duration = Duration::from_secs(4);
+    const CANCELLATION_BUDGET: Duration = Duration::from_secs(4);
+
     let workspace = tempfile::tempdir().unwrap();
     let physical = physical_attempt_server().await;
     let provider = Arc::new(SpawnThenBlockProvider::new(physical.uri()));
     let sink: Arc<dyn OutputSink> = Arc::new(StreamingSink::default());
     let mut config = bootstrap_config();
     configure_persisted_test_session(&mut config, workspace.path());
+    // The lease clock starts here; every deadline below is an offset from it.
+    let granted = Instant::now();
     let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
         .provider(provider.clone())
         .without_channels(true)
-        .with_dangerous_grant(dangerous_grant(3, "lease-spawn-e2e"))
+        .with_dangerous_grant(dangerous_grant(LEASE_TTL.as_secs(), "lease-spawn-e2e"))
         .build()
         .await
         .expect("Dangerous bootstrap must finish inside its one-shot lease");
@@ -345,13 +356,23 @@ async fn dangerous_expiry_reaches_bootstrapped_spawn_child() {
         (engine, outcome)
     });
 
-    tokio::time::timeout(Duration::from_secs(2), provider.child_entered.notified())
-        .await
-        .expect("production Spawn tool must start the child provider before expiry");
-    let (mut engine, outcome) = tokio::time::timeout(Duration::from_secs(4), run)
-        .await
-        .expect("lease expiry must stop the production child promptly")
-        .expect("engine task must join");
+    tokio::time::timeout(
+        (granted + CHILD_UP_BUDGET).saturating_duration_since(Instant::now()),
+        provider.child_entered.notified(),
+    )
+    .await
+    .expect(
+        "the production Spawn child must be up before the lease expires — with \
+         nothing in flight there is nothing for expiry to reach",
+    );
+    // The property bound, stated against EXPIRY rather than against whenever
+    // the fixture happened to finish setting up.
+    let abort_by = granted + LEASE_TTL + CANCELLATION_BUDGET;
+    let (mut engine, outcome) =
+        tokio::time::timeout(abort_by.saturating_duration_since(Instant::now()), run)
+            .await
+            .expect("lease expiry must stop the production child within its cancellation budget")
+            .expect("engine task must join");
     assert!(
         matches!(outcome, Err(AgentError::UserAborted)),
         "Dangerous expiry must surface UserAborted, got {outcome:?}"

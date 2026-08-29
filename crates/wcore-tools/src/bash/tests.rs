@@ -2767,12 +2767,11 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
         if floor <= decisive {
             if last_attempt {
                 eprintln!(
-                    "SKIP (wayland-core#350) {}: a {timeout_ms}ms timeout against a walk \
+                    "SKIP (wayland-core#350) the_bash_timeout_bounds_the_secret_deny_walk: a {timeout_ms}ms timeout against a walk \
                      flooring at {floor:?} cannot be told apart from an unbounded one on \
                      this host — the deadline alone costs up to {decisive:?} \
                      (timeout + a measured {allowance:?} timer allowance, doubled). \
-                     Nothing was graded on this attempt.",
-                    "the_bash_timeout_bounds_the_secret_deny_walk"
+                     Nothing was graded on this attempt."
                 );
                 return;
             }
@@ -2790,12 +2789,11 @@ async fn the_bash_timeout_bounds_the_secret_deny_walk() {
         // cannot hide the regression.
         assert!(
             observed < decisive,
-            "a {timeout_ms}ms {} timeout floors at {observed:?} over \
+            "a {timeout_ms}ms buffered timeout floors at {observed:?} over \
              {LATENCY_SAMPLES} calls, at or above the {decisive:?} this host's \
              deadline alone can cost (timeout + a measured {allowance:?} timer \
              allowance, doubled), against a walk flooring at {floor:?} — the \
-             manifest build is outside the timeout scope",
-            "buffered"
+             manifest build is outside the timeout scope"
         );
 
         // #1111 acceptance 3: "a manifest build that exceeds the timeout
@@ -2953,12 +2951,11 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
         if floor <= decisive {
             if last_attempt {
                 eprintln!(
-                    "SKIP (wayland-core#350) {}: a {timeout_ms}ms timeout against a walk \
+                    "SKIP (wayland-core#350) the_streaming_bash_timeout_bounds_the_secret_deny_walk: a {timeout_ms}ms timeout against a walk \
                      flooring at {floor:?} cannot be told apart from an unbounded one on \
                      this host — the deadline alone costs up to {decisive:?} \
                      (timeout + a measured {allowance:?} timer allowance, doubled). \
-                     Nothing was graded on this attempt.",
-                    "the_streaming_bash_timeout_bounds_the_secret_deny_walk"
+                     Nothing was graded on this attempt."
                 );
                 return;
             }
@@ -2976,12 +2973,11 @@ async fn the_streaming_bash_timeout_bounds_the_secret_deny_walk() {
         // cannot hide the regression.
         assert!(
             observed < decisive,
-            "a {timeout_ms}ms {} timeout floors at {observed:?} over \
+            "a {timeout_ms}ms streaming timeout floors at {observed:?} over \
              {LATENCY_SAMPLES} calls, at or above the {decisive:?} this host's \
              deadline alone can cost (timeout + a measured {allowance:?} timer \
              allowance, doubled), against a walk flooring at {floor:?} — the \
-             manifest build is outside the timeout scope",
-            "streaming"
+             manifest build is outside the timeout scope"
         );
 
         // #1111 acceptance 3: "a manifest build that exceeds the timeout

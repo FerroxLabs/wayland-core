@@ -332,7 +332,10 @@ impl PtyHarness {
         let mut widest = 0usize;
         for row in 0..rows {
             for col in (0..cols).rev() {
-                if screen.cell(row, col).is_some_and(|cell| cell.has_contents()) {
+                if screen
+                    .cell(row, col)
+                    .is_some_and(|cell| cell.has_contents())
+                {
                     widest = widest.max(col as usize + 1);
                     break;
                 }

@@ -2524,9 +2524,8 @@ fn project_committed_secrets(
     let mut out = found.into_inner().expect(POISONED);
     out.sort();
     dirs.extend(walked.into_inner().expect(POISONED));
-    WALK_ENTRIES.with(|c| {
-        c.set(c.get() + visited_parallel.load(std::sync::atomic::Ordering::Relaxed))
-    });
+    WALK_ENTRIES
+        .with(|c| c.set(c.get() + visited_parallel.load(std::sync::atomic::Ordering::Relaxed)));
     out
 }
 
