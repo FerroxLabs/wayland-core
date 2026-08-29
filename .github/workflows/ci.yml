@@ -1429,6 +1429,25 @@ jobs:
         run: |
           python3 scripts/check-criteria-ledger.py --self-test
           python3 scripts/check-criteria-ledger.py --offline
+      # ── Release-readiness gate: SELF-TEST ONLY ─────────────────────────
+      # The gate itself is NOT run here, and that is the whole design. It
+      # refuses a release while any in-scope defect still owes core work, so
+      # it is red by design for as long as any defect is open -- which,
+      # mid-cycle, is always. Running it per-PR would make it red on every
+      # in-progress lane, and a gate everyone bypasses is a gate nobody
+      # reads. It runs at RELEASE time (`release.yml` prepare-release), where
+      # every publishing job depends on it and a FAIL actually stops the cut.
+      #
+      # What runs here is the half that rots silently in between: the proof
+      # that the gate can still FAIL. `--self-test` builds throwaway ledgers
+      # in a temp dir and asserts it fires on each defect class -- a not-met
+      # core criterion on a defect, a remainder handed out with no `handoff:`,
+      # a missing `kind:` -- and stays silent on the control, with every red
+      # arm asserting the message it fired on. It touches no network and does
+      # not read .planning/ledger at all, so it says nothing about whether a
+      # release is ready; only that the thing which would say so still works.
+      - name: Release-readiness gate can still fail
+        run: python3 scripts/check-release-readiness.py --self-test
       # ── Windows-attribution gate (#1146) ──────────────────────────────
       # Same placement reasoning as the two steps above: AFTER checkout (it
       # reads the workflow YAML and .config/nextest.toml out of the working
