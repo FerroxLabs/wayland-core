@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
 use tokio::sync::{Mutex, oneshot};
 
-use super::{McpError, McpTransport};
+use super::{McpError, McpTransport, notified_tools_changed};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 
 /// Per-request timeout for SSE JSON-RPC calls (audit C6). Matches the
@@ -38,6 +38,12 @@ pub struct SseTransport {
     /// Set by `close()` so a new `request()` fast-fails instead of parking
     /// on a `oneshot` whose listener has been aborted (audit F26).
     closed: AtomicBool,
+    /// FerroxLabs/wayland#1175 — set by the listener when the server sends
+    /// `notifications/tools/list_changed`; take-and-cleared by
+    /// [`McpTransport::take_tools_changed`]. The SSE event stream is the only
+    /// server-to-client channel this transport has, so a notification dropped
+    /// here leaves a mid-session tool permanently uncallable.
+    tools_changed: Arc<AtomicBool>,
 }
 
 impl SseTransport {
@@ -266,25 +272,38 @@ impl SseTransport {
 
         // Spawn background task to listen for SSE responses
         let pending_clone = pending.clone();
+        let tools_changed = Arc::new(AtomicBool::new(false));
+        let tools_changed_listener = Arc::clone(&tools_changed);
         let listener = tokio::spawn(async move {
             let mut buf = buffer; // carry over remaining buffer
             let mut utf8 = utf8; // carry the UTF-8 decoder tail across loops
-            while let Some(chunk) = bytes_stream.next().await {
-                let Ok(chunk) = chunk else { break };
-                buf.push_str(&utf8.push(&chunk));
-
-                // mcp-40 — bound the listener reassembly buffer. On overflow
-                // we drop the stream (break): pending requests then time out
-                // via the per-request oneshot bound rather than OOMing.
-                if buf.len() > MAX_SSE_BUFFER_BYTES {
-                    break;
-                }
-
+            loop {
+                // FerroxLabs/wayland#1175 — drain what is ALREADY buffered
+                // before awaiting more. The handshake loop breaks out of the
+                // middle of a chunk the moment it sees the `endpoint` event,
+                // so any event the server batched into that same chunk is
+                // sitting in `buf` right now. Parsing only after the next
+                // chunk arrives loses it outright when the server has nothing
+                // further to say — which is exactly the shape of a server that
+                // announces its tool list once and then goes quiet.
                 while let Some(event_end) = buf.find("\n\n") {
                     let event_block = buf[..event_end].to_string();
                     buf = buf[event_end + 2..].to_string();
 
                     let (event_type, event_data) = parse_sse_event(&event_block);
+
+                    // FerroxLabs/wayland#1175 — `tools/list_changed` is a
+                    // NOTIFICATION: it carries no `id`, so the response-routing
+                    // arm below drops it. This event stream is the only channel
+                    // an SSE server has to announce a tool it registered
+                    // mid-session, so detect it before the routing arm.
+                    if (event_type == "message" || event_type.is_empty())
+                        && notified_tools_changed(&event_data)
+                    {
+                        tools_changed_listener.store(true, Ordering::SeqCst);
+                        tracing::debug!("[mcp] SSE server signalled tools/list_changed");
+                        continue;
+                    }
 
                     if (event_type == "message" || event_type.is_empty())
                         && let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&event_data)
@@ -298,6 +317,19 @@ impl SseTransport {
                             let _ = sender.send(response);
                         }
                     }
+                }
+
+                let Some(chunk) = bytes_stream.next().await else {
+                    break;
+                };
+                let Ok(chunk) = chunk else { break };
+                buf.push_str(&utf8.push(&chunk));
+
+                // mcp-40 — bound the listener reassembly buffer. On overflow
+                // we drop the stream (break): pending requests then time out
+                // via the per-request oneshot bound rather than OOMing.
+                if buf.len() > MAX_SSE_BUFFER_BYTES {
+                    break;
                 }
             }
 
@@ -319,6 +351,7 @@ impl SseTransport {
             _listener: listener,
             request_timeout,
             closed: AtomicBool::new(false),
+            tools_changed,
         })
     }
 
@@ -450,6 +483,14 @@ impl McpTransport for SseTransport {
     fn is_alive(&self) -> bool {
         !self.closed.load(Ordering::SeqCst) && !self._listener.is_finished()
     }
+
+    /// FerroxLabs/wayland#1175 — without this override the trait default
+    /// (`false`) made `McpManager::refresh_signalled_tools` skip every SSE
+    /// server unconditionally, so a server attached at runtime over a URL had
+    /// its `tools/list_changed` ignored for the life of the session.
+    fn take_tools_changed(&self) -> bool {
+        self.tools_changed.swap(false, Ordering::SeqCst)
+    }
 }
 
 /// Parse a single SSE event block into (event_type, data)
@@ -575,6 +616,7 @@ mod tests {
             _listener: listener,
             request_timeout: std::time::Duration::from_secs(1),
             closed: AtomicBool::new(false),
+            tools_changed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -648,6 +690,7 @@ mod tests {
             _listener: tokio::spawn(async {}),
             request_timeout: Duration::from_millis(500),
             closed: std::sync::atomic::AtomicBool::new(false),
+            tools_changed: Arc::new(AtomicBool::new(false)),
         };
 
         let req = JsonRpcRequest::new(1, "tools/call", None);
@@ -725,6 +768,7 @@ mod tests {
             _listener: tokio::spawn(async {}),
             request_timeout: Duration::from_millis(500),
             closed: std::sync::atomic::AtomicBool::new(false),
+            tools_changed: Arc::new(AtomicBool::new(false)),
         };
 
         let req = JsonRpcRequest::new(1, "tools/call", None);
@@ -820,6 +864,7 @@ mod tests {
             // catch the regression.
             request_timeout: Duration::from_secs(30),
             closed: std::sync::atomic::AtomicBool::new(false),
+            tools_changed: Arc::new(AtomicBool::new(false)),
         };
 
         let req = JsonRpcRequest::new(1, "tools/call", None);

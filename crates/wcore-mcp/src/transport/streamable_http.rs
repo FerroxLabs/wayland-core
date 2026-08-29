@@ -1,11 +1,12 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
 use tokio::sync::Mutex;
 
-use super::{McpError, McpTransport};
+use super::{McpError, McpTransport, TOOLS_LIST_CHANGED};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 
 /// Cap on the SSE reassembly buffer for streamable-HTTP responses
@@ -40,10 +41,43 @@ fn redacted_body_preview(body: &[u8]) -> String {
 #[derive(Debug)]
 pub struct StreamableHttpTransport {
     client: wcore_egress::EgressClient,
+    /// FerroxLabs/wayland#1175 — the standalone event stream is long-lived, so
+    /// it cannot use `client`: that one carries a 120s whole-request timeout
+    /// which would tear the stream down every two minutes. Same SSRF policy,
+    /// same resolver, no total deadline.
+    stream_client: wcore_egress::EgressClient,
     url: String,
     headers: HeaderMap,
     session_id: Mutex<Option<String>>,
     next_id: AtomicU64,
+    /// FerroxLabs/wayland#1175 — set when the server sends
+    /// `notifications/tools/list_changed`, on either channel it has: a frame
+    /// interleaved in a POST's own SSE response, or the standalone GET event
+    /// stream. Take-and-cleared by [`McpTransport::take_tools_changed`].
+    tools_changed: Arc<AtomicBool>,
+    /// The standalone `GET`-with-`Accept: text/event-stream` listener, started
+    /// once the first response arrives (the session id is only known then).
+    /// `std::sync::Mutex` rather than tokio's so `Drop` can abort it.
+    event_stream: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Set by `close()`. Until FerroxLabs/wayland#1175 this transport had no
+    /// notion of being closed at all and inherited `is_alive() -> true`, which
+    /// was harmless only because it also inherited `take_tools_changed() ->
+    /// false`. Now that it reports tool changes, a closed transport that still
+    /// reads as alive would let `McpManager::refresh_signalled_tools` re-list
+    /// and RE-REGISTER the tools of a server the operator removed
+    /// (`close_server` closes the transport but leaves it in the manager's
+    /// map). So the two overrides ship together.
+    closed: AtomicBool,
+}
+
+impl Drop for StreamableHttpTransport {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.event_stream.lock()
+            && let Some(handle) = guard.take()
+        {
+            handle.abort();
+        }
+    }
 }
 
 impl StreamableHttpTransport {
@@ -124,6 +158,7 @@ impl StreamableHttpTransport {
         // and resolver so reqwest can actually dial 127.0.0.1/::1 (the default
         // SsrfSafeResolver drops loopback at connect time). Both variants keep
         // every non-loopback SSRF protection intact.
+        let stream_policy = egress_policy.clone();
         let builder = wcore_egress::EgressClient::builder()
             .policy(egress_policy)
             .pool_idle_timeout(std::time::Duration::from_secs(5))
@@ -142,17 +177,98 @@ impl StreamableHttpTransport {
                     wcore_tools::url_safety::SsrfSafeResolver,
                 ))
         };
+        // FerroxLabs/wayland#1175 — same policy and resolver, no total
+        // request deadline: this one only ever holds the long-lived event
+        // stream open.
+        let stream_builder = if allow_local {
+            wcore_egress::EgressClient::builder()
+                .policy(stream_policy)
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .redirect(wcore_tools::url_safety::ssrf_safe_redirect_policy_allow_loopback())
+                .dns_resolver(std::sync::Arc::new(
+                    wcore_tools::url_safety::LoopbackOkResolver,
+                ))
+        } else {
+            wcore_egress::EgressClient::builder()
+                .policy(stream_policy)
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .redirect(wcore_tools::url_safety::ssrf_safe_redirect_policy())
+                .dns_resolver(std::sync::Arc::new(
+                    wcore_tools::url_safety::SsrfSafeResolver,
+                ))
+        };
+
         let client = builder
+            .build()
+            .map_err(|e| McpError::Transport(format!("HTTP client initialization failed: {e}")))?;
+        let stream_client = stream_builder
             .build()
             .map_err(|e| McpError::Transport(format!("HTTP client initialization failed: {e}")))?;
 
         Ok(Self {
             client,
+            stream_client,
             url: url.to_string(),
             headers: header_map,
             session_id: Mutex::new(None),
             next_id: AtomicU64::new(1),
+            tools_changed: Arc::new(AtomicBool::new(false)),
+            event_stream: std::sync::Mutex::new(None),
+            closed: AtomicBool::new(false),
         })
+    }
+
+    /// FerroxLabs/wayland#1175 — open the server-to-client event stream, once.
+    ///
+    /// The MCP Streamable HTTP transport gives a server exactly two ways to
+    /// send a message the client did not ask for: interleaved in the SSE body
+    /// of a POST it is already answering, and this standalone
+    /// `GET`-with-`Accept: text/event-stream`. Without the second one, a
+    /// `tools/list_changed` announced while no request is in flight has
+    /// nowhere to go and is lost — which is the defect the ticket reports, for
+    /// the transport its own documented `/mcp add <url>` path uses.
+    ///
+    /// Started here rather than in `connect` because `connect` performs no I/O
+    /// and the `Mcp-Session-Id` a server binds its stream to only exists once
+    /// `initialize` has been answered.
+    ///
+    /// A server that does not implement the standalone stream answers `405`
+    /// (the spec's own answer); the listener exits and is never retried.
+    async fn ensure_event_stream(&self) {
+        {
+            let guard = match self.event_stream.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if guard.is_some() {
+                return;
+            }
+        }
+
+        let client = self.stream_client.clone();
+        let url = self.url.clone();
+        let mut headers = self.headers.clone();
+        if let Some(sid) = self.session_id.lock().await.as_ref()
+            && let Ok(value) = HeaderValue::from_str(sid)
+        {
+            headers.insert("Mcp-Session-Id", value);
+        }
+        let tools_changed = Arc::clone(&self.tools_changed);
+
+        let handle = tokio::spawn(async move {
+            listen_for_server_events(client, url, headers, tools_changed).await;
+        });
+
+        let mut guard = match self.event_stream.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.is_some() {
+            // Another caller won the race; keep theirs and drop ours.
+            handle.abort();
+        } else {
+            *guard = Some(handle);
+        }
     }
 
     pub fn next_id(&self) -> u64 {
@@ -175,6 +291,21 @@ impl StreamableHttpTransport {
         req.body(body.to_string())
     }
 
+    /// Route a server-initiated frame by its `method`.
+    ///
+    /// FerroxLabs/wayland#1175 — `notifications/tools/list_changed` is the
+    /// only one the manager acts on today. Anything else is logged and
+    /// dropped, which is what an MCP client is allowed to do with a method it
+    /// does not implement.
+    fn note_server_message(&self, method: &str) {
+        if method == TOOLS_LIST_CHANGED {
+            self.tools_changed.store(true, Ordering::SeqCst);
+            tracing::debug!("[mcp] streamable-http server signalled tools/list_changed");
+        } else {
+            tracing::debug!(method, "[mcp] ignoring server-initiated frame");
+        }
+    }
+
     /// Parse response based on content type
     async fn parse_response(
         &self,
@@ -186,6 +317,11 @@ impl StreamableHttpTransport {
         {
             *self.session_id.lock().await = Some(sid_str.to_string());
         }
+
+        // FerroxLabs/wayland#1175 — first answered request is the earliest
+        // point the standalone server-to-client stream can be opened with the
+        // right session binding. Idempotent.
+        self.ensure_event_stream().await;
 
         let content_type = response
             .headers()
@@ -248,17 +384,13 @@ impl StreamableHttpTransport {
                 let event_block = buffer[..event_end].to_string();
                 buffer = buffer[event_end + 2..].to_string();
 
-                // Extract data lines
-                let mut data_lines = Vec::new();
-                for line in event_block.lines() {
-                    if let Some(value) = line.strip_prefix("data:") {
-                        data_lines.push(value.trim().to_string());
-                    }
-                }
-
-                let data = data_lines.join("\n");
+                let data = sse_data_payload(&event_block);
                 match classify_sse_frame(&data) {
                     SseFrame::Empty | SseFrame::Skip => continue,
+                    SseFrame::ServerMessage { method } => {
+                        self.note_server_message(&method);
+                        continue;
+                    }
                     SseFrame::Response(rpc_response) => return Ok(*rpc_response),
                     SseFrame::Error(err) => return Err(err),
                 }
@@ -280,6 +412,12 @@ enum SseFrame {
     /// A JSON-RPC error frame WITHOUT a usable `id` — surfaced structurally
     /// instead of being discarded.
     Error(McpError),
+    /// FerroxLabs/wayland#1175 — a SERVER-INITIATED message: it carries a
+    /// `method`, so it is a notification or a request from the server, never a
+    /// reply to ours. It used to deserialize into `JsonRpcResponse` (every
+    /// field but `jsonrpc` is optional) and be returned as the reply, losing
+    /// the real one; now it is routed by method and the scan continues.
+    ServerMessage { method: String },
     /// Non-empty but neither a response nor an error frame; logged and skipped.
     Skip,
 }
@@ -296,6 +434,18 @@ enum SseFrame {
 fn classify_sse_frame(data: &str) -> SseFrame {
     if data.is_empty() {
         return SseFrame::Empty;
+    }
+
+    // FerroxLabs/wayland#1175 — a `method` means the server is talking to us,
+    // not answering us. Must be classified BEFORE the response arm: a
+    // notification has no `id` and no `error`, so it parses cleanly into
+    // `JsonRpcResponse` and would otherwise be handed back as the reply.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
+        && let Some(method) = value.get("method").and_then(|m| m.as_str())
+    {
+        return SseFrame::ServerMessage {
+            method: method.to_string(),
+        };
     }
 
     // Happy path: a well-formed JSON-RPC response (result or error, with id).
@@ -324,6 +474,11 @@ fn classify_sse_frame(data: &str) -> SseFrame {
 #[async_trait]
 impl McpTransport for StreamableHttpTransport {
     async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(McpError::Transport(
+                "streamable-http MCP transport is closed".into(),
+            ));
+        }
         let body = serde_json::to_string(req)
             .map_err(|e| McpError::Transport(format!("JSON serialize error: {}", e)))?;
 
@@ -366,9 +521,151 @@ impl McpTransport for StreamableHttpTransport {
     }
 
     async fn close(&self) -> Result<(), McpError> {
-        // No persistent connection to close for HTTP
+        // FerroxLabs/wayland#1175 — the standalone event stream IS a
+        // persistent connection now, so it has to be torn down here as well as
+        // in `Drop` (the manager closes transports it keeps alive in a map).
+        let handle = {
+            let mut guard = match self.event_stream.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.take()
+        };
+        if let Some(handle) = handle {
+            handle.abort();
+        }
+        self.closed.store(true, Ordering::SeqCst);
         Ok(())
     }
+
+    /// FerroxLabs/wayland#1175 — see [`StreamableHttpTransport::closed`]. The
+    /// trait default (`true`, correct for a transport with no backing process)
+    /// stopped being safe the moment this transport started reporting tool
+    /// changes.
+    fn is_alive(&self) -> bool {
+        !self.closed.load(Ordering::SeqCst)
+    }
+
+    /// FerroxLabs/wayland#1175 — without this override the trait default
+    /// (`false`) made `McpManager::refresh_signalled_tools` skip every
+    /// Streamable HTTP server unconditionally.
+    fn take_tools_changed(&self) -> bool {
+        self.tools_changed.swap(false, Ordering::SeqCst)
+    }
+}
+
+/// How long to wait before re-opening a standalone event stream the server
+/// closed. Bounds reconnect traffic against a server that accepts the GET and
+/// hangs up immediately.
+const EVENT_STREAM_RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Consecutive zero-byte streams after which the listener gives up. A server
+/// that accepts the GET and closes it without sending anything, repeatedly,
+/// has no standalone stream in any useful sense; retrying forever would be
+/// unbounded background traffic for no signal.
+const EVENT_STREAM_MAX_EMPTY_ATTEMPTS: u32 = 3;
+
+/// Hold the standalone server-to-client SSE stream open and record every
+/// `tools/list_changed` the server announces on it.
+///
+/// FerroxLabs/wayland#1175. Exits — permanently — when the server says it has
+/// no such stream (any non-2xx, of which `405` is the spec's answer), when the
+/// GET cannot be made at all, or after
+/// [`EVENT_STREAM_MAX_EMPTY_ATTEMPTS`] consecutive streams that carried no
+/// bytes. Otherwise it re-opens the stream after
+/// [`EVENT_STREAM_RECONNECT_DELAY`], because a server closing an idle stream
+/// is normal and must not silence the session.
+async fn listen_for_server_events(
+    client: wcore_egress::EgressClient,
+    url: String,
+    headers: HeaderMap,
+    tools_changed: Arc<AtomicBool>,
+) {
+    use futures::StreamExt;
+
+    let mut empty_attempts = 0u32;
+    loop {
+        let response = match client
+            .get(&url)
+            .headers(headers.clone())
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "[mcp] streamable-http standalone event stream could not be opened"
+                );
+                return;
+            }
+        };
+
+        if !response.status().is_success() {
+            tracing::debug!(
+                status = %response.status(),
+                "[mcp] streamable-http server offers no standalone event stream; \
+                 its tools/list_changed will only be seen inside a response stream"
+            );
+            return;
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut utf8 = wcore_types::utf8_stream::Utf8StreamDecoder::new();
+        let mut saw_bytes = false;
+
+        while let Some(chunk) = stream.next().await {
+            let Ok(chunk) = chunk else { break };
+            saw_bytes = true;
+            buffer.push_str(&utf8.push(&chunk));
+
+            // mcp-40 — the same reassembly bound the other SSE readers use.
+            if buffer.len() > MAX_SSE_BUFFER_BYTES {
+                break;
+            }
+
+            while let Some(event_end) = buffer.find("\n\n") {
+                let event_block = buffer[..event_end].to_string();
+                buffer = buffer[event_end + 2..].to_string();
+
+                if let SseFrame::ServerMessage { method } =
+                    classify_sse_frame(&sse_data_payload(&event_block))
+                    && method == TOOLS_LIST_CHANGED
+                {
+                    tools_changed.store(true, Ordering::SeqCst);
+                    tracing::debug!("[mcp] streamable-http server signalled tools/list_changed");
+                }
+            }
+        }
+
+        if saw_bytes {
+            empty_attempts = 0;
+        } else {
+            empty_attempts += 1;
+            if empty_attempts >= EVENT_STREAM_MAX_EMPTY_ATTEMPTS {
+                tracing::debug!(
+                    "[mcp] streamable-http standalone event stream carried nothing \
+                     {EVENT_STREAM_MAX_EMPTY_ATTEMPTS} times; giving up"
+                );
+                return;
+            }
+        }
+
+        tokio::time::sleep(EVENT_STREAM_RECONNECT_DELAY).await;
+    }
+}
+
+/// Join the `data:` lines of one SSE event block into its payload.
+fn sse_data_payload(event_block: &str) -> String {
+    let mut data_lines = Vec::new();
+    for line in event_block.lines() {
+        if let Some(value) = line.strip_prefix("data:") {
+            data_lines.push(value.trim().to_string());
+        }
+    }
+    data_lines.join("\n")
 }
 
 #[cfg(test)]

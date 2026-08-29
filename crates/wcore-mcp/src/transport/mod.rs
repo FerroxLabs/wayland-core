@@ -7,6 +7,31 @@ use async_trait::async_trait;
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 
+/// The MCP notification a server sends when its tool list changes.
+pub(crate) const TOOLS_LIST_CHANGED: &str = "notifications/tools/list_changed";
+
+/// Is this inbound frame the `tools/list_changed` notification?
+///
+/// Parsed as a generic JSON value rather than a typed notification struct:
+/// the only field that matters is `method`, and a malformed or unrelated
+/// notification must be a plain `false`, never an error that kills the reader.
+///
+/// FerroxLabs/wayland#1175 — lives here rather than in `stdio` because all
+/// THREE transports need it. It was stdio-private while `take_tools_changed`
+/// was stdio-only, which is exactly the defect: a server attached over SSE or
+/// Streamable HTTP had its announcement discarded for the life of the session.
+pub(crate) fn notified_tools_changed(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("method")
+                .and_then(|method| method.as_str())
+                .map(|method| method == TOOLS_LIST_CHANGED)
+        })
+        .unwrap_or(false)
+}
+
 /// Transport abstraction for MCP communication
 #[async_trait]
 pub trait McpTransport: Send + Sync {
@@ -83,4 +108,42 @@ pub enum McpError {
     /// operational error they can retry.
     #[error("MCP server launch refused: {0}")]
     MalwareBlocked(String),
+}
+
+#[cfg(test)]
+mod tests {
+    /// FerroxLabs/wayland#1175 — `take_tools_changed` has a trait DEFAULT of
+    /// `false`, and for two of the three transports nobody overrode it. That
+    /// default is silent: an SSE or Streamable HTTP server announced a tool and
+    /// `McpManager::refresh_signalled_tools` skipped it for the life of the
+    /// session, with no warning anywhere.
+    ///
+    /// A behavioural test per transport cannot catch the FOURTH transport
+    /// somebody adds next year, so this grades the class: every
+    /// `impl McpTransport` in this module tree must say what it does about
+    /// server-initiated tool-list changes.
+    #[test]
+    fn every_transport_decides_take_tools_changed_for_itself() {
+        const SOURCES: [(&str, &str); 3] = [
+            ("stdio", include_str!("stdio.rs")),
+            ("sse", include_str!("sse.rs")),
+            ("streamable_http", include_str!("streamable_http.rs")),
+        ];
+
+        for (name, source) in SOURCES {
+            // POSITIVE CONTROL: prove the file really is a transport impl
+            // before reading anything into the absence below.
+            assert!(
+                source.contains("impl McpTransport for"),
+                "{name} no longer implements McpTransport — this lint is \
+                 grading the wrong file"
+            );
+            assert!(
+                source.contains("fn take_tools_changed"),
+                "{name} inherits the `false` default for take_tools_changed, so \
+                 a tools/list_changed it receives is discarded and the tool \
+                 stays uncallable for the session (FerroxLabs/wayland#1175)"
+            );
+        }
+    }
 }
