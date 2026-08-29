@@ -5,57 +5,54 @@
 > verification) and `PLAN-ROUTING.json` (assignment). If this disagrees with anyone's
 > recollection, this is right and the recollection is wrong — that is the entire point.
 
-Rendered 2026-08-29 14:26 UTC
+Rendered 2026-08-29 17:12 UTC
 
 ## VERDICT: BLOCKED
 
-**41 criteria block the 0.13.12 release.** Full list in §3.
+**25 criteria block the 0.13.12 release.** Full list in §3.
 
 | state | count | means |
 |---|---:|---|
 | DONE | 32 | met, evidence resolves, independently verified |
-| CLAIMED | 195 | met but NOT yet independently verified — never report as done |
-| OPEN | 45 | outstanding work |
-| HANDOFF | 1 | another team's half, with a filed ticket carrying it |
+| CLAIMED | 214 | met but NOT yet independently verified — never report as done |
+| OPEN | 33 | outstanding work |
+| HANDOFF | 10 | another team's half, with a filed ticket carrying it |
+
+### ⚠ 14 UNROUTED — nobody is doing these
+
+An unrouted criterion is how work goes missing. The render fails until each has a lane.
+
+- `wl#1228 c1` — A chat id the bot may post to is RECORDED in the live-cap credentials home, not merely used once
+- `wl#1228 c2` — The astral run is executed and both arms of its LIVE_CAP_UNIT block are pasted onto the issue
+- `wl#1228 c3` — The verdict is APPLIED: a refusal at 4,096 astral scalars drops the declared cap to 2,048, an accept leaves 4,
+- `wl#1228 c4` — docs/delivery-semantics.md records the unit, the date, and which arm settled it
+- `core#366 d1` — The product can enumerate wayland-created containers WITHOUT being given a nonce -- a key-presence scan reacha
+- `core#366 d2` — The nonce-scoped scan_orphans(nonce) contract is left intact for the caller that genuinely wants one run's orp
+- `core#366 d3` — An operator surface reports a leftover it did not create in this process -- one whose nonce is not in the live
+- `core#366 d4` — The conformance check at conformance.rs:340 is re-examined: it asserts enumerated && found.is_empty() for a no
+- `core#366 d5` — A regression test plants a labelled leftover under a nonce the running process has never used, and asserts the
+- `core#366 d6` — Whether reclamation is in scope is DECIDED and recorded: state whether an unscoped scan only reports, or also 
+- `core#373 c1` — The mechanism is named in code: what makes the ERROR not reach the scoped subscriber. Not inferred -- two infe
+- `core#373 c3` — The fix arm scores 0 failures at n>=100 on that same instrument, and the baseline is re-measured at the same n
+- `core#373 c4` — Both osv_check log-visibility tests keep their exact-equality assertion on [Level(Error)]
+- `core#373 c5` — cargo test --workspace --lib --no-fail-fast passes N>=10 consecutive times on hetzner-dsm, run count recorded
 
 ## §3 BLOCKING — the definition of done for 0.13.12
 
-### `atref-residuals` — @-ref secret guard: the residuals #339 shipped past
-
-Runs on: **hetzner**  ·  1-build
+### `UNROUTED`
 
 | criterion | issue | what must become true |
 |---|---|---|
-| `c4` | core#322 | The TUI @-ref directory walk gives the same treatment to a store reached under another name |
-
-### `browser-revive` — Browser tool non-functional by default
-
-Runs on: **hetzner**  ·  3-unrouted-pickup
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c5` | core#113 | The deny-by-default browsing posture is recorded as a decision on the issue and the issue is dispositioned |
-
-### `channel-caps` — Message caps: matrix/msteams probe shape, Telegram UTF-16, WhatsApp
-
-Runs on: **hetzner**  ·  1-build
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c8` | wl#934 | Telegram's unit question is settled: the cap is characters or UTF-16 code units, measured rather than assumed |
-
-### `container-latch` — Container backend latches on a leftover name, and attests a run that never happened
-
-Runs on: **hetzner**  ·  1-build
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c1` | core#365 | A container left in Created under the name a new task would take does not fail that task -- either the name carries the nonce, or the submit path clea |
-| `c2` | core#365 | A daemon-level refusal is not reported as a task exit: exit-125 from docker run produces a distinct outcome, never a receipt asserting the task ran an |
-| `c3` | core#365 | The daemon's stderr reaches the operator on a daemon-level failure rather than being captured into a receipt nobody reads |
-| `c4` | core#365 | A red arm is quoted verbatim: the new guard reverted, the test failing, restored and green, with the mutation shown to have landed on code |
-| `c5` | core#365 | conformance_matrix passes on a host that has run it before with a leftover container present -- the regression test creates the wedged container itsel |
-| `c6` | core#365 | The orphan-scan path is checked for the same latch: state whether docker ps -a --filter label=wayland.task.nonce= would have found these two, and if n |
+| `d1` | core#366 | The product can enumerate wayland-created containers WITHOUT being given a nonce -- a key-presence scan reachable from an operator-facing surface, not |
+| `d2` | core#366 | The nonce-scoped scan_orphans(nonce) contract is left intact for the caller that genuinely wants one run's orphans (cancel()); the unscoped scan is an |
+| `d3` | core#366 | An operator surface reports a leftover it did not create in this process -- one whose nonce is not in the live registry |
+| `d4` | core#366 | The conformance check at conformance.rs:340 is re-examined: it asserts enumerated && found.is_empty() for a nonce chosen so nothing can ever be found |
+| `d5` | core#366 | A regression test plants a labelled leftover under a nonce the running process has never used, and asserts the unscoped scan reports it -- creating th |
+| `d6` | core#366 | Whether reclamation is in scope is DECIDED and recorded: state whether an unscoped scan only reports, or also reclaims, and justify it against #365's  |
+| `c1` | core#373 | The mechanism is named in code: what makes the ERROR not reach the scoped subscriber. Not inferred -- two inferences have already failed |
+| `c3` | core#373 | The fix arm scores 0 failures at n>=100 on that same instrument, and the baseline is re-measured at the same n in the same session |
+| `c4` | core#373 | Both osv_check log-visibility tests keep their exact-equality assertion on [Level(Error)] |
+| `c5` | core#373 | cargo test --workspace --lib --no-fail-fast passes N>=10 consecutive times on hetzner-dsm, run count recorded |
 
 ### `decompose` — File each cross-team remainder as its OWN ticket with a contract
 
@@ -64,11 +61,7 @@ Runs on: **gh**  ·  2-decompose
 | criterion | issue | what must become true |
 |---|---|---|
 | `c5` | core#314 | A grant refusal is machine-readable rather than untyped English prose in an Info frame |
-| `c2` | wl#1088 | The user-visible half — the chat interface no longer reports Read/Glob/Write/Edit as restricted |
-| `c3` | wl#1151 | The transcript stops assembling out of order |
 | `c4` | wl#388 | The remaining four bullets of this ticket's own Expected Behavior list are met |
-| `c3` | wl#434 | The alias-resolves-server-side path is closed end to end |
-| `c5` | wl#998 | Desktop sends the per-tool field on the ACP path |
 
 ### `desktop-run` — Live Desktop session measurement
 
@@ -78,37 +71,6 @@ Runs on: **Desktop app**  ·  2-platform
 |---|---|---|
 | `c4` | wl#559 | This ticket's own close condition: ONE real 26-turn Desktop team run showing non-zero cache_read |
 
-### `flake-584` — Shared-process lib suite: the #584 fixture misses its truncation boundary under load
-
-Runs on: **hetzner**  ·  1-build
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c1` | core#361 | The mechanism is named: what makes output lack truncated under load is identified in code, not inferred |
-| `c2` | core#361 | The failure is reproduced deliberately at least once, with the command and environment recorded, before any fix is written |
-| `c3` | core#361 | The fixture reaches the truncation boundary deterministically, independent of scheduling |
-| `c4` | core#361 | Both assertions survive: the anti-vacuity control at mod.rs:5744 and the fragment assertion at :5749 |
-| `c5` | core#361 | A red arm is quoted verbatim: the fixture failing before the change, from a real run |
-| `c6` | core#361 | After the fix, cargo test --workspace --lib --no-fail-fast passes N>=10 consecutive times on the build host, and the run count is recorded |
-
-### `flux-contract` — Anvil/Elevation loop-ownership contract
-
-Runs on: **hetzner**  ·  3-unrouted-pickup
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c3` | wl#863 | F1 confirmed for the current deployment: Elevation is unreachable by default from flux-fast, flux-standard, flux-reasoning and flux-auto |
-| `c4` | wl#863 | F3 server half: requests carrying loop_owner or a client nonce bypass or vary the Flux semantic cache |
-| `c5` | wl#863 | F4: the bandit routes loop_owner requests to a tool-calling-capable arm, or a flux-agentic alias with that guarantee exists |
-
-### `instrument-integrity` — Prove the instruments can fail: mutation + measurement arms
-
-Runs on: **hetzner**  ·  1-build
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c5` | core#352 | A red arm is quoted verbatim for each platform arm |
-
 ### `macos-ci` — macOS arms via the lane/** CI wildcard
 
 Runs on: **macOS CI**  ·  2-platform
@@ -117,21 +79,13 @@ Runs on: **macOS CI**  ·  2-platform
 |---|---|---|
 | `c4` | core#352 | macOS: the pgrep arm is EXECUTED in CI at least once with the run cited, or deleted as unreachable |
 
-### `mcp-gate-mode` — MCP malware gate: explicit permissive/strict operator choice
+### `prompt-cache` — Prompt-cache collapse and re-billed context
 
 Runs on: **hetzner**  ·  1-build
 
 | criterion | issue | what must become true |
 |---|---|---|
-| `c7` | core#354 | The already-shipping non-session MCP launch path reads the operator's chosen mode, not the uninstalled permissive default |
-
-### `telegram-topic` — Telegram forum-topic target sent as reply_to_message_id, never message_thread_id
-
-Runs on: **hetzner**  ·  1-build
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c6` | core#363 | Discord does not regress: a thread channel id never reaches message_reference |
+| `c6` | wl#559 | The skill-router hint and PrePrompt hook contributions no longer land at messages[1] on turn 1 |
 
 ### `win-owned-tree` — OwnedTree kills the process tree on Windows, not the leaf
 
@@ -139,7 +93,7 @@ Runs on: **hetzner**  ·  1-build
 
 | criterion | issue | what must become true |
 |---|---|---|
-| `c6` | core#358 | clippy --target x86_64-pc-windows-msvc -p wcore-cli --all-targets -D warnings is clean |
+| `c4` | core#358 | A negative control passes in both arms, so a change that kills too much fails here |
 
 ### `win-runs` — Windows measurement arms - serialize, ONE box
 
@@ -154,8 +108,6 @@ Runs on: **SeanDesktop**  ·  2-platform
 | `c3` | core#342 | The same guarantee holds on Windows, where the product ships |
 | `c5` | core#342 | The two arms asserting a Unix-only guarantee state the Windows truth, from a measured Windows rate |
 | `c5` | core#350 | The issue's own close condition is met: a green nightly-windows-soak run against this tree |
-| `c2` | core#358 | A test grades the grandchild case ON WINDOWS: a direct child with a detached grandchild, guard dropped while unwinding, both gone afterwards |
-| `c3` | core#358 | The red arm is quoted VERBATIM from a real Windows run, showing the grandchild surviving before the change |
 | `c5` | core#358 | The CI run that executed the Windows arm is cited by URL |
 | `c5` | wl#1164 | A live confirmation run on SeanDesktop is recorded before the change lands |
 
@@ -167,9 +119,18 @@ it appears in §3 as blocking, because that is what it is.
 
 | criterion | issue | owner | carried by |
 |---|---|---|---|
+| `c5` | core#113 | maintainer | FerroxLabs/wayland#1229 |
+| `c2` | wl#1088 | desktop | FerroxLabs/wayland#1223 |
+| `c3` | wl#1151 | desktop | FerroxLabs/wayland#1224 |
+| `c3` | wl#434 | flux | FerroxLabs/wayland#1226 |
+| `c3` | wl#863 | flux | FerroxLabs/wayland#1227 |
+| `c4` | wl#863 | flux | FerroxLabs/wayland#1227 |
+| `c5` | wl#863 | flux | FerroxLabs/wayland#1227 |
 | `c5` | wl#934 | maintainer | FerroxLabs/wayland#1186 |
+| `c8` | wl#934 | maintainer | FerroxLabs/wayland#1228 |
+| `c5` | wl#998 | desktop | FerroxLabs/wayland#1225 |
 
-## §5 CLAIMED BUT UNVERIFIED — 195
+## §5 CLAIMED BUT UNVERIFIED — 214
 
 Marked `met` with resolving evidence, but no independent verifier has confirmed the lane.
 Historically this is exactly where a partial hides: a criterion written thin reads `met`
@@ -180,7 +141,7 @@ while the reported bug is still live. Do not report these as done.
 - **core#244** — c1, c2
 - **core#253** — c1, c2, c3, c5, c6, c7
 - **core#314** — c1, c2, c3, c4
-- **core#322** — c1, c2, c3
+- **core#322** — c1, c2, c3, c4
 - **core#323** — c1, c2, c3, c4
 - **core#325** — c1, c2, c3, c4
 - **core#335** — c1, c2, c3, c4
@@ -191,18 +152,21 @@ while the reported bug is still live. Do not report these as done.
 - **core#340** — c1, c2, c3, c4, c5
 - **core#342** — c1, c2, c4
 - **core#350** — c1, c2, c4
-- **core#352** — c1, c2, c3
+- **core#352** — c1, c2, c3, c5
 - **core#353** — c1, c2, c3, c4
-- **core#354** — c1, c2, c3, c4, c5, c6
+- **core#354** — c1, c2, c3, c4, c5, c6, c7
 - **core#356** — c1, c2, c3, c4
-- **core#358** — c1, c4
-- **core#360** — c1, c3
-- **core#363** — c1, c2, c3, c4, c5
+- **core#358** — c1, c2, c3, c6
+- **core#360** — c1, c3, c6
+- **core#361** — c1, c2, c3, c4, c5, c6
+- **core#363** — c1, c2, c3, c4, c5, c6
+- **core#365** — c1, c2, c3, c4, c5, c6
+- **core#373** — c2
 - **wl#174** — c1, c2, c3, c4, c5
 - **wl#305** — c1
 - **wl#388** — c1, c2, c3
 - **wl#434** — c1
-- **wl#559** — c1, c2, c6
+- **wl#559** — c1, c2
 - **wl#863** — c1, c2
 - **wl#908** — c1, c2, c3
 - **wl#934** — c1, c2, c3, c4, c6
