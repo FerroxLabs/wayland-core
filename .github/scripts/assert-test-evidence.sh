@@ -89,3 +89,36 @@ if [ ! -f "$GRADER" ]; then
 fi
 echo ""
 bash "$GRADER"
+RETRY_RC=$?
+
+# ── A COUNT OF FAILURES IS NOT A SET OF FAILURES (wayland-core#367) ────────
+#
+# The two gates above prove the suite RAN and that no failure was retried into
+# silence. Neither can tell one failing test from another. A workspace run on
+# `integ/f13` reported `1 failed`; this repository has a standing known
+# failure, so `1 failed` was read as `the known 1 failed`. It was a different
+# test, and what shipped was a never-merge red-arm instrument that reopened a
+# process-tree leak (wayland#1156). Three more commits landed on top before
+# anyone opened the name.
+#
+# Delegated and invoked BY PATH for the same reasons as the retry grader: one
+# responsibility per file, one wiring to keep in sync, and fail-closed on its
+# own absence — a gate that can be silently deleted is worth as little as one
+# that cannot fail.
+#
+# Its exit code is combined rather than short-circuited: both gates read the
+# same evidence and a reader who fixes only the first complaint should still
+# see the second on the same run.
+SETGRADER="$(cd "$(dirname "$0")" && pwd)/grade-failing-set.sh"
+if [ ! -f "$SETGRADER" ]; then
+  echo "::error title=Failing-set gate missing::${SETGRADER} is not present, so no run on this repository is comparing its failing-test SET against .config/known-failing-tests.txt (wayland-core#367). Restore it rather than removing this call."
+  exit 1
+fi
+echo ""
+bash "$SETGRADER"
+SET_RC=$?
+
+if [ "$RETRY_RC" -ne 0 ] || [ "$SET_RC" -ne 0 ]; then
+  exit 1
+fi
+exit 0

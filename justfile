@@ -87,6 +87,16 @@ test-ci:
 flake-gate:
     EVIDENCE_DIR=target/nextest/ci bash .github/scripts/grade-retry-flakes.sh
 
+# Compare a local CI-profile run's failing-test SET against the named
+# allowlist (wayland-core#367).
+#
+# This is the one to run before calling an integration branch clean. `N failed`
+# is not `the known N failed`: a red-arm instrument reached integ/f13 and
+# survived three commits because the count matched and nobody opened the names.
+# Reads target/nextest/ci/junit.xml, which only `--profile ci` writes.
+failing-set-gate:
+    EVIDENCE_DIR=target/nextest/ci bash .github/scripts/grade-failing-set.sh
+
 # Run a single test by name
 test-one NAME:
     vx cargo nextest run --workspace -E 'test({{ NAME }})'
