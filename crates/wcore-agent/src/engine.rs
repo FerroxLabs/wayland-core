@@ -37241,8 +37241,7 @@ mod retry_wedge_protection_tests {
             &self,
             _: &LlmRequest,
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
-            self.sends
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(url) = self.url.as_deref() {
                 let client = wcore_egress::EgressClient::new()
                     .with_policy(Arc::new(wcore_egress::AllowAllPolicy));
@@ -37336,7 +37335,9 @@ mod retry_wedge_protection_tests {
         engine.output = Arc::new(TestSink::new());
         if let (Some(sid), Some(dir)) = (durable, dir.as_ref()) {
             let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
-            let active = manager.create_for_run("test", "m", "/tmp", Some(sid)).unwrap();
+            let active = manager
+                .create_for_run("test", "m", "/tmp", Some(sid))
+                .unwrap();
             engine.session_manager = Some(manager);
             engine.current_session = Some(active.session);
             engine.session_journal = Some(active.journal);
@@ -37451,9 +37452,91 @@ mod retry_wedge_protection_tests {
             "the admission must say the partial work is not an answer: \
              {answer_stream:?}"
         );
-
     }
 
+    /// #388, Expected-Behavior bullet 2 — "preserve a checkpoint and allow the
+    /// user to continue" — on the exit that fires on this ticket's own symptom.
+    ///
+    /// A regression guard, not a fix: the conversation is ALREADY canonical
+    /// when the gate stops the run, because `sync_journal_conversation` runs
+    /// once per attempt. That was measured rather than assumed — a candidate
+    /// `save_session_mirror()` at the gate left every arm green and was dropped
+    /// instead of shipped. What this pins is that the property keeps holding,
+    /// because it is the only thing standing between a stalled long task and
+    /// work the user has to redo from scratch.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_stalled_run_leaves_its_conversation_durable() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "m", "/tmp", Some("38800000c6e5"))
+            .unwrap();
+        let journal = active.journal.clone();
+
+        let provider = Arc::new(DurableScriptedProvider {
+            scripts: Mutex::new(
+                vec![
+                    vec![LlmEvent::Error("boom".into())],
+                    vec![LlmEvent::Error("boom again".into())],
+                ]
+                .into(),
+            ),
+            sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            url: Some(server.uri()),
+        });
+        let mut engine = wedge_engine(provider);
+        engine.output = Arc::new(TestSink::new());
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
+        engine.messages = tool_round_history("BigTool blew up", true);
+        let result = engine.run("try again", "m-388-durable").await;
+        drop(engine);
+
+        assert!(
+            matches!(&result, Err(super::AgentError::ApiError(msg)) if msg.contains("BigTool")),
+            "this arm must reach the output-stall gate: {result:?}"
+        );
+        let conversation = journal.state().expect("journal state").conversation;
+        let carries_the_turn = conversation.iter().any(|value| {
+            serde_json::from_value::<Message>(value.clone())
+                .map(|message| {
+                    message.content.iter().any(
+                        |b| matches!(b, ContentBlock::ToolUse { name, .. } if name == "BigTool"),
+                    )
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            carries_the_turn,
+            "#388: a run the stall gate stopped must leave its conversation \
+             canonical — without it a provider stall becomes work redone from \
+             scratch. Durable conversation held {} message(s)",
+            conversation.len()
+        );
+        assert!(
+            conversation.iter().any(|value| {
+                serde_json::from_value::<Message>(value.clone())
+                    .map(|message| {
+                        message.content.iter().any(
+                            |b| matches!(b, ContentBlock::Text { text } if text == "try again"),
+                        )
+                    })
+                    .unwrap_or(false)
+            }),
+            "the prompt that started the stopped turn must be durable too, else \
+             a resume cannot continue from it. Held: {conversation:?}"
+        );
+    }
 
     /// #388 — a stream failure on a turn whose last tool round FAILED must
     /// still retry on a durable session.
