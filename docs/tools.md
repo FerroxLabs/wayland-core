@@ -171,18 +171,31 @@ Execute a shell command and return the result.
   uncommitted work can be lost this way even though Write and Edit protect it.
 - Default timeout: 120 seconds, max 600 seconds
 - Returns exit code, stdout, and stderr
-- Interpreter: `sh -c` on Unix, `cmd /C` on Windows. **Windows override** — run
-  commands through Windows PowerShell (`powershell -NoProfile -Command`) or
-  PowerShell 7+ (`pwsh`) instead of `cmd`:
+- Interpreter: `sh -c` on Unix. On Windows it is a real `bash -c` when this
+  host has one — Git for Windows or MSYS2, found at its KNOWN install location
+  (`%ProgramFiles%\Git`, `%ProgramFiles(x86)%\Git`, `%LOCALAPPDATA%\Programs\Git`),
+  never by a bare `PATH` lookup. `%SystemRoot%\System32\bash.exe` is refused: it
+  is the WSL launcher, and it would run your command inside a Linux
+  distribution against `/mnt/c` paths. So is the `WindowsApps` Store alias
+  stub. With no acceptable bash the interpreter is `cmd /S /C`, as before. The
+  tool description always tells the model which of these it actually got.
+- **Windows override** — run commands through Windows PowerShell
+  (`powershell -NoProfile -Command`) or PowerShell 7+ (`pwsh`), or pin `cmd`,
+  instead of the resolved default:
 
   ```toml
   [tools]
   windows_shell = "powershell"   # or "pwsh"
   ```
 
-  Or set `WAYLAND_BASH_SHELL=powershell` / `=pwsh` at runtime, which overrides
-  the config key. Either way it affects the Bash tool only — hook, MCP, and
-  skill shells keep `cmd /C`. No-op on Unix.
+  Or set `WAYLAND_BASH_SHELL=powershell` / `=pwsh` / `=cmd` at runtime, which
+  overrides the config key. `bash`, or a path naming one, keeps the resolved
+  default; any other value means `cmd`. Either way it affects the Bash tool
+  only — hook, MCP, and skill shells keep `cmd /C`. No-op on Unix.
+
+  Under `WAYLAND_SANDBOX=appcontainer` the interpreter is downgraded to `cmd`
+  whatever you select: `cmd.exe` is the only shell that loads under that
+  sandbox's Low-integrity restricted token.
 
 ### The command floor
 
