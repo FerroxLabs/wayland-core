@@ -66,6 +66,10 @@ use wcore_eval_scenarios::fixtures::openai::{OpenAiFixtureScript, OpenAiStep};
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
 use wcore_eval_scenarios::tempenv::{self, TempEnv};
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 const FIXTURE_MODEL: &str = "fixture-chat-v1";
 const FIXTURE_KEY: &str = "fixture-local-token";
 const TURNS: usize = 3;
@@ -129,8 +133,9 @@ async fn run_degraded_repl() -> (String, String) {
         .with_base_url(fixture.base_url());
     let env: TempEnv = tempenv::build(&provider).expect("build hermetic Core environment");
 
-    let mut child = Command::new(binary())
-        .arg("--no-tui")
+    let mut child = OwnedTree::new(
+        Command::new(binary())
+            .arg("--no-tui")
         .arg("--provider")
         .arg("openai")
         .arg("--model")
@@ -157,12 +162,13 @@ async fn run_degraded_repl() -> (String, String) {
                 env.path().join("missing-secret-service-bus").display()
             ),
         )
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn wayland-core");
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn wayland-core"),
+    );
 
     let mut stdin = child.stdin.take().expect("Core stdin pipe");
     let mut script = String::new();

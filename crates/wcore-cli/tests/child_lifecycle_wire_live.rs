@@ -34,6 +34,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
 #[path = "support/mod.rs"]
 mod support;
+use support::owned_tree::OwnedTree;
 use support::{mock_llm, pty, vault};
 
 /// Marker planted in the child's prompt so the mock can tell parent from child.
@@ -155,13 +156,15 @@ fn drive(home: &Path) -> WireRun {
     // under a hermetic WAYLAND_HOME, so the turn never reaches a provider and
     // every observation would be an absence rather than a verdict.
     let guard = vault::configure_process(&mut command);
-    let spawned = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+    let mut child = OwnedTree::new(
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the shipped binary must spawn"),
+    );
     drop(guard);
-    let mut child = spawned.expect("the shipped binary must spawn");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");

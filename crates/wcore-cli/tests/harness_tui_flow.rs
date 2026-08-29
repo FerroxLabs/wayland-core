@@ -48,6 +48,7 @@ use wcore_agent::session_journal::{ApprovalResolution, SessionEvent, SessionJour
 // `harness_mock_llm.rs` share one copy without a crate-level module.
 #[path = "support/mod.rs"]
 mod support;
+use support::owned_tree::OwnedTree;
 
 /// Path to the debug binary under test.
 fn binary() -> &'static str {
@@ -133,7 +134,7 @@ struct PtyHarness {
     /// `resize` calls work.
     master: Box<dyn MasterPty + Send>,
     /// The spawned child. `wait` consumes it; until then `Drop` kills it.
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    child: OwnedTree<Box<dyn portable_pty::Child + Send + Sync>>,
     /// Reader-thread join handle. Kept so the test can join after the
     /// child exits (clean shutdown), but `Drop` lets it dangle on panic.
     _reader: std::thread::JoinHandle<()>,
@@ -187,9 +188,8 @@ impl PtyHarness {
         cmd.env_remove("OPENAI_API_KEY");
         cmd.cwd(home);
         let vault = support::vault::configure_pty(&mut cmd);
-        let child = pty.slave.spawn_command(cmd);
+        let child = OwnedTree::new(pty.slave.spawn_command(cmd).expect("spawn wayland-core"));
         drop(vault);
-        let child = child.expect("spawn wayland-core");
 
         // The reader thread pumps the PTY's byte stream into a shared
         // vt100 parser; tests query the screen grid by locking the
@@ -300,17 +300,9 @@ impl PtyHarness {
     }
 }
 
-impl Drop for PtyHarness {
-    fn drop(&mut self) {
-        // Last-ditch cleanup: if the test panicked mid-flow, kill the
-        // child so it never outlives the test process. `try_wait` first
-        // to skip the kill on a clean exit.
-        if let Ok(None) = self.child.try_wait() {
-            let _ = self.child.kill();
-        }
-    }
-}
-
+// No `impl Drop for PtyHarness`: `child` is an `OwnedTree`, whose own `Drop` kills
+// the whole process tree and reaps it — strictly stronger than the leaf-only kill
+// that used to live here (FerroxLabs/wayland-core#352).
 /// Boot the TUI and block until `WAYLAND` (the chrome wordmark) lands on
 /// screen. Reused by every test in this file.
 ///
