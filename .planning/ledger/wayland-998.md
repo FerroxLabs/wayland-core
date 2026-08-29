@@ -1,6 +1,7 @@
 ---
 issue: 998
 repo: FerroxLabs/wayland
+kind: defect
 title: "Per-tool switches in the MCP Library are inert on Wayland Core and ACP backends"
 status: open
 last_verified_commit: 43848f75

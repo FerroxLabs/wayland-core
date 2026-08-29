@@ -1,6 +1,7 @@
 ---
 issue: 908
 repo: FerroxLabs/wayland
+kind: defect
 title: "Bug report: reasoning tags leak into answers; sandbox child timed out; further sub-symptoms"
 status: open
 last_verified_commit: 43848f75

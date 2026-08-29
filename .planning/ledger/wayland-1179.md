@@ -1,6 +1,7 @@
 ---
 issue: 1179
 repo: FerroxLabs/wayland
+kind: defect
 title: "Absolute context buffers saturate to zero on a small served window, so a learned window cannot be used to compact"
 status: open
 last_verified_commit: 43848f75

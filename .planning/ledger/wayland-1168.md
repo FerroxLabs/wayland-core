@@ -1,6 +1,7 @@
 ---
 issue: 1168
 repo: FerroxLabs/wayland
+kind: defect
 title: "Turn-1 transient injection poisons the prompt-cache prefix: both fixes (system-prefix date / trailing transient message) have measured collisions"
 status: closed
 last_verified_commit: 43848f75

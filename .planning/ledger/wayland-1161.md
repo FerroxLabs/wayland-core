@@ -1,6 +1,7 @@
 ---
 issue: 1161
 repo: FerroxLabs/wayland
+kind: defect
 title: "--resume mints a new conversation_id, breaking Flux sticky routing and fragmenting the cache ledger"
 status: closed
 last_verified_commit: 43848f75

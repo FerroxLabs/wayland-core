@@ -107,7 +107,17 @@ OWNERS = ("core", "desktop", "flux", "maintainer", "reporter")
 STATUSES = ("open", "closed")
 
 TOP_KEYS = {"issue", "repo", "title", "status", "last_verified_commit", "criteria"}
-CRIT_KEYS = {"id", "text", "state", "evidence", "owner", "note"}
+CRIT_KEYS = {"id", "text", "state", "evidence", "owner", "note", "handoff"}
+# Keys this schema ALLOWS but does not require, and does not itself judge.
+# `kind: defect|feature` and a criterion's `handoff:` belong to
+# scripts/check-release-readiness.py, which decides whether an issue is
+# release-blocking and whether a remainder handed to another lane is still
+# tracked once it leaves this lane. They are listed here only so this parser
+# does not reject a field it has no opinion about -- the allowlist is strict
+# on purpose, and a second parser for the same frontmatter is two grammars
+# that drift. Nothing this gate fails on changes: `kind` is required by the
+# release gate, not by this one, and `handoff` is judged there too.
+TOP_OPTIONAL = {"kind"}
 SUCCESSOR = re.compile(r"#(\d+)")
 CRIT_REQUIRED = {"id", "text", "state", "owner"}
 
@@ -180,9 +190,10 @@ def parse_ledger(path):
                 continue
             k, _, v = line.partition(":")
             k = k.strip()
-            if k not in TOP_KEYS:
+            if k not in TOP_KEYS | TOP_OPTIONAL:
                 errs.append("%s: unknown key %r (allowed: %s)"
-                            % (where, k, ", ".join(sorted(TOP_KEYS))))
+                            % (where, k,
+                               ", ".join(sorted(TOP_KEYS | TOP_OPTIONAL))))
                 continue
             if k in seen_top:
                 errs.append("%s: duplicate key %r" % (where, k))

@@ -1,6 +1,7 @@
 ---
 issue: 113
 repo: FerroxLabs/wayland-core
+kind: defect
 title: "Browser tool non-functional by default - Camoufox sidecar never spawned + policy-disabled (web automation/screenshots broken)"
 status: open
 last_verified_commit: 43848f75

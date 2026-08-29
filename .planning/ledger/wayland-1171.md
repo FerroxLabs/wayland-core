@@ -1,6 +1,7 @@
 ---
 issue: 1171
 repo: FerroxLabs/wayland
+kind: defect
 title: "ToolSearch hydration re-sorts tools[] mid-array, invalidating the prompt cache on the turn after any deferred-tool load"
 status: closed
 last_verified_commit: 43848f75

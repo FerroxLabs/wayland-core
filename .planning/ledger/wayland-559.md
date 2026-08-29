@@ -1,6 +1,7 @@
 ---
 issue: 559
 repo: FerroxLabs/wayland
+kind: defect
 title: "Team leader token burn: 77.7M input tok/session, cache_read=0 — enable prompt caching + trim re-billed context (Core/Flux)"
 status: open
 last_verified_commit: 43848f75

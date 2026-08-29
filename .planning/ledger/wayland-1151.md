@@ -1,6 +1,7 @@
 ---
 issue: 1151
 repo: FerroxLabs/wayland
+kind: defect
 title: "[Bug]: Clean install of 0.12.4 / core 0.13.6 — the Bash tool is cmd.exe, and the transcript still assembles out of order"
 status: open
 last_verified_commit: 43848f75

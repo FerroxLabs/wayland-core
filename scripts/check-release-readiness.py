@@ -1,0 +1,702 @@
+#!/usr/bin/env python3
+"""Refuse to cut a release while an in-scope DEFECT still owes core work.
+
+WHY THIS EXISTS
+    `scripts/check-criteria-ledger.py` gates the BOOKKEEPING. It fails on a
+    malformed entry, on a `met` with no evidence, on evidence that no longer
+    resolves, on a `blocked` owned by core, and on an open issue with no
+    ledger file. Every one of those is a check that the RECORD is honest.
+
+    Nothing checks that the WORK is done. On the tree this file was written
+    against, 67 criteria are `not-met` and owned by `core`, and
+    `just ledger-check` is completely green. It has never been possible for
+    this repo to go red because a release was incomplete -- only because a
+    ledger lied about it. That is the mechanism behind every partial release
+    here: v0.13.10 shipped claiming 22 issues closed, and grading them
+    against their own stated criteria found 9.
+
+    The rule this file enforces is the maintainer's: a ticket ends CLOSED or
+    DECOMPOSED -- core's half closed, and the remainder filed as its own
+    ticket against a named owner with the contract spelled out. "Partial" is
+    not a status; it is a ticket somebody failed to split.
+
+WHAT IS IN SCOPE, AND HOW IT IS DECIDED
+    Errors, problems and issues block a release. Feature requests do not.
+    An unshipped feature is a roadmap item; an unfixed defect is something a
+    user is living with in the version we are about to publish.
+
+    The tracker labels that would say which is which (`bug`, `enhancement`)
+    live on GitHub, and the offline arm must work with no network -- so the
+    classification is a first-class field in the ledger file itself:
+
+        kind: defect      # or: feature
+
+    It is REQUIRED. A missing `kind` is a hard failure, not a default,
+    because a default is a bypass: whichever way it defaulted, the next
+    entry written would silently land in the convenient bucket and nobody
+    would ever type the word. The live arm corroborates the field against
+    the tracker's own labels, and fails when GitHub calls something a `bug`
+    that the ledger has classified out of scope -- which is the one
+    direction of misclassification that shrinks the blocking set.
+
+    Where a title and body were genuinely ambiguous, the entry was written
+    `defect`. Over-blocking costs a conversation; under-blocking ships the
+    bug.
+
+WHAT IT FAILS ON
+    * a ledger entry with no `kind:`, or a `kind:` that is not
+      `defect` / `feature`                                    (unclassified)
+    * `kind: defect` with a criterion `state: not-met, owner: core`
+      -- core still owes work on a defect                       (OUTSTANDING)
+    * `kind: defect` with a criterion owned by desktop/flux/maintainer/
+      reporter that is `blocked` or `not-met` and carries no `handoff:`
+      naming the ticket that now owns it                     (UNDECOMPOSED)
+      A remainder nobody can find is a partial wearing a label. The existing
+      ledger gate already refuses a `blocked` owned by `core`; this is the
+      other half of the same rule, applied to the lanes core hands work TO.
+      `not-met` is included alongside `blocked` deliberately: they are the
+      same invisibility with a different word, and if only one of them
+      needed a `handoff` the escape would be to type the other one.
+    * a `handoff:` that is not `<owner>/<repo>#<number>`. A bare `#1187` is
+      ambiguous across two trackers, and this project has already lost a
+      release to a second tracker nobody could see.
+    * (live) a `handoff:` target that does not exist, or that is CLOSED.
+      A residual handed to a closed issue is untracked with extra steps.
+    * (live) an entry marked `kind: feature` that its tracker labels `bug`.
+    * scanning nothing -- no ledger directory, no files, no criteria, or a
+      tree in which not one entry is a `defect`. A gate that examined sixty
+      files and had no defect to judge did not pass; it abstained.
+
+WHAT IT DOES NOT DO
+    It does not judge whether a criterion is a GOOD criterion, whether a
+    `met` is true, or whether the evidence resolves. That is
+    check-criteria-ledger.py's job and it is not duplicated here -- this
+    file imports that one's parser precisely so the two gates can never
+    disagree about what a ledger file says.
+
+    It is NOT in `check-all`. See the justfile comment: a gate that is red
+    on every in-progress lane gets bypassed, and then ignored, and then it
+    is not a ratchet. This one is red by design until the work is done, so
+    it belongs on the release path and nowhere else.
+
+    python3 scripts/check-release-readiness.py --self-test  # prove both ways
+    python3 scripts/check-release-readiness.py              # the gate (needs gh)
+    python3 scripts/check-release-readiness.py --offline    # structure only
+"""
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+KINDS = ("defect", "feature")
+# Owners that are NOT core. A criterion in one of these hands work out of the
+# lane, and handing work out is exactly the moment a remainder goes invisible.
+FOREIGN_OWNERS = ("desktop", "flux", "maintainer", "reporter")
+# States that mean the work is outstanding. `superseded` is absent on purpose:
+# the ledger gate already refuses a `superseded` whose note names no successor
+# issue, and verifies that successor exists and is open. That IS decomposition,
+# so re-blocking on it here would be this gate second-guessing a check that
+# already passed.
+OPEN_STATES = ("not-met", "blocked")
+
+HANDOFF = re.compile(r"^(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(?P<num>\d+)$")
+# Label names that decide the question on GitHub. Anything else is silence,
+# and silence is not corroboration -- it is reported as such, never as a pass.
+BUG_LABELS = {"bug", "defect", "type:bug", "kind/bug", "regression"}
+FEATURE_LABELS = {"enhancement", "feature", "type:feature", "kind/feature"}
+
+
+def load_ledger_module():
+    """The sibling gate, imported for its parser. Hyphens, hence importlib.
+
+    Sharing the parser is the point. Two independent readers of the same
+    frontmatter is two grammars that drift, and the first symptom of the
+    drift is one gate quietly not seeing an entry the other one does.
+    """
+    p = os.path.join(HERE, "check-criteria-ledger.py")
+    if not os.path.isfile(p):
+        raise RuntimeError(
+            "%s is missing. This gate reads ledger files with that file's "
+            "parser and refuses to grow a second one." % p)
+    spec = importlib.util.spec_from_file_location("check_criteria_ledger", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# ── tracker state ────────────────────────────────────────────────────────────
+
+
+class TrackerError(Exception):
+    pass
+
+
+GH_LIMIT = 4000
+
+
+def gh_labels(repo):
+    """-> {number: set(label names)} for every issue in `repo`, any state."""
+    args = ["gh", "issue", "list", "-R", repo, "--state", "all",
+            "--limit", str(GH_LIMIT), "--json", "number,labels"]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True)
+    except OSError as e:
+        raise TrackerError(
+            "%s: could not run `gh` (%s). The corroboration arm needs it; "
+            "pass --offline if you meant to skip it, and read what --offline "
+            "prints before calling the result a pass." % (repo, e))
+    if r.returncode != 0:
+        raise TrackerError("%s: `gh issue list` failed -- %s"
+                           % (repo, (r.stderr or "").strip()[:300]))
+    try:
+        rows = json.loads(r.stdout)
+    except ValueError as e:
+        raise TrackerError("%s: unparseable gh output (%s)" % (repo, e))
+    if len(rows) >= GH_LIMIT:
+        raise TrackerError(
+            "%s: the query returned exactly %d rows, which is the request "
+            "limit -- it was TRUNCATED. Raise GH_LIMIT." % (repo, GH_LIMIT))
+    if not rows:
+        raise TrackerError(
+            "%s: reached ZERO issues in any state. That is not a clean "
+            "tracker, it is a broken query." % repo)
+    return {int(i["number"]): {l["name"] for l in i["labels"]} for i in rows}
+
+
+def gh_issue_state(ref):
+    """-> 'open' / 'closed' / None for `<owner>/<repo>#<number>`."""
+    repo, _, num = ref.partition("#")
+    r = subprocess.run(
+        ["gh", "issue", "view", num, "-R", repo, "--json", "state"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)["state"].lower()
+    except (ValueError, KeyError):
+        return None
+
+
+def fetch_tracker_state(repos, handoffs, injected):
+    """-> ({repo: {num: labels}}, {handoff ref: state-or-None}).
+
+    `injected` short-circuits the network for --self-test's fixtures. It has
+    no command-line switch, for the same reason the sibling gate's has none:
+    a flag that hands the gate its own tracker snapshot is a flag that makes
+    the gate say whatever the caller needs it to say, and the only place it
+    would ever be typed is a workflow trying to get green.
+    """
+    if injected is not None:
+        labels = {}
+        for ref, names in injected.get("labels", {}).items():
+            repo, _, num = ref.partition("#")
+            labels.setdefault(repo, {})[int(num)] = set(names)
+        for repo in repos:
+            labels.setdefault(repo, {})
+        return labels, {h: injected.get("issues", {}).get(h) for h in handoffs}
+    labels = {repo: gh_labels(repo) for repo in sorted(repos)}
+    return labels, {h: gh_issue_state(h) for h in sorted(handoffs)}
+
+
+# ── the gate ─────────────────────────────────────────────────────────────────
+
+
+def classify(rec, problems):
+    """-> 'defect' / 'feature' / None, appending a complaint when unusable."""
+    kind = (rec.get("kind") or "").strip()
+    if not kind:
+        problems.append(
+            "%s: no `kind:` field. Every ledger entry must say `kind: defect` "
+            "or `kind: feature` -- defects block a release, feature requests "
+            "do not, and a field that defaults is a field nobody ever types."
+            % rec["path"])
+        return None
+    if kind not in KINDS:
+        problems.append("%s: kind %r must be one of %s"
+                        % (rec["path"], kind, "/".join(KINDS)))
+        return None
+    return kind
+
+
+def run(root, offline=False, injected=None):
+    """-> (exit code, [lines])."""
+    out = []
+
+    def say(s=""):
+        out.append(s)
+
+    try:
+        L = load_ledger_module()
+    except RuntimeError as e:
+        say("FAIL: %s" % e)
+        return 2, out
+
+    files = L.collect(root)
+    if files is None:
+        say("FAIL: %s does not exist. There is no ledger to grade, which is "
+            "not the same as a release with nothing outstanding." % L.LEDGER_DIR)
+        return 2, out
+    if not files:
+        say("FAIL: %s holds no ledger files. A gate that scans nothing cannot "
+            "fail, and this repo has shipped one of those before." % L.LEDGER_DIR)
+        return 2, out
+
+    records, problems = [], []
+    for f in files:
+        rec, errs = L.parse_ledger(f)
+        # A file this gate cannot read is a file it cannot clear. It does not
+        # report the detail -- that is the ledger gate's output, and two gates
+        # printing the same parse errors trains people to read neither.
+        if errs:
+            problems.append(
+                "%s: does not parse. `just ledger-check` owns the detail; this "
+                "gate cannot grade an entry it cannot read." % f)
+        if rec is not None:
+            records.append(rec)
+
+    ncrit = sum(len(r["criteria"]) for r in records)
+    if ncrit == 0:
+        say("FAIL: %d ledger file(s) and zero criteria between them." % len(files))
+        return 2, out
+
+    kinds = {}
+    for rec in records:
+        kinds[rec["path"]] = classify(rec, problems)
+
+    ndefect = sum(1 for k in kinds.values() if k == "defect")
+    nfeature = sum(1 for k in kinds.values() if k == "feature")
+    say("ledger files: %d   criteria: %d   defect %d / feature %d / "
+        "unclassified %d"
+        % (len(files), ncrit, ndefect, nfeature,
+           len(kinds) - ndefect - nfeature))
+
+    if ndefect == 0 and not problems:
+        # Sixty files, none of them a defect, and therefore nothing this gate
+        # could ever have refused. That is not a clean tree; it is an
+        # abstention, and it is the shape a bypass would take.
+        say()
+        say("FAIL: not one ledger entry is `kind: defect`, so this gate had "
+            "nothing in scope to judge. A tree in which no open issue is a "
+            "problem is a misclassification, not a clean release.")
+        return 2, out
+
+    # ── the blocking set ────────────────────────────────────────────────
+    outstanding = []   # (rec, crit) -- core still owes work on a defect
+    undecomposed = []  # (rec, crit) -- handed out, with nothing carrying it
+    handoffs = set()
+
+    for rec in records:
+        if kinds.get(rec["path"]) != "defect":
+            continue
+        for c in rec["criteria"]:
+            state, owner = c.get("state"), c.get("owner")
+            ho = (c.get("handoff") or "").strip()
+            if ho:
+                if not HANDOFF.match(ho):
+                    problems.append(
+                        "%s:%s: handoff %r is not `<owner>/<repo>#<number>`. A "
+                        "bare issue number is ambiguous across two trackers, "
+                        "and an entire tracker going unseen is what this "
+                        "project already lost a release to."
+                        % (rec["path"], c.get("id"), ho))
+                else:
+                    handoffs.add(ho)
+            if state not in OPEN_STATES:
+                continue
+            if owner == "core":
+                if state == "not-met":
+                    outstanding.append((rec, c))
+                # `blocked` owned by core is already a hard failure in
+                # check-criteria-ledger.py. Repeating it here would double-count
+                # one defect across two gates and teach nobody anything.
+                continue
+            if owner in FOREIGN_OWNERS and not ho:
+                undecomposed.append((rec, c))
+
+    # ── live corroboration ──────────────────────────────────────────────
+    if offline:
+        say()
+        say("OFFLINE: handoff targets were NOT resolved, and `kind:` was NOT "
+            "cross-checked against the trackers' own labels. THIS IS NOT A "
+            "PASS for either. A `handoff:` naming an issue that is closed or "
+            "does not exist reads exactly like a real one here, and an entry "
+            "marked `kind: feature` that GitHub labels `bug` has removed "
+            "itself from the blocking set with nothing contradicting it. "
+            "Re-run without --offline before cutting anything.")
+    else:
+        repos = sorted({r.get("repo") for r in records if r.get("repo")})
+        try:
+            labels, ho_state = fetch_tracker_state(repos, handoffs, injected)
+        except TrackerError as e:
+            say()
+            say("FAIL: %s" % e)
+            say("The gate refuses to degrade to a structural check silently. "
+                "Pass --offline if you meant to skip corroboration.")
+            return 2, out
+        if injected is not None:
+            say("NOTE: tracker state was INJECTED. This is a fixture run, not "
+                "a gate run.")
+
+        uncorroborated = []
+        for rec in records:
+            kind = kinds.get(rec["path"])
+            if kind is None:
+                continue
+            repo, num = rec.get("repo"), rec.get("issue")
+            got = labels.get(repo, {}).get(int(num)) if str(num).isdigit() else None
+            if got is None:
+                if kind == "feature":
+                    uncorroborated.append("%s#%s (not found on the tracker)"
+                                          % (repo, num))
+                continue
+            if kind == "feature" and (got & BUG_LABELS):
+                problems.append(
+                    "MISCLASSIFIED: %s says `kind: feature`, but %s#%s is "
+                    "labelled %s on GitHub. A defect filed out of scope is the "
+                    "one direction of misclassification that shrinks this "
+                    "gate's blocking set."
+                    % (rec["path"], repo, num,
+                       "/".join(sorted(got & BUG_LABELS))))
+            elif kind == "feature" and not (got & FEATURE_LABELS):
+                uncorroborated.append("%s#%s (labels: %s)"
+                                      % (repo, num,
+                                         ", ".join(sorted(got)) or "none"))
+            elif kind == "defect" and (got & FEATURE_LABELS) and not (got & BUG_LABELS):
+                # Reported, NOT failed. This direction over-blocks, and an
+                # over-block costs a conversation while an under-block ships
+                # the bug. But it is printed, because a `defect` nobody agrees
+                # with is a row somebody should look at.
+                say("NOTE: %s says `kind: defect` while %s#%s is labelled %s. "
+                    "Blocking anyway -- over-blocking is the safe direction -- "
+                    "but the classification is worth a second look."
+                    % (rec["path"], repo, num,
+                       "/".join(sorted(got & FEATURE_LABELS))))
+
+        for ho in sorted(handoffs):
+            st = ho_state.get(ho)
+            if st is None:
+                problems.append(
+                    "HANDOFF: %s does not exist. A remainder handed to an "
+                    "issue nobody can open is not decomposed, it is deleted."
+                    % ho)
+            elif st == "closed":
+                problems.append(
+                    "HANDOFF: %s is CLOSED. A residual carried by a closed "
+                    "issue is untracked with extra steps." % ho)
+
+        say("corroborated `kind:` against tracker labels for %d issue(s) "
+            "across %s" % (sum(len(v) for v in labels.values()),
+                           ", ".join(repos) or "no trackers"))
+        say("resolved %d handoff target(s)" % len(handoffs))
+        if uncorroborated:
+            # Not a failure: most of the second tracker carries no labels at
+            # all. But a `feature` is the classification that removes work
+            # from the blocking set, so every one nothing corroborates is
+            # named here rather than absorbed into a green line.
+            say("NOTE: %d `kind: feature` classification(s) that no tracker "
+                "label corroborates -- each of these is a judgement call, and "
+                "each one shrinks the blocking set:" % len(uncorroborated))
+            for u in uncorroborated:
+                say("        " + u)
+
+    # ── verdict ─────────────────────────────────────────────────────────
+    if problems:
+        say()
+        say("FAIL: %d problem(s) with the ledger's release-readiness fields."
+            % len(problems))
+        for p in problems:
+            say("  " + p)
+        return 1, out
+
+    if outstanding or undecomposed:
+        say()
+        by_issue = {}
+        for rec, c in outstanding:
+            by_issue.setdefault(rec["path"], (rec, [], []))[1].append(c)
+        for rec, c in undecomposed:
+            by_issue.setdefault(rec["path"], (rec, [], []))[2].append(c)
+        say("RELEASE BLOCKED: %d defect issue(s) still owe work -- %d "
+            "core-owned criterion(s) not met, %d handed to another lane with "
+            "nothing tracking the remainder."
+            % (len(by_issue), len(outstanding), len(undecomposed)))
+        say("This list IS the definition of done for the release. A ticket "
+            "ends CLOSED or DECOMPOSED; `partial` is a ticket nobody split.")
+        say()
+        for path in sorted(by_issue):
+            rec, outs, unds = by_issue[path]
+            say("  %s#%s  %s" % (rec.get("repo"), rec.get("issue"),
+                                 rec.get("title", "")))
+            for c in outs:
+                say("      OUTSTANDING   %-4s %s"
+                    % (c.get("id"), c.get("text", "")))
+            for c in unds:
+                say("      UNDECOMPOSED  %-4s owner=%s state=%s -- no "
+                    "`handoff:` names the ticket that now carries this"
+                    % (c.get("id"), c.get("owner"), c.get("state")))
+        return 1, out
+
+    say()
+    say("OK: every `kind: defect` entry has zero core-owned criteria "
+        "outstanding, and every criterion handed to another lane names the "
+        "ticket that carries it%s"
+        % (" (handoff targets and labels not checked -- offline)." if offline
+           else ", which exists and is open."))
+    return 0, out
+
+
+# ── self-test ────────────────────────────────────────────────────────────────
+#
+# The most important part of this file. A gate that cannot fail is worth
+# exactly what a gate that cannot pass is worth, and this repo has shipped one
+# of each. Every arm below states which direction it expects, and every RED arm
+# names the message it must fire with -- an arm that goes red for somebody
+# else's reason has proved nothing about the check it was written for.
+
+_DEFECT = """---
+issue: 7
+repo: FerroxLabs/wayland
+kind: defect
+title: "a defect whose core half is finished"
+status: open
+last_verified_commit: cfa89a9c
+criteria:
+  - id: c1
+    text: "the boundary is probed rather than asserted against itself"
+    state: met
+    evidence: "test:src/t.rs::the_boundary_is_probed"
+    owner: core
+  - id: c2
+    text: "the credentialled probe cannot run in this lane"
+    state: blocked
+    owner: maintainer
+    handoff: "FerroxLabs/wayland#11"
+    note: "needs a Slack workspace credential the core lane does not hold"
+---
+
+Prose a human with no context can read: this is the fixture control for the
+release-readiness gate's own self-test, and it must stay green in every arm.
+"""
+
+_FEATURE = """---
+issue: 8
+repo: FerroxLabs/wayland
+kind: feature
+title: "a feature request, which does not block a release"
+status: open
+last_verified_commit: cfa89a9c
+criteria:
+  - id: c1
+    text: "the opt-in flag exists"
+    state: not-met
+    owner: core
+---
+
+Prose a human with no context can read: an unshipped feature is a roadmap item,
+not something a user is living with in the version about to be published.
+"""
+
+_INJ = {
+    "labels": {"FerroxLabs/wayland#7": ["bug", "area:core"],
+               "FerroxLabs/wayland#8": ["enhancement", "area:core"]},
+    "issues": {"FerroxLabs/wayland#11": "open"},
+}
+
+
+# A sentinel, because `None` has to mean "write no such file" -- the arm that
+# proves a tree with no defect in it goes red needs to omit the defect file
+# entirely, and a default-argument `None` cannot say both things.
+_KEEP = object()
+
+
+def _fixture(root, defect, feature):
+    d = os.path.join(root, ".planning", "ledger")
+    os.makedirs(d, exist_ok=True)
+    if defect is not None:
+        open(os.path.join(d, "wayland-7.md"), "w").write(defect)
+    if feature is not None:
+        open(os.path.join(d, "wayland-8.md"), "w").write(feature)
+    return root
+
+
+def self_test():
+    cases = []
+
+    def case(label, must_fire, defect=_KEEP, feature=_KEEP, expect=None,
+             offline=False, inj=_INJ):
+        cases.append((label, must_fire,
+                      _DEFECT if defect is _KEEP else defect,
+                      _FEATURE if feature is _KEEP else feature,
+                      expect, offline, inj))
+
+    # ── the controls, both arms ─────────────────────────────────────────
+    case("clean control: defect done, feature outstanding", False)
+    case("control again, offline", False, offline=True)
+    case("all-met tree: every criterion met, nothing outstanding", False,
+         defect=_DEFECT.replace(
+             "    state: blocked\n    owner: maintainer\n"
+             "    handoff: \"FerroxLabs/wayland#11\"\n"
+             "    note: \"needs a Slack workspace credential the core lane "
+             "does not hold\"\n",
+             "    state: met\n    evidence: \"file:src/t.rs\"\n"
+             "    owner: maintainer\n"),
+         feature=None)
+    case("a met core criterion on a defect stays silent", False,
+         defect=_DEFECT.replace('    state: met\n    evidence: '
+                                '"test:src/t.rs::the_boundary_is_probed"',
+                                '    state: met\n    evidence: "file:src/t.rs"'))
+
+    # ── the release-blocking set ────────────────────────────────────────
+    case("a not-met criterion owned by core on a DEFECT", True,
+         defect=_DEFECT.replace(
+             '    state: met\n    evidence: '
+             '"test:src/t.rs::the_boundary_is_probed"\n',
+             "    state: not-met\n"),
+         expect="OUTSTANDING   c1")
+    case("a not-met criterion owned by core on a FEATURE (out of scope)",
+         False,
+         feature=_FEATURE.replace(
+             '  - id: c1\n',
+             '  - id: c0\n    text: "a second unbuilt half"\n'
+             '    state: not-met\n    owner: core\n  - id: c1\n'),
+         expect="OK: every `kind: defect` entry")
+    case("a superseded core criterion is not this gate's business", False,
+         defect=_DEFECT.replace(
+             '    state: met\n    evidence: '
+             '"test:src/t.rs::the_boundary_is_probed"\n',
+             '    state: superseded\n    note: "carried by #11"\n'))
+
+    # ── decomposition ───────────────────────────────────────────────────
+    case("a blocked non-core criterion with a handoff", False)
+    case("a blocked non-core criterion with NO handoff", True,
+         defect=_DEFECT.replace(
+             '    handoff: "FerroxLabs/wayland#11"\n', ""),
+         expect="UNDECOMPOSED  c2")
+    case("a not-met criterion owned by desktop WITH a handoff", False,
+         defect=_DEFECT.replace(
+             "    state: blocked\n    owner: maintainer",
+             "    state: not-met\n    owner: desktop"))
+    case("a not-met criterion owned by desktop with NO handoff", True,
+         defect=_DEFECT.replace(
+             "    state: blocked\n    owner: maintainer",
+             "    state: not-met\n    owner: desktop").replace(
+             '    handoff: "FerroxLabs/wayland#11"\n', ""),
+         expect="UNDECOMPOSED  c2")
+    case("a handoff that is a bare issue number", True,
+         defect=_DEFECT.replace('"FerroxLabs/wayland#11"', '"#11"'),
+         expect="is not `<owner>/<repo>#<number>`")
+    case("a handoff naming an issue that is CLOSED", True,
+         inj={"labels": _INJ["labels"],
+              "issues": {"FerroxLabs/wayland#11": "closed"}},
+         expect="is CLOSED")
+    case("a handoff naming an issue that does not exist", True,
+         inj={"labels": _INJ["labels"], "issues": {}},
+         expect="does not exist")
+    case("a bad handoff is invisible offline, and the run SAYS so", False,
+         offline=True,
+         inj={"labels": _INJ["labels"], "issues": {}},
+         expect="THIS IS NOT A PASS")
+
+    # ── classification ──────────────────────────────────────────────────
+    case("a ledger entry with no `kind:` field", True,
+         defect=_DEFECT.replace("kind: defect\n", ""),
+         expect="no `kind:` field")
+    case("a `kind:` that is neither defect nor feature", True,
+         defect=_DEFECT.replace("kind: defect", "kind: chore"),
+         expect="must be one of defect/feature")
+    case("`kind: feature` on an issue GitHub labels `bug`", True,
+         feature=_FEATURE.replace("kind: feature", "kind: feature"),
+         inj={"labels": {"FerroxLabs/wayland#7": ["bug"],
+                         "FerroxLabs/wayland#8": ["bug", "area:core"]},
+              "issues": {"FerroxLabs/wayland#11": "open"}},
+         expect="MISCLASSIFIED")
+    case("`kind: feature` that no label corroborates is NAMED, not failed",
+         False,
+         inj={"labels": {"FerroxLabs/wayland#7": ["bug"],
+                         "FerroxLabs/wayland#8": []},
+              "issues": {"FerroxLabs/wayland#11": "open"}},
+         expect="no tracker label corroborates")
+    case("`kind: defect` on an issue GitHub labels `enhancement` still blocks",
+         False,
+         inj={"labels": {"FerroxLabs/wayland#7": ["enhancement"],
+                         "FerroxLabs/wayland#8": ["enhancement"]},
+              "issues": {"FerroxLabs/wayland#11": "open"}},
+         expect="worth a second look")
+
+    # ── vacuity ─────────────────────────────────────────────────────────
+    case("a tree in which nothing at all is a defect", True,
+         defect=None, expect="not one ledger entry is `kind: defect`")
+    case("a ledger file this gate cannot parse", True,
+         defect=_DEFECT.replace("---\n\nProse", "\nProse"),
+         expect="does not parse")
+
+    ok = True
+    results = []
+    for label, must, d, f, expect, offline, inj in cases:
+        # An arm whose fixture is byte-identical to the control, and whose
+        # tracker state is the control's too, is testing the control. One arm
+        # in this file did exactly that during development and read as a pass.
+        if must and d == _DEFECT and f == _FEATURE and inj is _INJ:
+            print("  %-58s MUTATION DID NOT APPLY -- the arm tests nothing"
+                  % label[:58])
+            ok = False
+            continue
+        with tempfile.TemporaryDirectory() as td:
+            _fixture(td, defect=d, feature=f)
+            code, out = run(td, offline=offline, injected=inj)
+        fired = code != 0
+        good = fired == must
+        if good and expect and expect not in "\n".join(out):
+            good = False
+            print("  %-58s did not say what it was written to say (%r absent)"
+                  % (label[:58], expect))
+        ok &= good
+        results.append((label, must, fired, good))
+
+    # Scanning nothing must never pass, twice over.
+    for label, setup in (
+        ("no ledger directory at all", lambda td: None),
+        ("a ledger directory holding no files",
+         lambda td: os.makedirs(os.path.join(td, ".planning", "ledger"))),
+    ):
+        with tempfile.TemporaryDirectory() as td:
+            setup(td)
+            code, _ = run(td, offline=True)
+        results.append((label, True, code != 0, code != 0))
+        ok &= code != 0
+
+    # And the control once more, after every mutation arm, so a fixture that
+    # leaked state between arms shows up as a red control rather than as a
+    # silently weaker gate.
+    with tempfile.TemporaryDirectory() as td:
+        _fixture(td, _DEFECT, _FEATURE)
+        code, _ = run(td, injected=_INJ)
+    results.append(("control after the vacuity arms (still green)",
+                    False, code != 0, code == 0))
+    ok &= code == 0
+
+    for label, must, got, good in results:
+        print("  %-58s expected %-5s got %-5s  %s"
+              % (label[:58], "RED" if must else "green",
+                 "RED" if got else "green", "ok" if good else "SELF-TEST FAILED"))
+    print("self-test: %s"
+          % ("both directions proven" if ok
+             else "BROKEN -- the gate cannot be trusted"))
+    return 0 if ok else 1
+
+
+def main(argv):
+    root = os.path.dirname(HERE)
+    code, out = run(root, offline="--offline" in argv)
+    print("\n".join(out))
+    return code
+
+
+if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(self_test())
+    sys.exit(main(sys.argv))

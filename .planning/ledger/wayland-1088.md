@@ -1,6 +1,7 @@
 ---
 issue: 1088
 repo: FerroxLabs/wayland
+kind: defect
 title: "Bug report: Chat Interface Bug and Restricted Read / Glob / Write / Edit"
 status: open
 last_verified_commit: 43848f75

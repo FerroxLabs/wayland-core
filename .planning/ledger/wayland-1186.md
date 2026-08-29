@@ -1,6 +1,7 @@
 ---
 issue: 1186
 repo: FerroxLabs/wayland
+kind: defect
 title: "[Credentials request] Five platform credentials needed to measure adapter message caps (#934 c5)"
 status: open
 last_verified_commit: 43848f75

@@ -1,6 +1,7 @@
 ---
 issue: 360
 repo: FerroxLabs/wayland-core
+kind: defect
 title: "The WhatsApp bridge ships a message cap borrowed from Meta's docs, and the coverage guard structurally cannot see it"
 status: open
 last_verified_commit: 43848f75

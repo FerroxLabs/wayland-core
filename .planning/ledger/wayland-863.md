@@ -1,6 +1,7 @@
 ---
 issue: 863
 repo: FerroxLabs/wayland
+kind: defect
 title: "CONTRACT: Loop ownership between Anvil (wayland-core) and Elevation (Flux) — anti-collision invariants"
 status: open
 last_verified_commit: 43848f75

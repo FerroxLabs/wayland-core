@@ -1,6 +1,7 @@
 ---
 issue: 253
 repo: FerroxLabs/wayland-core
+kind: feature
 title: "[Feature]: Bind conversation topics and threads to authorized agents"
 status: open
 last_verified_commit: 43848f75

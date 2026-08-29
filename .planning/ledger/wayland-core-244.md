@@ -1,6 +1,7 @@
 ---
 issue: 244
 repo: FerroxLabs/wayland-core
+kind: defect
 title: "VFS Read of raw .git/objects permitted (compressed; info-only)"
 status: open
 last_verified_commit: 43848f75

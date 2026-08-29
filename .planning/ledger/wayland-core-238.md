@@ -1,6 +1,7 @@
 ---
 issue: 238
 repo: FerroxLabs/wayland-core
+kind: defect
 title: "Windows reserved DOS device names (NUL/CON/COMn) bypass path guard"
 status: open
 last_verified_commit: 43848f75
