@@ -3,38 +3,44 @@ issue: 354
 repo: FerroxLabs/wayland-core
 title: "MCP malware gate: make the OSV fail-open an explicit operator choice (strict/permissive)"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: 86799a69
 criteria:
   - id: c1
     text: "A config key selects the malware-gate mode, permissive or strict, defaulting to today's permissive behaviour"
-    state: not-met
+    state: met
     owner: core
-    note: "No malware_gate key exists anywhere under crates/wcore-config/src in the graded tree. This is the policy surface #340 explicitly did not ship."
+    evidence: "test:crates/wcore-config/src/config.rs::malware_gate_defaults_to_permissive_and_parses_both_modes"
+    note: "`[mcp] malware_gate = \"permissive\" | \"strict\"` on `McpConfig`, through the config layer -- no hardcoded conditional. `#[default] Permissive`, so omitting the key leaves every existing install byte-identical; the test asserts the omitted case, both spellings, and that a typo (`\"strcit\"`) is a LOAD ERROR rather than a silent fall back to permissive. Cascade is asymmetric on purpose (`McpMalwareGateMode::stricter_of`): a project config may tighten to strict but can never loosen an operator's strict, the same rule `trust_project_hooks` already applies -- graded by `a_project_config_cannot_loosen_the_malware_gate`. Installed process-wide from `AgentBootstrap::build` via `wcore_mcp::malware_gate::install_mode` (one-shot, like `wcore_egress::install_global_policy`), because `StdioTransport::spawn` has no config handle."
   - id: c2
     text: "Under strict, a backend error from check_package_for_malware refuses with McpError::MalwareBlocked instead of returning Allowed"
-    state: not-met
+    state: met
     owner: core
-    note: "malware_gate.rs raises MalwareBlocked only for Unidentified (line 209) and Blocked (line 218). A backend error still falls through to Allowed in both directions because there is only one direction."
+    evidence: "test:crates/wcore-mcp/tests/mcp_launch_malware_gate.rs::strict_refuses_an_unchecked_package_before_exec"
+    note: "`MalwareCheckOutcome` gained `Unavailable(String)`; a backend error and the SSRF short-circuit now return it instead of collapsing into `Allowed`, so `Allowed` finally means \"queried and cleared\". `malware_gate::decide` (symbol:crates/wcore-mcp/src/malware_gate.rs::decide) maps `Unavailable` through the mode: permissive -> Ok, strict -> `McpError::MalwareBlocked` naming the key and the way out; the message content is graded by `the_strict_refusal_names_the_key_and_the_way_out`. RED ARM RUN, quoted verbatim in the note below."
   - id: c3
     text: "The SSRF short-circuit, where is_safe_url fails, follows the same mode as the backend-error path"
-    state: not-met
+    state: met
     owner: core
-    note: "Cannot follow a mode that does not exist. Graded not-met rather than n/a so it is not lost when c1 lands."
+    evidence: "test:crates/wcore-mcp/src/malware_gate.rs::the_ssrf_short_circuit_follows_the_same_mode_as_a_backend_error"
+    note: "True by construction, not by two matching copies: both paths return `MalwareCheckOutcome::Unavailable`, and `decide` has exactly ONE arm for it. The test drives both for real -- the SSRF arm against 169.254.169.254 (never queried, asserted by an empty backend call log) and the error arm against a public-IP endpoint with a Network error -- and asserts the two verdicts are equal in BOTH modes, and that they are errors exactly when the mode is strict."
   - id: c4
     text: "A test per mode drives StdioTransport::spawn against an unreachable backend: permissive launches and logs at ERROR, strict refuses and never reaches exec"
-    state: not-met
+    state: met
     owner: core
-    note: "The permissive half is graded today by osv_check fail-open visibility; the strict half has no test because it has no behaviour."
+    evidence: "test:crates/wcore-mcp/tests/mcp_launch_malware_gate.rs::permissive_launches_an_unchecked_package_and_logs_at_error"
+    note: "Both arms go through the real `StdioTransport::spawn` with the same `CapturingOsvBackend::with_error(Network)`. Permissive: marker file present (child ran) AND a captured `tracing::Level::ERROR` -- the fail-open stays audible, since ERROR is the only level a user with RUST_LOG unset sees. Strict: `Err(McpError::MalwareBlocked)` whose message contains `malware_gate`, marker ABSENT after the helper's 500ms wait, and the backend call count is still 1 so strict refuses AFTER trying rather than instead of trying. The strict arm is cited on c2 (`strict_refuses_an_unchecked_package_before_exec`) because the gate takes one token per criterion; it is the same test. A `ModeGuard` restores the process mode on drop so a mode cannot leak into the next test in the `osv_gate` serial group."
   - id: c5
     text: "A negative control shows a clean package launches in BOTH modes"
-    state: not-met
+    state: met
     owner: core
-    note: "Required by the ticket so a strict mode that refuses everything cannot pass as a fix."
+    evidence: "test:crates/wcore-mcp/tests/mcp_launch_malware_gate.rs::a_clean_package_launches_in_both_modes"
+    note: "Two controls in each mode: `uvx clean-pkg==1.0` IS queried (call count asserted 1, so the pass is not vacuous) and launches, and `my-mcp-server --port 0` is never queried and launches -- strict must not start gating commands that fetch nothing. The polarity control in the other direction is `test:crates/wcore-mcp/tests/mcp_launch_malware_gate.rs::permissive_still_blocks_known_malware`: a definite malware hit is refused in permissive too, so \"strict blocks malware\" cannot be satisfied by a build that only blocks in strict."
   - id: c6
     text: "The mode is documented in docs/mcp.md and surfaced in /doctor"
-    state: not-met
+    state: met
     owner: core
-    note: "docs/mcp.md carries no malware_gate section in the graded tree, and /doctor reports no gate mode."
+    evidence: "symbol:crates/wcore-cli/src/doctor/mod.rs::malware_gate_line"
+    note: "`docs/mcp.md` gains `## Supply-chain malware gate -- [mcp] malware_gate`: the four-answer table, which one the key governs, the honest cost of strict (no network means no npx/uvx MCP servers), the stricter-layer-wins cascade, and the /doctor line (`file:docs/mcp.md`). `print_mcp_section` prints `malware_gate_line(cfg.mcp.malware_gate)` whether or not any server is declared -- a fresh config with no servers is exactly when an operator wants to see the posture. The line is a pure function so the CONTENT is graded by `test:crates/wcore-cli/src/doctor/mod.rs::doctor_names_the_malware_gate_mode_and_what_it_does`: each mode must name the key, its value, and the consequence, and the two modes must differ."
 ---
 
 Split out of `#340`. That ticket asked for two things on the OSV fail-open: at
@@ -51,3 +57,79 @@ is only worth adding with the mode plumbed all the way through.
 Note the related standing decision Q3 in `.planning/DECISIONS.md`: the visibility
 question was answered "a typed protocol frame, not a log level", and that frame
 lands with Q4 (`FerroxLabs/wayland#1099`), not here.
+
+## Lane note — `lane/f13-mcp-gate-mode` (2026-08-29)
+
+All six criteria closed. The shape of the fix:
+
+`MalwareCheckOutcome::Allowed` was doing two jobs — "queried and cleared" and
+"could not query, proceeding anyway" — and that conflation is *why* c3's two
+paths diverged by accident and *why* c2 had no strict half to write. They did
+not diverge because someone chose differently in two places; they diverged
+because both places spelled themselves `Allowed` and there was only ever one
+direction out of that word. Splitting `Unavailable(String)` off is what makes
+the mode expressible at all, and it collapses c2 and c3 into a single arm in
+`malware_gate::decide` rather than two arms that must be kept in step.
+
+The default is `permissive` and stays there. Nothing changes for an existing
+user who never writes the key.
+
+### Red arm (c2), run verbatim
+
+Mutated `decide` so `Strict` returned `Ok(())` on `Unavailable` — i.e. the
+pre-change behaviour with the config key still present, which is the exact
+regression this criterion is supposed to catch:
+
+```
+$ cargo test -p wcore-mcp --test mcp_launch_malware_gate strict_refuses
+running 1 test
+test strict_refuses_an_unchecked_package_before_exec ... FAILED
+
+thread 'strict_refuses_an_unchecked_package_before_exec' panicked at
+crates/wcore-mcp/tests/mcp_launch_malware_gate.rs:320:9:
+strict must refuse a launch whose malware check could not be performed; got Ok("spawned")
+
+test result: FAILED. 0 passed; 1 failed; 14 filtered out
+
+$ cargo test -p wcore-mcp --lib malware_gate
+test malware_gate::tests::the_ssrf_short_circuit_follows_the_same_mode_as_a_backend_error ... FAILED
+test malware_gate::tests::the_strict_refusal_names_the_key_and_the_way_out ... FAILED
+
+thread '...::the_ssrf_short_circuit_follows_the_same_mode_as_a_backend_error' panicked at
+crates/wcore-mcp/src/malware_gate.rs:389:13:
+assertion `left == right` failed: Strict: wrong verdict for an unperformable check
+  left: false
+ right: true
+
+test result: FAILED. 2 passed; 2 failed; 139 filtered out
+```
+
+### Red arm (c3), run verbatim
+
+Second, independent mutation: returned `Allowed` from the SSRF short-circuit
+in `osv_check` while leaving the backend-error path on `Unavailable` — i.e.
+exactly the divergence c3 says must not exist:
+
+```
+$ cargo test -p wcore-mcp --lib the_ssrf_short_circuit
+test malware_gate::tests::the_ssrf_short_circuit_follows_the_same_mode_as_a_backend_error ... FAILED
+
+thread '...' panicked at crates/wcore-mcp/src/malware_gate.rs:370:9:
+the SSRF short-circuit still reports a clean check: Allowed
+
+test result: FAILED. 0 passed; 1 failed; 142 filtered out
+```
+
+Both mutations restored with `git checkout --` and `touch`ed afterwards, so
+cargo could not serve a stale mutated binary. Post-restore:
+`cargo test -p wcore-mcp --lib malware_gate` → 4 passed; 0 failed, and
+`cargo test -p wcore-mcp --test mcp_launch_malware_gate` → 15 passed; 0 failed.
+
+### Known limitation, not hidden
+
+The mode is installed from `AgentBootstrap::build`, the one seam every agent
+session passes through before an MCP server is connected. A future direct
+caller of `StdioTransport::spawn` that never builds an agent would read the
+uninstalled default (`permissive`) — that is the status-quo behaviour, not a
+new fail-open, but it is a real ceiling on `strict` and should be revisited if
+a non-session MCP launch path ever appears.
