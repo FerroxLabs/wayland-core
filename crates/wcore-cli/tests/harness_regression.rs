@@ -44,6 +44,10 @@ use wcore_eval_scenarios::assertions::Assertion;
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
 use wcore_eval_scenarios::scenario::{Category, Scenario, Turn};
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
@@ -375,7 +379,8 @@ async fn r003_no_model_guard() {
     );
     std::fs::write(cfg_dir.join("config.toml"), &body).expect("write config");
 
-    let mut child = AsyncCommand::new(&bin)
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
         .arg("--yolo")
         .arg("--json-stream")
         .arg("--provider")
@@ -391,7 +396,8 @@ async fn r003_no_model_guard() {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn json-stream");
+        .expect("spawn json-stream"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -500,7 +506,8 @@ async fn r004_crash_sentinel_clears_on_clean_exit() {
     );
 
     // --- First launch: clean session (close stdin → engine exits 0) ---
-    let mut child1 = AsyncCommand::new(&bin)
+    let mut child1 = OwnedTree::new(
+        AsyncCommand::new(&bin)
         .arg("--yolo")
         .arg("--json-stream")
         .arg("--provider")
@@ -516,7 +523,8 @@ async fn r004_crash_sentinel_clears_on_clean_exit() {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn first session");
+        .expect("spawn first session"),
+    );
 
     let mut stdin1 = child1.stdin.take().expect("piped stdin");
 
@@ -584,7 +592,8 @@ async fn r005_force_mode_aliases() {
     // (the in-process deserialization test already covers this, but this
     // confirms the binary-level wire path also works).
     for alias in ["yolo", "dangerously_skip_permissions", "force"] {
-        let mut child = AsyncCommand::new(&bin)
+        let mut child = OwnedTree::new(
+            AsyncCommand::new(&bin)
             .arg("--yolo")
             .arg("--json-stream")
             .arg("--provider")
@@ -599,7 +608,8 @@ async fn r005_force_mode_aliases() {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .expect("spawn for set_mode test");
+            .expect("spawn for set_mode test"),
+        );
 
         let mut stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
@@ -667,7 +677,8 @@ async fn r006_init_history_injects_system_prompt() {
         "sk-ant-harness-000000",
     );
 
-    let mut child = AsyncCommand::new(&bin)
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
         .arg("--yolo")
         .arg("--json-stream")
         .arg("--provider")
@@ -682,7 +693,8 @@ async fn r006_init_history_injects_system_prompt() {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn for init_history test");
+        .expect("spawn for init_history test"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -746,7 +758,8 @@ async fn r007_session_wal_survives_mid_turn_kill() {
     );
     seed_config(home.path());
 
-    let mut child = AsyncCommand::new(&bin)
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
         .arg("--yolo")
         .arg("--json-stream")
         .arg("--provider")
@@ -761,7 +774,8 @@ async fn r007_session_wal_survives_mid_turn_kill() {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn for WAL test");
+        .expect("spawn for WAL test"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -962,7 +976,8 @@ async fn r010_openrouter_url_no_double_v1() {
     let home = TempDir::new().expect("tempdir");
     seed_json_stream_env(home.path(), "openrouter", "openai/gpt-4o-mini", &key);
 
-    let mut child = AsyncCommand::new(&bin)
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
         .arg("--yolo")
         .arg("--json-stream")
         .arg("--provider")
@@ -977,7 +992,8 @@ async fn r010_openrouter_url_no_double_v1() {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn for openrouter test");
+        .expect("spawn for openrouter test"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -1223,7 +1239,8 @@ async fn r012_honcho_fallback_on_no_key() {
     let isolated_home = home.path().join("wayland-home");
     std::fs::create_dir_all(&isolated_home).expect("create isolated WAYLAND_HOME");
 
-    let mut child = AsyncCommand::new(&bin)
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
         .arg("--yolo")
         .arg("--json-stream")
         .arg("--provider")
@@ -1283,7 +1300,8 @@ async fn r012_honcho_fallback_on_no_key() {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn for ready-event check");
+        .expect("spawn for ready-event check"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -1380,7 +1398,8 @@ async fn r013_customer_flow_assistants() {
     let home = TempDir::new().expect("tempdir");
     seed_json_stream_env(home.path(), provider, model, &key);
 
-    let mut child = AsyncCommand::new(&bin)
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
         .arg("--yolo")
         .arg("--json-stream")
         .arg("--provider")
@@ -1402,7 +1421,8 @@ async fn r013_customer_flow_assistants() {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn for assistant flow test");
+        .expect("spawn for assistant flow test"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -1501,7 +1521,8 @@ async fn r014_customer_flow_skills_hello() {
     let home = TempDir::new().expect("tempdir");
     seed_json_stream_env(home.path(), provider, model, &key);
 
-    let mut child = AsyncCommand::new(&bin)
+    let mut child = OwnedTree::new(
+        AsyncCommand::new(&bin)
         .arg("--yolo")
         .arg("--json-stream")
         .arg("--provider")
@@ -1523,7 +1544,8 @@ async fn r014_customer_flow_skills_hello() {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn for skills flow test");
+        .expect("spawn for skills flow test"),
+    );
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
