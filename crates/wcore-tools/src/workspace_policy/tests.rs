@@ -1333,22 +1333,23 @@ fn secret_fixture_tree() -> (tempfile::TempDir, std::path::PathBuf) {
 /// A1 — #922 R1: the deny walk is not run for a backend that discards the list.
 ///
 /// Modelled on `contained_construction_does_not_walk_the_workspace` above,
-/// including its known-positive control: the `true` arm must be materially
-/// more expensive on the big tree than on an empty one, so a host where both
-/// arms are instant FAILS the instrument instead of passing the assertion
-/// vacuously.
+/// including its known-positive control — and, since #1182, stated the same
+/// way that one is: in ENTRIES VISITED, through [`super::walk_entries`].
+///
+/// It carried the identical wall-clock ratio and the identical defect, and it
+/// was caught the same way, on the same box, in a full-suite run under load:
+///
+/// ```text
+/// instrument is dead: the enforcing arm must be tree-driven;
+///   enforcing_big=25.529233ms enforcing_empty=2.964103ms
+/// ```
+///
+/// The enforcing arm in that run walked the whole 3000-directory tree. Only the
+/// EMPTY-tree baseline had moved. Counting entries removes the baseline, the
+/// ratio and the per-platform constant from the question at once, and states
+/// the claim itself — "R1 does not walk" — as the number it always was.
 #[test]
 fn r1_skips_the_walk_for_a_non_enforcing_backend() {
-    let empty = tempfile::tempdir().unwrap();
-    let baseline = WorkspacePolicy::contained(empty.path());
-    // Taken first so the cold cost of the fixed path probes lands here.
-    let t = std::time::Instant::now();
-    let _ = baseline.secret_deny_paths_for_backend(true);
-    let enforcing_empty = t.elapsed();
-    let t = std::time::Instant::now();
-    let _ = baseline.secret_deny_paths_for_backend(false);
-    let skipped_empty = t.elapsed();
-
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     for i in 0..3000 {
@@ -1365,29 +1366,30 @@ fn r1_skips_the_walk_for_a_non_enforcing_backend() {
     std::fs::write(root.join(".env"), b"TOKEN=1").unwrap();
     let p = WorkspacePolicy::contained(root);
 
-    let t = std::time::Instant::now();
+    let before = super::walk_entries();
     let enforcing = p.secret_deny_paths_for_backend(true);
-    let enforcing_big = t.elapsed();
-    let t = std::time::Instant::now();
-    let skipped = p.secret_deny_paths_for_backend(false);
-    let skipped_big = t.elapsed();
+    let enforcing_entries = super::walk_entries() - before;
+    // A FRESH policy for the skipped arm: the enforcing call above memoises its
+    // result, so re-asking the same policy would report zero entries because
+    // the answer was cached, not because R1 declined to walk.
+    let q = WorkspacePolicy::contained(root);
+    let before = super::walk_entries();
+    let skipped = q.secret_deny_paths_for_backend(false);
+    let skipped_entries = super::walk_entries() - before;
 
     // KNOWN-POSITIVE CONTROL: the walk this test claims to be skipping is
-    // reachable, does happen, and its cost really is driven by the tree.
+    // reachable and really does enumerate this tree.
     assert!(
-        enforcing_big > enforcing_empty * 10,
-        "instrument is dead: the enforcing arm must be tree-driven; \
-         enforcing_big={enforcing_big:?} enforcing_empty={enforcing_empty:?}"
+        enforcing_entries >= 3000,
+        "instrument is dead: the enforcing arm must enumerate the workspace; it \
+         visited {enforcing_entries} entries over a 3000-directory tree"
     );
 
-    // THE CLAIM: the skipped arm is flat — the big tree costs no more than the
-    // empty one. Stated against the empty-tree baseline plus half a walk, the
-    // same shape the construction pin uses, so the platform constant is
-    // subtracted rather than assumed to be zero.
-    assert!(
-        skipped_big < skipped_empty + enforcing_big / 2,
-        "R1 must not walk on a non-enforcing backend: skipped_big={skipped_big:?} \
-         skipped_empty={skipped_empty:?} enforcing_big={enforcing_big:?}"
+    // THE CLAIM, as the number it always was.
+    assert_eq!(
+        skipped_entries, 0,
+        "R1 must not walk on a non-enforcing backend: it visited \
+         {skipped_entries} entries (the enforcing arm visits {enforcing_entries})"
     );
 
     // And the skipped arm produces nothing at all, while the enforcing arm does.
