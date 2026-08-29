@@ -229,10 +229,21 @@ const CELLS: &[Cell] = &[
     },
     Cell {
         platform: "telegram",
-        boundary: Boundary::NotMeasured {
-            waiting_on: "a Telegram bot token and a chat the bot is a member of. Telegram \
-                         documents 4,096 characters but indexes entities in UTF-16 code units \
-                         on the same page, so which unit the 4,096 counts is unmeasured",
+        boundary: Boundary::Measured {
+            // Driven at a real bot and a real group. 4,096 was accepted as one
+            // message; 4,097 was refused outright, so the shipped cap sits
+            // exactly ON the boundary rather than below it — unlike Slack,
+            // where the boundary is 4,040 against a 4,000 cap.
+            //
+            // MEASURED IN ASCII, WHICH DOES NOT SETTLE THE UNIT QUESTION. The
+            // open question this cell was filed with is whether Telegram counts
+            // characters or UTF-16 code units; in ASCII those are the same
+            // number, so this run cannot tell them apart. A body of astral-plane
+            // characters (each 2 UTF-16 code units) would answer it and has NOT
+            // been run. Until it is, do not raise this cap for non-ASCII text.
+            accepts_up_to: 4_096,
+            above: Above::Refused("400: Bad Request: message is too long"),
+            on: "2026-08-29",
         },
         env: [
             "WL_LIVE_CAP_TELEGRAM_HOME",
