@@ -12876,6 +12876,15 @@ impl AgentEngine {
                         self.fire_on_session_end(turn).await;
                         self.cache_ledger.finish();
                         self.save_session_mirror();
+                        // #388 bullet 4, same class as the four provider-failure
+                        // exits: this is a TERMINAL exit of the run and it said
+                        // nothing on the ANSWER stream. A compaction bail is the
+                        // reporter’s own "runs out of token budget" symptom, so a
+                        // `-p` run ended with an EMPTY stdout and the cause only on
+                        // stderr. Measured, not modelled — see the c10 red arm.
+                        self.emit_incomplete_run_admission(
+                            "the context could not be compacted small enough to continue this run",
+                        );
                         return Err(e);
                     }
 
@@ -14606,6 +14615,15 @@ impl AgentEngine {
                             self.fire_on_session_end(turn).await;
                             self.cache_ledger.finish();
                             self.save_session_mirror();
+                            // #388 bullet 4, same class as the four provider-failure
+                            // exits: this is a TERMINAL exit of the run and it said
+                            // nothing on the ANSWER stream. A compaction bail is the
+                            // reporter’s own "runs out of token budget" symptom, so a
+                            // `-p` run ended with an EMPTY stdout and the cause only on
+                            // stderr. Measured, not modelled — see the c10 red arm.
+                            self.emit_incomplete_run_admission(
+                                "the context could not be compacted small enough to continue this run",
+                            );
                             return Err(e);
                         }
                         // Rebuild the volatile request inputs from the compacted
@@ -15179,6 +15197,15 @@ impl AgentEngine {
                                     self.fire_on_session_end(turn).await;
                                     self.cache_ledger.finish();
                                     self.save_session_mirror();
+                                    // #388 bullet 4, same class as the four provider-failure
+                                    // exits: this is a TERMINAL exit of the run and it said
+                                    // nothing on the ANSWER stream. A compaction bail is the
+                                    // reporter’s own "runs out of token budget" symptom, so a
+                                    // `-p` run ended with an EMPTY stdout and the cause only on
+                                    // stderr. Measured, not modelled — see the c10 red arm.
+                                    self.emit_incomplete_run_admission(
+                                        "the context could not be compacted small enough to continue this run",
+                                    );
                                     return Err(e);
                                 }
                                 let history_after = request_wire_fingerprint(
@@ -24026,6 +24053,96 @@ mod compact_tests {
             }
             other => panic!("expected ContextTooLong from emergency, got: {other:?}"),
         }
+    }
+
+    /// #388 bullet 4 (c10) - the COMPACTION bail is a terminal exit of the run
+    /// too, and it was the last class of run-ending failure saying nothing
+    /// where the answer goes.
+    ///
+    /// `emergency_stays_conservative_ignoring_real_watermark` above proves the
+    /// bail FIRES; this proves the user is TOLD when it fires, through a real
+    /// `run()`. This path is the reporter own words - "truncates because the
+    /// model runs out of token budget" - and the class was measured on the
+    /// shipped binary: a one-shot run ending on a provider-failure exit wrote
+    /// 177 bytes to stdout WITH the admission and 0 bytes with it stubbed out,
+    /// and the compaction exits were still on the 0-byte side.
+    #[tokio::test]
+    async fn a_compaction_bail_admits_itself_on_the_answer_stream() {
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            emergency_buffer: 3_000,
+            enabled: false,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 198_000;
+        state.last_real_input_tokens = 10_000;
+
+        let mut engine = make_compact_engine(config, state, vec![]);
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        let handle = sink.handle();
+        engine.output = sink;
+        engine.provider = Arc::new(SummaryProvider);
+
+        let result = engine.run("the live task", "m-388-compact").await;
+        assert!(
+            matches!(&result, Err(super::AgentError::ContextTooLong { .. })),
+            "this arm must reach the compaction bail: {result:?}"
+        );
+
+        let answer: String = handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            answer.contains("[stopped early]"),
+            "#388: a run that ends on a compaction bail must admit it where the \
+             ANSWER went - emit_error is stderr, so stdout is otherwise empty \
+             and the run reads as having produced nothing at all: {answer:?}"
+        );
+        assert!(
+            answer.contains("not an answer"),
+            "the admission must say the partial work is not an answer: {answer:?}"
+        );
+    }
+
+    /// CONTROL for the test above, and not decoration: it stops that test
+    /// passing by admitting on EVERY run. Same fixture, watermarks below the
+    /// emergency limit, provider answers normally - the answer stream must
+    /// carry the answer and no admission.
+    #[tokio::test]
+    async fn a_run_that_does_not_bail_carries_no_admission() {
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            emergency_buffer: 3_000,
+            enabled: false,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 1_000;
+        state.last_real_input_tokens = 1_000;
+
+        let mut engine = make_compact_engine(config, state, vec![]);
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        let handle = sink.handle();
+        engine.output = sink;
+        engine.provider = Arc::new(SummaryProvider);
+
+        let result = engine.run("the live task", "m-388-nobail").await;
+        assert!(result.is_ok(), "the control must complete: {result:?}");
+
+        let answer: String = handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            !answer.contains("[stopped early]"),
+            "a run that completed must not admit failure: {answer:?}"
+        );
     }
 
     // -- Microcompact runs when count trigger fires AND pressure is real --
