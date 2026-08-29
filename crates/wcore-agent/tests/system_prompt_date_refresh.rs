@@ -116,9 +116,8 @@ async fn a_stale_baked_date_is_refreshed_before_the_request_goes_out() {
         "the stale date must be gone from the wire, not merely joined: {}",
         systems[0]
     );
-    assert_eq!(
-        engine.system_prompt().contains(stale),
-        false,
+    assert!(
+        !engine.system_prompt().contains(stale),
         "the refresh must be persisted on the engine, or it re-renders every turn"
     );
 }

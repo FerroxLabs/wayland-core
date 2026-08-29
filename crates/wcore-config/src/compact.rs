@@ -830,7 +830,6 @@ context_window = 128000
         assert_eq!(cfg.enabled, default.enabled);
     }
 
-    #[test]
     /// #1166 Defect 5 — this stays off ON PURPOSE, and the reason is recorded
     /// on the field: the flag gates the per-TURN hit-rate line (noise on a
     /// healthy session), not the cache-health verdict, which reaches the user
