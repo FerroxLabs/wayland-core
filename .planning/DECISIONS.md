@@ -15,6 +15,8 @@
 | Q7 | Windows merge freeze for Lane W | **YES — a declared window, opened after Lane 0.1 is read** | Serializes the single Windows box |
 | Q-113 | core#113 | **CLOSE AS REFUTED**, recording deny-by-default as the decision | Maintainer performs the close |
 | Q-338c4 | core#338 credential surface | **Deny `/dev/tty` via `setsid`, in the SAME change as layer 1** | Layer 1 alone makes the test green while `credential.helper` stays open |
+| Q-338d6 | core#338 on **Windows** | **Clear `credential.helper` for quarantine clones there** | Windows cannot take the terminal away — see D-338-WINDOWS. Unix keeps the helper |
+| Q-338d5 | core#338 teardown | **Own and reap the git process TREE, not the pid** | Every error exit of `run_git`; success disarms. MASTER-PLAN.md:202 obliged this in the same change |
 
 ## D-SECRET-2 — REFUTED 2026-08-29. Do not build this.
 MASTER-PLAN.md §8 recommended splitting `reached` per tracker "to close the one hole in the
@@ -76,3 +78,36 @@ nothing in it describes broken behaviour. Its slice 2 carries a BREAKING migrati
 `acknowledge_open_admission` token an operator has written — every open-admission channel refuses to
 start until re-acknowledged. The buried Telegram defect needs none of that. Ship the defect, park the
 feature request, and be explicit that it is parked as a feature.
+
+## D-338-WINDOWS — TAKEN 2026-08-29. Measured, not argued.
+
+Q-338c4 denies the quarantine clone a terminal with `setsid(2)`, and the source
+called `DETACHED_PROCESS` "the analogue" on Windows. It is not one, and the
+difference is the whole decision.
+
+Measured on Windows 11 build 26200 (SeanDesktop), with a launcher holding a real
+console and reading its own screen buffer back with
+`ReadConsoleOutputCharacterW` against a control marker:
+
+| route | result |
+|---|---|
+| direct `DETACHED_PROCESS` child → `AttachConsole(ATTACH_PARENT_PROCESS)` | reached the launcher console |
+| console-less grandchild → `AttachConsole(<launcher pid>)` | reached the launcher console |
+| grandchild with its own console → `FreeConsole()` then `AttachConsole(<launcher pid>)` | reached the launcher console |
+
+A `setsid`'d unix child cannot do the equivalent: `TIOCSCTTY` refuses a terminal
+that is already another session's controlling terminal. So on Windows the first
+of #338's three policies is unavailable, and the second is taken instead —
+`-c credential.helper=` on every quarantine `git`, so no third-party helper is
+spawned to prompt at all.
+
+**The cost, stated.** A Windows install from a private plugin source that needs
+a credential helper now fails with a git authentication error instead of
+prompting. Credentials in the URL, `ssh` keys and an agent still work. Unix
+keeps the helper, because there the terminal really is denied and clearing it
+would be a regression for nothing.
+
+**The residual, stated.** The reset covers credential helpers. An `ssh://` or
+`git@` source still reaches `ssh`, whose Windows passphrase prompt is not a
+helper; `SSH_ASKPASS=""` and `SSH_ASKPASS_REQUIRE=never` are pinned, but those
+are route-1 knobs and route 1 is exactly the class Windows cannot enforce.

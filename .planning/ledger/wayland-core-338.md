@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Untrusted plugin install can make Wayland prompt the user for credentials via /dev/tty"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: 431d21ed
 criteria:
   - id: c1
     text: "A quarantine clone of untrusted plugin content cannot open /dev/tty to prompt the user directly"
@@ -15,9 +15,9 @@ criteria:
   - id: c2
     text: "Any prompt raised inside a quarantine operation is distinguishable by the user from a prompt raised by Wayland itself"
     state: met
-    evidence: "symbol:crates/wcore-cli/src/plugin/quarantine.rs::build_git_command"
+    evidence: "test:crates/wcore-cli/tests/quarantine_credential_helper_policy.rs::the_quarantine_builder_applies_this_platforms_credential_policy"
     owner: core
-    note: "Satisfied by ELIMINATION, not by labelling. build_git_command is the sole Command::new in the file and it both redirects stdio away from the terminal and removes the ctty, so no quarantine-originated prompt can reach the user at all. The criterion asked for distinguishability; the chosen policy makes the ambiguous prompt unreachable. Wording deviation flagged rather than papered over."
+    note: "Satisfied by ELIMINATION, not by labelling, and now on BOTH platforms rather than one. Wording deviation flagged rather than papered over. UNIX: build_git_command redirects stdio away from the terminal and setsid removes the ctty, so no quarantine-originated prompt can reach the user. WINDOWS: DETACHED_PROCESS is NOT that guarantee and the claim that it was has been removed from the source. MEASURED on Windows 11 build 26200 - a DETACHED_PROCESS child reached the launcher console via AttachConsole(ATTACH_PARENT_PROCESS), a console-less grandchild reached it via AttachConsole(<launcher pid>), and a grandchild holding its own console reached it after FreeConsole(); all three writes were read back out of the launcher screen buffer with ReadConsoleOutputCharacterW, against a control marker proving the read-back works. Windows therefore takes the SECOND policy on this criterion own menu (c4): credential.helper is reset in the argv so no third-party helper is spawned to prompt at all. The named test drives a real git against a loopback endpoint that answers 401, with a CONTROL arm proving a plain git DOES invoke the configured helper and a served-request counter proving the arm reached a credential lookup."
   - id: c3
     text: "The fix reasons about /dev/tty access rather than about inherited stdio or GIT_TERMINAL_PROMPT"
     state: met
@@ -29,7 +29,13 @@ criteria:
     state: met
     evidence: "file:.planning/DECISIONS.md"
     owner: maintainer
-    note: "TAKEN 2026-08-29 as Q-338c4: deny /dev/tty via setsid, in the SAME change as layer 1, because layer 1 alone makes the acceptance test green while credential.helper stays open. The rejected alternative and its product cost are also recorded in-tree at quarantine.rs:324 - clearing credential.helper would break private plugin sources. CAVEAT: the DETACHED_PROCESS arm is cfg(windows) and the test is cfg(unix), so the Windows half of the fix is unexercised."
+    note: "TAKEN 2026-08-29 as Q-338c4 (unix: deny /dev/tty via setsid, in the SAME change as layer 1) and EXTENDED 2026-08-29 as Q-338d6 (windows: clear credential.helper, because the first option is measurably unavailable there). The earlier CAVEAT - the DETACHED_PROCESS arm was cfg(windows) while every test was cfg(unix) - is closed: the unit module is now cfg(test), and two of its tests plus one integration test run on Windows."
+  - id: c5
+    text: "A quarantine git that fails does not leave the helpers it spawned running"
+    state: met
+    evidence: "test:crates/wcore-cli/src/plugin/quarantine.rs::a_timed_out_git_reaps_the_whole_detached_tree"
+    owner: core
+    note: "ADDED - not in the issue body, obliged by the fix. The setsid hardening put every quarantine git child in a session wayland-core does not own while the timeout path still SIGKILLed one pid, so the fix converted a bounded wedge into an unreaped detached tree (.planning/MASTER-PLAN.md:144 predicted exactly this and MASTER-PLAN.md:202 obliged the teardown to land in the same change). symbol:crates/wcore-cli/src/plugin/quarantine.rs::GitProcessTree now owns the tree - kill(-pgid) behind a verified group-leadership check on unix, a kill-on-close Job Object on Windows - reaped from EVERY error exit of run_git via Drop and disarmed only on success. Both failure shapes are graded, not just the one the defect named: the wall-clock timeout and the drain guard. RED ARM: the three new tests grafted onto a clean pre-fix checkout of origin/integ/f13 fail 3/3 (2 passed, 3 failed) with the defect wording - the background worker N that the timed-out git spawned is STILL ALIVE - while the two pre-existing tests stay green."
 ---
 
 An interactive wayland-core session installing an untrusted third-party plugin
@@ -48,3 +54,21 @@ inherits before anyone designs a remedy.
 
 The related unbounded-join hang on the same function was fixed separately and
 does not address this.
+
+## What the Windows arm can and cannot promise (measured 2026-08-29)
+
+Do not restore the sentence "on Windows the analogue is DETACHED_PROCESS". It
+is false, and it is what let the Windows half ship unexercised. `DETACHED_PROCESS`
+withholds the parent console at CREATION time and is not a boundary: on Windows
+11 build 26200 every re-acquisition route tested succeeded (direct child via
+`AttachConsole(ATTACH_PARENT_PROCESS)`; console-less grandchild via
+`AttachConsole(<pid>)`; grandchild via `FreeConsole()` then `AttachConsole(<pid>)`).
+The unix guarantee is different in kind - `TIOCSCTTY` refuses a terminal that is
+already another session's ctty - so it cannot be ported.
+
+What closes #338 on Windows is therefore that no third-party credential helper
+is spawned at all. The residual, stated rather than hidden: an `ssh://` or
+`git@` source still reaches `ssh`, whose Windows passphrase prompt is not a
+credential helper and is not covered by that reset. `SSH_ASKPASS=""` plus
+`SSH_ASKPASS_REQUIRE=never` are pinned, but they are route-1 knobs, and route 1
+is exactly the class Windows cannot enforce.

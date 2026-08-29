@@ -150,7 +150,8 @@ fn the_quarantine_builder_applies_this_platforms_credential_policy() {
     let before = server.served();
 
     // ---- ARM: the real quarantine builder --------------------------------
-    let mut arm = wcore_cli::plugin::quarantine::build_git_command(&["ls-remote", "--", &url], None);
+    let mut arm =
+        wcore_cli::plugin::quarantine::build_git_command(&["ls-remote", "--", &url], None);
     isolate(&mut arm);
     let arm_out = run(arm);
 
