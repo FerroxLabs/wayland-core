@@ -5695,6 +5695,12 @@ mod tests {
         let writer: Arc<dyn wcore_protocol::writer::ProtocolEmitter> =
             Arc::clone(&emitter) as Arc<dyn wcore_protocol::writer::ProtocolEmitter>;
 
+        // The filler is deliberately `[A-Za-z0-9]`: it is credential-shaped
+        // material sitting directly against a freshly minted token, which is
+        // what lets a greedy PII pattern bridge out of the token and into the
+        // filler. Do NOT "fix" a flake here by changing the filler — that
+        // deletes the adversarial input and hides the leak. See
+        // `output_redaction::tests::pii_scrub_cannot_strand_the_head_of_an_active_token`.
         let payload = format!("{}{token}{}", "A".repeat(80), "B".repeat(400));
         // CONTROL: the layout must actually straddle the head boundary, or the
         // test degenerates into the whole-token case above.
