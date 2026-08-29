@@ -34,10 +34,21 @@ pub const BACKEND_ID: &str = "container";
 pub const NONCE_LABEL: &str = "wayland.task.nonce";
 const DEFAULT_IMAGE: &str = "docker.io/library/busybox:1.36";
 
-/// The marker docker puts on its OWN diagnostics, as distinct from anything
-/// the contained process writes. See `classify_exit` for why a marker is
-/// needed at all.
+/// The marker docker puts on its OWN diagnostics. This is used ONLY to pick
+/// which stderr lines an operator is shown — never to decide whether a task
+/// ran. See `classify_run` for why that distinction is the whole of #365 c2.
 const DAEMON_ERROR_MARKER: &str = "Error response from daemon:";
+
+/// The zero `time.Time` docker renders in `.State.StartedAt` for a container
+/// that was created and whose process was never started. MEASURED on docker
+/// 29.2.1: it is a rendered zero value, not a human-readable message, and it
+/// is the daemon's own answer to "did anything of this task execute?".
+const NEVER_STARTED_AT: &str = "0001-01-01T00:00:00Z";
+
+/// The one inspect template this backend needs after a run. `.State.ExitCode`
+/// is the DAEMON's code for the container, which is not the same thing as the
+/// docker CLI's process exit status — see the table on `classify_run`.
+const FINAL_STATE_FORMAT: &str = "{{.State.StartedAt}}|{{.State.ExitCode}}|{{.State.Error}}";
 
 pub struct ContainerBackend {
     capabilities: BackendCapabilities,
@@ -110,92 +121,280 @@ async fn daemon_ping() -> std::result::Result<String, String> {
     }
 }
 
-/// What a `docker run` exit code actually means.
+/// What the daemon says about a container once `docker run` has returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContainerState {
+    /// `.State.StartedAt` is not the zero value, i.e. the container's process
+    /// was actually started. Only then does an exit code describe a run.
+    started: bool,
+    /// `.State.ExitCode` — the daemon's code for the container.
+    exit_code: i32,
+    /// `.State.Error` — empty on a clean run, the start failure otherwise.
+    error: String,
+}
+
+/// Whether a `docker run` produced a task execution at all.
 ///
-/// Docker overloads three exit codes across two completely different
-/// authorities, and this enum is where that overload is resolved ONCE.
+/// #365 c2 asks that a refusal never be reported as a task exit. The FIRST
+/// attempt keyed on the conjunction of exit code 125 and docker's
+/// `Error response from daemon:` line, and a live reproduction refuted it: the
+/// marker only covers DAEMON-side refusals, and docker's 125 class is bigger
+/// than that. Both of these exit 125 with the marker count at ZERO, and both
+/// therefore produced a signed receipt asserting the task ran and returned
+/// 125 — measured end to end through the CLI on docker 29.2.1:
 ///
-/// MEASURED on docker 29.2.1 (issue #365), which is also why the exit code
-/// ALONE is not a sound discriminator:
+/// * `docker run --rm BadImage:Tag true`
+///   → `docker: invalid reference format: repository name (library/BadImage)
+///     must be lowercase`
+/// * `docker run --rm --memory notanumber busybox:1.36 true`
+///   → `invalid argument "notanumber" for "-m, --memory" flag`
 ///
-/// | invocation                          | exit | docker's own stderr |
-/// |-------------------------------------|------|---------------------|
-/// | name conflict                       | 125  | yes                 |
-/// | `--memory 1` (below the daemon min) | 125  | yes                 |
-/// | image absent                        | 125  | yes                 |
-/// | `sh -c 'exit 125'`                  | 125  | NO                  |
-/// | argv is a directory                 | 126  | yes                 |
-/// | argv not on PATH                    | 127  | yes                 |
-/// | `sh -c 'exit 126'` / `'exit 127'`   | 126/127 | NO               |
+/// A text match on stderr cannot be repaired by adding more strings; the whole
+/// approach guesses at an authority docker will happily answer directly. So
+/// the discriminator is now the DAEMON'S OWN RECORD of the container, obtained
+/// from two structural facts and no message text:
 ///
-/// A contained process is free to exit 125 of its own accord, so keying on
-/// the code alone would reclassify a run that really happened as one that
-/// never did. In a subsystem whose product is a signed attestation that is the
-/// exact inverse of the reported defect and just as much a lie. The
-/// discriminator is therefore the CONJUNCTION of the reserved code and
-/// docker's own error line on stderr.
+/// 1. `--cidfile` — docker writes the container id there when, and only when,
+///    ContainerCreate succeeds. Its absence is positive proof that no
+///    container exists, which is a stronger statement than any diagnostic.
+/// 2. `.State.StartedAt` — the zero value means the container was created and
+///    its process never started, so nothing of the task executed.
 ///
-/// What that conjunction costs: a contained process that both exits 125 AND
-/// prints docker's error line has its run recorded as "did not execute". That
-/// is a strictly WEAKER claim than "ran and succeeded", so the forgery cannot
-/// manufacture a success attestation — it can only disclaim its own run. For a
-/// fail-closed attestation surface that is the correct direction to be wrong
-/// in, and it is the reason stderr shape is used to NARROW a daemon verdict
-/// and never to widen one.
+/// FULL ENUMERATION, every row measured on docker 29.2.1 (issue #365). "CLI"
+/// is `docker run`'s own exit status; the last three columns are the daemon's:
+///
+/// | class                            | CLI | cidfile | StartedAt | .State.ExitCode | verdict  |
+/// |----------------------------------|-----|---------|-----------|-----------------|----------|
+/// | client: bad image reference      | 125 | absent  | –         | –               | NeverRan |
+/// | client: bad flag value           | 125 | absent  | –         | –               | NeverRan |
+/// | client: daemon unreachable       |   1 | absent  | –         | –               | NeverRan |
+/// | client: stale cidfile            | 125 | (fresh) | –         | –               | NeverRan |
+/// | daemon: name conflict            | 125 | absent  | –         | –               | NeverRan |
+/// | daemon: `--memory 1`             | 125 | absent  | –         | –               | NeverRan |
+/// | daemon: image absent / pull fail | 125 | absent  | –         | –               | NeverRan |
+/// | daemon: start failed (network)   | 125 | written | zero      | 128             | NeverRan |
+/// | daemon: start failed (device)    | 127 | written | zero      | 128             | NeverRan |
+/// | argv not executable              | 126 | written | zero      | 126             | TaskExit |
+/// | argv not found                   | 127 | written | zero      | 127             | TaskExit |
+/// | task exits 0 / 7 / 125 / 126     |   = | written | real      | =               | TaskExit |
+///
+/// The two rows that matter most:
+///
+/// * `task exits 125` keeps a real receipt. The container started, so the
+///   daemon's own `.State.StartedAt` proves the run happened and 125 is the
+///   task's own status. This is the polarity the previous discriminator got
+///   right and that must not be lost while fixing the one it got wrong.
+/// * `start failed (device)` exits **127** at the CLI while the daemon records
+///   `.State.ExitCode` 128 and a zero `StartedAt`. The CLI code alone would
+///   have called that a task exit; the daemon's record does not.
+///
+/// 126/127 DISPOSITION, unchanged from the previous pass but now resting on a
+/// structural field instead of a string. The daemon assigns 126/127 for a
+/// failed exec OF THE TASK'S ARGV and 128 for a start failure of its own
+/// making, so `.State.ExitCode` carries the attribution the stderr text used
+/// to. They stay task exits: `Failure { code: "exit-127" }` is the
+/// conventional truthful encoding of "the argv you submitted is not there",
+/// the same one every POSIX shell uses, and reclassifying it as an unavailable
+/// BACKEND would make a typo in a task's argv read as a broken transport.
+///
+/// DIRECTION OF ERROR. Every uncertain case resolves to `NeverRan`, which is a
+/// refusal and a strictly WEAKER claim than any receipt. A lost cidfile or an
+/// inspect the daemon will not answer costs a real run its attestation; it can
+/// never manufacture one. For a surface whose product is a signed statement
+/// that is the correct direction to be wrong in.
 #[derive(Debug, PartialEq, Eq)]
 enum DockerExit {
-    /// The daemon refused before any of the task's code ran. There is nothing
-    /// to attest: no container was created under our nonce, no argv executed,
-    /// and no workspace was read. This must NEVER become a receipt.
-    DaemonRefusal(String),
+    /// No process of this task ever executed. There is nothing to attest: no
+    /// argv ran and no workspace was read. This must NEVER become a receipt.
+    NeverRan(String),
     /// The contained process's own terminal status, 126 and 127 included.
     TaskExit(i32),
 }
 
-/// Resolve a `docker run` result to the authority that produced it.
-fn classify_exit(exit_code: i32, stderr: &[u8]) -> DockerExit {
-    let text = String::from_utf8_lossy(stderr);
-    let daemon_spoke = text.contains(DAEMON_ERROR_MARKER);
-    match exit_code {
-        // 125 is the ONLY code docker reserves for its own client/daemon
-        // layer. With docker's error line present, nothing of the task ran.
-        125 if daemon_spoke => DockerExit::DaemonRefusal(daemon_diagnostic(&text)),
-        // 125 without docker's error line is the contained process's own
-        // status. Docker does not claim this code exclusively at runtime, and
-        // treating it as a refusal here would erase a run that happened.
-        125 => DockerExit::TaskExit(125),
-        // 126 and 127 are the CONTAINER's, not the daemon's, even though the
-        // daemon is what reports them: they say the argv the TASK submitted
-        // was found-but-not-executable / not found at all. That is a property
-        // of task input, not of this backend's infrastructure, and
-        // `Failure { code: "exit-126" }` is the conventional truthful encoding
-        // of it — the same one every POSIX shell uses. Reclassifying them as
-        // an unavailable BACKEND would make a task with a typo in its argv
-        // read as a broken transport, which is the inverse defect and would
-        // make the backend undiagnosable. They stay task exits; what they
-        // gained in this pass is that their stderr now reaches the operator
-        // through the receipt path rather than being the bare code alone.
-        126 | 127 => DockerExit::TaskExit(exit_code),
-        other => DockerExit::TaskExit(other),
+/// Resolve a run against the daemon's record of it.
+///
+/// `observed` is `None` when docker wrote no container id, i.e. no container
+/// was ever created. `docker_stderr` is used for the operator-facing message
+/// only, never for the verdict.
+fn classify_run(observed: Option<&ContainerState>, docker_stderr: &str) -> DockerExit {
+    let Some(state) = observed else {
+        // Nothing was created, so whatever docker exited with, it is docker's
+        // status and not a task's. This is the row the string match missed.
+        return DockerExit::NeverRan(docker_diagnostic(docker_stderr));
+    };
+    if state.started {
+        return DockerExit::TaskExit(state.exit_code);
+    }
+    match state.exit_code {
+        // The daemon attributes a failed exec of the TASK'S ARGV to 126/127.
+        126 | 127 => DockerExit::TaskExit(state.exit_code),
+        // Anything else with a zero StartedAt is the daemon failing to start a
+        // container it had already created — infrastructure, not the task.
+        _ => {
+            let detail = if state.error.trim().is_empty() {
+                docker_diagnostic(docker_stderr)
+            } else {
+                state.error.trim().to_string()
+            };
+            DockerExit::NeverRan(detail)
+        }
     }
 }
 
-/// Pull docker's own diagnostic lines out of a mixed stderr.
+/// Parse the `FINAL_STATE_FORMAT` render into a state.
+fn parse_final_state(rendered: &str) -> std::result::Result<ContainerState, String> {
+    let line = rendered.trim();
+    // `.State.Error` is taken as the REMAINDER: the daemon's message may itself
+    // contain a '|', and truncating it would drop the operator's diagnostic.
+    let mut parts = line.splitn(3, '|');
+    let started_at = parts.next().unwrap_or_default().trim();
+    let code = parts
+        .next()
+        .ok_or_else(|| format!("docker inspect returned an unparsable state: {line:?}"))?;
+    let error = parts.next().unwrap_or_default().trim().to_string();
+    if started_at.is_empty() {
+        return Err(format!("docker inspect returned no StartedAt: {line:?}"));
+    }
+    let exit_code: i32 = code
+        .trim()
+        .parse()
+        .map_err(|_| format!("docker inspect returned an unparsable exit code: {code:?}"))?;
+    Ok(ContainerState {
+        started: started_at != NEVER_STARTED_AT,
+        exit_code,
+        error,
+    })
+}
+
+/// Ask the daemon what became of the container this run created.
+async fn inspect_final_state(id: &str) -> std::result::Result<ContainerState, String> {
+    let mut command = wcore_config::shell::shell_command_argv(
+        "docker",
+        &["inspect", id, "--format", FINAL_STATE_FORMAT],
+    );
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| "docker inspect did not answer within 10s".to_string())?
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    parse_final_state(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The container id docker recorded, if it created one at all.
 ///
-/// The whole of stderr is not used: on a refusal docker appends
-/// `Run 'docker run --help' for more information`, which is noise in an
-/// operator-facing error. The lines carrying the marker are the ones that name
-/// the problem and the remedy.
-fn daemon_diagnostic(stderr: &str) -> String {
-    let lines: Vec<&str> = stderr
+/// A file that is missing, empty or not a hex id is read as "no container".
+/// Inventing a container from a malformed file would put the discriminator
+/// back on a guess.
+fn read_cid(path: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let id = raw.trim();
+    if id.len() >= 12 && id.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(id.to_string())
+    } else {
+        None
+    }
+}
+
+/// A `--cidfile` path for this run, PROVEN free before docker is invoked.
+///
+/// Two traps, both measured, both closed here:
+///
+/// * docker refuses to run at all when the path already exists — `docker:
+///   container ID file found, make sure the other container isn't running or
+///   delete <path>`, exit 125, client side and with no daemon line.
+/// * a leftover file would be read back as proof of a container THIS run never
+///   created, which is the forgery the discriminator exists to prevent.
+///
+/// Clearing the path and then re-checking it closes both. If it survives, the
+/// discriminator cannot be established, and a discriminator that cannot be
+/// established must not be assumed — the run is refused instead.
+fn cid_path(container_name: &str) -> Result<std::path::PathBuf> {
+    let dir = registry::state_dir().join("cid");
+    std::fs::create_dir_all(&dir)?;
+    // `container_name` has been through `validate_identifier`, so it is a
+    // single ascii path segment and cannot traverse out of `dir`.
+    let path = dir.join(format!("{container_name}.cid"));
+    if let Err(e) = std::fs::remove_file(&path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(ExecError::Unavailable {
+            backend_id: BACKEND_ID.into(),
+            detail: format!(
+                "could not clear a stale container-id file at {}: {e}",
+                path.display()
+            ),
+        });
+    }
+    if path.exists() {
+        return Err(ExecError::Unavailable {
+            backend_id: BACKEND_ID.into(),
+            detail: format!(
+                "the container-id file at {} could not be cleared, so whether a container \
+                 was created cannot be established; refusing to run rather than guess",
+                path.display()
+            ),
+        });
+    }
+    Ok(path)
+}
+
+/// Remove the container this run created. This is what replaced `--rm`.
+///
+/// `--rm` had to go for #365 c2: it deletes the container the instant it stops,
+/// and MEASURED on docker 29.2.1 that includes containers that never started —
+/// `docker inspect` by id after a `--rm` run returns `no such object` for a
+/// start failure exactly as it does for a clean exit. The daemon is the only
+/// authority on whether a task's process ran, so the container has to outlive
+/// the run long enough to be asked.
+///
+/// TRADEOFF, stated rather than hidden: `--rm` is daemon-side, so it cleaned up
+/// even if this process was killed mid-run, and an explicit removal cannot.
+/// What catches that window is the machinery #365 already built — the container
+/// keeps its deterministic name, so `reclaim_container_name` clears it on the
+/// next submit of the same task id, and it keeps its `wayland.task.nonce`
+/// label, so `scan_orphans` can still see it. The residue is the same class
+/// tracked by FerroxLabs/wayland-core#366.
+async fn remove_container(id: &str) {
+    let mut command = wcore_config::shell::shell_command_argv("docker", &["rm", "-f", id]);
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), command.output()).await;
+}
+
+/// Pull the lines an operator needs out of a mixed stderr.
+///
+/// The whole of stderr is not used: docker appends `Run 'docker run --help'
+/// for more information` and sometimes a `Usage:` banner, which are noise in an
+/// operator-facing error. When docker's own daemon line is present it is the
+/// whole answer; otherwise — the client-side classes — what is left after the
+/// noise is.
+fn docker_diagnostic(stderr: &str) -> String {
+    let signal: Vec<&str> = stderr
         .lines()
         .map(str::trim)
-        .filter(|line| line.contains(DAEMON_ERROR_MARKER))
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.starts_with("Usage:"))
+        .filter(|line| !(line.starts_with("Run '") && line.ends_with("for more information")))
         .collect();
-    if lines.is_empty() {
+    if signal.is_empty() {
         return stderr.trim().to_string();
     }
-    lines.join(" / ")
+    let daemon: Vec<&str> = signal
+        .iter()
+        .copied()
+        .filter(|line| line.contains(DAEMON_ERROR_MARKER))
+        .collect();
+    if daemon.is_empty() {
+        signal.join(" / ")
+    } else {
+        daemon.join(" / ")
+    }
 }
 
 /// Whatever container currently holds a name a submit is about to take.
@@ -404,6 +603,12 @@ impl ExecutionBackend for ContainerBackend {
         // neither a stray work directory nor a registry entry behind.
         reclaim_container_name(&name).await?;
 
+        // Issue #365 c2: the only authority on whether this task's process ran
+        // is the daemon, so the run must leave the daemon something to be asked
+        // about. `--cidfile` records the container id the moment
+        // ContainerCreate succeeds and writes nothing when it does not.
+        let cidfile = cid_path(&name)?;
+
         let workdir = registry::state_dir().join("work").join(&task.task_id);
         materialize_workspace(&workdir, task)?;
         let started = now_unix_ms();
@@ -426,7 +631,10 @@ impl ExecutionBackend for ContainerBackend {
         // interpreter on either side of the container boundary.
         let mut args: Vec<String> = vec![
             "run".into(),
-            "--rm".into(),
+            // NOT `--rm`: it would delete the daemon's record of this run
+            // before the run could be classified. See `remove_container`.
+            "--cidfile".into(),
+            cidfile.display().to_string(),
             "--name".into(),
             name.clone(),
             "--label".into(),
@@ -455,7 +663,10 @@ impl ExecutionBackend for ContainerBackend {
         let output = match tokio::time::timeout(wall, command.output()).await {
             Ok(result) => result.map_err(|e| ExecError::Exec(e.to_string()))?,
             Err(_) => {
+                // `cancel` removes the container by name; the id file is ours
+                // to clear so the next submit of this task id starts clean.
                 let _ = self.cancel(&task.task_id).await;
+                let _ = std::fs::remove_file(&cidfile);
                 return Err(ExecError::Exec(format!(
                     "container task {} exceeded its {}ms wall clock",
                     task.task_id, task.resources.wall_time_ms
@@ -465,29 +676,66 @@ impl ExecutionBackend for ContainerBackend {
 
         let finished = now_unix_ms();
 
-        // Issue #365: resolve WHOSE exit this is before anything is attested.
-        // A daemon refusal never becomes a receipt — there is no run to sign a
-        // statement about — and its diagnostic is returned as the error value,
-        // which the CLI prints unconditionally to stderr. It is deliberately
-        // NOT a `warn!`: RUST_LOG is unset for ordinary operators, so only
-        // ERROR reaches stderr and a log-level bump could never make the user
-        // told.
-        let exit_code = match classify_exit(output.status.code().unwrap_or(-1), &output.stderr) {
-            DockerExit::DaemonRefusal(detail) => {
-                // Nothing was created under our nonce, so there is nothing to
-                // remove; the registry entry and the workspace are still ours.
-                registry::forget(&task.task_id)?;
-                let _ = std::fs::remove_dir_all(&workdir);
-                return Err(ExecError::Unavailable {
-                    backend_id: BACKEND_ID.into(),
-                    detail: format!(
-                        "the container daemon refused to run task {}: {detail}",
+        // Issue #365 c2: resolve WHOSE exit this is before anything is
+        // attested, from the daemon's record rather than from message text. A
+        // run that never happened never becomes a receipt — there is nothing
+        // to sign a statement about — and its diagnostic is returned as the
+        // error VALUE, which the CLI prints unconditionally to stderr. It is
+        // deliberately NOT a `warn!`: RUST_LOG is unset for ordinary operators,
+        // so only ERROR reaches stderr and a log-level bump could never make
+        // the user told.
+        let stderr_text = String::from_utf8_lossy(&output.stderr).into_owned();
+        // Read the id BEFORE anything is removed. Absent means no container was
+        // ever created, whatever docker exited with.
+        let created_id = read_cid(&cidfile);
+
+        let abandon = |detail: String| -> ExecError {
+            registry::forget(&task.task_id).ok();
+            let _ = std::fs::remove_dir_all(&workdir);
+            let _ = std::fs::remove_file(&cidfile);
+            ExecError::Unavailable {
+                backend_id: BACKEND_ID.into(),
+                detail,
+            }
+        };
+
+        let observed = match &created_id {
+            None => None,
+            Some(id) => match inspect_final_state(id).await {
+                Ok(state) => Some(state),
+                Err(detail) => {
+                    // A container exists but the daemon will not describe it,
+                    // so whether the task ran is UNKNOWN. Fail closed and
+                    // refuse to attest, rather than pick the answer that
+                    // happens to produce a receipt.
+                    remove_container(id).await;
+                    return Err(abandon(format!(
+                        "task {} produced container {id}, but the daemon would not report \
+                         whether it ever started, so the run cannot be attested: {detail}",
                         task.task_id
-                    ),
-                });
+                    )));
+                }
+            },
+        };
+
+        let exit_code = match classify_run(observed.as_ref(), &stderr_text) {
+            DockerExit::NeverRan(detail) => {
+                if let Some(id) = &created_id {
+                    remove_container(id).await;
+                }
+                return Err(abandon(format!(
+                    "task {} was never executed — no container process started: {detail}",
+                    task.task_id
+                )));
             }
             DockerExit::TaskExit(code) => code,
         };
+
+        // The run is classified, so the daemon's record has served its purpose.
+        if let Some(id) = &created_id {
+            remove_container(id).await;
+        }
+        let _ = std::fs::remove_file(&cidfile);
 
         let cancelled = cancel_marker_taken(&task.task_id);
         registry::forget(&task.task_id)?;
@@ -607,19 +855,85 @@ mod tests {
 
     /// The exact stderr docker 29.2.1 produces for a name conflict, measured
     /// against a real daemon while diagnosing issue #365.
-    const CONFLICT_STDERR: &[u8] = b"docker: Error response from daemon: Conflict. The container name \"/wayland-f25-conf-container-ok\" is already in use by container \"9e0bb9943941e2308fa2cf57db1bbb105a685036800e07cfa920b8b392ce14f5\". You have to remove (or rename) that container to be able to reuse that name.\n\nRun 'docker run --help' for more information\n";
+    const CONFLICT_STDERR: &str = "docker: Error response from daemon: Conflict. The container name \"/wayland-f25-conf-container-ok\" is already in use by container \"9e0bb9943941e2308fa2cf57db1bbb105a685036800e07cfa920b8b392ce14f5\". You have to remove (or rename) that container to be able to reuse that name.\n\nRun 'docker run --help' for more information\n";
+
+    /// A container the daemon started, which exited with `code`.
+    fn ran(code: i32) -> ContainerState {
+        ContainerState {
+            started: true,
+            exit_code: code,
+            error: String::new(),
+        }
+    }
+
+    /// A container the daemon created and never started.
+    fn never_started(code: i32, error: &str) -> ContainerState {
+        ContainerState {
+            started: false,
+            exit_code: code,
+            error: error.into(),
+        }
+    }
+
+    /// THE REGRESSION THIS EXISTS FOR — the class nobody thought of.
+    ///
+    /// The first fix keyed on docker's `Error response from daemon:` line, and
+    /// docker's CLIENT side never prints it. Both of these were measured live
+    /// on docker 29.2.1 at exit 125 with a marker count of ZERO, and both
+    /// produced a signed receipt asserting the task ran and returned 125.
+    /// There is no container in either case, so there is nothing to attest.
+    ///
+    /// If a future change reintroduces any stderr text match, this is the test
+    /// that catches it: neither message contains the daemon marker.
+    #[test]
+    fn a_client_side_refusal_is_not_a_task_exit_though_it_prints_no_daemon_line() {
+        let client_side = [
+            // docker run --rm BadImage:Tag true
+            "docker: invalid reference format: repository name (library/BadImage) must be lowercase\n\nRun 'docker run --help' for more information\n",
+            // docker run --rm --memory notanumber busybox:1.36 true
+            "invalid argument \"notanumber\" for \"-m, --memory\" flag: invalid size: 'notanumber'\n\nUsage:  docker run [OPTIONS] IMAGE [COMMAND] [ARG...]\n\nRun 'docker run --help' for more information\n",
+            // a stale --cidfile, which is also client side and also 125
+            "docker: container ID file found, make sure the other container isn't running or delete /tmp/x.cid\n",
+            // the daemon going away between the availability ping and the run
+            "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory\n",
+        ];
+        for stderr in client_side {
+            assert!(
+                !stderr.contains(DAEMON_ERROR_MARKER),
+                "this test is only meaningful for stderr WITHOUT the daemon marker: {stderr}"
+            );
+            // No container id file was written, so `observed` is None.
+            match classify_run(None, stderr) {
+                DockerExit::NeverRan(detail) => {
+                    assert!(!detail.is_empty(), "the operator must be told why");
+                    assert!(
+                        !detail.contains("for more information"),
+                        "the help footer is noise: {detail}"
+                    );
+                    assert!(
+                        !detail.starts_with("Usage:"),
+                        "the usage banner is noise: {detail}"
+                    );
+                }
+                other => panic!(
+                    "a refusal that created no container must not be attested as a task exit: {other:?}"
+                ),
+            }
+        }
+    }
 
     #[test]
     fn a_daemon_refusal_is_never_a_task_exit() {
-        // Every 125 measured with docker's own error line on stderr: name
-        // conflict, a --memory below the daemon minimum, and an absent image.
+        // Every pre-create refusal measured: name conflict, a --memory below
+        // the daemon minimum, and an absent image. None of them writes a
+        // container id, which is what makes them refusals.
         for stderr in [
-            CONFLICT_STDERR.to_vec(),
-            b"docker: Error response from daemon: Minimum memory limit allowed is 6MB\n".to_vec(),
-            b"docker: Error response from daemon: No such image: no-such-image:nope\n".to_vec(),
+            CONFLICT_STDERR,
+            "docker: Error response from daemon: Minimum memory limit allowed is 6MB\n",
+            "docker: Error response from daemon: No such image: no-such-image:nope\n",
         ] {
-            match classify_exit(125, &stderr) {
-                DockerExit::DaemonRefusal(detail) => assert!(
+            match classify_run(None, stderr) {
+                DockerExit::NeverRan(detail) => assert!(
                     detail.contains(DAEMON_ERROR_MARKER),
                     "the refusal must carry the daemon's own words: {detail}"
                 ),
@@ -629,10 +943,32 @@ mod tests {
     }
 
     #[test]
+    fn a_container_created_but_never_started_is_not_a_task_exit() {
+        // MEASURED: `--network no-such-net` exits 125 at the CLI and `--device
+        // /dev/nonexistent` exits 127, but the daemon records a zero StartedAt
+        // and .State.ExitCode 128 for both. The CLI code alone would have
+        // called the second one a task exit.
+        let network = never_started(
+            128,
+            "failed to set up container networking: network no-such-net-f13 not found",
+        );
+        let device = never_started(
+            128,
+            "error gathering device information while adding custom device \"/dev/nonexistent-f13\": no such file or directory",
+        );
+        for state in [&network, &device] {
+            match classify_run(Some(state), "") {
+                DockerExit::NeverRan(detail) => assert_eq!(detail, state.error),
+                other => panic!("a container that never started did not run: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn the_conflict_message_the_operator_needs_survives_classification() {
         // c3: the message names the problem AND the remedy, and it is the
         // thing the operator sees. The `Run 'docker run --help'` noise is not.
-        let DockerExit::DaemonRefusal(detail) = classify_exit(125, CONFLICT_STDERR) else {
+        let DockerExit::NeverRan(detail) = classify_run(None, CONFLICT_STDERR) else {
             panic!("expected a refusal");
         };
         assert!(detail.contains("Conflict. The container name"), "{detail}");
@@ -645,45 +981,144 @@ mod tests {
 
     #[test]
     fn a_task_that_exits_125_on_its_own_is_still_a_real_run() {
-        // The inverse defect, and the reason the exit code alone cannot be the
-        // discriminator: `docker run busybox sh -c 'exit 125'` measured 125
-        // with NO daemon line. Erasing that run would be as much a lie as
-        // attesting a refusal.
-        assert_eq!(classify_exit(125, b""), DockerExit::TaskExit(125));
+        // The inverse defect, and the polarity the discriminator must keep:
+        // `docker run busybox sh -c 'exit 125'` measured 125 at the CLI with a
+        // real StartedAt and .State.ExitCode 125. Erasing that run would be as
+        // much a lie as attesting a refusal.
+        //
+        // This is NOT vacuous under the current rule: the verdict is reached
+        // through `started == true`, and the two cases below differ only in
+        // stderr, which no longer participates in the verdict at all.
+        assert_eq!(classify_run(Some(&ran(125)), ""), DockerExit::TaskExit(125));
         assert_eq!(
-            classify_exit(125, b"the task's own diagnostics\n"),
+            classify_run(Some(&ran(125)), "the task's own diagnostics\n"),
             DockerExit::TaskExit(125)
+        );
+        // Even if the task prints something that looks exactly like docker's
+        // own refusal, a started container's exit is still its own.
+        assert_eq!(
+            classify_run(Some(&ran(125)), CONFLICT_STDERR),
+            DockerExit::TaskExit(125),
+            "a started container's status is the daemon's record, not its stderr"
         );
     }
 
     #[test]
     fn one_hundred_twenty_six_and_seven_stay_the_containers_own_status() {
-        // Measured: both carry docker's error line, because the daemon is what
-        // reports them — but what they describe is the TASK's argv, so they
-        // remain task exits. They are dispositioned here explicitly rather
-        // than left to surface later.
-        let not_executable: &[u8] = b"docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: \"/etc\": is a directory: permission denied\n";
-        let not_found: &[u8] = b"docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: \"no-such-binary\": executable file not found in $PATH\n";
+        // MEASURED: an exec failure of the TASK'S ARGV never starts the
+        // container, but the daemon records .State.ExitCode 126/127 for it —
+        // its own attribution to the argv, as against 128 for a start failure
+        // of the daemon's making. That is what keeps these task exits without
+        // reading any message text.
+        let not_executable = never_started(
+            126,
+            "failed to create task for container: ... exec: \"/etc\": is a directory: permission denied",
+        );
+        let not_found = never_started(
+            127,
+            "failed to create task for container: ... exec: \"no-such-binary\": executable file not found in $PATH",
+        );
         assert_eq!(
-            classify_exit(126, not_executable),
+            classify_run(Some(&not_executable), ""),
             DockerExit::TaskExit(126)
         );
-        assert_eq!(classify_exit(127, not_found), DockerExit::TaskExit(127));
+        assert_eq!(
+            classify_run(Some(&not_found), ""),
+            DockerExit::TaskExit(127)
+        );
         // And when the contained process picks those codes itself.
-        assert_eq!(classify_exit(126, b""), DockerExit::TaskExit(126));
-        assert_eq!(classify_exit(127, b""), DockerExit::TaskExit(127));
+        assert_eq!(classify_run(Some(&ran(126)), ""), DockerExit::TaskExit(126));
+        assert_eq!(classify_run(Some(&ran(127)), ""), DockerExit::TaskExit(127));
     }
 
     #[test]
     fn an_ordinary_exit_is_untouched_whatever_is_on_stderr() {
-        assert_eq!(classify_exit(0, b""), DockerExit::TaskExit(0));
-        assert_eq!(classify_exit(3, b"boom\n"), DockerExit::TaskExit(3));
-        // A task is allowed to print anything, including something that looks
-        // like a daemon line. Without a reserved code it changes nothing.
+        assert_eq!(classify_run(Some(&ran(0)), ""), DockerExit::TaskExit(0));
         assert_eq!(
-            classify_exit(3, CONFLICT_STDERR),
+            classify_run(Some(&ran(3)), "boom\n"),
+            DockerExit::TaskExit(3)
+        );
+        // A task is allowed to print anything, including something that looks
+        // like a daemon line. stderr does not participate in the verdict.
+        assert_eq!(
+            classify_run(Some(&ran(3)), CONFLICT_STDERR),
             DockerExit::TaskExit(3),
-            "the marker NARROWS a reserved code and must never widen an ordinary one"
+        );
+    }
+
+    #[test]
+    fn the_daemons_state_render_is_parsed_including_a_pipe_in_the_error() {
+        let clean = parse_final_state("2026-08-29T15:05:09.475472605Z|0|").expect("parse");
+        assert_eq!(clean, ran(0));
+
+        let started_125 = parse_final_state("2026-08-29T15:05:15.103974142Z|125|").expect("parse");
+        assert!(started_125.started);
+        assert_eq!(started_125.exit_code, 125);
+
+        let zero = parse_final_state(
+            "0001-01-01T00:00:00Z|128|failed to set up container networking: network x not found",
+        )
+        .expect("parse");
+        assert!(!zero.started, "the zero StartedAt means it never started");
+        assert_eq!(zero.exit_code, 128);
+
+        // The daemon's message may contain the separator; it must survive whole
+        // rather than being truncated at the first '|'.
+        let piped =
+            parse_final_state("0001-01-01T00:00:00Z|127|exec: \"a|b\": not found").expect("parse");
+        assert_eq!(piped.error, "exec: \"a|b\": not found");
+
+        // A render this backend cannot understand is an error, never a guess.
+        assert!(parse_final_state("").is_err());
+        assert!(parse_final_state("0001-01-01T00:00:00Z|notanumber|").is_err());
+    }
+
+    #[test]
+    fn only_a_real_container_id_counts_as_a_container() {
+        let dir = std::env::temp_dir().join(format!("wayland-f25-cid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let missing = dir.join("missing.cid");
+        let _ = std::fs::remove_file(&missing);
+        assert_eq!(read_cid(&missing), None, "no file means no container");
+
+        let empty = dir.join("empty.cid");
+        std::fs::write(&empty, b"").expect("write");
+        assert_eq!(read_cid(&empty), None, "an empty file means no container");
+
+        let junk = dir.join("junk.cid");
+        std::fs::write(&junk, b"not-a-container-id\n").expect("write");
+        assert_eq!(
+            read_cid(&junk),
+            None,
+            "a malformed file must not invent one"
+        );
+
+        let good = dir.join("good.cid");
+        let id = "9e0bb9943941e2308fa2cf57db1bbb105a685036800e07cfa920b8b392ce14f5";
+        std::fs::write(&good, format!("{id}\n")).expect("write");
+        assert_eq!(read_cid(&good), Some(id.to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_cid_path_is_proven_free_before_the_run() {
+        // docker refuses to run when the cidfile already exists, and a
+        // leftover would be read back as a container this run never created.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _state = registry::StateDirGuard::set(dir.path());
+
+        let path = cid_path("wayland-f25-cidfree").expect("a free path");
+        assert!(!path.exists());
+
+        std::fs::write(&path, b"deadbeefdeadbeef\n").expect("plant a leftover");
+        assert!(path.exists());
+        let again = cid_path("wayland-f25-cidfree").expect("the leftover is cleared");
+        assert_eq!(again, path);
+        assert!(
+            !again.exists(),
+            "a stale container-id file must be gone before docker is invoked"
         );
     }
 

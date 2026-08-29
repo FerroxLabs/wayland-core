@@ -157,8 +157,9 @@ async fn the_leftover_is_actually_reclaimed_and_not_merely_stepped_around() {
         "terminal was {:?}",
         receipt.body.terminal
     );
-    // `--rm` removed the container the task actually ran in, so the old one
-    // cannot still be there under that name.
+    // The backend removes the container it created itself now that `--rm` is
+    // gone (see `remove_container`), so the old one cannot still be there
+    // under that name either.
     assert!(
         !exists(&name),
         "the leftover was not reclaimed — it is still holding the name"
@@ -304,4 +305,109 @@ async fn a_daemon_refusal_yields_no_receipt_and_carries_the_daemons_words() {
         }
         Err(other) => panic!("expected Unavailable, got {other:?}"),
     }
+}
+
+/// c2, THE CLASS NOBODY THOUGHT OF — docker's CLIENT-side 125.
+///
+/// The first fix keyed on docker's `Error response from daemon:` line. That
+/// line only appears on DAEMON-side refusals, and docker's 125 class is bigger
+/// than that: an unparsable image reference is rejected by the CLI before the
+/// daemon is ever contacted, exit 125, marker count ZERO. At 099b83e6 this
+/// printed `terminal: Failure { code: "exit-125" }`, exited 0, and wrote a
+/// 2527-byte receipt carrying a real ed25519 attestation — for a run in which
+/// no container was created and no argv executed. A signed lie.
+///
+/// This test drives the REAL backend against the REAL docker client, so it
+/// fails if any future discriminator regresses to reading message text.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_side_refusal_yields_no_receipt_either() {
+    let _state = temp_state();
+    if !daemon_answers() {
+        println!("UNEXERCISED — no docker daemon on this host");
+        return;
+    }
+    // Uppercase is not a legal repository name, so the docker CLI rejects the
+    // reference itself. Nothing reaches the daemon and nothing is created.
+    unsafe { std::env::set_var("WAYLAND_EXEC_CONTAINER_IMAGE", "BadImage:Tag") };
+    let backend = ContainerBackend::new(reference_budget()).expect("construct");
+    unsafe { std::env::remove_var("WAYLAND_EXEC_CONTAINER_IMAGE") };
+
+    let task_id = "wedge365-clientside";
+    let task = reference_task(task_id, "wedge365-nonce-clientside", reference_budget());
+    let result = backend.execute(&task).await;
+    remove(&format!("wayland-f25-{task_id}"));
+
+    match result {
+        Ok(receipt) => panic!(
+            "a refusal the docker CLIENT made must NOT produce a receipt asserting the task ran: {:?}",
+            receipt.body.terminal
+        ),
+        Err(ExecError::Unavailable { backend_id, detail }) => {
+            assert_eq!(backend_id, "container");
+            assert!(
+                detail.contains(task_id),
+                "the error must name the task it refused: {detail}"
+            );
+            // The proof this is the client-side class and not the daemon one:
+            // docker's daemon marker is absent, which is exactly why the old
+            // discriminator let it through.
+            assert!(
+                !detail.contains("Error response from daemon:"),
+                "this test is only meaningful for the class that carries NO daemon line: {detail}"
+            );
+            assert!(
+                detail.contains("invalid reference format"),
+                "the operator must get docker's own words: {detail}"
+            );
+        }
+        Err(other) => panic!("expected Unavailable, got {other:?}"),
+    }
+}
+
+/// c2 POLARITY, live: a task that genuinely runs and exits 125 by itself MUST
+/// still be attested as a real run.
+///
+/// Overcorrecting is the inverse defect and just as much a lie in a signed
+/// receipt. This is the direction the previous discriminator got right, and it
+/// is asserted here against a real daemon rather than only over fixtures — the
+/// unit test could be made to pass vacuously by a rule that never looks at the
+/// daemon at all, and this one cannot.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_that_exits_125_on_its_own_is_attested_as_a_real_run() {
+    let _state = temp_state();
+    if !daemon_answers() {
+        println!("UNEXERCISED — no docker daemon on this host");
+        return;
+    }
+    let task_id = "wedge365-self125";
+    let name = format!("wayland-f25-{task_id}");
+    remove(&name);
+
+    let mut task = reference_task(task_id, "wedge365-nonce-self125", reference_budget());
+    // The container starts, runs a shell, and picks 125 for itself.
+    task.argv = vec!["sh".into(), "-c".into(), "exit 125".into()];
+
+    let result = backend_execute(&task).await;
+    remove(&name);
+
+    let receipt = result.expect("a task that really ran must produce a receipt, not a refusal");
+    match &receipt.body.terminal {
+        wcore_exec_backend::receipt::TerminalStatus::Failure { code } => assert_eq!(
+            code, "exit-125",
+            "the task's own 125 must be reported as its own status"
+        ),
+        other => panic!("expected an honest ran-and-failed receipt, got {other:?}"),
+    }
+    // And the container really is gone afterwards, `--rm` or not.
+    assert!(
+        !exists(&name),
+        "the backend must remove the container it created"
+    );
+}
+
+async fn backend_execute(
+    task: &wcore_exec_backend::contract::ExecutionTask,
+) -> Result<wcore_exec_backend::receipt::ExecutionReceipt, ExecError> {
+    let backend = ContainerBackend::new(reference_budget()).expect("construct");
+    backend.execute(task).await
 }
