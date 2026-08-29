@@ -139,3 +139,36 @@ so a box loss costs the history, not the work.
 
 None of the four local branches was deleted. Deleting them is not required by
 the criteria, and it would remove the only copy of `lane/win-fix`.
+
+## Why these outcomes are cited as a FILE and not as `commit:<sha>`
+
+The obvious evidence token for "superseded by a named commit" is
+`commit:addb4f48`. It resolves on hetzner and it does NOT resolve in CI, and
+that is worth writing down because it is not specific to this issue.
+
+`.github/workflows/ci.yml` checks the repository out at `fetch-depth: 1`. The
+criteria-ledger gate resolves a `commit:` token with `git cat-file -t`, which
+in a one-commit checkout can only ever succeed for HEAD. Measured on run
+33248439907 (job 99089835386), step *"Criteria ledger is anchored and
+parseable"*: **76 problems, and 72 of them are the same sentence** —
+
+```
+last_verified_commit 43848f75 is not a commit in this tree --
+the entry was verified against something that is not here
+```
+
+— one for each of the 61 ledger files plus the `commit:` evidence tokens in
+`wayland-1168` and `wayland-1181`. That step therefore cannot pass in CI for
+any branch, on any tree, no matter what a lane does: every ledger file the
+convention requires carries a `last_verified_commit` sha by construction. It is
+a gate with no reachable pass state, which this repo treats as worth exactly as
+much as one that cannot fail.
+
+Nothing here fixes that — it belongs to whoever owns `check-criteria-ledger.py`
+and the workflow, the script would need to detect a shallow clone and downgrade
+commit resolution to a skip with a named reason, and a `ci.yml` edit needs a
+`workflow`-scope token this box does not have. What this lane does do is
+decline to make it worse: the four outcomes above are anchored to the section
+of this record that states them, which resolves in a shallow checkout and in a
+full one, and the superseding sha is named in the section and in the ledger
+note either way.
