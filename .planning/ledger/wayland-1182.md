@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The workspace-walk instrument check declares itself dead under load: a wall-clock ratio decides whether the control is alive"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: 856df7d0
 criteria:
   - id: c1
     text: "Liveness of the workspace walk is established by a direct observation, not by comparing two wall-clock timings"
@@ -21,9 +21,9 @@ criteria:
   - id: c3
     text: "The test no longer needs its entry in .config/flaky-allowlist.txt under the #1169 retry-flake gate"
     state: met
-    evidence: "absent:.config/flaky-allowlist.txt::gh#1182"
+    evidence: "absent:.config/flaky-allowlist.txt::contained_construction_does_not_walk_the_workspace"
     owner: core
-    note: "RE-GRADED 2026-08-29 and REPAIRED. The previous evidence (commit:c461293f) was true and useless: that commit really did delete the line, and merge 9c9f27b0 (origin/lane/f13-fix-shared-lib into integ/f13) put it back from the other side of the resolution, so the entry was PRESENT at .config/flaky-allowlist.txt:59 while this criterion read met. The two dangerous_lease_e2e_test deletions from the same commit survived, so it was a partial merge regression, and `git log -S` does not show it because -S skips merges. Deleted again here; the allowlist is now 8 dated entries and gh#1182 appears 0 times, while the known-positive control grep -c crucible_council still returns 1. The evidence is now `absent:`, a kind added to scripts/check-criteria-ledger.py in the same change, which re-reads the file on EVERY gate run instead of pointing at a deletion that once happened -- a second resurrection reds the gate."
+    note: "RE-GRADED 2026-08-29 and REPAIRED, then NARROWED 2026-08-30 after a verifier refutation. History: the original evidence (commit:c461293f) was true and useless -- that commit really did delete the line, and merge 9c9f27b0 (origin/lane/f13-fix-shared-lib into integ/f13) put it back from the other side of the resolution, so the entry was PRESENT at .config/flaky-allowlist.txt:59 while this criterion read met; `git log -S` does not show it because -S skips merges. The fix was an `absent:` evidence kind that re-reads the file on every gate run. THE VERIFIER THEN BROKE THAT FIX and they were right: the needle was `gh#1182`, the ISSUE TAG, so re-listing the SAME TEST under any other owner (`gh#9999`) left the ledger green -- the guard was one string wide and the string was not the subject of the criterion. The needle is now the test name itself, `contained_construction_does_not_walk_the_workspace`, which is what the criterion is actually about; an entry for this test cannot be resurrected under any tag. RED-ARMED with the verifier's own mutation: re-listing the test under gh#9999 now exits 1 naming this criterion, while the untouched tree exits 0 -- both runs in the same command. The allowlist is 8 dated entries; the known-positive control grep -c crucible_council still returns 1, so the absence is measured by a query that can see a hit."
 ---
 
 `contained_construction_does_not_walk_the_workspace` in
