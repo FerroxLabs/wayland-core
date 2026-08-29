@@ -141,8 +141,7 @@ impl PtyHarness {
         cmd.env_remove("ANTHROPIC_API_KEY");
         cmd.env_remove("OPENAI_API_KEY");
         cmd.cwd(home);
-        let child =
-            OwnedTree::new(pty.slave.spawn_command(cmd).expect("spawn wayland-core"));
+        let child = OwnedTree::new(pty.slave.spawn_command(cmd).expect("spawn wayland-core"));
 
         let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
         let parser = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(40, 120, 0)));

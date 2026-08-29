@@ -136,32 +136,32 @@ async fn run_degraded_repl() -> (String, String) {
     let mut child = OwnedTree::new(
         Command::new(binary())
             .arg("--no-tui")
-        .arg("--provider")
-        .arg("openai")
-        .arg("--model")
-        .arg(FIXTURE_MODEL)
-        .arg("--base-url")
-        .arg(fixture.base_url())
-        .current_dir(env.path())
-        .env("HOME", env.path())
-        .env("WAYLAND_HOME", env.home())
-        .env("OPENAI_API_KEY", FIXTURE_KEY)
-        .env("NO_COLOR", "1")
-        // `log_to_file` is `will_enter_tui || !rust_log_set`. Stdout is a pipe
-        // so the TUI half is already false; inheriting a developer's or CI's
-        // RUST_LOG would route the record to stderr instead of the file and
-        // make leg 2 assert on an empty log.
-        .env_remove("RUST_LOG")
-        // Deny every credential backend, which is what forces the degrade.
-        .env_remove("WAYLAND_VAULT_PASSPHRASE")
-        .env_remove("WAYLAND_VAULT_PASSPHRASE_FD")
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!(
-                "unix:path={}",
-                env.path().join("missing-secret-service-bus").display()
-            ),
-        )
+            .arg("--provider")
+            .arg("openai")
+            .arg("--model")
+            .arg(FIXTURE_MODEL)
+            .arg("--base-url")
+            .arg(fixture.base_url())
+            .current_dir(env.path())
+            .env("HOME", env.path())
+            .env("WAYLAND_HOME", env.home())
+            .env("OPENAI_API_KEY", FIXTURE_KEY)
+            .env("NO_COLOR", "1")
+            // `log_to_file` is `will_enter_tui || !rust_log_set`. Stdout is a pipe
+            // so the TUI half is already false; inheriting a developer's or CI's
+            // RUST_LOG would route the record to stderr instead of the file and
+            // make leg 2 assert on an empty log.
+            .env_remove("RUST_LOG")
+            // Deny every credential backend, which is what forces the degrade.
+            .env_remove("WAYLAND_VAULT_PASSPHRASE")
+            .env_remove("WAYLAND_VAULT_PASSPHRASE_FD")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!(
+                    "unix:path={}",
+                    env.path().join("missing-secret-service-bus").display()
+                ),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

@@ -673,9 +673,7 @@ mod pty {
             }
             let vault = support::vault::configure_pty(&mut cmd);
             cmd.cwd(home);
-            let child = OwnedTree::new(
-                pty.slave.spawn_command(cmd).expect("spawn wayland-core"),
-            );
+            let child = OwnedTree::new(pty.slave.spawn_command(cmd).expect("spawn wayland-core"));
             drop(vault);
 
             let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");

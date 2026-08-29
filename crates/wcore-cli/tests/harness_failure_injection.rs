@@ -158,8 +158,7 @@ impl PtyHarness {
             cmd.env(*k, *v);
         }
         cmd.cwd(home);
-        let child =
-            OwnedTree::new(pty.slave.spawn_command(cmd).expect("spawn wayland-core"));
+        let child = OwnedTree::new(pty.slave.spawn_command(cmd).expect("spawn wayland-core"));
 
         let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
         let parser = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(40, 120, 0)));

@@ -57,8 +57,7 @@ fn frames_for_set_mode(mode: &str, opt_in: bool) -> Vec<serde_json::Value> {
     if opt_in {
         command.env("WAYLAND_ALLOW_WIRE_FORCE", "1");
     }
-    let mut child =
-        OwnedTree::new(command.spawn().expect("spawn wayland-core --json-stream"));
+    let mut child = OwnedTree::new(command.spawn().expect("spawn wayland-core --json-stream"));
 
     let mut stdin = child.stdin.take().expect("capture stdin");
     writeln!(stdin, "{{\"type\":\"set_mode\",\"mode\":\"{mode}\"}}").expect("write set_mode");

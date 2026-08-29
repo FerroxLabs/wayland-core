@@ -250,8 +250,7 @@ impl Pty {
             cmd.env(k.as_ref(), v.as_ref());
         }
         cmd.cwd(cwd);
-        let child =
-            OwnedTree::new(pty.slave.spawn_command(cmd).expect("spawn wayland-core"));
+        let child = OwnedTree::new(pty.slave.spawn_command(cmd).expect("spawn wayland-core"));
 
         let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
         let parser = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(rows, cols, 0)));
