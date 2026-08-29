@@ -31,9 +31,10 @@ criteria:
     note: "The notice path keeps its one-observation sensitivity: detection still fires on a single backwards report. The corroboration gate sits only on served_window(), which is what sizes the session."
   - id: c5
     text: "A red arm is quoted verbatim"
-    state: not-met
+    state: met
+    evidence: "symbol:crates/wcore-config/src/context_window.rs::REGRESSION_CORROBORATION_OBSERVATIONS"
     owner: core
-    note: "The corpus tests are written as forward assertions; no verbatim red arm from before 1839b9ad is quoted in the commit body or in the tree. The behaviour that PROVOKED the ticket - cache_ledger_engine_test going red on an impossible fixture - is real and recorded on the issue, but it is not the same thing as a quoted red arm for this fix."
+    note: "RED ARMS RUN AND QUOTED, hetzner-dsm 2026-08-29, both directions. Baseline: the corpus binary is 13/13 PASS. Mutation 1, REGRESSION_CORROBORATION_OBSERVATIONS 2 -> 1 (i.e. the pre-#353 behaviour where one anomalous report sizes the session). The mutated line was printed back after the edit, so the mutation landed on the `pub const` DECLARATION at context_window.rs:191 and not on the twelve lines of doc comment above it. Verbatim: `thread 'a_single_regression_tells_the_user_but_does_not_yet_size_the_session' (3333905) panicked at crates/wcore-config/tests/issue_1172_served_window_corpus_test.rs:250:5: / assertion left == right failed: one anomalous usage report must not be enough to compact the user's conversation (#353) / left: Some(4050) / right: None`. That is the ticket's defect, reproduced. Two siblings went red with it in the same run (a_second_regression_corroborates_it_and_the_session_is_sized, a_shortfall_corroborates_an_earlier_regression), 3 of 13. Mutation 2, the other direction, 2 -> 3, so corroboration is never reached: `thread 'a_second_regression_corroborates_it_and_the_session_is_sized' (3358595) panicked at crates/wcore-config/tests/issue_1172_served_window_corpus_test.rs:276:5: / assertion left == right failed: a repeated regression must still size the session, or the fix is just a disabled detector / left: None / right: Some(4050)`. So the corpus can distinguish the fix from a disabled detector, and the constant is load-bearing in both directions. context_window.rs was restored to a clean git diff."
 ---
 
 `lane/finish-b` wired the learned served window into `autocompact_threshold_now`
