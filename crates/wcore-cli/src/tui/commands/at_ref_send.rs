@@ -32,8 +32,8 @@ use wcore_agent::tool_backends::http_fetch::HttpFetchBackend;
 use wcore_config::shell::shell_command_argv;
 use wcore_tools::web_fetch::{FetchOutcome, WEB_FETCH_DEFAULT_TIMEOUT_MS, WebFetchTool};
 
-use super::at_ref_parse::AtRef;
-use super::at_ref_resolve::{AtPayload, resolve};
+use super::at_ref_parse::{AtRef, AtRefError};
+use super::at_ref_resolve::{AtPayload, read_guarded, resolve};
 
 /// Header that separates the user's text from the auto-resolved context.
 const CONTEXT_HEADER: &str = "─── Referenced context (auto-resolved from @-mentions) ───";
@@ -393,8 +393,16 @@ fn render_symbol_blocking(name: &str, root: &Path) -> String {
 /// The repomap records only the start line, so this is a preview, not the
 /// exact definition span.
 fn read_def_snippet(path: &Path, start_line: usize) -> String {
-    let content = match std::fs::read_to_string(path) {
+    // core#339 c3: guarded exactly like the other three read sites on this
+    // surface — the RESOLVED name decides, and the bytes come from the handle
+    // that was decided on. The repomap supplies this path, so nothing the user
+    // typed constrains it: a symlinked source file anywhere in an indexed tree
+    // reaches a credential store without the user ever naming one.
+    let content = match read_guarded(path) {
         Ok(c) => c,
+        Err(AtRefError::SecretBlocked(_)) => {
+            return "(definition withheld: the file is on the secret denylist)".to_string();
+        }
         Err(e) => return format!("(could not read definition: {e})"),
     };
     let lines: Vec<&str> = content.lines().collect();
@@ -730,5 +738,68 @@ mod tests {
             !sentinel.exists(),
             "git must never have run — the sentinel file must not exist"
         );
+    }
+    // ── core#339 c3: `read_def_snippet`, the fourth read site ─────────────
+
+    /// core#339 c3 — the `@symbol` preview read is the fourth read site on this
+    /// surface and the only one that was never guarded: it took a
+    /// repomap-supplied path straight to `fs::read_to_string`, with no secret
+    /// check on either the spelled or the resolved name.
+    #[test]
+    fn symbol_snippet_refuses_a_credential_store() {
+        let tmp = TempDir::new().unwrap();
+        let secret = tmp.path().join(".git-credentials");
+        fs::write(&secret, "https://user:s3cr3t-token@git.example.com\n").unwrap();
+
+        let out = read_def_snippet(&secret, 1);
+        assert!(
+            !out.contains("s3cr3t-token"),
+            "the @symbol preview inlined a credential store: {out}"
+        );
+        assert!(
+            out.contains("secret denylist"),
+            "the refusal must be explicit, not a bare read error: {out}"
+        );
+    }
+
+    /// The same read site, reached through a link — the resolved name is what
+    /// the guard must decide on, exactly as `resolve_file` and the `@dir` walk
+    /// already do.
+    #[cfg(unix)]
+    #[test]
+    fn symbol_snippet_refuses_a_symlink_to_a_credential_store() {
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join(".git-credentials");
+        fs::write(&secret, "https://user:s3cr3t-token@git.example.com\n").unwrap();
+
+        let tmp = TempDir::new().unwrap();
+        let spelled = tmp.path().join("defs.rs");
+        std::os::unix::fs::symlink(&secret, &spelled).unwrap();
+
+        let out = read_def_snippet(&spelled, 1);
+        assert!(
+            !out.contains("s3cr3t-token"),
+            "the @symbol preview followed a link into a credential store: {out}"
+        );
+        assert!(
+            out.contains("secret denylist"),
+            "the refusal must be explicit, not a bare read error: {out}"
+        );
+    }
+
+    /// Wrong-refusal control — an ordinary source file, and an ordinary file
+    /// reached through a link, must still produce a preview. Passes on BOTH
+    /// arms, so the two tests above cannot be satisfied by refusing every read.
+    #[cfg(unix)]
+    #[test]
+    fn symbol_snippet_still_previews_an_ordinary_source_file() {
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("lib.rs");
+        fs::write(&real, "fn one() {}\nfn two() {}\n").unwrap();
+        let link = tmp.path().join("alias.rs");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert_eq!(read_def_snippet(&real, 2), "fn two() {}");
+        assert_eq!(read_def_snippet(&link, 1), "fn one() {}\nfn two() {}");
     }
 }

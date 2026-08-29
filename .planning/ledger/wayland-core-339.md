@@ -20,9 +20,10 @@ criteria:
     note: "MECHANISM SUBSTITUTED, deliberately. The criterion named symlink_metadata plus a canonical rel_to_root; the walk instead canonicalizes each entry and skips anything not under root_canonical (at_ref_resolve.rs:353-365), with a visited set. That permits an in-root dir symlink, which a bare symlink_metadata refusal would have broken - the fix the issue explicitly rejected. The escape is closed and tested; see c6 for the residual the lexical half leaves."
   - id: c3
     text: "read_def_snippet, the fourth read site on this surface, is guarded too"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/tui/commands/at_ref_send.rs::symbol_snippet_refuses_a_symlink_to_a_credential_store"
     owner: core
-    note: "read_def_snippet (at_ref_send.rs:395, reached from render_symbol_blocking:370 via @symbol) still calls std::fs::read_to_string on a repomap-supplied path with no is_secret_path and no admit(). grep -rn read_def_snippet returns only those two lines in the whole tree. The fourth read site is still ungraded."
+    note: "CLOSED 2026-08-29 (lane f13-atref-residuals). read_def_snippet now calls at_ref_resolve::read_guarded - the lexical floor, then admit() (open once, canonicalize, re-open and compare same_file::Handle), then is_secret_path on the RESOLVED name, then the bytes from that same handle. The guard is a shared helper in at_ref_resolve rather than a copy here, because two copies of a guard that must agree are how this surface grew four read sites with three answers. RED ARM, verbatim, before the fix: 'thread ...symbol_snippet_refuses_a_symlink_to_a_credential_store panicked at crates/wcore-cli/src/tui/commands/at_ref_send.rs:772:9: the @symbol preview followed a link into a credential store: https://user:s3cr3t-token@git.example.com', and the direct arm 'symbol_snippet_refuses_a_credential_store ... the @symbol preview inlined a credential store: https://user:s3cr3t-token@git.example.com'. Wrong-refusal control symbol_snippet_still_previews_an_ordinary_source_file (at_ref_send.rs) PASSED on the pre-fix arm too, so the pair cannot be satisfied by refusing every read. Both symbol tests green after."
   - id: c4
     text: "Wrong-refusal controls hold - an in-root symlink to an in-root file still resolves and is still offered by completion"
     state: met
@@ -37,9 +38,10 @@ criteria:
     note: "The issue names three production call sites; the ledger previously carried the completion surface only as a wrong-refusal control. at_ref_complete.rs:113-121 canonicalizes symlinks before judging. Added 2026-08-29 so the row is not missing from the ledger while it is present in the tree."
   - id: c6
     text: "The @dir walk judges gitignore on the resolved path, so an in-root symlink to an in-root gitignored file is not attached"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/tui/commands/at_ref_resolve.rs::at_dir_judges_gitignore_on_the_resolved_path"
     owner: core
-    note: "RESIDUAL FOUND WHILE GRADING c2, recorded nowhere else. walk_dir calls rel_to_root(&path, root) on the LEXICAL entry (at_ref_resolve.rs:339) and matches gitignore on it, so <root>/link.txt -> <root>/build/out.log under a build/ rule is judged as link.txt, not ignored, and attached. resolve_file does not have this hole - it uses admitted.canonical at :219. Small, real, and core-owned."
+    note: "CLOSED 2026-08-29 (lane f13-atref-residuals). walk_dir still applies the cheap lexical rel first, and now ALSO judges the rule on rel_to_root(resolved, root_canonical) - admitted.canonical in the file branch, fs::canonicalize in the dir branch - so a link named around a rule is judged by what it resolves to, matching resolve_file (core#335). No extra syscall: the file branch reuses the canonicalization admit() already performs, and the dir branch reuses the one the scope check already performs. RED ARM, verbatim, before the fix: 'thread ...at_dir_judges_gitignore_on_the_resolved_path panicked at crates/wcore-cli/src/tui/commands/at_ref_resolve.rs:996:9: a git-ignored file was attached through a link named around the rule: [\".gitignore\", \"alias.txt\", \"notes.txt\", \"ok.txt\"]'. The test carries its own wrong-refusal control in the same assertion set - a link to a NON-ignored file must still be attached (count == 2) - so the fix cannot be to skip every link."
 ---
 
 The composer's @-ref guard grades a path as a string. It never resolves it. So

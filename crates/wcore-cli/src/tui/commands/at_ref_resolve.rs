@@ -345,11 +345,6 @@ fn walk_dir(
             continue;
         }
         if is_dir {
-            // `.git` is always skipped — it is never useful context and
-            // can be enormous.
-            if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
-                continue;
-            }
             // An entry the walk cannot resolve is not descended into: without
             // a resolved location there is nothing to judge scope by.
             let Ok(canonical) = fs::canonicalize(&path) else {
@@ -360,6 +355,25 @@ fn walk_dir(
             // user asked for, and reaching through one is how `@./` walks into
             // `$HOME`.
             if !canonical.starts_with(root_canonical) {
+                *skipped += 1;
+                continue;
+            }
+            // core#322 c4: a VCS control directory or content store is never
+            // useful context, can be enormous, and reconstructs committed
+            // secrets through its own porcelain. This was a literal `.git`
+            // NAME test, which missed `.hg`/`.svn`/`.bzr` outright and missed
+            // a `.git` reached under any other name. The shape test is the one
+            // `wcore-tools`' deny walk uses — one list, one owner — and it is
+            // asked about the RESOLVED path, so the entry's own name is
+            // irrelevant.
+            if wcore_tools::workspace_policy::is_vcs_store_or_control_dir(&canonical) {
+                continue;
+            }
+            // core#339 c6: `.gitignore` is judged on where the entry resolves,
+            // for the same reason the secret guard is.
+            if rel_to_root(&canonical, root_canonical)
+                .is_some_and(|rel| ignore.is_ignored(&rel, true))
+            {
                 *skipped += 1;
                 continue;
             }
@@ -386,6 +400,17 @@ fn walk_dir(
             if !admitted.canonical.starts_with(root_canonical)
                 || is_secret_path(&path)
                 || is_secret_path(&admitted.canonical)
+            {
+                *skipped += 1;
+                continue;
+            }
+            // core#339 c6: the `rel` above is the LEXICAL entry, so an in-root
+            // link named `notes.txt` at an in-root `deploy.log` was judged as
+            // `notes.txt` and no `*.log` rule ever saw it. Judge the rule on
+            // what the entry RESOLVES to, as `resolve_file` already does
+            // (core#335).
+            if rel_to_root(&admitted.canonical, root_canonical)
+                .is_some_and(|rel| ignore.is_ignored(&rel, false))
             {
                 *skipped += 1;
                 continue;
@@ -493,6 +518,29 @@ impl Admitted {
                 message: e.to_string(),
             })
     }
+}
+
+/// Read one file for a `@`-surface read site under the secret guard: resolve
+/// once, decide on the resolved name, and return the bytes of the very handle
+/// that was decided on.
+///
+/// core#339 c3: three of the four read sites on this surface got the
+/// resolved-path guard and the fourth — `at_ref_send::read_def_snippet`, the
+/// `@symbol` preview — was missed, still calling `fs::read_to_string` on a
+/// repomap-supplied path. The guard lives HERE rather than being copied there,
+/// because two copies of a guard that must agree are how this surface grew four
+/// read sites with three answers in the first place.
+pub(super) fn read_guarded(path: &Path) -> Result<String, AtRefError> {
+    // The lexical floor first, so a denylisted NAME is refused loudly even when
+    // the path does not resolve — see `resolve_file` for why that order matters.
+    if is_secret_path(path) {
+        return Err(AtRefError::SecretBlocked(display(path)));
+    }
+    let admitted = admit(path, path)?;
+    if is_secret_path(&admitted.canonical) {
+        return Err(AtRefError::SecretBlocked(display(path)));
+    }
+    admitted.read_to_string(path)
 }
 
 /// Open `full` once and resolve what it names, refusing the reference when the
@@ -960,5 +1008,101 @@ mod tests {
         let payload = resolve(&AtRef::File(note.clone()), tmp.path())
             .expect("an explicit absolute attach is a capability, not a bypass");
         assert_eq!(payload.files[0].content, "outside content\n");
+    }
+    // ── core#339 c6 / core#322 c4: the @dir walk's remaining lexical
+    //    judgements — the gitignore match and the VCS-store skip ────────────
+
+    /// A committed object body with a recognisable marker, so a test can assert
+    /// the bytes never reached a payload without printing them.
+    const COMMITTED_OBJECT: &str = "COMMITTED-OBJECT s3cr3t-blob\n";
+
+    /// core#339 c6 — the walk matched `.gitignore` on the LEXICAL entry, so an
+    /// in-root link to an in-root ignored file was laundered past the rule by
+    /// its own spelling. `resolve_file` already judges the resolved path
+    /// (core#335); the walk did not.
+    #[cfg(unix)]
+    #[test]
+    fn at_dir_judges_gitignore_on_the_resolved_path() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join(".gitignore"), "*.log\n").expect("write gitignore");
+        fs::write(root.join("deploy.log"), "IGNORED-BUILD-OUTPUT\n").expect("write log");
+        fs::write(root.join("ok.txt"), "safe\n").expect("write ok");
+        // The same ignored file under a name the `*.log` rule does not match.
+        std::os::unix::fs::symlink(root.join("deploy.log"), root.join("notes.txt"))
+            .expect("symlink");
+        // Wrong-refusal control: a link to a file the rule does NOT cover stays
+        // attached, so the fix cannot be "skip every link". Passes on BOTH arms.
+        std::os::unix::fs::symlink(root.join("ok.txt"), root.join("alias.txt")).expect("symlink");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
+        let names: Vec<String> = payload
+            .files
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect();
+        assert!(
+            !payload
+                .files
+                .iter()
+                .any(|f| f.content.contains("IGNORED-BUILD-OUTPUT")),
+            "a git-ignored file was attached through a link named around the rule: {names:?}"
+        );
+        assert_eq!(
+            payload
+                .files
+                .iter()
+                .filter(|f| f.content == "safe\n")
+                .count(),
+            2,
+            "the ordinary file AND its link to a non-ignored file must both stay attached: {names:?}"
+        );
+    }
+
+    /// core#322 c4 — the walk skipped a VCS object store only when the entry
+    /// was LITERALLY named `.git`, so the same store reached under any other
+    /// name (an in-root link, a vendored checkout's `.hg/store` aliased) was
+    /// walked and every committed object under it inlined. This is the class
+    /// #322 closed on the `wcore-tools` deny walk; the composer surface had no
+    /// equivalent.
+    #[cfg(unix)]
+    #[test]
+    fn at_dir_never_walks_a_vcs_store_reached_under_another_name() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join(".git/objects/aa")).expect("mkdir git store");
+        fs::write(root.join(".git/objects/aa/deadbeef"), COMMITTED_OBJECT).expect("write object");
+        fs::create_dir_all(root.join(".hg/store/data")).expect("mkdir hg store");
+        fs::write(root.join(".hg/store/data/notes.i"), COMMITTED_OBJECT).expect("write revlog");
+
+        // The same stores, reached under names the literal `.git` test misses.
+        std::os::unix::fs::symlink(root.join(".git"), root.join("mirror")).expect("symlink");
+        std::os::unix::fs::symlink(root.join(".hg/store"), root.join("vendor")).expect("symlink");
+
+        // Wrong-refusal control: an ordinary directory whose name merely
+        // resembles one, and an ordinary file, must still be attached.
+        fs::create_dir_all(root.join("gitignore-docs")).expect("mkdir docs");
+        fs::write(root.join("gitignore-docs/notes.md"), "ordinary\n").expect("write notes");
+        fs::write(root.join("ok.txt"), "safe\n").expect("write ok");
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
+        let leaked: Vec<String> = payload
+            .files
+            .iter()
+            .filter(|f| f.content.contains("COMMITTED-OBJECT"))
+            .map(|f| f.path.display().to_string())
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "a VCS content store was walked under another name: {leaked:?}"
+        );
+        assert!(
+            payload.files.iter().any(|f| f.content == "ordinary\n"),
+            "control: an ordinary directory must still be walked"
+        );
+        assert!(
+            payload.files.iter().any(|f| f.content == "safe\n"),
+            "control: an ordinary file must still be attached"
+        );
     }
 }

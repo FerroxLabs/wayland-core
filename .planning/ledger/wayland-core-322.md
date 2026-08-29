@@ -27,8 +27,9 @@ criteria:
   - id: c4
     text: "The TUI @-ref directory walk gives the same treatment to a store reached under another name"
     state: not-met
+    evidence: "test:crates/wcore-cli/src/tui/commands/at_ref_resolve.rs::at_dir_never_walks_a_vcs_store_reached_under_another_name"
     owner: core
-    note: "NARROWED BY #339 BUT STILL OPEN, and NOT superseded: #339 shipped without touching it, so handing the residual to an issue that has already passed over it would retire a live defect. The 6d130a62 walk prunes a link pointing at a store OUTSIDE the workspace (canonicalize + starts_with(root_canonical), at_ref_resolve.rs:353-365), but a directory or symlink inside the root under any other name still canonicalizes inside and is walked. at_ref_resolve.rs:350 still skips a directory only when its file_name is exactly .git. || VERIFIER 2026-08-29 (lane/f13-atref-residuals, verdict PARTIAL): the named case IS closed and at_ref_resolve.rs:1070 passes, but 'the same treatment' does not hold and this entry's parity rationale is refutable from the tree. is_vcs_store_or_control_dir tests the path ITSELF; the deny walk it claims one-list-one-owner parity with uses inside_vcs_store (workspace_policy.rs:2835, path.ancestors().any(is_vcs_store_dir)) at :93. Different predicates, so a store reached under another name is not given equal treatment. Graded as a narrowing sold as a closure - c4 stays not-met."
+    note: "DISPUTED - resolved fail-safe as not-met pending a tiebreak. THE LANE CLAIMS CLOSED: CLOSED 2026-08-29 (lane f13-atref-residuals), on its own and NOT folded into #339. The literal file_name == \".git\" test is gone; walk_dir now asks wcore_tools::workspace_policy::is_vcs_store_or_control_dir about the CANONICAL path, so the entry's own name is irrelevant. The new predicate is derived from VCS_CONTENT_STORES - the same list c1/c2 hold - so the walk and the deny walk read one list with one owner; it ORs the existing is_vcs_store_dir shape test with the control-directory leaf (.git/.hg/.svn/.bzr), because a walk PRUNES where the deny walk denies and must stop at the control dir to avoid descending into every object below it. The red arm also proved a SECOND hole the criterion text did not name: the walk skipped .git only, so .hg/store was walked by its own real name. RED ARM, verbatim, before the fix: 'thread ...at_dir_never_walks_a_vcs_store_reached_under_another_name panicked at crates/wcore-cli/src/tui/commands/at_ref_resolve.rs:1047:9: a VCS content store was walked under another name: [\".hg/store/data/notes.i\", \"mirror/objects/aa/deadbeef\"]' - mirror is a symlink to <root>/.git. Wrong-refusal controls in the same test: an ordinary directory named gitignore-docs and an ordinary root file must both still be attached. || THE ADVERSARIAL VERIFIER REFUTED THE PARITY CLAIM: VERIFIER 2026-08-29 (lane/f13-atref-residuals, verdict PARTIAL): the named case IS closed and at_ref_resolve.rs:1070 passes, but 'the same treatment' does not hold and this entry's parity rationale is refutable from the tree. is_vcs_store_or_control_dir tests the path ITSELF; the deny walk it claims one-list-one-owner parity with uses inside_vcs_store (workspace_policy.rs:2835, path.ancestors().any(is_vcs_store_dir)) at :93. Different predicates, so a store reached under another name is not given equal treatment. Graded as a narrowing sold as a closure - c4 stays not-met. || TIEBREAK NEEDED: the lane argues the walk PRUNES at the control dir so it never descends, which would make the two predicates equivalent in effect even though they differ in form. The verifier argues they are simply different tests. Whoever settles this must decide it against the code and a test, not against either summary. Graded not-met because grading a refuted criterion met is exactly how a partial ships as done."
 ---
 
 The issue reports that the secret deny walk classified VCS object stores only
@@ -42,10 +43,13 @@ have been the classic miss and both were checked. The test file names its own
 red arms and carries the wrong-refusal controls, so it cannot be satisfied by a
 guard that refuses all of .git.
 
-The residual is that the same class is still open on a different surface. The
-composer's @-ref directory walk skips .git by literal name only, which is the
+The residual was that the same class stayed open on a different surface. The
+composer's @-ref directory walk skipped .git by literal name only, which is the
 exact shape this issue closed on the tools side. It is recorded here as c4 and
-is being fixed as part of #339, which rewrites that walk.
+was closed HERE on 2026-08-29, not folded into #339 - #339 rewrote that walk and
+shipped past this row, so handing the residual to it a second time would have
+retired a live defect. The walk now asks the shared VCS_CONTENT_STORES-derived
+predicate about the resolved path.
 
 Criteria come from the cluster A verification note of 2026-08-29; each cited
 test was re-checked in this tree.
