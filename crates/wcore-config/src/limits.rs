@@ -25,6 +25,8 @@
 //! listed; everything else is `None`.
 
 mod catalogue;
+#[cfg(test)]
+mod passthrough;
 
 use catalogue::CATALOGUE_CEILINGS;
 
@@ -818,6 +820,151 @@ mod tests {
              model_output_ceiling and would silently fall to the conservative \
              default (#165) — add their verified window/output above:\n  {}",
             missing.join("\n  ")
+        );
+    }
+
+    /// #1176 DRIFT GUARD -- the other half of #165, and the half both guards
+    /// were blind to.
+    ///
+    /// `every_routed_catalog_model_has_a_known_window` walks ROUTED ALIASES
+    /// only, and the release-time freshness script grades only the ordered
+    /// `CATALOGUE_CEILINGS` table -- it says in its own output that the
+    /// `if`-chain families above cannot be evaluated by a text parser. An id
+    /// that is in an `if` chain AND reaches users through provider-native
+    /// `--model` passthrough was therefore graded by nothing but a hand check,
+    /// and the hand check is what found `claude-opus-5` (no arm at all: 32,768
+    /// substituted for a 1,000,000 window), `gpt-4o-2024-05-13` (output
+    /// over-claimed 4x into a hard 400) and the `gemini-*-latest` aliases (32x
+    /// undersized).
+    ///
+    /// This walks the vendor catalogue instead. It is the half a text parser
+    /// could never do -- the chain evaluates ITSELF -- and it runs on every
+    /// PR, not once per release.
+    #[test]
+    fn every_passthrough_vendor_model_resolves_its_arm() {
+        use super::passthrough::PASSTHROUGH_VENDOR_MODELS;
+
+        let mut wrong = Vec::new();
+        for &(id, want_out, want_ctx) in PASSTHROUGH_VENDOR_MODELS {
+            match model_output_ceiling("passthrough", id) {
+                Some((out, ctx)) if (out, ctx) == (want_out, want_ctx) => {}
+                Some((out, ctx)) => wrong.push(format!(
+                    "{id}: the chain resolves output {out} / context {ctx}, \
+                     but the vendor figure is output {want_out} / context {want_ctx}"
+                )),
+                None => wrong.push(format!(
+                    "{id}: NO ARM AT ALL. A missing arm is not a safe default -- \
+                     `known_context_window` substitutes UNVERIFIED_CONTEXT_WINDOW \
+                     (32,768) and a non-omit-safe preset clamps output to \
+                     UNKNOWN_CAP (8,192). Expected output {want_out} / context \
+                     {want_ctx}"
+                )),
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "these provider-native passthrough ids no longer resolve their \
+             verified vendor limits (#1176). Add or correct the arm in \
+             `model_output_ceiling`, or -- if the VENDOR changed the figure -- \
+             update `limits/passthrough.rs` and say which vendor rows you \
+             checked:\n  {}",
+            wrong.join("\n  ")
+        );
+    }
+
+    /// The table records one canonical spelling per model because the lookup
+    /// is a substring match. That claim is load-bearing -- it is why 83 rows
+    /// cover the ~160 provider-specific spellings models.dev publishes -- so
+    /// it is asserted, not assumed.
+    #[test]
+    fn provider_specific_spellings_resolve_through_the_same_arm() {
+        for (canonical, dressed) in [
+            ("claude-opus-5", "us.anthropic.claude-opus-5"),
+            ("claude-opus-5", "claude-opus-5@default"),
+            (
+                "claude-sonnet-4-5-20250929",
+                "anthropic.claude-sonnet-4-5-20250929-v1:0",
+            ),
+            ("claude-opus-4-6", "eu.anthropic.claude-opus-4-6-v1"),
+            ("grok-4.3", "xai.grok-4.3"),
+            ("gemini-flash-latest", "google/gemini-flash-latest"),
+        ] {
+            assert_eq!(
+                model_output_ceiling("passthrough", canonical),
+                model_output_ceiling("passthrough", dressed),
+                "{dressed} must resolve through the same arm as {canonical}"
+            );
+            assert!(
+                model_output_ceiling("passthrough", dressed).is_some(),
+                "{dressed} must resolve at all"
+            );
+        }
+    }
+
+    /// A shadowed or duplicated row would make the release script's
+    /// containment lookup disagree with the chain, which is the drift this
+    /// whole guard exists to prevent.
+    #[test]
+    fn passthrough_table_is_populated_and_free_of_duplicates() {
+        use super::passthrough::PASSTHROUGH_VENDOR_MODELS;
+        assert!(
+            PASSTHROUGH_VENDOR_MODELS.len() >= 50,
+            "the table parsed to {} rows -- a table this small is not covering \
+             the vendor catalogue",
+            PASSTHROUGH_VENDOR_MODELS.len()
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for &(id, _, _) in PASSTHROUGH_VENDOR_MODELS {
+            assert!(
+                id.chars().all(|c| c.is_ascii_lowercase()
+                    || c.is_ascii_digit()
+                    || matches!(c, '.' | '-' | '_' | '@' | ':' | '/')),
+                "{id} is not a lowercased model id"
+            );
+            assert!(seen.insert(id), "{id} appears twice in the table");
+        }
+    }
+
+    /// The PREMISE, asserted rather than asserted-about: these ids really are
+    /// invisible to the routed-alias drift guard. If the routing catalogue
+    /// ever gains one, this test says so and the row moves.
+    #[test]
+    fn the_passthrough_table_covers_ids_the_routed_guard_cannot_see() {
+        use super::passthrough::PASSTHROUGH_VENDOR_MODELS;
+        use wcore_types::model_aliases::{known_providers, models_for_provider};
+
+        let mut routed = Vec::new();
+        for provider in known_providers() {
+            for (_alias, model_id) in models_for_provider(provider) {
+                routed.push(model_id.to_ascii_lowercase());
+            }
+        }
+        let unseen: Vec<&str> = PASSTHROUGH_VENDOR_MODELS
+            .iter()
+            .map(|&(id, _, _)| id)
+            .filter(|id| !routed.iter().any(|r| r.contains(*id)))
+            .collect();
+
+        // The three ids the hand check caught last cycle. Each must be in the
+        // passthrough table AND absent from the routed catalogue -- that
+        // combination is precisely the gap #1176 reports.
+        for id in ["claude-opus-5", "gpt-4o-2024-05-13", "gemini-flash-latest"] {
+            assert!(
+                PASSTHROUGH_VENDOR_MODELS.iter().any(|&(t, _, _)| t == id),
+                "{id} cost a real defect last cycle and must stay in the table"
+            );
+            assert!(
+                unseen.contains(&id),
+                "{id} is now in the routed catalogue too -- good, but move it \
+                 out of this list so the premise stays honest"
+            );
+        }
+        assert!(
+            unseen.len() >= 20,
+            "only {} passthrough ids are outside the routed catalogue; if the \
+             two catalogues have converged, say so here rather than leaving a \
+             guard that grades nothing new",
+            unseen.len()
         );
     }
 
