@@ -1271,6 +1271,93 @@ mod tests {
         );
     }
 
+    /// Pin a permissive PROCESS-GLOBAL dispatcher before installing a scoped
+    /// one. FerroxLabs/wayland-core#373.
+    ///
+    /// ── THE MECHANISM, READ OUT OF tracing-core 0.1.36, NOT INFERRED ──────
+    ///
+    /// `tracing::error!` expands to (tracing 0.1.44, `event!`):
+    ///
+    /// ```text
+    /// let interest = __CALLSITE.interest();
+    /// if !interest.is_never() && __CALLSITE.is_enabled(interest) { ...dispatch... }
+    /// ```
+    ///
+    /// `interest` is a PROCESS-GLOBAL cache on the callsite, filled once, on
+    /// the first thread that ever reaches it, by
+    /// `DefaultCallsite::register()` -> `callsite::rebuild_callsite_interest(
+    /// self, &DISPATCHERS.rebuilder())` (tracing-core `src/callsite.rs:319`,
+    /// `:490`).
+    ///
+    /// `Dispatchers::rebuilder()` (`src/callsite.rs:544`) returns
+    /// `Rebuilder::JustOne` while `has_just_one` holds — which it does whenever
+    /// at most ONE dispatcher is registered, the normal state of this test
+    /// binary. `Rebuilder::JustOne::for_each` (`:564`) then calls
+    /// `dispatcher::get_default(f)` — **the CALLING thread's** dispatcher, not
+    /// the registered one. A sibling test that reaches this callsite first, on
+    /// its own thread, with no scoped subscriber installed, therefore has its
+    /// `NoSubscriber` asked, and `impl Subscriber for NoSubscriber` returns
+    /// `Interest::never()` (`src/subscriber.rs:676`). That `never` is cached
+    /// for the whole process, and `!interest.is_never()` short-circuits the
+    /// event before any dispatcher is consulted.
+    ///
+    /// The window is narrow, which is why the rate is a few percent and not
+    /// 100 %: `set_default` itself calls `callsite::register_dispatch` ->
+    /// `CALLSITES.rebuild_interest(Write)` (`:484`), which recomputes every
+    /// ALREADY-REGISTERED callsite from the live registrar list. So a callsite
+    /// poisoned BEFORE the scoped subscriber goes in is repaired by installing
+    /// it. Only a first-hit registration that lands AFTER `set_default` and
+    /// BEFORE the event survives.
+    ///
+    /// ── MEASURED, verbatim from the instrumented failing run ──────────────
+    ///
+    /// ```text
+    /// DIAG373 arm=failopen observed=[] max_level=LevelFilter::TRACE
+    ///         fresh=[Level(Error)] after_rebuild=[Level(Error), Level(Error)]
+    /// ```
+    ///
+    /// `max_level=TRACE` rules out the global level filter. `fresh=[Error]` is
+    /// a brand-new callsite emitted from the same thread with the same scoped
+    /// subscriber still installed — so the subscriber IS current and the
+    /// dispatcher IS reachable. `after_rebuild` gains the missing ERROR after
+    /// nothing but `tracing::callsite::rebuild_interest_cache()` and a re-run
+    /// of the identical code path: the cached `Interest` was the only thing in
+    /// the way.
+    ///
+    /// ── WHY THIS FIXES IT, AND WHY THE TWO EARLIER ATTEMPTS DID NOT ───────
+    ///
+    /// A global default makes `dispatcher::get_default` return something
+    /// permissive on EVERY thread, so the `JustOne` path can no longer cache
+    /// `never`; and once a scoped subscriber is added alongside it the
+    /// registrar list has two entries, `has_just_one` goes false, and the
+    /// rebuilder stops consulting the calling thread at all. Either way the
+    /// union is `always` or `sometimes` — never `never`, because
+    /// `Interest::and` (`src/subscriber.rs:658`) only keeps `never` when every
+    /// registered dispatcher agrees on it.
+    ///
+    /// `serial_test` could not fix this (5/40, the baseline): the poisoning
+    /// thread is any test that reaches the callsite, not only the other
+    /// subscriber-installing test. `rebuild_interest_cache()` after
+    /// `set_default` could not either (4/100, the baseline): at that moment the
+    /// callsite is typically still UNREGISTERED, so there is nothing to rebuild,
+    /// and the poisoning happens afterwards.
+    fn pin_permissive_global_dispatcher() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // A `Registry` with no layers records nothing and prints nothing;
+            // it exists only so that `register_callsite` on an uninvolved
+            // thread answers `Interest::always()` instead of `never`.
+            //
+            // The result is deliberately ignored rather than unwrapped: if
+            // some other test in this binary has already installed a global
+            // default, that default serves the same purpose and failing here
+            // would turn a satisfied precondition into a panic.
+            let _ = tracing::subscriber::set_global_default(
+                tracing_subscriber::registry::Registry::default(),
+            );
+        });
+    }
+
     /// #340 — the fail-open must be VISIBLE. `wcore-cli` builds its stderr
     /// writer as `stderr.with_max_level(tracing::Level::ERROR)`, so ERROR is
     /// the only level a user with no `RUST_LOG` set ever sees. This asserts on
@@ -1293,6 +1380,8 @@ mod tests {
                 self.0.lock().unwrap().push(*event.metadata().level());
             }
         }
+
+        pin_permissive_global_dispatcher();
 
         let captured = Captured::default();
         let subscriber = tracing_subscriber::registry::Registry::default().with(captured.clone());
@@ -1339,6 +1428,8 @@ mod tests {
                 self.0.lock().unwrap().push(*event.metadata().level());
             }
         }
+
+        pin_permissive_global_dispatcher();
 
         let captured = Captured::default();
         let subscriber = tracing_subscriber::registry::Registry::default().with(captured.clone());
