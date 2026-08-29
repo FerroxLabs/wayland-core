@@ -597,3 +597,32 @@ retries = 0
 [[profile.ci.overrides]]
 filter = 'test(=bash::tests::the_bash_timeout_bounds_the_secret_deny_walk) + test(=bash::tests::the_streaming_bash_timeout_bounds_the_secret_deny_walk) + test(=matching_assistant_dials_scoped_deferred_server)'
 retries = 0
+
+# ── #1155: the TOCTOU race whose regression must not be retryable ───────────
+#
+# FerroxLabs/wayland#1155 is "an Edit can overwrite a save that arrives while
+# the guard is checking it (TOCTOU), AND retries=2 hides it". The first half is
+# fixed (`atomic_write_checked` publishes through `RENAME_EXCHANGE`); this block
+# is the second half. Without it `inv2_round5_adversarial_test` sat under
+# `[profile.ci] retries = 2` with no override at all, so a reintroduced race
+# that lost a save on one attempt and won on the next would report the RUN as
+# SUCCESS — the number release gates, dashboards and humans read — with the
+# evidence buried in a `TRY 1 FAIL` line.
+#
+# MEASURED on hetzner-dsm, `--profile ci`, a probe in THIS binary that fails on
+# its first attempt and passes on any retry (the exact shape a race takes):
+#   * without this block: `TRY 1 FAIL`, `TRY 2 PASS`,
+#     `Summary 1 test run: 1 passed (1 flaky)`, cargo exit 0 — laundered green.
+#   * with this block:    `FAIL`, `Summary 1 test run: 0 passed, 1 failed`,
+#     cargo exit 100 — the failure reaches the run conclusion.
+#
+# The same tree also reddens the real thing: with the exchange withdrawn and the
+# check window held open, `an_in_place_save_is_not_lost_to_the_final_rename`
+# fails with "4 of 12 interleavings lost". A regression here is signal.
+#
+# Scoped to the binary, same discipline as the three blocks above: every other
+# test in the suite keeps `retries = 2`. Every assertion in this file is a
+# data-loss assertion, so none of them may be retried into a pass.
+[[profile.ci.overrides]]
+filter = 'binary(=inv2_round5_adversarial_test)'
+retries = 0
