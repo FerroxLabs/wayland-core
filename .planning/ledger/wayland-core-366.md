@@ -3,7 +3,7 @@ issue: 366
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "Container orphan scan is nonce-scoped, so it can never see a leftover from an earlier run"
-status: open  # every criterion met; the close is a maintainer action
+status: open
 last_verified_commit: a452b639
 criteria:
   - id: d1
