@@ -260,7 +260,28 @@ def _is_git(root):
     ).returncode == 0
 
 
-def resolve_evidence(root, ev, git):
+def _is_shallow(root):
+    """True when only part of the history is present.
+
+    actions/checkout defaults to `fetch-depth: 1`, so in CI the ONLY commit
+    that resolves is HEAD. Every ledger file carries a `last_verified_commit`
+    by construction, so validating those shas against a shallow clone produces
+    one guaranteed problem per file -- 63 of them here -- and the step can
+    never pass on any branch or any tree. A gate with no reachable pass state
+    is worth exactly as much as one that cannot fail, and it takes the real
+    checks in the same step down with it.
+
+    So the sha check DOWNGRADES to a named skip when the clone is shallow,
+    rather than being silently dropped: the run says which check did not run
+    and why, and the same gate stays fully armed on a full clone.
+    """
+    return subprocess.run(
+        ["git", "-C", root, "rev-parse", "--is-shallow-repository"],
+        capture_output=True, text=True,
+    ).stdout.strip() == "true"
+
+
+def resolve_evidence(root, ev, git, shallow=False):
     """-> None if it resolves, else why it does not."""
     m = TEST_EV.match(ev)
     if m:
@@ -295,6 +316,11 @@ def resolve_evidence(root, ev, git):
     if m:
         if not git:
             return "commit evidence needs a git worktree; this root is not one"
+        if shallow:
+            # Same shallow wall as `last_verified_commit` -- see _is_shallow.
+            # Fixing only that site would have left this one to surface later;
+            # the class is "any sha resolved through git", not one field.
+            return None
         r = subprocess.run(
             ["git", "-C", root, "cat-file", "-t", m.group("s")],
             capture_output=True, text=True)
@@ -306,7 +332,7 @@ def resolve_evidence(root, ev, git):
             "or commit:<sha>." % ev)
 
 
-def validate_record(root, rec, git):
+def validate_record(root, rec, git, shallow=False):
     """-> list of complaints about one ledger record."""
     bad = []
     p = rec["path"]
@@ -338,7 +364,7 @@ def validate_record(root, rec, git):
     sha = rec.get("last_verified_commit", "")
     if not re.fullmatch(r"[0-9a-f]{7,40}", sha or ""):
         bad.append("%s: last_verified_commit %r is not a sha" % (p, sha))
-    elif git:
+    elif git and not shallow:
         r = subprocess.run(["git", "-C", root, "cat-file", "-t", sha],
                            capture_output=True, text=True)
         if r.stdout.strip() != "commit":
@@ -392,7 +418,7 @@ def validate_record(root, rec, git):
                     "will fix -- put the `#<number>` that carries it in the "
                     "note." % (w, cid))
         if ev:
-            why = resolve_evidence(root, ev, git)
+            why = resolve_evidence(root, ev, git, shallow)
             if why:
                 bad.append("%s: %s evidence does not resolve -- %s" % (w, cid, why))
     return bad
@@ -490,6 +516,15 @@ def run(root, offline=False, injected=None, quiet=False):
         out.append(s)
 
     git = _is_git(root)
+    shallow = git and _is_shallow(root)
+    if shallow:
+        # Say it. A check that quietly stops running is indistinguishable from
+        # one that ran and passed, and that is how a gate rots between releases.
+        say("NOTE: shallow clone -- `last_verified_commit` resolution is SKIPPED "
+            "for every entry. Only HEAD resolves at fetch-depth 1, so the check "
+            "could only ever report one problem per ledger file. Every OTHER "
+            "ledger check below still ran. Set `fetch-depth: 0` on the checkout "
+            "to arm it.")
     files = collect(root)
     if files is None:
         say("FAIL: %s does not exist. There is no ledger to check, which is not "
@@ -513,7 +548,7 @@ def run(root, offline=False, injected=None, quiet=False):
         return 2, out
 
     for rec in records:
-        problems += validate_record(root, rec, git)
+        problems += validate_record(root, rec, git, shallow)
 
     counts = {s: 0 for s in STATES}
     for r in records:
