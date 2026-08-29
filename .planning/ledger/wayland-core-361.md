@@ -50,3 +50,27 @@ Two hypotheses were tested and refuted, and one reproduction instrument was reje
 constraining cores with taskset produces a DIFFERENT failure (a stack overflow in
 concurrent_near_cap_admits_exactly_one_retained_workspace under thread contention), so it measures
 the instrument rather than the subject. See the issue for detail.
+
+## Re-graded at HEAD by lane f13-u-flake-chan, 2026-08-29
+
+OWNED ELSEWHERE, NOT DUPLICATED. c1-c5 are closed on `lane/f13-fin-flake-584`
+(`5fe7f9fab` pins the fixture to the adversarial approval token, `47ab6cbfc`
+grades the criteria). That branch is NOT merged into `origin/integ/f13`, which
+is why every row above still reads `not-met` on this tree: the states describe
+THIS tree, not that lane's. Re-graded rather than trusted -- the mechanism
+`47ab6cbfc` names (a v4 uuid whose fourth group ends `fc` puts a
+FIRECRAWL_API_KEY prefix inside the minted approval token, and the pre-`aa524efd`
+PII-first ordering in `redact_tool_output` ate the token tail and all 400 filler
+bytes, collapsing 490 chars to 133 under a 200-char truncation cap) is
+arithmetically consistent with the panic text quoted in their ledger, and
+`aa524efd` (the ordering fix) IS in this tree, which is why the fixture is no
+longer observed to fail here.
+
+c6 is not partial and not abandoned: it is handed to core#373 verbatim as that
+issue's c5. This lane closed core#373 c1-c4 (see
+`.planning/ledger/wayland-core-373.md`) -- the mechanism is now named in code
+and reproduced deterministically. core#373 c5 (= this c6) stays open because
+`cargo test --workspace --lib --no-fail-fast` on `origin/integ/f13` is also red
+for three OTHER shared-process races whose fixes live on `lane/f13-fin-flake-584`
+(`2c8efb46`, `812e26075`, `18e59e85f`) and are likewise unmerged. The ten
+consecutive clean runs are reachable only on the integrated tree.
