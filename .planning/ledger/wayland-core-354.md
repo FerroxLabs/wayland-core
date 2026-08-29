@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "MCP malware gate: make the OSV fail-open an explicit operator choice (strict/permissive)"
 status: open
-last_verified_commit: 86799a69
+last_verified_commit: 4e24bda6
 criteria:
   - id: c1
     text: "A config key selects the malware-gate mode, permissive or strict, defaulting to today's permissive behaviour"
@@ -44,9 +44,10 @@ criteria:
     note: "`docs/mcp.md` gains `## Supply-chain malware gate -- [mcp] malware_gate`: the four-answer table, which one the key governs, the honest cost of strict (no network means no npx/uvx MCP servers), the stricter-layer-wins cascade, and the /doctor line (`file:docs/mcp.md`). `print_mcp_section` prints `malware_gate_line(cfg.mcp.malware_gate)` whether or not any server is declared -- a fresh config with no servers is exactly when an operator wants to see the posture. The line is a pure function so the CONTENT is graded by `test:crates/wcore-cli/src/doctor/mod.rs::doctor_names_the_malware_gate_mode_and_what_it_does`: each mode must name the key, its value, and the consequence, and the two modes must differ."
   - id: c7
     text: "The already-shipping non-session MCP launch path reads the operator's chosen mode, not the uninstalled permissive default"
-    state: not-met
+    state: met
     owner: core
-    note: "Added 2026-08-29 by the adversarial verifier of lane/f13-mcp-gate-mode, which REFUTED this entry's own disclosure. c1-c6 hold on their literal text, but the note claiming the uninstalled default only affects a hypothetical caller that `should be revisited if a non-session MCP launch path ever appears` is false: such a path already ships. `wayland --doctor --probe-mcp` returns at main.rs:1819 into doctor::run BEFORE config/OAuth/engine bootstrap, so it reaches StdioTransport::spawn without an installed mode and silently takes permissive. Under strict, the one command an operator runs to ASK whether the gate is on is the command that does not honour it. A mode that the diagnostic path ignores is not an operator choice."
+    evidence: "test:crates/wcore-cli/tests/doctor_probe_malware_gate.rs::doctor_probe_launches_under_the_operator_malware_gate"
+    note: "CLOSED on lane/f13-n-mcp-gate. `print_mcp_section` now calls `install_and_report_malware_gate` (symbol:crates/wcore-cli/src/doctor/mod.rs::install_and_report_malware_gate), which installs `cfg.mcp.malware_gate` and then builds the printed line from `malware_gate::mode()` — the READ-BACK is the point: the posture doctor prints and the posture doctor enforces are now one value, so they cannot disagree again. Enumeration behind `not the instance`: `grep -rn 'McpManager::connect' crates/ --include=*.rs` outside tests reaches four call sites — bootstrap.rs:1843, plugins/mcp_delivery.rs:167, main.rs:5452 and main.rs:5742 (all post-`AgentBootstrap::build`), engine_bridge.rs:3038 (in-session `AddMcpServer`) — plus doctor/mod.rs:654. Doctor was the only pre-bootstrap one, which is what c7 says. REPRODUCED FIRST on origin/integ/f13 at 362ba8a60 with the real binary: under `unshare -n` (OSV unreachable) and a config carrying `malware_gate = \"strict\"`, doctor printed `[mcp] malware_gate = \"strict\" — ... REFUSES the launch` and the stand-in `npx` still ran (marker file present). Same command on the fix: `✕ probe failed: MCP server launch refused: 'npx' fetches and executes a package ... malware_gate = \"strict\" refuses a launch whose malware check could not be performed`, marker ABSENT. Negative control on the same binary with `malware_gate = \"permissive\"`: marker PRESENT, so the fix did not turn doctor into a refuse-everything path. Red arm: `git checkout origin/integ/f13 -- crates/wcore-cli/src/doctor/mod.rs` (diff against the branch then empty, so the test ran against byte-identical pre-fix source) failed with `--doctor --probe-mcp executed the package runner although [mcp] malware_gate = \"strict\"`; restored, touched, green."
 ---
 
 Split out of `#340`. That ticket asked for two things on the OSV fail-open: at
@@ -170,3 +171,17 @@ carried the same text — `DispatchAdmission("dispatch requires 9126805504 bytes
 with 0 bytes available to the dispatch gate. They are recorded here rather than
 dropped: they were re-run once ~55 GiB came free and all 33 passed, which is
 what makes "environmental" a measurement instead of an assumption.
+
+## Lane note — `lane/f13-n-mcp-gate` (2026-08-29)
+
+c7 closed. The `Known limitation, not hidden` section above is now history: the
+mode is installed from `AgentBootstrap::build` **and** from the `--doctor` MCP
+section, and doctor reports the mode it read back from the gate rather than the
+one it read out of the config. The regression test owns its own process
+(`crates/wcore-cli/tests/doctor_probe_malware_gate.rs`, one test in one file)
+because the posture is a process-wide `OnceLock` and the test sets
+`WAYLAND_HOME`; it carries its own control — a permissive-default launch that
+MUST reach exec — so a refusal cannot be confused with a broken fixture.
+
+Every criterion on this entry is now met. Closing #354 is Sean's action, not
+the lane's.
