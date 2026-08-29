@@ -12,6 +12,10 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use wcore_eval_scenarios::fixtures::mcp::{McpHttpFixture, McpHttpMode};
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_wayland-core")
 }
@@ -29,7 +33,7 @@ fn write_home(home: &Path, oauth_sentinel: &[u8]) {
 }
 
 struct CoreSession {
-    child: std::process::Child,
+    child: OwnedTree<std::process::Child>,
     stdin: std::process::ChildStdin,
     lines: std::sync::mpsc::Receiver<String>,
 }
@@ -55,7 +59,7 @@ impl CoreSession {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = command.spawn().expect("spawn packaged Core");
+        let mut child = OwnedTree::new(command.spawn().expect("spawn packaged Core"));
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = child.stdout.take().expect("child stdout");
         let (tx, lines) = std::sync::mpsc::channel();

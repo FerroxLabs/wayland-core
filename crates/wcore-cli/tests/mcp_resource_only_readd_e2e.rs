@@ -16,6 +16,10 @@ use tempfile::TempDir;
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_wayland-core")
 }
@@ -66,7 +70,7 @@ async fn resource_only_server() -> MockServer {
 }
 
 struct CoreSession {
-    child: std::process::Child,
+    child: OwnedTree<std::process::Child>,
     stdin: std::process::ChildStdin,
     lines: std::sync::mpsc::Receiver<String>,
 }
@@ -92,7 +96,7 @@ impl CoreSession {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = command.spawn().expect("spawn packaged Core");
+        let mut child = OwnedTree::new(command.spawn().expect("spawn packaged Core"));
         let stdin = child.stdin.take().expect("child stdin");
         let stdout = child.stdout.take().expect("child stdout");
         let (tx, lines) = std::sync::mpsc::channel();
