@@ -969,11 +969,9 @@ mod tests {
     /// and the two states it can express must stay distinguishable.
     #[test]
     fn mcp_tools_flag_parses_named_and_disable_all() {
-        let parsed = super::parse_mcp_tool_selections(&[
-            "fs=read, list".to_string(),
-            "shell=".to_string(),
-        ])
-        .expect("both forms parse");
+        let parsed =
+            super::parse_mcp_tool_selections(&["fs=read, list".to_string(), "shell=".to_string()])
+                .expect("both forms parse");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].server, "fs");
         assert_eq!(
@@ -995,7 +993,9 @@ mod tests {
         assert!(super::parse_mcp_tool_selections(&["fs".to_string()]).is_err());
         assert!(super::parse_mcp_tool_selections(&["=read".to_string()]).is_err());
         assert!(
-            super::parse_mcp_tool_selections(&[]).expect("no flags is no selection").is_empty()
+            super::parse_mcp_tool_selections(&[])
+                .expect("no flags is no selection")
+                .is_empty()
         );
     }
 

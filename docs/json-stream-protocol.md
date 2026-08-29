@@ -688,6 +688,12 @@ be byte-identical to the one above, so it is annotated:
 | `tools` | string[] | List of tool names registered from this server |
 | `already_connected` | boolean | Optional; omitted when false. `true` means this receipt acknowledges a **skipped** re-add of an already-connected server, not a new connection. Absent means a real connect -- but see the feature-detect note below |
 
+To reconfigure a connected server on purpose, send `"replace": true` (§2.8).
+That is the only way to change a live server's configuration, and it is opt-in
+precisely because a retry, a reconnect, or two hosts racing the same add must
+never tear a working server down as a side effect. A successful replace is a
+REAL connect, so its `mcp_ready` carries no `already_connected` annotation.
+
 Feature-detect `mcp_ready_skip_annotation_v1` in the contract capabilities before
 reading anything into the field's absence: a Core that predates the annotation
 omits it on *every* `mcp_ready`, skips included, so on such a producer "absent"
@@ -1262,6 +1268,7 @@ Dynamically inject an MCP server before the conversation starts. This command is
 | `url` | string | sse/http only | Server URL |
 | `headers` | object | no | HTTP headers (for sse/http) |
 | `allowed_tools` | string[] | no | Per-tool allow-list. **Omit for the previous behaviour** (every advertised tool registered). When present, ONLY the named tools are registered — an advertised tool the list omits is denied, and `[]` disables the server's tools entirely. Names are the tool names the server advertises. The camelCase spelling `allowedTools` (the Wayland desktop model's own) is accepted as an alias. Added in 0.13.10 (#998). |
+| `replace` | boolean | no | **Opt-in destructive reconfigure.** Omit (or `false`) for the default: a re-add of an already-connected server is skipped and its connection, configuration and lifecycle generation are untouched (see the `already_connected` annotation in §`mcp_ready`). `true` tears the existing connection DOWN -- the stdio child exits, the tools are unregistered -- and re-establishes it from THIS command's configuration. Only a server this process introduced at runtime may be replaced; a config-declared name is still refused, and a server that is connecting, stopping, or whose prior cleanup is unverified is refused rather than interrupted. Added in 0.13.10 (#1165). |
 
 **Lifecycle:**
 

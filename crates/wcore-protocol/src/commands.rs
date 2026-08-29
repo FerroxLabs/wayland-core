@@ -1071,8 +1071,7 @@ mod tests {
         );
         assert!(replace_of(&format!("{{{base},\"replace\":true}}")));
 
-        let quiet: ProtocolCommand =
-            serde_json::from_str(&format!("{{{base}}}")).expect("decode");
+        let quiet: ProtocolCommand = serde_json::from_str(&format!("{{{base}}}")).expect("decode");
         let round = serde_json::to_value(&quiet).expect("encode");
         assert!(
             round.get("replace").is_none(),

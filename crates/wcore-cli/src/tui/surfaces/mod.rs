@@ -1932,10 +1932,7 @@ impl Router {
                                 ) {
                                     (Some(req), Some(engine)) => {
                                         if req.replace {
-                                            engine.replace_mcp_server(
-                                                req.name.clone(),
-                                                req.target,
-                                            );
+                                            engine.replace_mcp_server(req.name.clone(), req.target);
                                             push_system(
                                                 app,
                                                 format!(
@@ -1945,14 +1942,10 @@ impl Router {
                                                 ),
                                             );
                                         } else {
-                                            engine
-                                                .add_mcp_server(req.name.clone(), req.target);
+                                            engine.add_mcp_server(req.name.clone(), req.target);
                                             push_system(
                                                 app,
-                                                format!(
-                                                    "Connecting MCP server '{}'…",
-                                                    req.name
-                                                ),
+                                                format!("Connecting MCP server '{}'…", req.name),
                                             );
                                         }
                                     }

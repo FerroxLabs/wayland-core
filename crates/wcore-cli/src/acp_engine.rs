@@ -43,7 +43,9 @@ use tokio_util::sync::CancellationToken;
 
 use wcore_acp::AcpError;
 use wcore_acp::a2a::{A2aCapabilities, A2aError, A2aHandler, A2aHandshake, A2aMessage};
-use wcore_acp::protocol::{ErrorCode, JsonRpcError, McpToolSelection, MessageEvent, ToolCall, ToolDefinition, ToolResult};
+use wcore_acp::protocol::{
+    ErrorCode, JsonRpcError, McpToolSelection, MessageEvent, ToolCall, ToolDefinition, ToolResult,
+};
 use wcore_acp::turn::{TurnEngine, TurnRequest};
 
 use wcore_agent::bootstrap::AgentBootstrap;

@@ -243,7 +243,10 @@ async fn replace_tears_the_connection_down_and_re_establishes_it() {
     let mut session = CoreSession::start(home.path());
 
     let first = session.add(&script, "alpha", false);
-    assert_eq!(first["type"], "mcp_ready", "first add must connect: {first}");
+    assert_eq!(
+        first["type"], "mcp_ready",
+        "first add must connect: {first}"
+    );
     assert!(
         tool_names(&first).iter().any(|t| t.contains("alpha")),
         "CONTROL: the first connection must contribute its own tool, else the \

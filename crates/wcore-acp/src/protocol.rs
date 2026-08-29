@@ -617,7 +617,10 @@ mod tests {
         };
         let s = serde_json::to_string(&req).unwrap();
         assert_eq!(s, r#"{"model":"claude-opus-4-8"}"#);
-        assert!(!s.contains("mcp"), "absent selection must not appear on wire");
+        assert!(
+            !s.contains("mcp"),
+            "absent selection must not appear on wire"
+        );
 
         let legacy: SessionCreateRequest =
             serde_json::from_str(r#"{"model":"claude-opus-4-8"}"#).unwrap();

@@ -39081,10 +39081,7 @@ mod issue_434_routed_model_tests {
         }
     }
 
-    fn engine_behind_alias(
-        provider: Arc<dyn LlmProvider>,
-        model: &str,
-    ) -> super::AgentEngine {
+    fn engine_behind_alias(provider: Arc<dyn LlmProvider>, model: &str) -> super::AgentEngine {
         let mut engine = super::AgentEngine::new_with_provider(
             provider,
             wcore_config::config::Config::default(),

@@ -2625,16 +2625,8 @@ impl TuiEngine {
                 name.clone(),
             )
             .await;
-            Self::connect_and_register_mcp(
-                engine,
-                tx,
-                lifecycle,
-                runtime_mcp,
-                true,
-                name,
-                config,
-            )
-            .await;
+            Self::connect_and_register_mcp(engine, tx, lifecycle, runtime_mcp, true, name, config)
+                .await;
         });
     }
 
@@ -4498,8 +4490,8 @@ mod tests {
     /// where it cannot be mistaken for the child's own argv.
     #[test]
     fn parse_mcp_add_keeps_replace_opt_in_and_out_of_the_target() {
-        let plain = parse_mcp_add("/mcp add docs https://mcp.example.com/sse")
-            .expect("a plain add parses");
+        let plain =
+            parse_mcp_add("/mcp add docs https://mcp.example.com/sse").expect("a plain add parses");
         assert_eq!(plain.name, "docs");
         assert_eq!(plain.target, "https://mcp.example.com/sse");
         assert!(

@@ -4109,7 +4109,8 @@ mod tests {
                 .replays_thinking_in_history()
         );
         assert!(
-            !OpenAIProvider::message_compat(&flux, "gpt-4o", None, false).replays_thinking_in_history()
+            !OpenAIProvider::message_compat(&flux, "gpt-4o", None, false)
+                .replays_thinking_in_history()
         );
     }
 

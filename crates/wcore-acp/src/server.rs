@@ -343,7 +343,10 @@ impl AcpServer {
     /// Empty for a session that made no selection, and for an unknown session:
     /// "no narrowing" is the only safe reading of "no record", and an unknown
     /// session is refused by the caller before a turn can run anyway.
-    pub async fn session_mcp_servers(&self, session_id: &str) -> Vec<crate::protocol::McpToolSelection> {
+    pub async fn session_mcp_servers(
+        &self,
+        session_id: &str,
+    ) -> Vec<crate::protocol::McpToolSelection> {
         self.sessions
             .read()
             .await

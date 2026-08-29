@@ -27,7 +27,7 @@ use support::mock_llm::{MockLlm, received_requests};
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use wcore_acp::protocol::{McpToolSelection, SessionCreateRequest, MessageSendRequest};
+use wcore_acp::protocol::{McpToolSelection, MessageSendRequest, SessionCreateRequest};
 use wcore_acp::server::AcpServer;
 use wcore_acp::transport::http::HttpHandler;
 use wcore_acp::turn::{TurnEngine, TurnRequest};
@@ -211,12 +211,7 @@ async fn offered_with(
 /// none of them mean anything unless this passes.
 #[tokio::test]
 async fn control_an_unselected_server_contributes_every_tool() {
-    let offered = offered_with(
-        "99999999-1111-2222-3333-000000000001",
-        None,
-        Vec::new(),
-    )
-    .await;
+    let offered = offered_with("99999999-1111-2222-3333-000000000001", None, Vec::new()).await;
     assert!(
         offers(&offered, SAFE_TOOL) && offers(&offered, DANGER_TOOL),
         "with no selection the configured MCP server must contribute both of \

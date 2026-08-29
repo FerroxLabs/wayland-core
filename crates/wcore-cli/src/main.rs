@@ -3668,8 +3668,7 @@ async fn teardown_runtime_mcp_for_replace(
             McpLifecycleState::Ready | McpLifecycleState::Failed { .. } => {}
             McpLifecycleState::Connecting => {
                 return Err(
-                    "server is still connecting; replace would race the dial in flight"
-                        .to_string(),
+                    "server is still connecting; replace would race the dial in flight".to_string(),
                 );
             }
             McpLifecycleState::Stopping => {

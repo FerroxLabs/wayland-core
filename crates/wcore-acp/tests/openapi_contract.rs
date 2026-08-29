@@ -342,11 +342,11 @@ async fn shape_checker_rejects_a_3_0_encoded_document() {
     // nullable sites the document has", and pinning a literal here made adding
     // ONE optional field fail this control for a reason that has nothing to do
     // with the encoding it exists to police.
-    let expected_sites = serde_json::from_str::<Value>(FIXTURE)
-        .expect("fixture is JSON")["type_array_null_sites"]
-        .as_array()
-        .expect("fixture lists the 3.1-form sites")
-        .len();
+    let expected_sites =
+        serde_json::from_str::<Value>(FIXTURE).expect("fixture is JSON")["type_array_null_sites"]
+            .as_array()
+            .expect("fixture lists the 3.1-form sites")
+            .len();
     assert_eq!(
         shape.nullable_keyword.len(),
         expected_sites,
