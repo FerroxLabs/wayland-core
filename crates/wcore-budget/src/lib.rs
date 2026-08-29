@@ -46,6 +46,10 @@ pub use daily::{
     DAILY_LEDGER_SCHEMA_VERSION, DailyAuthority, DailyGrant, DailyPosition, DailySpendError,
     DailySpendStore,
 };
+pub use execution::{
+    AgentDepthGuard, ExecutionBudget, ExecutionBudgetSnapshot, ExecutionBudgetView,
+    ProcessCleanupProof, ToolRunGuard,
+};
 pub use spend::{
     EscalationError, EscalationGate, EscalationRecord, ModelBilling, ModelSpendProfile,
     SPEND_SCHEMA_VERSION, SpendMode, SpendPolicy, SpendRefusal,
@@ -53,10 +57,6 @@ pub use spend::{
 pub use spend_audit::{
     JsonlSpendAuditSink, MemorySpendAuditSink, SpendAuditDispatch, SpendAuditError,
     SpendAuditRecord, SpendAuditRefusal, SpendAuditSink, SpendAuditor, now_unix_ms,
-};
-pub use execution::{
-    AgentDepthGuard, ExecutionBudget, ExecutionBudgetSnapshot, ExecutionBudgetView,
-    ProcessCleanupProof, ToolRunGuard,
 };
 pub use tracker::{
     BudgetCap, BudgetCapBuilder, BudgetError, BudgetEvent, BudgetEventSink, BudgetExtensionError,

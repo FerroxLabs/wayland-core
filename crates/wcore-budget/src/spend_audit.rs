@@ -432,7 +432,13 @@ mod tests {
 
     #[test]
     fn a_finished_task_totals_its_dispatches() {
-        let auditor = SpendAuditor::new("t1", "s1", SpendMode::Unrestricted, &metered("haiku", 1.0), 10);
+        let auditor = SpendAuditor::new(
+            "t1",
+            "s1",
+            SpendMode::Unrestricted,
+            &metered("haiku", 1.0),
+            10,
+        );
         auditor.charge(dispatch("conversation", 100, 20, Some(0.25)));
         auditor.charge(dispatch("compaction", 900, 80, Some(0.75)));
         let record = auditor.finish(50).expect("first finish emits");
@@ -447,7 +453,13 @@ mod tests {
 
     #[test]
     fn an_unpriced_dispatch_is_counted_not_treated_as_zero() {
-        let auditor = SpendAuditor::new("t1", "s1", SpendMode::Unrestricted, &metered("haiku", 1.0), 0);
+        let auditor = SpendAuditor::new(
+            "t1",
+            "s1",
+            SpendMode::Unrestricted,
+            &metered("haiku", 1.0),
+            0,
+        );
         auditor.charge(dispatch("conversation", 10, 10, Some(0.5)));
         auditor.charge(dispatch("conversation", 10, 10, None));
         let record = auditor.finish(1).expect("emits");
@@ -455,7 +467,11 @@ mod tests {
         assert!(!record.cost_is_complete());
         // The summary must SAY the total is a floor, or a reader will take
         // $0.50 for the whole bill.
-        assert!(record.summary().contains("unknown price"), "{}", record.summary());
+        assert!(
+            record.summary().contains("unknown price"),
+            "{}",
+            record.summary()
+        );
     }
 
     #[test]
@@ -467,7 +483,13 @@ mod tests {
 
     #[test]
     fn escalations_and_refusals_reach_the_record() {
-        let auditor = SpendAuditor::new("t1", "s1", SpendMode::Unrestricted, &metered("haiku", 1.0), 0);
+        let auditor = SpendAuditor::new(
+            "t1",
+            "s1",
+            SpendMode::Unrestricted,
+            &metered("haiku", 1.0),
+            0,
+        );
         let mut gate = EscalationGate::new("s1", metered("haiku", 1.0));
         let escalation = gate
             .authorize(metered("opus", 30.0), "operator", "approved", 5)
@@ -491,7 +513,8 @@ mod tests {
     fn the_jsonl_sink_appends_one_line_per_event_and_round_trips() {
         let dir = tempfile::tempdir().expect("tempdir");
         let sink = JsonlSpendAuditSink::new(dir.path().join("spend-audit.jsonl"));
-        let auditor = SpendAuditor::new("t1", "s1", SpendMode::LocalOnly, &metered("haiku", 1.0), 0);
+        let auditor =
+            SpendAuditor::new("t1", "s1", SpendMode::LocalOnly, &metered("haiku", 1.0), 0);
         auditor.charge(dispatch("conversation", 5, 5, Some(0.1)));
         let record = auditor.finish(1).expect("emits");
         sink.record(&record).expect("write record");
@@ -520,8 +543,13 @@ mod tests {
     fn finish_into_writes_once_and_only_once() {
         let memory = Arc::new(MemorySpendAuditSink::default());
         let sink: Arc<dyn SpendAuditSink> = memory.clone();
-        let auditor =
-            SpendAuditor::new("t1", "s1", SpendMode::Unrestricted, &metered("haiku", 1.0), 0);
+        let auditor = SpendAuditor::new(
+            "t1",
+            "s1",
+            SpendMode::Unrestricted,
+            &metered("haiku", 1.0),
+            0,
+        );
         assert!(auditor.finish_into(&sink, 1).expect("ok").is_some());
         assert!(auditor.finish_into(&sink, 2).expect("ok").is_none());
         assert_eq!(memory.records().len(), 1);

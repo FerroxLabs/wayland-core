@@ -163,8 +163,7 @@ impl ModelSpendProfile {
             // A non-finite or negative rate would make every comparison below
             // meaningless in a direction that FAVOURS the escalation. Clamp it
             // to the most expensive reading instead of trusting it.
-            blended_usd_per_mtok: if blended_usd_per_mtok.is_finite()
-                && blended_usd_per_mtok >= 0.0
+            blended_usd_per_mtok: if blended_usd_per_mtok.is_finite() && blended_usd_per_mtok >= 0.0
             {
                 blended_usd_per_mtok
             } else {
@@ -376,7 +375,8 @@ impl EscalationGate {
     /// 4. otherwise it is an escalation exactly when the blended rate rises.
     #[must_use]
     pub fn is_escalation(&self, requested: &ModelSpendProfile) -> bool {
-        if requested.model == self.authorized.model && requested.provider == self.authorized.provider
+        if requested.model == self.authorized.model
+            && requested.provider == self.authorized.provider
         {
             return false;
         }
@@ -607,7 +607,9 @@ mod tests {
         gate.authorize(metered("opus", 30.0), "operator", "second", 2)
             .unwrap()
             .unwrap();
-        let reverted = gate.revert_last_authorization().expect("a record to revert");
+        let reverted = gate
+            .revert_last_authorization()
+            .expect("a record to revert");
         assert_eq!(reverted.to.model, "opus");
         // The FIRST escalation survives — a failed write of the second must
         // not silently un-authorize a model that was properly recorded.

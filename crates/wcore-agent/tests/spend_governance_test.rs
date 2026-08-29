@@ -19,11 +19,11 @@ use tokio::sync::mpsc;
 use wcore_agent::engine::AgentEngine;
 use wcore_agent::output::OutputSink;
 use wcore_agent::output::null_sink::NullSink;
-use wcore_tools::registry::ToolRegistry;
 use wcore_budget::{BudgetConfig, SpendMode};
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::Config;
 use wcore_providers::{LlmProvider, ProviderError};
+use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 
@@ -444,7 +444,9 @@ async fn every_task_writes_its_own_audit_record_even_with_no_mode_configured() {
         2,
         "two tasks must produce two records, not one rolling total: {records:#?}"
     );
-    let first_id = records[0]["payload"]["task_id"].as_str().unwrap_or_default();
+    let first_id = records[0]["payload"]["task_id"]
+        .as_str()
+        .unwrap_or_default();
     let second_id = records[1]["payload"]["task_id"]
         .as_str()
         .unwrap_or_default();

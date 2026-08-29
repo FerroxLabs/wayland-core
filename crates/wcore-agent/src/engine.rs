@@ -639,7 +639,10 @@ impl Drop for ProviderBudgetReservation {
 
 enum ConfiguredFallbackAdmissionFailure {
     Budget(ProviderBudgetMutationError),
-    Unpriced { provider: String, model: String },
+    Unpriced {
+        provider: String,
+        model: String,
+    },
     /// #174 c3-c5 — the fallback's provider/model is refused by the session's
     /// spend mode, or is an un-authorized model escalation.
     ///

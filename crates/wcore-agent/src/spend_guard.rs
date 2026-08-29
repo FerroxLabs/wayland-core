@@ -412,9 +412,7 @@ fn charge_usage(
                 1.0,
             )
             .filter(|status| status.priced)
-            .map(|status| {
-                status.microcents as f64 / wcore_types::crucible::MICROCENTS_PER_USD
-            }),
+            .map(|status| status.microcents as f64 / wcore_types::crucible::MICROCENTS_PER_USD),
     };
     auditor.charge(SpendAuditDispatch {
         provider: profile.provider.clone(),
@@ -478,14 +476,16 @@ mod tests {
             &self,
             _request: &LlmRequest,
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
             Ok(rx)
         }
     }
 
-    fn guard(mode: SpendMode, baseline: ModelSpendProfile) -> (Arc<SpendGuard>, Arc<MemorySpendAuditSink>) {
+    fn guard(
+        mode: SpendMode,
+        baseline: ModelSpendProfile,
+    ) -> (Arc<SpendGuard>, Arc<MemorySpendAuditSink>) {
         let memory = Arc::new(MemorySpendAuditSink::default());
         let sink: Arc<dyn SpendAuditSink> = memory.clone();
         (
@@ -512,7 +512,11 @@ mod tests {
 
     #[test]
     fn a_catalogued_model_classifies_metered_with_a_positive_rate() {
-        let profile = classify_model("anthropic", wcore_types::model_aliases::ANTHROPIC_SONNET, &compat());
+        let profile = classify_model(
+            "anthropic",
+            wcore_types::model_aliases::ANTHROPIC_SONNET,
+            &compat(),
+        );
         assert_eq!(profile.billing, ModelBilling::Metered);
         assert!(profile.blended_usd_per_mtok > 0.0);
     }
@@ -572,7 +576,11 @@ mod tests {
         });
         let (guard, _sink) = guard(
             SpendMode::Unrestricted,
-            classify_model("anthropic", wcore_types::model_aliases::ANTHROPIC_HAIKU, &compat()),
+            classify_model(
+                "anthropic",
+                wcore_types::model_aliases::ANTHROPIC_HAIKU,
+                &compat(),
+            ),
         );
         let wrapped = SpendGuardProvider::new(inner, Arc::clone(&guard), "anthropic", compat());
         let request = LlmRequest {
@@ -590,7 +598,11 @@ mod tests {
         // Authorize it, and the same request goes through.
         guard
             .authorize(
-                classify_model("anthropic", wcore_types::model_aliases::ANTHROPIC_OPUS, &compat()),
+                classify_model(
+                    "anthropic",
+                    wcore_types::model_aliases::ANTHROPIC_OPUS,
+                    &compat(),
+                ),
                 EscalationSource::Operator,
                 "operator picked opus",
             )
@@ -650,7 +662,9 @@ mod tests {
             tokens_out: 1,
             cost_usd: Some(0.01),
         });
-        let second = guard.finish_task().expect("second task emits its own record");
+        let second = guard
+            .finish_task()
+            .expect("second task emits its own record");
         assert_ne!(first.task_id, second.task_id);
         assert_eq!(second.dispatches.len(), 1);
     }
