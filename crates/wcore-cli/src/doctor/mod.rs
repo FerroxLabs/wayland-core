@@ -572,7 +572,13 @@ async fn print_mcp_section(probe: bool, cli_args: &wcore_config::config::CliArgs
             // wayland-core#354 — the launch gate's posture, printed whether or
             // not any server is declared: a fresh config with no servers yet
             // is exactly when an operator wants to see which mode they are on.
-            println!("{}", malware_gate_line(cfg.mcp.malware_gate));
+            //
+            // wayland-core#354 c7 — and INSTALLED here, not merely printed.
+            // `--doctor` returns from `main` before the engine bootstrap that
+            // used to be the only `install_mode` caller, so `--probe-mcp`
+            // spawned every config-declared stdio server on the uninstalled
+            // `permissive` default while this very line said `strict`.
+            println!("{}", install_and_report_malware_gate(cfg.mcp.malware_gate));
         }
         Err(e) => println!("  (config not loaded: {e})"),
     }
@@ -1140,6 +1146,30 @@ pub(crate) fn malware_gate_line(mode: wcore_config::config::McpMalwareGateMode) 
         "  [mcp] malware_gate = \"{}\" — {consequence}",
         mode.as_str()
     )
+}
+
+/// wayland-core#354 c7 — install the operator's launch posture on the doctor
+/// path, and report the posture that will ACTUALLY be enforced.
+///
+/// `--doctor --probe-mcp` connect-tests every config-declared MCP server, and
+/// it returns from `main` at the `--doctor` early exit — before
+/// `AgentBootstrap::build`, which until this call was the only caller of
+/// [`wcore_mcp::malware_gate::install_mode`]. So the one command whose job is
+/// to launch every configured stdio server was the one command that ignored
+/// `[mcp] malware_gate`, and it printed `strict` in the same output while
+/// letting an unperformable check fail open. A posture the diagnostic path
+/// ignores is not an operator choice.
+///
+/// The line is built from `malware_gate::mode()` rather than from `configured`
+/// on purpose. The read-back is what makes the printed posture and the
+/// ENFORCED posture the same value: if a future path ever reaches here with a
+/// mode already installed (the install is one-shot), doctor prints what will
+/// happen instead of what the config asked for.
+pub(crate) fn install_and_report_malware_gate(
+    configured: wcore_config::config::McpMalwareGateMode,
+) -> String {
+    wcore_mcp::malware_gate::install_mode(configured);
+    malware_gate_line(wcore_mcp::malware_gate::mode())
 }
 
 fn grim_hints() -> Vec<String> {

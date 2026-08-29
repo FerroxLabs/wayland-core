@@ -443,14 +443,20 @@ not restrict who can then use it within that session.
 A stdio entry with `command = "npx"`, `"uvx"`, `"pipx"`, `"bunx"`, `"pnpm dlx"`
 (and the other package runners listed in `wcore_mcp::malware_gate`) makes Core
 **fetch a package from a public registry and execute it** with your ambient
-authority, at connect time. Every stdio launch is therefore queried against the
-[OSV](https://osv.dev) malware feed *before the child process exists*.
+authority, at connect time. Every stdio launch passes through the gate before
+the child process exists, and every launch the gate can **identify as a
+registry fetch** is queried against the [OSV](https://osv.dev) malware feed
+there.
+
+That is narrower than "every stdio launch is checked", and the gap is the part
+worth reading: see [What the gate does not
+cover](#what-the-gate-does-not-cover) below before you rely on it.
 
 Three of the four answers are the same in every configuration:
 
 | Answer | What happens |
 |--------|--------------|
-| Not a package runner | Nothing is fetched, nothing is queried, the server launches |
+| No package runner the gate recognises in the command | Nothing is queried and the server launches. This is **not** a finding that nothing is fetched — see the limits below |
 | Queried, no malware advisories | The server launches |
 | Known malware advisories | **Refused** — `MalwareBlocked`, before exec |
 | A package runner whose argv names no readable package | **Refused** — the check could not run, and "the check did not happen" is not a pass. Name it explicitly (`npx --package <pkg>`, `uvx --from <pkg>`, `pipx --spec <pkg>`) |
@@ -480,13 +486,44 @@ malware_gate = "permissive"
 Both failure paths — the backend error and the SSRF short-circuit — follow the
 same mode. There is no way to have one strict and the other permissive.
 
+### What the gate does not cover
+
+An overstated security guarantee is worse than an understated one, because it
+stops the next person looking. This list is the operator-facing half of the
+boundary in `crates/wcore-mcp/src/malware_gate.rs`; a launch in any of these
+shapes reaches exec **unchecked, in both modes**.
+
+- **A runner the gate does not name.** The recognised set is the coverage: the
+  runners listed above, plus their Windows `PATHEXT` spellings (`npx.cmd`,
+  `pnpm.bat`, …) and one or two levels of `sh -c` / `bash -c` / `cmd /C`
+  wrapper. A package runner outside that set is a new entry in
+  `wcore_tools::osv_check::runner_forms`, not something the gate infers.
+- **A shell command that hides its runner.** The wrapper decomposition is a
+  tokeniser, not a shell: variable expansion, command substitution, an alias,
+  `eval`, a sourced file or a wrapper script on disk all defeat it. This is why
+  the table row above says "nothing is *queried*" rather than "nothing is
+  fetched".
+- **A package installed by other means and then executed locally.** An
+  already-installed global binary, a vendored `node_modules`, a `pip install`
+  baked into an image. OSV is queried on the *fetch*, and there is no fetch
+  here for the gate to see.
+- **Anything OSV does not know about**, or does not know about yet.
+- **An advisory that postdates the launch.** The query happens once, at connect
+  time; nothing re-checks a server that is already running.
+
+`strict` does not narrow this list. It governs exactly one thing — a check that
+was attempted and could not be completed — and nothing about a launch the gate
+never recognised as a registry fetch in the first place.
+
 **Cascading.** This key is a security posture, so it does **not** follow the
 usual "project overrides global" rule: the **stricter** of the two layers wins.
 A project `config.toml` can tighten a global `permissive` to `strict`; it can
 never loosen a global `strict` back to `permissive`.
 
 **Checking which mode you are on.** `wayland --doctor` prints it in the MCP
-section, whether or not any server is declared:
+section, whether or not any server is declared, and `--probe-mcp` launches the
+declared servers under that same posture — the line and the launch read one
+value (wayland-core#354 c7):
 
 ```
 MCP servers (declared):
