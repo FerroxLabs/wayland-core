@@ -487,40 +487,6 @@ struct ProviderBudgetReservation {
     conservative_input_tokens: u64,
     conservative_output_tokens: u64,
     conservative_cost_usd: f64,
-    audit: SettledDispatchAudit,
-}
-
-/// #174 c2 — the task-audit half of a provider reservation.
-///
-/// Carried on the reservation rather than read from the engine at settle time
-/// because two of the four reservation sites live inside the configured-
-/// fallback admitter closure, which does not hold `&self`. Binding the audit
-/// identity at RESERVE time also means the record names the provider/model the
-/// reservation was actually taken against, not whatever the engine moved to
-/// afterwards.
-struct SettledDispatchAudit {
-    auditor: Arc<wcore_budget::SpendAuditor>,
-    provider: String,
-    model: String,
-    /// `conversation` or `configured_fallback`.
-    purpose: &'static str,
-    /// Whether the reserved cost was a real price. An unpriced dispatch is
-    /// recorded as unpriced, never as $0 — the record's `unpriced_dispatches`
-    /// count is what tells a reader the total is a floor.
-    priced: bool,
-}
-
-impl SettledDispatchAudit {
-    fn charge(&self, input_tokens: u64, output_tokens: u64, cost_usd: f64) {
-        self.auditor.charge(wcore_budget::SpendAuditDispatch {
-            provider: self.provider.clone(),
-            model: self.model.clone(),
-            purpose: self.purpose.to_owned(),
-            tokens_in: input_tokens,
-            tokens_out: output_tokens,
-            cost_usd: self.priced.then_some(cost_usd),
-        });
-    }
 }
 
 enum ProviderBudgetOwner {
@@ -544,7 +510,6 @@ impl ProviderBudgetReservation {
         conservative_input_tokens: u64,
         conservative_output_tokens: u64,
         conservative_cost_usd: f64,
-        audit: SettledDispatchAudit,
     ) -> Self {
         Self {
             owner,
@@ -553,7 +518,6 @@ impl ProviderBudgetReservation {
             conservative_input_tokens,
             conservative_output_tokens,
             conservative_cost_usd,
-            audit,
         }
     }
 
@@ -567,10 +531,6 @@ impl ProviderBudgetReservation {
             .reservation
             .take()
             .expect("provider budget reservation settles exactly once");
-        // #174 c2 — every settled provider dispatch is charged to the task's
-        // spend audit here, at the ONE place all five settle call sites funnel
-        // through, rather than at each of them.
-        self.audit.charge(actual_input_tokens, actual_output_tokens, actual_cost_usd);
         match &self.owner {
             ProviderBudgetOwner::Durable {
                 authority,
@@ -13885,13 +13845,7 @@ impl AgentEngine {
                          conservative ceiling. Spend is reported only where a real price is known."
                     ));
                 }
-                // #174 c2 — keep the priced/unpriced verdict alongside the
-                // number. `reserved_cost.usd` is a conservative CEILING even
-                // when nothing is priced, and recording that ceiling as a cost
-                // would report an unpriced call as a known bill.
-                let reserved_cost_priced = reserved_cost.priced;
                 let reserved_cost = reserved_cost.usd;
-                let dispatch_auditor = self.spend_guard.auditor();
                 let budget_dispatch_id = provider_dispatch_id.clone().unwrap_or_else(|| {
                     format!("provider-budget-dispatch-{}", uuid::Uuid::new_v4())
                 });
@@ -13918,13 +13872,6 @@ impl AgentEngine {
                             reserved_input,
                             reserved_output,
                             reserved_cost,
-                            SettledDispatchAudit {
-                                auditor: dispatch_auditor.clone(),
-                                provider: reservation_provider.to_string(),
-                                model: effective_model.clone(),
-                                purpose: "conversation",
-                                priced: reserved_cost_priced,
-                            },
                         )),
                         Err(wcore_budget::BudgetError::CapExceeded {
                             kind,
@@ -13960,13 +13907,6 @@ impl AgentEngine {
                             reserved_input,
                             reserved_output,
                             reserved_cost,
-                            SettledDispatchAudit {
-                                auditor: dispatch_auditor.clone(),
-                                provider: reservation_provider.to_string(),
-                                model: effective_model.clone(),
-                                purpose: "conversation",
-                                priced: reserved_cost_priced,
-                            },
                         )),
                         Err(wcore_budget::BudgetError::CapExceeded {
                             kind,
@@ -14003,7 +13943,6 @@ impl AgentEngine {
                 let fallback_session_id = reservation_session_id.clone();
                 let fallback_dispatch_id = budget_dispatch_id.clone();
                 let fallback_compat = self.compat.clone();
-                let auditor_for_fallback = self.spend_guard.auditor();
                 let guard_for_fallback = Arc::clone(&self.spend_guard);
                 let fallback_admitter: wcore_providers::retry::ConfiguredFallbackAdmitter =
                     Arc::new(move |_, _, next_provider, next_model, previous_attempted| {
@@ -14094,13 +14033,6 @@ impl AgentEngine {
                                         reserved_input,
                                         reserved_output,
                                         next_cost_usd,
-                                        SettledDispatchAudit {
-                                            auditor: auditor_for_fallback.clone(),
-                                            provider: next_provider.to_string(),
-                                            model: next_model.to_string(),
-                                            purpose: "configured_fallback",
-                                            priced: next_cost.priced,
-                                        },
                                     )),
                                     Ok(Err(error)) => {
                                         state.failure =
@@ -14138,13 +14070,6 @@ impl AgentEngine {
                                         reserved_input,
                                         reserved_output,
                                         next_cost_usd,
-                                        SettledDispatchAudit {
-                                            auditor: auditor_for_fallback.clone(),
-                                            provider: next_provider.to_string(),
-                                            model: next_model.to_string(),
-                                            purpose: "configured_fallback",
-                                            priced: next_cost.priced,
-                                        },
                                     )),
                                     Err(error) => {
                                         state.failure =
