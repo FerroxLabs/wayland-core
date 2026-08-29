@@ -782,16 +782,24 @@ mod tests {
     /// programme has taken.
     #[test]
     fn the_unmeasured_default_stays_finite_and_conservative() {
+        // Read through the adapter rather than the constant. The number that
+        // matters is the one `send_to_keyed` chunks on, and it reaches that
+        // through the config — a constant checked in isolation would stay green
+        // if the plumbing between the two ever stopped agreeing.
+        let shipped =
+            WhatsappBridgeChannel::new("wa", cfg(WhatsappBackend::Baileys, PathBuf::from("/nope")))
+                .max_message_len()
+                .expect(
+                    "the bridge must declare a finite cap; None disables chunking entirely and \
+                     sends an unbounded body at a limit nobody has published",
+                );
+        assert!(shipped > 0, "a zero width chunks forever");
         assert!(
-            BRIDGE_UNMEASURED_CHUNK_WIDTH > 0,
-            "a zero width chunks forever"
-        );
-        assert!(
-            BRIDGE_UNMEASURED_CHUNK_WIDTH <= 4096,
-            "BRIDGE_UNMEASURED_CHUNK_WIDTH was raised to {BRIDGE_UNMEASURED_CHUNK_WIDTH}. The \
-             number is a policy, not a measurement: no vendor documents a body limit for the \
-             WhatsApp Web protocol these backends speak. Raising it needs a boundary run against \
-             a real paired bridge recorded in docs/delivery-semantics.md §4.2, not a wider guess."
+            shipped <= 4096,
+            "the unmeasured default is {shipped}. The number is a policy, not a measurement: no \
+             vendor documents a body limit for the WhatsApp Web protocol these backends speak. \
+             Raising it needs a boundary run against a real paired bridge recorded in \
+             docs/delivery-semantics.md §4.2, not a wider guess."
         );
     }
 
