@@ -1290,6 +1290,18 @@ jobs:
           fi
 
       - uses: actions/checkout@v6
+        with:
+          # The `Criteria ledger is anchored and parseable` step below resolves
+          # every ledger entry's `last_verified_commit` with `git cat-file -t`.
+          # actions/checkout defaults to fetch-depth 1, where only HEAD resolves,
+          # so on a shallow checkout that check produced one guaranteed problem
+          # per ledger file -- 63 of them -- and the step could never pass on any
+          # branch or any tree. The script now DETECTS a shallow clone and skips
+          # the sha resolution with a named NOTE rather than failing, so the two
+          # failure modes are separated: without this line the gate is green but
+          # permanently SKIPPED, which is a gate that never runs. Full history
+          # here is what actually arms it.
+          fetch-depth: 0
 
       # ── anti-vacuity gate ─────────────────────────────────────────────
       # THIS STEP USED TO BE DEAD, TWICE, IN TWO DIFFERENT WAYS.
