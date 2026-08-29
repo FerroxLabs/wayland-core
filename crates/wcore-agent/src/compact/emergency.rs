@@ -112,6 +112,16 @@ mod tests {
         ));
     }
 
+    /// #1179 — the buffer is SCALED to the window, so an 8,000-token window
+    /// does not hand 37.5% of itself to a figure tuned for 200,000.
+    ///
+    /// This used to read `limit = 8k - 3k = 5k`. That number was not a safe
+    /// hard stop, it was an unreachable one: on the same window the #255
+    /// pre-flight ceiling was `8_000 - 20_000 - 3_000` saturated to **0**, so
+    /// the guard aborted the run on the very first turn and the emergency limit
+    /// was never consulted. Scaled, the reserves are 2,666 / 1,733 / 400 and
+    /// the three boundaries are ordered as they are meant to be: autocompact at
+    /// 3,601, the pre-flight ceiling at 4,934, the hard stop last at 7,600.
     #[test]
     fn small_context_window() {
         let config = CompactConfig {
@@ -119,13 +129,25 @@ mod tests {
             emergency_buffer: 3_000,
             ..default_config()
         };
-        // limit = 8k - 3k = 5k; 6k >= 5k
-        assert!(is_at_emergency_limit(
+        assert_eq!(
+            emergency_limit(&config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+            7_600
+        );
+        assert!(!is_at_emergency_limit(
             6_000,
             &config,
             UNKNOWN_PROVIDER,
             UNKNOWN_MODEL
         ));
+        assert!(is_at_emergency_limit(
+            7_600,
+            &config,
+            UNKNOWN_PROVIDER,
+            UNKNOWN_MODEL
+        ));
+        // The hard stop is LAST: it must sit above the pre-flight ceiling, or
+        // the guard it exists to back up can never fire.
+        assert!(config.input_ceiling_for_window(8_000) < 7_600);
     }
 
     #[test]
@@ -182,22 +204,43 @@ mod tests {
         ));
     }
 
+    /// #1179 — a buffer larger than the window can no longer saturate the
+    /// limit to zero, because it is scaled to the window before it is
+    /// subtracted.
+    ///
+    /// The old behaviour was described in this test as "degenerate but safe".
+    /// It was degenerate and it was NOT safe: a limit of 0 makes
+    /// `tokens >= limit` true of every turn including an empty one, so the
+    /// session was refused before it began. `saturating_sub` prevented an
+    /// underflow and prevented nothing else.
     #[test]
-    fn emergency_buffer_larger_than_context_window_saturates() {
+    fn emergency_buffer_larger_than_context_window_is_scaled_not_saturated() {
         let config = CompactConfig {
             context_window: Some(1_000),
             emergency_buffer: 5_000,
             ..default_config()
         };
-        // saturating_sub: limit = 0; any positive token count triggers
-        assert!(is_at_emergency_limit(
+        let limit = emergency_limit(&config, UNKNOWN_PROVIDER, UNKNOWN_MODEL);
+        assert!(
+            limit > 0,
+            "a zero limit refuses the first turn of every session"
+        );
+        assert_eq!(limit, 917, "1_000 - scaled 5_000 (83)");
+        assert!(!is_at_emergency_limit(
             1,
             &config,
             UNKNOWN_PROVIDER,
             UNKNOWN_MODEL
         ));
-        // 0 tokens = 0 >= 0 → true (degenerate but safe)
         assert!(is_at_emergency_limit(
+            917,
+            &config,
+            UNKNOWN_PROVIDER,
+            UNKNOWN_MODEL
+        ));
+        // An empty context is no longer at the hard stop, which is the whole
+        // point: `0 >= 0` used to be true and refuse the session on turn one.
+        assert!(!is_at_emergency_limit(
             0,
             &config,
             UNKNOWN_PROVIDER,

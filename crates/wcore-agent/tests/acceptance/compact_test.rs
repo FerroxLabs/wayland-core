@@ -249,20 +249,29 @@ fn emergency_truncation_detection() {
     let config = CompactConfig {
         context_window: Some(1000),
         emergency_buffer: 100,
-        // limit = 1000 - 100 = 900
+        // #1179 — the buffers are scaled to the window before they are
+        // subtracted, so the limit is 1000 - scaled(100) = 999, not 900. The
+        // scale is derived from `output_reserve + autocompact_buffer` (33,000
+        // by default), which is 33x this window; an operator who tuned
+        // `emergency_buffer` for a 1,000-token window but left the other two at
+        // their 200k-era defaults is scaled by those defaults too. That is the
+        // cost of ONE common factor, and it is what makes the ordering of the
+        // three boundaries hold at every window without a special case.
         ..CompactConfig::default()
     };
 
-    // 950 >= 900 → true (at emergency limit)
     assert!(
-        is_at_emergency_limit(950, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
-        "950 tokens should be at the emergency limit (threshold = 900)"
+        is_at_emergency_limit(999, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        "a 1,000-token window must still have a reachable emergency limit"
+    );
+    assert!(
+        !is_at_emergency_limit(950, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        "950 is below the scaled limit of 999"
     );
 
-    // 800 < 900 → false (below emergency limit)
     assert!(
         !is_at_emergency_limit(800, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
-        "800 tokens should be below the emergency limit (threshold = 900)"
+        "800 tokens should be below the emergency limit"
     );
 
     // Verify emergency check works even when config.enabled = false
@@ -274,7 +283,7 @@ fn emergency_truncation_detection() {
     };
 
     assert!(
-        is_at_emergency_limit(950, &disabled_config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        is_at_emergency_limit(999, &disabled_config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "emergency limit should apply even when compact is disabled"
     );
     assert!(

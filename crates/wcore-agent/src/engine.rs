@@ -26900,6 +26900,64 @@ mod approval_bridge_engine_tests {
         );
     }
 
+    /// #1172 — the AUTOCOMPACT trigger sees the learned window too, not just
+    /// the pre-flight guard.
+    ///
+    /// This is the "compaction never fires" half of #1172: the static trigger
+    /// resolved its window from the config and the model alone, so on a stock
+    /// Ollama serving 4,096 it sat at 22,937 — five times past anything the
+    /// endpoint would accept. Graded separately from the guard because it is a
+    /// separate call path: `autocompact_threshold_now`, not
+    /// `resolve_preflight_window`.
+    #[test]
+    fn the_autocompact_trigger_moves_onto_a_learned_served_window() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            95_000,
+            "128_000 - 20_000 - 13_000, the catalogued window"
+        );
+
+        engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 20_000, 8_192);
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            3_688,
+            "the trigger must follow the window the endpoint actually serves"
+        );
+        assert!(
+            engine.should_autocompact_now(4_000),
+            "4,000 tokens is past the trigger for an 8,192 slot"
+        );
+        assert!(
+            !engine.should_autocompact_now(3_000),
+            "an under-baseline turn must not summarize"
+        );
+    }
+
+    /// The refusal half, on the trigger path: a served window too small to work
+    /// in must not move the trigger either, or every turn opens with an LLM
+    /// summarization that cannot help.
+    #[test]
+    fn the_autocompact_trigger_ignores_a_served_window_too_small_to_work_in() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 12_000, 4_096);
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            95_000,
+            "a 4,096 slot cannot hold core's own baseline turn; moving the \
+             trigger onto it summarizes every turn and reclaims nothing"
+        );
+        assert!(!engine.should_autocompact_now(3_118));
+    }
+
     /// The other half of the gate, and the whole reason #1179 existed: a served
     /// window too small to work in must NOT be narrowed onto, because the
     /// guard would then fire on every turn and abort every run.
