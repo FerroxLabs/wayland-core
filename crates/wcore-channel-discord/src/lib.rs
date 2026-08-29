@@ -1385,9 +1385,19 @@ heartbeat_grace_ms = 8000
             thread_id: Some("1276543210987654321".to_string()),
             ..OutgoingMessage::text(TEST_CHANNEL, "hello")
         };
-        ch.send_message_idempotent(msg, key).await.unwrap();
+        let result = ch.send_message_idempotent(msg, key).await;
 
-        mock.assert_async().await;
+        // Asserted on the MOCK, not on the send: a body carrying an
+        // unexpected `message_reference` simply matches no mock, and the
+        // `Transport("server 501")` that comes back would name the symptom
+        // rather than the defect.
+        assert!(
+            mock.matched_async().await,
+            "Discord put something other than {{content, nonce}} on the wire: \
+             the thread DESTINATION was spent as a message_reference \
+             (FerroxLabs/wayland-core#363 c6). Send result: {result:?}"
+        );
+        result.expect("the send itself must still succeed");
         ch.stop().await.unwrap();
     }
 
@@ -1424,9 +1434,14 @@ heartbeat_grace_ms = 8000
             thread_id: Some("1276543210987654321".to_string()),
             ..OutgoingMessage::text(TEST_CHANNEL, "hello")
         };
-        ch.send_message_idempotent(msg, key).await.unwrap();
+        let result = ch.send_message_idempotent(msg, key).await;
 
-        mock.assert_async().await;
+        assert!(
+            mock.matched_async().await,
+            "Discord dropped or altered a GENUINE reply's message_reference \
+             (FerroxLabs/wayland-core#363 c6 control). Send result: {result:?}"
+        );
+        result.expect("the send itself must still succeed");
         ch.stop().await.unwrap();
     }
 }

@@ -1,0 +1,26 @@
+   Compiling wcore-channel-discord v0.13.11 (/root/w-f13/fin-hetzner-residuals/crates/wcore-channel-discord)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.96s
+     Running unittests src/lib.rs (target/debug/deps/wcore_channel_discord-0aa466711333ea45)
+
+running 4 tests
+test gateway::tests::invalid_session_backoff_in_discord_window ... ok
+test tests::discord_still_quotes_a_genuine_reply_to_message ... ok
+test tests::discord_sends_the_derived_nonce_but_must_not_claim_idempotency ... ok
+test tests::discord_never_sends_a_thread_destination_as_a_message_reference ... FAILED
+
+failures:
+
+---- tests::discord_never_sends_a_thread_destination_as_a_message_reference stdout ----
+
+thread 'tests::discord_never_sends_a_thread_destination_as_a_message_reference' (877498) panicked at crates/wcore-channel-discord/src/lib.rs:1389:52:
+called `Result::unwrap()` on an `Err` value: Transport("server 501 Not Implemented")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::discord_never_sends_a_thread_destination_as_a_message_reference
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 63 filtered out; finished in 3.01s
+
+error: test failed, to rerun pass `-p wcore-channel-discord --lib`
+DONE

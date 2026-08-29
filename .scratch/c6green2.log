@@ -1,0 +1,11 @@
+   Compiling wcore-channel-discord v0.13.11 (/root/w-f13/fin-hetzner-residuals/crates/wcore-channel-discord)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.98s
+     Running unittests src/lib.rs (target/debug/deps/wcore_channel_discord-0aa466711333ea45)
+
+running 2 tests
+test tests::discord_never_sends_a_thread_destination_as_a_message_reference ... ok
+test tests::discord_still_quotes_a_genuine_reply_to_message ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 65 filtered out; finished in 0.00s
+
+DONE
