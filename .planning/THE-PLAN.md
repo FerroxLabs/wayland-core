@@ -5,7 +5,7 @@
 > verification) and `PLAN-ROUTING.json` (assignment). If this disagrees with anyone's
 > recollection, this is right and the recollection is wrong — that is the entire point.
 
-Rendered 2026-08-29 11:37 UTC
+Rendered 2026-08-29 11:38 UTC
 
 ## VERDICT: BLOCKED
 
@@ -18,19 +18,7 @@ Rendered 2026-08-29 11:37 UTC
 | OPEN | 87 | outstanding work |
 | HANDOFF | 0 | another team's half, with a filed ticket carrying it |
 
-### ⚠ 1 UNROUTED — nobody is doing these
-
-An unrouted criterion is how work goes missing. The render fails until each has a lane.
-
-- `core#354 c7` — The already-shipping non-session MCP launch path reads the operator's chosen mode, not the uninstalled permiss
-
 ## §3 BLOCKING — the definition of done for 0.13.12
-
-### `UNROUTED`
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c7` | core#354 | The already-shipping non-session MCP launch path reads the operator's chosen mode, not the uninstalled permissive default |
 
 ### `acp-mcp` — ACP MCP surface and alias resolution
 
@@ -183,6 +171,7 @@ Runs on: **hetzner**  ·  1-build
 | `c4` | core#354 | A test per mode drives StdioTransport::spawn against an unreachable backend: permissive launches and logs at ERROR, strict refuses and never reaches e |
 | `c5` | core#354 | A negative control shows a clean package launches in BOTH modes |
 | `c6` | core#354 | The mode is documented in docs/mcp.md and surfaced in /doctor |
+| `c7` | core#354 | The already-shipping non-session MCP launch path reads the operator's chosen mode, not the uninstalled permissive default |
 
 ### `prompt-cache` — Prompt-cache collapse and re-billed context
 

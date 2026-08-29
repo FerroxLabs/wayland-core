@@ -151,6 +151,11 @@
       "lane": "mcp-gate-mode",
       "phase": "1-build"
     },
+    "core#354 c7": {
+      "host": "hetzner",
+      "lane": "mcp-gate-mode",
+      "phase": "1-build"
+    },
     "core#355 c1": {
       "host": "hetzner",
       "lane": "floor-disclosure",

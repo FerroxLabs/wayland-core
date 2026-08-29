@@ -22,11 +22,12 @@ LANE = {
  "flux-contract":      ("Anvil/Elevation loop-ownership contract", "hetzner", "3-unrouted-pickup"),
  "desktop-contract":   ("Published desktop contract schema gaps", "hetzner", "3-unrouted-pickup"),
  "decompose":          ("File each cross-team remainder as its OWN ticket with a contract", "gh", "2-decompose"),
+ "flake-584":          ("Shared-process lib suite: the #584 fixture misses its truncation boundary under load", "hetzner", "1-build"),
  "maintainer":         ("Sean-only: credentials and platform accounts", "Sean", "2-maintainer"),
 }
 
 M = {
- "mcp-gate-mode":       [("core#354", "c1 c2 c3 c4 c5 c6")],
+ "mcp-gate-mode":       [("core#354", "c1 c2 c3 c4 c5 c6 c7")],
  "floor-disclosure":    [("core#355", "c1 c2 c3 c4")],
  "atref-residuals":     [("core#339", "c3 c6"), ("core#322", "c4")],
  "win-bash":            [("wl#1164", "c1 c2 c3 c4"), ("wl#1151", "c2")],
@@ -49,6 +50,7 @@ M = {
                          ("core#314", "c5")],
  "flux-contract":       [("wl#863", "c3 c4 c5")],
  "browser-revive":      [("core#113", "c5")],
+ "flake-584":           [("core#361", "c1 c2 c3 c4 c5 c6")],
  "maintainer":          [("wl#1186", "c5"), ("wl#934", "c5")],
 }
 NOTE = {
