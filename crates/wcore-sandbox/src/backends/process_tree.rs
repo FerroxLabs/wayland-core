@@ -104,14 +104,58 @@ impl ProcessTreeGuard {
     }
 
     /// Own a Linux process subtree whose root may have created a new session
-    /// and therefore cannot be addressed through the launcher's process group.
+    /// and therefore cannot be addressed through the launcher's process group,
+    /// or answer `Ok(None)` when that root is confirmed already gone.
+    ///
+    /// # Why this one can be absent when `new` cannot
+    ///
+    /// [`ProcessTreeGuard::new`] opens the identity of a DIRECT child the
+    /// caller has not yet reaped, so on Linux `/proc/<pid>` is guaranteed to be
+    /// there — a zombie keeps its `stat` file. That guarantee is exactly what
+    /// the Darwin corpse work on [`MacProcessGroupAuthority::attach_with_hook`]
+    /// relied on when it recorded "Linux never reproduces it".
+    ///
+    /// It does not hold here, and this is the one call site where it does not.
+    /// The observed root is SOMEBODY ELSE'S child — bubblewrap's sandboxed
+    /// PID-namespace init, handed to us over `--json-status-fd` — and
+    /// bubblewrap reaps it the instant it exits. A command fast enough to
+    /// finish inside the window between that JSON line being written and this
+    /// function reading `/proc/<pid>/stat` therefore leaves nothing to open,
+    /// and the probe answers ENOENT.
+    ///
+    /// MEASURED: `/bin/echo hello` under bwrap on a contended host. CI run
+    /// 33240249894 (linux-containerized) turned two `wcore-sandbox` tests that
+    /// had run to completion into
+    /// `ExecFailed("sandbox process-tree ownership: No such file or directory
+    /// (os error 2)")`, and the same reproduces on hetzner-dsm by pinning
+    /// concurrent bwrap execs onto two CPUs.
+    ///
+    /// # Why "gone" is safe to answer with no guard
+    ///
+    /// The observed root is the init of a PID namespace (`--unshare-all`
+    /// implies `--unshare-pid`). When a namespace init dies the kernel SIGKILLs
+    /// everything left in that namespace, so a root that is gone has already
+    /// taken its whole subtree with it: there is no tree left to own. The
+    /// caller keeps its own guard on the bubblewrap process, and bubblewrap
+    /// keeps `--die-with-parent`, so the backstop is unchanged.
+    ///
+    /// A root that was RECYCLED onto a stranger reports absence too, and must:
+    /// the process we were asked to own is gone either way, and owning the
+    /// stranger would be worse than owning nothing.
+    ///
+    /// ENOENT, ESRCH and a recycle verdict only. EPERM is NOT absence —
+    /// reading it as absence is the fail-open direction — and still errors.
     #[cfg(target_os = "linux")]
-    pub(crate) fn from_observed_root(pid: u32) -> std::io::Result<Self> {
-        Ok(Self {
-            process_group: None,
-            root: Some(LinuxProcessIdentity::open(pid)?),
-            linux_group: None,
-        })
+    pub(crate) fn from_observed_root(pid: u32) -> std::io::Result<Option<Self>> {
+        match LinuxProcessIdentity::open(pid) {
+            Ok(root) => Ok(Some(Self {
+                process_group: None,
+                root: Some(root),
+                linux_group: None,
+            })),
+            Err(error) if observed_root_is_gone(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Ask a Unix child group to unwind cooperatively before the guard's hard
@@ -1232,6 +1276,19 @@ mod macos_tests {
     }
 }
 
+/// True only when an identity probe failed because the process is CONFIRMED
+/// absent.
+///
+/// `linux_process_start_time` reads `/proc/<pid>/stat` and answers ENOENT;
+/// `pidfd_open` answers ESRCH; `LinuxProcessIdentity::open`'s own recycle check
+/// answers a synthetic `NotFound`. Anything else is not absence — EPERM above
+/// all, which is the answer for a process that exists and is not ours, and
+/// reading it as absence is the fail-open direction.
+#[cfg(target_os = "linux")]
+fn observed_root_is_gone(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ESRCH) || error.kind() == std::io::ErrorKind::NotFound
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct LinuxProcessIdentity {
@@ -1498,6 +1555,67 @@ fn linux_descendants(root: libc::pid_t) -> Vec<LinuxProcessIdentity> {
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests {
     use super::*;
+
+    /// An observed root that has already exited AND been reaped is "nothing to
+    /// own", not a failure.
+    ///
+    /// This is the bwrap `--json-status-fd` child on any fast command. Before
+    /// this, `/bin/echo hello` inside bwrap on a contended host intermittently
+    /// failed the whole exec with `sandbox process-tree ownership: No such file
+    /// or directory (os error 2)` even though the command had run to
+    /// completion — CI run 33240249894 lost two `wcore-sandbox` tests to it.
+    #[test]
+    fn an_observed_root_that_is_already_reaped_reports_nothing_to_own() {
+        // POSITIVE CONTROL FIRST: a live root really does yield a guard, so a
+        // blanket `Ok(None)` cannot pass this test.
+        let mut live = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a live fixture");
+        let guard = ProcessTreeGuard::from_observed_root(live.id())
+            .expect("control: a live observed root must not error");
+        assert!(
+            guard.is_some(),
+            "control: a live observed root must yield a guard"
+        );
+        drop(guard);
+        let _ = live.kill();
+        let _ = live.wait();
+
+        let mut gone = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn a short-lived fixture");
+        let pid = gone.id();
+        gone.wait().expect("reap the fixture");
+        // The pid is now unallocated, so `/proc/<pid>/stat` is ENOENT. Linux
+        // hands out pids monotonically, so reuse of this exact number within
+        // the next few microseconds would require wrapping the whole pid space.
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "precondition: the reaped fixture must be gone from /proc"
+        );
+        assert!(
+            ProcessTreeGuard::from_observed_root(pid)
+                .expect("a reaped root is absence, not failure")
+                .is_none(),
+            "a root that is already gone must report nothing to own"
+        );
+    }
+
+    /// EPERM is not absence. Reading it as absence would silently drop
+    /// containment for a process that exists and is simply not ours.
+    #[test]
+    fn a_permission_error_is_never_read_as_absence() {
+        let denied = std::io::Error::from_raw_os_error(libc::EPERM);
+        assert!(!observed_root_is_gone(&denied));
+        let missing = std::io::Error::from_raw_os_error(libc::ENOENT);
+        assert!(observed_root_is_gone(&missing));
+        let no_such_process = std::io::Error::from_raw_os_error(libc::ESRCH);
+        assert!(observed_root_is_gone(&no_such_process));
+        let recycled =
+            std::io::Error::new(std::io::ErrorKind::NotFound, "process identity changed");
+        assert!(observed_root_is_gone(&recycled));
+    }
 
     #[test]
     fn identity_drift_never_signals_foreign_process() {
