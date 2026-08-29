@@ -343,16 +343,6 @@ impl<C: Reapable> OwnedTree<C> {
     /// parent link disappears.
     #[cfg(unix)]
     pub fn snapshot(&mut self) {
-        // RED ARM for FerroxLabs/wayland-core#352 c5, macOS arm. This branch is a
-        // throwaway instrument, never merged: the guard is reduced to owning the
-        // LEAF only, which is what every swept site did before #1156 and what the
-        // Windows arm still does. `black_box` keeps the compiler from folding the
-        // condition, so the rest of the body is not `unreachable_code` and clippy
-        // -D warnings still passes -- the previous macOS red-arm attempt died on
-        // an unrelated lint before it ever reached the tests.
-        if std::hint::black_box(true) {
-            return;
-        }
         let Some(pid) = self.child.as_ref().and_then(Reapable::pid) else {
             return;
         };
