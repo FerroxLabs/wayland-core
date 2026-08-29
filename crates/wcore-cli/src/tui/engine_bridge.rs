@@ -563,6 +563,11 @@ impl OutputSink for ChannelSink {
         });
     }
 
+    /// #1180: the TUI opens a real modal on this frame.
+    fn can_prompt_for_approval(&self) -> bool {
+        true
+    }
+
     fn emit_approval_required(
         &self,
         call_id: &str,

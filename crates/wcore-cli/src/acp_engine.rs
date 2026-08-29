@@ -206,6 +206,13 @@ impl OutputSink for RelaySink {
     ) {
         self.with_sink(|s| s.emit_provider_circuit_event(primary, fallback, state, error));
     }
+    /// #1180: relayed to the ACP client, which renders the approval. The
+    /// per-turn sender may be unbound between turns, but an egress consent is
+    /// only ever raised inside a turn.
+    fn can_prompt_for_approval(&self) -> bool {
+        true
+    }
+
     fn emit_approval_required(
         &self,
         call_id: &str,

@@ -286,9 +286,27 @@ pub trait OutputSink: Send + Sync {
     ) {
     }
 
+    /// #1180: can this sink actually put an approval prompt in front of a
+    /// human?
+    ///
+    /// [`Self::emit_approval_required`] is a no-op by default, so "the sink
+    /// was called" is no evidence that anyone was asked. Anything that BLOCKS
+    /// waiting for the answer -- the egress consent doorbell -- has to know
+    /// the difference: on a sink with no surface the request can only end at
+    /// the approval TTL, five minutes later, and is then reported to the user
+    /// as a refusal at a prompt they were never shown.
+    ///
+    /// Default `false`, so a sink is surfaceless until it says otherwise. That
+    /// is the safe direction: the cost of a wrong `false` is a prompt not
+    /// asked (and, for egress, the documented no-doorbell fallback), while the
+    /// cost of a wrong `true` is the stall this exists to remove.
+    fn can_prompt_for_approval(&self) -> bool {
+        false
+    }
+
     /// W7 S4: emit ApprovalRequired (host renders modal). Default
-    /// no-op; `ProtocolSink` overrides and gates on
-    /// `with_hitl_suspend(true)`.
+    /// no-op; `ProtocolSink` overrides. See
+    /// [`Self::can_prompt_for_approval`].
     fn emit_approval_required(
         &self,
         _call_id: &str,

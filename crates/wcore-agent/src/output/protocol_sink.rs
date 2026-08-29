@@ -1066,9 +1066,31 @@ impl OutputSink for ProtocolSink {
         self.streaming_tools_enabled
     }
 
-    /// W7 S4: emit `ProtocolEvent::ApprovalRequired` when the sink was
-    /// configured with `with_hitl_suspend(true)`. Default-off so hosts
-    /// that haven't learned about the new variant stay undisturbed.
+    /// #1180: this sink IS an approval surface. See
+    /// [`Self::emit_approval_required`] for why the frame is ungated.
+    fn can_prompt_for_approval(&self) -> bool {
+        true
+    }
+
+    /// W7 S4: emit `ProtocolEvent::ApprovalRequired`.
+    ///
+    /// #1180 -- NOT gated on `hitl_suspend`, unlike its two siblings.
+    ///
+    /// The gate existed so hosts that had not learned the variant stayed
+    /// undisturbed, and `with_hitl_suspend(true)` is called NOWHERE in the
+    /// workspace -- so on `--json-stream` this method emitted nothing, ever.
+    /// It protected no one either: `GatingProtocolWriter` synthesizes an
+    /// `ApprovalRequired` after every `ToolRequest`, and the engine's
+    /// orchestration and council gates emit one straight on the writer, so
+    /// every json-stream host already receives this frame on ordinary tool
+    /// use. All the gate did was silence the one caller that has no other
+    /// emitter -- the egress consent doorbell -- whose prompt then went
+    /// nowhere while the turn blocked for the 300s approval TTL and failed
+    /// closed with "declined at the consent prompt".
+    ///
+    /// `Suspend` and `ApprovalResume` stay gated, and
+    /// `capabilities.hitl_suspend` still reports the builder flag, so the
+    /// advertised contract is unchanged.
     ///
     /// Wave SC: emits both `resume_token` (legacy field, same opaque
     /// value) AND the new `correlation_id` field. The on-wire value is
@@ -1082,9 +1104,6 @@ impl OutputSink for ProtocolSink {
         reason: &str,
         context: &str,
     ) {
-        if !self.hitl_suspend_enabled {
-            return;
-        }
         let _ = self.writer.emit(&ProtocolEvent::ApprovalRequired {
             call_id: call_id.to_string(),
             resume_token: resume_token.to_string(),

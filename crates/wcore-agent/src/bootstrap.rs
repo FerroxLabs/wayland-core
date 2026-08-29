@@ -3011,12 +3011,12 @@ impl AgentBootstrap {
         // F09: attach the consent doorbell only to this session's policy. A
         // later ACP/Desktop session therefore cannot repoint an earlier
         // session's approval bridge.
+        // #1180: and only where the sink can actually show the prompt --
+        // `install_consent_doorbell` refuses otherwise, leaving the documented
+        // no-doorbell fallback rather than a 300s stall on a prompt nobody
+        // could see.
         if let Some(policy) = self.session_egress_policy.as_ref() {
-            let doorbell = std::sync::Arc::new(crate::egress::BridgeConsentDoorbell::new(
-                approval_bridge.clone(),
-                self.output.clone(),
-            ));
-            policy.set_doorbell(doorbell);
+            crate::egress::install_consent_doorbell(policy, &approval_bridge, &self.output);
         }
 
         if self.config.builtin_tools.script.enabled {

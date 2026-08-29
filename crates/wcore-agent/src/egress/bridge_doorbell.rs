@@ -24,6 +24,38 @@ use crate::approval::{ApprovalBridge, ApprovalRequest};
 use crate::output::OutputSink;
 
 use super::consent::{ConsentDecision, ConsentDoorbell};
+use super::policy::AgentEgressPolicy;
+
+/// Wire the consent doorbell onto `policy` -- but ONLY where `sink` can put
+/// the prompt in front of a human. Returns whether it was installed.
+///
+/// #1180. The doorbell BLOCKS the turn on the operator's answer, so installing
+/// one on a surfaceless sink does not degrade to "no prompt": it degrades to a
+/// five-minute stall ending in `ConsentDecision::No`, which the policy renders
+/// as "declined at the consent prompt" -- naming a prompt that was never
+/// shown. The documented fallback for a surfaceless session is the opposite,
+/// and is already implemented: with NO doorbell `resolve_ask` allows the
+/// data-less read, while the `Exfil` verdict stays hard-denied regardless, so
+/// declining to install never widens the exfiltration boundary.
+///
+/// This is a function rather than a comment on the caller because the caller
+/// already had the comment -- `BridgeConsentDoorbell::ask` still says "this
+/// doorbell is only installed where a real surface exists" -- and bootstrap
+/// installed it unconditionally anyway.
+pub fn install_consent_doorbell(
+    policy: &AgentEgressPolicy,
+    bridge: &Arc<ApprovalBridge>,
+    sink: &Arc<dyn OutputSink>,
+) -> bool {
+    if !sink.can_prompt_for_approval() {
+        return false;
+    }
+    policy.set_doorbell(Arc::new(BridgeConsentDoorbell::new(
+        bridge.clone(),
+        sink.clone(),
+    )));
+    true
+}
 
 /// A consent doorbell that surfaces the prompt through the engine's approval
 /// bridge + output sink.
