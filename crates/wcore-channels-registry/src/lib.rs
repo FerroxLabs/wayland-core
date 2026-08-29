@@ -27,6 +27,9 @@ use wcore_channels::auto_register::{ChannelFactory, ChannelLoadError};
 use wcore_channels::{Channel, ChannelConfig, ChannelManager};
 use wcore_config::credentials::CredentialsStore;
 
+mod selector;
+pub use selector::{ChannelSelector, constructible_selectors, known_platforms};
+
 pub use wcore_channels::auto_register::{ChannelFactory as Factory, ChannelLoadError as LoadError};
 
 /// The channel runtime this registry loads into, re-exported.

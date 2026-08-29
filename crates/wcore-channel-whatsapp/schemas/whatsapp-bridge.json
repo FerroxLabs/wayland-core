@@ -49,6 +49,11 @@
       "default": 60,
       "minimum": 1,
       "maximum": 600
+    },
+    "max_message_chars": {
+      "type": "integer",
+      "description": "Width to chunk a single message at, in characters. When unset the channel uses BRIDGE_UNMEASURED_CHUNK_WIDTH (4096), which is a CHUNKING POLICY and not a measured or documented WhatsApp limit: neither baileys nor whatsapp-web.js nor WhatsApp publishes a body limit for the Web/multi-device protocol these backends speak, and the 4096 this replaced was borrowed from Meta's Cloud API page, which governs a different surface. Set this only from a boundary you have actually driven against your own paired bridge — too high is the direction that loses messages.",
+      "minimum": 1
     }
   }
 }

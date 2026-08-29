@@ -61,6 +61,9 @@ fn cfg(backend: WhatsappBackend, path: PathBuf) -> WhatsappBridgeConfig {
         default_recipient: String::new(),
         handshake_timeout_secs: 30,
         rpc_timeout_secs: 30,
+        // The live test drives the launch path, not the chunker, so it takes
+        // the shipped default rather than pinning a width of its own.
+        max_message_chars: None,
     }
 }
 
