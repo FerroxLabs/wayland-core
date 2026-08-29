@@ -713,6 +713,50 @@ fn comparator_rejects_a_missing_row() {
     );
 }
 
+/// **wayland-core#360 c4.** The bridge's row, gone, reported by the comparator.
+///
+/// [`comparator_rejects_a_missing_row`] above already proves the rule fires for
+/// a platform-keyed row. This is not the same claim: the bridge is the row that
+/// could not EXIST until the harness stopped enumerating platform strings, so
+/// the interesting question is whether the widened comparator actually reaches
+/// it, or whether the two new rows are inert text that nothing would miss.
+/// Removing them must be reported, twice, by selector key.
+#[test]
+fn comparator_rejects_the_bridge_rows_going_missing() {
+    let mut declared = parse_declaration(DECLARATION);
+    let measured = measured_capabilities();
+    assert!(
+        disagreements(&declared, &measured).is_empty(),
+        "the unmutated comparison must be green for this test to mean anything"
+    );
+
+    for key in ["whatsapp+baileys", "whatsapp+whatsapp-web"] {
+        declared.guarantees.remove(key);
+        declared.caps.remove(key);
+        declared.cap_measured.remove(key);
+        declared.cap_source.remove(key);
+    }
+
+    let problems = disagreements(&declared, &measured);
+    assert_eq!(problems.len(), 2, "got: {problems:?}");
+    for key in ["whatsapp+baileys", "whatsapp+whatsapp-web"] {
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.starts_with(&format!("{key}:")) && p.contains("NO row in")),
+            "the bridge backend {key} must be reported as unrowed, not silently skipped: \
+             {problems:?}"
+        );
+    }
+    // And the Cloud API row must be untouched by that removal — the three
+    // WhatsApp implementations share a platform string, so a comparator keyed
+    // on the platform would have reported the wrong one or none at all.
+    assert!(
+        !problems.iter().any(|p| p.starts_with("whatsapp:")),
+        "removing the bridge rows must not implicate the Cloud API row: {problems:?}"
+    );
+}
+
 #[test]
 fn comparator_rejects_a_row_for_an_adapter_that_does_not_exist() {
     let mut declared = parse_declaration(DECLARATION);
