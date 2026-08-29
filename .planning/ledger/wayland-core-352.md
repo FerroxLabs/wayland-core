@@ -1,6 +1,7 @@
 ---
 issue: 352
 repo: FerroxLabs/wayland-core
+kind: defect
 title: "Test process-tree ownership: the ~40 remaining json-stream spawn sites, and the two platforms the new guard never exercises"
 status: open
 last_verified_commit: 43848f75

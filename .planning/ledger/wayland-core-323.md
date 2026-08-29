@@ -1,6 +1,7 @@
 ---
 issue: 323
 repo: FerroxLabs/wayland-core
+kind: defect
 title: "Two divergent secret denylists: at_ref_guard maintains its own copy, so @-refs miss entries the tools deny"
 status: open
 last_verified_commit: 43848f75

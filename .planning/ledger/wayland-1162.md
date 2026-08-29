@@ -1,6 +1,7 @@
 ---
 issue: 1162
 repo: FerroxLabs/wayland
+kind: defect
 title: "cache report --session rejects the session id the user set; ledger is keyed by the internal conversation UUID"
 status: closed
 last_verified_commit: 43848f75

@@ -1,6 +1,7 @@
 ---
 issue: 434
 repo: FerroxLabs/wayland
+kind: defect
 title: "Flux tier-alias -> strict-reasoner: #417 replay gap (engine keys off request.model, alias resolves server-side)"
 status: open
 last_verified_commit: 43848f75

@@ -1,6 +1,7 @@
 ---
 issue: 1150
 repo: FerroxLabs/wayland
+kind: defect
 title: "[Bug]: Absurd Input Token Size"
 status: open
 last_verified_commit: 43848f75

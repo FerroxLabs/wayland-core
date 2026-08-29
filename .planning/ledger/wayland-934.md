@@ -1,6 +1,7 @@
 ---
 issue: 934
 repo: FerroxLabs/wayland
+kind: defect
 title: "max_message_len is unverified across 8 adapters: the caps are asserted against themselves"
 status: open
 last_verified_commit: 43848f75

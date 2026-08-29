@@ -1,6 +1,7 @@
 ---
 issue: 338
 repo: FerroxLabs/wayland-core
+kind: defect
 title: "Untrusted plugin install can make Wayland prompt the user for credentials via /dev/tty"
 status: open
 last_verified_commit: 43848f75

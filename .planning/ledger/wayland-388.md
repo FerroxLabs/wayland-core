@@ -1,6 +1,7 @@
 ---
 issue: 388
 repo: FerroxLabs/wayland
+kind: defect
 title: "[Bug]: Long-running tasks intermittently truncate, stall, or restart inconsistently through Free Models Router"
 status: open
 last_verified_commit: 43848f75

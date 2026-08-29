@@ -1,6 +1,7 @@
 ---
 issue: 336
 repo: FerroxLabs/wayland-core
+kind: defect
 title: "Flaky: harness_tui_flow narrow_terminal_resize_stays_coherent_without_panicking times out under parallel load"
 status: open
 last_verified_commit: 43848f75

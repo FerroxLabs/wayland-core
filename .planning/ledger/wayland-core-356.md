@@ -1,6 +1,7 @@
 ---
 issue: 356
 repo: FerroxLabs/wayland-core
+kind: defect
 title: "Two path resolvers with different escape properties 70 lines apart, and the weaker one guards the skill-source write refusal"
 status: open
 last_verified_commit: 43848f75

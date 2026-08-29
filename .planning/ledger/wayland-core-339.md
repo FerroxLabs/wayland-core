@@ -1,6 +1,7 @@
 ---
 issue: 339
 repo: FerroxLabs/wayland-core
+kind: defect
 title: "SECURITY: the @-ref secret guard is lexical, so a symlink bypasses it"
 status: open
 last_verified_commit: 43848f75

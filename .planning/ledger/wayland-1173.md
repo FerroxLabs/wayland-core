@@ -1,6 +1,7 @@
 ---
 issue: 1173
 repo: FerroxLabs/wayland
+kind: defect
 title: "CLI refuses to start against a keyless local endpoint despite having a self-hosted placeholder path"
 status: closed
 last_verified_commit: 43848f75

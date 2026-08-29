@@ -244,7 +244,14 @@ _auto-commit-fixes:
 # `ledger-check` added 2026-08-29 (lane ledger): the OFFLINE arm only. The
 # coverage arm needs `gh` against two repos and lives in `ledger-check-live`,
 # because a network dependency inside `check-all` buys flakiness for nothing.
-check-all: check-no-personal-identifiers check-model-limits check-windows-attribution ledger-check fmt-check lint test-ci hakari-verify audit deny verify-suppressions
+# `release-readiness-selftest` added 2026-08-29 (lane f13-relgate): the
+# SELF-TEST only, deliberately not the gate. The gate is red by design while
+# any defect is open, so putting it here would make every in-progress lane
+# red, and a gate everyone bypasses is a gate nobody reads. The gate itself
+# runs on the release path (`release-readiness-live`, and the
+# `prepare-release` job in release.yml). This arm only proves the gate can
+# still fail — which is the half that rots silently between releases.
+check-all: check-no-personal-identifiers check-model-limits check-windows-attribution ledger-check release-readiness-selftest fmt-check lint test-ci hakari-verify audit deny verify-suppressions
 
 # ── User-flow harness (CLI + TUI + failure injection) ────────────────────
 # Drives the COMPILED wayland-core binary the way a user does:
@@ -373,6 +380,69 @@ ledger-check:
 ledger-check-live:
     python3 scripts/check-criteria-ledger.py --self-test
     python3 scripts/check-criteria-ledger.py
+
+# ── Release-readiness gate ────────────────────────────────────────────────
+# `ledger-check` above gates the BOOKKEEPING: a malformed entry, a `met` with
+# no evidence, evidence that no longer resolves, a `blocked` owned by core, an
+# open issue with no ledger file. Every one of those asks whether the RECORD is
+# honest. NONE of them ask whether the WORK is done.
+#
+# On the tree this recipe was added to, 67 criteria were `not-met` and owned by
+# `core`, and `just ledger-check` was completely green. It has never been
+# possible for this repo to go red because a release was INCOMPLETE — only
+# because a ledger lied about it. That is the mechanism behind every partial
+# release here, v0.13.10 included: 22 issues claimed closed, 9 met on grading.
+#
+# This gate refuses to cut a release while any in-scope DEFECT still has
+# core-owned work outstanding. Errors, problems and issues block; feature
+# requests do not, and the split is a required `kind: defect|feature` field in
+# each ledger file rather than a GitHub label, so the offline arm needs no
+# network. A MISSING `kind` is a hard failure: a field that defaults is a field
+# nobody ever types, and it would default into whichever bucket was convenient.
+#
+# It also refuses a remainder that was handed out and then lost. A criterion
+# `blocked` or `not-met` under desktop/flux/maintainer must carry a
+# `handoff: <owner>/<repo>#<number>` naming the ticket that now owns it. A
+# ticket ends CLOSED or DECOMPOSED; "partial" is a ticket nobody split, and an
+# untracked remainder is what makes a partial invisible.
+#
+# DELIBERATELY NOT IN `check-all`. Every lane runs `check-all`, and this gate is
+# red BY DESIGN for as long as any defect is open — which is always, mid-cycle.
+# A gate that is red on every in-progress lane gets bypassed, then gets ignored,
+# then gets deleted, and that is how a ratchet dies. It belongs on the release
+# path, where red means "do not cut", and it is wired into the `prepare-release`
+# job in .github/workflows/release.yml so a FAIL actually stops the publish
+# instead of being advisory. The SELF-TEST, by contrast, is cheap and always
+# meaningful — see `release-readiness-selftest` below, which ci.yml runs, so the
+# gate cannot rot in between releases.
+#
+# TWO recipes, the same split as `ledger-check`:
+#   * `release-readiness`      — structure only, no network. Prints in as many
+#     words that it did NOT resolve handoff targets and did NOT corroborate
+#     `kind:` against tracker labels. A skip that reads as a pass is the exact
+#     defect class this repo keeps finding.
+#   * `release-readiness-live` — adds both. Fails when a `handoff:` names an
+#     issue that is closed or does not exist, and when an entry marked
+#     `kind: feature` is labelled `bug` on its tracker — the one direction of
+#     misclassification that shrinks the blocking set.
+#
+# Run: `just release-readiness`
+release-readiness:
+    python3 scripts/check-release-readiness.py --self-test
+    python3 scripts/check-release-readiness.py --offline
+
+# Run: `just release-readiness-live` — before cutting. Needs gh on both trackers
+release-readiness-live:
+    python3 scripts/check-release-readiness.py --self-test
+    python3 scripts/check-release-readiness.py
+
+# Proves the gate can FAIL. No network, and it does not read .planning/ledger at
+# all, so it is safe in `check-all` where the gate itself is not: it says nothing
+# about whether a release is ready, only that the thing which would say so still
+# works. That is the half which rots silently between releases.
+# Run: `just release-readiness-selftest`
+release-readiness-selftest:
+    python3 scripts/check-release-readiness.py --self-test
 
 # ── Vacuous-green gate ─────────────────────────────────────────────────────
 # `cargo nextest` fails closed on a zero-test run (`no-tests = "fail"` in

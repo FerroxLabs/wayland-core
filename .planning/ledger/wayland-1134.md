@@ -1,6 +1,7 @@
 ---
 issue: 1134
 repo: FerroxLabs/wayland
+kind: defect
 title: "Test-written process globals are invisible to CI: nextest isolates per process, cargo test does not"
 status: closed
 last_verified_commit: 43848f75

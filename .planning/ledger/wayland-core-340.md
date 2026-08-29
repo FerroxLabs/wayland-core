@@ -1,6 +1,7 @@
 ---
 issue: 340
 repo: FerroxLabs/wayland-core
+kind: defect
 title: "The MCP malware gate does not cover every launch, and its doc claims it does"
 status: open
 last_verified_commit: 43848f75

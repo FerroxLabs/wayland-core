@@ -1,6 +1,7 @@
 ---
 issue: 305
 repo: FerroxLabs/wayland
+kind: feature
 title: "[Feature]: improve Win/WSL interop"
 status: open
 last_verified_commit: 43848f75

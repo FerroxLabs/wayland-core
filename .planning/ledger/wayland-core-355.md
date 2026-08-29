@@ -1,6 +1,7 @@
 ---
 issue: 355
 repo: FerroxLabs/wayland-core
+kind: defect
 title: "A command-floor refusal makes the model improvise and hand the user a confident wrong answer instead of blocked by policy"
 status: open
 last_verified_commit: 43848f75

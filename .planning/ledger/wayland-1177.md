@@ -1,6 +1,7 @@
 ---
 issue: 1177
 repo: FerroxLabs/wayland
+kind: defect
 title: "An outer workflow retry overwrites junit.xml, erasing a genuine failure before any grader sees it"
 status: open
 last_verified_commit: 43848f75
