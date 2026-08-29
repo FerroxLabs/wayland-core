@@ -287,6 +287,7 @@ pub async fn autocompact(
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         };
 
         match provider.stream(&request).await {

@@ -51,6 +51,7 @@ fn minimal_request() -> LlmRequest {
         temperature: None,
         omit_max_tokens: false,
         routed_model_hint: None,
+        replay_reasoning_content: false,
     }
 }
 
@@ -637,6 +638,7 @@ async fn gemini_live_api_smoke_test() {
         temperature: None,
         omit_max_tokens: false,
         routed_model_hint: None,
+        replay_reasoning_content: false,
     };
 
     let rx = provider

@@ -148,6 +148,7 @@ mod tests {
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         };
         let result = p.stream(&req).await;
         assert!(result.is_err(), "expected error from unreachable host");

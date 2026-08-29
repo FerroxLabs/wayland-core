@@ -986,6 +986,7 @@ mod resilience_wrap {
                 temperature: None,
                 omit_max_tokens: false,
                 routed_model_hint: None,
+                replay_reasoning_content: false,
             };
             let _ = result.provider.stream(&req).await;
         }
@@ -1041,6 +1042,7 @@ mod resilience_wrap {
                 temperature: None,
                 omit_max_tokens: false,
                 routed_model_hint: None,
+                replay_reasoning_content: false,
             };
             let _ = result.provider.stream(&req).await;
         }

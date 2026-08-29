@@ -428,6 +428,7 @@ mod tests {
             temperature: None,
             omit_max_tokens: false,
             routed_model_hint: None,
+            replay_reasoning_content: false,
         };
         let mut rx = p.stream(&req).await.unwrap();
         let first = rx.recv().await.unwrap();
