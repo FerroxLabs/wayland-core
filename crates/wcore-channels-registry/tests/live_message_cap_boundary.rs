@@ -253,11 +253,22 @@ const CELLS: &[Cell] = &[
     },
     Cell {
         platform: "sms",
-        boundary: Boundary::NotMeasured {
-            waiting_on: "a Twilio account SID, auth token and provisioned From number. No \
-                         Twilio credential exists on this programme (measured, see the \
-                         2026-07-30 correction in docs/delivery-semantics.md), and every probe \
-                         send is billable",
+        boundary: Boundary::Measured {
+            // Driven at a real Twilio account to a real handset. 1,600 was
+            // accepted as one concatenated message; 1,601 was refused by Twilio
+            // BEFORE reaching a carrier, so the over-arm cost nothing.
+            //
+            // Twilio's own error names the unit, which is why this is less
+            // ambiguous than Telegram's: "The concatenated message body exceeds
+            // the 1600 character limit" (21617). It is a CHARACTER limit, and it
+            // applies whatever the segment encoding is — GSM-7 packs 153 chars
+            // per segment and UCS-2 packs 67, but the 1,600 ceiling does not
+            // move. Probed in ASCII/GSM-7 at 11 segments.
+            accepts_up_to: 1_600,
+            above: Above::Refused(
+                "HTTP 400 code 21617, The concatenated message body exceeds the 1600 character limit",
+            ),
+            on: "2026-08-29",
         },
         env: [
             "WL_LIVE_CAP_SMS_HOME",
