@@ -250,12 +250,19 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     let mut skipped = 0usize;
     let mut truncated = false;
     let root_canonical = canonical_root(root);
+    let base_canonical = canonical_root(&full);
+    let scope = WalkScope {
+        root,
+        root_canonical: &root_canonical,
+        base: &full,
+        base_canonical: &base_canonical,
+        spelled: path,
+    };
     let mut visited = HashSet::new();
 
     walk_dir(
         &full,
-        root,
-        &root_canonical,
+        &scope,
         &ignore,
         &mut visited,
         &mut files,
@@ -298,6 +305,61 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
     })
 }
 
+/// The two directories a walked entry is judged against.
+///
+/// D3: they were one. `walk_dir` named every entry relative to the WORKSPACE
+/// root and dropped — silently, without even counting a skip — any entry the
+/// root could not name. Every `@dir` spelling that escapes the root lexically
+/// (`@../repo/`, `@/abs/dir/`) therefore resolved to an empty payload behind a
+/// successful-looking chip: the user attached a directory and the model got
+/// nothing. The workspace root is the `.gitignore`'s jurisdiction; the
+/// directory the reference NAMES is what the walk may not leave.
+struct WalkScope<'a> {
+    /// The workspace root, as the caller spelled it.
+    root: &'a Path,
+    /// The workspace root with symlinks resolved.
+    root_canonical: &'a Path,
+    /// The directory the reference names, and its canonical form. For an
+    /// in-root `@dir` this sits under the workspace root, so core#339's
+    /// confinement is exactly what it was.
+    base: &'a Path,
+    base_canonical: &'a Path,
+    /// The user's own spelling of that directory, echoed back in the names of
+    /// entries the workspace root cannot name — the same answer `resolve_file`
+    /// gives for an escaping `@file`.
+    spelled: &'a Path,
+}
+
+impl WalkScope<'_> {
+    /// `path` relative to the workspace root, or `None` when the workspace
+    /// cannot name it. `None` means "outside the `.gitignore`'s jurisdiction",
+    /// never "invisible".
+    fn in_root(&self, path: &Path) -> Option<String> {
+        rel_to_root(path, self.root)
+    }
+
+    /// The same question asked of a RESOLVED location, for the rules that are
+    /// judged on where an entry actually points (core#335 / core#339 c6).
+    fn canonical_in_root(&self, canonical: &Path) -> Option<String> {
+        rel_to_root(canonical, self.root_canonical)
+    }
+
+    /// True when a resolved location is inside the workspace or inside the
+    /// directory the reference names. Everything else is a link OUT of what
+    /// the user asked for.
+    fn contains(&self, canonical: &Path) -> bool {
+        canonical.starts_with(self.root_canonical) || canonical.starts_with(self.base_canonical)
+    }
+
+    /// The name the payload carries for `path`.
+    fn name(&self, path: &Path) -> Option<PathBuf> {
+        match self.in_root(path) {
+            Some(rel) => Some(PathBuf::from(rel)),
+            None => Some(self.spelled.join(rel_to_root(path, self.base)?)),
+        }
+    }
+}
+
 /// Depth-first directory walk for `@dir`, applying both guardrails.
 ///
 /// `root_canonical` and `visited` exist for core#339. The walk is the call site
@@ -306,11 +368,9 @@ fn resolve_dir(path: &Path, root: &Path) -> Result<AtPayload, AtRefError> {
 /// by `@./` alone. Every entry is therefore judged by what it RESOLVES to —
 /// which also means a directory can be reached twice, so `visited` keeps a
 /// link back into the tree from recursing until the stack runs out.
-#[allow(clippy::too_many_arguments)]
 fn walk_dir(
     dir: &Path,
-    root: &Path,
-    root_canonical: &Path,
+    scope: &WalkScope<'_>,
     ignore: &GitIgnore,
     visited: &mut HashSet<PathBuf>,
     out: &mut Vec<ResolvedFile>,
@@ -336,11 +396,13 @@ fn walk_dir(
             return Ok(());
         }
         let is_dir = path.is_dir();
-        let rel = match rel_to_root(&path, root) {
-            Some(r) => r,
-            None => continue,
-        };
-        if ignore.is_ignored(&rel, is_dir) {
+        // D3: an entry the workspace root cannot NAME is out of the workspace
+        // `.gitignore`'s jurisdiction — it is not invisible. Dropping it here
+        // is what made every escaping `@dir` spelling resolve to an empty
+        // payload, and without `*skipped += 1` there was not even a warning.
+        if let Some(rel) = scope.in_root(&path)
+            && ignore.is_ignored(&rel, is_dir)
+        {
             *skipped += 1;
             continue;
         }
@@ -354,7 +416,7 @@ fn walk_dir(
             // A link OUT of the workspace is not part of the directory the
             // user asked for, and reaching through one is how `@./` walks into
             // `$HOME`.
-            if !canonical.starts_with(root_canonical) {
+            if !scope.contains(&canonical) {
                 *skipped += 1;
                 continue;
             }
@@ -371,7 +433,8 @@ fn walk_dir(
             }
             // core#339 c6: `.gitignore` is judged on where the entry resolves,
             // for the same reason the secret guard is.
-            if rel_to_root(&canonical, root_canonical)
+            if scope
+                .canonical_in_root(&canonical)
                 .is_some_and(|rel| ignore.is_ignored(&rel, true))
             {
                 *skipped += 1;
@@ -381,23 +444,29 @@ fn walk_dir(
             if !visited.insert(canonical) {
                 continue;
             }
-            walk_dir(
-                &path,
-                root,
-                root_canonical,
-                ignore,
-                visited,
-                out,
-                skipped,
-                truncated,
-            )?;
+            walk_dir(&path, scope, ignore, visited, out, skipped, truncated)?;
         } else {
+            // D7: `admit` OPENS the entry, and opening a named pipe blocks
+            // until a writer appears — `@./` in any tree containing a FIFO
+            // (build systems, editors and language servers all leave them)
+            // wedged the turn forever, inside a blocking syscall on the turn
+            // task where cancellation cannot reach it. Only a regular file is
+            // readable; `resolve_file` has always said so, the walk never did.
+            // `metadata` follows the link and only stats, so it cannot block.
+            let Ok(meta) = fs::metadata(&path) else {
+                *skipped += 1;
+                continue;
+            };
+            if !meta.is_file() {
+                *skipped += 1;
+                continue;
+            }
             // Resolve once; guard the resolved name; read the same handle.
             let Ok(admitted) = admit(&path, &path) else {
                 *skipped += 1;
                 continue;
             };
-            if !admitted.canonical.starts_with(root_canonical)
+            if !scope.contains(&admitted.canonical)
                 || is_secret_path(&path)
                 || is_secret_path(&admitted.canonical)
             {
@@ -409,17 +478,22 @@ fn walk_dir(
             // `notes.txt` and no `*.log` rule ever saw it. Judge the rule on
             // what the entry RESOLVES to, as `resolve_file` already does
             // (core#335).
-            if rel_to_root(&admitted.canonical, root_canonical)
+            if scope
+                .canonical_in_root(&admitted.canonical)
                 .is_some_and(|rel| ignore.is_ignored(&rel, false))
             {
                 *skipped += 1;
                 continue;
             }
+            let Some(name) = scope.name(&path) else {
+                *skipped += 1;
+                continue;
+            };
             // Read text files only; a binary file is skipped silently
             // rather than corrupting the payload with lossy bytes.
             match admitted.read_to_string(&path) {
                 Ok(content) => out.push(ResolvedFile {
-                    path: PathBuf::from(&rel),
+                    path: name,
                     content,
                 }),
                 Err(_) => *skipped += 1,
@@ -535,6 +609,12 @@ pub(super) fn read_guarded(path: &Path) -> Result<String, AtRefError> {
     // the path does not resolve — see `resolve_file` for why that order matters.
     if is_secret_path(path) {
         return Err(AtRefError::SecretBlocked(display(path)));
+    }
+    // D7, the walk's sibling read site: `admit` opens the path, and opening a
+    // named pipe blocks until a writer appears. Only a regular file is a
+    // readable `@`-reference target.
+    if !path.is_file() {
+        return Err(AtRefError::NotFound(display(path)));
     }
     let admitted = admit(path, path)?;
     if is_secret_path(&admitted.canonical) {
