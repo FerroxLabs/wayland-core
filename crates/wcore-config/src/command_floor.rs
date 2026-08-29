@@ -1480,7 +1480,11 @@ mod tests {
         }
     }
 
+    // Serialized for the same reason as
+    // `rule_2b_yields_where_the_workspace_is_inside_the_authority_directory`:
+    // `wayland_config_dir()` / `profile_home()` read `WAYLAND_HOME`.
     #[test]
+    #[serial_test::serial]
     fn the_resolved_config_dir_is_protected_without_the_bare_name_rule() {
         // `config.toml` is Cargo's own basename, so it is protected by
         // RESOLVED PATH only. This is the arm that grades rule 2b on its own:
@@ -1508,7 +1512,16 @@ mod tests {
         assert!(floor_refusal(&format!("cat \"{}\"", oauth.display()), None).is_some());
     }
 
+    // `profile_home()` reads `WAYLAND_HOME`, which this module's env-driven
+    // tests set and restore globally, so this test has to take the same lock
+    // they do. Without it the read races them: the base becomes another
+    // test's `/tmp/wl693-store`, the whole-directory rule stops matching
+    // `/work`, and the control assertion at the top fails with
+    // `control: the whole-directory rule must refuse this from outside`.
+    // `cargo nextest` process-isolates every test and cannot see this, so the
+    // gate is green while plain `cargo test` fails intermittently.
     #[test]
+    #[serial_test::serial]
     fn rule_2b_yields_where_the_workspace_is_inside_the_authority_directory() {
         // The migrate-quarantine live legs put the session workspace INSIDE the
         // per-run profile home, because the sandbox only grants writes inside

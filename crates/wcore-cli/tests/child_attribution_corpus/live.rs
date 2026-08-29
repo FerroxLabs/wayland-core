@@ -72,6 +72,7 @@ use tempfile::TempDir;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
 use crate::cases::{AttributionCase, LifecycleEvent};
+use crate::support::owned_tree::OwnedTree;
 use crate::support::{mock_llm, pty, vault};
 
 /// Goal markers, prefixed into each sibling's delegated prompt so the provider
@@ -506,22 +507,24 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
     // under a hermetic WAYLAND_HOME, so the turn never reaches a provider and
     // every observation would be an absence rather than a verdict.
     let guard = vault::configure_process(&mut command);
-    let spawned = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    drop(guard);
+    let mut child = OwnedTree::new({
+        let spawned = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        drop(guard);
 
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(error) => {
-            return LiveRun::empty(
-                invocation,
-                format!("the binary could not be spawned: {error}"),
-            );
+        match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                return LiveRun::empty(
+                    invocation,
+                    format!("the binary could not be spawned: {error}"),
+                );
+            }
         }
-    };
+    });
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");

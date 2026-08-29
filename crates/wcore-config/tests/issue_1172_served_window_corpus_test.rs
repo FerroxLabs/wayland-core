@@ -217,3 +217,127 @@ fn a_stable_ceiling_is_reported_once() {
     );
     assert_eq!(tracker.served_window(), Some(4095));
 }
+
+// ————————— FerroxLabs/wayland-core#353: corroboration before the trigger moves ————————
+
+/// The TELLING half. One qualifying turn still produces evidence and still
+/// establishes `served_window()` — the notice keeps its one-observation
+/// sensitivity, which #353 explicitly forbids regressing.
+///
+/// The SIZING half does not. `sizing_window()` is what
+/// `wcore_agent::Engine::narrow_to_served_window` reads, and it stays `None`
+/// until the verdict is corroborated.
+#[test]
+fn a_single_regression_tells_the_user_but_does_not_yet_size_the_session() {
+    let mut tracker = ServedWindowTracker::default();
+    assert_eq!(
+        tracker.observe(ROUTE, 4489, 4050),
+        None,
+        "the baseline turn"
+    );
+
+    let evidence = tracker
+        .observe(ROUTE, 4617, 3910)
+        .expect("the NOTICE must still fire on one observation");
+    assert_eq!(evidence.signal, TruncationSignal::Regression);
+    assert_eq!(evidence.served_window, 4050);
+    assert_eq!(
+        tracker.served_window(),
+        Some(4050),
+        "the telling figure is available immediately"
+    );
+
+    assert_eq!(
+        tracker.sizing_window(),
+        None,
+        "one anomalous usage report must not be enough to compact the user\'s \
+         conversation (#353)"
+    );
+}
+
+/// The other half, and the reason #353 is not closed by disabling the tracker:
+/// on a real truncating endpoint the regression repeats on the very next turn,
+/// so corroboration costs exactly one turn.
+#[test]
+fn a_second_regression_corroborates_it_and_the_session_is_sized() {
+    let mut tracker = ServedWindowTracker::default();
+    tracker.observe(ROUTE, 4489, 4050);
+    tracker.observe(ROUTE, 4617, 3910);
+    assert_eq!(tracker.sizing_window(), None, "still one observation");
+
+    // The second regression sits at an UNCHANGED ceiling, so `observe` returns
+    // no fresh notice for it. Corroboration must be counted anyway — if it
+    // were recorded after that suppression this arm would never corroborate.
+    assert_eq!(
+        tracker.observe(ROUTE, 4700, 3800),
+        None,
+        "the ceiling has not moved, so the user is not told twice"
+    );
+    assert_eq!(
+        tracker.sizing_window(),
+        Some(4050),
+        "a repeated regression must still size the session, or the fix is just \
+         a disabled detector"
+    );
+    assert_eq!(
+        tracker.served_window(),
+        tracker.sizing_window(),
+        "once corroborated the two figures agree"
+    );
+}
+
+/// A `Shortfall` corroborates itself, so #1172\'s measured behaviour is
+/// unchanged. Its arm already requires a miss of at least
+/// `MIN_SHORTFALL_TOKENS` AND a ratio below `SERVED_SHORTFALL_RATIO`, which is
+/// the absolute magnitude the `Regression` arm has no equivalent of. Without
+/// this the fix would have delayed every real detection by a turn.
+#[test]
+fn a_shortfall_carries_its_own_corroboration() {
+    let mut tracker = ServedWindowTracker::default();
+    let evidence = tracker
+        .observe(ROUTE, 10_466, 4_095)
+        .expect("the gross shortfall #1172 measured against a stock Ollama");
+    assert_eq!(evidence.signal, TruncationSignal::Shortfall);
+    assert_eq!(
+        tracker.sizing_window(),
+        Some(4_095),
+        "a shortfall is corroborated within its own turn"
+    );
+}
+
+/// A `Shortfall` is also the "agreement with a second signal" that corroborates
+/// an earlier `Regression`, which is why the rule is stated as evidence rather
+/// than as a regression counter alone.
+#[test]
+fn a_shortfall_corroborates_an_earlier_regression() {
+    let mut tracker = ServedWindowTracker::default();
+    tracker.observe(ROUTE, 4489, 4050);
+    tracker.observe(ROUTE, 4617, 3910);
+    assert_eq!(tracker.sizing_window(), None);
+
+    tracker.observe(ROUTE, 10_000, 3_500);
+    assert_eq!(
+        tracker.sizing_window(),
+        Some(4050),
+        "a second, independent signal on the same route corroborates the first"
+    );
+}
+
+/// A model swap throws the corroboration away with everything else. A different
+/// tokenizer shifts the reported count by the same order as the `Regression`
+/// arm, so carrying evidence across the swap would manufacture it.
+#[test]
+fn a_model_swap_discards_the_corroboration_too() {
+    let mut tracker = ServedWindowTracker::default();
+    tracker.observe(ROUTE, 4489, 4050);
+    tracker.observe(ROUTE, 4617, 3910);
+    tracker.observe(ROUTE, 4700, 3800);
+    assert_eq!(tracker.sizing_window(), Some(4050), "corroborated here");
+
+    tracker.observe("openai/qwen3:14b", 4800, 4700);
+    assert_eq!(
+        tracker.sizing_window(),
+        None,
+        "the new route has no evidence of its own"
+    );
+}

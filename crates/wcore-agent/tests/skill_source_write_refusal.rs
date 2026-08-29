@@ -214,6 +214,118 @@ async fn a_load_path_above_the_workspace_is_refused() {
     assert!(result.is_error, "not refused: {}", result.content);
 }
 
+/// FerroxLabs/wayland-core#356, escape 1 of 2 — a `..` that follows a component
+/// which does not exist yet.
+///
+/// This is one of the two shapes #1097 rewrote `canon_existing_ancestor` for,
+/// and until #356 neither of them was graded on the resolver
+/// `is_skill_source_path` actually uses. It is not hypothetical here: a skill's
+/// first report creates its own directory on the way, so "part of the path is
+/// missing" is the ORDINARY state of a write into `skills/`, not an edge case.
+///
+/// The missing component does not make the write fail, which is the part that
+/// makes this reachable: `RealFs::write` calls `create_dir_all` on the parent,
+/// so `not-yet/` is created, the `..` then resolves through it, and the bytes
+/// land in `skills/` proper.
+#[tokio::test]
+async fn a_traversal_through_a_directory_that_does_not_exist_yet_is_refused() {
+    let home = wayland_home();
+    let cwd = TempDir::new().unwrap();
+    let (_vfs, ctx) = session(cwd.path());
+
+    let missing = home.join("skills").join("not-yet");
+    assert!(
+        !missing.exists(),
+        "the point of this case is that this component is absent"
+    );
+    let target = missing.join("..").join("traversed.html");
+    let landing = home.join("skills").join("traversed.html");
+
+    let result = write(&ctx, &target, "<html>traversed</html>").await;
+
+    assert!(
+        !landing.exists(),
+        "the report landed at {} — a `..` after a missing component walked back \
+         into the skill SOURCE directory",
+        landing.display()
+    );
+    assert!(
+        result.is_error,
+        "the write was not refused: {}",
+        result.content
+    );
+}
+
+/// FerroxLabs/wayland-core#356, escape 2 of 2 — the dangling-symlink hop.
+///
+/// `std::fs::canonicalize` FAILS on a link whose target does not exist yet, so
+/// a resolver that canonicalizes the longest existing ancestor and appends the
+/// rest verbatim judges where the LINK sits instead of where the write lands.
+/// `std::fs::write` follows the link. The same shape with an EXISTING target is
+/// resolved correctly by both resolvers, which is why the control below is the
+/// one that separates this case from "every symlink is refused".
+#[tokio::test]
+#[cfg(unix)]
+async fn a_dangling_symlink_into_a_skill_source_dir_is_refused() {
+    let home = wayland_home();
+    let cwd = TempDir::new().unwrap();
+    let (_vfs, ctx) = session(cwd.path());
+
+    let skill = home.join("skills").join("linked-skill");
+    std::fs::create_dir_all(&skill).unwrap();
+
+    // CONTROL: the link with an EXISTING target. Already refused before #356,
+    // so a green on the probe below cannot come from this arm.
+    let live_landing = skill.join("live.html");
+    std::fs::write(&live_landing, b"seed").unwrap();
+    let live_link = cwd.path().join("live-link.html");
+    std::os::unix::fs::symlink(&live_landing, &live_link).unwrap();
+    let live = write(&ctx, &live_link, "<html>through a live link</html>").await;
+    assert!(
+        live.is_error,
+        "CONTROL: a symlink with an existing target inside the skill source dir \
+         must be refused: {}",
+        live.content
+    );
+    assert_eq!(
+        std::fs::read_to_string(&live_landing).unwrap(),
+        "seed",
+        "CONTROL: the live-link write reached the file anyway"
+    );
+
+    // THE DEFECT: the target does not exist yet, so the link dangles.
+    let landing = skill.join("brief.html");
+    let link = cwd.path().join("brief.html");
+    std::os::unix::fs::symlink(&landing, &link).unwrap();
+
+    let result = write(&ctx, &link, "<html>brief</html>").await;
+
+    assert!(
+        !landing.exists(),
+        "the report landed at {} — a DANGLING symlink carried the write into the \
+         skill SOURCE directory",
+        landing.display()
+    );
+    assert!(
+        result.is_error,
+        "the write was not refused: {}",
+        result.content
+    );
+
+    // CONTROL: a dangling link that lands somewhere ordinary stays writable, so
+    // the fix resolves links rather than blanket-refusing unresolvable ones.
+    let ordinary_landing = home.join("sessions").join("dangling-ok.txt");
+    std::fs::create_dir_all(home.join("sessions")).unwrap();
+    let ordinary_link = cwd.path().join("ordinary-link.txt");
+    std::os::unix::fs::symlink(&ordinary_landing, &ordinary_link).unwrap();
+    let ordinary = write(&ctx, &ordinary_link, "ok").await;
+    assert!(
+        !ordinary.is_error,
+        "CONTROL: a dangling link landing outside any skill source dir was refused: {}",
+        ordinary.content
+    );
+}
+
 /// CONTROL — the predicate keys on the `.wayland-core` PARENT, not on the leaf
 /// name. A project with its own top-level `skills/` or `commands/` directory
 /// (a documentation folder, a Rails-style app dir) is ordinary user data and

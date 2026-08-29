@@ -8203,7 +8203,14 @@ impl AgentEngine {
     /// it is core declining to brick a run it cannot rescue, while #1172's
     /// notice tells the operator the one thing that does fix it.
     fn narrow_to_served_window(&self, window: Option<u64>) -> Option<u64> {
-        let Some(served) = self.compact_state.served_window.served_window() else {
+        // #353 — `sizing_window()`, not `served_window()`. Everything reached
+        // through this function ACTS on the conversation — the autocompact
+        // trigger, the pre-flight ceiling, the smart-compact fraction — so it
+        // is held to corroborated evidence. The notice and the context gauge
+        // read `served_window()` directly and keep their one-observation
+        // sensitivity: telling the user is cheap to be wrong about, compacting
+        // their conversation is not.
+        let Some(served) = self.compact_state.served_window.sizing_window() else {
             return window;
         };
         if !self.compact_config.supports_compaction(served as usize) {
@@ -26987,6 +26994,113 @@ mod approval_bridge_engine_tests {
             !engine.should_autocompact_now(3_000),
             "an under-baseline turn must not summarize"
         );
+    }
+
+    /// #353 —ARM 1— a SINGLE anomalous usage report must not move the trigger.
+    ///
+    /// #1172/#1179 wired the learned served window into
+    /// `autocompact_threshold_now`, which is correct and is what that ticket
+    /// asked for. The side effect is that a tracker false positive was upgraded
+    /// from "a spurious notice" to "a spurious compaction", and a spurious
+    /// compaction silently discards the conversation. The `Regression` arm has
+    /// no absolute-magnitude requirement, so one bad `usage` block — a provider
+    /// bug, an oddly billed retry, a proxy that rewrites usage — used to be
+    /// enough. `cache_ledger_engine_test` caught exactly this shape with a
+    /// scripted sequence whose prompt halves while messages are appended.
+    #[test]
+    fn a_single_anomalous_usage_report_does_not_move_the_autocompact_trigger() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        let catalogued = engine.autocompact_threshold_now();
+        assert_eq!(catalogued, 95_000, "the catalogued 128,000 window");
+
+        // A baseline turn, then ONE turn whose reported prompt goes backwards
+        // while the prompt we sent grew. Neither is a `Shortfall` (8,192 and
+        // 7,000 are both well above 60% of what was sent), so this is the
+        // `Regression` arm and nothing else.
+        assert_eq!(
+            engine
+                .compact_state
+                .served_window
+                .observe("openai/gpt-4o", 10_000, 8_192),
+            None,
+            "the baseline turn is not evidence"
+        );
+        let evidence = engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 11_000, 7_000);
+
+        // NOT VACUOUS, and the constraint the ticket puts on the fix: the
+        // NOTICE still fires on this one observation. Closing #353 by making
+        // the detector quieter would be the wrong fix.
+        let evidence = evidence.expect("the notice must still fire on one observation");
+        assert_eq!(
+            evidence.signal,
+            wcore_config::context_window::TruncationSignal::Regression
+        );
+        assert_eq!(
+            engine.compact_state.served_window.served_window(),
+            Some(8_192),
+            "the telling figure is learned immediately, or this test measures nothing"
+        );
+
+        // ...and 8,192 IS a window the trigger would otherwise move onto, so
+        // this is not passing because `supports_compaction` refused it.
+        assert!(
+            engine.compact_config.supports_compaction(8_192),
+            "8,192 must be workable, or the #1179 gate would explain the result"
+        );
+
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            catalogued,
+            "one anomalous report moved the autocompact trigger, so the next turn \
+             past it silently discards the user\'s conversation (#353)"
+        );
+        assert!(
+            !engine.should_autocompact_now(4_000),
+            "4,000 tokens is nowhere near the catalogued trigger"
+        );
+    }
+
+    /// #353 —ARM 2— a genuine, REPEATED regression still moves it.
+    ///
+    /// The half that stops the fix from being "disable the tracker". A guard
+    /// that refuses everything is not a guard, and #1172 is a real, measured
+    /// defect: on a truncating endpoint the regression repeats on the very next
+    /// turn, so corroboration costs one turn and nothing else.
+    #[test]
+    fn a_repeated_regression_still_moves_the_autocompact_trigger() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        assert_eq!(engine.autocompact_threshold_now(), 95_000);
+
+        for (sent, reported) in [(10_000u64, 8_192u64), (11_000, 7_000)] {
+            engine
+                .compact_state
+                .served_window
+                .observe("openai/gpt-4o", sent, reported);
+        }
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            95_000,
+            "one observation is not yet corroboration"
+        );
+
+        // The SECOND regression on the same route. Same shape, one turn later.
+        engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 12_000, 6_500);
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            3_688,
+            "a corroborated regression must still move the trigger onto the \
+             window the endpoint actually serves — 8,192 here"
+        );
+        assert!(engine.should_autocompact_now(4_000));
+        assert!(!engine.should_autocompact_now(3_000));
     }
 
     /// The refusal half, on the trigger path: a served window too small to work

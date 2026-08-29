@@ -18,6 +18,7 @@
 
 #[path = "support/mod.rs"]
 mod support;
+use support::owned_tree::OwnedTree;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -1147,13 +1148,14 @@ fn drive_skill_turn(home: &Path, skill_name: &str, sentinel: &Path) -> Vec<Strin
     // crate does. Without it the turn dies before reaching the Skill tool, and
     // BOTH legs would then be measuring a dead engine rather than containment.
     let vault = support::vault::configure_process(&mut cmd);
-    let child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+    let mut child = OwnedTree::new(
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn wayland-core --json-stream"),
+    );
     drop(vault);
-    let mut child = child.expect("spawn wayland-core --json-stream");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");

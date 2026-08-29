@@ -59,6 +59,7 @@ use tempfile::TempDir;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
 
 use crate::cases::{CorpusEntry, Dimension};
+use crate::support::owned_tree::OwnedTree;
 use crate::support::pty;
 use crate::support::vault;
 use crate::surfaces::{CorpusExecutor, LiveEvidence, Mode, Outcome, ProbeResult, Surface, runtime};
@@ -870,30 +871,32 @@ fn run_json_stream(world: &LiveWorld) -> LiveRun {
     // a provider and every downstream observation would be an absence rather
     // than a refusal. See the module note on the anti-vacuity gate.
     let vault = vault::configure_process(&mut command);
-    let spawned = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    drop(vault);
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(error) => {
-            return LiveRun {
-                invocation,
-                asserted_mode: None,
-                transcript: format!("the binary could not be spawned: {error}"),
-                provider_requests: 0,
-                delegation_attempted: false,
-                child_turns: 0,
-                grandchild_turns: 0,
-                child_shell_ran: false,
-                child_shell_wrote_inside: false,
-                child_tool_results: String::new(),
-                transcript_path: String::new(),
-            };
+    let mut child = OwnedTree::new({
+        let spawned = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        drop(vault);
+        match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                return LiveRun {
+                    invocation,
+                    asserted_mode: None,
+                    transcript: format!("the binary could not be spawned: {error}"),
+                    provider_requests: 0,
+                    delegation_attempted: false,
+                    child_turns: 0,
+                    grandchild_turns: 0,
+                    child_shell_ran: false,
+                    child_shell_wrote_inside: false,
+                    child_tool_results: String::new(),
+                    transcript_path: String::new(),
+                };
+            }
         }
-    };
+    });
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -1031,31 +1034,33 @@ fn run_headless(world: &LiveWorld) -> LiveRun {
         .current_dir(world.cwd());
     pty::harden_child_env(&mut command, world.root());
     let vault = vault::configure_process(&mut command);
-    let spawned = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    drop(vault);
+    let mut child = OwnedTree::new({
+        let spawned = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        drop(vault);
 
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(error) => {
-            return LiveRun {
-                invocation,
-                asserted_mode: None,
-                transcript: format!("the binary could not be spawned: {error}"),
-                provider_requests: 0,
-                delegation_attempted: false,
-                child_turns: 0,
-                grandchild_turns: 0,
-                child_shell_ran: false,
-                child_shell_wrote_inside: false,
-                child_tool_results: String::new(),
-                transcript_path: String::new(),
-            };
+        match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                return LiveRun {
+                    invocation,
+                    asserted_mode: None,
+                    transcript: format!("the binary could not be spawned: {error}"),
+                    provider_requests: 0,
+                    delegation_attempted: false,
+                    child_turns: 0,
+                    grandchild_turns: 0,
+                    child_shell_ran: false,
+                    child_shell_wrote_inside: false,
+                    child_tool_results: String::new(),
+                    transcript_path: String::new(),
+                };
+            }
         }
-    };
+    });
 
     let streams = collect_streams(&mut child);
     // A bounded wait rather than `output()`, which has none: an unbounded

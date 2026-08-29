@@ -61,6 +61,10 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 /// Which answer the two backend-liveness probes behind
 /// `capabilities.browser_suite` / `.computer_use` should give for a run.
 ///
@@ -185,7 +189,7 @@ fn first_startup_events(backends: Backends) -> [serde_json::Value; 2] {
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
     apply_backend_env(&mut cmd, backends);
-    let mut child = cmd.spawn().expect("spawn wayland-core --json-stream");
+    let mut child = OwnedTree::new(cmd.spawn().expect("spawn wayland-core --json-stream"));
 
     // Read the first stdout line on a worker thread so we can enforce
     // a wall-clock timeout against a child that never emits.

@@ -28,6 +28,10 @@ use wcore_eval_scenarios::fixtures::openai::{
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
 use wcore_eval_scenarios::tempenv::{self, TempEnv};
 
+#[path = "support/mod.rs"]
+mod support;
+use support::owned_tree::OwnedTree;
+
 const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
 const FIXTURE_MODEL: &str = "fixture-chat-v1";
@@ -88,7 +92,7 @@ impl VaultSecret {
 }
 
 struct CoreProcess {
-    child: Child,
+    child: OwnedTree<Child>,
     stdin: ChildStdin,
     stdout: Lines<BufReader<ChildStdout>>,
     stderr: Arc<Mutex<Vec<u8>>>,
@@ -158,16 +162,18 @@ impl CoreProcess {
             );
         }
 
-        let child = command.spawn();
-        // SAFETY: after spawn, only the child may consume its inherited copy.
-        if let Some(vault_fd) = vault_fd {
-            assert_eq!(
-                unsafe { libc::close(vault_fd) },
-                0,
-                "close parent vault pipe"
-            );
-        }
-        let mut child = child.expect("spawn packaged wayland-core");
+        let mut child = OwnedTree::new({
+            let child = command.spawn();
+            // SAFETY: after spawn, only the child may consume its inherited copy.
+            if let Some(vault_fd) = vault_fd {
+                assert_eq!(
+                    unsafe { libc::close(vault_fd) },
+                    0,
+                    "close parent vault pipe"
+                );
+            }
+            child.expect("spawn packaged wayland-core")
+        });
         let stdin = child.stdin.take().expect("Core stdin pipe");
         let stdout = BufReader::new(child.stdout.take().expect("Core stdout pipe")).lines();
         let mut child_stderr = child.stderr.take().expect("Core stderr pipe");
@@ -339,7 +345,7 @@ impl CoreProcess {
     }
 
     async fn sigkill(mut self) -> Vec<u8> {
-        let pid = self.child.id().expect("running Core pid");
+        let pid = self.child.child_mut().id().expect("running Core pid");
         // SAFETY: `pid` came from the live child owned by this harness. The
         // signal has no attacker-controlled component and targets that exact
         // process only.
@@ -362,7 +368,10 @@ struct TuiProcess {
     writer: Box<dyn Write + Send>,
     parser: Arc<Mutex<vt100::Parser>>,
     _master: Box<dyn MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    // Held only for its `Drop`, which kills and reaps the whole process tree
+    // (FerroxLabs/wayland-core#352); nothing else in this file reads it.
+    #[allow(dead_code)]
+    child: OwnedTree<Box<dyn portable_pty::Child + Send + Sync>>,
     _reader: std::thread::JoinHandle<()>,
 }
 
@@ -405,10 +414,11 @@ impl TuiProcess {
         command.env_remove("GEMINI_API_KEY");
         command.env_remove("GOOGLE_API_KEY");
 
-        let child = pty
-            .slave
-            .spawn_command(command)
-            .expect("spawn packaged TUI");
+        let child = OwnedTree::new(
+            pty.slave
+                .spawn_command(command)
+                .expect("spawn packaged TUI"),
+        );
 
         let mut reader = pty.master.try_clone_reader().expect("clone TUI PTY reader");
         let parser = Arc::new(Mutex::new(vt100::Parser::new(40, 2_000, 0)));
@@ -497,13 +507,9 @@ impl TuiProcess {
     }
 }
 
-impl Drop for TuiProcess {
-    fn drop(&mut self) {
-        if let Ok(None) = self.child.try_wait() {
-            let _ = self.child.kill();
-        }
-    }
-}
+// No `impl Drop for TuiProcess`: `child` is an `OwnedTree`, whose own `Drop`
+// kills the whole process tree and reaps it — strictly stronger than the
+// leaf-only kill that used to live here (FerroxLabs/wayland-core#352).
 
 fn environment(fixture: &RunningOpenAiFixture) -> TempEnv {
     let provider = ProviderConfig::new(ProviderId::OpenAI, FIXTURE_MODEL)
@@ -618,15 +624,17 @@ async fn seed_recoverable_profile(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = command.spawn();
-    // SAFETY: after spawn, only the child may consume its inherited copy.
-    assert_eq!(
-        unsafe { libc::close(vault_fd) },
-        0,
-        "close parent seed vault pipe"
-    );
+    let child = OwnedTree::new({
+        let child = command.spawn();
+        // SAFETY: after spawn, only the child may consume its inherited copy.
+        assert_eq!(
+            unsafe { libc::close(vault_fd) },
+            0,
+            "close parent seed vault pipe"
+        );
+        child.expect("spawn recoverable-profile seeder")
+    });
     let output = child
-        .expect("spawn recoverable-profile seeder")
         .wait_with_output()
         .await
         .expect("wait for recoverable-profile seeder");
@@ -1340,7 +1348,7 @@ fn disable_sessions(env: &TempEnv) {
 
 #[cfg(target_os = "linux")]
 async fn spawn_keyless(mut command: Command) -> (CoreProcess, Value) {
-    let mut child = command.spawn().expect("spawn keyless wayland-core");
+    let mut child = OwnedTree::new(command.spawn().expect("spawn keyless wayland-core"));
     let stdin = child.stdin.take().expect("Core stdin pipe");
     let stdout = BufReader::new(child.stdout.take().expect("Core stdout pipe")).lines();
     let mut child_stderr = child.stderr.take().expect("Core stderr pipe");
@@ -1566,7 +1574,7 @@ async fn without_secure_store_an_operator_who_requires_durability_gets_a_refusal
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().expect("spawn packaged wayland-core");
+    let mut child = OwnedTree::new(command.spawn().expect("spawn packaged wayland-core"));
     drop(child.stdin.take());
     let output = tokio::time::timeout(EVENT_TIMEOUT, child.wait_with_output())
         .await
@@ -1920,10 +1928,12 @@ async fn a_session_whose_key_is_gone_is_refused_by_name_and_only_that_session() 
         .kill_on_drop(false);
     let output = tokio::time::timeout(
         EVENT_TIMEOUT,
-        command
-            .spawn()
-            .expect("spawn keyless resume of a locked session")
-            .wait_with_output(),
+        OwnedTree::new(
+            command
+                .spawn()
+                .expect("spawn keyless resume of a locked session"),
+        )
+        .wait_with_output(),
     )
     .await
     .expect("locked-session resume terminated")

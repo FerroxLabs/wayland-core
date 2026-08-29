@@ -962,19 +962,28 @@ impl WorkspacePolicy {
     /// business, and a benign-named symlink into the control surface resolves
     /// before the prefix match so it cannot be used to smuggle a write through.
     pub fn is_repo_control_path(&self, path: &Path) -> bool {
-        // `canon_deep`, not `canon_for_scope`: the root is canonicalized at
-        // construction, so a candidate that resolves to something shallower
-        // never matches it. `canon_for_scope` resolves only the IMMEDIATE
-        // parent and returns the RAW path when that parent is missing —
-        // which is exactly the shape of a NEW control file
+        // `canon_existing_ancestor`, not `canon_for_scope`: the root is
+        // canonicalized at construction, so a candidate that resolves to
+        // something shallower never matches it. `canon_for_scope` resolves only
+        // the IMMEDIATE parent and returns the RAW path when that parent is
+        // missing — which is exactly the shape of a NEW control file
         // (`.wayland-core/skills/<new>/SKILL.md`, `.git/<new>/hook`), and
         // exactly the write this guard exists to refuse. Measured on this
-        // tree before the change: with the workspace addressed through a
+        // tree before that change: with the workspace addressed through a
         // symlink, `Write` of `<link>/.git/hooks/pre-commit` (parent not yet
         // created) reported `Created`, while the same write addressed through
         // the real root was refused. See
         // `crates/wcore-tools/tests/repo_control_symlink.rs`.
-        let canon = canon_deep(path);
+        //
+        // #356: it was `canon_deep` until this line, and the doc comment above
+        // claims a benign-named symlink "resolves before the prefix match".
+        // That was only true of a link whose target already exists —
+        // `std::fs::canonicalize` fails on a DANGLING one, and the walk-up form
+        // then judged where the LINK sits. `canon_existing_ancestor` hops the
+        // link by hand (`resolve_prefix`), so the claim above is now true as
+        // written. Graded by
+        // `tests::a_dangling_symlink_into_the_skill_load_path_is_refused`.
+        let canon = canon_existing_ancestor(path);
         REPO_CONTROL_DIRS
             .iter()
             .any(|dir| canon.starts_with(self.root.join(dir)))
@@ -1013,13 +1022,26 @@ impl WorkspacePolicy {
     /// their `SKILL.md` files through `wcore_config::atomic_write` / `std::fs`,
     /// never the tool VFS, so skill installation and drafting are unaffected.
     pub fn is_skill_source_path(&self, path: &Path) -> bool {
-        let canon = canon_deep(path);
+        // #356 — WHICH resolver, stated here rather than only at its
+        // definition, because this file used to hold two with different escape
+        // properties seventy lines apart and a reader here could not see that a
+        // choice had been made. `canon_existing_ancestor` walks DOWN and
+        // re-resolves after every component; the walk-UP-and-append-verbatim
+        // form this call site used until #356 (`canon_deep`) could not see a
+        // path that reaches a load path through a DANGLING symlink, because
+        // `std::fs::canonicalize` fails on one and the component was then kept
+        // verbatim. Both escapes #1097 was written for are graded on THIS
+        // predicate by `tests::a_dangling_symlink_into_the_skill_load_path_is_refused`
+        // and `tests::a_parent_dir_after_a_missing_component_still_reaches_the_skill_load_path`,
+        // and end to end through the real `Write` tool by
+        // `wcore-agent/tests/skill_source_write_refusal.rs`.
+        let canon = canon_existing_ancestor(path);
         if under_project_load_path(&canon) {
             return true;
         }
         wcore_config::config::user_skill_source_dirs()
             .iter()
-            .any(|dir| canon.starts_with(canon_deep(dir)))
+            .any(|dir| canon.starts_with(canon_existing_ancestor(dir)))
     }
 
     /// Refuse a write target this session could never read back
@@ -2896,34 +2918,6 @@ pub(crate) fn canon_for_scope(path: &Path) -> PathBuf {
             .unwrap_or_else(|_| path.to_path_buf()),
         _ => path.to_path_buf(),
     }
-}
-
-/// Canonicalize as much of `path` as exists and keep the remainder verbatim.
-///
-/// [`canon_for_scope`] resolves only the IMMEDIATE parent and falls back to the
-/// raw path when that parent is missing. For a deny predicate that is a hole on
-/// any host whose config or temp root is itself a symlink (`/var` ->
-/// `/private/var` on macOS): the deny list resolves, the candidate does not, and
-/// the prefix comparison misses. The miss lands on exactly the case
-/// [`WorkspacePolicy::is_skill_source_path`] exists to catch — writing
-/// `<config_dir>/skills/<new-skill>/report.html` creates BOTH missing
-/// components, so "the parent exists" is false precisely when it matters.
-fn canon_deep(path: &Path) -> PathBuf {
-    if let Ok(resolved) = std::fs::canonicalize(path) {
-        return resolved;
-    }
-    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
-    let mut cursor = path;
-    while let (Some(parent), Some(name)) = (cursor.parent(), cursor.file_name()) {
-        trailing.push(name.to_os_string());
-        if let Ok(base) = std::fs::canonicalize(parent) {
-            let mut resolved = base;
-            resolved.extend(trailing.iter().rev());
-            return resolved;
-        }
-        cursor = parent;
-    }
-    path.to_path_buf()
 }
 
 /// True when any ancestor of `path` is a `.wayland-core/skills` or
