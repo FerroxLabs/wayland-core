@@ -232,6 +232,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request'
       || github.ref_name == 'main'
+      || startsWith(github.ref_name, 'integ/')
       || github.ref_name == 'plan/f20-unified-audit-repair'
       || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
       || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')

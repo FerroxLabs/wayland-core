@@ -134,6 +134,31 @@ def gate(text, verbose=True):
                 if t not in full:
                     fails.append("full build matrix lost %s" % t)
 
+    # EVERY SPELLING, not just the three the regexes above know about.
+    #
+    # 2026-08-30: the integration branch was added to the admission condition by
+    # a single-line string replace. It patched all five single-line clause
+    # groups -- both matrices and the reporting step -- and MISSED the `ci` job's
+    # own job-level `if:`, which is a multi-line folded scalar (`>-`) with each
+    # clause on its own line. The macOS BUILD targets duly ran and the `ci`
+    # matrix job skipped anyway, because the job gate still refused the branch.
+    # The change was verified against the matrix expression, i.e. against the
+    # thing edited rather than the thing that decides.
+    #
+    # So: find every `github.ref_name == 'main'` in the file, in any layout, and
+    # require each one to sit in a clause group that also admits `integ/`. This
+    # cannot be satisfied by patching a subset.
+    main_clauses = [m.start() for m in re.finditer(r"github\.ref_name == 'main'", text)]
+    if not main_clauses:
+        fails.append("no `github.ref_name == 'main'` clause found at all -- the admission "
+                     "condition has been restructured and this gate is now blind; fix the gate")
+    orphans = [i for i in main_clauses if "integ/" not in text[i:i + 160]]
+    if orphans:
+        lines = sorted({text.count("\n", 0, i) + 1 for i in orphans})
+        fails.append("%d admission clause group(s) admit `main` but NOT `integ/` -- the "
+                     "integration branch would be rationed like a lane there. Lines: %s"
+                     % (len(orphans), lines))
+
     cond = conds[0]
     for name, ev, ref, hm, cm, exp in CASES:
         got = evaluate(cond, ev, ref, hm, cm)
