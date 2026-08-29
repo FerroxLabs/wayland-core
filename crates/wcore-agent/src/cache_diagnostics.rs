@@ -57,6 +57,48 @@ fn hash_message(message: &Message) -> u64 {
     hasher.finish()
 }
 
+/// Did this turn read its PRIOR CONTEXT back out of the cache? (#1166 follow-up)
+///
+/// The absolute floor added for #1166 tests `cache_read / total_input`, which
+/// is the right question about a cache that never worked and the wrong one
+/// about a turn that simply carries a lot of NEW input. A warm turn that reads
+/// its whole 40k prefix back and then adds a 150k tool result scores 0.21 on
+/// that ratio, and the floor reported it as `PartialMiss { TtlExpiry }` — an
+/// invalidation that did not happen, attributed to the server, and written
+/// durably into the cache ledger as `expired`. That is #1166's own Defect 4
+/// re-entering through #1166's fix.
+///
+/// The discriminator is the denominator. Measure `cache_read` against the
+/// PREVIOUS turn's total input — the context a working cache would have to
+/// hand back — instead of against this turn's. On the measured #559 leader
+/// session that is 192 / 6_220 = 0.031 and the floor still fires; on a fully
+/// reused prefix it is 40_000 / 40_500 = 0.988 and it does not.
+///
+/// `prior_context_tokens == 0` is not evidence of reuse (there was no prior
+/// turn, or it processed nothing), so it does NOT suppress.
+fn cached_prefix_covers_prior_context(cache_read_tokens: u64, prior_context_tokens: u64) -> bool {
+    prior_context_tokens > 0
+        && (cache_read_tokens as f64 / prior_context_tokens as f64) >= CACHE_HEALTH_WARN_RATIO
+}
+
+/// How much of the previous turn's `cache_read` may be lost before it counts as
+/// a partial miss.
+const CACHE_READ_DROP_TOLERANCE: f64 = 0.05;
+
+/// Did `cache_read` fall materially against the previous turn's?
+///
+/// One function, because BOTH halves have to apply it or they disagree.
+/// `compute_diagnostic` has always tested this before reaching the absolute
+/// floor, so the floor's prior-context suppression can never swallow a real
+/// drop. `check_cache_health` has no drop branch of its own — until this
+/// existed, its copy of the suppression could, and the two halves would then
+/// report a turn as `PartialMiss` and stay silent about it in the same breath.
+/// That is ticket Defect 2 (the detecting half and the explaining half being
+/// different paths) re-entering through the #1166 c5 repair.
+fn cache_read_dropped(current: u64, previous: u64) -> bool {
+    previous > 0 && (1.0 - (current as f64 / previous as f64)) > CACHE_READ_DROP_TOLERANCE
+}
+
 /// First index at which two turns' message arrays diverge, if any.
 ///
 /// Only the COMMON prefix is compared. Appending a message is the shape of
@@ -152,6 +194,17 @@ pub struct CacheBreakDetector {
     current_snapshot: Option<PromptSnapshot>,
     /// Cache stats from the previous API response.
     prev_stats: Option<CacheStats>,
+    /// Total input the turn BEFORE `prev_stats` processed — the context a
+    /// working cache would have to read back on the turn `check_cache_health`
+    /// is probing. `check_response` rotates `prev_stats` to the CURRENT turn
+    /// before the engine calls `check_cache_health`, so that field cannot
+    /// answer this question; `compute_diagnostic` runs before the rotation and
+    /// reads its own `prev` directly.
+    prior_context_tokens: Option<u64>,
+    /// `cache_read` on the turn before `prev_stats`, for the same reason and
+    /// with the same rotation caveat as `prior_context_tokens`. Feeds
+    /// [`cache_read_dropped`] on the `check_cache_health` side.
+    prior_cache_read_tokens: Option<u64>,
     /// Layer E1 — completed round-trips (responses seen via
     /// [`check_response`]). Drives the warm-session gate for
     /// [`check_cache_health`].
@@ -170,6 +223,8 @@ impl CacheBreakDetector {
             prev_snapshot: None,
             current_snapshot: None,
             prev_stats: None,
+            prior_context_tokens: None,
+            prior_cache_read_tokens: None,
             round_trips: 0,
             seen_cache_tokens: false,
         }
@@ -229,6 +284,8 @@ impl CacheBreakDetector {
         if stats.cache_read_tokens > 0 || stats.cache_creation_tokens > 0 {
             self.seen_cache_tokens = true;
         }
+        self.prior_context_tokens = self.prev_stats.as_ref().map(CacheStats::total_input_tokens);
+        self.prior_cache_read_tokens = self.prev_stats.as_ref().map(|s| s.cache_read_tokens);
         self.prev_stats = Some(stats);
         Some(diagnostic)
     }
@@ -254,6 +311,19 @@ impl CacheBreakDetector {
         }
         let ratio = stats.cache_read_tokens as f64 / total_input_tokens as f64;
         if ratio >= CACHE_HEALTH_WARN_RATIO {
+            return None;
+        }
+        // #1166 follow-up — a low ratio on a turn that read its whole prior
+        // context back is a big new input, not a break. Same guard as the
+        // absolute floor in `compute_diagnostic`, so the two halves cannot
+        // disagree about whether this turn was healthy.
+        if cached_prefix_covers_prior_context(
+            stats.cache_read_tokens,
+            self.prior_context_tokens.unwrap_or(0),
+        ) && !cache_read_dropped(
+            stats.cache_read_tokens,
+            self.prior_cache_read_tokens.unwrap_or(0),
+        ) {
             return None;
         }
         // #1166 — attribute, do not just report. `current_snapshot` is always
@@ -306,12 +376,9 @@ impl CacheBreakDetector {
         };
 
         // Partial miss: cache_read dropped >5% compared to previous
-        if prev.cache_read_tokens > 0 {
-            let drop_pct = 1.0 - (stats.cache_read_tokens as f64 / prev.cache_read_tokens as f64);
-            if drop_pct > 0.05 {
-                let cause = self.attribute_cause(current);
-                return CacheDiagnostic::PartialMiss { hit_rate, cause };
-            }
+        if cache_read_dropped(stats.cache_read_tokens, prev.cache_read_tokens) {
+            let cause = self.attribute_cause(current);
+            return CacheDiagnostic::PartialMiss { hit_rate, cause };
         }
 
         // #1166 — the absolute floor. Every test above measures this turn
@@ -322,10 +389,18 @@ impl CacheBreakDetector {
         // the ratio against this turn's own input as well, behind the same
         // warm-session and provider-supports-caching gates
         // `check_cache_health` uses, so the two halves cannot disagree.
+        // The floor must not fire on a turn that read its whole prior context
+        // back: `cached_prefix_covers_prior_context` is the discriminator
+        // between a cache that never worked (the #559 leader, 192 / 6_220)
+        // and one that worked perfectly under a large new input.
         if self.round_trips >= CACHE_HEALTH_WARM_AFTER_ROUND_TRIPS
             && self.seen_cache_tokens
             && total_input_tokens > 0
             && hit_rate < CACHE_HEALTH_WARN_RATIO
+            && !cached_prefix_covers_prior_context(
+                stats.cache_read_tokens,
+                prev.total_input_tokens(),
+            )
         {
             let cause = self.attribute_cause(current);
             return CacheDiagnostic::PartialMiss { hit_rate, cause };
@@ -843,6 +918,169 @@ mod tests {
                 "turn {turn} of a healthy trace must not fire a health alert"
             );
         }
+    }
+
+    /// #1166 follow-up — the absolute floor must not manufacture an
+    /// invalidation on a turn where the cache worked perfectly.
+    ///
+    /// The floor tests `cache_read / total_input`, so ANY warm turn whose NEW
+    /// input dwarfs the cached prefix trips it — even when the entire prefix
+    /// was read back verbatim. That is the shape of a long tool result, a
+    /// pasted file, or a `Read` of a large source file: nothing was
+    /// invalidated, the whole prior context came back from cache, and the
+    /// ratio collapses purely because the numerator did not grow with the
+    /// denominator. Reporting `PartialMiss { cause: TtlExpiry }` there blames
+    /// the server's TTL for an event that did not happen, and (via
+    /// `cause_of_diagnostic`) writes a durable `expired` invalidation into the
+    /// cache ledger.
+    ///
+    /// The discriminator is prior-context coverage: `cache_read` measured
+    /// against the PREVIOUS turn's total input, which is what a working cache
+    /// would have to read back. Here that is 40_000 / 40_500 = 0.988. In the
+    /// #559 leader session it was 192 / 6_220 = 0.031, which is why
+    /// `flat_cache_read_on_warm_session_is_not_healthy` still reddens.
+    #[test]
+    fn a_fully_reused_prefix_under_a_large_new_input_is_not_an_invalidation() {
+        let mut detector = CacheBreakDetector::new();
+
+        // Three healthy warm turns: 40k of prefix read back against 500 new.
+        for turn in 1..=3u64 {
+            detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+            let stats = CacheStats {
+                input_tokens: 500,
+                cache_read_tokens: 40_000,
+                cache_creation_tokens: 0,
+            };
+            let diag = detector.check_response(stats.clone()).unwrap();
+            assert!(
+                matches!(diag, CacheDiagnostic::Healthy { .. }),
+                "warm-up turn {turn} must be Healthy, got {diag:?}"
+            );
+            assert!(detector.check_cache_health(&stats).is_none());
+        }
+
+        // Turn 4: the SAME 40k prefix is read back — nothing was invalidated —
+        // but the turn carries 150k of new input, so the hit ratio is 0.21.
+        detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+        let stats = CacheStats {
+            input_tokens: 150_000,
+            cache_read_tokens: 40_000,
+            cache_creation_tokens: 0,
+        };
+        let diag = detector
+            .check_response(stats.clone())
+            .expect("detector must produce a diagnostic");
+        assert!(
+            matches!(diag, CacheDiagnostic::Healthy { .. }),
+            "the whole prior context was read back from cache; nothing expired. \
+             got {diag:?}"
+        );
+        assert!(
+            detector.check_cache_health(&stats).is_none(),
+            "a turn that read its entire prior context back must not fire a \
+             cache-health alert: {:?}",
+            detector.check_cache_health(&stats)
+        );
+    }
+
+    /// Control on the #1166 c5 suppression: it must not open a blind spot.
+    ///
+    /// The suppression fires when `cache_read / previous total input` is at or
+    /// above the threshold. There is a window where that is true and the turn's
+    /// own hit ratio is still under the floor — it needs the turn's input to
+    /// more than triple — and a REAL partial invalidation can land inside it.
+    /// Here the previous turn read 40_000 back and this one reads 13_000
+    /// (coverage 13_000 / 40_500 = 0.32, so the suppression is armed) while the
+    /// turn carries 137_000 of new input (hit ratio 0.087, under the floor).
+    /// Two-thirds of the cached prefix is gone; that is a break and must be
+    /// reported by BOTH halves.
+    #[test]
+    fn a_real_drop_inside_the_suppression_window_is_still_reported() {
+        let mut detector = CacheBreakDetector::new();
+
+        for _ in 0..3 {
+            detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+            let stats = CacheStats {
+                input_tokens: 500,
+                cache_read_tokens: 40_000,
+                cache_creation_tokens: 0,
+            };
+            detector.check_response(stats.clone());
+            assert!(detector.check_cache_health(&stats).is_none());
+        }
+
+        detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+        let stats = CacheStats {
+            input_tokens: 137_000,
+            cache_read_tokens: 13_000,
+            cache_creation_tokens: 0,
+        };
+        assert!(
+            cached_prefix_covers_prior_context(13_000, 40_500),
+            "the premise of this control is that the suppression IS armed here; \
+             if it is not, the test is no longer probing the window"
+        );
+        let diag = detector.check_response(stats.clone()).unwrap();
+        assert!(
+            matches!(diag, CacheDiagnostic::PartialMiss { .. }),
+            "two thirds of the cached prefix was lost; that is a partial miss, \
+             not a large new input. got {diag:?}"
+        );
+        assert!(
+            detector.check_cache_health(&stats).is_some(),
+            "the detecting half reported PartialMiss and the alerting half said \
+             nothing -- that is #1166 Defect 2, and the two halves are supposed \
+             to apply one rule"
+        );
+    }
+
+    /// #1166 c4 — the snapshot must describe the request actually DISPATCHED.
+    ///
+    /// The criterion is positional: it is about which side of the smart-routing
+    /// tier swap and the transient tail injections `record_request` sits on.
+    /// It had been anchored on a bare `engine.rs` line number, which resolves
+    /// against any file long enough and had already drifted onto an unrelated
+    /// block by the time this was re-graded — so the criterion was carrying an
+    /// anchor that could never fail. This lint is the anchor instead.
+    ///
+    /// Snapshotted before the swap, `request.model` is the pre-swap model and a
+    /// genuinely cold pool reports `TtlExpiry` (ticket Defect 4); snapshotted
+    /// before the tail injections, the #559 prefix mutation — which lived in
+    /// exactly one of them — is invisible to attribution (ticket Defect 3).
+    #[test]
+    fn the_snapshot_is_taken_after_the_tier_swap_and_the_transient_injections() {
+        const ENGINE: &str = include_str!("engine.rs");
+        const SWAP: &str = "request.model = tier_model.clone();";
+        const HINT: &str = "Self::attach_transient_block(last, hint);";
+        const RECORD: &str = "self.cache_detector.record_request(";
+
+        // Controls: each marker must be present exactly once, so a rename
+        // reddens this test instead of making it pass vacuously on an absence.
+        for (label, marker) in [("swap", SWAP), ("hint", HINT), ("record", RECORD)] {
+            assert_eq!(
+                ENGINE.matches(marker).count(),
+                1,
+                "{label} marker `{marker}` is not in engine.rs exactly once; \
+                 this lint can no longer say anything about the ordering"
+            );
+        }
+
+        let swap = ENGINE.find(SWAP).unwrap();
+        let hint = ENGINE.find(HINT).unwrap();
+        let record = ENGINE.find(RECORD).unwrap();
+
+        assert!(
+            record > swap,
+            "cache_detector.record_request runs BEFORE the smart-routing tier \
+             swap, so the snapshot names the pre-swap model and a cold pool is \
+             attributed to the server's TTL (#1166 Defect 4)"
+        );
+        assert!(
+            record > hint,
+            "cache_detector.record_request runs BEFORE the skill-router hint \
+             is attached, so a prefix mutation in a transient tail injection is \
+             invisible to attribution (#1166 Defect 3, and the #559 cause)"
+        );
     }
 
     /// Control for the warm-session gate on the absolute floor. Turns 1 and 2

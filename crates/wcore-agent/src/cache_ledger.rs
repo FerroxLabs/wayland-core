@@ -71,7 +71,18 @@ use crate::cache_diagnostics::{CacheBreakCause, CacheDiagnostic};
 
 /// On-disk schema version. Bumped when a field's meaning changes; readers
 /// refuse a version they do not understand rather than silently mis-reporting.
-pub const LEDGER_SCHEMA: u32 = 1;
+///
+/// `2` (#1163 follow-up): [`TurnSample::uncached_equivalent_usd`] changed from
+/// `f64` to `Option<f64>`, and with it the MEANING of a zero. A v1 writer set
+/// the field to `0.0` precisely when nothing could price the counterfactual —
+/// that zero is the fabricated baseline #1163 was filed about. A v2 writer
+/// omits the field in that case and writes `Some(0.0)` only for a genuine
+/// priced zero. `#[serde(default)]` decodes a v1 `0.0` as `Some(0.0)`, so
+/// reading a v1 file at schema 1 reproduces the ticket verbatim on the fixed
+/// build — the same `saving_usd = -cost`, now additionally graded
+/// `saving_truth=priced`. The version is what lets the reader tell the two
+/// zeros apart; see [`migrate_v1_counterfactual`].
+pub const LEDGER_SCHEMA: u32 = 2;
 
 /// Directory name under the Wayland home holding one ledger per session.
 pub const LEDGER_DIR: &str = "cache-ledger";
@@ -167,9 +178,14 @@ pub struct TurnSample {
     /// provider×model — no catalog row and no user-supplied rate. A
     /// provider-family preset is deliberately not accepted here: it is a
     /// conservative ceiling, and subtracting a real billed figure from a
-    /// ceiling is not a measurement. Absent on the wire (#1163); a `0.0` read
-    /// back from a ledger an older build wrote decodes as `Some(0.0)`, which is
-    /// what that build meant by it.
+    /// ceiling is not a measurement. Absent on the wire (#1163).
+    ///
+    /// A `0.0` in a **v1** file does NOT mean `Some(0.0)`: v1 wrote `0.0`
+    /// exactly when nothing could price the counterfactual, which is the
+    /// fabricated baseline this field was made optional to remove. `load`
+    /// therefore migrates a v1 zero back to `None` — see
+    /// [`migrate_v1_counterfactual`] — instead of letting `#[serde(default)]`
+    /// launder it into a priced zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uncached_equivalent_usd: Option<f64>,
 
@@ -812,23 +828,56 @@ pub fn save(ledger: &CacheLedger, path: &Path) -> Result<(), LedgerError> {
     })
 }
 
-/// Read one ledger, refusing an unknown schema.
+/// Undo the v1 zero-counterfactual default (#1163).
+///
+/// v1 stored the counterfactual as a bare `f64` and wrote `0.0` when the model
+/// had no catalog row, so the saving rendered as `-cost` against a baseline
+/// nobody computed. v2 makes the field optional and omits it in that case, but
+/// `#[serde(default)]` cannot tell a v1 `0.0` from a v2 `Some(0.0)` — only the
+/// schema version can. Every v1 zero is therefore mapped back to `None`, which
+/// is what that writer actually knew.
+///
+/// A v1 turn whose counterfactual was a genuine priced zero (a round-trip that
+/// processed no tokens) is demoted to unknown by this. That is the safe
+/// direction: an unknown saving renders as unknown, whereas a false zero
+/// renders as a confident negative number, which is the ticket.
+fn migrate_v1_counterfactual(ledger: &mut CacheLedger) {
+    for turn in &mut ledger.turns {
+        if turn.uncached_equivalent_usd == Some(0.0) {
+            turn.uncached_equivalent_usd = None;
+        }
+    }
+    ledger.schema = LEDGER_SCHEMA;
+}
+
+/// Read one ledger, refusing a schema this build cannot account for.
+///
+/// Every older schema needs its OWN arm in the match below — a version range
+/// would silently apply the v1 migration to a v2 file the day
+/// [`LEDGER_SCHEMA`] goes to 3, which is the same class of harm the migration
+/// exists to undo. The migration is read-only: the file on disk keeps its own
+/// version until something writes it again, so a downgrade still finds the
+/// ledger it left behind.
 pub fn load(path: &Path) -> Result<CacheLedger, LedgerError> {
     let raw = std::fs::read(path).map_err(|source| LedgerError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    let ledger: CacheLedger =
+    let mut ledger: CacheLedger =
         serde_json::from_slice(&raw).map_err(|source| LedgerError::Malformed {
             path: path.to_path_buf(),
             source,
         })?;
-    if ledger.schema != LEDGER_SCHEMA {
-        return Err(LedgerError::SchemaMismatch {
-            path: path.to_path_buf(),
-            found: ledger.schema,
-            expected: LEDGER_SCHEMA,
-        });
+    match ledger.schema {
+        LEDGER_SCHEMA => {}
+        1 => migrate_v1_counterfactual(&mut ledger),
+        found => {
+            return Err(LedgerError::SchemaMismatch {
+                path: path.to_path_buf(),
+                found,
+                expected: LEDGER_SCHEMA,
+            });
+        }
     }
     Ok(ledger)
 }
@@ -1416,6 +1465,173 @@ mod tests {
             load(&path),
             Err(LedgerError::SchemaMismatch { .. })
         ));
+    }
+
+    /// A ledger written by v0.13.9 or earlier, in the shape `git show v0.13.9`
+    /// confirms: schema 1, `uncached_equivalent_usd` a bare `0.0` because
+    /// `flux-reasoning` has no catalog row. Read back at schema 1 this
+    /// reproduced #1163 character-for-character on the FIXED build —
+    /// `saving_usd=-0.061389`, and now additionally `saving_truth=priced`,
+    /// a confidence the pre-fix build never claimed.
+    fn legacy_v1_ledger_json(cost_usd: f64) -> serde_json::Value {
+        let mut v = serde_json::to_value(CacheLedger::new("aa55aa55-0002")).unwrap();
+        v["schema"] = serde_json::json!(1);
+        let mut turn = serde_json::to_value(sample(1, 0, 7232, 0)).unwrap();
+        turn["cost_usd"] = serde_json::json!(cost_usd);
+        turn["cost_source"] = serde_json::json!("provider_reported");
+        // v1 wrote the field unconditionally, as a bare f64.
+        turn["uncached_equivalent_usd"] = serde_json::json!(0.0);
+        v["turns"] = serde_json::json!([turn]);
+        v
+    }
+
+    #[test]
+    fn a_legacy_zero_counterfactual_does_not_read_back_as_a_priced_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("legacy.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&legacy_v1_ledger_json(0.061389)).unwrap(),
+        )
+        .unwrap();
+
+        let back = load(&path).expect("a v1 ledger must still be readable");
+        assert_eq!(
+            back.turns[0].uncached_equivalent_usd, None,
+            "v1 wrote 0.0 to mean `nothing could price this`; decoding it as \
+             Some(0.0) is the fabricated baseline #1163 is about"
+        );
+
+        let s = back.summarize();
+        assert_eq!(
+            s.cache_saving_usd(),
+            None,
+            "the saving must render as unknown, not as a negative number \
+             against a baseline nobody computed"
+        );
+        assert_eq!(s.counterfactual_unpriced_round_trips, 1);
+        assert_ne!(
+            s.saving_truth(),
+            CostTruth::Priced,
+            "a saving computed against an unknown counterfactual must not be \
+             graded priced"
+        );
+    }
+
+    /// The migration must not invent unknowns where the writer knew something.
+    /// A v1 row with a real, non-zero counterfactual keeps it, so an operator
+    /// upgrading does not lose the savings they could already see.
+    #[test]
+    fn a_legacy_priced_counterfactual_survives_the_migration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("legacy-priced.json");
+        let mut v = legacy_v1_ledger_json(0.02);
+        v["turns"][0]["uncached_equivalent_usd"] = serde_json::json!(0.05);
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+
+        let back = load(&path).unwrap();
+        assert_eq!(back.turns[0].uncached_equivalent_usd, Some(0.05));
+        let s = back.summarize();
+        assert!((s.cache_saving_usd().expect("priced") - 0.03).abs() < 1e-9);
+        assert_eq!(s.counterfactual_unpriced_round_trips, 0);
+    }
+
+    /// The version is what makes the two zeros distinguishable, so a build
+    /// that writes the new meaning must not stamp the old version.
+    #[test]
+    fn a_new_ledger_is_stamped_with_the_schema_that_carries_the_new_meaning() {
+        // Read the stamp off a ledger this build actually constructs, rather
+        // than off the constant: `assert!(LEDGER_SCHEMA > 1)` is a constant
+        // expression and `clippy::assertions_on_constants` (denied in CI)
+        // refuses it -- and the interesting claim is about what gets WRITTEN
+        // anyway.
+        let stamped = CacheLedger::new("s").schema;
+        assert_eq!(stamped, LEDGER_SCHEMA);
+        assert!(
+            stamped > 1,
+            "uncached_equivalent_usd changed meaning in place; the module's \
+             own rule is that the version is bumped when it does"
+        );
+    }
+
+    /// #1166 ticket Defect 5 — "off by default". Only the CHAT-VISIBLE half is,
+    /// and that is deliberate.
+    ///
+    /// `compact.cache_diagnostics` defaults to `false` and stays there: it
+    /// gates the three `emit_info` lines that print a cache verdict into the
+    /// conversation, which #101 filed as alarming users over normal behaviour
+    /// (a `TtlExpiry` after a pause is expected). What must NOT sit behind it
+    /// are the two DETECTING surfaces — the `cache_health_warn` tracing event
+    /// (the CLI's default filter is `info`, so a `warn!` is emitted) and the
+    /// ledger record (`recording_enabled` is on unless the env kill-switch is
+    /// set). A default install therefore still detects, still attributes and
+    /// still persists the verdict; it just does not interrupt the chat.
+    ///
+    /// A source lint rather than a runtime assertion because the property is
+    /// positional: it is about which side of a brace an emission sits on.
+    #[test]
+    fn a_default_install_still_detects_and_records_a_cache_break() {
+        const ENGINE: &str = include_str!("engine.rs");
+        const GATE: &str = "if self.compact_config.cache_diagnostics {";
+
+        let gates: Vec<usize> = ENGINE.match_indices(GATE).map(|(i, _)| i).collect();
+        assert!(
+            !gates.is_empty(),
+            "the `{GATE}` gate is not in engine.rs at all -- this lint can no \
+             longer say anything about what is behind it"
+        );
+
+        let bytes = ENGINE.as_bytes();
+        let mut gated: Vec<&str> = Vec::new();
+        for start in gates {
+            let open = start + GATE.len() - 1;
+            let mut depth = 0usize;
+            let mut end = open;
+            for (i, b) in bytes.iter().enumerate().skip(open) {
+                match b {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            gated.push(&ENGINE[open..=end]);
+        }
+
+        // Controls on the extraction itself: a runaway brace match would
+        // swallow the rest of the file and make every probe below pass for the
+        // wrong reason, and an empty body would make them pass vacuously.
+        for body in &gated {
+            assert!(
+                body.len() > 20 && body.len() < 1_000,
+                "brace matching produced a {}-byte block; the extraction is \
+                 wrong, so its verdict means nothing",
+                body.len()
+            );
+            assert!(
+                body.contains("emit_info"),
+                "cache_diagnostics gates the chat-visible emit_info lines and \
+                 nothing else; found a gated block that emits nothing: {body}"
+            );
+        }
+
+        for probe in ["cache_health_warn", "recording_enabled"] {
+            assert!(
+                ENGINE.contains(probe),
+                "{probe} is not in engine.rs at all -- this lint is asking \
+                 about something that no longer exists"
+            );
+            assert!(
+                gated.iter().all(|body| !body.contains(probe)),
+                "{probe} moved inside `{GATE}`. A default install would stop \
+                 detecting the break, which is ticket Defect 5 of #1166"
+            );
+        }
     }
 
     #[test]
