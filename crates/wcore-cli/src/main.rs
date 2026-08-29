@@ -8613,7 +8613,9 @@ mod tests {
         // nothing and would pass vacuously. Both sites exist today.
         assert!(
             eof_sites.len() >= 2,
-            "expected at least the 2 known host-EOF sites, found {} -- the              marker this scan looks for must have been renamed, and the check              below is now vacuous",
+            "expected at least the 2 known host-EOF sites, found {} -- the \
+                marker this scan looks for must have been renamed, and the check \
+                below is now vacuous",
             eof_sites.len()
         );
 
@@ -8621,7 +8623,11 @@ mod tests {
             let window = code[site..code.len().min(site + 8)].join(" ");
             assert!(
                 window.contains("deny_pending_approvals_on_host_eof("),
-                "the host-EOF site at code line {site} (of comment-stripped                  source) does not drain the approval stores. Every                  `commands_open = false` site must call                  deny_pending_approvals_on_host_eof, or a bridge approval                  parked there waits out CRUCIBLE_APPROVAL_TTL (86,400s).                  Context: {window}"
+                "the host-EOF site at code line {site} (of comment-stripped \
+                    source) does not drain the approval stores. Every \
+                    `commands_open = false` site must call \
+                    deny_pending_approvals_on_host_eof, or a bridge approval \
+                    parked there waits out CRUCIBLE_APPROVAL_TTL (86,400s).                  Context: {window}"
             );
         }
     }

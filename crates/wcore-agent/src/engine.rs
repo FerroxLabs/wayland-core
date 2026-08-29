@@ -29759,11 +29759,13 @@ mod audit_2026_05_22_tests {
         let connect = wcore_providers::http_client::CONNECT_TIMEOUT;
         assert_eq!(
             sends, 2,
-            "a stalled endpoint was dialled {sends} times at {connect:?} each;              the measured 92.4 s of #1077 is exactly what 3 buys"
+            "a stalled endpoint was dialled {sends} times at {connect:?} each; \
+                the measured 92.4 s of #1077 is exactly what 3 buys"
         );
         assert!(
             elapsed < connect * 3,
-            "the turn spent {elapsed:?}, at or past the three full connect              deadlines this ceiling exists to stop"
+            "the turn spent {elapsed:?}, at or past the three full connect \
+                deadlines this ceiling exists to stop"
         );
         // KNOWN-POSITIVE CONTROL for the bound above: an assertion that the
         // turn took LESS than something is satisfied for free by a turn that
@@ -38274,7 +38276,8 @@ mod stream_retry_budget_tests {
         );
         assert!(
             budget < super::DEFAULT_MAX_STREAM_RETRIES,
-            "a stalled attempt still gets the full {} retries: that is              {:?} of wall clock for an endpoint that has already answered              the same way — the measured 92.4 s of #1077",
+            "a stalled attempt still gets the full {} retries: that is              {:?} of wall clock for an endpoint that has already answered \
+                the same way — the measured 92.4 s of #1077",
             super::DEFAULT_MAX_STREAM_RETRIES,
             connect * (super::DEFAULT_MAX_STREAM_RETRIES + 1),
         );

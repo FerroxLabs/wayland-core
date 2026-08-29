@@ -1505,6 +1505,30 @@ jobs:
           python3 scripts/check-test-env-globals.py --self-test
           python3 scripts/check-test-env-globals.py
 
+      # ── message-whitespace gate (FerroxLabs/wayland#1162, defect D22) ──
+      # A multi-line message written with `\`-newline continuations gets
+      # collapsed onto one source line by a tooling pass, and the SOURCE
+      # indentation that used to follow the continuation survives inside the
+      # string. The operator then reads "keyed by the engine's internal
+      #           conversation id" on the terminal. Nothing else in the
+      # toolchain can see it: rustfmt does not format string contents, and the
+      # assertions written over these messages are `contains("cache list")`
+      # shaped, which the mangled text satisfies. 23 messages were shipped this
+      # way, including the one #1162 was opened to improve.
+      #
+      # It fails only on a run of 4+ spaces BETWEEN TWO WORDS OF PROSE, at
+      # least three words into the literal, in a literal carrying no explicit
+      # `\n`/`\t`. That triple is what keeps deliberate column padding
+      # ("bundle        intact", "health:        UNAVAILABLE"), key hints
+      # ("↑↓ move   i details") and embedded code fixtures out of it. The
+      # `--self-test` drives both directions -- 12 cases, 3 that must fire and
+      # 9 that must stay silent -- so a scanner that has stopped matching fails
+      # loudly rather than passing everything.
+      - name: No collapsed continuation whitespace in messages
+        run: |
+          python3 scripts/check-message-whitespace.py --self-test
+          python3 scripts/check-message-whitespace.py crates
+
       # ── criteria-ledger gate ──────────────────────────────────────────
       # `.planning/ledger/<repo>-<number>.md` says what must be TRUE for an
       # issue to close and anchors every `met` claim to something a machine

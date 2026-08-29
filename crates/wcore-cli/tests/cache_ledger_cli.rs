@@ -815,6 +815,31 @@ fn an_unknown_session_id_still_fails_and_says_where_to_look() {
         err.contains("cache list"),
         "the error must point at the verb that lists the real keys:\n{err}"
     );
+
+    // #1162 / defect D22 -- the MESSAGE is this ticket's deliverable, so its
+    // shape is graded, not just its keywords. The message shipped with runs of
+    // ten and twenty-two literal spaces mid-sentence: a `\`-newline
+    // continuation was collapsed onto one source line and the source
+    // indentation stayed inside the string. `contains("cache list")` above is
+    // satisfied by the mangled text, which is why it went out unnoticed.
+    //
+    // Pinned two ways. First the exact sentence, spelled with single spaces --
+    // this is the clause that carried the ten-space run.
+    assert!(
+        err.contains("keyed by the engine's internal conversation id"),
+        "the explanation of what the key really is must read as one sentence, \
+            not as words separated by collapsed source indentation:\n{err}"
+    );
+    // Then the general shape, so the next collapse anywhere in this message is
+    // caught even if the wording changes. Leading indentation of a wrapped
+    // terminal line is not this defect, hence `trim_start`.
+    for line in err.lines() {
+        assert!(
+            !line.trim_start().contains("   "),
+            "the failure message carries a run of collapsed source indentation \
+                mid-sentence; join the words with a single space:\n{err}"
+        );
+    }
 }
 
 // ── #1163: an unpriceable counterfactual must render as unknown ─────────────

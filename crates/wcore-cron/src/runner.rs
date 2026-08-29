@@ -1223,7 +1223,8 @@ mod tests {
     fn unless_is_not_the_pager_less() {
         // Prose that says a skill needs no credentials was refused because
         // "unless" contains "less " and the sentence contains "credentials".
-        let target = "This skill reads public daily closes. It needs no credentials                       unless you point it at a private feed.";
+        let target = "This skill reads public daily closes. It needs no credentials \
+            unless you point it at a private feed.";
         assert_eq!(scan_target_text(target), None);
         for word in ["unless ", "regardless ", "useless ", "nevertheless "] {
             let t = format!("{word}the credentials are not needed");
