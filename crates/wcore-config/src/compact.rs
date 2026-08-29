@@ -54,27 +54,76 @@ pub const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
 /// that already exists, whereas the silent-truncation case is none of those.
 pub const UNVERIFIED_CONTEXT_WINDOW: usize = 32_768;
 
-/// Autocompact threshold, as a fraction of the window, for the ONE degenerate
-/// case: `window - output_reserve - autocompact_buffer` saturating to zero.
+/// FerroxLabs/wayland#1179 — the largest share of a context window the
+/// ABSOLUTE reserve buffers may consume before they are scaled down.
 ///
-/// Those buffers are ABSOLUTE and were tuned for a 200k window — 33,000 tokens
-/// of headroom, 16.5% there but 100.7% of a 32,768-token window. Zero is not
-/// "no threshold" anywhere in the trigger path, it is "always fire":
-/// `should_autocompact` tests `tokens >= threshold`
-/// (`wcore_agent::compact::auto`) and `ContextPressure::admits_trigger`
-/// short-circuits to `true` on a zero threshold by name
-/// (`wcore_agent::compact::micro`). An operator who took the unknown-window
-/// notice at its word and set `context_window = 32768` would have got an LLM
-/// summarization at the top of every single turn.
+/// # The problem this replaces
 ///
-/// It is a REPLACEMENT for the saturated value, not a floor applied to every
-/// window: `wcore_agent::compact::auto::autocompact_threshold` reaches for it
-/// only when the subtraction already collapsed. A general floor at this
-/// fraction would also have moved windows between ~33,000 and ~110,000, and
-/// #1150 is no evidence about that band. Every window above 33,000 tokens —
-/// which is every model in the `limits` catalogue, the smallest being
-/// 128,000 — keeps exactly the threshold it had.
-pub const MIN_AUTOCOMPACT_WINDOW_FRACTION: f64 = 0.70;
+/// `output_reserve` + `autocompact_buffer` is 33,000 tokens by default, tuned
+/// when the only window in play was 200,000. That is 16.5% of a 200k window,
+/// 100.7% of a 32,768-token one, and 806% of the 4,096-token slot #1172
+/// measured a stock Ollama actually serving. Subtracting an absolute figure
+/// from a window an order of magnitude smaller does not produce a conservative
+/// boundary, it produces a degenerate one: `input_ceiling()` saturates to zero
+/// (the #255 pre-flight guard then fires on EVERY turn and aborts the run) and
+/// the autocompact threshold saturates to zero, which on that path means
+/// ALWAYS FIRE, not "no threshold".
+///
+/// #1150 patched the second of those with a 0.70-of-window replacement used
+/// only when the subtraction had already collapsed. That closed the cliff and
+/// left the slope: at 32,768 the threshold became 22,937 while the pre-flight
+/// ceiling stayed at 32,768 − 23,000 = 9,768, so the guard shed and aborted
+/// at 9,768 and autocompact — sitting 13,169 tokens ABOVE it — could never
+/// fire at all. Two boundaries derived from the same window disagreed about
+/// which came first.
+///
+/// # Why 0.55, and why it is not a picked fraction
+///
+/// Scaling ALL THREE reserves by one factor keeps them ordered by
+/// construction, because the ordering only ever depended on their relative
+/// sizes: `threshold = w − s(output_reserve + autocompact_buffer)` is below
+/// `ceiling = w − s(output_reserve + emergency_buffer)` for every `s > 0`
+/// exactly when `autocompact_buffer > emergency_buffer`, which is the
+/// invariant the absolute figures already encoded. That is the part #1150's
+/// notes correctly warned about: a proportional floor applied to the THRESHOLD
+/// ALONE would have raised a pinned 60,000-token window's trigger from 27,000
+/// to 42,000, past its own pre-flight shed ceiling of 37,000 — an inversion.
+/// Scaling the ceiling with it cannot invert.
+///
+/// The fraction itself is then FORCED, not chosen. The scale engages below
+/// `(output_reserve + autocompact_buffer) / MAX_RESERVE_FRACTION`, which at the
+/// default reserves is `33,000 / 0.55 = 60,000`. 0.55 is the LARGEST fraction
+/// that leaves that 60,000 window at a scale of exactly 1.0 — i.e. the largest
+/// one for which the case #1150 named as the thing not to disturb is
+/// byte-for-byte unchanged. Anything larger keeps eating small windows;
+/// anything smaller pulls the crossover UP and starts retuning windows nobody
+/// has evidence about. Every window at or above 60,000 — which is every model
+/// in the [`crate::limits`] catalogue, the smallest being 128,000 — is
+/// therefore untouched.
+///
+/// Measured consequences, at the five points #1179 asks for (default reserves,
+/// `BASELINE_TURN_TOKENS` = 3,118):
+///
+/// | window | ceiling before → after | threshold before → after | verdict |
+/// |---|---|---|---|
+/// | 4,096 | 0 → 2,527 | 2,867 → 1,844 | still below the baseline turn: unusable |
+/// | 8,192 | 0 → 5,053 | 5,734 → 3,688 | workable, 570 tokens of room |
+/// | 32,768 | 9,768 → 20,208 | 22,937 → 14,747 | inversion fixed |
+/// | 60,000 | 37,000 → 37,000 | 27,000 → 27,000 | unchanged |
+/// | 200,000 | 177,000 → 177,000 | 167,000 → 167,000 | unchanged |
+pub const MAX_RESERVE_FRACTION: f64 = 0.55;
+
+/// Core's OWN baseline turn, in real prompt tokens — the system prompt plus
+/// eight tool schemas, before the user has said anything.
+///
+/// MEASURED, not modelled: #1172 drove a real `qwen3:8b` through a logging
+/// reverse proxy and read the figure off the endpoint's own `usage` block. It
+/// is the floor under every boundary in this module, because a threshold below
+/// it fires on an empty conversation and a ceiling below it aborts the run
+/// before the user has typed anything. It is what makes
+/// [`CompactConfig::supports_compaction`] answerable with a number instead of
+/// a guess.
+pub const BASELINE_TURN_TOKENS: usize = 3_118;
 
 /// #1150's whole claim, enforced by the compiler rather than by a runtime
 /// assertion that could never fail: the window assumed for a model we cannot
@@ -83,11 +132,16 @@ pub const MIN_AUTOCOMPACT_WINDOW_FRACTION: f64 = 0.70;
 /// the build here rather than silently restoring the runaway.
 const _: () = assert!(UNVERIFIED_CONTEXT_WINDOW < DEFAULT_CONTEXT_WINDOW);
 
-/// The floor must stay a floor: a fraction at or above 1.0 would put the
-/// autocompact threshold at or past the window itself, and a non-positive one
-/// would re-open the zero-threshold "always fire" cliff.
-const _: () =
-    assert!(MIN_AUTOCOMPACT_WINDOW_FRACTION > 0.0 && MIN_AUTOCOMPACT_WINDOW_FRACTION < 1.0);
+/// The reserves must stay a MINORITY of the window they are taken out of. At
+/// or above 1.0 the scaled reserves would consume the whole window and every
+/// boundary would saturate to zero again — the exact cliff this replaces; at or
+/// below 0 they would vanish and the pre-flight guard would never fire.
+const _: () = assert!(MAX_RESERVE_FRACTION > 0.0 && MAX_RESERVE_FRACTION < 1.0);
+
+/// The scale is only ever a REDUCTION, and it must not reorder the buffers:
+/// `autocompact_buffer > emergency_buffer` is what puts the autocompact
+/// threshold below the pre-flight ceiling, and one common factor preserves it.
+const _: () = assert!(default_autocompact_buffer_const() > default_emergency_buffer_const());
 
 /// Configuration for the multi-level context compaction system.
 ///
@@ -415,6 +469,100 @@ impl CompactConfig {
         self.known_context_window(provider, model)
             .unwrap_or(UNVERIFIED_CONTEXT_WINDOW)
     }
+
+    /// #1179 — the reserve buffers this config applies AT `window`.
+    ///
+    /// Identity whenever `output_reserve + autocompact_buffer` already fits
+    /// inside [`MAX_RESERVE_FRACTION`] of the window, which is every window at
+    /// or above 60,000 with the default reserves. Below that all three are
+    /// scaled by ONE common factor, so their ordering — and therefore the
+    /// ordering of every boundary derived from them — is preserved.
+    pub fn scaled_reserves(&self, window: usize) -> ScaledReserves {
+        let nominal = self.output_reserve.saturating_add(self.autocompact_buffer);
+        let budget = window as f64 * MAX_RESERVE_FRACTION;
+        if nominal == 0 || nominal as f64 <= budget {
+            return ScaledReserves {
+                output_reserve: self.output_reserve,
+                autocompact_buffer: self.autocompact_buffer,
+                emergency_buffer: self.emergency_buffer,
+            };
+        }
+        let scale = budget / nominal as f64;
+        let apply = |v: usize| (v as f64 * scale) as usize;
+        ScaledReserves {
+            output_reserve: apply(self.output_reserve),
+            autocompact_buffer: apply(self.autocompact_buffer),
+            emergency_buffer: apply(self.emergency_buffer),
+        }
+    }
+
+    /// The autocompact trigger for `window`:
+    /// `window − scaled output_reserve − scaled autocompact_buffer`.
+    ///
+    /// THE definition. `wcore_agent::compact::auto::autocompact_threshold`
+    /// resolves the window and delegates here, so a reporter and an enforcer
+    /// cannot end up on different arithmetic.
+    ///
+    /// Cannot saturate to zero for any positive window: the scaled reserves are
+    /// at most [`MAX_RESERVE_FRACTION`] of it, so this is at least
+    /// `(1 − MAX_RESERVE_FRACTION) × window`. That is why #1150's
+    /// `MIN_AUTOCOMPACT_WINDOW_FRACTION` replacement — which existed only for
+    /// the saturated case — is gone rather than kept as an unreachable branch.
+    pub fn autocompact_threshold_for_window(&self, window: usize) -> usize {
+        let r = self.scaled_reserves(window);
+        window
+            .saturating_sub(r.output_reserve)
+            .saturating_sub(r.autocompact_buffer)
+    }
+
+    /// The #255 pre-flight input ceiling for `window`:
+    /// `window − scaled output_reserve − scaled emergency_buffer`.
+    pub fn input_ceiling_for_window(&self, window: usize) -> usize {
+        let r = self.scaled_reserves(window);
+        window
+            .saturating_sub(r.output_reserve)
+            .saturating_sub(r.emergency_buffer)
+    }
+
+    /// The emergency hard stop for `window`: `window − scaled emergency_buffer`.
+    pub fn emergency_limit_for_window(&self, window: usize) -> usize {
+        window.saturating_sub(self.scaled_reserves(window).emergency_buffer)
+    }
+
+    /// #1179 — is `window` big enough for compaction to be worth pointing at?
+    ///
+    /// Both boundaries must clear core's own [`BASELINE_TURN_TOKENS`]. A
+    /// threshold below it summarizes an empty conversation at the top of every
+    /// turn; a ceiling below it aborts the run before the user has typed
+    /// anything. Neither is a fix, and both are what a naively-applied learned
+    /// window would have produced.
+    ///
+    /// This is the gate on feeding #1172's LEARNED served window into the
+    /// pre-flight guard and the compaction triggers. At the 4,096-token slot
+    /// #1172 measured, it answers `false` — core's baseline turn alone is 76%
+    /// of that window and no division of it leaves room to work. The honest
+    /// remedy there is the operator raising the server's context length, which
+    /// is what #1172's notice already tells them; narrowing the guard onto it
+    /// would only abort the run faster.
+    pub fn supports_compaction(&self, window: usize) -> bool {
+        self.autocompact_threshold_for_window(window) > BASELINE_TURN_TOKENS
+            && self.input_ceiling_for_window(window) > BASELINE_TURN_TOKENS
+    }
+}
+
+/// The reserve buffers as they apply at one particular window.
+///
+/// A distinct type rather than a tuple so a caller cannot silently swap two of
+/// three same-typed fields — the failure would be a boundary that is merely
+/// wrong rather than one that does not compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScaledReserves {
+    /// Tokens held back for the model's output.
+    pub output_reserve: usize,
+    /// Additional headroom below the input ceiling at which autocompact fires.
+    pub autocompact_buffer: usize,
+    /// The last-resort headroom below the window itself.
+    pub emergency_buffer: usize,
 }
 
 impl Default for CompactConfig {
@@ -452,9 +600,17 @@ fn default_output_reserve() -> usize {
     20_000
 }
 fn default_autocompact_buffer() -> usize {
-    13_000
+    default_autocompact_buffer_const()
 }
 fn default_emergency_buffer() -> usize {
+    default_emergency_buffer_const()
+}
+/// `const` mirrors, so the ordering the scaling relies on is checked by the
+/// compiler rather than by a runtime assertion that could never fail.
+const fn default_autocompact_buffer_const() -> usize {
+    13_000
+}
+const fn default_emergency_buffer_const() -> usize {
     3_000
 }
 fn default_max_failures() -> u32 {

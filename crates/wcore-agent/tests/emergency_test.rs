@@ -66,19 +66,32 @@ fn tc_2_5_03_at_exact_emergency_threshold() {
 
 // ── TC-2.5-04: Small context window ────────────────────────────────────────
 
+/// #1179 — the reserve buffers are scaled to the window, so an 8,000-token
+/// window's hard stop is 7,600, not 5,000.
+///
+/// The old 5,000 was unreachable in practice: on the same window the #255
+/// pre-flight ceiling was `8_000 - 20_000 - 3_000` saturated to 0, so the guard
+/// aborted the run before the hard stop could ever be consulted. What this case
+/// is really for — a small window still has a REACHABLE, correctly-ordered hard
+/// stop — is asserted below, at the number the engine now enforces.
 #[test]
 fn tc_2_5_04_small_context_window() {
-    // context_window=8_000, emergency_buffer=3_000
-    // emergency_limit = 8k - 3k = 5k
-    // 6k >= 5k → true
     let config = CompactConfig {
         context_window: Some(8_000),
         emergency_buffer: 3_000,
         ..CompactConfig::default()
     };
     assert!(
-        is_at_emergency_limit(6_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
-        "6k tokens should exceed 5k emergency limit on an 8k context window"
+        !is_at_emergency_limit(6_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        "6k is below the scaled 7,600 hard stop on an 8k window"
+    );
+    assert!(
+        is_at_emergency_limit(7_600, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        "an 8k context window must still have a reachable hard stop"
+    );
+    assert!(
+        config.input_ceiling_for_window(8_000) < 7_600,
+        "the hard stop must sit above the pre-flight ceiling it backs up"
     );
 }
 

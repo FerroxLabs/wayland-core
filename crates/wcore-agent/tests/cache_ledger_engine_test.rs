@@ -179,6 +179,25 @@ async fn a_real_run_writes_a_ledger_with_one_row_per_round_trip() {
     // A model the pricing catalog knows, so `priced` is true and the USD
     // figures are facts rather than floors.
     config.model = "claude-opus-4-7".to_string();
+    // #1179 — this case is about CACHE accounting, so the compactor is turned
+    // off rather than left to interact with it.
+    //
+    // Its scripted usage is not a physically possible sequence: round trip 1
+    // reports 40,000 total input (20,000 uncached + 20,000 cache WRITE) and
+    // round trip 2 reports 20,500, i.e. the prompt SHRANK by half while
+    // messages were appended. That is precisely the signature #1172's
+    // `ServedWindowTracker` reads as truncation, so it learns a served window
+    // of 40,000 from this fixture. Until #1179 that cost a spurious notice and
+    // nothing else; now that the learned window also moves the autocompact
+    // trigger (to 18,001 on a 40,000 window) the fixture's own round trip 2
+    // crosses it and round trip 3 arrives behind a real summarization —
+    // `HistoryRewritten`, zero cache read, and this test measuring compaction
+    // instead of the cache.
+    //
+    // The fixture is wrong and the detector is right, but rebalancing the
+    // scripted token buckets would move every cost and hit-ratio number this
+    // case exists to pin. Disabling the compactor isolates the subject instead.
+    config.compact.enabled = false;
 
     let mut engine = AgentEngine::new_with_provider(
         provider,
@@ -214,7 +233,7 @@ async fn a_real_run_writes_a_ledger_with_one_row_per_round_trip() {
     assert_eq!(ledger.turns[0].cache_write_tokens, 20_000);
     assert!(!ledger.turns[0].is_hit());
     assert!(ledger.turns[1].is_hit());
-    assert!(ledger.turns[2].is_hit());
+    assert!(ledger.turns[2].is_hit(), "{:#?}", ledger.turns);
     // A cold open that successfully WROTE cache is normal, not an
     // invalidation, and must not be mislabelled `no_marker`.
     assert_eq!(

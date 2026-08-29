@@ -21,7 +21,7 @@
 //! corrupt state.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Write `contents` to `path` atomically and durably.
 ///
@@ -101,27 +101,30 @@ pub fn atomic_write_checked<P: AsRef<Path>>(
     let dest = dest.as_ref();
     let tmp = staged_temp_file(dest, contents)?;
 
-    match exchange(&tmp, dest)? {
-        Swap::Exchanged => {
-            // `tmp` now names what `dest` held; `dest` names `contents`.
-            let verdict = match std::fs::read(&tmp) {
+    match publish_displacing(&tmp, dest)? {
+        Swap::Displaced(displaced) => {
+            // `dest` now names `contents`; `displaced` names what `dest` held
+            // at the instant of publication.
+            let verdict = match std::fs::read(&displaced) {
                 Ok(observed) => accept(Some(&observed)),
                 Err(e) => Err(format!("it could no longer be read ({e})")),
             };
             if let Err(why) = verdict {
-                // Retract, by the same atomic step that published.
-                if let Err(e) = exchange(&tmp, dest) {
-                    // The publish stands and the temp file is the only copy of
-                    // what was displaced, so it must not be unlinked on drop.
-                    let kept = tmp.keep()?;
+                // Retract, by the inverse of the step that published.
+                if let Err(e) = restore(&displaced, dest) {
+                    // The publish stands and the displaced file is the only
+                    // copy of what it replaced, so it must not be unlinked.
+                    let kept = keep_displaced(tmp, &displaced)?;
                     return Err(std::io::Error::other(format!(
                         "{why}, and the original could not be put back ({e}); \
                          it is preserved at {}",
                         kept.display()
                     )));
                 }
+                discard_displaced(tmp, &displaced);
                 return Ok(Err(why));
             }
+            discard_displaced(tmp, &displaced);
             Ok(Ok(()))
         }
         // No exchange to make, or none available. Both fall back to reading the
@@ -153,40 +156,107 @@ fn staged_temp_file(dest: &Path, contents: &[u8]) -> std::io::Result<tempfile::T
     Ok(tmp.into_temp_path())
 }
 
-/// What an attempt to exchange two names did.
+/// What an attempt to publish-and-displace did.
 ///
-/// Where there is no exchange primitive, [`exchange`] can only ever answer
-/// `Unsupported` and the other two are unconstructible. They are still the
-/// right shape for the outcome, so the enum is kept whole rather than split
-/// into a second, platform-specific one.
-#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+/// Where there is no primitive that hands the displaced bytes back,
+/// [`publish_displacing`] can only ever answer `Unsupported` and the other two
+/// are unconstructible. They are still the right shape for the outcome, so the
+/// enum is kept whole rather than split into a platform-specific one.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", windows)),
+    allow(dead_code)
+)]
 enum Swap {
-    /// The two names were exchanged, atomically.
-    Exchanged,
-    /// The destination does not exist, so there was nothing to exchange with.
+    /// The new bytes are published at the destination, and the payload names a
+    /// file holding exactly what the destination held at that instant.
+    ///
+    /// On the exchange platforms that file IS the staged temp file, which now
+    /// names the pre-image. On Windows it is a separate sibling backup, which
+    /// is why this carries the path instead of the caller assuming it.
+    Displaced(PathBuf),
+    /// The destination does not exist, so there was nothing to displace.
     Vacant,
-    /// This platform, kernel or filesystem has no exchange primitive.
+    /// This platform, kernel or filesystem has no such primitive.
     Unsupported,
 }
 
-/// Atomically swap the names `a` and `b`, so that each afterwards refers to
-/// what the other referred to. The one place the platform difference lives.
+/// Put `displaced` back at `dest`, undoing a [`Swap::Displaced`] publish.
+///
+/// The inverse of whichever primitive published, so it inherits that
+/// primitive's atomicity: a second `RENAME_EXCHANGE` / `RENAME_SWAP` where the
+/// publish was one, and a replacing rename on Windows where the publish was
+/// `ReplaceFileW`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn restore(displaced: &Path, dest: &Path) -> std::io::Result<()> {
+    publish_displacing(displaced, dest).map(|_| ())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn restore(displaced: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::rename(displaced, dest)
+}
+
+/// Drop the leftovers of a completed publish.
+///
+/// `tmp` guards the staged file. On the exchange platforms `displaced` IS that
+/// path (the exchange moved the pre-image into it), so dropping the guard is
+/// the whole job. On Windows the staged file was consumed by `ReplaceFileW`
+/// and `displaced` is a separate backup this module created, so it has to be
+/// unlinked explicitly — the `TempPath` drop then finds nothing and is a no-op.
+fn discard_displaced(tmp: tempfile::TempPath, displaced: &Path) {
+    if displaced != &*tmp {
+        let _ = std::fs::remove_file(displaced);
+    }
+    drop(tmp);
+}
+
+/// Keep the displaced pre-image on disk and name it, for the one path where
+/// the publish stands and it is the only surviving copy.
+fn keep_displaced(tmp: tempfile::TempPath, displaced: &Path) -> std::io::Result<PathBuf> {
+    if displaced == &*tmp {
+        return Ok(tmp.keep()?);
+    }
+    drop(tmp);
+    Ok(displaced.to_path_buf())
+}
+
+/// Publish `a` over `b` and hand back a name holding what `b` held at that
+/// instant. The one place the platform difference lives.
 ///
 /// - **Linux** — `renameat2(RENAME_EXCHANGE)`, since 3.15. Invoked as a raw
 ///   syscall rather than through the glibc wrapper, which arrived in 2.28 and
-///   does not exist on musl at all.
+///   does not exist on musl at all. The displaced name is `a` itself.
 /// - **macOS** — `renamex_np(RENAME_SWAP)`, since 10.12. APFS and HFS+ only.
-/// - **Windows and everything else** — [`Swap::Unsupported`]. Win32 has no
-///   exchange: `MoveFileEx` replaces and `ReplaceFile` does not publish the
-///   displaced file under a name the caller chooses, so neither yields the
-///   bytes that were overwritten. The caller falls back to re-check-then-rename,
-///   which is what every platform did before and is therefore not a regression
-///   there — but the race #1155 describes remains open on Windows.
+///   The displaced name is `a` itself.
+/// - **Windows** — `ReplaceFileW` with a backup name (#1155's second
+///   residual). Win32 has no exchange, and this is not one: `ReplaceFileW`
+///   renames the replaced file to `lpBackupFileName` and then renames the
+///   replacement into its place, so unlike `RENAME_EXCHANGE` there is an
+///   instant at which the destination name does not resolve. What it DOES
+///   give is the property the verdict actually needs — the displaced bytes,
+///   under a name this module chose — so the check becomes an observation
+///   taken AFTER publication rather than a re-read taken before it, and the
+///   check-then-write window closes the same way it does elsewhere. The
+///   earlier reading, recorded in this file, that `ReplaceFile` "does not
+///   publish the displaced file under a name the caller chooses" was simply
+///   wrong about `lpBackupFileName`.
 ///
-/// A filesystem that does not implement the flag (overlayfs, several network
-/// filesystems) reports [`Swap::Unsupported`] rather than failing the write.
+///   **Ungraded on Windows by the lane that wrote it.** It is reachable only
+///   on a platform this workspace cannot execute from Linux, so it ships
+///   verified by `cargo check --target x86_64-pc-windows-gnu` and by
+///   [`tests::the_check_is_handed_the_bytes_the_publish_displaced`], whose
+///   Windows arm now asserts the post-publication reading and will fail the
+///   Windows CI job if any of the above is wrong.
+///
+/// - **Everything else** — [`Swap::Unsupported`], and the caller falls back to
+///   re-check-then-rename.
+///
+/// Any failure other than a missing destination degrades to
+/// [`Swap::Unsupported`] rather than failing the write: the fallback is what
+/// every platform did before this existed, so the worst case of a primitive
+/// that misbehaves is the previous behaviour, never a lost write.
 #[cfg(target_os = "linux")]
-fn exchange(a: &Path, b: &Path) -> std::io::Result<Swap> {
+fn publish_displacing(a: &Path, b: &Path) -> std::io::Result<Swap> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -210,7 +280,7 @@ fn exchange(a: &Path, b: &Path) -> std::io::Result<Swap> {
         )
     };
     if rc == 0 {
-        return Ok(Swap::Exchanged);
+        return Ok(Swap::Displaced(a.to_path_buf()));
     }
     let err = std::io::Error::last_os_error();
     match err.raw_os_error() {
@@ -223,7 +293,7 @@ fn exchange(a: &Path, b: &Path) -> std::io::Result<Swap> {
 }
 
 #[cfg(target_os = "macos")]
-fn exchange(a: &Path, b: &Path) -> std::io::Result<Swap> {
+fn publish_displacing(a: &Path, b: &Path) -> std::io::Result<Swap> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -237,7 +307,7 @@ fn exchange(a: &Path, b: &Path) -> std::io::Result<Swap> {
     // locals that outlive the call.
     let rc = unsafe { libc::renamex_np(ca.as_ptr(), cb.as_ptr(), libc::RENAME_SWAP) };
     if rc == 0 {
-        return Ok(Swap::Exchanged);
+        return Ok(Swap::Displaced(a.to_path_buf()));
     }
     let err = std::io::Error::last_os_error();
     match err.raw_os_error() {
@@ -248,8 +318,70 @@ fn exchange(a: &Path, b: &Path) -> std::io::Result<Swap> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn exchange(_a: &Path, _b: &Path) -> std::io::Result<Swap> {
+/// `ReplaceFileW(dest, replacement, backup)` — see [`publish_displacing`]'s
+/// doc for why this is the Windows analogue and what it does not promise.
+///
+/// The backup name is derived from the staged temp file's own (already random,
+/// already unique) name, so it is a sibling on the same volume — `ReplaceFileW`
+/// requires that — without creating a second file to reserve a name.
+#[cfg(windows)]
+fn publish_displacing(a: &Path, b: &Path) -> std::io::Result<Swap> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        REPLACEFILE_IGNORE_ACL_ERRORS, REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW,
+    };
+
+    /// `ERROR_FILE_NOT_FOUND`. Spelled out rather than imported so the mapping
+    /// to [`Swap::Vacant`] reads at the match arm.
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+
+    fn wide(p: &Path) -> Vec<u16> {
+        p.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let Some(stem) = a.file_name() else {
+        return Ok(Swap::Unsupported);
+    };
+    let mut backup_name = stem.to_os_string();
+    backup_name.push(".wl-displaced");
+    let backup = a.with_file_name(backup_name);
+    // ReplaceFileW moves the replaced file ONTO this name; a stale file there
+    // from a killed run must not be mistaken for the pre-image.
+    let _ = std::fs::remove_file(&backup);
+
+    // SAFETY: all three pointers are NUL-terminated UTF-16 buffers owned by
+    // locals that outlive the call, and both reserved parameters are the
+    // documented NULL.
+    let ok = unsafe {
+        ReplaceFileW(
+            wide(b).as_ptr(),
+            wide(a).as_ptr(),
+            wide(&backup).as_ptr(),
+            REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if ok != 0 {
+        return Ok(Swap::Displaced(backup));
+    }
+
+    let err = std::io::Error::last_os_error();
+    // ReplaceFileW documents partial failures in which the replaced file has
+    // already been moved aside. Put it back before degrading, so the caller's
+    // fallback publishes over the destination rather than over a hole.
+    if backup.exists() && !b.exists() {
+        let _ = std::fs::rename(&backup, b);
+    }
+    let _ = std::fs::remove_file(&backup);
+    if err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND) {
+        return Ok(Swap::Vacant);
+    }
+    Ok(Swap::Unsupported)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn publish_displacing(_a: &Path, _b: &Path) -> std::io::Result<Swap> {
     Ok(Swap::Unsupported)
 }
 
@@ -492,24 +624,21 @@ mod tests {
 
         assert!(r.is_ok());
         assert_eq!(seen.as_deref(), Some(&b"old"[..]), "displaced bytes");
-        // Where an exchange primitive exists the publish has ALREADY happened
-        // when the check runs, so the destination reads as the new bytes and a
-        // refusal is a rollback. Windows has none (`Swap::Unsupported`), so the
-        // publish degrades to re-check-then-rename and the destination still
-        // reads as the old bytes at check time. That is the #1155 race staying
-        // open on Windows -- documented in `Swap` and stated here rather than
-        // asserted away, because a test that claimed the exchange held on
-        // Windows would be claiming the race was closed there.
-        #[cfg(not(windows))]
+        // The publish has ALREADY happened when the check runs, so the
+        // destination reads as the new bytes and a refusal is a rollback.
+        //
+        // This assertion used to be split: Windows had no primitive that gave
+        // the displaced bytes back, degraded to re-check-then-rename, and this
+        // arm asserted `b"old"` -- i.e. it asserted that the #1155 race stayed
+        // open there. `publish_displacing` now uses `ReplaceFileW` with a
+        // backup name, so the property is the same on every platform and this
+        // is one assertion again. It is ALSO the grading instrument for that
+        // Windows path, which no Linux host can execute: if `ReplaceFileW`
+        // does not behave as `publish_displacing`'s doc claims, this fails in
+        // the Windows CI job.
         assert_eq!(
             on_disk_during, b"new",
             "the publish precedes the check, so the check is handed what it displaced"
-        );
-        #[cfg(windows)]
-        assert_eq!(
-            on_disk_during, b"old",
-            "Windows has no exchange primitive, so the check is a re-read taken \
-             BEFORE the publish -- the race this closes elsewhere is open here"
         );
         assert_eq!(std::fs::read(&p).unwrap(), b"new");
     }
