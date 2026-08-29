@@ -267,6 +267,9 @@ impl Channel for TelegramChannel {
     async fn send_message(&mut self, msg: OutgoingMessage) -> Result<MessageReceipt, ChannelError> {
         let token = self.bot_token.as_deref().ok_or(ChannelError::NotStarted)?;
         let reply_to = msg.reply_to.as_deref().and_then(|s| s.parse::<i64>().ok());
+        // Forum-topic destination. Independent of `reply_to`: this selects the
+        // topic, `reply_to` quotes a message inside it. Issue #253.
+        let message_thread_id = msg.thread_id.as_deref().and_then(|s| s.parse::<i64>().ok());
 
         // Track the most recent successful send so the receipt reflects
         // the last thing Telegram accepted (text first, then each
@@ -301,6 +304,7 @@ impl Channel for TelegramChannel {
                 chat_id: &msg.conversation_id,
                 text,
                 parse_mode: Some(self.config.parse_mode.as_api_str()),
+                message_thread_id,
                 reply_to_message_id: reply_to,
             };
             let result = api::send_message(&self.http, &self.api_base, token, &body)
@@ -322,7 +326,13 @@ impl Channel for TelegramChannel {
         match msg.attachments.as_slice() {
             [] => {}
             [url] => {
-                let body = api::build_send_document(&msg.conversation_id, url, None, reply_to);
+                let body = api::build_send_document(
+                    &msg.conversation_id,
+                    url,
+                    None,
+                    message_thread_id,
+                    reply_to,
+                );
                 let result = api::send_document(&self.http, &self.api_base, token, &body)
                     .await
                     .map_err(ChannelError::from)?;
@@ -330,8 +340,13 @@ impl Channel for TelegramChannel {
             }
             many => {
                 for chunk in many.chunks(MEDIA_GROUP_MAX) {
-                    let body =
-                        api::build_send_media_group(&msg.conversation_id, chunk, None, reply_to);
+                    let body = api::build_send_media_group(
+                        &msg.conversation_id,
+                        chunk,
+                        None,
+                        message_thread_id,
+                        reply_to,
+                    );
                     let result = api::send_media_group(&self.http, &self.api_base, token, &body)
                         .await
                         .map_err(ChannelError::from)?;
@@ -1192,6 +1207,115 @@ parse_mode = "MarkdownV2"
     }
 
     // -----------------------------------------------------------------
+    // 9z. Issue #253 — a forum-topic send reaches the wire as
+    //     `message_thread_id`, and the reply-quote slot is left alone.
+    //
+    //     Before the fix the destination topic was written into
+    //     `OutgoingMessage.reply_to`, so this adapter emitted
+    //     `reply_to_message_id: 123` — a quote of the topic-creation service
+    //     message — and `message_thread_id` never appeared on any outbound
+    //     request at all (`git grep message_thread_id` found only the INBOUND
+    //     parse). The mock below rejects the send unless the topic is in the
+    //     thread field.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn outbound_forum_topic_sets_message_thread_id_not_reply_to() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/sendMessage").as_str())
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"chat_id":"-1001234567890","message_thread_id":123}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"ok":true,"result":{"message_id":5,"date":5,"chat":{"id":1}}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        ch.start().await.unwrap();
+        let msg = OutgoingMessage {
+            conversation_id: "-1001234567890".to_string(),
+            text: "into the topic".to_string(),
+            thread_id: Some("123".to_string()),
+            reply_to: None,
+            attachments: Vec::new(),
+        };
+        ch.send_message(msg).await.unwrap();
+        m.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    // -----------------------------------------------------------------
+    // 9z-b. Issue #253 — the two fields are independent on the wire: a reply
+    //       to a specific message INSIDE a topic carries both, with the topic
+    //       in `message_thread_id` and the quoted message in
+    //       `reply_to_message_id`. Neither value may appear in the other slot.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn outbound_reply_inside_a_topic_carries_both_fields_independently() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/sendMessage").as_str())
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"chat_id":"-1001234567890","message_thread_id":123,"reply_to_message_id":987}"#
+                    .to_string(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"ok":true,"result":{"message_id":6,"date":6,"chat":{"id":1}}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        ch.start().await.unwrap();
+        let msg = OutgoingMessage {
+            conversation_id: "-1001234567890".to_string(),
+            text: "quoted reply in a topic".to_string(),
+            thread_id: Some("123".to_string()),
+            reply_to: Some("987".to_string()),
+            attachments: Vec::new(),
+        };
+        ch.send_message(msg).await.unwrap();
+        m.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    // -----------------------------------------------------------------
+    // 9z-c. NEGATIVE CONTROL — passes in BOTH arms. An ordinary chat send
+    //       (no topic, no quote) must carry neither key. A mapping that
+    //       stamped a thread id onto every send would satisfy the two tests
+    //       above and break every non-forum chat; this is what refuses that.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn outbound_plain_chat_send_carries_no_thread_or_reply_keys() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/sendMessage").as_str())
+            .match_request(|req| {
+                let body = req.body().expect("body");
+                let v: serde_json::Value = serde_json::from_slice(body).expect("json body");
+                v.get("message_thread_id").is_none() && v.get("reply_to_message_id").is_none()
+            })
+            .with_status(200)
+            .with_body(r#"{"ok":true,"result":{"message_id":7,"date":7,"chat":{"id":1}}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        ch.start().await.unwrap();
+        ch.send_message(OutgoingMessage::text("42", "plain"))
+            .await
+            .unwrap();
+        m.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    // -----------------------------------------------------------------
     // 10. Outbound attachments: each URL goes out via sendDocument with
     //     chat_id + document=<url>, after the text send.
     // -----------------------------------------------------------------
@@ -1222,6 +1346,7 @@ parse_mode = "MarkdownV2"
         let msg = OutgoingMessage {
             conversation_id: "1".to_string(),
             text: "see attached".to_string(),
+            thread_id: None,
             reply_to: None,
             attachments: vec!["https://example.com/a.pdf".to_string()],
         };
@@ -1260,6 +1385,7 @@ parse_mode = "MarkdownV2"
         let msg = OutgoingMessage {
             conversation_id: "1".to_string(),
             text: String::new(),
+            thread_id: None,
             reply_to: None,
             attachments: vec!["https://example.com/b.png".to_string()],
         };
@@ -1310,6 +1436,7 @@ parse_mode = "MarkdownV2"
             conversation_id: "1".to_string(),
             // Empty text so the send is attachments-only — isolates the group path.
             text: String::new(),
+            thread_id: None,
             reply_to: None,
             attachments: vec![
                 "https://example.com/a.pdf".to_string(),

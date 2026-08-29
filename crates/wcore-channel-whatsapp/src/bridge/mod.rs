@@ -864,6 +864,7 @@ bridge_path = "/nonexistent/bridge.js"
         let msg = OutgoingMessage {
             conversation_id: "123@s.whatsapp.net".to_string(),
             text: "see attached".to_string(),
+            thread_id: None,
             reply_to: None,
             attachments: vec!["https://cdn.example/pic.jpg".to_string()],
         };

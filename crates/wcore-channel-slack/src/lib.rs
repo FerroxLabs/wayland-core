@@ -700,7 +700,13 @@ impl SlackChannel {
         let req = api::PostMessageRequest {
             channel: conversation_id.clone(),
             text: msg.text.clone(),
-            thread_ts: msg.reply_to.clone(),
+            // Slack `thread_ts` IS a thread DESTINATION, so it comes from
+            // `thread_id` first. The `reply_to` fallback keeps every existing
+            // caller working: the inbound path used to put the thread root
+            // there, and its parser only ever sets `reply_to_message_id` to the
+            // `thread_ts` itself, so the value on the wire is unchanged.
+            // Issue #253.
+            thread_ts: msg.thread_id.clone().or_else(|| msg.reply_to.clone()),
         };
 
         let send_result = api::post_message_keyed(
@@ -1188,6 +1194,83 @@ mod tests {
     /// likely discovery point — and it mapped the refusal straight to
     /// `ChannelError::Auth`, telling the caller and telling health nothing.
     /// `edit_message`, `delete_message` and `fetch_media` had the same hole.
+    /// Issue #253 — Slack's `thread_ts` is a thread DESTINATION, so it reads
+    /// the new `OutgoingMessage.thread_id`. Without this the split of thread
+    /// from quote (made for Telegram) would silently stop Slack replies
+    /// landing in their thread.
+    #[tokio::test]
+    async fn slack_takes_its_thread_ts_from_the_thread_destination() {
+        let mut server = mockito::Server::new_async().await;
+        let _auth = server
+            .mock("POST", "/api/auth.test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"user_id":"U123","team":"acme"}"#)
+            .create_async()
+            .await;
+        let m = server
+            .mock("POST", "/api/chat.postMessage")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"channel":"C1","thread_ts":"1700000001.000100"}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"ts":"1700000002.000200","channel":"C1"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut ch = started_against(&server).await;
+        ch.send_message(OutgoingMessage {
+            conversation_id: "C1".to_string(),
+            text: "in thread".to_string(),
+            thread_id: Some("1700000001.000100".to_string()),
+            reply_to: None,
+            attachments: Vec::new(),
+        })
+        .await
+        .expect("send");
+        m.assert_async().await;
+    }
+
+    /// BACKWARD-COMPATIBILITY CONTROL — passes in BOTH arms. A caller that
+    /// still puts the thread root in `reply_to` (every pre-#253 caller) keeps
+    /// working through the fallback.
+    #[tokio::test]
+    async fn slack_still_honours_a_thread_root_supplied_as_reply_to() {
+        let mut server = mockito::Server::new_async().await;
+        let _auth = server
+            .mock("POST", "/api/auth.test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"user_id":"U123","team":"acme"}"#)
+            .create_async()
+            .await;
+        let m = server
+            .mock("POST", "/api/chat.postMessage")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"channel":"C1","thread_ts":"1700000001.000100"}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"ts":"1700000002.000200","channel":"C1"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut ch = started_against(&server).await;
+        ch.send_message(OutgoingMessage {
+            conversation_id: "C1".to_string(),
+            text: "in thread".to_string(),
+            thread_id: None,
+            reply_to: Some("1700000001.000100".to_string()),
+            attachments: Vec::new(),
+        })
+        .await
+        .expect("send");
+        m.assert_async().await;
+    }
+
     #[tokio::test]
     async fn every_outbound_surface_publishes_auth_expired_on_a_refusal() {
         for (method, path) in [

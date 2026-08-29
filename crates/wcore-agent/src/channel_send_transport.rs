@@ -230,10 +230,17 @@ impl ChannelManagerTransport {
     ) -> SendOutcome {
         let platform_token = target.platform.as_str();
         let conversation_id = target.chat_id.clone().unwrap_or_default();
+        // `platform:chat_id:thread_id` names a DESTINATION thread (a Telegram
+        // forum topic, a Slack thread root). It is not a message being quoted,
+        // so it rides `thread_id`; `reply_to` stays empty because a tool-driven
+        // send has no inbound message to quote. Issue #253: putting the topic
+        // in `reply_to` made every send a quote of the topic-creation message
+        // and left the topic destination off the wire entirely.
         let outgoing = OutgoingMessage {
             conversation_id,
             text: message.to_string(),
-            reply_to: target.thread_id.clone(),
+            thread_id: target.thread_id.clone(),
+            reply_to: None,
             attachments: Vec::new(),
         };
         // Re-read the oracle before every send, so the contract the NEXT
@@ -747,6 +754,11 @@ mod tests {
             log[0].reply_to, None,
             "a destination topic id must never be substituted for reply-to-message metadata"
         );
+        assert_eq!(
+            log[0].thread_id.as_deref(),
+            Some("123"),
+            "the destination topic must be carried as a thread destination"
+        );
     }
 
     /// NEGATIVE CONTROL for the test above — passes in BOTH arms.
@@ -770,6 +782,7 @@ mod tests {
         assert_eq!(log[0].conversation_id, "-1001234567890");
         assert_eq!(log[0].text, "no topic here");
         assert_eq!(log[0].reply_to, None, "no inbound quote to carry");
+        assert_eq!(log[0].thread_id, None, "no topic destination was asked for");
     }
 
     /// RED ARM 1 — the tool seam has no limiter at all.
