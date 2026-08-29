@@ -5,11 +5,11 @@
 > verification) and `PLAN-ROUTING.json` (assignment). If this disagrees with anyone's
 > recollection, this is right and the recollection is wrong — that is the entire point.
 
-Rendered 2026-08-29 14:25 UTC
+Rendered 2026-08-29 14:26 UTC
 
 ## VERDICT: BLOCKED
 
-**42 criteria block the 0.13.12 release.** Full list in §3.
+**41 criteria block the 0.13.12 release.** Full list in §3.
 
 | state | count | means |
 |---|---:|---|
@@ -116,14 +116,6 @@ Runs on: **macOS CI**  ·  2-platform
 | criterion | issue | what must become true |
 |---|---|---|
 | `c4` | core#352 | macOS: the pgrep arm is EXECUTED in CI at least once with the run cited, or deleted as unreachable |
-
-### `maintainer` — Sean-only: credentials and platform accounts
-
-Runs on: **Sean**  ·  2-maintainer
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c5` | wl#1186 | whatsapp (Meta Cloud API): a credential exists and a boundary probe sends at cap and at +1 |
 
 ### `mcp-gate-mode` — MCP malware gate: explicit permissive/strict operator choice
 

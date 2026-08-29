@@ -382,7 +382,12 @@ def main():
             if state == OPEN:
                 if not route:
                     unrouted.append(row)
-                if kind != "feature":
+                # Must match check-release-readiness.py's exclusion exactly, or
+                # the board and the gate report two different numbers and the
+                # reader has to guess which one is the release. `feature` is an
+                # unshipped roadmap item; `task` is a ticket whose remaining
+                # criteria are all credentials or accounts a human must obtain.
+                if kind not in ("feature", "task"):
                     blocking.append(row)
 
     n = lambda s: sum(1 for r in rows if r["state"] == s)
