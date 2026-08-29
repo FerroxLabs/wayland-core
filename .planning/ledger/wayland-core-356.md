@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Two path resolvers with different escape properties 70 lines apart, and the weaker one guards the skill-source write refusal"
 status: open
-last_verified_commit: 43848f75
+last_verified_commit: e7cb6679
 criteria:
   - id: c1
     text: "is_skill_source_path is graded against dotdot-after-a-missing-component and the dangling-symlink hop, the two escapes #1097 was written for"
@@ -27,9 +27,9 @@ criteria:
   - id: c4
     text: "If both resolvers remain, the reason each call site picked one is stated AT the call site"
     state: met
-    evidence: "symbol:crates/wcore-tools/src/workspace_policy.rs::canon_existing_ancestor"
+    evidence: "test:crates/wcore-tools/tests/workspace_policy_resolver_class.rs::a_dangling_link_to_a_not_yet_created_project_secret_is_a_project_secret"
     owner: core
-    note: "The conditional does not arise: canon_deep is deleted, so ONE resolver remains and there is no choice for a later reader to make blind. The commit body records that the reason each call site picked its resolver is stated at the call site, and is_repo_control_path's own doc claim (a benign-named symlink resolves before the prefix match) is now true as written rather than true only of a link whose target exists."
+    note: "FALSE WHEN WRITTEN, TRUE NOW. canon_deep was deleted, but the file still held a THIRD resolver, canon_for_scope, with the same escape property - canonicalize the parent, re-attach the leaf - and it guarded three live security refusals plus the escalation-prompt path. MEASURED at origin/integ/f13, each escape paired with two controls (the name spelled directly, and a link whose target EXISTS) so a predicate answering true to everything could not pass: is_project_secret returned FALSE for <root>/notes.txt -> <root>/.env with .env absent, which is the Full-posture WRITE direction its own doc says has no SandboxedFs to pre-canonicalize; is_vcs_content_store returned FALSE for a dangling link into .git/objects; is_read_reachable called a dangling link out of the workspace REACHABLE, which also suppresses the path_boundary escalation prompt for it. canon_for_scope is now deleted and canon_existing_ancestor is the only resolver in the file, which is what this criterion asserts. Its call sites were is_project_secret, is_vcs_content_store, is_read_reachable, is_session_read_granted, three home lookups, and path_boundary.rs. RED ARM RUN: crates/wcore-tools/src/ checked out at the pre-fix e7cb6679b and touched, 3/3 fail; restored, touched, 3/3 pass, wcore-tools 1824/1824 and wcore-agent 3895/3895."
 ---
 
 Found while grading the superseded `lane/finish-criteria` orphan branches. Not a
@@ -45,8 +45,23 @@ is what the `#1096` skill-source write refusal still uses.
 The gap was not a proven hole, it was an ungraded one. Grading it turned one of
 the two into a REAL hole: the dangling-symlink hop genuinely escaped `canon_deep`,
 measured and quoted in `e4cef7c2`. Both call sites moved to
-`canon_existing_ancestor` and `canon_deep` is deleted, so there is now one
-resolver and no choice for a later reader to make blind.
+`canon_existing_ancestor` and `canon_deep` is deleted.
+
+That was two of three. `canon_for_scope` — same abandoned shape, same escape —
+survived the sweep and still guarded `is_project_secret`,
+`is_vcs_content_store`, `is_read_reachable` and the escalation-prompt path in
+`path_boundary.rs`. Each was measured escaping (see c4). It is deleted now, so
+the claim this ticket makes is finally true of the whole file.
+
+`is_session_write_granted` was deleted in the same change. Its doc comment
+called it "the predicate `SandboxedFs`'s mutating operations ask"; it had no
+production call site at all — `grep -rn` found only its definition and two
+assertions in `path_write_grant_test.rs`, whose real subject is the live path.
+The enforcement that actually runs is `SandboxedFs::contain_granted` /
+`live_grant_roots` in `vfs.rs`, which does its own dangling-boundary
+resolution. A documented enforcement predicate that enforces nothing is the
+same trap this ticket is about, one level further on: the next author reads the
+doc, routes a change through it, and the change is dead on arrival.
 
 Graded against `origin/integ/next` at `43848f75`, after `lane/session-tickets`
 merged in as `2165c30a`.

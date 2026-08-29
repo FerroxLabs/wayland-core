@@ -58,6 +58,7 @@ use wcore_types::tool::{JsonSchema, ToolResult};
 use crate::Tool;
 use crate::context::ToolContext;
 use crate::unsaved_work::{Staging, staging_verdict, stash_refusal};
+use crate::workspace_policy::is_secret_path_static;
 
 /// Typed git op variants — not consumed directly by the LLM (the tool input
 /// is JSON with an `op` field), but useful for downstream introspection /
@@ -182,6 +183,144 @@ fn reject_option_shaped(kind: &str, value: &str) -> Option<ToolResult> {
         });
     }
     None
+}
+
+/// D1 / core#244, GitTool half. **`diff` and `blame` return file CONTENT, so
+/// they are read-path siblings of `Read` and `Grep` and owe the same secret
+/// policy.**
+///
+/// MEASURED, not reasoned, in the contained posture with `SecretDenyFs`
+/// installed: `.env` committed and then deleted from the working tree — so its
+/// bytes live ONLY in the object store — and
+/// `Git{op: "diff", rev: "HEAD~1", path: ".env"}` returned
+/// `-AWS_SECRET_ACCESS_KEY=PROBE-GIT-9931`. That is precisely what core#244's
+/// c3 says is unreachable, arriving through a subprocess this product spawns.
+/// `SecretDenyFs` cannot see it: this tool gates only `cwd` through the vfs and
+/// then runs `git` itself, and under the STRICT sandbox `Bash` cannot run `git`
+/// at all, so this is the ONLY door — which makes it the door that has to hold.
+///
+/// The refusal is deliberately NOT a whole-op refusal. A `diff` over a commit
+/// that happens to have touched `.env` is ordinary review work, and refusing it
+/// outright would take the only git surface a contained session has away for a
+/// reason the caller cannot act on. So the per-FILE sections a diff is already
+/// made of are withheld individually and the withholding is REPORTED — the same
+/// shape `grep_policy` uses, for the same reason: "could not show you" and
+/// "there was nothing" are different answers.
+///
+/// Splitting on `diff --git ` is exact rather than heuristic: git emits that
+/// header once per file, at the start of a line, and every byte of a file's
+/// patch — mode lines, index line, hunks — follows it until the next one.
+/// Anything before the first header (there is nothing, in `git diff` output) is
+/// kept, so a format change cannot silently turn this into a pass-through of
+/// the whole diff.
+fn withhold_secret_diff_sections(content: &str) -> (String, Vec<String>) {
+    const HEADER: &str = "diff --git ";
+    let mut kept = String::new();
+    let mut withheld: Vec<String> = Vec::new();
+    let mut current: Option<(String, String)> = None;
+
+    let flush =
+        |current: &mut Option<(String, String)>, kept: &mut String, withheld: &mut Vec<String>| {
+            if let Some((name, body)) = current.take() {
+                if name.is_empty() {
+                    kept.push_str(&body);
+                } else {
+                    withheld.push(name);
+                }
+            }
+        };
+
+    for line in content.split_inclusive('\n') {
+        if let Some(rest) = line.strip_prefix(HEADER) {
+            flush(&mut current, &mut kept, &mut withheld);
+            let name = secret_diff_target(rest);
+            current = Some((name.unwrap_or_default(), line.to_string()));
+            continue;
+        }
+        match current.as_mut() {
+            Some((_, body)) => body.push_str(line),
+            None => kept.push_str(line),
+        }
+    }
+    flush(&mut current, &mut kept, &mut withheld);
+    (kept, withheld)
+}
+
+/// The basename of the file a `diff --git a/X b/X` header names, when that file
+/// is secret-shaped; `None` otherwise.
+///
+/// Reads the `b/` side (the post-image), falling back to the `a/` side for a
+/// deletion, so a rename INTO or OUT OF a secret name is caught from either
+/// end. A path containing a space makes the header ambiguous by git's own
+/// format; the whole remainder is then tested, which errs toward withholding.
+fn secret_diff_target(rest: &str) -> Option<String> {
+    let rest = rest.trim_end_matches(['\n', '\r']);
+    let mut candidates: Vec<&str> = Vec::new();
+    if let Some((a, b)) = rest.split_once(" b/") {
+        candidates.push(b);
+        candidates.push(a.strip_prefix("a/").unwrap_or(a));
+    } else {
+        candidates.push(rest);
+    }
+    // Anchored under a root before the test. `is_secret_path_static` spells its
+    // dotfile rules as PATH suffixes (`/.env`, `/.npmrc`), so a bare relative
+    // `.env` — which is exactly what a diff header carries — misses every one
+    // of them. MEASURED, not assumed: `is_secret_path_static(Path::new(".env"))`
+    // is FALSE while `Path::new("a/.env")` is TRUE. Every other caller happens
+    // to hand it an already-resolved absolute path, so the edge had nowhere to
+    // show; anchoring here keeps the answer the same as `Read`'s and `Grep`'s
+    // rather than introducing a second, weaker spelling of the same list.
+    candidates
+        .into_iter()
+        .find(|c| is_secret_path_static(&std::path::Path::new("/").join(c)))
+        .map(|c| {
+            std::path::Path::new(c)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| c.to_string())
+        })
+}
+
+/// Apply [`withhold_secret_diff_sections`] to a successful result, appending a
+/// deterministic footer naming what was withheld.
+fn apply_diff_secret_policy(mut result: ToolResult) -> ToolResult {
+    if result.is_error {
+        return result;
+    }
+    let (kept, withheld) = withhold_secret_diff_sections(&result.content);
+    if withheld.is_empty() {
+        return result;
+    }
+    let mut names: Vec<String> = withheld;
+    names.sort();
+    names.dedup();
+    result.content = format!(
+        "{kept}[Git policy: {} secret-shaped file section(s) withheld ({})]",
+        names.len(),
+        names.join(", ")
+    );
+    result
+}
+
+/// A content-returning op may not be pointed AT a secret. Separate from the
+/// section filter because `blame` has no per-file sections to withhold — the
+/// whole answer is one file's content — and because naming the file outright
+/// deserves to be told, not silently emptied.
+fn refuse_secret_path(cwd: &str, path: &str) -> Option<ToolResult> {
+    if path.is_empty() {
+        return None;
+    }
+    let target = resolved_cwd(cwd).join(path);
+    if !is_secret_path_static(&target) {
+        return None;
+    }
+    Some(ToolResult {
+        content: format!(
+            "Refused: {path:?} is a credential-bearing file, and this op returns its \
+             content"
+        ),
+        is_error: true,
+    })
 }
 
 /// The branch currently checked out, or `None` on a detached / unborn HEAD.
@@ -338,6 +477,9 @@ impl Tool for GitTool {
                 // is the only git surface there is (see the module docs), so
                 // that silent empty diff left a "review this PR" job with no
                 // way to see the pull request at all.
+                if let Some(err) = refuse_secret_path(cwd, path) {
+                    return err;
+                }
                 let mut args: Vec<&str> = vec!["diff"];
                 if staged {
                     args.push("--staged");
@@ -349,7 +491,7 @@ impl Tool for GitTool {
                     args.push("--");
                     args.push(path);
                 }
-                run_git(cwd, &args).await
+                apply_diff_secret_policy(run_git(cwd, &args).await)
             }
             "log" => {
                 let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(20);
@@ -366,6 +508,9 @@ impl Tool for GitTool {
                         };
                     }
                 };
+                if let Some(err) = refuse_secret_path(cwd, path) {
+                    return err;
+                }
                 let line = input.get("line").and_then(|v| v.as_u64()).unwrap_or(1);
                 let range = format!("{line},{line}");
                 // `git blame -L <range> -- <path>` — argv mode, no shell.
