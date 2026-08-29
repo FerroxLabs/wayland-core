@@ -111,15 +111,24 @@ impl ContextWindow {
     }
 
     /// Pre-flight input ceiling = window − output_reserve − emergency_buffer,
-    /// saturating (never underflows). `None` when the window is unknown — the
-    /// overflow guard then SKIPS (fail open), identical to today's `window > 0`
-    /// skip, with `size_output_cap`'s UNKNOWN_CAP + the provider 400 as backstops.
-    pub fn input_ceiling(&self, output_reserve: u64, emergency_buffer: u64) -> Option<u64> {
+    /// with both reserves SCALED to this window
+    /// ([`CompactConfig::scaled_reserves`]). `None` when the window is unknown —
+    /// the overflow guard then SKIPS (fail open), identical to the old
+    /// `window > 0` skip, with `size_output_cap`'s UNKNOWN_CAP + the provider
+    /// 400 as backstops.
+    ///
+    /// # Why this takes the config and not two numbers (#1179)
+    ///
+    /// It used to take `output_reserve` and `emergency_buffer` as bare `u64`s,
+    /// and every caller passed `config.output_reserve` / `config.emergency_buffer`
+    /// unscaled. Those absolutes were tuned for a 200,000-token window; against
+    /// the 4,096-token slot #1172 measured they saturate the ceiling to zero and
+    /// the guard fires on every turn. Taking the config means there is no
+    /// unscaled spelling of this left for a caller to reach for by accident —
+    /// the scaling is not something a call site can forget.
+    pub fn input_ceiling(&self, config: &crate::compact::CompactConfig) -> Option<u64> {
         let w = self.window?;
-        Some(
-            w.saturating_sub(output_reserve)
-                .saturating_sub(emergency_buffer),
-        )
+        Some(config.input_ceiling_for_window(w as usize) as u64)
     }
 }
 
@@ -430,11 +439,14 @@ mod tests {
 
     #[test]
     fn input_ceiling_known_fires_on_gpt4o_where_200k_would_not() {
+        let cfg = crate::compact::CompactConfig::default();
         let ctx = ContextWindow {
             used_tokens: 110_000,
             window: Some(128_000),
         };
-        let ceiling = ctx.input_ceiling(20_000, 3_000);
+        let ceiling = ctx.input_ceiling(&cfg);
+        // 128_000 is far above the #1179 scaling crossover (60_000), so the
+        // reserves apply in full and this is the number it always was.
         assert_eq!(ceiling, Some(105_000));
         // 110_000 >= 105_000 -> the #255 guard fires; the old 200k-based
         // ceiling (177_000) would have let it through (false negative).
@@ -443,19 +455,41 @@ mod tests {
 
     #[test]
     fn input_ceiling_unknown_is_none() {
+        let cfg = crate::compact::CompactConfig::default();
         let ctx = ContextWindow {
             used_tokens: 110_000,
             window: None,
         };
-        assert_eq!(ctx.input_ceiling(20_000, 3_000), None);
+        assert_eq!(ctx.input_ceiling(&cfg), None);
     }
 
+    /// #1179 — this used to assert `Some(0)`, i.e. that a window smaller than
+    /// the absolute reserves produced a ceiling of zero "without underflowing".
+    /// Zero is not a safe answer on this path: `used >= ceiling` is true of
+    /// every turn, including an empty one, so the #255 guard fires immediately
+    /// and aborts the run. The saturating subtraction never underflowed and
+    /// never helped.
+    ///
+    /// With the reserves scaled to the window the case cannot arise: the
+    /// ceiling is at least `(1 - MAX_RESERVE_FRACTION)` of the window for any
+    /// positive window, so it is positive whenever the window is.
     #[test]
-    fn input_ceiling_saturates_no_underflow() {
-        let ctx = ContextWindow {
-            used_tokens: 0,
-            window: Some(1_000),
-        };
-        assert_eq!(ctx.input_ceiling(20_000, 3_000), Some(0));
+    fn input_ceiling_is_positive_for_every_positive_window() {
+        let cfg = crate::compact::CompactConfig::default();
+        for window in [1_000u64, 4_096, 8_192, 32_768, 60_000, 128_000, 200_000] {
+            let ctx = ContextWindow {
+                used_tokens: 0,
+                window: Some(window),
+            };
+            let ceiling = ctx.input_ceiling(&cfg).expect("a known window");
+            assert!(
+                ceiling > 0,
+                "a zero ceiling fires the #255 guard on an empty turn; window {window}"
+            );
+            assert!(
+                ceiling as f64 >= window as f64 * (1.0 - crate::compact::MAX_RESERVE_FRACTION),
+                "window {window} kept only {ceiling} tokens of input budget"
+            );
+        }
     }
 }

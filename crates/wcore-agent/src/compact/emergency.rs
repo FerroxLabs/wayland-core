@@ -49,9 +49,7 @@ pub fn is_at_emergency_limit(
 /// `provider` / `model` must be the POST-swap effective pair (the same values
 /// fed to `size_output_cap` and the #255 pre-flight guard).
 pub fn emergency_limit(config: &CompactConfig, provider: &str, model: &str) -> usize {
-    config
-        .effective_context_window(provider, model)
-        .saturating_sub(config.emergency_buffer)
+    config.emergency_limit_for_window(config.effective_context_window(provider, model))
 }
 
 #[cfg(test)]

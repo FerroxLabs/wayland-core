@@ -8173,6 +8173,107 @@ impl AgentEngine {
     /// `flux_served_window` / `flux_context_pressure` fresh each turn (the model
     /// swap was already applied by `apply_pre_turn_outcome`), so there is no
     /// stored trigger state to invalidate.
+    /// #1172/#1179 — THE one place a LEARNED served window is admitted.
+    ///
+    /// `served_window()` is `None` until this route has been OBSERVED to drop
+    /// part of a prompt, and `None` there means "no evidence", never "the
+    /// window is fine" — so a route that has never truncated is returned
+    /// unchanged. When there IS evidence it is applied by `min`, so it can only
+    /// ever narrow.
+    ///
+    /// `supports_compaction` is the gate #1179 exists for. At the 4,096-token
+    /// slot #1172 measured, core's own 3,118-token baseline turn is 76% of the
+    /// window: narrowing onto it would put the pre-flight ceiling and the
+    /// autocompact threshold both below the cost of an empty conversation, so
+    /// the guard would abort every run and the summarizer would fire every
+    /// turn. Leaving the window alone there is not the guard failing to fire —
+    /// it is core declining to brick a run it cannot rescue, while #1172's
+    /// notice tells the operator the one thing that does fix it.
+    fn narrow_to_served_window(&self, window: Option<u64>) -> Option<u64> {
+        let Some(served) = self.compact_state.served_window.served_window() else {
+            return window;
+        };
+        if !self.compact_config.supports_compaction(served as usize) {
+            return window;
+        }
+        Some(window.map_or(served, |w| w.min(served)))
+    }
+
+    /// The autocompact trigger VALUE for this turn, on the window that will
+    /// actually serve it.
+    ///
+    /// #1172: `auto::autocompact_threshold` resolves the window from the config
+    /// and the model alone, so it could never see a window learned from the
+    /// endpoint's own `usage`. Against the stock Ollama #1172 reproduced, that
+    /// left the trigger at 22,937 on a 4,096-token slot — five times past
+    /// anything the endpoint would accept, which is the "compaction never
+    /// fires" half of that report.
+    ///
+    /// Only the LEARNED narrowing is added here; the base window is still
+    /// `effective_context_window`, so an operator's `[compact] context_window`
+    /// keeps the precedence it has always had.
+    fn autocompact_threshold_now(&self) -> usize {
+        let base = self
+            .compact_config
+            .effective_context_window(self.compat.provider_type(), &self.model);
+        let window = self
+            .narrow_to_served_window(Some(base as u64))
+            .unwrap_or(base as u64);
+        self.compact_config
+            .autocompact_threshold_for_window(window as usize)
+    }
+
+    /// [`Self::autocompact_threshold_now`] as the trigger `should_autocompact`
+    /// spells, `config.enabled` included.
+    fn should_autocompact_now(&self, tokens: u64) -> bool {
+        self.compact_config.enabled && tokens as usize >= self.autocompact_threshold_now()
+    }
+
+    /// THE one reconciliation of every window source, for the #255 pre-flight
+    /// guard and everything that must agree with it.
+    ///
+    /// Three sources, in increasing order of authority:
+    ///
+    /// 1. the kernel (`ContextWindow::resolve`) — the model's catalogued window,
+    ///    or the operator's `[compact] context_window`, or `None`;
+    /// 2. Flux's signalled-back served window (#282), for a tier alias;
+    /// 3. #1172's LEARNED served window — what this endpoint was OBSERVED to
+    ///    actually process, applied by `min` so it can only ever narrow.
+    ///
+    /// # Why (3) is gated (#1179)
+    ///
+    /// The learned window fed the pressure gauge and the user-facing notice
+    /// from the day #1172 shipped, and deliberately fed nothing else, because
+    /// with ABSOLUTE reserves it would have bricked the run rather than saved
+    /// it: at the 4,096-token slot #1172 measured, the ceiling saturated to
+    /// zero and the guard fired on every turn. Scaling the reserves
+    /// (`CompactConfig::scaled_reserves`) fixes that for every window with room
+    /// to work in, and `supports_compaction` is what decides whether this one
+    /// has any: both boundaries must clear core's own 3,118-token baseline
+    /// turn. At 4,096 they cannot — the baseline turn alone is 76% of the
+    /// window — so the learned figure is NOT narrowed onto here and the run
+    /// proceeds on the wider estimate while the notice tells the operator to
+    /// raise the server's context length. Aborting faster is not a fix.
+    fn resolve_preflight_window(
+        &self,
+        used_tokens: u64,
+        model: &str,
+    ) -> wcore_config::context_window::ContextWindow {
+        let mut ctx = wcore_config::context_window::ContextWindow::resolve(
+            used_tokens,
+            self.compat.provider_type(),
+            model,
+            self.compact_config.kernel_config_window(),
+        );
+        if wcore_providers::is_flux_tier_alias(model)
+            && let Some(window) = self.flux_served_window
+        {
+            ctx.window = Some(window);
+        }
+        ctx.window = self.narrow_to_served_window(ctx.window);
+        ctx
+    }
+
     fn smart_compact_fraction(&self) -> Option<f64> {
         // Chokepoint: nothing below runs unless explicitly enabled.
         if !self.compact_config.smart_enabled {
@@ -8187,6 +8288,12 @@ impl AgentEngine {
         // Flux-aware denominator, mirroring the pre-flight guard + #282
         // reconciliation: prefer the REAL served-model window when Flux signalled
         // it back for a tier alias; else the #255 kernel resolution.
+        // #1179: the same three-source reconciliation the pre-flight guard uses,
+        // so the trigger and the guard cannot disagree about the window. The
+        // learned served window is applied here on the same `supports_compaction`
+        // gate — pointing the summarizer at a window whose threshold sits below
+        // core's own baseline turn is an LLM call at the top of every turn,
+        // forever, which is the brick #1179 exists to avoid.
         let kernel_fraction: Option<f64> = if wcore_providers::is_flux_tier_alias(&self.model)
             && self.flux_served_window.is_some()
         {
@@ -8196,13 +8303,8 @@ impl AgentEngine {
             }
             .fraction()
         } else {
-            ContextWindow::resolve(
-                used_tokens,
-                self.compat.provider_type(),
-                &self.model,
-                self.compact_config.kernel_config_window(),
-            )
-            .fraction()
+            self.resolve_preflight_window(used_tokens, &self.model)
+                .fraction()
         };
 
         // The Flux-signalled pressure header is served-model ground truth; it
@@ -12787,25 +12889,15 @@ impl AgentEngine {
                     // to the old `window > 0` skip; `size_output_cap`'s UNKNOWN_CAP and
                     // the provider 400 are the backstops.
                     {
-                        let mut ctx = wcore_config::context_window::ContextWindow::resolve(
-                            input_token_estimate as u64,
-                            self.compat.provider_type(),
-                            &request.model,
-                            self.compact_config.kernel_config_window(),
-                        );
-                        // #282 contract V1: once Flux has SIGNALLED-BACK the real served
-                        // window (`x-flux-model-window`) on a prior turn of THIS Flux
-                        // route, prefer it over the alias's pre-route guess so the guard
-                        // measures against the model that will actually serve the turn.
-                        if wcore_providers::is_flux_tier_alias(&request.model)
-                            && let Some(window) = self.flux_served_window
-                        {
-                            ctx.window = Some(window);
-                        }
-                        if let Some(ceiling) = ctx.input_ceiling(
-                            self.compact_config.output_reserve as u64,
-                            self.compact_config.emergency_buffer as u64,
-                        ) && ctx.used_tokens >= ceiling
+                        // #282 contract V1 (Flux's signalled-back served window) and
+                        // #1172's LEARNED served window are both reconciled inside
+                        // `resolve_preflight_window`, so this guard and the
+                        // length-finish check below can never end up on different
+                        // windows.
+                        let mut ctx = self
+                            .resolve_preflight_window(input_token_estimate as u64, &request.model);
+                        if let Some(ceiling) = ctx.input_ceiling(&self.compact_config)
+                            && ctx.used_tokens >= ceiling
                         {
                             // #636 — graceful degradation (rung 1). Before aborting, shed
                             // the largest tool-result outputs (spilling full content to
@@ -14558,21 +14650,9 @@ impl AgentEngine {
                         // guard, including the Flux served-window signal-back
                         // (which may have just updated via ProviderMeta on
                         // THIS stream).
-                        let mut ctx = wcore_config::context_window::ContextWindow::resolve(
-                            input_token_estimate as u64,
-                            self.compat.provider_type(),
-                            &request.model,
-                            self.compact_config.kernel_config_window(),
-                        );
-                        if wcore_providers::is_flux_tier_alias(&request.model)
-                            && let Some(window) = self.flux_served_window
-                        {
-                            ctx.window = Some(window);
-                        }
-                        let ceiling = ctx.input_ceiling(
-                            self.compact_config.output_reserve as u64,
-                            self.compact_config.emergency_buffer as u64,
-                        );
+                        let ctx = self
+                            .resolve_preflight_window(input_token_estimate as u64, &request.model);
+                        let ceiling = ctx.input_ceiling(&self.compact_config);
                         // At/over on either count: the provider-billed input is
                         // authoritative when present — providers can count
                         // higher than our estimate, which is exactly how a
@@ -17252,11 +17332,10 @@ impl AgentEngine {
     /// exactly that drift. (`self.model` is already post-swap — the tier swap
     /// is applied by `apply_pre_turn_outcome` before the turn runs.)
     fn autocompact_threshold_tokens(&self) -> u64 {
-        auto::autocompact_threshold(
-            &self.compact_config,
-            self.compat.provider_type(),
-            &self.model,
-        ) as u64
+        // #1172: the REPORTED threshold must be the ENFORCED one, learned
+        // window included, or the ledger sends an operator hunting a boundary
+        // the engine never used.
+        self.autocompact_threshold_now() as u64
     }
 
     /// The emergency hard-stop limit, as tokens, for this engine's config and
@@ -17543,11 +17622,7 @@ impl AgentEngine {
         // relief rather than an unconditional wipe on the eleventh tool call.
         let micro_pressure = micro::ContextPressure {
             real_input_tokens: self.compact_state.last_real_input_tokens,
-            autocompact_threshold: auto::autocompact_threshold(
-                &self.compact_config,
-                self.compat.provider_type(),
-                &self.model,
-            ),
+            autocompact_threshold: self.autocompact_threshold_now(),
         };
         if micro::should_microcompact(&self.messages, &self.compact_config, micro_pressure) {
             let result = micro::microcompact(&mut self.messages, &self.compact_config);
@@ -17587,13 +17662,8 @@ impl AgentEngine {
         // so a tripped breaker can't latch it. `smart_drove` is reused below for
         // the CompactOffload reason string and the cannot-shrink latch.
         let smart_drove = std::mem::take(&mut self.smart_compact_force);
-        let should_compact = smart_drove
-            || auto::should_autocompact(
-                self.compact_state.last_real_input_tokens,
-                &self.compact_config,
-                self.compat.provider_type(),
-                &self.model,
-            );
+        let should_compact =
+            smart_drove || self.should_autocompact_now(self.compact_state.last_real_input_tokens);
         if should_compact && !self.compact_state.is_circuit_broken(&self.compact_config) {
             let provider: Arc<dyn LlmProvider> = match (
                 self.session_journal.as_ref(),
@@ -17910,11 +17980,7 @@ impl AgentEngine {
             // GH#635 — call the SAME extracted function the trigger uses. This
             // was an inline re-derivation of the threshold and would have kept
             // reporting the stale 200k-based number after the fix.
-            let threshold = auto::autocompact_threshold(
-                &self.compact_config,
-                self.compat.provider_type(),
-                &self.model,
-            );
+            let threshold = self.autocompact_threshold_now();
             if self.compact_state.last_real_input_tokens as usize >= threshold {
                 self.output.emit_info(&format!(
                     "Autocompact: disabled (compact.enabled=false, \
@@ -26792,6 +26858,75 @@ mod approval_bridge_engine_tests {
         // The f32 pressure header (≈0.70) wins over the kernel fraction (0.50)
         // via max(); allow for f32→f64 rounding.
         assert!(forced > 0.69, "forced frac was {forced}");
+    }
+
+    /// #1172/#1179 WIRING — a learned served window narrows the pre-flight
+    /// window, but only where it leaves room to work.
+    ///
+    /// This grades the CHOKEPOINT, not the predicate: both the #255 guard and
+    /// the length-finish check call `resolve_preflight_window`, so a window
+    /// this test sees is a window they see.
+    #[test]
+    fn a_learned_served_window_narrows_the_preflight_window_when_it_is_workable() {
+        let mut engine = make_engine();
+        // A model the catalogue knows, so there IS a wider window to narrow.
+        engine.model = "gpt-4o".into();
+
+        let before = engine.resolve_preflight_window(1_000, "gpt-4o");
+        assert_eq!(before.window, Some(128_000), "the catalogued window");
+
+        // 8,192 clears the baseline turn on both boundaries -> it is applied.
+        engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 20_000, 8_192);
+        assert_eq!(
+            engine.compact_state.served_window.served_window(),
+            Some(8_192),
+            "the tracker must have learned it, or this arm measures nothing"
+        );
+        let narrowed = engine.resolve_preflight_window(1_000, "gpt-4o");
+        assert_eq!(
+            narrowed.window,
+            Some(8_192),
+            "an observed served window outranks the catalogue"
+        );
+        let ceiling = narrowed
+            .input_ceiling(&engine.compact_config)
+            .expect("a known window");
+        assert!(
+            ceiling > wcore_config::compact::BASELINE_TURN_TOKENS as u64,
+            "narrowing onto {ceiling} would abort the baseline turn"
+        );
+    }
+
+    /// The other half of the gate, and the whole reason #1179 existed: a served
+    /// window too small to work in must NOT be narrowed onto, because the
+    /// guard would then fire on every turn and abort every run.
+    #[test]
+    fn a_learned_served_window_too_small_to_work_in_is_not_narrowed_onto() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        // 4,096 -- the slot #1172 measured a stock Ollama serving.
+        engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 12_000, 4_096);
+        assert_eq!(
+            engine.compact_state.served_window.served_window(),
+            Some(4_096),
+            "the tracker must have learned it, or this arm measures nothing"
+        );
+        let ctx = engine.resolve_preflight_window(1_000, "gpt-4o");
+        assert_eq!(
+            ctx.window,
+            Some(128_000),
+            "core's own baseline turn is 76% of a 4,096 slot; narrowing onto it \
+             aborts every run instead of saving any"
+        );
+        // And the run is not aborted on an empty turn.
+        let ceiling = ctx.input_ceiling(&engine.compact_config).expect("known");
+        assert!(ceiling > wcore_config::compact::BASELINE_TURN_TOKENS as u64);
     }
 
     /// Fire test + the band clamp: an out-of-band trigger (0.95) is clamped to

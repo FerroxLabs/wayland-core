@@ -6,7 +6,7 @@
 //! summary.  A circuit breaker prevents runaway retries.
 
 use tokio::sync::mpsc;
-use wcore_config::compact::{CompactConfig, MIN_AUTOCOMPACT_WINDOW_FRACTION};
+use wcore_config::compact::CompactConfig;
 use wcore_providers::{LlmProvider, ProviderError, flux_loop};
 use wcore_types::compact::{CompactMetadata, CompactTrigger};
 use wcore_types::llm::{FluxLoopIntent, LlmEvent, LlmRequest, ThinkingConfig};
@@ -103,8 +103,8 @@ pub fn should_autocompact(
     last_input_tokens as usize >= autocompact_threshold(config, provider, model)
 }
 
-/// The autocompact trigger threshold in tokens:
-/// `effective_context_window - output_reserve - autocompact_buffer`.
+/// The autocompact trigger threshold in tokens, for the POST-swap effective
+/// model's window.
 ///
 /// F23-04 exposes this so the cache/compaction ledger can report token pressure
 /// as a fraction of the boundary that actually fires, rather than as a raw
@@ -123,39 +123,20 @@ pub fn should_autocompact(
 /// Note this ignores `config.enabled`: it is the threshold's VALUE, and a
 /// disabled compactor still has one worth showing next to the watermark.
 ///
-/// #1150 — when the subtraction SATURATES TO ZERO the threshold falls back to
-/// [`MIN_AUTOCOMPACT_WINDOW_FRACTION`] of the window instead.
+/// # Where the arithmetic lives (#1179)
 ///
-/// `output_reserve` + `autocompact_buffer` is 33,000 tokens by default, tuned
-/// when the only window in play was 200,000. It is 16.5% of a 200k window and
-/// 100.7% of a 32,768-token one, so below ~33k the subtraction saturates — and
-/// zero does not mean "no threshold" on this path, it means ALWAYS FIRE:
-/// [`should_autocompact`] tests `tokens >= threshold`, so an empty context on
-/// turn one qualifies, and `micro::ContextPressure::admits_trigger` treats a
-/// zero threshold as explicitly ungated. A 32,768-token window produced exactly
-/// that — an LLM summarization at the top of every turn — which is why the
-/// unknown-window notice's remedy ("set `[compact] context_window`") could not
-/// stand on its own.
-///
-/// The fallback is gated on `after_reserves == 0` rather than applied as a
-/// general floor, deliberately. A floor of the same fraction would also have
-/// RAISED the threshold for windows between ~33,000 and ~110,000 (a pinned
-/// 60,000-token window would have moved from 27,000 to 42,000, past its own
-/// pre-flight shed ceiling of 37,000). Nothing in #1150 is evidence about that
-/// band, so it is left exactly as it was: every window above 33,000 tokens —
-/// which is every model in the `limits` catalogue, the smallest being 128,000 —
-/// is byte-for-byte unchanged.
+/// This resolves the window and delegates to
+/// [`CompactConfig::autocompact_threshold_for_window`], which subtracts the
+/// reserves SCALED to that window. It used to subtract them raw and fall back
+/// to `MIN_AUTOCOMPACT_WINDOW_FRACTION` of the window when that saturated to
+/// zero. The fallback closed #1150's cliff at 32,768 and left an inversion
+/// behind it: the threshold became 22,937 while the pre-flight ceiling — which
+/// got no such fallback — stayed at 9,768, so the guard shed and aborted
+/// 13,169 tokens BELOW the trigger and autocompact could never fire. Scaling
+/// both from one factor is what removes that, and it is why the saturated case
+/// no longer exists to fall back from.
 pub fn autocompact_threshold(config: &CompactConfig, provider: &str, model: &str) -> usize {
-    let window = config.effective_context_window(provider, model);
-    let after_reserves = window
-        .saturating_sub(config.output_reserve)
-        .saturating_sub(config.autocompact_buffer);
-    if after_reserves > 0 {
-        return after_reserves;
-    }
-    // Degenerate only: the absolute reserves consumed the entire window, and a
-    // zero threshold is ALWAYS FIRE on this path, not "no threshold".
-    (window as f64 * MIN_AUTOCOMPACT_WINDOW_FRACTION) as usize
+    config.autocompact_threshold_for_window(config.effective_context_window(provider, model))
 }
 
 // ── Request sanitation ──────────────────────────────────────────────────────
