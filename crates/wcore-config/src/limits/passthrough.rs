@@ -44,8 +44,20 @@
 //! serve the same id at wildly different limits. `output == context` is
 //! models.dev saying UNKNOWN, never a ceiling -- `grok-4.5` / `grok-4.6`
 //! report 500,000 both ways and their OUTPUT is therefore ungraded (the
-//! context is not in doubt). No open-weights family is listed here: those
-//! live in `CATALOGUE_CEILINGS`, where the same rule already applies.
+//! context is not in doubt).
+//!
+//! OPEN WEIGHTS, STATED HONESTLY. This module used to claim "no open-weights
+//! family is listed here". That was false on its own contents: the MiniMax M2
+//! and M3 rows and the DeepSeek V4 rows below are open-weights ids, served by
+//! third parties at their own limits -- `minimax-m2.5` runs 65,536 to 228,700
+//! across 46 host rows on the 2026-08-28 pull, `deepseek-v4-pro` 128,000 to
+//! 1,050,000 across 74 -- and `model_output_ceiling` is keyed on the model id
+//! ALONE, so each arm is handed to every host serving that name. Those twelve
+//! rows predate this table's guards and are tracked in
+//! FerroxLabs/wayland#1232; do not read them as precedent. What IS enforced
+//! is the forward direction: `check-model-limits-freshness.py` will not demand
+//! an arm for a NEW open-weights id whose hosts disagree by 2x or more, it
+//! REPORTs and says why (AGENTS.md's third model-limits rule).
 //!
 //! Ids are recorded in their CANONICAL vendor spelling. The lookup is a
 //! substring match, so the provider-specific dressings -- `anthropic.`,

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Test-written process globals are invisible to CI: nextest isolates per process, cargo test does not"
 status: closed
-last_verified_commit: 9de21aa1
+last_verified_commit: 43848f75
 criteria:
   - id: c1
     text: "A shared-process lib leg runs in CI, floored so it cannot pass while scanning nothing"
@@ -19,10 +19,11 @@ criteria:
     owner: core
   - id: c3
     text: "A lint catches the class in CI, with a paired-direction self-test run immediately before it"
-    state: not-met
-    evidence: "file:.github/workflows/ci.yml:1399"
+    state: met
+    evidence: "symbol:scripts/check-test-env-globals.py::classify_site"
     owner: core
-    note: "REFUTED 2026-08-29 by the 0.13.12 close-sweep, recorded verbatim: DOES NOT HOLD AS WRITTEN. The wiring half is fine: ci.yml:1398-1399 runs `check-test-env-globals.py --self-test` immediately followed by the gate, unconditional, in a required job; anchor 1399 is exact. But 'catches the class' is measured false for the class's own headline instance. The lint only fails on kind UNSERIALIZED-TEST - a `set_var` lexically inside a fn carrying a test attribute. A write inside a non-test helper is classified 'helper' and is explicitly not audited; the script prints so itself: `NOT audited by this gate: 153 write(s) inside helper functions`. `PinnedRetryBudget::pin` (crates/wcore-agent/src/test_utils/mod.rs:381) - the exact helper #1134 opens with - is one of those. PROOF, not inference: with the serial attribute removed from its caller at engine.rs:29581 (the mutation that makes `cargo test -p wcore-agent --lib` fail 3-vs-11, see c1), the lint returned EXIT=0, `OK: no unserialized test writes a global that its own binary's production code reads.`, and byte-identical counts {'serial-attr': 459, 'helper': 153, 'UNSERIALIZED-TEST': 49, 'lock-guarded': 20} - it did not even see the change. Graded minor rather than major only because c1's lib leg demonstrably DOES catch that exact regression, so the class is bounded by the legs even though the lint criterion overstates the lint."
+    handoff: "#1233"
+    note: "RE-GRADED 2026-08-29. The wiring half always held (ci.yml runs --self-test then the gate, unconditional, in a required job). The SUBSTANCE did not: the lint fired only on a set_var written lexically inside a test fn, so the identical write moved one call deep was classified `helper` and never graded -- 153 sites, and the headline one, PinnedRetryBudget::pin, was not even seen, because src/test_utils/mod.rs is an ungated `pub mod` with no cfg(test) span around it. MEASURED before: removing #[serial_test::serial] from its caller at engine.rs made `cargo test -p wcore-agent --lib` fail 3-vs-11 while the lint returned exit 0 with byte-identical counts. MEASURED after: the same mutation returns exit 1 naming test_utils/mod.rs pin/drop as `helper write, reached from an unserialized test`. Callers are resolved by attribution key -- the impl TYPE for a method (so an RAII guard\'s ctor and Drop are one key, and `drop`/`new` name collisions are impossible), the fn name for a free fn and only when declared once in the binary; anything else is reported, never failed. The self-test gained three paired cases: the write one call deep with an unserialized caller (FIRE), the same with a serialized caller (quiet), and a guard nothing constructs (quiet). HANDOFF: eight pre-existing pairs the new audit names are dated debt in .config/env-global-helper-debt.txt owned by #1233; a ninth, a DIRECT write of WAYLAND_EXEC_CONTAINER_IMAGE that had the gate RED at HEAD, was fixed here via ContainerBackend::with_image. A direct write is never exempt, an expired entry fails, and a stale entry fails -- all three red-armed."
   - id: c4
     text: "That lint proves both directions itself, so it cannot rot into a checker that matches nothing"
     state: met

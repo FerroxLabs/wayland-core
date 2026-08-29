@@ -165,6 +165,29 @@ PASSTHROUGH_IN_SCOPE = {
     "minimax": re.compile(r"^minimax-m(?:[2-9]|\d\d)"),
 }
 
+# AGENTS.md's THIRD preserved rule: "Do not add a static arm for an
+# open-weights model served at wildly different limits by different hosts."
+#
+# Two of the six passthrough families publish their weights, so the same id is
+# also served by hosts that are not the vendor and that size it however they
+# like. The other four are vendor-only: nobody but Anthropic serves
+# `claude-opus-5`, so its arm cannot be wrong for somebody else's endpoint.
+#
+# This set is what stops the REPORT arm below from automating new violations.
+# `PASSTHROUGH_IN_SCOPE` is a set of FLOORS -- "this generation and everything
+# above it" -- so without this, the first `minimax-m4` or `deepseek-v5` to
+# appear on models.dev reddens the release with the instruction "Add the arm if
+# it has none, then add the row", which is precisely the arm the rule forbids.
+PASSTHROUGH_OPEN_WEIGHTS = {"deepseek", "minimax"}
+
+# What "wildly different" means, stated as a number so the gate can apply it.
+# MEASURED on the 2026-08-28 pull: `minimax-m2.5` runs 65,536 -> 228,700 across
+# 46 host rows (3.5x) and `deepseek-v4-pro` runs 128,000 -> 1,050,000 across 74
+# rows (8.2x), while a vendor-only id like `claude-opus-5` agrees to the digit
+# across every endpoint that serves it. 2.0 sits well clear of the 196,608 vs
+# 204,800 kind of noise and well below both real cases.
+HOST_SPREAD_RATIO = 2.0
+
 # Specialty modalities the chain deliberately excludes: they are MUCH smaller
 # than the text tier and an over-claim would 400 them, so they fail open to the
 # unknown path on purpose.
@@ -257,6 +280,32 @@ def canonical(model_id: str) -> str:
     return b
 
 
+def host_spread(catalogue: dict, model_id: str):
+    """-> (low, high, [provider ids]) for one id across EVERY host, or None.
+
+    Deliberately not restricted to `PASSTHROUGH_VENDORS`. The vendor floor is
+    the right input for "is our arm honest about the vendor"; it is exactly the
+    WRONG input for "may this id have a single static arm at all", because a
+    vendor-only view cannot by construction observe the disagreement that makes
+    an open-weights id unarmable. Junk is dropped the same way it is elsewhere:
+    a missing or zero context is not a datum, and `output == context` is
+    models.dev saying UNKNOWN.
+    """
+    seen, where = [], []
+    for pid, prov in catalogue.items():
+        for mid, meta in ((prov or {}).get("models") or {}).items():
+            if canonical(mid) != model_id:
+                continue
+            ctx = (meta.get("limit") or {}).get("context")
+            if not ctx:
+                continue
+            seen.append(ctx)
+            where.append(pid)
+    if len(seen) < 2:
+        return None
+    return min(seen), max(seen), sorted(set(where))
+
+
 def scan_passthrough(catalogue: dict, rows: list[tuple[str, int, int]]) -> list[Finding]:
     """#1176 -- grade PASSTHROUGH_VENDOR_MODELS against vendor-operated rows.
 
@@ -296,6 +345,27 @@ def scan_passthrough(catalogue: dict, rows: list[tuple[str, int, int]]) -> list[
             where = sorted(set(rec["where"]))
             floor_ctx = min(rec["ctx"])
             if mid not in table:
+                spread = (host_spread(catalogue, mid)
+                          if family in PASSTHROUGH_OPEN_WEIGHTS else None)
+                if spread and spread[1] >= spread[0] * HOST_SPREAD_RATIO:
+                    low, high, hosts = spread
+                    findings.append(Finding(
+                        "REPORT",
+                        f"[{family}] `{mid}` has no row, and it must NOT get "
+                        f"one by default: it is an OPEN-WEIGHTS id served at "
+                        f"context {low} to {high} ({high / low:.1f}x) across "
+                        f"{len(hosts)} hosts {hosts}. AGENTS.md's third rule -- "
+                        f"'do not add a static arm for an open-weights model "
+                        f"served at wildly different limits by different "
+                        f"hosts' -- forbids the arm, because `model_output_"
+                        f"ceiling` is keyed on the model id alone and would "
+                        f"hand the vendor's figure to every third-party host "
+                        f"too. An arm is permitted ONLY if it is below the "
+                        f"status-quo fallback in BOTH dimensions, per the rule's "
+                        f"own Llama exception; otherwise leave it unarmed and "
+                        f"record the decision. NOT a failure."
+                    ))
+                    continue
                 out_note = (
                     f", output={min(rec['out'])}" if rec["out"]
                     else " (output UNKNOWN -- models.dev reports output == context)"
@@ -503,6 +573,12 @@ def report(findings: list[Finding], entries_count: int,
           "older generations these tables deliberately do not arm (Claude 3.x, "
           "GPT-3.5 / o-series, DeepSeek V3+R1, the Gemini image/tts/live "
           "modalities) -- and any endpoint that is not vendor-operated.")
+    print("NOT DEMANDED (AGENTS.md rule 3): a NEW %s id whose hosts disagree by "
+          "%.1fx or more is REPORTED, never failed. Those families publish "
+          "their weights, `model_output_ceiling` is keyed on the id alone, and "
+          "a static arm would hand the vendor's figure to every third-party "
+          "host serving the same name."
+          % ("/".join(sorted(PASSTHROUGH_OPEN_WEIGHTS)), HOST_SPREAD_RATIO))
 
     if pinned:
         print("\n" + "=" * 72)
@@ -795,6 +871,50 @@ def self_test() -> int:
     }}
     junk["poe"] = {"models": {"claude-opus-5": {"limit": {"context": 0, "output": 0}}}}
     pcase("PASS when only a non-vendor aggregator disagrees", junk, False)
+
+    # P12. #1176 c5 / AGENTS.md rule 3. A NEW open-weights generation appears
+    #      inside an in-scope FAMILY FLOOR, and the hosts disagree wildly. The
+    #      gate must not demand an arm for it -- REPORT, never FAIL. Before
+    #      this arm existed the floor `^minimax-m(?:[2-9]|\d\d)` reddened the
+    #      release with "Add the arm if it has none", automating the exact
+    #      violation the rule forbids.
+    ow = _fixture_passthrough_catalogue(
+        minimax={"minimax-m4": {"limit": {"context": 204_800, "output": 128_000}}})
+    ow["nebius"] = {"models": {
+        "minimax-m4": {"limit": {"context": 65_536, "output": 8_192}}}}
+    ow["openrouter"] = {"models": {
+        "minimax/minimax-m4": {"limit": {"context": 196_608, "output": 16_000}}}}
+    pcase("REPORT, not FAIL, for a new open-weights id the hosts disagree on",
+          ow, False)
+    found = scan_passthrough(ow, pt_rows)
+    ok = any(f.kind == "REPORT" and "minimax-m4" in f.text for f in found)
+    print(f"  [{'ok' if ok else 'BROKEN'}] ...and it is REPORTED rather than "
+          f"passed over in silence")
+    if not ok:
+        for f in found:
+            print(f"        -> {f.kind}: {f.text}")
+        failures.append("open-weights suppression is reported")
+
+    # P13. THE CONTROL FOR P12, and the reason the suppression is a MEASUREMENT
+    #      rather than a family-wide exemption. Same family, same floor, but
+    #      every host agrees: the id is armable and its absence is the #165
+    #      shape again, so it must still FAIL.
+    agreed = _fixture_passthrough_catalogue(
+        minimax={"minimax-m4": {"limit": {"context": 204_800, "output": 128_000}}})
+    agreed["nebius"] = {"models": {
+        "minimax-m4": {"limit": {"context": 204_800, "output": 128_000}}}}
+    pcase("FAIL for a new open-weights id every host serves identically",
+          agreed, True)
+
+    # P14. The suppression must not leak to the vendor-only families. Nobody
+    #      but Anthropic serves claude-opus-6; an aggregator publishing 8,192
+    #      for it is junk, not a host spread, and the missing arm is still #165.
+    leak = _fixture_passthrough_catalogue(
+        anthropic={"claude-opus-6": {"limit": {"context": 2_000_000, "output": 256_000}}})
+    leak["openrouter"] = {"models": {
+        "anthropic/claude-opus-6": {"limit": {"context": 8_192, "output": 8_192}}}}
+    pcase("FAIL still, for a vendor-only id an aggregator disagrees about",
+          leak, True)
 
     # P9. A pin suppresses ONE exact disagreement...
     pinned = _fixture_passthrough_catalogue()
