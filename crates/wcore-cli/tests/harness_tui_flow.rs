@@ -195,7 +195,11 @@ impl PtyHarness {
         // vt100 parser; tests query the screen grid by locking the
         // parser and rendering its current contents.
         let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
-        let parser = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(40, 120, 0)));
+        let parser = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(
+            HARNESS_ROWS,
+            HARNESS_COLS,
+            0,
+        )));
         let parser_for_thread = std::sync::Arc::clone(&parser);
         let reader_handle = std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -271,9 +275,34 @@ impl PtyHarness {
         }
     }
 
-    /// Resize the PTY. The TUI sees this as a `crossterm::event::Resize`
-    /// and reflows.
+    /// Resize the PTY **and the parser that reads it**. The TUI sees this as a
+    /// `crossterm::event::Resize` and reflows.
+    ///
+    /// core#336: this used to resize the PTY alone. The `vt100::Parser` stayed
+    /// pinned at the boot geometry, so the only surface a test can observe kept
+    /// showing the PRE-resize frame — and every post-resize predicate in this
+    /// file was already true before the resize was requested. Those assertions
+    /// could not fail, whether or not the resize was ever delivered.
+    ///
+    /// Re-sizing the parser to match makes the grid the assertions read the one
+    /// the app is now painting into, which is what lets a caller state a
+    /// WIDTH observation: after a widening resize, a glyph beyond the old
+    /// right-hand edge can only have been painted by the app after it saw the
+    /// new geometry. No stale frame reaches that far.
+    ///
+    /// `set_size` rather than a fresh `Parser`: replacing it clears the grid,
+    /// and the app's renderer only emits the cells it believes CHANGED, so the
+    /// position-stable chrome is never re-sent and the screen stays
+    /// permanently half-blank. Measured — a cleared parser fails the
+    /// post-shrink chrome wait on a healthy binary. Truncating the grid is
+    /// enough for the observation anyway: after shrinking to 80 columns
+    /// nothing on screen is wider than 80, so the widen leg below starts from
+    /// a grid that CANNOT already satisfy it.
     fn resize(&mut self, cols: u16, rows: u16) {
+        {
+            let mut parser = self.parser.lock().expect("parser lock");
+            parser.set_size(rows, cols);
+        }
         self.master
             .resize(PtySize {
                 rows,
@@ -282,6 +311,75 @@ impl PtyHarness {
                 pixel_height: 0,
             })
             .expect("resize PTY");
+    }
+
+    /// Column index (1-based) of the rightmost painted cell anywhere on screen.
+    ///
+    /// core#336: the direct observation that the app really re-laid-out at the
+    /// new geometry.
+    ///
+    /// Read off the GRID, cell by cell, and NOT off `screen_text()`. vt100
+    /// records that a row was wrapped and `contents()` re-joins the two halves
+    /// into one logical line, so a 140-column paint into a 120-column grid
+    /// measures 140 there — the exact reading that would make this observation
+    /// pass against the defect it exists to catch. Measured: with the parser
+    /// pinned at the boot width, the `contents()` form of this helper passed.
+    /// The grid form cannot exceed the grid.
+    fn widest_painted_row(&self) -> usize {
+        let parser = self.parser.lock().expect("parser lock");
+        let screen = parser.screen();
+        let (rows, cols) = screen.size();
+        let mut widest = 0usize;
+        for row in 0..rows {
+            for col in (0..cols).rev() {
+                if screen
+                    .cell(row, col)
+                    .is_some_and(|cell| cell.has_contents())
+                {
+                    widest = widest.max(col as usize + 1);
+                    break;
+                }
+            }
+        }
+        widest
+    }
+
+    /// Wait until the app has painted at least `cols` columns wide, polling on
+    /// the same cadence as [`Self::wait_for`].
+    ///
+    /// POLLED, not sampled once: a paint arrives some frames after the resize
+    /// that provoked it, and a single snapshot taken in between reports the
+    /// PREVIOUS geometry. Sampling it once is how the first cut of this
+    /// observation flaked — and worse, it flaked GREEN, because a boot width
+    /// captured before the chrome reached the edge made every later comparison
+    /// against it trivially true.
+    fn wait_for_width(&self, cols: usize, timeout: Duration, what: &str) {
+        let deadline = Instant::now() + timeout;
+        let mut widest = 0;
+        while Instant::now() < deadline {
+            widest = self.widest_painted_row();
+            if widest >= cols {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        panic!(
+            "timed out after {timeout:?} waiting for {what}: the widest painted row \
+             reached {widest} columns, never {cols}.\n--- last screen ---\n{}\n--- end ---",
+            self.screen_text()
+        );
+    }
+
+    /// True while the spawned binary is still running.
+    ///
+    /// core#336: what the SHRINK leg of the resize test uniquely guards is that
+    /// the live binary survives an aggressive narrow resize — a render-primitive
+    /// panic on tight rows kills the child. That is a process fact, and asking
+    /// the process is how to establish it. The leg used to ask the SCREEN
+    /// instead, which conflates "did not die" with "repainted the chrome", and
+    /// only the first of those is promised at an intermediate width.
+    fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 
     /// Block until the child exits or `timeout` elapses. Returns the
@@ -320,6 +418,16 @@ impl Drop for PtyHarness {
 /// (audit C2) and runs concurrently with the rest of bootstrap. Allow 60s
 /// so a cold runner has slack but a regression that re-introduces
 /// unbounded waiting still trips the assert.
+/// The geometry the harness boots at, in ONE place.
+///
+/// core#336: the PTY and the `vt100::Parser` used to be sized independently —
+/// the PTY moved on a resize and the parser did not — so the only surface the
+/// assertions can read never changed shape. Naming the boot geometry once lets
+/// the resize test state its observation against a real, non-drifting number
+/// instead of a width it sampled from a frame that may not have landed yet.
+const HARNESS_ROWS: u16 = 40;
+const HARNESS_COLS: u16 = 120;
+
 fn boot_to_workspace(home: &Path) -> PtyHarness {
     let h = PtyHarness::spawn(home);
     h.wait_for(
@@ -448,6 +556,28 @@ fn slash_exit_via_palette_terminates_the_session_cleanly() {
 
 #[test]
 fn narrow_terminal_resize_stays_coherent_without_panicking() {
+    /// Well below `RAIL_RESPONSIVE_MIN_WIDTH` = 100; the canonical "narrow
+    /// terminal".
+    const NARROW_COLS: u16 = 80;
+    /// WIDER than the boot geometry on purpose — see the restore leg.
+    const WIDE_COLS: u16 = 140;
+    /// How long one paint may take.
+    ///
+    /// core#336 reported this test as "intermittently fails with a 5s PTY
+    /// `wait_for` timeout under full parallel suite load", 1 failure in 6 runs,
+    /// and asked whether that budget is too tight or the resize path is racing.
+    /// It is the budget. The resize path is not racing: with the direct
+    /// observation above in place this test passes in isolation and reddens on
+    /// BOTH ways of breaking the resize (parser pinned at the boot width, PTY
+    /// never resized), so a wedged resize is caught at any budget.
+    ///
+    /// What was left was a 5s wait on the same class of event — the TUI
+    /// painting a frame — that the SAME harness grants 60s at boot
+    /// (`boot_to_workspace`). Nothing justified the 12x gap, and a repaint is
+    /// not the cheaper of the two under 90 concurrent tests: by then the box is
+    /// busy. Half the boot budget, and only a FAILING run ever pays it.
+    const PAINT_BUDGET: Duration = Duration::from_secs(30);
+
     // v0.9.1.2 F15 removed the rail's `Path map` panel and W8 removed the
     // `Tools` panel; the rail's sole remaining tenant is `Activity`, which
     // renders ONLY when there is active work (running tools or system
@@ -459,36 +589,89 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
     // What this PTY test still uniquely guards: the LIVE binary survives an
     // aggressive narrow resize and back without panicking, and the chrome
     // stays coherent throughout (the surface never corrupts on tight rows).
+    //
+    // core#336: this test could not observe a resize at all. `PtyHarness::resize`
+    // resized the PTY and left the `vt100::Parser` pinned at the 40x120 boot
+    // geometry, so the only surface an assertion can read never changed shape,
+    // and the post-resize predicate ("WAYLAND" and "Workspace" are on screen)
+    // was ALREADY TRUE from boot — `boot_to_workspace` waits for exactly that.
+    // The test passed whether or not the resize was delivered, handled, or
+    // rendered. It could not fail.
+    //
+    // It now carries a direct observation. The parser follows the PTY's
+    // geometry, the shrink leg truncates the grid to 80 columns so nothing
+    // stale survives past that edge, and the restore leg widens PAST the boot
+    // width and requires the app to paint out to the new edge. A glyph beyond
+    // column 120 cannot come from any frame drawn before the resize.
     let home = TempDir::new().expect("tempdir");
     seed_config(home.path());
     let mut h = boot_to_workspace(home.path());
 
+    // KNOWN-POSITIVE CONTROL for the instrument, before any resize: this chrome
+    // paints out to the terminal's right-hand edge. If it did not, a width
+    // observation could see nothing and every assertion below would be
+    // unfalsifiable in the other direction.
+    h.wait_for_width(
+        HARNESS_COLS as usize,
+        PAINT_BUDGET,
+        "the boot chrome to paint out to the 120-column edge",
+    );
+
     // Shrink well below RAIL_RESPONSIVE_MIN_WIDTH = 100. 80 cols is the
     // canonical "narrow terminal" size. A render-primitive panic on tight
     // rows would crash the child here.
-    h.resize(80, 40);
-    h.wait_for(
-        |s| s.contains("WAYLAND") && s.contains("Workspace"),
-        Duration::from_secs(5),
-        "chrome to stay painted after shrinking to 80 cols",
-    );
+    h.resize(NARROW_COLS, HARNESS_ROWS);
 
-    // Sanity: the screen is still coherent — the surface didn't panic and
-    // the tabs are still painted.
-    let screen = h.screen_text();
+    // What this leg promises is SURVIVAL, and it is asked of the process, not
+    // of the screen. MEASURED, 1 full-suite run in 6: waiting here for the
+    // chrome to reappear times out on a healthy binary. Shrinking the grid to
+    // 80 columns truncates away the part of the boot frame the predicate was
+    // reading, so satisfying it needs a FULL repaint at the intermediate width
+    // — and the app is under no obligation to emit one before the next resize.
+    // Requiring it turned a survival check into a bet on the renderer's diff
+    // strategy. The chrome is asserted after the widen instead, where a repaint
+    // IS required and is separately observed.
+    std::thread::sleep(Duration::from_millis(300));
     assert!(
-        screen.contains("Workspace"),
-        "Workspace tab vanished after resize — surface state corrupt.\n{screen}"
+        h.is_running(),
+        "the binary died on an aggressive narrow resize — a render primitive \
+         panicked on tight rows"
     );
 
     // Restoring width must keep the chrome coherent — the symmetric half of
     // the contract. A resize handler that corrupted state on the way down
     // and never recovered would fail here.
-    h.resize(120, 40);
+    //
+    // Restored WIDER than boot on purpose. Coming back to the boot width is
+    // indistinguishable from doing nothing at all; coming back wider is not.
+    h.resize(WIDE_COLS, HARNESS_ROWS);
     h.wait_for(
         |s| s.contains("WAYLAND") && s.contains("Workspace"),
-        Duration::from_secs(5),
-        "chrome to stay coherent after resizing back to 120 cols",
+        PAINT_BUDGET,
+        "the chrome to REPAINT after resizing out to 140 cols",
+    );
+    // The coherence half, read off the frame the app painted AFTER both
+    // resizes: the surface came back from 80 columns intact.
+    let screen = h.screen_text();
+    assert!(
+        screen.contains("Workspace"),
+        "Workspace tab vanished across the resize cycle — surface state \
+         corrupt.\n{screen}"
+    );
+
+    // THE observation. A glyph past column 120 is beyond the right-hand edge of
+    // every grid this session has had until now, so it cannot come from a stale
+    // frame, from the boot paint, or from a resize that was never delivered. It
+    // requires that the app saw the new geometry and re-laid-out for it.
+    //
+    // Each of the three ways this can be broken leaves the widest row at or
+    // below 120 and reddens here: a parser that stays at the boot width (the
+    // core#336 defect) truncates at 120, a PTY that is never resized leaves the
+    // app painting 120, and a surface that ignores `Resize` does the same.
+    h.wait_for_width(
+        WIDE_COLS as usize,
+        PAINT_BUDGET,
+        "the app to re-lay-out and paint out to the new 140-column edge",
     );
 
     // Clean shutdown so the next test (or the dropping panic guard) is
