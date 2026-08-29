@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 title: "Shared-process lib suite: active_approval_token_split_by_truncation_leaves_no_fragment fails its anti-vacuity control under load"
 status: open
 kind: defect
-last_verified_commit: 18e59e85
+last_verified_commit: d9f7e0a0
 criteria:
   - id: c1
     text: "The mechanism is named: what makes output lack truncated under load is identified in code, not inferred"
@@ -42,7 +42,7 @@ criteria:
     owner: core
     handoff: "FerroxLabs/wayland-core#373"
     evidence: "commit:18e59e85"
-    note: "NOT met, and deliberately handed over rather than left partial. The command was red on integ/f13 for FOUR independent shared-process races, none of them #361's. Three are closed in this lane: wcore-config's serial-group split (2c8efb46), wcore-observability's unserialized env-gate readers (812e26075), and wcore-cli emptying the process PATH under every other test (18e59e85f). The fourth is wcore-tools osv_check::tests::ssrf_refusal_is_visible_at_default_log_levels, measured at 5 failures in 100 runs on unmodified integ/f13, with two hypotheses tested and refuted -- it is filed with its full evidence and a written contract as #373, which carries this criterion verbatim as its own c5. Best observed streak across three attempts: 1 consecutive pass. Ten consecutive passes were NOT attempted again on purpose: against a live 5%-per-run flake a clean ten is a 60% coin flip, and recording that as evidence would be a lucky green, not a green."
+    note: "NOT met, and deliberately handed over rather than left partial. The command was red on integ/f13 for FOUR independent shared-process races, none of them #361's. Three are closed in this lane: wcore-config's serial-group split (2c8efb46), wcore-observability's unserialized env-gate readers (812e26075), and wcore-cli emptying the process PATH under every other test (18e59e85f). The fourth is wcore-tools osv_check::tests::ssrf_refusal_is_visible_at_default_log_levels, measured at 5 failures in 100 runs on unmodified integ/f13, with two hypotheses tested and refuted -- it is filed with its full evidence and a written contract as #373, which carries this criterion verbatim as its own c5. Re-measured after merging current integ/f13 (d9f7e0a0): 12 failures in 100 runs, so it did not go away and got no better. Best observed streak across three attempts: 1 consecutive pass. Ten consecutive passes were NOT attempted again on purpose: against a live 5%-per-run flake a clean ten is a 60% coin flip, and recording that as evidence would be a lucky green, not a green."
 ---
 
 ## What this actually was
@@ -231,3 +231,41 @@ to load.
 * Swapping the pinned token back to a minted one. That restores the 1-in-256
   flake and de-fangs the boundary test. The `token.contains("fc-")` control
   exists to make that change fail loudly.
+
+## Two instrument failures worth not repeating
+
+Both produced confident numbers that were entirely artefact, and both were
+caught only by a sanity check rather than by the number looking wrong.
+
+* **A stale test binary.** `ls -t target/debug/deps/wcore_observability-*` picked
+  an artifact from an earlier build and reported 21/50 failures on a tree that
+  was already fixed. Take the binary name from cargo's own `Executable ...` line
+  at measurement time, never from a glob.
+* **A binary that was not there at all.** A later loop scored 86/100 and then
+  100/100 against a path that had stopped existing; every "failure" was exit
+  127. The measurement script now resolves the path, checks `-x`, and runs one
+  positive-control execution that must print a `test result:` line before the
+  loop starts.
+
+A third instrument was rejected before it could mislead: a filtered
+high-collision A/B for the `wcore-cli` PATH fix scored 0/100 on BOTH the fixed
+and the unfixed binary. It could not have failed, so it proves nothing, and the
+fix is justified at the mechanism instead.
+
+## One failure that was NOT ours, proven
+
+`wcore-cli::harness_owns_spawned_trees::dropping_the_guard_kills_a_detached_grandchild_and_reaps_the_direct_child`
+failed the lane gate. It is the surviving-process-tree defect from
+FerroxLabs/wayland#1156: "the grandchild N outlived the guard - killing the
+direct child does not reach a backgrounded descendant".
+
+Attribution, measured rather than argued: 3/3 FAIL at this lane's merge-base
+`ab6b602f`, 3/3 PASS on `origin/integ/f13` as it stood afterwards. Pre-existing,
+and fixed upstream between the two. The first attempt at that attribution was
+invalid and nearly went the other way -- it checked out `origin/integ/f13`,
+which had ADVANCED since this worktree was created, so it compared against a
+newer tree rather than the base. The merge-base is the arm.
+
+A further instrument note: reproducing it with `--no-capture` is wrong. That
+flag makes nextest inherit stdio, and the subject is a test about detached
+descendants holding a process tree open.

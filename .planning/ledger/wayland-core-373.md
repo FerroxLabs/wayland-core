@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 title: "cargo test --workspace --lib --no-fail-fast cannot be run 10x consecutively: osv_check::tests::ssrf_refusal_is_visible_at_default_log_levels fails ~5% of runs"
 status: open
 kind: defect
-last_verified_commit: 18e59e85
+last_verified_commit: d9f7e0a0
 criteria:
   - id: c1
     text: "The mechanism is named in code: what makes the ERROR not reach the scoped subscriber. Not inferred -- two inferences have already failed"
@@ -16,7 +16,7 @@ criteria:
     state: met
     owner: core
     evidence: "test:crates/wcore-tools/src/osv_check.rs::ssrf_refusal_is_visible_at_default_log_levels"
-    note: "Baseline measured on hetzner-dsm at integ/f13 (18e59e85), tight loop of ./target/debug/deps/wcore_tools-78a8b0c9297025a9 --quiet: 5 failures in 100 runs. Red arm verbatim -- panicked at crates/wcore-tools/src/osv_check.rs:1356:9, 'assertion `left == right` failed / left: [] / right: [Level(Error)]'."
+    note: "Baseline measured on hetzner-dsm at integ/f13 (18e59e85), tight loop of ./target/debug/deps/wcore_tools-78a8b0c9297025a9 --quiet: 5 failures in 100 runs, and 12 in 100 after merging current integ/f13 (d9f7e0a0) -- the rate moves with host load, so measure both arms in the same session. Red arm verbatim -- panicked at crates/wcore-tools/src/osv_check.rs:1356:9, 'assertion `left == right` failed / left: [] / right: [Level(Error)]'."
   - id: c3
     text: "The fix arm scores 0 failures at n>=100 on that same instrument, and the baseline is re-measured at the same n in the same session"
     state: not-met
