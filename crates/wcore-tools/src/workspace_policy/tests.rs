@@ -9,73 +9,84 @@ use std::path::Path;
 /// inside the bootstrap future that blocks the TUI's first paint, so on a large
 /// tree it cost seconds of dead startup time.
 ///
-/// Stated against baselines taken over an EMPTY tree rather than as a bare
-/// `walk > construct * 10` ratio, because construction carries a per-platform
-/// CONSTANT — canonicalization plus a handful of well-known-path probes — that
-/// the old form silently assumed was zero. MEASURED on Windows, where that
-/// constant is the same order as the walk itself at this tree size:
+/// #1182: stated in ENTRIES VISITED, by direct observation through
+/// [`super::walk_entries`], not in wall-clock time.
+///
+/// The two properties this test needs are "the walk really enumerates the tree"
+/// (otherwise "construction did not walk" passes for free against a walk that
+/// is unreachable) and "construction does not". Both used to be stated as
+/// timings, and both were therefore decided by whatever else the host was
+/// doing. The liveness half was the worse of the two because it could declare
+/// ITSELF dead — recorded verbatim on the 0.13.10 integration branch under
+/// concurrent load on a 96-core box:
 ///
 /// ```text
-///   dirs   construct     walk
-///    300    12.4 ms    11.6 ms
-///   3000    10.4 ms   112.7 ms
-///  12000    25.7 ms  1011.9 ms
+/// instrument is dead: the walk must be reachable and tree-driven;
+///   walk=20.476985ms  walk_empty=8.247227ms  construct_empty=772.466µs
 /// ```
 ///
-/// Construction is FLAT while the walk is linear, so the property holds — but
-/// the ratio at 3000 sat on the 10x line and flapped (a failing CI run
-/// measured 6.5x). Comparing construction against construction removes the
-/// constant instead of pretending it is absent, and an eager walk still cannot
-/// pass: it would add a whole walk to the big-tree construction.
+/// The walk in that run visited the whole 3000-directory tree. Nothing was
+/// wrong with it; the EMPTY-tree baseline had stalled, the ratio compressed,
+/// and the control reported a healthy instrument as a dead one. A ratio of two
+/// wall clocks cannot tell "the walk did not happen" from "the machine is
+/// busy", and only the first of those is a defect.
+///
+/// The counter tells them apart, and it keeps the property that made the
+/// control worth having: a walk that becomes unreachable visits ZERO entries
+/// and this test still fails. It also states the SECOND half directly, which
+/// removes the last timing — an eager walk at construction is now a count, not
+/// a duration comparison against a per-platform constant that earlier revisions
+/// of this test had to model (on Windows, construction's fixed path probes cost
+/// the same order as the walk itself at this tree size).
 #[test]
 fn contained_construction_does_not_walk_the_workspace() {
-    // Baselines over an empty tree. Taken FIRST so they absorb the cold cost
-    // of the fixed path probes, which would otherwise land on the measurement
-    // below and flatter it.
-    let empty = tempfile::tempdir().unwrap();
-    let t = std::time::Instant::now();
-    let baseline = WorkspacePolicy::contained(empty.path());
-    let construct_empty = t.elapsed();
-    let t = std::time::Instant::now();
-    let _ = baseline.secret_deny_paths_dynamic();
-    let walk_empty = t.elapsed();
-
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    // Enough directories that a walk is unmistakably more expensive than not
-    // walking, but small enough to stay quick in CI.
+    // Enough directories that a walk is unmistakably an enumeration of THIS
+    // tree rather than of a handful of fixed probe paths, but small enough to
+    // stay quick in CI. Above `SERIAL_WALK_BUDGET`, so the parallel arm is the
+    // one graded — the arm whose entries are counted on a worker pool and
+    // folded back onto this thread.
     for i in 0..3000 {
         let sub = root.join(format!("d{i}"));
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("a.rs"), b"fn main() {}").unwrap();
     }
+    // A real committed secret, so the walk has a positive result to report and
+    // "visited the tree" cannot mean "enumerated it and understood nothing".
+    std::fs::write(root.join(".env"), b"TOKEN=hunter2\n").unwrap();
 
-    let t0 = std::time::Instant::now();
+    let before_construct = super::walk_entries();
     let p = WorkspacePolicy::contained(root);
-    let construct = t0.elapsed();
+    let during_construct = super::walk_entries() - before_construct;
 
-    // Known-positive control in the same test: the walk this construction must
-    // NOT be doing is still reachable, still happens, and its cost really is
-    // driven by the tree. Without this the assertion below could pass on a
-    // machine where BOTH are instant — i.e. where the instrument is dead.
-    let t1 = std::time::Instant::now();
+    let before_walk = super::walk_entries();
     let dynamic = p.secret_deny_paths_dynamic();
-    let walk = t1.elapsed();
-    let _ = dynamic;
+    let during_walk = super::walk_entries() - before_walk;
 
+    // KNOWN-POSITIVE CONTROL, stated first: the walk this construction must NOT
+    // be doing is reachable and really did enumerate this tree. Without it the
+    // assertion below passes for free against a walk that never runs.
     assert!(
-        walk > walk_empty * 10 && walk > construct_empty,
-        "instrument is dead: the walk must be reachable and tree-driven; \
-         walk={walk:?} walk_empty={walk_empty:?} construct_empty={construct_empty:?}"
+        during_walk >= 3000,
+        "instrument is dead: the walk must be reachable and must enumerate the \
+         workspace; it visited {during_walk} entries over a 3000-directory tree"
+    );
+    // The second half of the same control: enumerating is not classifying. A
+    // walk that visited every entry and stopped recognising secrets would leave
+    // the deny list empty and every claim built on it vacuous.
+    assert!(
+        dynamic.iter().any(|path| path.ends_with(".env")),
+        "instrument is dead: the walk must still find the planted .env; got {dynamic:?}"
     );
 
-    // An eager walk would put a whole `walk` inside `construct`. Half of one is
-    // far below that and far above the noise on the constant.
-    assert!(
-        construct < construct_empty + walk / 2,
-        "construction must not walk the workspace: construct={construct:?} \
-         construct_empty={construct_empty:?} walk={walk:?} \
-         (an eager walk adds a whole walk to construction)"
+    // The property. An eager walk at construction would put the whole
+    // enumeration above inside `contained()`.
+    assert_eq!(
+        during_construct, 0,
+        "construction must not walk the workspace: it visited {during_construct} \
+         entries before anything asked for the deny list (the walk itself visits \
+         {during_walk})"
     );
 }
 
