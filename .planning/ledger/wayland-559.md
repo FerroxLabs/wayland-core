@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Team leader token burn: 77.7M input tok/session, cache_read=0 — enable prompt caching + trim re-billed context (Core/Flux)"
 status: open
-last_verified_commit: 313c04e7f
+last_verified_commit: 00081ad24
 criteria:
   - id: c1
     text: "The turn-1 transient that poisoned the cache prefix is removed from messages[1]"

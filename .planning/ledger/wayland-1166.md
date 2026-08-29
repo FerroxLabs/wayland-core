@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "CacheBreakDetector reports Healthy with 0 causes on a 3% hit ratio: a flat cache_read never reaches attribute_cause, and messages are never hashed"
 status: closed
-last_verified_commit: 313c04e7f
+last_verified_commit: 00081ad24
 criteria:
   - id: c1
     text: "A flat cache_read is reported rather than falling through to Healthy — an absolute floor, not only a ratio"
