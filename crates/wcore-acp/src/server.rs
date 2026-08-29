@@ -15,12 +15,13 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures::stream::{self, Stream, StreamExt};
 use tokio::sync::RwLock;
 
+use crate::allowlist::{ProjectAllowlist, ProjectEntry, ProjectListResponse};
 use crate::auth::Principal;
 use crate::cursor::{Cursor, EventLog, ResumeError, ResumeResponse};
 use crate::error::AcpError;
@@ -80,6 +81,17 @@ struct SessionRecord {
     /// no persona overlay is applied to the engine yet, so selecting an agent
     /// does NOT change turn behaviour or cross any credential boundary.
     agent: Option<String>,
+    /// #305 c2 — the ALLOWLISTED project directory this session works in, as
+    /// accepted at create-time. Carried into every turn so the engine bridge
+    /// builds the session there; `None` means the server's own launch
+    /// directory (the pre-#305 behaviour).
+    cwd: Option<String>,
+    /// #305 c2 — the session's `cwd` is covered by an ENABLED allowlist entry,
+    /// so its approval gates are resolved by the server instead of being
+    /// forwarded to the host. Decided once, at create-time, from the list as it
+    /// stood then: a mid-turn edit to the allowlist must not silently change
+    /// the posture of a turn already in flight.
+    auto_approve: bool,
 }
 
 /// Minimal ACP server with in-memory session storage.
@@ -145,7 +157,31 @@ pub struct AcpServer {
     /// (where process spawn + the ACP client pool live), keeping `wcore-acp`
     /// process-machinery-free.
     router: Option<Arc<dyn crate::router::ProfileRouter>>,
+    /// #305 c2 — the operator's project allowlist. Always present; EMPTY by
+    /// default, which is the fail-closed posture (no `cwd` is accepted and
+    /// nothing auto-approves). Shared as an `Arc` because the REST routes that
+    /// edit it and the `session/create` path that reads it must be looking at
+    /// one list.
+    allowlist: Arc<ProjectAllowlist>,
+    /// #305 c3 — how long a turn may produce NO frame before the server
+    /// discloses the stall on the stream. See
+    /// [`Self::with_turn_stall_timeout`].
+    turn_stall_timeout: Option<Duration>,
 }
+
+/// #305 c3 — default stall bound for a turn's event stream.
+///
+/// Ten minutes of TOTAL silence, not a bound on the turn: every frame — a
+/// thinking token, a tool result, an approval gate — restarts the clock, so a
+/// long build that prints nothing is the only legitimate thing this can catch,
+/// and ten minutes of it is already indistinguishable from the hang.
+///
+/// The number exists because the alternative measured in the field was 902
+/// seconds and counting with no output at all (the #305/UAT symptom). A caller
+/// that would rather wait forever can say so with
+/// [`AcpServer::with_turn_stall_timeout`]`(None)`; nothing infers that posture
+/// from silence.
+pub const DEFAULT_TURN_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl std::fmt::Debug for AcpServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -164,6 +200,7 @@ impl std::fmt::Debug for AcpServer {
                 "router",
                 &self.router.as_ref().map(|_| "<dyn ProfileRouter>"),
             )
+            .field("turn_stall_timeout", &self.turn_stall_timeout)
             .finish()
     }
 }
@@ -193,7 +230,38 @@ impl AcpServer {
             turn_engine: None,
             roster: None,
             router: None,
+            allowlist: Arc::new(ProjectAllowlist::new()),
+            turn_stall_timeout: Some(DEFAULT_TURN_STALL_TIMEOUT),
         }
+    }
+
+    /// #305 c2 — install the operator's project allowlist.
+    ///
+    /// Without this the server holds an empty one: no `cwd` is accepted at
+    /// `session/create` and nothing auto-approves, which is exactly how the
+    /// server behaved before the allowlist existed.
+    #[must_use]
+    pub fn with_allowlist(mut self, allowlist: Arc<ProjectAllowlist>) -> Self {
+        self.allowlist = allowlist;
+        self
+    }
+
+    /// The installed project allowlist (the REST routes edit it through here).
+    pub fn allowlist(&self) -> Arc<ProjectAllowlist> {
+        Arc::clone(&self.allowlist)
+    }
+
+    /// #305 c3 — set (or with `None`, DISABLE) the turn stall bound.
+    ///
+    /// `None` restores the pre-#305 behaviour: a turn that stops producing
+    /// frames hangs the stream with no disclosure. It is offered because an
+    /// operator running genuinely silent multi-hour tools may want it, and
+    /// because a control nobody can turn off gets worked around in worse ways.
+    /// It is NOT the default.
+    #[must_use]
+    pub fn with_turn_stall_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.turn_stall_timeout = timeout;
+        self
     }
 
     /// This process's run identity — the suffix of every stream id it mints.
@@ -420,6 +488,129 @@ impl AcpServer {
         }))
     }
 
+    /// #305 c2 — resolve every approval gate on `upstream` on the host's
+    /// behalf, and do not forward the gate frame.
+    ///
+    /// The frame is DROPPED rather than passed through because forwarding it is
+    /// what makes a host prompt: a Desktop that sees `approval_required` opens
+    /// its dialog, and "the dialog opens and something else answers it" is a
+    /// worse experience than the prompting this exists to remove. What actually
+    /// ran is still fully visible — the `ToolCall` and `ToolResult` frames are
+    /// untouched — so the stream loses the question, never the record.
+    ///
+    /// Resolution rides the SAME `TurnEngine::resolve_approval` path the REST
+    /// endpoint uses, including the gate's `resume_token`, so an auto-approval
+    /// cannot reach a gate a host could not have resolved by hand.
+    fn auto_resolve_approvals(
+        &self,
+        session_id: &str,
+        upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>>,
+    ) -> Pin<Box<dyn Stream<Item = MessageEvent> + Send>> {
+        let engine = self.turn_engine.clone();
+        let session_id = session_id.to_string();
+        Box::pin(upstream.filter_map(move |ev| {
+            let engine = engine.clone();
+            let session_id = session_id.clone();
+            async move {
+                let MessageEvent::ApprovalRequired {
+                    call, resume_token, ..
+                } = &ev
+                else {
+                    return Some(ev);
+                };
+                let Some(engine) = engine else {
+                    // No engine to resolve against: forward the gate rather
+                    // than swallowing a question nobody can now answer.
+                    return Some(ev);
+                };
+                let decision = crate::turn::ApprovalDecision {
+                    approved: true,
+                    scope: crate::turn::ApprovalScopeWire::Once,
+                    answer: None,
+                    resume_token: if resume_token.is_empty() {
+                        None
+                    } else {
+                        Some(resume_token.clone())
+                    },
+                };
+                match engine
+                    .resolve_approval(&session_id, &call.id, decision)
+                    .await
+                {
+                    Ok(()) => None,
+                    Err(error) => {
+                        // The auto-resolution FAILED. Forwarding the gate hands
+                        // the question back to the host, which is the only
+                        // honest outcome: swallowing it here would park the tool
+                        // forever with nobody left holding the decision.
+                        tracing::warn!(
+                            target: "wcore_acp::server",
+                            session_id = %session_id,
+                            call_id = %call.id,
+                            %error,
+                            "project-allowlist auto-approval failed; forwarding the \
+                             gate to the host"
+                        );
+                        Some(ev)
+                    }
+                }
+            }
+        }))
+    }
+
+    /// #305 c3 — disclose a stalled turn on the stream instead of hanging.
+    ///
+    /// Wraps `upstream` so that going `timeout` without a single frame ends the
+    /// stream with one terminal [`MessageEvent::Error`]. It sits BEFORE the
+    /// tee, so the disclosure is recorded in the session's event log too — a
+    /// client that resumes after the stall is told what happened rather than
+    /// being handed a stream that simply stopped.
+    ///
+    /// Ending the stream drops `upstream`, which cancels the engine turn. That
+    /// is deliberate: a turn nobody is receiving and nobody has been told about
+    /// is the failure being fixed, and keeping it running would leave the
+    /// caller's next request racing an invisible predecessor.
+    fn guard_stall(
+        upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>>,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Stream<Item = MessageEvent> + Send>> {
+        struct State {
+            upstream: Pin<Box<dyn Stream<Item = MessageEvent> + Send>>,
+            disclosed: bool,
+        }
+        let state = State {
+            upstream,
+            disclosed: false,
+        };
+        Box::pin(stream::unfold(state, move |mut state| async move {
+            if state.disclosed {
+                return None;
+            }
+            match tokio::time::timeout(timeout, state.upstream.next()).await {
+                Ok(Some(ev)) => Some((ev, state)),
+                Ok(None) => None,
+                Err(_) => {
+                    state.disclosed = true;
+                    let secs = timeout.as_secs();
+                    let ev = MessageEvent::Error {
+                        error: JsonRpcError {
+                            code: ErrorCode::Timeout.code(),
+                            message: format!(
+                                "turn produced no output for {secs}s and was abandoned. \
+                                 The most common cause is a tool or an approval gate \
+                                 waiting on something that never arrives; nothing here \
+                                 says the work failed, only that it stopped reporting."
+                            ),
+                            data: None,
+                        },
+                        turn_id: String::new(),
+                    };
+                    Some((ev, state))
+                }
+            }
+        }))
+    }
+
     /// The tip cursor for a session's stream — what a live subscriber holds.
     pub async fn event_tip(&self, session_id: &str) -> Option<Cursor> {
         self.events.read().await.get(session_id).map(|l| l.tip())
@@ -539,6 +730,33 @@ impl HttpHandler for AcpServer {
             }
         }
 
+        // #305 c2: the project directory. This is NOT a hint — it becomes the
+        // working directory the session's engine is built with — so the
+        // allowlist decides it, and an uncovered path is refused. With the
+        // default (empty) allowlist nothing is covered, so a `cwd`-bearing
+        // request is refused outright and a `cwd`-free one is untouched.
+        let covering = match req.cwd.as_deref() {
+            Some(cwd) => {
+                let entry = self
+                    .allowlist
+                    .covering(cwd)
+                    .await
+                    .map_err(|e| AcpError::Protocol(format!("session cwd refused: {e}")))?;
+                let Some(entry) = entry else {
+                    return Err(AcpError::Protocol(format!(
+                        "session cwd {cwd:?} is not covered by any entry in the project \
+                         allowlist. Add it with PUT /v1/approvals/projects before opening \
+                         a session there; an unlisted directory is refused rather than \
+                         served, because this value is the directory the session's tools \
+                         actually run in."
+                    )));
+                };
+                Some(entry)
+            }
+            None => None,
+        };
+        let auto_approve = covering.as_ref().is_some_and(|e| e.enabled);
+
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
         let metadata = SessionMetadata {
@@ -553,6 +771,8 @@ impl HttpHandler for AcpServer {
             system_prompt: req.system_prompt.clone(),
             tools: req.tools.clone(),
             agent: req.agent.clone(),
+            cwd: req.cwd.clone(),
+            auto_approve,
         };
         self.sessions.write().await.insert(id.clone(), record);
         // Open the session's event stream at create, not lazily at first send.
@@ -692,6 +912,19 @@ impl HttpHandler for AcpServer {
         // body can never smuggle in a persona that was not authorized at create.
         let agent = self.session_agent(&req.session_id).await;
 
+        // #305 c2: the session's allowlisted project directory and the
+        // auto-approval posture derived from it at create-time. Read from the
+        // RECORD, never from the request body — a per-message body must not be
+        // able to nominate a directory or a posture the allowlist never
+        // approved.
+        let (cwd, auto_approve) = {
+            let guard = self.sessions.read().await;
+            guard
+                .get(&req.session_id)
+                .map(|r| (r.cwd.clone(), r.auto_approve))
+                .unwrap_or((None, false))
+        };
+
         // persona-profiles PR-7: a `profile:<name>` session is served by its own
         // child process — forward the message to that child instead of the
         // in-process turn engine. The persona/tools overlay is the CHILD's
@@ -731,6 +964,7 @@ impl HttpHandler for AcpServer {
                                 text: req.text,
                                 tools,
                                 agent,
+                                cwd,
                             })
                             .await?
                     }
@@ -752,7 +986,46 @@ impl HttpHandler for AcpServer {
                     }
                 }
             };
+        // #305 c2 — auto-resolve first, so a gate that the allowlist answers
+        // never reaches the host at all.
+        let upstream = if auto_approve {
+            self.auto_resolve_approvals(&session_id, upstream)
+        } else {
+            upstream
+        };
+        // #305 c3 — then the stall guard, INSIDE the tee so the disclosure is
+        // logged for a resuming client as well as delivered to a live one.
+        let upstream = match self.turn_stall_timeout {
+            Some(timeout) => Self::guard_stall(upstream, timeout),
+            None => upstream,
+        };
         Ok(self.tee_into_log(&session_id, upstream))
+    }
+
+    async fn list_projects(&self) -> Result<ProjectListResponse, AcpError> {
+        Ok(ProjectListResponse {
+            projects: self.allowlist.list().await,
+        })
+    }
+
+    async fn upsert_project(&self, path: String, enabled: bool) -> Result<ProjectEntry, AcpError> {
+        self.allowlist
+            .upsert(&path, enabled)
+            .await
+            .map_err(|e| AcpError::Protocol(e.to_string()))
+    }
+
+    async fn delete_project(&self, id: String) -> Result<(), AcpError> {
+        let removed = self
+            .allowlist
+            .remove(&id)
+            .await
+            .map_err(|e| AcpError::Protocol(e.to_string()))?;
+        if removed {
+            Ok(())
+        } else {
+            Err(AcpError::Session(format!("project not found: {id}")))
+        }
     }
 
     /// The server's authorization decision, taken from the principal the
@@ -886,6 +1159,7 @@ mod tests {
             tools: Vec::new(),
             system_prompt: None,
             agent: None,
+            cwd: None,
         }
     }
 
@@ -898,6 +1172,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: None,
+                cwd: None,
             })
             .await
             .unwrap();
@@ -1052,6 +1327,7 @@ mod tests {
                 tools: tools.clone(),
                 system_prompt: Some("be terse".to_string()),
                 agent: None,
+                cwd: None,
             })
             .await
             .unwrap();
@@ -1104,6 +1380,7 @@ mod tests {
                 tools: vec![stored_tool],
                 system_prompt: None,
                 agent: None,
+                cwd: None,
             })
             .await
             .unwrap();
@@ -1272,6 +1549,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: Some("architect".to_string()),
+                cwd: None,
             })
             .await
             .unwrap();
@@ -1295,6 +1573,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: Some("root".to_string()),
+                cwd: None,
             })
             .await
             .expect_err("unauthorized agent must be rejected");
@@ -1382,6 +1661,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: Some("profile:work".to_string()),
+                cwd: None,
             })
             .await
             .unwrap();
@@ -1440,6 +1720,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: Some("profile:ghost".to_string()),
+                cwd: None,
             })
             .await
             .expect_err("a child that cannot open must fail the create");
@@ -1465,6 +1746,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: Some("profile:work".to_string()),
+                cwd: None,
             })
             .await
             .expect_err("profile agent with no supervisor must fail closed");
@@ -1483,6 +1765,7 @@ mod tests {
                 tools: Vec::new(),
                 system_prompt: None,
                 agent: Some("architect".to_string()),
+                cwd: None,
             })
             .await
             .expect_err("no roster ⇒ cannot authorize any selector");
@@ -1526,6 +1809,7 @@ mod tests {
                 tools,
                 system_prompt: None,
                 agent: None,
+                cwd: None,
             })
             .await
             .unwrap();

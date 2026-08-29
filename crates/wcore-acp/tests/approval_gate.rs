@@ -59,6 +59,7 @@ fn turn_req() -> TurnRequest {
         text: "write the probe".to_string(),
         tools: Vec::new(),
         agent: None,
+        cwd: None,
     }
 }
 

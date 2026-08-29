@@ -1047,11 +1047,20 @@ impl EngineTurnEngine {
     /// the overlay were applied per-turn instead, the first session to build an
     /// engine would silently impose its persona on every later session — an
     /// identity/security bug.)
+    ///
+    /// FerroxLabs/wayland#305 c2: `cwd` is the session's ALLOWLISTED project
+    /// directory, or `None` for this process's launch directory. Like the
+    /// persona, it is bound at BUILD time — the engine cached under this
+    /// session id is constructed in that directory and stays there. The value
+    /// was checked against the operator's project allowlist by `AcpServer`
+    /// before it could reach here; it is a caller-supplied path only in the
+    /// sense that the caller chose WHICH approved directory to use.
     async fn session_for(
         &self,
         session_id: &str,
         agent: Option<&str>,
         requested_tools: &[String],
+        cwd: Option<&str>,
     ) -> Result<Arc<EngineSession>, AcpError> {
         {
             let pool = self.sessions.lock().await;
@@ -1106,11 +1115,16 @@ impl EngineTurnEngine {
             .execution_policy
             .with_requested_approvals(smart_policy, PolicySource::Acp);
 
+        // #305 c2: the session's allowlisted project directory, defaulting to
+        // the directory the server was launched in.
+        let session_cwd = cwd.map(str::to_string).unwrap_or_else(|| self.cwd.clone());
+
         let output: Arc<dyn OutputSink> = Arc::new(RelaySink::new(relay.clone()));
-        let mut bootstrap = AgentBootstrap::new(session_config.clone(), self.cwd.clone(), output)
-            .with_execution_policy(execution_policy)
-            .with_approval_manager(approval_manager.clone())
-            .tool_allowlist(narrow_tool_allowlist(persona_tools, requested_tools));
+        let mut bootstrap =
+            AgentBootstrap::new(session_config.clone(), session_cwd.clone(), output)
+                .with_execution_policy(execution_policy)
+                .with_approval_manager(approval_manager.clone())
+                .tool_allowlist(narrow_tool_allowlist(persona_tools, requested_tools));
         if let Some(provider) = &self.provider {
             bootstrap = bootstrap.provider(provider.clone());
         }
@@ -1122,7 +1136,7 @@ impl EngineTurnEngine {
 
         let provider_name = session_config.provider_label.clone();
         engine
-            .init_session(&provider_name, &self.cwd, Some(session_id))
+            .init_session(&provider_name, &session_cwd, Some(session_id))
             .map_err(|e| AcpError::Protocol(format!("engine init_session failed: {e}")))?;
         engine.rebind_memory_session().await;
         engine.run_session_start_hooks().await;
@@ -1166,7 +1180,12 @@ impl TurnEngine for EngineTurnEngine {
         let requested_tools = requested_tool_names(&req.tools);
         // persona-profiles PR-4': bind THIS session's authorized persona (None = none).
         let session = self
-            .session_for(&req.session_id, req.agent.as_deref(), &requested_tools)
+            .session_for(
+                &req.session_id,
+                req.agent.as_deref(),
+                &requested_tools,
+                req.cwd.as_deref(),
+            )
             .await?;
         // A session already in the pool was built with its own selection and
         // cannot be re-narrowed; refuse loudly rather than ignore silently.
@@ -1338,7 +1357,11 @@ impl EngineA2aHandler {
     /// registered tools.
     async fn tool_catalog(&self) -> Vec<String> {
         // A2A federation carries no ACP persona selector — no overlay.
-        match self.inner.session_for(&self.agent_id, None, &[]).await {
+        match self
+            .inner
+            .session_for(&self.agent_id, None, &[], None)
+            .await
+        {
             Ok(session) => session.tool_names(),
             Err(_) => Vec::new(),
         }
@@ -1387,7 +1410,7 @@ impl A2aHandler for EngineA2aHandler {
         };
         let session = self
             .inner
-            .session_for(&session_id, None, &[])
+            .session_for(&session_id, None, &[], None)
             .await
             .map_err(|e| A2aError::HandlerError(e.to_string()))?;
         let msg_id = uuid::Uuid::new_v4().to_string();

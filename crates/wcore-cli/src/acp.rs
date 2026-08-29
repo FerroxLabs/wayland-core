@@ -707,8 +707,37 @@ async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
         crate::acp_engine::EngineA2aHandler::new(agent_id, config, cwd)
             .force_tools(args.allow_all_tools),
     );
+    // FerroxLabs/wayland#305 c2 — the project approval allowlist, persisted
+    // beside the rest of this home's state so a grant survives the Core
+    // restart a Win/WSL host cannot avoid. It starts EMPTY, which is the
+    // fail-closed posture: no `session/create` may name a `cwd` and nothing
+    // auto-approves until an operator (or Desktop, over
+    // `PUT /v1/approvals/projects`) lists a directory and enables it.
+    //
+    // A malformed file REFUSES the launch rather than starting empty: an
+    // operator whose allowlist silently did not load would see gates they
+    // believed they had turned off, which is indistinguishable from the bug
+    // this feature fixes.
+    let allowlist_path = wcore_config::config::wayland_config_dir().join("acp-projects.json");
+    let allowlist = Arc::new(
+        wcore_acp::allowlist::ProjectAllowlist::backed_by(&allowlist_path)
+            .map_err(|e| anyhow::anyhow!("project allowlist: {e}"))?,
+    );
+    let enabled_projects = allowlist
+        .list()
+        .await
+        .into_iter()
+        .filter(|e| e.enabled)
+        .count();
+    eprintln!(
+        "wayland-core acp: project approval allowlist at {} - {enabled_projects} \
+         directory(ies) auto-approve; a session/create cwd outside the list is refused",
+        allowlist_path.display()
+    );
+
     let mut acp_server = AcpServer::new()
         .with_a2a_handler(a2a)
+        .with_allowlist(allowlist)
         .with_turn_engine(turn_engine);
     if let Some(r) = roster {
         acp_server = acp_server.with_roster(r);
@@ -857,6 +886,7 @@ async fn request(args: AcpRequestArgs) -> anyhow::Result<()> {
                     tools: Vec::new(),
                     system_prompt: None,
                     agent: None,
+                    cwd: None,
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("create_session: {e}"))?;

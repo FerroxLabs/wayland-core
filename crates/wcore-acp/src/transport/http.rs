@@ -117,6 +117,38 @@ pub trait HttpHandler: Send + Sync + 'static {
         ))
     }
 
+    /// #305 c2 — the operator's project allowlist (`GET /v1/approvals/projects`).
+    ///
+    /// Defaults to an EMPTY list rather than a "not supported" error: an
+    /// allowlist with nothing in it is the honest description of a handler that
+    /// does not host one, and it is also the fail-closed state, so a host can
+    /// read the posture off one route without special-casing the answer.
+    async fn list_projects(&self) -> Result<crate::allowlist::ProjectListResponse, AcpError> {
+        Ok(crate::allowlist::ProjectListResponse {
+            projects: Vec::new(),
+        })
+    }
+
+    /// #305 c2 — add a project root, or flip an existing one's `enabled`.
+    /// Default refuses: granting authority is never something a handler should
+    /// appear to do by inheriting a default.
+    async fn upsert_project(
+        &self,
+        _path: String,
+        _enabled: bool,
+    ) -> Result<crate::allowlist::ProjectEntry, AcpError> {
+        Err(AcpError::Protocol(
+            "project allowlist not supported by this handler".to_string(),
+        ))
+    }
+
+    /// #305 c2 — remove one project root by id.
+    async fn delete_project(&self, _id: String) -> Result<(), AcpError> {
+        Err(AcpError::Protocol(
+            "project allowlist not supported by this handler".to_string(),
+        ))
+    }
+
     /// persona-profiles Phase A — the persona-agent roster (`agents/list`).
     /// Default returns an empty roster so existing handlers + mocks compile
     /// unchanged and the route is backward-compatible (feature default-OFF).

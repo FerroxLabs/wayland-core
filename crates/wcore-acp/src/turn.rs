@@ -79,6 +79,15 @@ pub struct TurnRequest {
     /// `Some(id)` here as already-authorized — but it MUST still resolve it
     /// through the same authorized set (fail closed) rather than trusting it.
     pub agent: Option<String>,
+    /// FerroxLabs/wayland#305 c2 — the ALLOWLISTED project directory this
+    /// session was created with, or `None` for the server's own launch
+    /// directory.
+    ///
+    /// It reached the server as `SessionCreateRequest::cwd` and was checked
+    /// against the operator's project allowlist there; an engine bridge may
+    /// therefore build the session in it. `None` is the pre-#305 behaviour and
+    /// the only value an allowlist-free server can produce.
+    pub cwd: Option<String>,
 }
 
 /// Turns one user prompt into a stream of [`MessageEvent`]s.
@@ -197,6 +206,7 @@ mod tests {
             text: "go".to_string(),
             tools: Vec::new(),
             agent: None,
+            cwd: None,
         };
         let frames: Vec<MessageEvent> = Arc::new(engine)
             .run_turn(req)
@@ -239,6 +249,7 @@ mod tests {
             text: "go".to_string(),
             tools: Vec::new(),
             agent: None,
+            cwd: None,
         };
         let frames: Vec<MessageEvent> = Arc::new(engine)
             .run_turn(req)

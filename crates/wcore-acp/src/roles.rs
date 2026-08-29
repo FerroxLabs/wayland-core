@@ -115,14 +115,27 @@ pub fn required_role(method: &str) -> Role {
         // for the events it missed. It reveals exactly what a live subscriber
         // already received, so it is classified with the other reads rather
         // than falling through to the Admin default.
-        "initialize" | "session/list" | "session/get" | "session/events" | "agents/list"
-        | "tools/list" | "health" => Role::Viewer,
+        "initialize"
+        | "session/list"
+        | "session/get"
+        | "session/events"
+        | "agents/list"
+        | "tools/list"
+        | "health"
+        | "approvals/projects/list" => Role::Viewer,
         "session/create"
         | "message/send"
         | "session/approval/resolve"
         | "a2a/handshake"
         | "a2a/message/send" => Role::Operator,
-        "session/delete" | "support/bundle" => Role::Admin,
+        // #305 c2: editing the project allowlist GRANTS (or revokes)
+        // unattended tool execution for a directory tree. That is an operator
+        // authority decision, not a session operation, so it sits with the
+        // other Admin methods rather than with `session/create`.
+        "session/delete"
+        | "support/bundle"
+        | "approvals/projects/set"
+        | "approvals/projects/delete" => Role::Admin,
         _ => Role::Admin,
     }
 }

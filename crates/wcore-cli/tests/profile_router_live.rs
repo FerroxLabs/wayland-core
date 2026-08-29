@@ -207,6 +207,7 @@ async fn profile_session_spawns_child_routes_turn_and_reaps() {
             tools: Vec::new(),
             system_prompt: None,
             agent: Some("profile:livetest".to_string()),
+            cwd: None,
         })
         .await
         .expect("open profile session (child must spawn + become healthy)");
@@ -310,6 +311,7 @@ async fn unknown_profile_fails_closed_and_spawns_no_child() {
             tools: Vec::new(),
             system_prompt: None,
             agent: Some("profile:does-not-exist".to_string()),
+            cwd: None,
         })
         .await
         .expect_err("an unknown profile must be rejected");
@@ -383,6 +385,7 @@ async fn a_sigkilled_supervisor_does_not_leave_an_orphaned_profile_child() {
             tools: Vec::new(),
             system_prompt: None,
             agent: Some("profile:orphantest".to_string()),
+            cwd: None,
         })
         .await
         .expect("open profile session (child must spawn + become healthy)");
@@ -464,6 +467,7 @@ async fn a_panicking_test_body_still_reaps_the_supervisor_tree() {
             tools: Vec::new(),
             system_prompt: None,
             agent: Some("profile:panictest".to_string()),
+            cwd: None,
         })
         .await
         .expect("open profile session (child must spawn + become healthy)");

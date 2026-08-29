@@ -19,6 +19,18 @@
     "`type` arrays containing \"null\" and for `nullable: true`."
   ],
   "_measured": "2026-07-29, live curl against `wayland-core 0.12.25` acp serve on hetzner-dsm; 18286 bytes, 8 paths, 10 operations.",
+  "_amended": [
+    "2026-08-29 (FerroxLabs/wayland#305 c2): SessionCreateRequest gained an optional `cwd` — the",
+    "project directory a session works in, checked against the operator's approval allowlist. That",
+    "is a TENTH nullable site, and it is an ADDITIVE optional field: a 3.1 consumer reading the",
+    "document keeps every schema it already had, and a client that never sends `cwd` serializes",
+    "byte-identically (`skip_serializing_if`), which `protocol.rs` asserts directly. Three new",
+    "paths (/v1/approvals/projects and its {id} form) came with it; none of their schemas carry a",
+    "nullable field, so the encoding is untouched. Consumers can absorb this.",
+    "Measured against the shape the emitter produces in this tree, not against a running binary —",
+    "the emitter IS the document (utoipa derives it), and openapi_shape_matches_committed_fixture",
+    "fetches it over a live listener on every run."
+  ],
 
   "openapi_version": "3.1.0",
   "nullable_encoding": "type-array",
@@ -29,6 +41,7 @@
     "/components/schemas/ApprovalResolveRequest/properties/prefix",
     "/components/schemas/ApprovalResolveRequest/properties/resume_token",
     "/components/schemas/SessionCreateRequest/properties/agent",
+    "/components/schemas/SessionCreateRequest/properties/cwd",
     "/components/schemas/SessionCreateRequest/properties/model",
     "/components/schemas/SessionCreateRequest/properties/system_prompt",
     "/components/schemas/SessionCreateResponse/properties/model",

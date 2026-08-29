@@ -488,6 +488,14 @@ impl ProfileRouter for CliProfileRouter {
                 tools: req.tools.clone(),
                 system_prompt: req.system_prompt.clone(),
                 agent: None,
+                // #305 c2: forward the project directory to the CHILD, which
+                // validates it against ITS OWN allowlist. The parent's grant
+                // does not transfer — a profile child runs under a different
+                // `WAYLAND_HOME` with a different operator-managed list — so a
+                // directory the child has not listed makes this create fail
+                // closed rather than silently running the child somewhere it
+                // was never approved for.
+                cwd: req.cwd.clone(),
             })
             .await;
 
@@ -681,6 +689,7 @@ mod tests {
             tools: Vec::new(),
             system_prompt: None,
             agent: None,
+            cwd: None,
         }
     }
 

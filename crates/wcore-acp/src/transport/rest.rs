@@ -12,6 +12,9 @@
 //!   GET    /v1/sessions/{id}         get_session
 //!   DELETE /v1/sessions/{id}         delete_session
 //!   POST   /v1/sessions/{id}/prompt  send_message  (SSE: text/event-stream)
+//!   GET    /v1/approvals/projects    list_projects   (#305 project allowlist)
+//!   PUT    /v1/approvals/projects    upsert_project
+//!   DELETE /v1/approvals/projects/{id} delete_project
 //!   GET    /v1/tools                 list_tools
 //!   GET    /v1/agents                list_agents  (persona-profiles roster)
 //!   GET    /v1/initialize            initialize   (capability handshake, R2)
@@ -42,12 +45,13 @@ use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures::stream::{Stream, StreamExt};
 use serde::Serialize;
 use utoipa::OpenApi;
 
+use crate::allowlist::{ProjectEntry, ProjectListResponse, ProjectUpsertRequest};
 use crate::auth::Verifier;
 use crate::error::AcpError;
 use crate::protocol::{
@@ -234,6 +238,14 @@ impl<H: HttpHandler> RestTransport<H> {
                 "/v1/sessions/:id/approvals/:call_id/resolve",
                 post(resolve_approval::<H>),
             )
+            // #305 c2 — the project allowlist. Read is a Viewer-class list of
+            // directories; the two mutations grant/revoke auto-approval and are
+            // classified Admin in `roles::required_role`.
+            .route(
+                "/v1/approvals/projects",
+                get(list_projects::<H>).put(upsert_project::<H>),
+            )
+            .route("/v1/approvals/projects/:id", delete(delete_project::<H>))
             .route("/v1/tools", get(list_tools::<H>))
             // persona-profiles Phase A: agent roster + capability handshake.
             // Both default-safe (empty roster / advertised capability only) and
@@ -282,6 +294,9 @@ impl<H: HttpHandler> RestTransport<H> {
         delete_session,
         prompt,
         resolve_approval,
+        list_projects,
+        upsert_project,
+        delete_project,
         list_tools,
         list_agents,
         initialize,
@@ -301,6 +316,9 @@ impl<H: HttpHandler> RestTransport<H> {
         ApprovalResolveRequest,
         ApprovalResolveResponse,
         ApprovalScopeDto,
+        ProjectEntry,
+        ProjectListResponse,
+        ProjectUpsertRequest,
         JsonRpcError,
         AgentsListResponse,
         InitializeResponse,
@@ -439,6 +457,11 @@ pub(crate) fn rest_method_for(path: &str, verb: &axum::http::Method) -> String {
         (&Method::POST, ["v1", "sessions", _, "prompt"]) => "message/send".to_string(),
         (&Method::POST, ["v1", "sessions", _, "approvals", _, "resolve"]) => {
             "session/approval/resolve".to_string()
+        }
+        (&Method::GET, ["v1", "approvals", "projects"]) => "approvals/projects/list".to_string(),
+        (&Method::PUT, ["v1", "approvals", "projects"]) => "approvals/projects/set".to_string(),
+        (&Method::DELETE, ["v1", "approvals", "projects", _]) => {
+            "approvals/projects/delete".to_string()
         }
         (&Method::GET, ["v1", "tools"]) => "tools/list".to_string(),
         (&Method::GET, ["v1", "agents"]) => "agents/list".to_string(),
@@ -593,6 +616,47 @@ async fn prompt<H: HttpHandler>(
         Ok(Event::default().event(kind).data(data))
     });
     Ok(Sse::new(sse_stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+#[utoipa::path(
+    get, path = "/v1/approvals/projects", tag = "sessions",
+    responses((status = 200, description = "The project approval allowlist", body = ProjectListResponse))
+)]
+async fn list_projects<H: HttpHandler>(
+    State(h): State<Arc<H>>,
+) -> Result<Json<ProjectListResponse>, AcpHttpError> {
+    Ok(Json(h.list_projects().await?))
+}
+
+#[utoipa::path(
+    put, path = "/v1/approvals/projects", tag = "sessions",
+    request_body = ProjectUpsertRequest,
+    responses(
+        (status = 200, description = "Entry added or updated", body = ProjectEntry),
+        (status = 400, description = "Path is not absolute/normalized", body = JsonRpcError)
+    )
+)]
+async fn upsert_project<H: HttpHandler>(
+    State(h): State<Arc<H>>,
+    Json(body): Json<ProjectUpsertRequest>,
+) -> Result<Json<ProjectEntry>, AcpHttpError> {
+    Ok(Json(h.upsert_project(body.path, body.enabled).await?))
+}
+
+#[utoipa::path(
+    delete, path = "/v1/approvals/projects/{id}", tag = "sessions",
+    params(("id" = String, Path, description = "Project entry id")),
+    responses(
+        (status = 204, description = "Removed"),
+        (status = 404, description = "No such entry", body = JsonRpcError)
+    )
+)]
+async fn delete_project<H: HttpHandler>(
+    State(h): State<Arc<H>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AcpHttpError> {
+    h.delete_project(id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(

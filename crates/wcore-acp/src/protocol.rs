@@ -77,6 +77,12 @@ pub enum ErrorCode {
     /// the method demonstrably exists, and pretending otherwise would send an
     /// operator looking for a typo in a method name that is correct.
     Forbidden,
+    /// #305 c3: the turn produced no frame for longer than the server's stall
+    /// bound and was DISCLOSED rather than left hanging. Distinct from
+    /// [`Self::InternalError`] because the operator action differs: nothing
+    /// failed, something stopped answering, and the caller may reasonably
+    /// retry or go look at what the tool is waiting on.
+    Timeout,
 }
 
 impl ErrorCode {
@@ -92,6 +98,7 @@ impl ErrorCode {
             Self::ToolFailed => -32003,
             Self::AgentNotFound => -32004,
             Self::Forbidden => -32005,
+            Self::Timeout => -32006,
         }
     }
 }
@@ -120,6 +127,22 @@ pub struct SessionCreateRequest {
     /// feature-flagged; an unknown id resolves to [`ErrorCode::AgentNotFound`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// FerroxLabs/wayland#305 c2 — the PROJECT DIRECTORY this session works in.
+    ///
+    /// Absolute and already-normalized (no `.`/`..`). It must be covered by an
+    /// entry in the server's project allowlist
+    /// ([`crate::allowlist::ProjectAllowlist`]); an uncovered path is refused
+    /// at `session/create` rather than silently ignored, because this value
+    /// becomes the working directory the session's engine is built with and an
+    /// unchecked one would let any key-holder point a session anywhere on the
+    /// host. When the covering entry is ENABLED, the session's approval gates
+    /// auto-resolve instead of prompting for every call.
+    ///
+    /// Omitted (the default, and every pre-#305 client) the session runs in the
+    /// server's own launch directory under the ordinary gated posture — the
+    /// wire stays byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// `session/create` response payload.
@@ -508,6 +531,7 @@ mod tests {
             tools: Vec::new(),
             system_prompt: None,
             agent: None,
+            cwd: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         assert_eq!(s, r#"{"model":"claude-opus-4-8"}"#);
@@ -528,6 +552,7 @@ mod tests {
             tools: Vec::new(),
             system_prompt: None,
             agent: Some("researcher".into()),
+            cwd: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         assert!(s.contains(r#""agent":"researcher""#));

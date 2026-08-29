@@ -338,10 +338,13 @@ async fn shape_checker_rejects_a_3_0_encoded_document() {
         "mutator must have removed every 3.1-form site, left: {:?}",
         shape.type_array_null
     );
+    // Ten since #305 c2 added `SessionCreateRequest.cwd`; nine before it. The
+    // count is spelled out rather than compared to the fixture so a fixture
+    // edit and a mutator regression cannot cancel each other out.
     assert_eq!(
         shape.nullable_keyword.len(),
-        9,
-        "mutator must have produced the nine 3.0-form sites, got {:?}",
+        10,
+        "mutator must have produced the ten 3.0-form sites, got {:?}",
         shape.nullable_keyword
     );
 

@@ -7,6 +7,7 @@
 //! 1.A.6 — minimal in-memory server. 1.A.8 — auth layer.
 //! Client 1.A.7 + engine integration 1.A.10 still to land.
 pub mod a2a;
+pub mod allowlist;
 pub mod auth;
 pub mod client;
 pub mod cursor;
@@ -22,6 +23,7 @@ pub mod transport;
 pub mod turn;
 
 pub use a2a::{A2aCapabilities, A2aError, A2aHandler, A2aHandshake, A2aMessage, DefaultA2aHandler};
+pub use allowlist::{AllowlistError, ProjectAllowlist, ProjectEntry};
 pub use client::{AcpClient, ResumeOutcome, ResumeRefused};
 pub use cursor::{Cursor, CursorError, EventLog, Positioned, ResumeError, ResumeResponse};
 pub use error::AcpError;
