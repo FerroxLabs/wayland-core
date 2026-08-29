@@ -843,7 +843,7 @@ impl ExecutionBackend for ContainerBackend {
             Ok(found) => Ok(OrphanSweep {
                 backend_id: BACKEND_ID.into(),
                 kind: BackendKind::Container,
-                method: format!("docker ps -a --filter label={NONCE_LABEL} (key presence)"),
+                method: format!("docker ps -a --filter {} (key presence)", sweep_filter()),
                 found,
                 enumerated: true,
             }),
@@ -868,8 +868,21 @@ impl ExecutionBackend for ContainerBackend {
 ///
 /// The nonce comes back beside the name via `{{.Label "…"}}` because the
 /// operator surface has to be able to say which of these THIS process created.
+/// The key-presence filter, as ONE definition.
+///
+/// Found by the red arm for core#366: with the filter mutated to carry a nonce
+/// VALUE and the `method` string left alone, the operator surface printed
+/// `via docker ps -a --filter label=wayland.task.nonce (key presence)` while
+/// actually running a value query. A hand-written account of a query is a claim
+/// the code can stop honouring, and this whole module exists because an
+/// unmeasured zero must never read as a measured one -- so the query and the
+/// account of it come from the same string.
+fn sweep_filter() -> String {
+    format!("label={NONCE_LABEL}")
+}
+
 async fn sweep_containers() -> std::result::Result<Vec<OrphanSurface>, String> {
-    let filter = format!("label={NONCE_LABEL}");
+    let filter = sweep_filter();
     // Tab-separated, because a container name cannot contain a tab and a nonce
     // is validated to `[A-Za-z0-9._-]`, so neither field can forge a separator.
     let format = format!("{{{{.Names}}}}\t{{{{.Label \"{NONCE_LABEL}\"}}}}");
