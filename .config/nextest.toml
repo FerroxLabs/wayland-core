@@ -185,6 +185,38 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 filter = 'binary(packaged_driver_gate)'
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# `bash_unsaved_guard_bound_live` — the SAME shape as the override above, found
+# the same way, and recorded here rather than left to be rediscovered.
+#
+# Its three bounded-guard cases each grow a real workspace fixture on disk and
+# then measure the guard against a caller budget. On NTFS that CONSTRUCTION is
+# the whole cost, and it lands within a few seconds of the default profile's
+# 60s hard kill.
+#
+# MEASURED on SEANDESKTOP (Windows 11 build 10.0.26200.9168, real msvc), the
+# binary alone with nothing else scheduled, the two profiles back to back on
+# one tree (b52fb934) with the interpreter and the binaries identical:
+#     default profile  Summary [  60.026s] 4 tests run: 1 passed, 3 timed out
+#                      each killed at exactly 60.024-60.025s
+#     --profile ci     Summary [  52.485s] 4 tests run: 4 passed
+#                      the three finish at 52.482-52.484s
+# So the work takes ~52s and the default budget is 60s. Nothing is wrong with
+# the tests; the budget is inside the noise.
+#
+# Why this matters beyond one binary: `just test-ci` and the ci.yml legs pass
+# `--profile ci` (90s x 2 = 180s) and these pass there, but
+# `scripts/wayland-e2e-windows-soak.ps1` PHASE G invokes nextest with NO
+# `--profile`, so the soak — the one job whose green is #350's close condition —
+# graded them at 60s. That is a gate that cannot reach a pass state, which is
+# the failure this file's `packaged_driver_gate` note already names.
+#
+# `terminate-after = 3` gives a 180s hard kill, matching the ci profile's own
+# ceiling so the two agree, and `period` stays at 60s so nextest keeps printing
+# the "running for over 60 seconds" notice and the cost stays visible.
+[[profile.default.overrides]]
+filter = 'binary(bash_unsaved_guard_bound_live)'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
 # `walk_parallel_identity_test`'s two TIMING cases build a 15,000-file fixture
 # before they measure anything (`a_disjoint_grant_really_does_cost_a_second_walk`
 # builds two), and on NTFS that CONSTRUCTION, not the measurement, is the whole

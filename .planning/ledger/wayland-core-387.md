@@ -23,7 +23,7 @@ criteria:
     state: met
     evidence: "test:crates/wcore-tools/tests/bash_sandbox_routing_test.rs::env_and_cwd_are_honored_through_sandbox"
     owner: core
-    note: "MEASURED ON SEANDESKTOP 2026-08-29 (Windows 11 build 10.0.26200.9168), tree D:\\u-win at b52fb934, `--retries 0`. HOST PRECONDITION CONFIRMED FIRST, because the defect is conditional and a host without Git for Windows could not exhibit it: `C:\\Program Files\\Git\\bin\\bash.exe` is present AND ahead of `C:\\WINDOWS\\system32\\bash.exe`, which is also present. Result, verbatim: `Summary [   0.200s] 6 tests run: 6 passed, 4421 skipped`, covering all three named tests plus three controls - `bash_failure_never_reports_exit_zero` (which uses `exit 3`, valid in both dialects, and was already passing before this change, so a regression in the shared plumbing would show), and the two path_validation arms carried by core#374."
+    note: "MEASURED ON SEANDESKTOP 2026-08-29 (Windows 11 build 10.0.26200.9168), tree D:\\u-win at b52fb934, `--retries 0`. HOST PRECONDITION CONFIRMED FIRST, because the defect is conditional and a host without Git for Windows could not exhibit it: `C:\\Program Files\\Git\\bin\\bash.exe` is present AND ahead of `C:\\WINDOWS\\system32\\bash.exe`, which is also present. Result, verbatim: `Summary [   0.200s] 6 tests run: 6 passed, 4421 skipped`, covering all three named tests plus three controls - `bash_failure_never_reports_exit_zero` (which uses `exit 3`, valid in both dialects, and was already passing before this change, so a regression in the shared plumbing would show), and the two path_validation arms carried by core#374. CONFIRMED ON THE LEG THAT REPORTED THE DEFECT, which is the arm that closes this rather than a workstation run: run https://github.com/FerroxLabs/wayland-core/actions/runs/33266399460, `CI (windows-latest, hosted)` - the same job where these three were 3 of the 9 failures in run 33258852685. They now PASS BY NAME and by index, so they ran and were not skipped: `PASS [   0.379s] ( 7958/15988) wcore-cli::tool_formatter_real_payloads bash_success_renders_the_real_exit_code_and_byte_count`, `PASS [   0.384s] ( 7959/15988) wcore-cli::tool_formatter_real_payloads bash_stderr_is_surfaced`, `PASS [   0.301s] (15382/15988) wcore-tools::bash_sandbox_routing_test env_and_cwd_are_honored_through_sandbox`. The leg is still red at `Summary [1400.572s] 15988 tests run: 15979 passed (4 slow, 1 flaky, 1 leaky), 9 failed, 163 skipped`, and NONE of the nine is one of these three: one is `wcore-cli::sandbox_activeness sandbox_status_filesystem_claim_matches_a_real_escape_attempt` and eight are `wcore-exec-backend` container/conformance cases that need a Docker daemon this image does not have. SECOND WINDOWS LEG, self-hosted msvc `CI (Array)` in the same run: `Summary [ 223.370s] 15988 tests run: 15987 passed (1 slow, 1 leaky), 1 failed, 163 skipped`, the one failure being that same `sandbox_activeness` case."
   - id: c4
     text: "The selection is non-vacuous: telling the fixtures the wrong interpreter reddens them on that same host"
     state: met
@@ -41,8 +41,27 @@ The defect is in the fixtures, not in #1164: the feature's own behaviour was
 confirmed live on the same host in the same session (wl#1164 c5).
 
 THE CLASS WAS SWEPT, NOT ASSUMED. Every file referencing BashTool was checked
-for a cfg(windows) arm: 13 files carry one, and of those only the three named
-here embed cmd dialect. The others are dialect-agnostic -- `echo hello_stream`
-in bash_sandbox_routing_test.rs:558 and bash/tests.rs:80, and
-`echo typed-bypass-bash-succeeded` in wcore-agent -- and were left alone. Three
-sites in the class, three changed.
+for a cfg(windows) arm: 13 files carry one. Three of them embed cmd dialect in a
+fixture the product's own resolution can invalidate, and all three are changed.
+The rest are dialect-agnostic -- `echo hello_stream` in
+bash_sandbox_routing_test.rs:558 and bash/tests.rs:80, and
+`echo typed-bypass-bash-succeeded` in wcore-agent -- and were left alone.
+
+ONE FILE IS CMD-DIALECT AND DELIBERATELY NOT CHANGED, stated rather than left to
+be found: `crates/wcore-tools/tests/win_toolchain_launch.rs` is full of cmd
+spellings (`where git`, `echo hello> marker`,
+`echo fn main(){println!("rc");}> m.rs && rustc ...`). It is outside the class
+for a reason in the code, not because it is quiet: it is `#![cfg(windows)]`,
+`#[ignore]`, and asserts on `WAYLAND_SANDBOX_LIVE_WINDOWS=1`, so it runs neither
+in CI nor in the soak -- and when it IS run it drives the AppContainer backend,
+where `downgrade_unsupported_shell_for_sandbox` (bash.rs) rewrites any
+bash/sh/powershell prefix to `cmd /S /C` because the Low-integrity token runs
+cmd.exe only. So under its own execution context the interpreter really is cmd
+and its fixtures are correct. If that downgrade is ever removed, this file joins
+the class.
+
+NOTED, NOT FIXED: `downgrade_unsupported_shell_for_sandbox` carries a third copy
+of the final-component `.exe`-stripping parse that `shell_program_stem` now
+owns. It is not deduped here because, unlike `shell_disclosure`, it does not
+have to agree with the fixtures -- it decides an argv rewrite on the sandbox
+spawn path, and changing that path is risk this issue does not ask for.
