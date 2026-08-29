@@ -366,7 +366,13 @@ fn walk_dir(
             // `wcore-tools`' deny walk uses — one list, one owner — and it is
             // asked about the RESOLVED path, so the entry's own name is
             // irrelevant.
-            if wcore_tools::workspace_policy::is_vcs_store_or_control_dir(&canonical) {
+            //
+            // The predicate tests the path AND its ancestors, because pruning
+            // alone does not cover this walk: a symlink aimed BELOW a store
+            // root is met at the top of the tree and never descended TO, so a
+            // self-only test admitted `.git/objects/aa` and inlined the
+            // objects under it.
+            if wcore_tools::workspace_policy::is_within_vcs_store_or_control_dir(&canonical) {
                 continue;
             }
             // core#339 c6: `.gitignore` is judged on where the entry resolves,
@@ -400,6 +406,13 @@ fn walk_dir(
             if !admitted.canonical.starts_with(root_canonical)
                 || is_secret_path(&path)
                 || is_secret_path(&admitted.canonical)
+                // core#322 c4: the same reach on the FILE arm. `is_secret_path`
+                // matches secret NAMES and an object file is named after its
+                // hash, so a link straight at `.git/objects/aa/deadbeef` was
+                // read and inlined without any store predicate being consulted.
+                || wcore_tools::workspace_policy::is_within_vcs_store_or_control_dir(
+                    &admitted.canonical,
+                )
             {
                 *skipped += 1;
                 continue;
@@ -1107,7 +1120,7 @@ mod tests {
     }
 
     /// core#322 c4 — THE TIEBREAK. The lane graded c4 met on a parity claim: the
-    /// walk asks [`wcore_tools::workspace_policy::is_vcs_store_or_control_dir`],
+    /// walk asks [`wcore_tools::workspace_policy::is_within_vcs_store_or_control_dir`],
     /// which tests the path ITSELF, and the deny walk asks `inside_vcs_store`,
     /// which tests the path and every ANCESTOR. The lane's defence was that a
     /// walk PRUNES at the control directory and therefore can never stand
