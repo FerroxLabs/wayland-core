@@ -53,9 +53,9 @@ fn system32_bash_is_refused_as_the_wsl_launcher() {
 #[test]
 fn windowsapps_shim_is_refused() {
     for path in [
-        r"C:\Users\sean\AppData\Local\Microsoft\WindowsApps\bash.exe",
-        r"C:\Users\sean\AppData\Local\Microsoft\windowsapps\bash.exe",
-        "C:/Users/sean/AppData/Local/Microsoft/WindowsApps/bash.exe",
+        r"C:\Users\testuser\AppData\Local\Microsoft\WindowsApps\bash.exe",
+        r"C:\Users\testuser\AppData\Local\Microsoft\windowsapps\bash.exe",
+        "C:/Users/testuser/AppData/Local/Microsoft/WindowsApps/bash.exe",
     ] {
         assert_eq!(
             windows_bash_path_refusal(path),
@@ -64,7 +64,7 @@ fn windowsapps_shim_is_refused() {
         );
     }
     let selection = select_windows_bash(&[BashCandidate::new(
-        r"C:\Users\sean\AppData\Local\Microsoft\WindowsApps\bash.exe",
+        r"C:\Users\testuser\AppData\Local\Microsoft\WindowsApps\bash.exe",
         true,
     )]);
     assert_eq!(selection.selected, None);
@@ -119,7 +119,7 @@ fn git_for_windows_bash_is_accepted() {
         GIT_BASH,
         r"C:\Program Files\Git\usr\bin\bash.exe",
         r"C:\Program Files (x86)\Git\bin\bash.exe",
-        r"C:\Users\sean\AppData\Local\Programs\Git\bin\bash.exe",
+        r"C:\Users\testuser\AppData\Local\Programs\Git\bin\bash.exe",
         r"D:\msys64\usr\bin\bash.exe",
         "C:/Program Files/Git/bin/bash.exe",
     ] {
@@ -139,7 +139,7 @@ fn candidates_are_known_install_locations_never_a_bare_path_lookup() {
         program_files: Some(r"C:\Program Files".to_string()),
         program_w6432: Some(r"C:\Program Files".to_string()),
         program_files_x86: Some(r"C:\Program Files (x86)".to_string()),
-        local_app_data: Some(r"C:\Users\sean\AppData\Local".to_string()),
+        local_app_data: Some(r"C:\Users\testuser\AppData\Local".to_string()),
         ..Default::default()
     };
     let candidates = windows_bash_candidates(&env);
@@ -150,8 +150,8 @@ fn candidates_are_known_install_locations_never_a_bare_path_lookup() {
             r"C:\Program Files\Git\usr\bin\bash.exe".to_string(),
             r"C:\Program Files (x86)\Git\bin\bash.exe".to_string(),
             r"C:\Program Files (x86)\Git\usr\bin\bash.exe".to_string(),
-            r"C:\Users\sean\AppData\Local\Programs\Git\bin\bash.exe".to_string(),
-            r"C:\Users\sean\AppData\Local\Programs\Git\usr\bin\bash.exe".to_string(),
+            r"C:\Users\testuser\AppData\Local\Programs\Git\bin\bash.exe".to_string(),
+            r"C:\Users\testuser\AppData\Local\Programs\Git\usr\bin\bash.exe".to_string(),
         ],
         "%ProgramW6432% duplicates %ProgramFiles% in a 64-bit process and must \
          not be probed twice"
@@ -184,7 +184,7 @@ fn selection_takes_the_first_present_candidate_and_records_the_skipped_ones() {
         BashCandidate::new(r"C:\Program Files\Git\bin\bash.exe", false),
         BashCandidate::new(r"C:\Program Files\Git\usr\bin\bash.exe", true),
         BashCandidate::new(
-            r"C:\Users\sean\AppData\Local\Programs\Git\bin\bash.exe",
+            r"C:\Users\testuser\AppData\Local\Programs\Git\bin\bash.exe",
             true,
         ),
     ]);
