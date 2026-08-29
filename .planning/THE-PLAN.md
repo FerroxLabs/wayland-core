@@ -5,18 +5,18 @@
 > verification) and `PLAN-ROUTING.json` (assignment). If this disagrees with anyone's
 > recollection, this is right and the recollection is wrong — that is the entire point.
 
-Rendered 2026-08-29 17:17 UTC
+Rendered 2026-08-29 17:22 UTC
 
 ## VERDICT: BLOCKED
 
-**16 criteria block the 0.13.12 release.** Full list in §3.
+**14 criteria block the 0.13.12 release.** Full list in §3.
 
 | state | count | means |
 |---|---:|---|
 | DONE | 32 | met, evidence resolves, independently verified |
-| CLAIMED | 223 | met but NOT yet independently verified — never report as done |
-| OPEN | 24 | outstanding work |
-| HANDOFF | 10 | another team's half, with a filed ticket carrying it |
+| CLAIMED | 226 | met but NOT yet independently verified — never report as done |
+| OPEN | 22 | outstanding work |
+| HANDOFF | 9 | another team's half, with a filed ticket carrying it |
 
 ### ⚠ 14 UNROUTED — nobody is doing these
 
@@ -63,22 +63,6 @@ Runs on: **gh**  ·  2-decompose
 | `c5` | core#314 | A grant refusal is machine-readable rather than untyped English prose in an Info frame |
 | `c4` | wl#388 | The remaining four bullets of this ticket's own Expected Behavior list are met |
 
-### `desktop-run` — Live Desktop session measurement
-
-Runs on: **Desktop app**  ·  2-platform
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c4` | wl#559 | This ticket's own close condition: ONE real 26-turn Desktop team run showing non-zero cache_read |
-
-### `macos-ci` — macOS arms via the lane/** CI wildcard
-
-Runs on: **macOS CI**  ·  2-platform
-
-| criterion | issue | what must become true |
-|---|---|---|
-| `c4` | core#352 | macOS: the pgrep arm is EXECUTED in CI at least once with the run cited, or deleted as unreachable |
-
 ### `prompt-cache` — Prompt-cache collapse and re-billed context
 
 Runs on: **hetzner**  ·  1-build
@@ -111,10 +95,9 @@ it appears in §3 as blocking, because that is what it is.
 | `c4` | wl#863 | flux | FerroxLabs/wayland#1227 |
 | `c5` | wl#863 | flux | FerroxLabs/wayland#1227 |
 | `c5` | wl#934 | maintainer | FerroxLabs/wayland#1186 |
-| `c8` | wl#934 | maintainer | FerroxLabs/wayland#1228 |
 | `c5` | wl#998 | desktop | FerroxLabs/wayland#1225 |
 
-## §5 CLAIMED BUT UNVERIFIED — 223
+## §5 CLAIMED BUT UNVERIFIED — 226
 
 Marked `met` with resolving evidence, but no independent verifier has confirmed the lane.
 Historically this is exactly where a partial hides: a criterion written thin reads `met`
@@ -137,7 +120,7 @@ while the reported bug is still live. Do not report these as done.
 - **core#340** — c1, c2, c3, c4, c5
 - **core#342** — c1, c2, c3, c4, c5
 - **core#350** — c1, c2, c4, c5
-- **core#352** — c1, c2, c3, c5
+- **core#352** — c1, c2, c3, c4, c5
 - **core#353** — c1, c2, c3, c4
 - **core#354** — c1, c2, c3, c4, c5, c6, c7
 - **core#356** — c1, c2, c3, c4
@@ -151,10 +134,10 @@ while the reported bug is still live. Do not report these as done.
 - **wl#305** — c1
 - **wl#388** — c1, c2, c3
 - **wl#434** — c1
-- **wl#559** — c1, c2
+- **wl#559** — c1, c2, c4
 - **wl#863** — c1, c2
 - **wl#908** — c1, c2, c3
-- **wl#934** — c1, c2, c3, c4, c6
+- **wl#934** — c1, c2, c3, c4, c6, c8
 - **wl#998** — c1, c2, c3, c4
 - **wl#1088** — c1
 - **wl#1134** — c1, c2, c3, c4, c5

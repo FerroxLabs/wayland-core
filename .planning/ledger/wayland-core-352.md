@@ -25,9 +25,10 @@ criteria:
     note: "Deliberately split out to wayland-core#358, which is open and carries the full Windows contract. child_pids under cfg(windows) still returns Vec::new() (owned_tree.rs:97-100) even after the sweep merged, so reap() snapshots an empty descendant set on all 40-plus swept sites at once."
   - id: c4
     text: "macOS: the pgrep arm is EXECUTED in CI at least once with the run cited, or deleted as unreachable"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/tests/harness_owns_spawned_trees.rs::dropping_the_guard_kills_a_detached_grandchild_and_reaps_the_direct_child"
     owner: core
-    note: "Still open after the merge. 8f7e6655 was pushed with a [ci-darwin] marker and the commit body says the marker is deliberate, but NO run URL is cited anywhere in the tree, which is what the criterion asks for. The only macOS-arm run I can find is lane/352-macos-redarm run 33235055214, which FAILED and whose branch has since been deleted; the lane/session-tickets CI run 33238005604 was still in progress at grading time. Compiling is not running, and neither is 'a run happened somewhere'."
+    note: "MET 2026-08-29. The macOS pgrep descendant walk is EXECUTED and GREEN in CI, cited: https://github.com/FerroxLabs/wayland-core/actions/runs/33257637102 (job 99114021304), branch lane/f13-352-macos-green2 at the head of this lane, KEPT and not deleted so the run stays chaseable. Verbatim: >>> PASS [   0.175s] ( 8121/17178) wcore-cli::harness_owns_spawned_trees dropping_the_guard_kills_a_detached_grandchild_and_reaps_the_direct_child / Summary [1145.585s] 17178 tests run: 17177 passed (1 leaky), 1 failed, 120 skipped <<< That is the arm running against the unmutated guard on macos-latest -- pgrep -P, because macOS has no /proc -- and it is the citation the previous passes could not produce. GETTING IT REQUIRED FINDING A DEFECT FIRST, and that is the part worth keeping. A green run was impossible on integ/f13: the throwaway instrument 8d6add71 had been MERGED as d03a6e14, so OwnedTree::snapshot returned early behind black_box(true) and the guard owned the leaf only. Measured on the unmodified integration tree rather than inferred -- hetzner-dsm, 3 of 3 tries in the full nextest sweep and 3 of 3 again with the test run ALONE, so not scheduling and not load: >>> thread 'dropping_the_guard_kills_a_detached_grandchild_and_reaps_the_direct_child' panicked at crates/wcore-cli/tests/harness_owns_spawned_trees.rs:121:5: the grandchild 1658408 outlived the guard -- killing the direct child does not reach a backgrounded descendant, which is exactly the surviving process TREE the ticket reported (FerroxLabs/wayland#1156) <<< and on macOS in https://github.com/FerroxLabs/wayland-core/actions/runs/33255873933 (job 99109355513, branch lane/f13-352-macos-green, also kept), same test, same line, grandchild 83274. Bisected: green at bb850cc5^ (0df4c47d), red at ab6b602f. bf0b41f7 reverts the ten lines. NOTE WHERE THE RED FELL, because it settles this criterion twice over: line 121, the ownership assertion, NOT the line 89 precondition child_pids(direct).contains(&grandchild). The pgrep walk ran on macOS and FOUND the grandchild even while the snapshot was cut, so the arm is executed on the red run as well as on the green one. ONE PRE-EXISTING RED SHARES THE CITED LEG and is not this criterion's: wcore-protocol::quiescence_contract::the_published_corpus_is_current is the only other failure in the whole macOS leg, and it is Desktop-contract-corpus drift over seven files (events/ready.json, manifest.json, three adversarial/events/*.jsonl, two compat/events/*). Its Linux sibling is wcore-protocol::desktop_contract_corpus::checked_corpus_matches_real_serializers_byte_for_byte. Both are red at ab6b602f BEFORE any commit on this lane and green at 0df4c47d, verified by running them alone in clean worktrees at each commit, so they are an integration defect this lane inherited and did not cause."
   - id: c5
     text: "A red arm is quoted verbatim for each platform arm"
     state: met
@@ -47,8 +48,19 @@ in as `2165c30a` while this ledger pass was running, so the sweep and the ratche
 ARE in the integration tree: every spawn site in the crate's test tree is owned,
 `ALLOWED_UNOWNED` is empty, and a new ungoverned site fails the ratchet.
 
-What is still open is the evidence, not the code. The macOS arm was pushed with
-`[ci-darwin]` but no run URL is cited in-tree and the only macOS-arm run that can
-be found FAILED on a branch since deleted; no verbatim red arm is recorded for
-either non-Linux arm. The Windows half was correctly split out to `#358` rather
-than half-shipped, and `child_pids` there still returns an empty vector.
+**Updated 2026-08-29.** The macOS arm is now executed, green, and cited by run
+URL (c4), and both non-Linux arms that can have a red arm now have one quoted
+verbatim. What is left is c5's Windows half alone.
+
+Getting c4 cost more than a CI push, and the finding outlives it. `8d6add71`,
+a throwaway red-arm instrument whose own commit body says *"Delete this branch
+after reading the run; it is an instrument, not a fix"*, had been MERGED into
+`integ/f13` as `d03a6e14`. It cuts `OwnedTree::snapshot` short behind
+`black_box(true)`, so the guard owned the LEAF only — on every Unix, across all
+forty-plus swept sites, in the integration tree. c1 and c2 stayed green the
+whole time, because they certify that every site HANDS its child to the guard,
+not what the guard then does with it. `bf0b41f7` reverts the ten lines.
+
+`#358` still holds the Windows half. It landed a kill-on-close Job Object
+rather than a descendant walk, so `child_pids` there returns an empty vector by
+design and c5's stated settlement condition needs restating in those terms.
