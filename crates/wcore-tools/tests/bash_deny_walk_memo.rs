@@ -27,6 +27,28 @@ use wcore_tools::bash::BashTool;
 use wcore_tools::context::ToolContext;
 use wcore_tools::workspace_policy::WorkspacePolicy;
 
+/// WHY THE WALL-CLOCK ARMS SUBTRACT A BASELINE AND SAMPLE MINIMA
+///
+/// They used to assert `second_exec * 3 < cold_walk` on ONE sample of ONE
+/// execution. That conflates two things: `second_exec` is
+/// `exec overhead + (a walk, if it was repeated)`, and the overhead — process
+/// spawn, policy construction, sandbox plumbing — is none of it the walk. On a
+/// contended host the overhead alone reaches tens of milliseconds and the
+/// assertion fails while the walk has been performed exactly once.
+///
+/// MEASURED, `macos-latest`, CI run 33240249894: `second exec 53.414ms` against
+/// `cold walk 105.839125ms` — a red gate over 53 ms of process spawn. REPRODUCED
+/// on hetzner-dsm by pinning six concurrent copies onto four CPUs: 7 of 72
+/// executions failed, both variants, e.g. `second exec 28.316531ms against a
+/// cold walk measured at 67.81672ms`.
+///
+/// So the verdict is now taken on the part of the cost the big tree can
+/// account for — steady-state minus an identical exec over an EMPTY workspace —
+/// and both arms are sampled interleaved and reduced to MINIMA, because a
+/// single descheduled sample is exactly what used to decide it. The claim
+/// itself is additionally graded by `secret_deny_walk_count()`, which is
+/// deterministic and cannot flake at all.
+///
 /// The cold walk a fixture must reach before any latency verdict is taken.
 #[cfg(unix)]
 const TARGET_WALK: Duration = Duration::from_millis(60);
@@ -77,6 +99,43 @@ async fn warm_bash_process_init(root: &std::path::Path) {
         .execute_with_ctx(json!({"command": "echo warm"}), &ctx_for(policy))
         .await;
 }
+
+/// One `BashTool` execution at the requested call site, asserted successful and
+/// timed.
+#[cfg(unix)]
+async fn timed_exec(streaming: bool, ctx: &ToolContext, command: &str) -> Duration {
+    let started = Instant::now();
+    let result = if streaming {
+        BashTool
+            .execute_streaming_with_ctx(json!({ "command": command }), ctx, &NullToolOutputSink)
+            .await
+    } else {
+        BashTool
+            .execute_with_ctx(json!({ "command": command }), ctx)
+            .await
+    };
+    let elapsed = started.elapsed();
+    assert!(!result.is_error, "{}", result.content);
+    elapsed
+}
+
+/// A second, EMPTY workspace under the same contained policy — the walk-free
+/// arm the verdict below is taken against.
+///
+/// The `TempDir` is returned so the caller keeps it alive; dropping it would
+/// delete the workspace under the running policy.
+#[cfg(unix)]
+async fn walk_free_arm() -> (tempfile::TempDir, ToolContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    warm_bash_process_init(&root).await;
+    let ctx = ctx_for(Arc::new(WorkspacePolicy::contained(&root)));
+    (tmp, ctx)
+}
+
+/// How many times each arm is sampled once the memo is warm.
+#[cfg(unix)]
+const STEADY_SAMPLES: usize = 5;
 
 /// Grow `root` until a COLD walk of it costs at least `target`, and return the
 /// smallest cold-walk sample observed (the honest floor).
@@ -137,33 +196,51 @@ async fn a_second_bash_exec_does_not_repeat_the_walk_buffered() {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     warm_bash_process_init(&root).await;
+    let (_walk_free_dir, walk_free_ctx) = walk_free_arm().await;
     let walk = workspace_whose_cold_walk_costs_at_least(&root, TARGET_WALK);
+
+    // #1145: the memo may not answer for a tree that changed within one
+    // filesystem timestamp tick of the walk. Let the grown fixture settle past
+    // that tick, as the counter-driven tests below already do.
+    std::thread::sleep(Duration::from_millis(60));
 
     let policy = Arc::new(WorkspacePolicy::contained(&root));
     let ctx = ctx_for(Arc::clone(&policy));
 
-    let t = Instant::now();
-    let first = BashTool
-        .execute_with_ctx(json!({"command": "echo one"}), &ctx)
-        .await;
-    let first_elapsed = t.elapsed();
-    assert!(!first.is_error, "{}", first.content);
+    // The walk happens here, on the first execution over the grown tree.
+    let first_elapsed = timed_exec(false, &ctx, "echo one").await;
 
-    let t = Instant::now();
-    let second = BashTool
-        .execute_with_ctx(json!({"command": "echo two"}), &ctx)
-        .await;
-    let second_elapsed = t.elapsed();
-    assert!(!second.is_error, "{}", second.content);
+    // Steady state, sampled INTERLEAVED against the walk-free arm so both
+    // minima are drawn from the same contention window, and taken as MINIMA so
+    // one descheduled sample cannot decide the verdict.
+    let mut steady = Duration::from_secs(3600);
+    let mut walk_free = Duration::from_secs(3600);
+    for _ in 0..STEADY_SAMPLES {
+        steady = steady.min(timed_exec(false, &ctx, "echo two").await);
+        walk_free = walk_free.min(timed_exec(false, &walk_free_ctx, "echo base").await);
+    }
 
+    // THE CLAIM, GRADED DETERMINISTICALLY. A wall clock cannot tell a skipped
+    // walk from a fast one and reads badly under contention; this counter can,
+    // and it cannot flake. It also makes the wall-clock arm below impossible to
+    // pass vacuously.
+    assert_eq!(
+        policy.secret_deny_walk_count(),
+        1,
+        "buffered executions over one policy must walk the workspace once, not once per exec"
+    );
+
+    let attributable = steady.saturating_sub(walk_free);
     println!(
         "#1111 buffered: cold walk {walk:?}, first exec {first_elapsed:?}, \
-         second exec {second_elapsed:?}"
+         steady {steady:?}, walk-free {walk_free:?}, attributable {attributable:?}"
     );
     assert!(
-        second_elapsed * 3 < walk,
-        "the second exec took {second_elapsed:?} against a cold walk measured at \
-         {walk:?} (first exec {first_elapsed:?}) — the walk is repeated per exec"
+        attributable * 2 < walk,
+        "the steady-state exec costs {steady:?}, {attributable:?} of it above the \
+         {walk_free:?} an identical exec costs over an EMPTY workspace, against a cold \
+         walk of {walk:?} (first exec {first_elapsed:?}) — a walk repeated per exec \
+         would put the attributable cost at a full walk"
     );
 }
 
@@ -175,34 +252,51 @@ async fn a_second_bash_exec_does_not_repeat_the_walk_streaming() {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     warm_bash_process_init(&root).await;
+    let (_walk_free_dir, walk_free_ctx) = walk_free_arm().await;
     let walk = workspace_whose_cold_walk_costs_at_least(&root, TARGET_WALK);
+
+    // #1145: the memo may not answer for a tree that changed within one
+    // filesystem timestamp tick of the walk. Let the grown fixture settle past
+    // that tick, as the counter-driven tests below already do.
+    std::thread::sleep(Duration::from_millis(60));
 
     let policy = Arc::new(WorkspacePolicy::contained(&root));
     let ctx = ctx_for(Arc::clone(&policy));
 
-    let t = Instant::now();
-    let first = BashTool
-        .execute_streaming_with_ctx(json!({"command": "echo one"}), &ctx, &NullToolOutputSink)
-        .await;
-    let first_elapsed = t.elapsed();
-    assert!(!first.is_error, "{}", first.content);
+    // The walk happens here, on the first execution over the grown tree.
+    let first_elapsed = timed_exec(true, &ctx, "echo one").await;
 
-    let t = Instant::now();
-    let second = BashTool
-        .execute_streaming_with_ctx(json!({"command": "echo two"}), &ctx, &NullToolOutputSink)
-        .await;
-    let second_elapsed = t.elapsed();
-    assert!(!second.is_error, "{}", second.content);
+    // Steady state, sampled INTERLEAVED against the walk-free arm so both
+    // minima are drawn from the same contention window, and taken as MINIMA so
+    // one descheduled sample cannot decide the verdict.
+    let mut steady = Duration::from_secs(3600);
+    let mut walk_free = Duration::from_secs(3600);
+    for _ in 0..STEADY_SAMPLES {
+        steady = steady.min(timed_exec(true, &ctx, "echo two").await);
+        walk_free = walk_free.min(timed_exec(true, &walk_free_ctx, "echo base").await);
+    }
 
+    // THE CLAIM, GRADED DETERMINISTICALLY. A wall clock cannot tell a skipped
+    // walk from a fast one and reads badly under contention; this counter can,
+    // and it cannot flake. It also makes the wall-clock arm below impossible to
+    // pass vacuously.
+    assert_eq!(
+        policy.secret_deny_walk_count(),
+        1,
+        "streaming executions over one policy must walk the workspace once, not once per exec"
+    );
+
+    let attributable = steady.saturating_sub(walk_free);
     println!(
         "#1111 streaming: cold walk {walk:?}, first exec {first_elapsed:?}, \
-         second exec {second_elapsed:?}"
+         steady {steady:?}, walk-free {walk_free:?}, attributable {attributable:?}"
     );
     assert!(
-        second_elapsed * 3 < walk,
-        "the second streaming exec took {second_elapsed:?} against a cold walk \
-         measured at {walk:?} (first exec {first_elapsed:?}) — the walk is \
-         repeated per exec"
+        attributable * 2 < walk,
+        "the steady-state streaming exec costs {steady:?}, {attributable:?} of it above the \
+         {walk_free:?} an identical exec costs over an EMPTY workspace, against a cold \
+         walk of {walk:?} (first exec {first_elapsed:?}) — a walk repeated per exec \
+         would put the attributable cost at a full walk"
     );
 }
 

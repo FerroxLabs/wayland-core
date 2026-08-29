@@ -680,6 +680,10 @@ impl BubblewrapBackend {
             super::process_tree::ProcessTreeGuard::new(child.id()).map_err(|error| {
                 SandboxError::ExecFailed(format!("process-tree ownership: {error}"))
             })?;
+        // `None` means the sandboxed command had already finished by the time
+        // its pid reached us — see `from_observed_root` for why that is routine
+        // for a fast command on a loaded host, and why a dead PID-namespace
+        // init leaves no tree to own. A completed command is not a failure.
         #[cfg(target_os = "linux")]
         let mut sandbox_tree = {
             drop(status_writer);
@@ -711,7 +715,9 @@ impl BubblewrapBackend {
         // arm does.
         let wait_fut = super::wait_with_bounded_output_on_exit(&mut child, || {
             #[cfg(target_os = "linux")]
-            sandbox_tree.disarm();
+            if let Some(sandbox_tree) = sandbox_tree.as_mut() {
+                sandbox_tree.disarm();
+            }
             process_tree.disarm();
         });
         let output = match manifest.timeout {
