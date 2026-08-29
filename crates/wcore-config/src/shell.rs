@@ -195,6 +195,41 @@ pub fn windows_cmd_payload_prefix() -> Vec<String> {
     vec!["cmd".to_string(), "/S".to_string(), "/C".to_string()]
 }
 
+/// The interpreter a shell prefix actually names, as a lowercased program
+/// stem: `sh`, `bash`, `cmd`, `powershell`, `pwsh`, or whatever else was
+/// selected.
+///
+/// The FINAL path component, because since FerroxLabs/wayland#1164 the Windows
+/// interpreter is named by its absolute path (`C:\Program Files\Git\bin\
+/// bash.exe`) whenever a real bash was resolved. Splitting is done here rather
+/// than with `std::path`, which on Unix does not treat `\` as a separator, so
+/// the Windows spellings are classified identically from any host. A trailing
+/// `.exe` is stripped so `BASH.EXE` and `bash` are the same answer.
+///
+/// This lives here, in the crate that BUILDS the prefix, because two callers
+/// need the same answer: `wcore_tools::bash::shell_disclosure`, which tells the
+/// model which dialect it is driving, and the Windows test fixtures that have
+/// to be written in that dialect (FerroxLabs/wayland-core#387). A fixture that
+/// hard-codes `cmd` syntax under `cfg(windows)` is wrong on any host with Git
+/// for Windows installed.
+pub fn shell_program_stem(prefix: &[String]) -> String {
+    prefix
+        .first()
+        .map(|p| p.to_ascii_lowercase())
+        .map(|p| {
+            let base = p.rsplit(['/', '\\']).next().unwrap_or(&p).to_string();
+            base.strip_suffix(".exe").unwrap_or(&base).to_string()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the interpreter this prefix names is a POSIX shell, i.e. one where
+/// `;` separates commands, `$VAR` expands and `echo` terminates a line with a
+/// bare `\n`. False for `cmd` and for PowerShell.
+pub fn shell_prefix_is_posix(prefix: &[String]) -> bool {
+    matches!(shell_program_stem(prefix).as_str(), "sh" | "bash")
+}
+
 /// Normalize a `WAYLAND_BASH_SHELL` / `[tools] windows_shell` value to its
 /// lowercased program stem so the selector accepts not only `pwsh` / `powershell`
 /// but also `pwsh.exe`, `powershell.exe`, and absolute or relative paths such as
@@ -541,6 +576,84 @@ fn wrap_cmd_payload(payload: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{shell_prefix_is_posix, shell_program_stem};
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The stem is the FINAL component with `.exe` stripped, and the Windows
+    /// spellings are classified identically from a Unix host -- which is the
+    /// point, since this is what the Windows fixtures branch on
+    /// (FerroxLabs/wayland-core#387) and they are authored on Linux.
+    #[test]
+    fn the_stem_is_the_final_component_on_either_separator_and_any_case() {
+        assert_eq!(shell_program_stem(&argv(&["sh", "-c"])), "sh");
+        assert_eq!(shell_program_stem(&argv(&["cmd", "/S", "/C"])), "cmd");
+        assert_eq!(
+            shell_program_stem(&argv(&["C:\\Program Files\\Git\\bin\\bash.exe", "-c"])),
+            "bash"
+        );
+        assert_eq!(
+            shell_program_stem(&argv(&["C:/Program Files/Git/bin/BASH.EXE", "-c"])),
+            "bash"
+        );
+        assert_eq!(
+            shell_program_stem(&argv(&["powershell", "-NoProfile", "-Command"])),
+            "powershell"
+        );
+        // An empty prefix must not panic; it simply names nothing.
+        assert_eq!(shell_program_stem(&[]), "");
+    }
+
+    /// A fixture that asks "may I write `$VAR` and `;`?" must get `true` for a
+    /// resolved Windows bash and `false` for `cmd` -- the whole reason #387
+    /// exists is that the platform no longer answers that question.
+    #[test]
+    fn only_a_posix_shell_is_reported_as_posix() {
+        assert!(shell_prefix_is_posix(&argv(&["sh", "-c"])));
+        assert!(shell_prefix_is_posix(&argv(&[
+            "C:\\Program Files\\Git\\bin\\bash.exe",
+            "-c"
+        ])));
+        assert!(!shell_prefix_is_posix(&argv(&["cmd", "/S", "/C"])));
+        assert!(!shell_prefix_is_posix(&argv(&[
+            "powershell",
+            "-NoProfile",
+            "-Command"
+        ])));
+        assert!(!shell_prefix_is_posix(&argv(&[
+            "pwsh",
+            "-NoProfile",
+            "-Command"
+        ])));
+        assert!(!shell_prefix_is_posix(&[]));
+    }
+
+    /// The helper must agree with the prefix the product actually builds, in
+    /// both Windows arms -- otherwise a fixture could be written in the wrong
+    /// dialect while every test above still passes.
+    #[test]
+    fn the_helper_agrees_with_every_arm_the_prefix_builder_produces() {
+        const GIT_BASH: &str = "C:\\Program Files\\Git\\bin\\bash.exe";
+        assert!(shell_prefix_is_posix(&super::bash_shell_prefix_for(
+            true,
+            None,
+            Some(GIT_BASH)
+        )));
+        assert!(!shell_prefix_is_posix(&super::bash_shell_prefix_for(
+            true, None, None
+        )));
+        assert!(!shell_prefix_is_posix(&super::bash_shell_prefix_for(
+            true,
+            Some("powershell"),
+            Some(GIT_BASH)
+        )));
+        assert!(shell_prefix_is_posix(&super::bash_shell_prefix_for(
+            false, None, None
+        )));
+    }
+
     use super::*;
 
     /// The `cmd /C` payload rule fires on exactly the argv shape that carries a

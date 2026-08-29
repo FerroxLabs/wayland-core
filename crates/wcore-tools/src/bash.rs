@@ -560,15 +560,11 @@ fn shell_disclosure(prefix: &[String], os: &str) -> String {
     let invocation = prefix.join(" ");
     // The FINAL path component, because on Windows the interpreter is now
     // named by its absolute path (`C:\Program Files\Git\bin\bash.exe`) when
-    // #1164 resolved a real bash. Lowercase first so `BASH.EXE` also matches.
-    let program = prefix
-        .first()
-        .map(|p| p.to_ascii_lowercase())
-        .map(|p| {
-            let base = p.rsplit(['/', '\\']).next().unwrap_or(&p).to_string();
-            base.strip_suffix(".exe").unwrap_or(&base).to_string()
-        })
-        .unwrap_or_default();
+    // #1164 resolved a real bash. Shared with the Windows test fixtures that
+    // must be written in the same dialect this sentence describes, so the two
+    // can never disagree about which interpreter was picked
+    // (FerroxLabs/wayland-core#387).
+    let program = wcore_config::shell::shell_program_stem(prefix);
     let syntax = match program.as_str() {
         "bash" => "This is a real bash. POSIX shell syntax applies in full: `;` \
              separates commands, `$VAR` expands, and pipes, redirection, globbing, \

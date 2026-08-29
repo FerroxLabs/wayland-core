@@ -795,17 +795,53 @@ mod tests {
         }
     }
 
+    /// A path whose `fs::metadata` fails for a NON-absence reason, in this
+    /// platform's own spelling. Returned rather than inlined so the premise
+    /// assertion below is identical on both.
+    ///
+    /// UNIX -- the original #238 red arm: a component that is a FILE rather
+    /// than a directory makes `metadata` fail with `ENOTDIR`.
+    ///
+    /// WINDOWS (FerroxLabs/wayland-core#374): that same provocation maps to
+    /// `ERROR_PATH_NOT_FOUND` (3), which Rust reports as `NotFound` -- the one
+    /// kind the guard deliberately lets through -- so the premise could not be
+    /// established and the test HARD-FAILED the nightly soak, 3 of 3 tries.
+    /// A component longer than `NAME_MAX` is used instead. MEASURED on Windows
+    /// 11 build 26200 rather than assumed, because two of the three
+    /// provocations #374 suggested do not work here:
+    ///
+    /// ```text
+    /// file-as-a-component      ERR kind=NotFound        raw=Some(3)
+    /// component of 300 chars   ERR kind=InvalidFilename raw=Some(123)
+    /// illegal character `<`    ERR kind=InvalidFilename raw=Some(123)
+    /// 392-char path, MAX_PATH  ERR kind=NotFound        raw=Some(3)
+    /// ```
+    ///
+    /// So the over-long *path* #374 proposed is `NotFound` on this build and
+    /// would not have established the premise either; the over-long
+    /// *component* does. It is preferred over the illegal-character spelling
+    /// because every character in it is a legal filename character, so no
+    /// earlier guard in `validate_user_path` can plausibly claim it first.
+    fn a_non_absence_stat_failure(dir: &Path) -> PathBuf {
+        #[cfg(not(windows))]
+        {
+            let file = dir.join("not-a-dir.txt");
+            std::fs::write(&file, b"x").expect("write");
+            file.join("child.txt")
+        }
+        #[cfg(windows)]
+        {
+            dir.join("L".repeat(300))
+        }
+    }
+
     /// #238 RED ARM. The `NonRegularFile` guard was written `if let
-    /// Ok(meta)`, so any stat failure SKIPPED it and the path returned `Ok`.
-    /// A component that is a FILE rather than a directory makes `metadata`
-    /// fail with `ENOTDIR` -- not `NotFound` -- on every Unix, and the path
-    /// sailed through.
+    /// Ok(meta)`, so any stat failure SKIPPED it and the path returned `Ok`,
+    /// and the path sailed through.
     #[test]
     fn a_path_whose_metadata_fails_for_a_reason_other_than_absence_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let file = dir.path().join("not-a-dir.txt");
-        std::fs::write(&file, b"x").expect("write");
-        let through_a_file = file.join("child.txt");
+        let through_a_file = a_non_absence_stat_failure(dir.path());
 
         let err = std::fs::metadata(&through_a_file).unwrap_err();
         assert_ne!(
