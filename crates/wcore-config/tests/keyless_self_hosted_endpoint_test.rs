@@ -247,6 +247,121 @@ fn an_explicit_compat_optout_restores_the_key_requirement() {
     assert_refused_for_missing_key(resolved, "explicit `keyless_self_hosted = false`");
 }
 
+/// NEGATIVE CONTROL — the smuggled spelling, at the GATE rather than at the
+/// predicate. `https://api.openai.com?x=@127.0.0.1` is a PUBLIC endpoint; the
+/// authority-parsing defect made the predicate call it self-hosted, the startup
+/// gate exempted it, and the CLI dispatched the user's prompt to api.openai.com
+/// with the placeholder bearer instead of refusing. The two other spellings of
+/// the same smuggle (`#` fragment, WHATWG backslash) are pinned alongside it.
+#[test]
+#[serial]
+fn a_smuggled_authority_does_not_exempt_a_public_endpoint() {
+    for url in [
+        "https://api.openai.com?x=@127.0.0.1",
+        "https://api.openai.com#@127.0.0.1",
+        r"https://api.openai.com\@127.0.0.1",
+    ] {
+        let resolved = resolve_without_credentials("openai", Some(url), None);
+        assert_refused_for_missing_key(resolved, url);
+    }
+}
+
+/// #1173 was applied at ONE of the two credential gates. `resolve_council_provider`
+/// re-implements the same chain for cross-provider council members and did not
+/// consult the exemption, so a council member pointed at a keyless local Ollama
+/// was classified `Keyless` and dropped before spawn — the opposite decision the
+/// CLI gate makes on identical configuration.
+#[test]
+#[serial]
+fn the_council_gate_honours_the_same_keyless_self_hosted_exemption() {
+    use wcore_config::config::{ProviderConfig, resolve_council_provider};
+
+    let _env = NoCredentialEnv::enter();
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        "openai".to_string(),
+        ProviderConfig {
+            base_url: Some(LOCAL_ENDPOINT.to_string()),
+            model: Some("qwen3:8b".to_string()),
+            ..Default::default()
+        },
+    );
+    let base = Config::default();
+
+    let (cfg, _model) = resolve_council_provider(&providers, &base, "openai").unwrap_or_else(|e| {
+        panic!(
+            "a council member on a user-declared keyless self-hosted endpoint \
+             must resolve, exactly as the CLI gate resolves it. Got: {e}"
+        )
+    });
+    assert_eq!(cfg.base_url, LOCAL_ENDPOINT);
+    assert!(
+        cfg.api_key.is_empty(),
+        "the council member must not acquire a credential here"
+    );
+}
+
+/// NEGATIVE CONTROL for the council gate — the same three conditions still
+/// apply there. A PUBLIC endpoint, the provider's own DEFAULT endpoint, a wire
+/// with no keyless path, and an explicit opt-out each keep the `Keyless` skip.
+#[test]
+#[serial]
+fn the_council_gate_still_skips_every_non_exempt_keyless_member() {
+    use wcore_config::compat::ProviderCompat;
+    use wcore_config::config::{CouncilProviderError, ProviderConfig, resolve_council_provider};
+
+    let _env = NoCredentialEnv::enter();
+    let base = Config::default();
+
+    let cases: Vec<(&str, &str, ProviderConfig)> = vec![
+        (
+            "openai",
+            "a PUBLIC endpoint the user declared",
+            ProviderConfig {
+                base_url: Some("https://api.openai.com/v1".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "openai",
+            "the provider's own default endpoint",
+            ProviderConfig::default(),
+        ),
+        (
+            "cohere",
+            "a wire with no keyless path",
+            ProviderConfig {
+                base_url: Some(LOCAL_ENDPOINT.to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "openai",
+            "an explicit `keyless_self_hosted = false` opt-out",
+            ProviderConfig {
+                base_url: Some(LOCAL_ENDPOINT.to_string()),
+                compat: Some(ProviderCompat {
+                    keyless_self_hosted: Some(false),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    for (id, case, provider_config) in cases {
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(id.to_string(), provider_config);
+        let err = resolve_council_provider(&providers, &base, id)
+            .err()
+            .unwrap_or_else(|| panic!("{case}: the council gate must still skip this member"));
+        assert!(
+            matches!(err, CouncilProviderError::Keyless(_)),
+            "{case}: expected a Keyless skip, got {err:?}"
+        );
+    }
+}
+
 /// The address predicate must not be talked into calling a public host local.
 /// `is_self_hosted_base_url` is what stands between the exemption and the open
 /// internet, so its polarity is pinned here as well as in its own crate.

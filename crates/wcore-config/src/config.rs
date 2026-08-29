@@ -3567,6 +3567,39 @@ pub fn resolve_council_provider(
         .map(str::to_string)
         .unwrap_or(raw_model);
 
+    let compat_defaults = if let Some(entry) = catalog_entry.as_ref() {
+        ProviderCompat::from_catalog_entry(&entry.id, entry.api_path.as_deref())
+    } else {
+        compat_defaults_for(provider)
+    };
+    let user_compat = provider_config.compat.clone().unwrap_or_default();
+    let mut compat = ProviderCompat::merge(compat_defaults, user_compat.clone());
+
+    // F-088: align the advertised effort capability with what the resolved
+    // model actually accepts (only when the user hasn't pinned it explicitly).
+    if provider == ProviderType::OpenAI
+        && user_compat.supports_effort.is_none()
+        && compat.supports_effort.unwrap_or(false)
+        && !model.is_empty()
+        && !openai_model_accepts_effort(&model)
+    {
+        compat.supports_effort = Some(false);
+        compat.effort_levels = Some(vec![]);
+    }
+
+    // #1173 — the keyless self-hosted exemption, applied at BOTH credential
+    // gates. `Config::resolve` is the CLI's gate; this is the council's, and it
+    // re-implements the same chain, so without this arm the two gates made
+    // OPPOSITE decisions on identical configuration: a council member pointed
+    // at a keyless local Ollama was classified `Keyless` and dropped before
+    // spawn while the main CLI path ran the same endpoint happily. Same three
+    // conditions as `Config::resolve`, minus the CLI half of condition 1 (the
+    // council never takes a `--base-url`), so the endpoint must have been
+    // declared under `[providers.<name>] base_url`.
+    let declared_keyless_self_hosted_endpoint = provider_config.base_url.is_some()
+        && compat.keyless_self_hosted()
+        && crate::self_hosted::is_self_hosted_base_url(&base_url);
+
     // Credentials: inline config key → store → env var (per provider), plus the
     // catalog entry's own env var as a fallback — exactly Config::resolve's
     // chain, with no CLI key (the council never takes a CLI `--api-key`).
@@ -3599,9 +3632,12 @@ pub fn resolve_council_provider(
         // env var, if somehow set for this id, still wins — mirrors resolve().)
         Ok(empty) => catalog_env_key.clone().unwrap_or(empty),
         // Nothing found anywhere: honor a catalog env var, else this is a
-        // keyless BYO member the council skips (not fatal).
+        // keyless BYO member the council skips (not fatal) -- UNLESS the user
+        // declared a self-hosted endpoint on a wire that has a keyless path
+        // (#1173), in which case there is no remote credential to be missing.
         Err(_) => match catalog_env_key.clone() {
             Some(key) => key,
+            None if declared_keyless_self_hosted_endpoint => String::new(),
             None => return Err(CouncilProviderError::Keyless(provider_id.to_string())),
         },
     };
@@ -3616,26 +3652,6 @@ pub fn resolve_council_provider(
         .as_ref()
         .and_then(PromptCachingConfig::min_prefix_tokens)
         .unwrap_or(DEFAULT_CACHE_MIN_PREFIX_TOKENS);
-
-    let compat_defaults = if let Some(entry) = catalog_entry.as_ref() {
-        ProviderCompat::from_catalog_entry(&entry.id, entry.api_path.as_deref())
-    } else {
-        compat_defaults_for(provider)
-    };
-    let user_compat = provider_config.compat.clone().unwrap_or_default();
-    let mut compat = ProviderCompat::merge(compat_defaults, user_compat.clone());
-
-    // F-088: align the advertised effort capability with what the resolved
-    // model actually accepts (only when the user hasn't pinned it explicitly).
-    if provider == ProviderType::OpenAI
-        && user_compat.supports_effort.is_none()
-        && compat.supports_effort.unwrap_or(false)
-        && !model.is_empty()
-        && !openai_model_accepts_effort(&model)
-    {
-        compat.supports_effort = Some(false);
-        compat.effort_levels = Some(vec![]);
-    }
 
     let resolved_model = if model.is_empty() {
         None

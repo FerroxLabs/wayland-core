@@ -25,13 +25,27 @@
 /// rather than silently sending a bogus bearer and getting a 401.
 #[must_use]
 pub fn is_self_hosted_base_url(base_url: &str) -> bool {
-    // Host = strip scheme, take up to the first '/', drop any `user@`, strip the
+    // Host = strip scheme, take the AUTHORITY, drop any `user@`, strip the
     // `:port`. IPv6 literals are bracketed (`[::1]:11434`).
+    //
+    // The authority ends at the first of `/`, `?`, `#` or `\` — not at `/`
+    // alone. Cutting at `/` alone left a query string, a fragment or a
+    // backslash-smuggled userinfo inside the "authority", and the `rsplit('@')`
+    // below then read whatever private literal had been parked there: the
+    // predicate called `https://api.openai.com?x=@127.0.0.1` self-hosted, the
+    // startup gate exempted it, and the prompt went to the PUBLIC host with the
+    // placeholder bearer instead of being refused. `\` is in the set because
+    // reqwest (WHATWG) maps it to `/` for special schemes, so the host actually
+    // dialled from `https://api.openai.com\@127.0.0.1` is api.openai.com — the
+    // same smuggle `SseTransport::resolve_endpoint` already defends against.
     let after_scheme = base_url
         .split_once("://")
         .map(|(_, r)| r)
         .unwrap_or(base_url);
-    let authority = after_scheme.split('/').next().unwrap_or("");
+    let authority = after_scheme
+        .split(['/', '?', '#', '\\'])
+        .next()
+        .unwrap_or("");
     let host_port = authority.rsplit('@').next().unwrap_or(authority);
     let host = if let Some(rest) = host_port.strip_prefix('[') {
         rest.split(']').next().unwrap_or(rest)
