@@ -85,9 +85,18 @@ def load_ledger():
     return recs
 
 
-def classify(rec, crit, verified_lanes, route):
+def classify(rec, crit, verified_lanes, route, ckey=None):
     st = crit["state"]
     if st in ("met", "superseded"):
+        # PER-CRITERION verdict wins over the lane's. A verifier that returns
+        # PARTIAL is saying "some of this lane holds and some does not", and it
+        # says WHICH -- so demoting the whole lane discards the half it checked
+        # and confirmed. That under-reports, and under-reporting sends the next
+        # session re-verifying settled work. A criterion key here must come from
+        # a verifier that named that criterion explicitly; absence still falls
+        # back to the lane, and absence of both is still CLAIMED.
+        if ckey and ckey in verified_lanes:
+            return DONE if verified_lanes[ckey] == "CONFIRMED" else CLAIMED
         lane = route.get("lane") if route else None
         return DONE if (lane and verified_lanes.get(lane) == "CONFIRMED") else CLAIMED
     if st == "blocked":
@@ -359,7 +368,7 @@ def main():
         for c in r["crits"]:
             ck = "%s %s" % (r["key"], c["id"])
             route = routes.get(ck)
-            state = classify(r, c, verified, route)
+            state = classify(r, c, verified, route, ck)
             kind = r["kind"] or routing.get("kind_overrides", {}).get(r["key"], "")
             row = dict(key=r["key"], title=r["title"], cid=c["id"], text=c["text"],
                        owner=c["owner"], state=state, raw=c["state"], kind=kind,

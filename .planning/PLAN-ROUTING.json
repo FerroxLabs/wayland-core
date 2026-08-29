@@ -287,6 +287,36 @@
       "lane": "telegram-topic",
       "phase": "1-build"
     },
+    "core#365 c1": {
+      "host": "hetzner",
+      "lane": "container-latch",
+      "phase": "1-build"
+    },
+    "core#365 c2": {
+      "host": "hetzner",
+      "lane": "container-latch",
+      "phase": "1-build"
+    },
+    "core#365 c3": {
+      "host": "hetzner",
+      "lane": "container-latch",
+      "phase": "1-build"
+    },
+    "core#365 c4": {
+      "host": "hetzner",
+      "lane": "container-latch",
+      "phase": "1-build"
+    },
+    "core#365 c5": {
+      "host": "hetzner",
+      "lane": "container-latch",
+      "phase": "1-build"
+    },
+    "core#365 c6": {
+      "host": "hetzner",
+      "lane": "container-latch",
+      "phase": "1-build"
+    },
     "wl#1088 c2": {
       "host": "gh",
       "lane": "decompose",
@@ -520,6 +550,11 @@
       "host": "hetzner",
       "phase": "1-build",
       "title": "Message caps: matrix/msteams probe shape, Telegram UTF-16, WhatsApp"
+    },
+    "container-latch": {
+      "host": "hetzner",
+      "phase": "1-build",
+      "title": "Container backend latches on a leftover name, and attests a run that never happened"
     },
     "decompose": {
       "host": "gh",
