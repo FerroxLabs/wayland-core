@@ -43,6 +43,27 @@ const DEFAULT_MAX_BYTES: u64 = 100_000_000;
 /// completes as soon as the child exits.
 const DRAIN_GRACE: Duration = Duration::from_secs(5);
 
+/// `DETACHED_PROCESS` — the child gets no console, and does not inherit ours.
+///
+/// Module-level because two places need it and they must agree: the hardening
+/// hook, and [`spawn_owned`], which has to OR it together with
+/// `CREATE_SUSPENDED` (`Command::creation_flags` REPLACES the flags rather than
+/// adding to them, so setting the job flag separately would silently drop this
+/// one).
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+/// Config pins prepended to every quarantine `git` argv on Windows.
+///
+/// An empty `credential.helper` value is git's own spelling of "reset the
+/// helper list", and `-c` is parsed last, so it clears every helper the system,
+/// global, local and URL-scoped config contributed. No helper process is
+/// spawned at all, which is the only elimination Windows offers — see
+/// [`harden_against_credential_prompt`] for the measurement that rules out the
+/// unix approach there.
+#[cfg(windows)]
+const WINDOWS_CREDENTIAL_PINS: &[&str] = &["-c", "credential.helper="];
+
 /// A cloned + normalized source ready to lower. `path` contains only
 /// allowlisted regular files and directories; `resolved_sha` pins the exact
 /// commit fetched.
@@ -317,13 +338,30 @@ fn normalize_copy(src: &Path, dst: &Path, copied: &mut u64, cap: u64) -> Result<
 /// controlling terminal away rather than to ask the child not to use it:
 /// `setsid(2)` between fork and exec puts the child in a fresh session with no
 /// ctty, `open("/dev/tty")` then fails with `ENXIO`, and every descendant the
-/// child spawns — helpers included — inherits that session. On Windows the
-/// analogue is `DETACHED_PROCESS`, which denies the child the parent's console
-/// and so `CONIN$`/`CONOUT$` with it.
+/// child spawns — helpers included — inherits that session.
 ///
-/// `credential.helper` is deliberately NOT cleared. Clearing it would break
-/// installs from private plugin sources, which is a real product cost, and
-/// route 2 already removes the helper's terminal.
+/// **Windows has no equivalent of that, and this is measured, not assumed.**
+/// `DETACHED_PROCESS` withholds the parent's console at CREATION time only; it
+/// is not a boundary. On Windows 11 build 26200 all three re-acquisition routes
+/// succeed and land text on the launching process's own console:
+///
+/// * the direct `DETACHED_PROCESS` child calling
+///   `AttachConsole(ATTACH_PARENT_PROCESS)`,
+/// * a console-less GRANDCHILD calling `AttachConsole(<launcher pid>)`,
+/// * a grandchild that was given its own console calling `FreeConsole()` and
+///   then `AttachConsole(<launcher pid>)`.
+///
+/// A `setsid`'d unix child cannot do the analogous thing, because `TIOCSCTTY`
+/// refuses a terminal that is already another session's controlling terminal.
+/// So route 2 CANNOT be closed on Windows by taking the terminal away.
+///
+/// `credential.helper` is therefore cleared on WINDOWS ONLY, via
+/// [`build_git_command`]. That is the second of the three policies issue #338
+/// itself puts on the table, and it is the only one available on a platform
+/// where the first (deny the terminal) is measurably unavailable: a helper that
+/// is never spawned cannot re-acquire a console. On unix it stays untouched,
+/// because there route 2 really is closed and clearing it would break installs
+/// from private plugin sources for no gain.
 ///
 /// Fail-closed: if `setsid` fails the spawn fails, and the install reports an
 /// error rather than proceeding with a child that still holds the terminal.
@@ -358,9 +396,6 @@ pub fn harden_against_credential_prompt(cmd: &mut std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        /// `DETACHED_PROCESS` — the child gets no console, and does not
-        /// inherit ours.
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
         cmd.creation_flags(DETACHED_PROCESS);
     }
 }
@@ -373,6 +408,10 @@ pub fn harden_against_credential_prompt(cmd: &mut std::process::Command) {
 /// a PR here before. Every quarantine `git` spawn goes through this.
 pub fn build_git_command(args: &[&str], cwd: Option<&Path>) -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
+    // Before the caller's args, so the caller's subcommand still parses and so
+    // a later `-c` from a caller cannot be shadowed by ours.
+    #[cfg(windows)]
+    cmd.args(WINDOWS_CREDENTIAL_PINS);
     cmd.args(args);
     if let Some(c) = cwd {
         cmd.current_dir(c);
@@ -384,12 +423,163 @@ pub fn build_git_command(args: &[&str], cwd: Option<&Path>) -> std::process::Com
     cmd
 }
 
-fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<String> {
-    let mut cmd = build_git_command(args, cwd);
+/// Ownership of the whole process TREE one quarantine `git` invocation creates.
+///
+/// # Why the direct child is not enough
+///
+/// `harden_against_credential_prompt` puts the child in a NEW SESSION on unix
+/// (`setsid`). That is the fix for issue #338, and it is also exactly what
+/// makes `child.kill()` insufficient: `git` spawns credential, askpass and
+/// transport helpers with its own stdio inherited and does NOT detach them
+/// (the reason [`DRAIN_GRACE`] exists), and those descendants now live in a
+/// session `wayland-core` does not own — no group signal of ours reaches them,
+/// and a terminal hangup no longer reaps them either. Killing the direct pid
+/// leaves them running with no owner after the install has already reported an
+/// error. MEASURED on hetzner before this type existed: SIGKILL to a `setsid`'d
+/// shell left its backgrounded grandchild alive in the detached session.
+///
+/// # What each platform can own
+///
+/// `setsid` makes the child the leader of a fresh process group whose id equals
+/// its pid, so `kill(-pid, SIGKILL)` reaches the whole tree. [`spawn_owned`]
+/// verifies that leadership against the kernel BEFORE recording it, because
+/// signalling a group we do not lead would signal `wayland-core` itself.
+///
+/// Windows has no process group. The workspace primitive is a kill-on-close Job
+/// Object — [`wcore_types::job_object::WindowsJobObject`] — the same one the MCP
+/// stdio transport and the sandbox `ProcessTreeGuard` use, so there is one
+/// definition of "own this tree" and not a third copy.
+struct GitProcessTree {
+    #[cfg(unix)]
+    process_group: Option<libc::pid_t>,
+    #[cfg(windows)]
+    job: Option<wcore_types::job_object::WindowsJobObject>,
+}
+
+impl GitProcessTree {
+    /// Give up ownership WITHOUT killing anything.
+    ///
+    /// Called on the one path where the tree is not ours to reap: `git` ran to
+    /// completion and succeeded. What can still be alive there is git's OWN
+    /// deliberately-daemonized helper (`git-credential-cache--daemon`, measured
+    /// in [`DRAIN_GRACE`]'s note to hold none of our pipes), which outliving
+    /// the clone is its documented job.
+    fn disarm(&mut self) {
+        #[cfg(unix)]
+        {
+            self.process_group = None;
+        }
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            // Windows offers no way to release a kill-on-close job except by
+            // closing its last handle, and closing it is what terminates the
+            // tree. Holding the handle instead is deliberate: it is bounded at
+            // one per quarantine `git` invocation (an install makes at most
+            // five), and its only effect is that anything still in the job is
+            // reaped no later than process exit.
+            std::mem::forget(job);
+        }
+    }
+
+    /// Kill the tree. Idempotent — a second call has nothing left to take.
+    fn reap(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.process_group.take() {
+            // SAFETY: a plain signal call. `pgid` was verified in
+            // `spawn_owned` to be a group this call created and leads; the
+            // negative pid addresses that group.
+            //
+            // The leader may already have been reaped by `try_wait` by now, so
+            // in principle its pid could be recycled. Signalling the wrong tree
+            // would need a double coincidence: the kernel handing that exact
+            // pid to a new process AND that process becoming a group leader
+            // (processes inherit their parent's group unless they call
+            // `setsid`/`setpgid`). While any member of our group is alive the
+            // id cannot be reused at all, and if none is, there was nothing to
+            // kill.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            job.terminate();
+        }
+    }
+}
+
+impl Drop for GitProcessTree {
+    /// The backstop that makes this correct by construction: EVERY error
+    /// return from [`run_git`] reaps the tree, including the ones added later.
+    /// Only the success path opts out, and it has to say so explicitly.
+    fn drop(&mut self) {
+        self.reap();
+    }
+}
+
+/// Spawn `cmd` and take ownership of the process tree it will create.
+///
+/// Fails closed on unix: a child that is not its own process-group leader is
+/// killed and reported rather than run, because its descendants could not be
+/// reaped and `kill(-pgid)` on the group we would have recorded is our own.
+fn spawn_owned(cmd: &mut std::process::Command) -> Result<(std::process::Child, GitProcessTree)> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+        // `WindowsJobObject::create_suspended` would REPLACE the creation
+        // flags, dropping `DETACHED_PROCESS`; both are set together here.
+        // Suspended until the job assignment lands, so the child cannot create
+        // a descendant outside the job — see `wcore_types::job_object`.
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_SUSPENDED);
+    }
 
     let mut child = cmd
         .spawn()
         .map_err(|e| PluginCliError::Git(format!("spawn git: {e}")))?;
+
+    #[cfg(unix)]
+    {
+        let pid = libc::pid_t::try_from(child.id()).unwrap_or(-1);
+        // SAFETY: a plain query taking no pointers.
+        let pgid = unsafe { libc::getpgid(pid) };
+        if pid <= 0 || pgid != pid {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(PluginCliError::Git(format!(
+                "quarantine git child {pid} is not the leader of its own process group                  (pgid {pgid}); refusing to run a git whose helpers could not be reaped"
+            )));
+        }
+        Ok((
+            child,
+            GitProcessTree {
+                process_group: Some(pid),
+            },
+        ))
+    }
+    #[cfg(windows)]
+    {
+        match wcore_types::job_object::WindowsJobObject::attach(child.id()) {
+            Ok(job) => Ok((child, GitProcessTree { job: Some(job) })),
+            Err(e) => {
+                // `attach` may fail before or after the assignment landed; the
+                // kill is correct for both shapes (see its docs).
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(PluginCliError::Git(format!(
+                    "own the quarantine git process tree: {e}"
+                )))
+            }
+        }
+    }
+}
+
+fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<String> {
+    let mut cmd = build_git_command(args, cwd);
+
+    // `tree` outlives every early return below: its `Drop` reaps the helpers
+    // `git` spawned on EVERY error path, and only the success path disarms it.
+    let (mut child, mut tree) = spawn_owned(&mut cmd)?;
 
     let mut out_pipe = child.stdout.take().expect("stdout piped");
     let mut err_pipe = child.stderr.take().expect("stderr piped");
@@ -413,6 +603,10 @@ fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<Strin
             Some(s) => break s,
             None => {
                 if start.elapsed() > timeout {
+                    // The tree FIRST, while the leader is still alive to
+                    // anchor the group id, then the direct pid so the zombie
+                    // is reaped and `Child` updates its own state.
+                    tree.reap();
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(PluginCliError::Git(format!(
@@ -435,6 +629,10 @@ fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<Strin
             String::from_utf8_lossy(&err).trim()
         )));
     }
+    // Success: git exited 0 and both pipes reached EOF, so nothing of OURS is
+    // left in the tree. Anything still there is git's own daemon and outliving
+    // the clone is its job.
+    tree.disarm();
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
@@ -573,6 +771,144 @@ mod tests {
         assert!(
             elapsed < budget,
             "it must be the drain guard that fires, not the wall-clock guard: {elapsed:?}"
+        );
+    }
+
+    /// Is `pid` a live (non-reaped) process?
+    ///
+    /// `kill(pid, 0)` is the only portable oracle here. It also answers "yes"
+    /// for a zombie, which is the conservative direction for these tests: a
+    /// false "alive" fails them, it never passes them.
+    fn is_alive(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 performs the permission/existence check only.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// Wait up to `budget` for `pid` to disappear.
+    fn wait_gone(pid: libc::pid_t, budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            if !is_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        !is_alive(pid)
+    }
+
+    /// Prove the liveness oracle can say BOTH things in this process, so a
+    /// "the descendant is gone" result below cannot come from an oracle that
+    /// only ever says "gone".
+    fn assert_oracle_is_bidirectional() {
+        let mut probe = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn the oracle control");
+        let pid = probe.id() as libc::pid_t;
+        assert!(
+            is_alive(pid),
+            "the liveness oracle failed to see a process it just spawned"
+        );
+        let _ = probe.kill();
+        let _ = probe.wait();
+        assert!(
+            wait_gone(pid, Duration::from_secs(5)),
+            "the liveness oracle failed to see a process it just killed"
+        );
+    }
+
+    /// A quarantine `git` that times out must take the helpers it spawned with
+    /// it — not just its own pid.
+    ///
+    /// The `setsid` hardening for #338 is what makes this load-bearing: the
+    /// descendants are in a session this process does not own, so the previous
+    /// `child.kill()` left them running with no owner and nothing else would
+    /// ever reap them. A `!`-alias reproduces the exact production shape (a
+    /// helper `git` spawns that backgrounds a worker) with no network.
+    #[test]
+    fn a_timed_out_git_reaps_the_whole_detached_tree() {
+        assert_oracle_is_bidirectional();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        run_git(&["init", "-q", "."], Some(repo), Duration::from_secs(60)).expect("git init");
+
+        let pidfile = repo.join("worker.pid");
+        let alias = format!(
+            "alias.wedge=!sh -c 'sleep 300 & echo $! > {} ; sleep 300'",
+            pidfile.display()
+        );
+
+        let started = Instant::now();
+        let err = run_git(
+            &["-c", &alias, "wedge"],
+            Some(repo),
+            Duration::from_millis(1_500),
+        )
+        .expect_err("the wall-clock guard must fire");
+        assert!(
+            err.to_string().contains("timed out"),
+            "it must be the timeout path that fired: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the guard must fire on its own budget: {:?}",
+            started.elapsed()
+        );
+
+        // Non-vacuity: the helper really did create a backgrounded descendant.
+        let worker: libc::pid_t = std::fs::read_to_string(&pidfile)
+            .expect("the helper must have recorded its background worker's pid")
+            .trim()
+            .parse()
+            .expect("worker pid");
+        assert!(worker > 0, "worker pid {worker}");
+
+        assert!(
+            wait_gone(worker, Duration::from_secs(10)),
+            "the background worker {worker} that the timed-out git spawned is STILL ALIVE — \
+             killing the direct child does not reach a descendant in the detached session"
+        );
+    }
+
+    /// The same obligation on the OTHER failure exit: `git` exits promptly but
+    /// a helper it spawned holds the inherited pipe, so `join_drain` refuses.
+    ///
+    /// Enumerated deliberately — `run_git` has two failure shapes that leave a
+    /// tree behind, and an entry written from one of them leaves the other to
+    /// surface later.
+    #[test]
+    fn a_pipe_holding_helper_is_reaped_when_the_drain_guard_fires() {
+        assert_oracle_is_bidirectional();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        run_git(&["init", "-q", "."], Some(repo), Duration::from_secs(60)).expect("git init");
+
+        let pidfile = repo.join("worker.pid");
+        let alias = format!(
+            "alias.leak=!sh -c 'sleep 300 & echo $! > {} ; exit 0'",
+            pidfile.display()
+        );
+
+        let err = run_git(&["-c", &alias, "leak"], Some(repo), Duration::from_secs(60))
+            .expect_err("the drain guard must fire");
+        assert!(
+            err.to_string().contains("pipe is still open"),
+            "it must be the drain guard that fired, not the wall clock: {err}"
+        );
+
+        let worker: libc::pid_t = std::fs::read_to_string(&pidfile)
+            .expect("the helper must have recorded its background worker's pid")
+            .trim()
+            .parse()
+            .expect("worker pid");
+        assert!(worker > 0, "worker pid {worker}");
+
+        assert!(
+            wait_gone(worker, Duration::from_secs(10)),
+            "the pipe-holding worker {worker} survived the drain-guard failure — the install \
+             reported an error and left an unowned process running"
         );
     }
 }
