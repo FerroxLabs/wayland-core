@@ -217,6 +217,31 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 filter = 'binary(bash_unsaved_guard_bound_live)'
 slow-timeout = { period = "60s", terminate-after = 3 }
 
+# THE DATA-LOSS ARMS MUST NOT BE RETRYABLE IN THE SOAK EITHER (FerroxLabs/wayland-core#350).
+#
+# The block at the bottom of this file pins `inv2_round5_adversarial_test` to
+# `retries = 0`, and explains at length why: every assertion in that binary is a
+# data-loss assertion, so a race that loses a save on one attempt and wins on the
+# next must NOT report the run as SUCCESS. That reasoning is not repeated here.
+#
+# What was missed is that the pin is `[[profile.ci.overrides]]` ONLY.
+# `scripts/wayland-e2e-windows-soak.ps1` PHASE G invokes nextest with NO
+# `--profile`, so it runs under `[profile.default]`, where `retries = 1` (line 70)
+# applies. MEASURED, not argued: soak run 33266413002 PHASE G shows
+# `TRY 1 TMT [  60.010s]` then `TRY 2 TMT [  60.019s]` for each of three timeouts,
+# so the default profile really is spending a retry on that job. The soak is the
+# one job whose green is #350's close condition, and it could have retried a lost
+# save into a pass.
+#
+# KNOWN RESIDUAL, stated rather than left to be found: the other four `retries = 0`
+# overrides in this file (`pipeline_test`, the two deny-walk timing tests, and the
+# three harness-ownership binaries) are still ci-only, so the soak can still retry
+# THOSE. Only the data-loss binary is mirrored here, because only it went red on a
+# Windows leg this cycle (core#387 c3).
+[[profile.default.overrides]]
+filter = 'binary(=inv2_round5_adversarial_test)'
+retries = 0
+
 # `walk_parallel_identity_test`'s two TIMING cases build a 15,000-file fixture
 # before they measure anything (`a_disjoint_grant_really_does_cost_a_second_walk`
 # builds two), and on NTFS that CONSTRUCTION, not the measurement, is the whole
