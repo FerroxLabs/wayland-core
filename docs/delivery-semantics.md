@@ -376,7 +376,7 @@ of a conditional guarantee"; it means "this adapter's `max_message_len()`".
 | **Slack** | 4,000 | **Quoted.** [`chat.postMessage`](https://docs.slack.dev/reference/methods/chat.postMessage), "Truncating content": *"For best results, limit the number of characters in the `text` field to 4,000 characters"*, and separately *"Slack will truncate messages containing more than 40,000 characters"*. 4,000 is advisory and is also the split point; 40,000 is silent truncation, not a catchable rejection. | **MEASURED 2026-08-27** — 4,040 is the largest single message; at 4,041 the API splits into 4,000-char messages. Was declared 39,000: the manager chunks on this value, so one 39,000-char send arrived as ten messages while `chunks_for(..).len() <= 1` marked it single-delivery. |
 | **Matrix** | 16,384 | **Derived — the platform limit is BYTES.** [Client-Server API, Size limits](https://spec.matrix.org/latest/client-server-api/#size-limits): *"The complete event MUST NOT be larger than 65536 bytes … encoded as Canonical JSON."* Synapse enforces exactly that (`MAX_PDU_SIZE = 65536`); nothing documents a limit on `body` itself. `65536 / 4` is the largest scalar count whose UTF-8 encoding cannot exceed it. | **NOT MEASURED — and the two-point probe cannot measure it.** The derivation IS checked, hermetically and on every build, by `a_derived_cap_is_exactly_what_its_budget_admits`. The live arm owed is a SATURATING one: 16,384 astral-plane scalars, 65,536 UTF-8 bytes, the budget exactly. See the byte-budget note below. |
 | **Discord** | 2,000 | **Quoted.** [Create Message](https://docs.discord.com/developers/resources/message): *"content?* — string — Message contents (up to 2000 characters)"*. The 25 MiB on the same page is the whole request. | **MEASURED 2026-08-27** — 2,000 accepted; 2,001 refused by the platform with HTTP 400 `50035 Invalid Form Body`. |
-| **Telegram** | 4,096 | **Quoted.** [`sendMessage`](https://core.telegram.org/bots/api#sendmessage): *"text — String — Yes — Text of the message to be sent, 1-4096 characters after entities parsing"*. Unit unstated; `MessageEntity` on the same page indexes in UTF-16 code units. | **MEASURED 2026-08-29** — 4,096 accepted as one message, 4,097 refused `400: Bad Request: message is too long`. Probed in ASCII, so the cap is confirmed for ASCII text; the character-vs-UTF-16 question is still open. The arm that settles it is committed — `live_boundary_at_real_telegram` with `WL_LIVE_CAP_TELEGRAM_ASTRAL=1` — and if the answer is code units then the shipped 4,096 is UNSAFE for non-BMP text and must drop to 2,048. |
+| **Telegram** | 4,096 | **Quoted.** [`sendMessage`](https://core.telegram.org/bots/api#sendmessage): *"text — String — Yes — Text of the message to be sent, 1-4096 characters after entities parsing"*. Unit unstated; `MessageEntity` on the same page indexes in UTF-16 code units. | **MEASURED 2026-08-29, and the unit is SETTLED.** ASCII arm: 4,096 accepted as one message, 4,097 refused `400: Bad Request: message is too long`. ASTRAL arm, driven the same day with `WL_LIVE_CAP_TELEGRAM_ASTRAL=1` so the whole body was U+1F600: 4,096 scalars = 16,384 UTF-8 bytes = **8,192 UTF-16 code units accepted**, 4,097 scalars refused with the same `message is too long`. The boundary did not move with the encoding, so the limit is not code units — Telegram counts SCALARS and the shipped 4,096 is safe for non-BMP text. `MessageEntity` indexes in UTF-16; the `sendMessage` length does not. |
 | **Twilio SMS** | 1,600 | **Quoted.** [Message resource](https://www.twilio.com/docs/messaging/api/message-resource): *"The text content of the outgoing message. Can be up to 1,600 characters in length."* The GSM-7/UCS-2 split in the same sentence governs segmentation and billing, not the maximum. | **MEASURED 2026-08-29** — 1,600 accepted as one concatenated message, 1,601 refused by Twilio before it reached a carrier: `400 code 21617, The concatenated message body exceeds the 1600 character limit`. Twilio's own error names the unit, so unlike Telegram this is unambiguously a CHARACTER limit and holds for either encoding. Probed in ASCII/GSM-7 at 11 segments. |
 | **WhatsApp** | 4,096 | **Quoted.** [Cloud API text messages](https://developers.facebook.com/docs/whatsapp/cloud-api/messages/text-messages): *"Body text. … Maximum 4096 characters."* Unit unstated. | **NOT MEASURED** |
 | **WhatsApp bridge** (`backend = "baileys"` / `"whatsapp-web"`) | 4,096 | **NOT a vendor figure — a POLICY.** Neither `baileys` nor `whatsapp-web.js` nor WhatsApp publishes a body limit for the Web/multi-device protocol these backends speak, so there is no page to quote. `BRIDGE_UNMEASURED_CHUNK_WIDTH` in `crates/wcore-channel-whatsapp/src/bridge/mod.rs` is a chunking width chosen for safety, and `cap_source` points at the decision rather than at a vendor: [wayland-core#360](https://github.com/FerroxLabs/wayland-core/issues/360). Overridable per channel with `max_message_chars`. | **NOT MEASURED** — it needs a running bridge (Node, an operator's own `bridge.js`, a QR-paired number), not a credential; nobody can issue one for a backend that authenticates by pairing. |
@@ -507,20 +507,34 @@ the next reader to rediscover.
 
 #### The unit question, and why an ASCII run cannot settle it (wayland#934 c8)
 
-Every boundary this programme has driven was driven in ASCII, where one character is one
-Unicode scalar is one UTF-16 code unit. So none of the four runs can tell a CHARACTER limit
-from a CODE-UNIT limit, and those differ by a factor of two for astral-plane text — in the
-dangerous direction. Telegram is the sharp case: `sendMessage` says *"1-4096 characters after
-entities parsing"* while `MessageEntity` on the same page indexes in UTF-16 code units. If the
-limit is code units, a 4,096-scalar emoji reply is 8,192 code units, the platform refuses it
-**at the cap we ship**, and `send_to_keyed` does not re-send it.
+An ASCII probe cannot tell a CHARACTER limit from a CODE-UNIT limit, because in ASCII they
+are the same number, and the two differ by a factor of two for astral-plane text — in the
+dangerous direction. Telegram was the sharp case: `sendMessage` says *"1-4096 characters
+after entities parsing"* while `MessageEntity` on the same page indexes in UTF-16 code
+units. If the limit were code units, a 4,096-scalar emoji reply would be 8,192 code units,
+the platform would refuse it **at the cap we ship**, and `send_to_keyed` does not re-send it.
+
+**SETTLED 2026-08-29, and the answer is the benign one.** The astral arm was driven at the
+real bot and the real group with the whole body set to U+1F600:
+
+```text
+LIVE_CAP_PROBE selector=telegram shipped_cap=4096 probing_at=4096 astral=true
+LIVE_CAP_AT   scalars=4096 utf8_bytes=16384 utf16_units=8192 accepted id=19
+LIVE_CAP_OVER scalars=4097 utf8_bytes=16388 utf16_units=8194 REFUSED rejected by platform:
+              400: Bad Request: message is too long
+```
+
+8,192 UTF-16 code units were accepted AT the cap and 8,194 refused one scalar later, so the
+limit cannot be 4,096 code units. Telegram counts SCALARS; the shipped 4,096 stands and is
+safe for non-BMP text. The cell records `CapUnit::MeasuredScalars` with that evidence.
 
 `CapUnit` records which of the two each cell has settled, and `unit_safety_faults` refuses a
-scalar cap above `limit / 2` once a UTF-16 verdict is recorded. No cell has settled one yet, so
-that rule has nothing to enforce today — which is precisely the state in which a rule rots, so
+scalar cap above `limit / 2` once a UTF-16 verdict is recorded. No cell has recorded a
+UTF-16 verdict, so that rule still has nothing live to enforce — which is precisely the
+state in which a rule rots, so
 `the_unit_rule_refuses_a_cap_a_utf16_verdict_makes_unsafe` constructs the verdict a Telegram
-astral run would produce and requires the checker to refuse today's 4,096. The run itself is
-one command against a credential the programme already holds, plus a destination chat:
+astral run WOULD have produced had the answer gone the other way, and requires the checker
+to refuse today's 4,096. The run that settled it, for anyone re-driving it:
 
 ```text
 WL_LIVE_CAP_TELEGRAM_HOME=… WL_LIVE_CAP_TELEGRAM_CHANNEL=… WL_LIVE_CAP_TELEGRAM_TO=… \
@@ -541,7 +555,7 @@ skip** when that configuration is absent.
 | **Slack** | `WL_LIVE_SLACK_HOME` (bot token with `chat:write`) + `WL_SLACK_CHANNEL` | **Yes** — `live_slack_actions.rs` drives a real workspace today |
 | **Discord** | `WL_LIVE_DISCORD_HOME` (bot token) + `WL_LIVE_DISCORD_CHANNEL` (a real snowflake in a guild the bot has joined) | **Yes** — `live_discord_actions.rs` drives a real guild today |
 | **Matrix** | `MATRIX_HOMESERVER` + `MATRIX_ACCESS_TOKEN` + `MATRIX_USER_ID` + `MATRIX_ROOM_ID`, and the SATURATING arm — 16,384 astral scalars — not the two-point probe | **Token is DEAD.** matrix.org answered `M_UNKNOWN_TOKEN — "Token is not active"` on 2026-07-31 and it has not been replaced. A working token is a Sean-only input. Note the token was never the whole blocker: the probe SHAPE was wrong too, and that half is fixed in-tree |
-| **Telegram** | a `TELEGRAM_BOT_TOKEN` from BotFather + a chat id the bot may post to | **No.** Measured: the only hits for that name in `crates/` are the redaction pattern in `wcore-safety/src/pii.rs` |
+| **Telegram** | a `TELEGRAM_BOT_TOKEN` from BotFather + a chat id the bot may post to | **Yes, and both arms are driven.** The bot token and the destination chat id are held outside every checkout; the ASCII boundary and the astral unit arm were both run on 2026-08-29 |
 | **Twilio SMS** | `WL_LIVE_TWILIO_HOME` (a `credentials.toml` carrying an account SID + auth token) + `WL_LIVE_TWILIO_TO`, and a Twilio-provisioned `from_number`. Costs real money per send | **No.** We hold no Twilio credential — see the 2026-07-30 correction in §2 |
 | **WhatsApp** (Meta Cloud) | `WL_LIVE_WHATSAPP_HOME` (a Meta business app's access token + `phone_number_id`) + `WL_LIVE_WHATSAPP_TO`, with the recipient inside the 24-hour customer-service window | **No.** We hold no Meta credential |
 | **WhatsApp bridge** | `WL_LIVE_CAP_WHATSAPP_BAILEYS_{HOME,CHANNEL,TO}` (or `…_WHATSAPP_WEB_…`), a Node runtime, the operator's own `bridge.js` with the backend package installed, and a WhatsApp number QR-paired to it | **No.** And not obtainable as a credential at all: both bridged backends authenticate by QR pairing, so there is nothing anybody can issue — it needs a running bridge and a real paired account |
@@ -551,9 +565,9 @@ Four of the nine have been driven. Of the five that have not: two (Matrix, MS Te
 byte-budget shapes whose derivation is already checked in-tree and whose remaining arm is a
 single saturating send; two (the bridge backends) cannot be unblocked by procurement at all,
 because a QR-paired account is not a credential anybody issues; and one (Meta Cloud) is a
-genuine procurement item. Telegram is separately owed an ASTRAL run on a credential the
-programme already holds — that one is neither a shape problem nor a procurement item, only a
-destination chat.
+genuine procurement item. Telegram's astral run — the one that was owed here — was driven on
+2026-08-29 once the destination chat was recorded, and settled the unit question in favour of
+scalars.
 
 ---
 

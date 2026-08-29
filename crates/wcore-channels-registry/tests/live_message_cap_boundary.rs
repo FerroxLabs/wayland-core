@@ -480,12 +480,16 @@ fn a_byte_budget_cell_states_why_the_two_point_probe_cannot_decide_it() {
     );
 }
 
-/// **wayland#934 c8.** A settled UTF-16 verdict must be enforced against the
+/// **wayland#934 c8.** A settled unit verdict must be enforced against the
 /// shipped cap, not merely recorded beside it.
 ///
-/// No cell has settled one yet, so this test is green today by having nothing
-/// to enforce — which is exactly the state that makes a rule rot. The
-/// enforcement is therefore exercised in the same run by
+/// Telegram was the sharp case and it is SETTLED as of 2026-08-29: the astral
+/// arm was driven at the real bot and group, 4,096 U+1F600 scalars — 8,192
+/// UTF-16 code units — were accepted AT the shipped cap and 4,097 refused one
+/// scalar later, so a 4,096 code-unit limit is refuted and Telegram counts
+/// SCALARS. No cell records a UTF-16 verdict, so the halving rule still has
+/// nothing live to enforce — which is exactly the state that makes a rule rot.
+/// The enforcement is therefore exercised in the same run by
 /// [`the_unit_rule_refuses_a_cap_a_utf16_verdict_makes_unsafe`] over the same
 /// function, and the census below keeps the owed runs visible.
 #[test]
@@ -520,6 +524,39 @@ fn a_settled_unit_verdict_is_enforced_against_the_shipped_cap() {
             continue;
         };
         println!("  UNSETTLED {key} needs: {needs}");
+    }
+
+    // wayland#934 c8, settled by the run recorded on the cell. Assert the
+    // verdict is RECORDED, because losing it is otherwise invisible here:
+    // `unit_safety_faults` is silent on an unsettled cell by design, so
+    // reverting telegram to `UnsettledAsciiOnly` would keep every assertion
+    // above green while the product went back to shipping an unverified unit.
+    let Boundary::Measured { unit, .. } = cell("telegram").boundary else {
+        panic!("telegram must have a measured boundary");
+    };
+    assert!(
+        matches!(unit, CapUnit::MeasuredScalars { .. }),
+        "telegram's unit question was settled in SCALARS by a live astral run on 2026-08-29 \
+         (4,096 scalars = 8,192 UTF-16 code units accepted at the cap; 4,097 refused). Got: \
+         {unit:?}"
+    );
+
+    // And a scalar verdict only means something if the run FOUND the boundary.
+    // An astral arm accepted on both sides settles nothing, so a
+    // `MeasuredScalars` cell whose over-arm is not a refusal is a verdict with
+    // no boundary behind it.
+    for c in CELLS {
+        let Boundary::Measured { unit, above, .. } = c.boundary else {
+            continue;
+        };
+        if matches!(unit, CapUnit::MeasuredScalars { .. }) {
+            assert!(
+                matches!(above, Above::Refused(_)),
+                "{}: the unit is recorded as MeasuredScalars, but the over-arm is {above:?} — a \
+                 run that never found the boundary cannot settle the unit",
+                c.key
+            );
+        }
     }
 }
 

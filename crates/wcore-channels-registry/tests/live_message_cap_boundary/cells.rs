@@ -309,14 +309,19 @@ pub const CELLS: &[Cell] = &[
             // where the boundary is 4,040 against a 4,000 cap.
             accepts_up_to: 4_096,
             above: Above::Refused("400: Bad Request: message is too long"),
-            unit: CapUnit::UnsettledAsciiOnly {
-                needs: "an astral-plane run, and this is the one that MATTERS. Telegram's \
-                        sendMessage says \"1-4096 characters after entities parsing\" while \
-                        MessageEntity on the same page indexes in UTF-16 code units. If the \
-                        limit is code units then a 4,096-scalar astral body is 8,192 code units \
-                        and the platform refuses it AT THE CAP WE SHIP — send_to_keyed would \
-                        hand it over whole and nothing re-sends it. Drive \
-                        live_boundary_at_real_telegram with WL_LIVE_CAP_TELEGRAM_ASTRAL=1",
+            unit: CapUnit::MeasuredScalars {
+                on: "2026-08-29",
+                evidence: "Driven at the real bot and the real group with \
+                           WL_LIVE_CAP_TELEGRAM_ASTRAL=1, so every character in the body was \
+                           U+1F600 rather than x. The boundary did NOT move with the encoding, \
+                           which is what settles it: LIVE_CAP_AT scalars=4096 utf8_bytes=16384 \
+                           utf16_units=8192 accepted (message id 19, deleted afterwards); \
+                           LIVE_CAP_OVER scalars=4097 utf8_bytes=16388 utf16_units=8194 REFUSED \
+                           \"400: Bad Request: message is too long\". 8,192 UTF-16 code units \
+                           were accepted AT the cap and 8,194 refused one scalar later, so the \
+                           limit cannot be 4,096 code units — Telegram counts SCALARS and the \
+                           shipped 4,096 is safe for non-BMP text. The MessageEntity page \
+                           indexes in UTF-16; the sendMessage length does not",
             },
             on: "2026-08-29",
         },
