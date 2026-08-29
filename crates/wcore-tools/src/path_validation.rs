@@ -53,6 +53,68 @@ pub enum PathValidationError {
     DeviceOrVerbatimPath(PathBuf),
     #[error("path is not a regular file: {0:?}")]
     NonRegularFile(PathBuf),
+    #[error("path names the Windows NUL device: {0:?}")]
+    WindowsNullDevice(PathBuf),
+    #[error("path could not be inspected ({1:?}): {0:?}")]
+    Unstattable(PathBuf, std::io::ErrorKind),
+}
+
+/// #238 -- is this final path component the Windows `NUL` device?
+///
+/// **Deliberately just `NUL`.** The filed fix was the textbook one: refuse any
+/// component whose extension-stripped name is a reserved DOS device
+/// (`NUL`/`CON`/`AUX`/`PRN`/`COM1`-`COM9`/`LPT1`-`LPT9`). That fix was written,
+/// unit-tested green, and then REFUTED by measurement -- the tests were green
+/// because they encoded the same wrong assumption the guard did.
+///
+/// Measured 2026-08-18 on Windows 11 build 10.0.26200.0 / NTFS, fresh
+/// directory, .NET write + read-back + on-disk byte count + `cmd type`:
+///
+/// | name | write | read back | bytes on disk | verdict |
+/// |---|---|---|---|---|
+/// | `NUL` | throws | fail | 0 | device |
+/// | `CON` `AUX` `PRN` `COM1` `LPT1` | ok | ok | 1 | **ordinary file** |
+/// | `NUL.txt` `AUX.log` | ok | ok | 1 | **ordinary file** |
+/// | `ordinary.txt` (control) | ok | ok | 1 | ordinary file |
+///
+/// Both controls were present: `ordinary.txt` proves the probe reads normal
+/// behaviour and `NUL` proves it can still detect device behaviour, so the
+/// middle rows are real. The broad blocklist would therefore REFUSE
+/// `aux.txt`, `NUL.txt`, `COM1` and `con.json` -- addressable files holding
+/// real user data on this build. Refusing real data to close a LOW-severity
+/// read of an empty device stream is a worse trade than the gap.
+///
+/// `NUL` alone is free: no ordinary file can bear that name on Windows, so
+/// refusing it cannot refuse anything real. Trailing dots and spaces are
+/// stripped because Win32 strips them before resolving the name; the extension
+/// is NOT stripped, because the measurement says `NUL.txt` is a file.
+///
+/// On an older kernel (Server 2019/2022, build 20348) the other names are
+/// likely still devices -- the same build split as the DELETE-mask work. That
+/// residual is knowingly left open: it reads an empty stream, while the fix
+/// for it destroys data on current Windows. Do not re-file the broad guard
+/// without a measurement table for the build you are targeting.
+///
+/// Pure and string-only, so it is unit-testable on every platform; the
+/// ENFORCEMENT is Windows-gated, because `NUL` is an ordinary, legal file name
+/// on Unix and refusing it there would be the same data-refusing mistake.
+pub fn is_windows_null_device_name(component: &str) -> bool {
+    component
+        .trim_end_matches(['.', ' '])
+        .eq_ignore_ascii_case("nul")
+}
+
+/// The #238 decision with the platform as a PARAMETER.
+///
+/// There is no local Windows gate in this project, so a `#[cfg(windows)]`
+/// enforcement arm would be graded by nothing until CI. Threading the platform
+/// through means both arms -- refuse on Windows, allow on Unix -- are exercised
+/// on every host, the way the UNC guard is tested by its string form.
+fn is_windows_null_device_path(path: &Path, on_windows: bool) -> bool {
+    on_windows
+        && path
+            .file_name()
+            .is_some_and(|name| is_windows_null_device_name(&name.to_string_lossy()))
 }
 
 /// Validate an LLM-supplied path before any filesystem touch.
@@ -90,6 +152,15 @@ pub fn validate_user_path(path: &Path) -> Result<PathBuf, PathValidationError> {
     // guard is enforced and unit-tested on every platform.
     if looks_like_device_or_verbatim(path, &path_str) {
         return Err(PathValidationError::DeviceOrVerbatimPath(raw));
+    }
+
+    // #238: `C:\\Users\\me\\NUL` has an ordinary Disk prefix, is absolute, and
+    // is neither UNC nor a device/verbatim namespace, so every guard above
+    // passes it straight through to `CreateFileW`, which resolves it to the
+    // null device. Windows-only: see `is_windows_null_device_name` for why
+    // this is `NUL` and nothing else, and why Unix must not enforce it.
+    if is_windows_null_device_path(path, cfg!(windows)) {
+        return Err(PathValidationError::WindowsNullDevice(raw));
     }
 
     if !path.is_absolute() {
@@ -147,11 +218,22 @@ pub fn validate_user_path(path: &Path) -> Result<PathBuf, PathValidationError> {
     // forever (DoS). `fs::metadata` follows symlinks, so a symlink to such a
     // target is caught too. Only enforced when the path already exists, so a
     // not-yet-created Write/Edit target (and ordinary directories) still pass.
-    if let Ok(meta) = fs::metadata(&normalized) {
-        let ft = meta.file_type();
-        if !ft.is_file() && !ft.is_dir() {
-            return Err(PathValidationError::NonRegularFile(normalized));
+    //
+    // #238: this used to be `if let Ok(meta)`, so ANY stat failure silently
+    // SKIPPED the check and the path returned `Ok`. A guard that disappears
+    // exactly when the OS refuses to describe the target is the wrong way
+    // round. `NotFound` is the one benign failure -- it is the normal
+    // Write/Edit "leaf does not exist yet" case -- so it alone still passes;
+    // every other kind now fails closed and says which kind it was.
+    match fs::metadata(&normalized) {
+        Ok(meta) => {
+            let ft = meta.file_type();
+            if !ft.is_file() && !ft.is_dir() {
+                return Err(PathValidationError::NonRegularFile(normalized));
+            }
         }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(PathValidationError::Unstattable(normalized, err.kind())),
     }
 
     Ok(normalized)
@@ -616,6 +698,142 @@ pub(crate) fn lex_normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- #238: the Windows NUL device ------------------------------------
+    //
+    // Every path literal below uses FORWARD slashes on purpose. `Path` treats
+    // `\` as an ordinary character on Unix, so a backslash literal would give
+    // `file_name() == "C:\\Users\\me\\NUL"` here and the test would pass for
+    // the wrong reason. `/` is a separator on BOTH platforms.
+
+    /// The name predicate. `NUL` and its trailing-dot/space forms only --
+    /// every other reserved DOS name is an ordinary file on the build this
+    /// was measured on, and refusing them would refuse real user data.
+    #[test]
+    fn only_nul_is_treated_as_a_windows_device_name() {
+        for yes in ["NUL", "nul", "Nul", "NUL.", "NUL ", "nul. . ."] {
+            assert!(
+                is_windows_null_device_name(yes),
+                "{yes:?} must be recognised as the NUL device"
+            );
+        }
+        // MEASURED ordinary files on Windows 11 26200 -- see the predicate's
+        // doc comment. Refusing any of these is the refuted fix.
+        for no in [
+            "CON", "AUX", "PRN", "COM1", "LPT1", "con", "aux.txt", "NUL.txt", "nul.log",
+            "con.json", "NULL", "nulls", "annul", "", "n u l",
+        ] {
+            assert!(
+                !is_windows_null_device_name(no),
+                "{no:?} is an ordinary file name and must NOT be refused"
+            );
+        }
+    }
+
+    /// The enforcement decision, with the platform threaded in so BOTH arms
+    /// run on every host. There is no local Windows gate; a `#[cfg(windows)]`
+    /// test would be graded by nothing until CI.
+    #[test]
+    fn the_null_device_guard_fires_on_windows_and_only_on_windows() {
+        let device = Path::new("C:/Users/me/NUL");
+        assert!(
+            is_windows_null_device_path(device, true),
+            "on Windows this reaches CreateFileW and resolves to the null device"
+        );
+        // NEGATIVE CONTROL: `NUL` is a legal, ordinary file name on Unix.
+        // Enforcing there would be the same data-refusing mistake as the
+        // blocklist, in the other direction.
+        assert!(
+            !is_windows_null_device_path(Path::new("/home/me/NUL"), false),
+            "Unix must not refuse an ordinary file named NUL"
+        );
+        // Only the FINAL component names a device: `C:\NUL\x` is not one.
+        assert!(!is_windows_null_device_path(
+            Path::new("C:/NUL/notes.txt"),
+            true
+        ));
+        // NEGATIVE CONTROL: the measured-ordinary names, through the real
+        // path decision rather than the string predicate.
+        for ordinary in ["C:/p/CON", "C:/p/COM1", "C:/p/NUL.txt", "C:/p/aux.log"] {
+            assert!(
+                !is_windows_null_device_path(Path::new(ordinary), true),
+                "{ordinary} holds real user data on Windows 11 26200"
+            );
+        }
+    }
+
+    /// End-to-end on this host: a file literally named `NUL` must still be
+    /// readable on Unix. This is the guard-does-not-leak control, and it runs
+    /// in plain CI on Linux and macOS.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_unix_file_named_nul_is_still_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nul = dir.path().join("NUL");
+        std::fs::write(&nul, b"real user data").expect("write");
+        let validated = validate_user_path(&nul).expect("NUL is an ordinary Unix file name");
+        assert_eq!(validated.file_name().unwrap(), "NUL");
+    }
+
+    /// End-to-end on Windows. Unverified locally -- there is no Windows host
+    /// in this loop -- so it is graded by CI's windows job alone.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_nul_path_is_refused_end_to_end() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let device = dir.path().join("NUL");
+        assert!(matches!(
+            validate_user_path(&device),
+            Err(PathValidationError::WindowsNullDevice(_))
+        ));
+        // NEGATIVE CONTROL: the measured-ordinary reserved names still work.
+        for ordinary in ["CON", "COM1", "NUL.txt", "aux.log"] {
+            let target = dir.path().join(ordinary);
+            std::fs::write(&target, b"real user data").expect("write");
+            validate_user_path(&target)
+                .unwrap_or_else(|e| panic!("{ordinary} must stay readable: {e}"));
+        }
+    }
+
+    /// #238 RED ARM. The `NonRegularFile` guard was written `if let
+    /// Ok(meta)`, so any stat failure SKIPPED it and the path returned `Ok`.
+    /// A component that is a FILE rather than a directory makes `metadata`
+    /// fail with `ENOTDIR` -- not `NotFound` -- on every Unix, and the path
+    /// sailed through.
+    #[test]
+    fn a_path_whose_metadata_fails_for_a_reason_other_than_absence_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir.txt");
+        std::fs::write(&file, b"x").expect("write");
+        let through_a_file = file.join("child.txt");
+
+        let err = std::fs::metadata(&through_a_file).unwrap_err();
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "premise: this must be a NON-absence stat failure, got {err:?}"
+        );
+
+        let refusal = validate_user_path(&through_a_file)
+            .expect_err("a target the OS refuses to describe must not be waved through");
+        assert!(
+            matches!(refusal, PathValidationError::Unstattable(_, _)),
+            "expected Unstattable, got {refusal:?}"
+        );
+    }
+
+    /// NEGATIVE CONTROL -- must pass in BOTH arms. A Write/Edit target whose
+    /// leaf does not exist yet is the normal case and must stay allowed.
+    #[test]
+    fn a_not_yet_created_write_target_is_still_allowed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("new-file.txt");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        validate_user_path(&target).expect("a nonexistent leaf under a real dir must be allowed");
+    }
 
     #[test]
     fn relative_path_rejected() {
