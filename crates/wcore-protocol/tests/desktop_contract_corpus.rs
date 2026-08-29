@@ -476,10 +476,11 @@ fn manifest_pins_generator_and_all_three_digests() {
     // 26 -> 29 / 61 -> 67: wayland#896's three quiescence commands and five
     // receipts, plus wayland#372's dispatched-route event. Additive; see the
     // CONTRACT_MINOR 1.19 -> 1.21 note in `generate.rs`.
+    // 68 -> 69: core#314 c5's `workspace_grant_refused`, at 1.22 -> 1.23.
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 29);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 68);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 69);
     assert_eq!(manifest["counts"]["commands"], 29);
-    assert_eq!(manifest["counts"]["events"], 68);
+    assert_eq!(manifest["counts"]["events"], 69);
     assert_eq!(manifest["counts"]["child_types"], 3);
     assert_eq!(
         manifest["child_types"],
@@ -569,8 +570,8 @@ fn manifest_publishes_a_wire_shape_for_every_command_and_event() {
     );
     assert_eq!(
         shapes.len(),
-        29 + 68 + 1,
-        "29 commands, 68 events, and the legacy sub-agent compatibility branch"
+        29 + 69 + 1,
+        "29 commands, 69 events, and the legacy sub-agent compatibility branch"
     );
     // The correlation anchors every later tool frame is matched against. A
     // rename here is the exact break regeneration used to bless.

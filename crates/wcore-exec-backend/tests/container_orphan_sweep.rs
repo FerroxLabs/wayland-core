@@ -33,7 +33,7 @@ fn daemon_answers() -> bool {
 
 /// A labelled container in `Created`, exactly as the backend creates one.
 fn plant(name: &str, nonce: &str) {
-    let _ = docker(&["rm", "-f", name]);
+    free_name(name);
     let label = format!("{NONCE_LABEL}={nonce}");
     let out = docker(&[
         "create",
@@ -55,6 +55,36 @@ fn plant(name: &str, nonce: &str) {
 
 fn remove(name: &str) {
     let _ = docker(&["rm", "-f", name]);
+}
+
+/// Free `name`, and WAIT until the daemon agrees it is free.
+///
+/// `docker rm -f` is not synchronous with the name being released: while a
+/// removal is in flight the daemon answers a fresh `create` with the same
+/// `Conflict. The container name ... is already in use` that #365 is about, and
+/// it answers it in milliseconds, so the retry looks like a deterministic bug
+/// rather than a race. MEASURED here: a first attempt killed by the harness
+/// timeout left the name latched, and the retry failed instantly with that
+/// conflict on all three tests at once.
+///
+/// This is not the product's problem being papered over -- the product's own
+/// reclaim is what #365 fixed and what `container_wedge.rs` proves. This is the
+/// TEST refusing to race the daemon while setting up.
+fn free_name(name: &str) {
+    let _ = docker(&["rm", "-f", name]);
+    for _ in 0..150 {
+        if !exists(name) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("{name} is still held 15s after `docker rm -f`; the daemon is wedged");
+}
+
+fn exists(name: &str) -> bool {
+    docker(&["inspect", name, "--format", "{{.Id}}"])
+        .status
+        .success()
 }
 
 /// d5 + d1 + d3. The leftover carries a nonce THIS PROCESS HAS NEVER USED, so
@@ -168,7 +198,7 @@ async fn the_sweep_does_not_claim_an_unlabelled_container() {
         return;
     }
     let name = "sweep366-not-ours";
-    let _ = docker(&["rm", "-f", name]);
+    free_name(name);
     let out = docker(&[
         "create",
         "--name",
