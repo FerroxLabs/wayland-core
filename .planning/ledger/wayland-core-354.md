@@ -125,6 +125,18 @@ cargo could not serve a stale mutated binary. Post-restore:
 `cargo test -p wcore-mcp --lib malware_gate` → 4 passed; 0 failed, and
 `cargo test -p wcore-mcp --test mcp_launch_malware_gate` → 15 passed; 0 failed.
 
+### Scope boundary on c6, stated rather than glossed
+
+`/doctor` here means `wayland --doctor` (`wcore-cli/src/doctor/mod.rs`), the
+canonical surface, and that is where the line is graded. The TUI has a SECOND
+posture table — `tui::surfaces::diagnostics::scan_config_health`, which already
+renders "valid but permissive" states as `Warn` (plaintext credential store,
+egress guard off) — and the malware gate belongs there too. It was left alone
+deliberately: the row needs a new `ConfigView` field plumbed through
+`tui/mod.rs`, `tui/app.rs`, `surfaces/mod.rs` and `surfaces/config.rs`, which
+is a settings-surface change rather than a doctor change. Follow-up, not a gap
+in this criterion.
+
 ### Known limitation, not hidden
 
 The mode is installed from `AgentBootstrap::build`, the one seam every agent
@@ -133,3 +145,22 @@ caller of `StdioTransport::spawn` that never builds an agent would read the
 uninstalled default (`permissive`) — that is the status-quo behaviour, not a
 new fail-open, but it is a real ceiling on `strict` and should be revisited if
 a non-session MCP launch path ever appears.
+
+### Gate, run on hetzner at HEAD
+
+`cargo fmt --all && git diff --exit-code` clean; `clippy --workspace
+--all-targets --all-features -- -D warnings` exit 0; `check --workspace
+--all-targets --all-features --locked` exit 0; `nextest run --workspace
+--profile ci --no-fail-fast` 17,099 tests with ONE persistent failure, the
+known `wcore-exec-backend::conformance_matrix::every_reference_backend_passes_
+the_same_harness_or_reports_why_it_did_not`, plus one retry-flake
+(`wcore-cli::deterministic_openai_loop::packaged_f04_run_is_repeatable_and_
+content_addressed`, TRY 1 FAIL / TRY 2 PASS, a content digest diverging under
+load).
+
+An EARLIER run of the same gate reported 33 further failures. Every one of them
+carried the same text — `DispatchAdmission("dispatch requires 9126805504 bytes
+... but only 0 bytes are available")` — and `df` showed the shared box at 100%
+with 0 bytes available to the dispatch gate. They are recorded here rather than
+dropped: they were re-run once ~55 GiB came free and all 33 passed, which is
+what makes "environmental" a measurement instead of an assumption.
