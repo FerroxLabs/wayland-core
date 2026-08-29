@@ -1339,4 +1339,60 @@ mod tests {
             "control: an ordinary directory reached through a link must still be walked: {names:?}"
         );
     }
+
+    /// The LEXICAL floor — the three name-based checks that run before the
+    /// resolved-path ones. A mutation sweep found all three ungraded: deleting
+    /// `is_secret_path(&full)` (`resolve_file`), the walk's
+    /// `ignore.is_ignored(&rel, is_dir)`, or the walk's `is_secret_path(&path)`
+    /// each left all 69 `at_ref` tests green, because for an ordinary entry the
+    /// lexical name and the resolved name are the same and the resolved checks
+    /// answer identically.
+    ///
+    /// They are not redundant. Each earns its keep exactly where the two
+    /// answers DIVERGE — a denylisted or ignored NAME whose target is
+    /// innocuous — and on the one case with no resolved path at all: a
+    /// denylisted name that does not exist must be refused LOUDLY, because
+    /// "not found" reads as "retry with a better spelling".
+    #[cfg(unix)]
+    #[test]
+    fn the_lexical_floor_refuses_a_denylisted_or_ignored_name_whatever_it_resolves_to() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join(".gitignore"), "*.log\n").expect("write gitignore");
+        fs::write(root.join("ok.txt"), "safe\n").expect("write ok");
+        // A denylisted NAME and an ignored NAME, both pointing at an innocuous
+        // file — so only the lexical answer refuses them.
+        std::os::unix::fs::symlink(root.join("ok.txt"), root.join(".env")).expect("symlink env");
+        std::os::unix::fs::symlink(root.join("ok.txt"), root.join("deploy.log"))
+            .expect("symlink log");
+
+        // `@.env` with nothing behind it at all is still a loud refusal, not a
+        // NotFound the user would read as "try another spelling".
+        let missing = resolve(&AtRef::parse("@nope/.env").expect("parse"), root);
+        assert!(
+            matches!(missing, Err(AtRefError::SecretBlocked(_))),
+            "a denylisted name that does not exist must be refused loudly, got {missing:?}"
+        );
+
+        let payload = resolve(&AtRef::parse("@./").expect("parse"), root).expect("resolve dir");
+        let names: Vec<String> = payload
+            .files
+            .iter()
+            .map(|f| f.path.display().to_string())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n == ".env"),
+            "a denylisted NAME must not be attached however innocuous its target: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "deploy.log"),
+            "an ignored NAME must not be attached however innocuous its target: {names:?}"
+        );
+        // WRONG-REFUSAL CONTROL: the ordinary file is still attached, so the
+        // floor cannot be satisfied by refusing everything. Passes on BOTH arms.
+        assert!(
+            names.iter().any(|n| n == "ok.txt"),
+            "control: the ordinary file must still be attached: {names:?}"
+        );
+    }
 }
