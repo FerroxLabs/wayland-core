@@ -152,12 +152,22 @@ fi
 # itself. Derived from the YAML rather than hard-coded here, so a fourth test
 # job added tomorrow reds THIS test instead of silently narrowing the tracker's
 # view — which is precisely how core#325 happened.
+#
+# Only the JOB-LEVEL `if:` (indent 4, plus its `>-` continuation lines at
+# deeper indent) counts as the candidate marker. A STEP-level
+# `if: ... f20_candidate == 'true'` exists inside windows-live-acceptance at
+# indent 8; treating that as a job-level condition dropped a real scheduled job
+# out of this roster on the first draft, which would have made the guard agree
+# with the bug.
 SCHEDULED_JOBS=$(awk '
+  /^jobs:/ { injobs = 1; next }
+  !injobs { next }
   /^  [A-Za-z0-9_-]+:[ \t]*$/ {
     if (job != "" && !candidate && job != "soak-tracker") print job
-    job = $1; sub(/:$/, "", job); candidate = 0; next
+    job = $1; sub(/:$/, "", job); candidate = 0; inif = 0; next
   }
-  /f20_candidate == .true./ { candidate = 1 }
+  /^    [A-Za-z_-]+:/ { inif = ($0 ~ /^    if:/) ? 1 : 0 }
+  inif && /f20_candidate == .true./ { candidate = 1 }
   END { if (job != "" && !candidate && job != "soak-tracker") print job }
 ' "$WF" | sort)
 

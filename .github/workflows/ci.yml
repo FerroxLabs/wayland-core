@@ -1598,12 +1598,31 @@ jobs:
       # is not limited to that run: every historical CI failure count on this
       # repository is a LOWER BOUND, not a total, and any triage that treated a
       # count as complete was reading a truncated suite.
+      # PER-ATTEMPT EVIDENCE (wayland#1177). The retry re-runs the SAME
+      # nextest command, and the `ci` profile writes its report to the FIXED
+      # path target/nextest/ci/junit.xml — so attempt 2 used to OVERWRITE
+      # attempt 1. A test that genuinely failed on attempt 1 and passed on
+      # attempt 2 left no structured trace anywhere: not a `<failure>`, not
+      # even a `<flakyFailure>`, because the flake record lived in the file
+      # that was just destroyed. The retry-flake grader added for #1169 reads
+      # exactly that file, so its gate was complete one layer down and blind
+      # one layer up.
+      #
+      # The retry is NOT dropped in favour of nextest's own graded `retries`:
+      # it exists for the runner-agent crash documented above, which SIGTERMs
+      # the nextest PROCESS. Per-test retries inside a process being killed
+      # cannot absorb that; only re-running the process can. So the wrapper
+      # keeps the retry and stops the evidence being destroyed — an agent
+      # crash writes no JUnit at all (nothing preserved, nothing graded, the
+      # retry absorbs it as designed), while a real attempt-1 test failure is
+      # preserved as outer-attempts/outer-attempt-1.xml and reds the required
+      # `report` check.
       - name: Run tests (nextest CI profile)
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 45
           max_attempts: 2
-          command: $DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo nextest run --workspace --profile ci --no-fail-fast
+          command: bash .github/scripts/run-tests-with-attempt-evidence.sh $DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo nextest run --workspace --profile ci --no-fail-fast
 
       # ── Swarm delegated-dispatch gate ────────────────────────────────────
       # THE COUNTERWEIGHT TO THE HONEST SKIP.
@@ -1947,7 +1966,13 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: nextest-junit-linux-containerized
-          path: target/nextest/ci/junit.xml
+          # The surviving report AND every attempt the outer retry used to
+          # destroy (wayland#1177). Two paths make the artifact root
+          # target/nextest/ci, so the `report` job's download lands junit.xml
+          # next to outer-attempts/ and grade-retry-flakes.sh reads both.
+          path: |
+            target/nextest/ci/junit.xml
+            target/nextest/ci/outer-attempts/
           if-no-files-found: ignore
 
       # 2026-07-29: this leg now runs WITH bubblewrap and WITH the namespace
