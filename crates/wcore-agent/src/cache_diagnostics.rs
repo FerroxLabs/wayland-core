@@ -981,6 +981,19 @@ mod tests {
              cache-health alert: {:?}",
             detector.check_cache_health(&stats)
         );
+        // wayland#1205/#1206: the verdict is DURABLE. `record_cache_ledger_turn`
+        // runs `cause_of_diagnostic` into the ledger and `recording_enabled` is
+        // on unless the env kill-switch is set, so a wrong verdict here becomes
+        // an `expired` invalidation an operator reads back weeks later out of
+        // `wayland cache`. Assert the recorded consequence, not only the
+        // in-memory enum.
+        assert_eq!(
+            crate::cache_ledger::cause_of_diagnostic(&diag),
+            None,
+            "nothing was invalidated on this turn, so nothing may be written \
+             to the cache ledger for it -- least of all Expired, which names \
+             the server's TTL for a client-side event that did not happen"
+        );
     }
 
     /// Control on the #1166 c5 suppression: it must not open a blind spot.

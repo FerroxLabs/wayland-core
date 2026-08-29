@@ -108,13 +108,39 @@ fn write_ledger(
 ) {
     std::fs::create_dir_all(dir).unwrap();
     let ledger = serde_json::json!({
-        "schema": 1,
+        // The schema this build WRITES, not a literal. Pinned at `1`, every
+        // fixture here quietly became a legacy file the moment #1163 c4 bumped
+        // the version, so the whole suite would have been grading the
+        // migration path while claiming to grade the current one.
+        "schema": wcore_agent::cache_ledger::LEDGER_SCHEMA,
         "session_id": session,
         "started_at": "2026-07-29T10:00:00.000Z",
         "updated_at": format!("2026-07-29T10:{:02}:00.000Z", turns.len().max(1)),
         "session_complete": true,
         "turns": turns,
         "compactions": compactions,
+    });
+    std::fs::write(
+        dir.join(format!("{session}.json")),
+        serde_json::to_vec_pretty(&ledger).unwrap(),
+    )
+    .unwrap();
+}
+
+/// A ledger in the shape v0.13.9 wrote: schema 1, and the counterfactual a
+/// bare `0.0` because the model had no catalog rate. v1 had no way to say
+/// "unknown", so `0.0` WAS how it said it — which is the whole of #1163 and,
+/// once the field became `Option<f64>`, of wayland#1205.
+fn write_v1_ledger(dir: &Path, session: &str, turns: Vec<serde_json::Value>) {
+    std::fs::create_dir_all(dir).unwrap();
+    let ledger = serde_json::json!({
+        "schema": 1,
+        "session_id": session,
+        "started_at": "2026-07-29T10:00:00.000Z",
+        "updated_at": "2026-07-29T10:04:00.000Z",
+        "session_complete": true,
+        "turns": turns,
+        "compactions": [],
     });
     std::fs::write(
         dir.join(format!("{session}.json")),
@@ -876,6 +902,78 @@ fn an_unpriced_counterfactual_renders_unknown_instead_of_a_negative_saving() {
         "the report must never render a negative saving against a zero it \
          invented:\n{report}"
     );
+}
+
+/// wayland#1205 — reading back a ledger an OLDER build wrote must not
+/// reproduce #1163 on the fixed build.
+///
+/// `uncached_equivalent_usd` changed from `f64` to `Option<f64>` in place, and
+/// `#[serde(default)]` cannot tell a v1 `0.0` (which meant "nothing could
+/// price this") from a v2 `Some(0.0)` (a genuine priced zero). Only the schema
+/// version can, which is why it was bumped. Measured through the BINARY, on
+/// all three verbs, because the operator in #1163 filed it off a `cache report`
+/// over a ledger directory they already had — a library-level assertion would
+/// not have been that surface.
+#[test]
+fn a_v0_13_9_ledger_does_not_render_a_negative_saving_or_certify_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_v1_ledger(
+        tmp.path(),
+        "legacy-sess",
+        vec![turn_json(
+            1,
+            6_620,
+            7_232,
+            0,
+            0.061389,
+            0.0,
+            "provider_reported",
+            None,
+            14_752,
+        )],
+    );
+
+    let report = stdout(&run(tmp.path(), &["report"]));
+    assert_eq!(
+        field(&report, "cost", "uncached_equivalent_usd"),
+        "unknown",
+        "a v1 zero meant `nothing could price this`; rendering it as a priced \
+         zero is #1163 coming back on the fixed build:\n{report}"
+    );
+    assert_eq!(field(&report, "cost", "saving_usd"), "unknown");
+    assert_ne!(
+        field(&report, "cost", "saving_truth"),
+        "priced",
+        "grading the fabricated saving `priced` is a confidence the pre-fix \
+         build never even claimed:\n{report}"
+    );
+    assert!(
+        !report.contains("saving_usd=-"),
+        "the ticket`s own report line is `saving_usd=-0.061389`; it must not \
+         come back:\n{report}"
+    );
+
+    // The store total sums the same field, so one legacy session poisons
+    // `cache list` for the whole directory if the migration is skipped.
+    let list = stdout(&run(tmp.path(), &["list"]));
+    assert_eq!(
+        field(&list, "total", "uncached_equivalent_usd"),
+        "unknown",
+        "one legacy session must not put a fabricated zero into the store \
+         total:\n{list}"
+    );
+
+    // `verify` may still call the SPEND trustworthy — the provider reported it
+    // — but it must not call the SAVING priced.
+    let verified = run(tmp.path(), &["verify"]);
+    let v = stdout(&verified);
+    assert_ne!(
+        field(&v, "verify", "saving_truth"),
+        "priced",
+        "verify is the certification surface; certifying a saving computed \
+         against a baseline nobody wrote is the worst place to say it:\n{v}"
+    );
+    assert_eq!(field(&v, "verify", "cost_truth"), "priced");
 }
 
 /// Known-negative for the test above: a REAL negative saving — a session that
