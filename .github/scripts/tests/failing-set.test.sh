@@ -180,6 +180,42 @@ mv "$D/tmp.xml" "$D/junit.xml"
 allow "$A"
 expect "a discarded outer attempt is not graded here" 0 "$D" "$A" "failing tests in this evidence set: 0"
 
+# ── 12. BOTH graders must report on one run. `assert-test-evidence.sh` runs
+#        under `set -e`, so a bare `bash "$GRADER"` that returns 1 exits the
+#        file on the spot and this gate never executes -- a red retry-flake
+#        report would silently suppress the failing-SET verdict on the same
+#        evidence. Driven through the WIRED entry point, with a
+#        <flakyFailure> and an unlisted <failure> in one report.
+D="$TMP/both"; A="$TMP/both.txt"; mkdir -p "$D"
+cat > "$D/junit.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="2" failures="1" errors="0">
+  <testsuite name="probe" tests="2" failures="1">
+    <testcase classname="wcore-cli::probe" name="flaky_on_first_attempt" time="0.3">
+      <flakyFailure message="panicked" type="test failure with exit code 101">stack</flakyFailure>
+    </testcase>
+    <testcase classname="wcore-cli::probe" name="hard_failure" time="0.3">
+      <failure message="panicked" type="test failure with exit code 101">stack</failure>
+    </testcase>
+  </testsuite>
+</testsuites>
+XML
+allow "$A"
+OUT=$(EVIDENCE_DIR="$D" EXPECTED_MIN=1 LABEL="both" UPSTREAM_RESULT=success \
+      KNOWN_FAILING_LIST="$A" FAILING_SET_TODAY=2026-01-01 \
+      FLAKE_ALLOWLIST="$TMP/no-such-flake-allowlist.txt" \
+      bash "$ROOT/.github/scripts/assert-test-evidence.sh" 2>&1)
+RC=$?
+if [ "$RC" -ne 1 ]; then
+  bad "both graders report on one run (exit $RC, wanted 1)"
+elif ! printf '%s' "$OUT" | grep -qF "Retried failure"; then
+  bad "both graders report on one run (the retry gate said nothing)"
+elif ! printf '%s' "$OUT" | grep -qF "Unexpected failing test"; then
+  bad "both graders report on one run (set -e swallowed the failing-set gate)"
+else
+  ok "both graders report on one run"
+fi
+
 echo ""
 echo "passed: $PASS   failed: $FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

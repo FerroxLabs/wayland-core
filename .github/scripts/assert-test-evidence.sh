@@ -88,8 +88,12 @@ if [ ! -f "$GRADER" ]; then
   exit 1
 fi
 echo ""
-bash "$GRADER"
-RETRY_RC=$?
+# `|| RETRY_RC=$?`, not a bare call followed by `$?`. This file runs under
+# `set -e`: a bare failing call exits HERE, and the failing-set gate below
+# would never run on any red retry-flake report. The self-test arm named
+# "both graders report on one run" is what holds this open.
+RETRY_RC=0
+bash "$GRADER" || RETRY_RC=$?
 
 # ── A COUNT OF FAILURES IS NOT A SET OF FAILURES (wayland-core#367) ────────
 #
@@ -115,8 +119,8 @@ if [ ! -f "$SETGRADER" ]; then
   exit 1
 fi
 echo ""
-bash "$SETGRADER"
-SET_RC=$?
+SET_RC=0
+bash "$SETGRADER" || SET_RC=$?
 
 if [ "$RETRY_RC" -ne 0 ] || [ "$SET_RC" -ne 0 ]; then
   exit 1
