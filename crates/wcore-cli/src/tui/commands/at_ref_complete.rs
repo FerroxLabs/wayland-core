@@ -271,4 +271,50 @@ mod tests {
         assert_eq!(human_size(2048), "2 KB");
         assert_eq!(human_size(3 * 1024 * 1024), "3.0 MB");
     }
+
+    /// core#339 — completion offers a benign-named symlink whose target is a
+    /// credential store, because the guard matched the LEXICAL name. Accepting
+    /// the completion then inlines the store.
+    #[cfg(unix)]
+    #[test]
+    fn completion_never_offers_a_symlink_to_a_credential_store() {
+        let outside = TempDir::new().expect("tempdir");
+        let secret = outside.path().join(".git-credentials");
+        fs::write(&secret, "https://user:s3cr3t-token@git.example.com\n").expect("write secret");
+
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("notes-real.txt"), "ok").expect("write ordinary");
+        std::os::unix::fs::symlink(&secret, root.join("notes.txt")).expect("symlink");
+
+        let inserts: Vec<String> = complete("@notes", root)
+            .into_iter()
+            .map(|c| c.insert)
+            .collect();
+        assert!(
+            !inserts.iter().any(|i| i == "@notes.txt"),
+            "completion offered a symlink to a credential store: {inserts:?}"
+        );
+        assert!(
+            inserts.iter().any(|i| i == "@notes-real.txt"),
+            "the ordinary sibling must still be offered: {inserts:?}"
+        );
+    }
+
+    /// core#339 negative control for the completion surface — an ordinary
+    /// symlink stays offerable. Passes on BOTH arms.
+    #[cfg(unix)]
+    #[test]
+    fn completion_still_offers_a_symlink_to_an_ordinary_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("real.md"), "real").expect("write");
+        std::os::unix::fs::symlink(root.join("real.md"), root.join("link.md")).expect("symlink");
+
+        let inserts: Vec<String> = complete("@link", root)
+            .into_iter()
+            .map(|c| c.insert)
+            .collect();
+        assert!(inserts.iter().any(|i| i == "@link.md"), "{inserts:?}");
+    }
 }

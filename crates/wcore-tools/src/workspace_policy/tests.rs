@@ -2193,3 +2193,75 @@ fn an_unscannably_large_root_is_refused_not_waved_through() {
     // WRONG-REFUSAL CONTROL: the same tree, under a budget that covers it.
     scan_write_root_bounded(dir.path(), 5).expect("a root inside the budget is scanned and passes");
 }
+
+// ── core#323: ONE denylist, ONE owner ───────────────────────────────────────
+
+/// Every credential file name the `@`-attach guard denies that THIS predicate
+/// — the one `Read`, `Grep`, `SecretDenyFs` and the Bash deny walk consult —
+/// did not.
+///
+/// core#323's first cut made `wcore-cli`'s `@`-attach guard consult BOTH
+/// lists. That closed the `@` half and left the dangerous half open: a user
+/// typing `@.pgpass` was refused, while the MODEL could read the same file
+/// through `Read` / `Grep` / `Bash cat`, because those consult this predicate
+/// alone. Two lists that must agree drift again; the entries below are the
+/// drift that was still live after the union landed.
+///
+/// Asserted under a directory prefix because every caller of this predicate
+/// passes an absolute path.
+const AT_ATTACH_ONLY_SECRETS: &[&str] = &[
+    ".envrc",
+    ".pgpass",
+    "secrets.json",
+    "secrets.yaml",
+    "secrets.yml",
+    "credentials",
+    "credentials.json",
+    "release.keystore",
+    "signing.jks",
+    "deploy_rsa",
+    "deploy_ed25519",
+];
+
+#[test]
+fn the_shared_denylist_carries_every_name_the_at_attach_guard_denies() {
+    let base = Path::new("/w").join("project");
+    let escaped: Vec<&str> = AT_ATTACH_ONLY_SECRETS
+        .iter()
+        .copied()
+        .filter(|n| !is_secret_path_static(&base.join(n)))
+        .collect();
+    assert!(
+        escaped.is_empty(),
+        "the file tools would hand these credential files to the model: {escaped:?}"
+    );
+}
+
+/// Without this control the table above is satisfied by a predicate that
+/// denies everything. `credentials/README.md` pins that the bare `credentials`
+/// rule matches a FILE NAME and not a directory on the way to one;
+/// `turnkey.json` / `monkey.json` pin the existing `*-key.json` boundary.
+#[test]
+fn the_shared_denylist_still_admits_ordinary_files() {
+    let base = Path::new("/w").join("project");
+    let refused: Vec<&str> = [
+        "src/main.rs",
+        "README.md",
+        "Cargo.toml",
+        "environment.rs",
+        "docs/monkey.json",
+        "notes/turnkey.json",
+        "credentials/README.md",
+        "secretsmanager.rs",
+        "keystore.rs",
+        "config",
+    ]
+    .iter()
+    .copied()
+    .filter(|n| is_secret_path_static(&base.join(n)))
+    .collect();
+    assert!(
+        refused.is_empty(),
+        "ordinary files must stay readable, but these were denied: {refused:?}"
+    );
+}

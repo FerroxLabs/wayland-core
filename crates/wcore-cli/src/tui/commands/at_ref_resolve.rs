@@ -693,4 +693,126 @@ mod tests {
         );
         assert!(rel_to_root(Path::new("/elsewhere/x.rs"), root).is_none());
     }
+
+    // ── core#339 / core#335: the guard must decide by what a path RESOLVES
+    //    to, not by the shape of the string the user typed ────────────────
+
+    /// A credential store with a recognisable body, so a test can assert the
+    /// bytes never reached a payload without printing them.
+    const CREDENTIAL_BODY: &str = "https://user:s3cr3t-token@git.example.com\n";
+
+    /// core#339 — `@notes.txt` where `notes.txt` is a symlink to
+    /// `~/.git-credentials`. The guard matched the LEXICAL name, found
+    /// nothing on either denylist, and `fs::read_to_string` then followed the
+    /// link and inlined the credential store into the outgoing prompt.
+    #[cfg(unix)]
+    #[test]
+    fn at_file_refuses_a_symlink_whose_target_is_a_credential_store() {
+        let outside = TempDir::new().expect("tempdir");
+        let secret = outside.path().join(".git-credentials");
+        fs::write(&secret, CREDENTIAL_BODY).expect("write secret");
+
+        let tmp = TempDir::new().expect("tempdir");
+        std::os::unix::fs::symlink(&secret, tmp.path().join("notes.txt")).expect("symlink");
+
+        let at = AtRef::parse("@notes.txt").expect("parse");
+        match resolve(&at, tmp.path()) {
+            Err(AtRefError::SecretBlocked(_)) => {}
+            Err(other) => panic!("expected SecretBlocked, got {other:?}"),
+            Ok(payload) => panic!(
+                "the credential store was inlined into the prompt: {} bytes, \
+                 credential present = {}",
+                payload.bytes(),
+                payload.files[0].content.contains("s3cr3t-token")
+            ),
+        }
+    }
+
+    /// core#339, the walk arm. The `@dir` walk pulls such a link in without
+    /// the user ever naming it — the more dangerous of the three call sites.
+    #[cfg(unix)]
+    #[test]
+    fn at_dir_never_walks_a_symlink_into_a_credential_store() {
+        let outside = TempDir::new().expect("tempdir");
+        let secret = outside.path().join(".git-credentials");
+        fs::write(&secret, CREDENTIAL_BODY).expect("write secret");
+
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("ok.txt"), "safe").expect("write ok");
+        std::os::unix::fs::symlink(&secret, root.join("notes.txt")).expect("symlink");
+
+        let at = AtRef::parse("@./").expect("parse");
+        let payload = resolve(&at, root).expect("resolve dir");
+        let leaked = payload
+            .files
+            .iter()
+            .any(|f| f.content.contains("s3cr3t-token"));
+        assert!(
+            !leaked,
+            "the @dir walk inlined a credential store reached through a symlink"
+        );
+        assert!(
+            payload.files.iter().any(|f| f.content == "safe"),
+            "the ordinary file in the same directory must still be attached"
+        );
+    }
+
+    /// core#339 negative control — a symlink is NOT a secret. A repo that
+    /// symlinks an ordinary file must keep working; a guard that refuses
+    /// every link is not a fix. Passes on BOTH arms.
+    #[cfg(unix)]
+    #[test]
+    fn at_file_still_attaches_a_symlink_to_an_ordinary_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("real.md"), "real content\n").expect("write");
+        std::os::unix::fs::symlink(root.join("real.md"), root.join("link.md")).expect("symlink");
+
+        let at = AtRef::parse("@link.md").expect("parse");
+        let payload = resolve(&at, root).expect("an ordinary symlink is not a secret");
+        assert_eq!(payload.files[0].content, "real content\n");
+    }
+
+    /// core#335 — the gitignore check is skipped whenever `strip_prefix`
+    /// cannot see that the path is inside the root. `@../<repo>/build/out.log`
+    /// names a file that RESOLVES inside the workspace and is ignored by the
+    /// workspace `.gitignore`, but `rel_to_root` returns `None` for the
+    /// `..`-bearing spelling and the guard is never consulted.
+    #[test]
+    fn a_dotdot_spelling_does_not_escape_the_workspace_gitignore() {
+        let parent = TempDir::new().expect("tempdir");
+        let root = parent.path().join("repo");
+        fs::create_dir_all(root.join("build")).expect("mkdir");
+        fs::write(root.join(".gitignore"), "build/\n").expect("write gitignore");
+        fs::write(root.join("build/out.log"), "build log\n").expect("write log");
+
+        // The same file the relative spelling refuses, spelled to defeat the
+        // lexical prefix test.
+        let at = AtRef::parse("@../repo/build/out.log").expect("parse");
+        let got = resolve(&at, &root);
+        assert!(
+            matches!(got, Err(AtRefError::GitIgnored(_))),
+            "a git-ignored file must stay refused however it is spelled, got {got:?}"
+        );
+    }
+
+    /// core#335 negative control — attaching a file from OUTSIDE the
+    /// workspace by absolute path is a documented capability, not a bypass.
+    /// It must keep working, and the workspace `.gitignore` must not reach
+    /// out of the workspace to veto it. Passes on BOTH arms.
+    #[test]
+    fn an_absolute_path_outside_the_workspace_still_attaches() {
+        let outside = TempDir::new().expect("tempdir");
+        let note = outside.path().join("out.log");
+        fs::write(&note, "outside content\n").expect("write");
+
+        let tmp = TempDir::new().expect("tempdir");
+        // The workspace ignores `*.log`; the file is not in the workspace.
+        fs::write(tmp.path().join(".gitignore"), "*.log\n").expect("write gitignore");
+
+        let payload = resolve(&AtRef::File(note.clone()), tmp.path())
+            .expect("an explicit absolute attach is a capability, not a bypass");
+        assert_eq!(payload.files[0].content, "outside content\n");
+    }
 }
