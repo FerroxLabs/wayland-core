@@ -401,44 +401,85 @@ impl PtyHarness {
             .collect()
     }
 
-    /// Wait until the app has RE-LAID-OUT for a narrower grid, and prove it
-    /// from the frame rather than from the process.
+    /// The ink on one grid row, trailing blanks trimmed.
+    fn row_text(&self, row: usize) -> String {
+        let parser = self.parser.lock().expect("parser lock");
+        let screen = parser.screen();
+        let (rows, cols) = screen.size();
+        if row >= rows as usize {
+            return String::new();
+        }
+        let line: String = (0..cols)
+            .map(|col| {
+                let c = screen
+                    .cell(row as u16, col)
+                    .map(|cell| cell.contents())
+                    .unwrap_or_default();
+                if c.is_empty() { " ".to_string() } else { c }
+            })
+            .collect();
+        line.trim_end().to_string()
+    }
+
+    /// The row carrying the chrome wordmark — the tab bar.
+    fn chrome_row(&self) -> Option<usize> {
+        let rows = {
+            let parser = self.parser.lock().expect("parser lock");
+            parser.screen().size().0 as usize
+        };
+        (0..rows).find(|row| self.row_text(*row).contains("WAYLAND"))
+    }
+
+    /// Wait until the TAB BAR has been re-laid-out for a `cols`-wide frame.
     ///
     /// core#336 c2 asks for a post-resize predicate "that can only be satisfied
-    /// by a frame that is actually 80 columns wide". This is that predicate.
+    /// by a frame that is actually 80 columns wide". This is that predicate,
+    /// and the two obvious cheaper ones are both measured dead ends.
     ///
-    /// `vt100::Screen::set_size` TRUNCATES: every cell in columns `0..cols`
-    /// survives the shrink byte for byte. So `was_painted` — the rows that
-    /// carried a glyph at the new right-hand edge while the grid was still 120
-    /// wide — is exactly the set a pure truncation preserves. A row LEAVING
-    /// that set means the app wrote a blank over a cell that the shrink itself
-    /// could not have touched, which no stale frame, no undelivered resize and
-    /// no truncation can do. The session is hermetic and static — no agent
-    /// turn, no scrollback movement, no activity rail — so the only layout that
-    /// clears the edge of a row the 120-column layout filled is a layout for
-    /// the narrower width.
+    /// * `widest_painted_row() == 80` cannot work. `vt100::Cell::has_contents`
+    ///   is true for a cell the app painted a BACKGROUND into, and this TUI
+    ///   paints one across the whole surface, so every row of every frame
+    ///   reaches the last column and the answer is the grid width by
+    ///   construction. Even reading ink instead, the boot frame's full-width
+    ///   rules already fill column 79 and `set_size` TRUNCATES rather than
+    ///   repaints, so they survive the shrink.
+    /// * "some row stopped putting ink on column 79" cannot work either, and
+    ///   this one passed the c3 no-op mutation when it was tried: the hermetic
+    ///   boot emits a capability notice a beat AFTER `boot_to_workspace`
+    ///   returns, which clears the wordmark art and moves that column with no
+    ///   resize involved at all.
     ///
-    /// MEASURED on a healthy binary, idle box: 21 of 40 rows change inside
-    /// columns 0..80 within 500ms of the shrink, the tab labels come back
-    /// ellipsized (`Workspa…`, `Sub-Age…`) and the transcript rule stops at
-    /// column 78 where the 120-column frame ran past the edge.
-    fn wait_for_narrower_relayout(&self, col: usize, was_painted: &[usize], timeout: Duration) {
+    /// What is left is a fact about LAYOUT rather than about paint. The tab
+    /// strip does not fit in 80 columns, so a frame laid out for 80 ellipsizes
+    /// its labels — `Workspace` comes back as `Workspa…`. A 120-column frame
+    /// truncated to 80 keeps `Workspace` whole (it sits at columns 14..23,
+    /// nowhere near the cut), an undelivered resize leaves it whole, and no
+    /// stale frame can produce the ellipsis. MEASURED at 120: `◆ WAYLAND
+    /// Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows`, no
+    /// `…` anywhere; at 80: `◆ WAYLAND   Workspa…   Sub-Age…   Plan   Config
+    /// Diagnos…   Workflo…`.
+    ///
+    /// `full_label` is asserted absent and `…` present TOGETHER, so the tab bar
+    /// simply vanishing — a corrupt narrow frame, which is the thing this leg
+    /// is here to catch — does not satisfy it either.
+    fn wait_for_tab_strip_reflow(&self, full_label: &str, timeout: Duration) {
         let deadline = Instant::now() + timeout;
-        let mut still = Vec::new();
+        let mut last = String::new();
         while Instant::now() < deadline {
-            still = self.rows_painted_at_column(col);
-            if was_painted.iter().any(|row| !still.contains(row)) {
+            last = self
+                .chrome_row()
+                .map(|r| self.row_text(r))
+                .unwrap_or_default();
+            if last.contains('…') && !last.contains(full_label) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(30));
         }
         panic!(
-            "timed out after {timeout:?} waiting for the app to re-lay-out for a \
-             {}-column grid: every one of the {} rows that reached column {col} before \
-             the resize still reaches it ({still:?}), which is what a grid that was \
-             merely TRUNCATED looks like.\n--- last screen ---\n{}\n--- end ---",
-            col + 1,
-            was_painted.len(),
+            "timed out after {timeout:?} waiting for the tab strip to be re-laid-out for \
+             the narrower frame: it still reads `{last}`, which is the layout for a WIDER \
+             terminal. A frame actually narrow enough to need it would have ellipsized \
+             `{full_label}`.\n--- last screen ---\n{}\n--- end ---",
             self.screen_text()
         );
     }
@@ -682,21 +723,20 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
         "the boot chrome to paint out to the 120-column edge",
     );
 
-    // core#336 c2 — read the discriminator's BASELINE while the grid is still
-    // 120 wide: which rows carry a glyph at what is about to become the last
-    // column. `vt100`'s `set_size` truncates rather than repaints, so every one
-    // of these cells survives the shrink untouched, and a row leaving this set
-    // afterwards can only be the app painting into the new geometry.
-    //
-    // KNOWN-POSITIVE CONTROL for the instrument: the set must be non-empty, or
-    // the wait below would be unfalsifiable in the other direction.
-    let edge_before = h.rows_painted_at_column(NARROW_COLS as usize - 1);
+    // core#336 c2 — KNOWN-POSITIVE CONTROL for the instrument, taken while the
+    // grid is still 120 wide: the tab strip fits at the boot width, so the
+    // label is whole and there is no ellipsis on that row. Without this the
+    // wait below would be unfalsifiable in the other direction — a tab bar that
+    // was ALREADY ellipsized at 120 would satisfy it with no resize at all.
+    const TAB_LABEL: &str = "Workspace";
+    let wide_tabs = h
+        .chrome_row()
+        .map(|r| h.row_text(r))
+        .expect("the chrome wordmark must be on screen after boot");
     assert!(
-        !edge_before.is_empty(),
-        "no row reaches column {} at the boot width, so a narrow-width observation \
-         has nothing to observe.\n{}",
-        NARROW_COLS - 1,
-        h.screen_text()
+        wide_tabs.contains(TAB_LABEL) && !wide_tabs.contains('…'),
+        "the tab strip is already ellipsized at the {HARNESS_COLS}-column boot width, so \
+         the narrow-width observation below cannot distinguish anything: `{wide_tabs}`"
     );
 
     // Shrink well below RAIL_RESPONSIVE_MIN_WIDTH = 100. 80 cols is the
@@ -723,7 +763,7 @@ fn narrow_terminal_resize_stays_coherent_without_panicking() {
     // boot. This one requires the weakest possible evidence of a repaint —
     // ONE cell blanked at the new edge — on the full PAINT_BUDGET. Measured
     // on a healthy binary: the relayout lands within 500ms.
-    h.wait_for_narrower_relayout(NARROW_COLS as usize - 1, &edge_before, PAINT_BUDGET);
+    h.wait_for_tab_strip_reflow(TAB_LABEL, PAINT_BUDGET);
 
     // The frame the app painted at 80 columns is a WHOLE frame, not a corrupt
     // one. This is the coherence half the shrink leg lost when the chrome wait
