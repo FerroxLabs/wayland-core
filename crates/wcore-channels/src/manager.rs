@@ -947,8 +947,11 @@ impl ChannelManager {
             };
         }
 
-        // Multi-chunk: each piece keeps the conversation + reply target;
-        // attachments ride the LAST chunk (so the text precedes the media).
+        // Multi-chunk: each piece keeps the conversation, the THREAD
+        // DESTINATION and the reply target; attachments ride the LAST chunk
+        // (so the text precedes the media). Dropping `thread_id` here would
+        // land chunks 2..N in the parent conversation instead of the topic —
+        // the same class of defect as issue #253, one layer down.
         // Returns the final chunk's receipt.
         let last = chunks.len() - 1;
         let mut receipt: Option<MessageReceipt> = None;
@@ -956,6 +959,7 @@ impl ChannelManager {
             let part = OutgoingMessage {
                 conversation_id: msg.conversation_id.clone(),
                 text: chunk,
+                thread_id: msg.thread_id.clone(),
                 reply_to: msg.reply_to.clone(),
                 attachments: if i == last {
                     msg.attachments.clone()
@@ -1544,6 +1548,7 @@ mod tests {
                 OutgoingMessage {
                     conversation_id: "c1".into(),
                     text: body.clone(),
+                    thread_id: None,
                     reply_to: Some("t1".into()),
                     attachments: vec!["file://a".into()],
                 },
@@ -1564,11 +1569,75 @@ mod tests {
         );
         // reply_to carried on every chunk; attachments only on the last.
         assert!(log.iter().all(|m| m.reply_to.as_deref() == Some("t1")));
+        // NEGATIVE CONTROL: a quote must not leak into the thread destination.
+        assert!(log.iter().all(|m| m.thread_id.is_none()));
         assert!(log[0].attachments.is_empty());
         assert!(log[1].attachments.is_empty());
         assert_eq!(log[2].attachments, vec!["file://a".to_string()]);
         // Receipt is the final chunk's.
         assert_eq!(receipt.id, "capped-out-2");
+    }
+
+    /// Issue #253 — a chunked body must land ENTIRELY in the destination
+    /// thread. Dropping `thread_id` on the split would put chunk 1 in the
+    /// topic and chunks 2..N in the parent conversation, tearing one reply
+    /// across two places.
+    #[tokio::test]
+    async fn a_chunked_send_carries_the_thread_destination_on_every_chunk() {
+        let (ch, sent) = CappedChannel::new("capped", 10);
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+
+        mgr.send_to(
+            "capped",
+            OutgoingMessage {
+                conversation_id: "-1001234567890".into(),
+                text: "abcdefghijklmnopqrstuvwxy".into(),
+                thread_id: Some("123".into()),
+                reply_to: Some("987".into()),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .expect("send_to");
+
+        let log = sent.lock().await;
+        assert_eq!(log.len(), 3, "25 chars at cap 10 → 3 sends");
+        assert!(
+            log.iter().all(|m| m.thread_id.as_deref() == Some("123")),
+            "every chunk must target the same thread"
+        );
+        assert!(
+            log.iter().all(|m| m.reply_to.as_deref() == Some("987")),
+            "the quote is preserved too, and separately"
+        );
+    }
+
+    /// NEGATIVE CONTROL — passes in BOTH arms. A chunked send with no thread
+    /// destination must not acquire one, so the test above cannot be satisfied
+    /// by stamping a constant.
+    #[tokio::test]
+    async fn a_chunked_send_without_a_thread_does_not_invent_one() {
+        let (ch, sent) = CappedChannel::new("capped", 10);
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+
+        mgr.send_to(
+            "capped",
+            OutgoingMessage {
+                conversation_id: "c1".into(),
+                text: "abcdefghijklmnopqrstuvwxy".into(),
+                thread_id: None,
+                reply_to: None,
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .expect("send_to");
+
+        let log = sent.lock().await;
+        assert_eq!(log.len(), 3);
+        assert!(log.iter().all(|m| m.thread_id.is_none()));
     }
 
     #[tokio::test]
@@ -1581,6 +1650,7 @@ mod tests {
             OutgoingMessage {
                 conversation_id: "c1".into(),
                 text: "short".into(),
+                thread_id: None,
                 reply_to: None,
                 attachments: Vec::new(),
             },

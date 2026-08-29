@@ -227,12 +227,20 @@ pub struct ResponseParameters {
 }
 
 /// sendMessage request body.
+///
+/// `message_thread_id` selects a forum TOPIC and is independent of
+/// `reply_to_message_id`, which quotes one specific message. Sending the topic
+/// id in the reply field instead (what this adapter used to receive) quotes the
+/// topic-creation service message and does not target the topic at all — and
+/// fails outright once that message is deleted. Issue #253.
 #[derive(Debug, Clone, Serialize)]
 pub struct SendMessageBody<'a> {
     pub chat_id: &'a str,
     pub text: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_mode: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_thread_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<i64>,
 }
@@ -254,6 +262,9 @@ pub struct SendDocumentBody<'a> {
     pub document: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caption: Option<&'a str>,
+    /// Destination forum topic. See [`SendMessageBody`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_thread_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<i64>,
 }
@@ -280,6 +291,9 @@ pub struct InputMediaDocument<'a> {
 pub struct SendMediaGroupBody<'a> {
     pub chat_id: &'a str,
     pub media: Vec<InputMediaDocument<'a>>,
+    /// Destination forum topic. See [`SendMessageBody`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_thread_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<i64>,
 }
@@ -715,12 +729,14 @@ pub(crate) fn build_send_document<'a>(
     chat_id: &'a str,
     document: &'a str,
     caption: Option<&'a str>,
+    message_thread_id: Option<i64>,
     reply_to_message_id: Option<i64>,
 ) -> SendDocumentBody<'a> {
     SendDocumentBody {
         chat_id,
         document,
         caption,
+        message_thread_id,
         reply_to_message_id,
     }
 }
@@ -745,6 +761,7 @@ pub(crate) fn build_send_media_group<'a>(
     chat_id: &'a str,
     urls: &'a [String],
     caption: Option<&'a str>,
+    message_thread_id: Option<i64>,
     reply_to_message_id: Option<i64>,
 ) -> SendMediaGroupBody<'a> {
     let media = urls
@@ -761,6 +778,7 @@ pub(crate) fn build_send_media_group<'a>(
     SendMediaGroupBody {
         chat_id,
         media,
+        message_thread_id,
         reply_to_message_id,
     }
 }
@@ -1076,7 +1094,7 @@ mod tests {
 
     #[test]
     fn send_document_body_serializes_with_caption() {
-        let body = build_send_document("42", "https://x/a.jpg", Some("hello"), Some(7));
+        let body = build_send_document("42", "https://x/a.jpg", Some("hello"), None, Some(7));
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["chat_id"], "42");
         assert_eq!(json["document"], "https://x/a.jpg");
@@ -1086,12 +1104,83 @@ mod tests {
 
     #[test]
     fn send_document_body_omits_absent_optionals() {
-        let body = build_send_document("42", "https://x/a.jpg", None, None);
+        let body = build_send_document("42", "https://x/a.jpg", None, None, None);
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["chat_id"], "42");
         assert_eq!(json["document"], "https://x/a.jpg");
-        // caption + reply_to_message_id skip-serialize when None.
+        // caption + message_thread_id + reply_to_message_id skip-serialize
+        // when None. NEGATIVE CONTROL: a non-topic send must not grow a
+        // `message_thread_id` key, or every ordinary chat send would be
+        // rejected by Telegram as targeting a nonexistent topic.
         assert!(json.get("caption").is_none());
+        assert!(json.get("message_thread_id").is_none());
+        assert!(json.get("reply_to_message_id").is_none());
+    }
+
+    /// Issue #253 — a forum-topic destination and a reply quote are separate
+    /// wire fields and must both survive, independently.
+    #[test]
+    fn send_document_body_carries_topic_and_quote_independently() {
+        let body = build_send_document("42", "https://x/a.jpg", None, Some(123), Some(7));
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["message_thread_id"], 123);
+        assert_eq!(json["reply_to_message_id"], 7);
+    }
+
+    /// A topic destination with NO quote must carry the topic and nothing in
+    /// the reply slot — the exact shape the tool-driven `platform:chat:topic`
+    /// send produces.
+    #[test]
+    fn send_document_body_topic_without_quote_leaves_reply_slot_empty() {
+        let body = build_send_document("42", "https://x/a.jpg", None, Some(123), None);
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["message_thread_id"], 123);
+        assert!(json.get("reply_to_message_id").is_none());
+    }
+
+    /// Issue #253 — the grouped-attachment path must target the topic too.
+    /// A media group that omitted it would drop N attachments into the parent
+    /// conversation while the accompanying text went to the topic.
+    #[test]
+    fn send_media_group_body_carries_the_topic_destination() {
+        let urls = vec!["https://x/a.pdf".to_string(), "https://x/b.png".to_string()];
+        let body = build_send_media_group("42", &urls, None, Some(123), None);
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["message_thread_id"], 123);
+        assert!(json.get("reply_to_message_id").is_none());
+    }
+
+    /// The `sendMessage` body is built inline by the adapter rather than by a
+    /// builder, so its shape is pinned here directly.
+    #[test]
+    fn send_message_body_carries_topic_and_quote_independently() {
+        let body = SendMessageBody {
+            chat_id: "-1001234567890",
+            text: "hi",
+            parse_mode: None,
+            message_thread_id: Some(123),
+            reply_to_message_id: Some(7),
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["message_thread_id"], 123);
+        assert_eq!(json["reply_to_message_id"], 7);
+    }
+
+    /// NEGATIVE CONTROL — an ordinary (non-topic, non-reply) sendMessage body
+    /// carries neither key.
+    #[test]
+    fn send_message_body_omits_absent_topic_and_quote() {
+        let body = SendMessageBody {
+            chat_id: "42",
+            text: "hi",
+            parse_mode: Some("MarkdownV2"),
+            message_thread_id: None,
+            reply_to_message_id: None,
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["chat_id"], "42");
+        assert_eq!(json["parse_mode"], "MarkdownV2");
+        assert!(json.get("message_thread_id").is_none());
         assert!(json.get("reply_to_message_id").is_none());
     }
 
@@ -1102,7 +1191,7 @@ mod tests {
             "https://x/b.png".to_string(),
             "https://x/c.txt".to_string(),
         ];
-        let body = build_send_media_group("42", &urls, Some("shared"), Some(7));
+        let body = build_send_media_group("42", &urls, Some("shared"), None, Some(7));
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["chat_id"], "42");
         assert_eq!(json["reply_to_message_id"], 7);
@@ -1120,10 +1209,12 @@ mod tests {
     #[test]
     fn send_media_group_body_omits_absent_optionals() {
         let urls = vec!["https://x/a.pdf".to_string(), "https://x/b.png".to_string()];
-        let body = build_send_media_group("42", &urls, None, None);
+        let body = build_send_media_group("42", &urls, None, None, None);
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["chat_id"], "42");
-        // No caption anywhere and no reply target when both are None.
+        // No caption anywhere, and no thread destination or reply target when
+        // they are None. NEGATIVE CONTROL, as above.
+        assert!(json.get("message_thread_id").is_none());
         assert!(json.get("reply_to_message_id").is_none());
         let media = json["media"].as_array().expect("media is an array");
         assert!(media[0].get("caption").is_none());

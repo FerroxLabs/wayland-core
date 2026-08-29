@@ -230,10 +230,17 @@ impl ChannelManagerTransport {
     ) -> SendOutcome {
         let platform_token = target.platform.as_str();
         let conversation_id = target.chat_id.clone().unwrap_or_default();
+        // `platform:chat_id:thread_id` names a DESTINATION thread (a Telegram
+        // forum topic, a Slack thread root). It is not a message being quoted,
+        // so it rides `thread_id`; `reply_to` stays empty because a tool-driven
+        // send has no inbound message to quote. Issue #253: putting the topic
+        // in `reply_to` made every send a quote of the topic-creation message
+        // and left the topic destination off the wire entirely.
         let outgoing = OutgoingMessage {
             conversation_id,
             text: message.to_string(),
-            reply_to: target.thread_id.clone(),
+            thread_id: target.thread_id.clone(),
+            reply_to: None,
             attachments: Vec::new(),
         };
         // Re-read the oracle before every send, so the contract the NEXT
@@ -716,6 +723,66 @@ mod tests {
             ChannelManagerTransport::new(Arc::new(RwLock::new(mgr))),
             sent,
         )
+    }
+
+    /// RED ARM (issue #253, buried defect) — a destination TOPIC must never be
+    /// written into the reply-quote slot.
+    ///
+    /// `platform:chat_id:thread_id` names a DESTINATION thread (a Telegram
+    /// forum topic). Today `deliver()` copies it into `OutgoingMessage.reply_to`,
+    /// which the Telegram adapter parses into `reply_to_message_id` — so every
+    /// reply into a topic is sent as a quote of the topic-creation message and
+    /// the topic destination itself (`message_thread_id`) is never transmitted.
+    #[tokio::test]
+    async fn topic_destination_never_occupies_the_reply_quote_slot() {
+        let (transport, sent) = logging_transport("telegram").await;
+        let topic_target = ParsedTarget {
+            platform: MessagingPlatform::Telegram,
+            chat_id: Some("-1001234567890".to_string()),
+            thread_id: Some("123".to_string()),
+        };
+
+        let outcome = transport.send(&topic_target, "into the topic").await;
+        assert!(
+            matches!(outcome, SendOutcome::Ok { .. }),
+            "the topic send must be delivered, not refused"
+        );
+
+        let log = sent.lock().await;
+        assert_eq!(log.len(), 1, "exactly one outbound message");
+        assert_eq!(
+            log[0].reply_to, None,
+            "a destination topic id must never be substituted for reply-to-message metadata"
+        );
+        assert_eq!(
+            log[0].thread_id.as_deref(),
+            Some("123"),
+            "the destination topic must be carried as a thread destination"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the test above — passes in BOTH arms.
+    ///
+    /// A threadless target must still deliver, with no reply-quote and no
+    /// thread destination. Without this, a `deliver()` that refused every send
+    /// or dropped every field would satisfy the red arm vacuously.
+    #[tokio::test]
+    async fn threadless_target_still_delivers_with_no_reply_quote() {
+        let (transport, sent) = logging_transport("telegram").await;
+        let plain = target(MessagingPlatform::Telegram, "-1001234567890");
+
+        let outcome = transport.send(&plain, "no topic here").await;
+        assert!(
+            matches!(outcome, SendOutcome::Ok { .. }),
+            "a threadless send must be delivered"
+        );
+
+        let log = sent.lock().await;
+        assert_eq!(log.len(), 1, "exactly one outbound message");
+        assert_eq!(log[0].conversation_id, "-1001234567890");
+        assert_eq!(log[0].text, "no topic here");
+        assert_eq!(log[0].reply_to, None, "no inbound quote to carry");
+        assert_eq!(log[0].thread_id, None, "no topic destination was asked for");
     }
 
     /// RED ARM 1 — the tool seam has no limiter at all.
