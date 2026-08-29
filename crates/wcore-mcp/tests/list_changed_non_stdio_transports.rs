@@ -129,11 +129,7 @@ async fn sse_transport_ignores_every_other_id_less_frame() {
 /// `Accept: text/event-stream` — the MCP spec's standalone server→client
 /// channel — is answered with `get_body` when `serve_get` is set, and with the
 /// spec-legal `405 Method Not Allowed` when it is not.
-fn spawn_http_server(
-    post_body: &'static str,
-    serve_get: bool,
-    get_body: &'static str,
-) -> String {
+fn spawn_http_server(post_body: &'static str, serve_get: bool, get_body: &'static str) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     listener.set_nonblocking(true).expect("nonblocking");
@@ -160,7 +156,9 @@ fn spawn_http_server(
                         }
                     } else {
                         let _ = socket
-                            .write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
+                            .write_all(
+                                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n",
+                            )
                             .await;
                     }
                 } else {
@@ -249,7 +247,11 @@ async fn streamable_http_observes_the_standalone_notification_stream() {
 #[tokio::test]
 async fn a_server_that_refuses_the_standalone_stream_still_works() {
     let url = spawn_http_server(
-        concat!("data: ", r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#, "\n\n"),
+        concat!(
+            "data: ",
+            r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#,
+            "\n\n"
+        ),
         false,
         "",
     );
@@ -355,7 +357,10 @@ fn spawn_sse_mcp_server() -> String {
                 let id = body
                     .split("\"id\":")
                     .nth(1)
-                    .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty()))
+                    .and_then(|rest| {
+                        rest.split(|c: char| !c.is_ascii_digit())
+                            .find(|s| !s.is_empty())
+                    })
                     .unwrap_or("1")
                     .to_string();
 

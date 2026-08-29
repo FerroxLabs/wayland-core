@@ -100,9 +100,10 @@ async fn anthropic_messages_path_is_identical_for_every_base_spelling() {
     for base in spellings("", "/v1") {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+            )
             .mount(&server)
             .await;
 
@@ -171,7 +172,11 @@ async fn cohere_chat_path_is_identical_for_every_base_spelling() {
         let _ = provider.stream(&minimal_request()).await;
 
         let path = only_requested_path(&server).await;
-        let expected = if base.starts_with("/v1") { "/v1/chat" } else { "/chat" };
+        let expected = if base.starts_with("/v1") {
+            "/v1/chat"
+        } else {
+            "/chat"
+        };
         assert_eq!(
             path, expected,
             "base_url {base_url:?} must reach a single, unduplicated chat path"
@@ -220,9 +225,10 @@ async fn a_base_path_that_only_resembles_the_api_prefix_is_not_collapsed() {
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+            )
             .mount(&server)
             .await;
 

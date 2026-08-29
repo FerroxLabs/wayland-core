@@ -182,9 +182,9 @@ impl StreamableHttpTransport {
                     wcore_tools::url_safety::SsrfSafeResolver,
                 ))
         };
-        let stream_client = stream_builder.build().map_err(|e| {
-            McpError::Transport(format!("HTTP client initialization failed: {e}"))
-        })?;
+        let stream_client = stream_builder
+            .build()
+            .map_err(|e| McpError::Transport(format!("HTTP client initialization failed: {e}")))?;
 
         Ok(Self {
             client,
