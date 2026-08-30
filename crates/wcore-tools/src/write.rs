@@ -803,14 +803,15 @@ mod tests {
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = Arc::clone(&handed);
         let doomed = p.clone();
-        let tool = tool(None).with_publish_window_probe(Arc::new(move |observed: Option<&[u8]>| {
-            recorded.lock().unwrap().push(observed.map(<[u8]>::to_vec));
-            // Inside the window by construction: the publish exchange has
-            // happened (that is what produced `observed`) and the restore
-            // exchange has not.
-            std::fs::remove_file(&doomed).unwrap();
-            Err("its contents changed on disk".to_owned())
-        }));
+        let tool =
+            tool(None).with_publish_window_probe(Arc::new(move |observed: Option<&[u8]>| {
+                recorded.lock().unwrap().push(observed.map(<[u8]>::to_vec));
+                // Inside the window by construction: the publish exchange has
+                // happened (that is what produced `observed`) and the restore
+                // exchange has not.
+                std::fs::remove_file(&doomed).unwrap();
+                Err("its contents changed on disk".to_owned())
+            }));
 
         let result = tool
             .execute(json!({
