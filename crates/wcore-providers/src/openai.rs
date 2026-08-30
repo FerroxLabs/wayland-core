@@ -6704,6 +6704,12 @@ mod tests {
             "http://172.32.0.1:11434",  // just outside 172.16/12
             "http://100.200.0.1:11434", // just outside 100.64/10
             "",
+            // #1211 — the `@` is in the QUERY, not the authority. This wire is
+            // the OTHER consumer of the predicate (`select_key` below sends the
+            // placeholder bearer on a `true`), so its own polarity list has to
+            // carry the spelling that fooled the hand-cut authority.
+            "https://api.openai.com?x=@127.0.0.1",
+            "https://h?a=@10.0.0.1",
         ] {
             assert!(!is_self_hosted_base_url(url), "expected public: {url}");
         }
