@@ -11322,6 +11322,11 @@ mod tests {
                     continue;
                 }
                 let source = std::fs::read_to_string(&path).expect("read rust source");
+                // A COMMENT IS NOT A CALL. Counting raw text let the negative
+                // control below be satisfied by `// refresh.register_runtime_
+                // server(...)`, which is the same trap the #1175 transport
+                // guard closed on its own side.
+                let source = strip_line_comments(&source);
                 let built = source.matches(constructs).count();
                 if built == 0 {
                     continue;
@@ -11423,6 +11428,46 @@ mod tests {
         );
     }
 
+    /// `source` with every `//`-to-end-of-line comment removed.
+    ///
+    /// Both guards in this module count CALLS, and a comment naming a call is
+    /// not a call — the trap that made the #1175 transport guard accept
+    /// `// we do not need fn take_tools_changed here`. Naive on purpose: a
+    /// `//` inside a string literal (a URL) truncates that line early, which
+    /// can only ever HIDE a needle, never invent one, so the guard's error is
+    /// toward a false red on the add side. Block comments are not stripped;
+    /// that gap is recorded in the #1175 ledger rather than implied away.
+    fn strip_line_comments(source: &str) -> String {
+        source
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(at) => &line[..at],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_comment_is_not_a_registration() {
+        let needle = concat!("register_runtime_", "server(");
+        let commented = "    // refresh.register_runtime_server(&mgr, &configs);\n";
+        assert!(
+            !strip_line_comments(commented).contains(needle),
+            "a commented-out registration satisfies the add-side guard"
+        );
+        // POSITIVE CONTROL: the real call still counts, or the check above is
+        // satisfied by a stripper that deletes everything.
+        let real = "    refresh.register_runtime_server(&mgr, &configs);\n";
+        assert!(
+            strip_line_comments(real).contains(needle),
+            "a real registration is not recognised"
+        );
+        // And a trailing comment must not eat the call on the same line.
+        let both = "    refresh.register_runtime_server(&mgr, &configs); // wayland#1175\n";
+        assert!(strip_line_comments(both).contains(needle));
+    }
+
     /// Every top-level (column-zero) `fn` in `source`, as `(name, body)`.
     ///
     /// Column zero is the discriminator: a nested helper or a test lives
@@ -11464,7 +11509,7 @@ mod tests {
                 if code.contains('{') {
                     opened = true;
                 }
-                body.push_str(lines[k]);
+                body.push_str(code);
                 body.push('\n');
                 if opened && depth <= 0 {
                     break;
