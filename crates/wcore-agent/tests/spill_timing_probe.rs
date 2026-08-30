@@ -45,9 +45,13 @@ fn spilled_path(engine: &AgentEngine) -> std::path::PathBuf {
 }
 
 #[tokio::test]
+#[ignore = "measurement instrument for wayland-core#378; run with --ignored"]
 async fn timing_probe() {
     let t0 = std::time::Instant::now();
-    let payload: usize = std::env::var("SPILL_PROBE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(480_000);
+    let payload: usize = std::env::var("SPILL_PROBE_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(480_000);
     let workspace = tempfile::tempdir().expect("workspace");
     let policy = Arc::new(WorkspacePolicy::contained(workspace.path()));
 
@@ -118,6 +122,12 @@ async fn timing_probe() {
         )
     });
     let t_end = t0.elapsed();
-    eprintln!("PHASE bytes={payload} setup_s={:.3} run_s={:.3} readback_s={:.3} total_s={:.3}", t_setup.as_secs_f64(), (t_run-t_setup).as_secs_f64(), (t_end-t_run).as_secs_f64(), t_end.as_secs_f64());
+    eprintln!(
+        "PHASE bytes={payload} setup_s={:.3} run_s={:.3} readback_s={:.3} total_s={:.3}",
+        t_setup.as_secs_f64(),
+        (t_run - t_setup).as_secs_f64(),
+        (t_end - t_run).as_secs_f64(),
+        t_end.as_secs_f64()
+    );
     assert!(!bytes.is_empty());
 }
