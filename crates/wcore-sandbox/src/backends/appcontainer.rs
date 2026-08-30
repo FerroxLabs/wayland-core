@@ -473,6 +473,53 @@ mod probe_cache_tests {
     }
 }
 
+/// What the Windows AppContainer backend is KNOWN not to do, in the operator's
+/// words, because a capability row of booleans cannot say it.
+///
+/// # Why these are strings in the product and not just rows in a tracker
+///
+/// Both facts below were MEASURED on real Windows and both are OPEN. Until
+/// this constant existed, an operator running `wayland-core sandbox status` on
+/// a host with `WAYLAND_SANDBOX=appcontainer` read `confines_filesystem true`,
+/// `enforces_read_deny true`, `owns_descendants_hard true` and had no way to
+/// learn either one. The booleans were not wrong; they answered the questions
+/// somebody had thought to ask, and a defect nobody had thought to ask about
+/// is invisible to a capability row by construction.
+///
+/// Each string names the defect AND its tracker so the claim is checkable.
+/// Neither is a promise that a fix is coming: `#368`'s remedy is AppContainer
+/// ACL work that is explicitly out of scope by a recorded decision (see
+/// `.planning/DECISIONS.md` Q-368-honesty), and this constant is what the
+/// product says INSTEAD of that fix, not on the way to it.
+#[cfg(any(windows, test))]
+pub(crate) const APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION: &str = "concurrent identities interfere: a DENY applied by one execution strips \
+     the package grant a CONCURRENT execution holds on the same object, and a \
+     grant applied after that deny cannot reach the object at all. Measured on \
+     Windows 11 build 26200, roughly one run in five. Two sandboxed commands \
+     touching the same path at the same time can therefore see \"Access is \
+     denied.\" on a path they were granted. Tracked as \
+     FerroxLabs/wayland-core#368; NOT fixed.";
+
+/// See [`APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION`].
+///
+/// The second fact is the one that cost twelve days: it is not that the
+/// backend can fail, it is that a single unrecoverable lease file fails it
+/// PERMANENTLY and TOTALLY, and the only place the cause appeared was inside
+/// the text of an `execute()` the operator had to provoke. The reachability
+/// half of that is closed — see
+/// [`super::SandboxBackend::unavailable_reason`] — and the wedge itself is
+/// not, so it is declared here rather than left for the next operator to
+/// rediscover by losing a fortnight to it.
+#[cfg(any(windows, test))]
+pub(crate) const APPCONTAINER_WEDGED_LEASE_LIMITATION: &str = "one unrecoverable ACL lease file disables this backend permanently and \
+     for every command, not just the one that wrote it: recovery retries it \
+     forever instead of quarantining it. Observed on a developer machine for \
+     twelve days from 2026-08-17. `wayland-core sandbox status` now prints the \
+     recorded cause under UNAVAILABLE rather than requiring an execute() to \
+     provoke it, and the lease directory is \
+     %LOCALAPPDATA%\\Wayland\\Core\\AppContainerLeases\\v1. Tracked as \
+     FerroxLabs/wayland-core#369; NOT fixed.";
+
 /// The AppContainer + Job Object hard-containment identity.
 ///
 /// Centralized here so the mechanism wiring lives in-scope. The real Windows
@@ -585,6 +632,20 @@ mod stub_impl {
         fn is_available(&self) -> bool {
             false
         }
+        /// The stub answers `false` for a reason that is a fact about the
+        /// BUILD, not about the host, and an operator reading
+        /// `available false` on a Mac deserves to be told which. Without this
+        /// the two indistinguishable cases -- "this binary cannot ever do
+        /// AppContainer" and "this Windows host's AppContainer is broken" --
+        /// present identically (#369 c2).
+        fn unavailable_reason(&self) -> Option<String> {
+            Some(
+                "this binary was built for a non-Windows target, so it carries \
+                 the AppContainer compile stub and can never spawn an \
+                 AppContainer. Nothing about this host has been probed."
+                    .to_owned(),
+            )
+        }
         async fn execute(
             &self,
             _manifest: &SandboxManifest,
@@ -629,3 +690,89 @@ mod stub_impl {
 pub use stub_impl::AppContainerBackend;
 #[cfg(windows)]
 pub use windows_impl::AppContainerBackend;
+
+/// The declared-limitation strings are PRODUCT TEXT, so they are graded like
+/// product text and on every platform, not only where the backend runs.
+///
+/// These assert the properties that make the strings worth having. A
+/// limitation that does not name its tracker cannot be checked by the reader;
+/// one that says a fix is coming re-tells the lie the booleans told. The
+/// wording itself is deliberately not pinned character-for-character -- that
+/// would make an honest rewording fail -- so what is pinned is the tracker,
+/// the measured host, and the absence of a reassurance.
+#[cfg(test)]
+mod declared_limitation_tests {
+    use super::{
+        APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION, APPCONTAINER_WEDGED_LEASE_LIMITATION,
+    };
+
+    #[test]
+    fn every_declared_limitation_names_its_tracker_and_says_it_is_not_fixed() {
+        for text in [
+            APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION,
+            APPCONTAINER_WEDGED_LEASE_LIMITATION,
+        ] {
+            assert!(
+                text.contains("FerroxLabs/wayland-core#"),
+                "a declared limitation an operator cannot look up is an \
+                 assertion, not a disclosure: {text:?}"
+            );
+            assert!(
+                text.contains("NOT fixed"),
+                "a declared limitation must say it is open; a reader who \
+                 assumes it is historical is worse off than one who never \
+                 read it: {text:?}"
+            );
+        }
+    }
+
+    /// The two must not collapse into each other. They have different
+    /// remedies -- one is ACL application, one is lease recovery -- and #324
+    /// cost this program weeks by conflating a lease defect with a race.
+    #[test]
+    fn the_two_declared_limitations_are_distinct_facts() {
+        assert_ne!(
+            APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION,
+            APPCONTAINER_WEDGED_LEASE_LIMITATION
+        );
+        assert!(
+            APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION.contains("#368"),
+            "the concurrent-identity limitation must carry #368"
+        );
+        assert!(
+            APPCONTAINER_WEDGED_LEASE_LIMITATION.contains("#369"),
+            "the wedged-lease limitation must carry #369"
+        );
+    }
+
+    /// The measurement is the reason to believe the sentence. A limitation
+    /// with no measured host is an opinion.
+    #[test]
+    fn the_concurrent_identity_limitation_carries_its_measured_host() {
+        assert!(
+            APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION.contains("Windows 11 build 26200"),
+            "the concurrent-identity limitation must name the host it was \
+             measured on"
+        );
+    }
+
+    /// The non-Windows stub must say its `false` is a build fact.
+    #[test]
+    #[cfg(not(windows))]
+    fn the_stub_says_its_unavailability_is_a_build_fact_not_a_host_fact() {
+        use super::super::SandboxBackend;
+        let backend = super::AppContainerBackend::new();
+        let why = backend
+            .unavailable_reason()
+            .expect("the stub knows exactly why it is unavailable");
+        assert!(
+            why.contains("non-Windows target"),
+            "the stub's reason must name the BUILD as the cause: {why:?}"
+        );
+        assert!(
+            why.contains("Nothing about this host has been probed"),
+            "the stub must deny having measured the host, or an operator will \
+             read it as a verdict on their machine: {why:?}"
+        );
+    }
+}

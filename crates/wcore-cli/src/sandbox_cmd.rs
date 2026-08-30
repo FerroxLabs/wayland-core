@@ -140,6 +140,11 @@ pub struct SandboxStatus {
     pub owns_descendants_hard: bool,
     pub binds_cwd_authority: bool,
     pub binds_workspace_authority: bool,
+    /// Why `available` is `false`, when the backend knows (#369 c2). An
+    /// operator must not have to provoke an `execute()` to find out.
+    pub unavailable_reason: Option<String>,
+    /// What the selected backend is KNOWN not to do (#368, #369).
+    pub known_limitations: Vec<String>,
 }
 
 impl SandboxStatus {
@@ -155,6 +160,12 @@ impl SandboxStatus {
             owns_descendants_hard: registry.owns_descendants_hard(),
             binds_cwd_authority: registry.binds_cwd_authority(),
             binds_workspace_authority: registry.binds_workspace_authority(),
+            unavailable_reason: registry.unavailable_reason(),
+            known_limitations: registry
+                .known_limitations()
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
         }
     }
 
@@ -168,7 +179,57 @@ impl SandboxStatus {
             "owns_descendants_hard": self.owns_descendants_hard,
             "binds_cwd_authority": self.binds_cwd_authority,
             "binds_workspace_authority": self.binds_workspace_authority,
+            "unavailable_reason": self.unavailable_reason,
+            "known_limitations": self.known_limitations,
         })
+    }
+}
+
+/// `sandbox status` is the operator's ONLY read of the containment posture,
+/// and until `#368`/`#369` it could not carry a fact nobody had thought to
+/// turn into a boolean. These grade the two fields that changed that.
+#[cfg(test)]
+mod disclosure_tests {
+    use super::SandboxStatus;
+
+    fn bare() -> SandboxStatus {
+        SandboxStatus {
+            backend: "test".to_owned(),
+            available: true,
+            bypasses_containment: false,
+            confines_filesystem: false,
+            enforces_read_deny: false,
+            owns_descendants_hard: false,
+            binds_cwd_authority: false,
+            binds_workspace_authority: false,
+            unavailable_reason: None,
+            known_limitations: Vec::new(),
+        }
+    }
+
+    /// Both fields must reach `--json`. A host integration or a script reads
+    /// that and nothing else, and a disclosure only the human-readable arm
+    /// carries is a disclosure the desktop app cannot surface.
+    #[test]
+    fn the_json_arm_carries_the_disclosure_a_script_reads() {
+        let mut status = bare();
+        status.available = false;
+        status.unavailable_reason = Some("the probe said so".to_owned());
+        status.known_limitations = vec!["it does not do the thing".to_owned()];
+        let json = status.to_json();
+        assert_eq!(json["unavailable_reason"], "the probe said so");
+        assert_eq!(json["known_limitations"][0], "it does not do the thing");
+    }
+
+    /// A backend with nothing to disclose must emit JSON `null` and an EMPTY
+    /// list, never an empty string or a reassuring placeholder. A consumer
+    /// that sees `""` cannot tell "no cause recorded" from "cause is blank",
+    /// and #369's whole harm was a cause that existed and could not be read.
+    #[test]
+    fn nothing_recorded_serialises_as_null_and_empty_not_as_reassurance() {
+        let json = bare().to_json();
+        assert!(json["unavailable_reason"].is_null());
+        assert_eq!(json["known_limitations"].as_array().map(Vec::len), Some(0));
     }
 }
 
@@ -258,6 +319,21 @@ fn run_status(json: bool) -> anyhow::Result<()> {
         "binds workspace authority {}",
         status.binds_workspace_authority
     );
+    if let Some(why) = &status.unavailable_reason {
+        println!();
+        println!("UNAVAILABLE, and the backend knows why:");
+        println!("      {why}");
+    }
+    if !status.known_limitations.is_empty() {
+        println!();
+        println!(
+            "KNOWN LIMITATIONS of backend `{}` — measured, open, and NOT fixed:",
+            status.backend
+        );
+        for l in &status.known_limitations {
+            println!("      - {l}");
+        }
+    }
     // A row of booleans is not readable as a security posture. Say the
     // consequence of the one that decides whether a command can leave the
     // workspace, naming the mechanism so an operator can act on it.

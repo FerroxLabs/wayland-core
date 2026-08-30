@@ -419,6 +419,39 @@ pub trait SandboxBackend: Send + Sync + 'static {
         false
     }
 
+    /// Why [`Self::is_available`] answered `false`, when the backend knows.
+    ///
+    /// `is_available()` is a bare `bool`, and a bare `bool` was measured
+    /// costing a developer machine twelve days: AppContainer was disabled on
+    /// SEANDESKTOP from 2026-08-17 by one unrecoverable lease file, every
+    /// sandboxed command was refused, and the only place the cause appeared
+    /// was inside the error text of an `execute()` the operator had to
+    /// PROVOKE to see (FerroxLabs/wayland-core#369). A backend that knows why
+    /// it is down must be able to say so without being asked to run something.
+    ///
+    /// Contract: `None` when the backend is available, or when it genuinely
+    /// has no recorded cause. Never a placeholder — an invented reason is
+    /// worse than silence, because it stops the operator looking.
+    fn unavailable_reason(&self) -> Option<String> {
+        None
+    }
+
+    /// What this backend is KNOWN not to do, in the operator's words.
+    ///
+    /// Capability booleans answer questions someone thought to ask. This
+    /// answers the ones nobody asked, and it exists because the alternative
+    /// has a measured cost: the Windows AppContainer posture announced
+    /// "filesystem allowlists, fs_read_deny and network denial are enforced by
+    /// the OS" while two measured defects sat under it (#368, #369), and an
+    /// operator reading the capability row had no way to learn either.
+    ///
+    /// Each string names the defect AND its tracker, so a claim here is
+    /// checkable rather than asserted. Empty by default: a backend with no
+    /// recorded limitation says nothing rather than reassuring anybody.
+    fn known_limitations(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
     /// True only when the backend owns the complete descendant tree even if
     /// an untrusted child calls `setsid` or `setpgid`. Process-group cleanup
     /// alone is not hard ownership and must keep the default `false`.

@@ -391,9 +391,9 @@ fn publish_displacing(a: &Path, b: &Path) -> std::io::Result<Swap> {
         Some(libc::ENOENT) => Ok(Swap::Vacant),
         // ENOSYS: kernel older than 3.15. EINVAL / EOPNOTSUPP: the filesystem
         // does not implement the flag.
-        Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP) => {
-            Ok(Swap::Unsupported(format!("renameat2(RENAME_EXCHANGE): {err}")))
-        }
+        Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP) => Ok(Swap::Unsupported(
+            format!("renameat2(RENAME_EXCHANGE): {err}"),
+        )),
         _ => Err(err),
     }
 }

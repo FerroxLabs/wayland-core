@@ -306,7 +306,8 @@ fn a_quarantine_git_announces_itself_on_the_operators_console() {
 
     // Content, from the pure function: the notice must name the tool, deny
     // authorship of any prompt, and say wayland-core never asks here.
-    let notice = wcore_cli::plugin::quarantine::console_attribution_notice(&["fetch", "--depth", "1"]);
+    let notice =
+        wcore_cli::plugin::quarantine::console_attribution_notice(&["fetch", "--depth", "1"]);
     for needle in [
         "wayland-core:",
         "git fetch --depth 1",

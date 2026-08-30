@@ -313,6 +313,55 @@ impl SandboxBackend for AppContainerBackend {
         "appcontainer"
     }
 
+    /// Why this backend is down, WITHOUT the operator having to provoke an
+    /// `execute()` to find out (`#369` c2).
+    ///
+    /// # This is a read, not a probe, and that is the whole design
+    ///
+    /// The cause has always existed: [`record_probe_outcome`] stores the
+    /// failing Win32 call and its status verbatim, and [`unavailable_refusal`]
+    /// composes it into the error `execute()` returns. What did not exist was
+    /// any way to READ it. `is_available()` answers a bare `bool`, and a bare
+    /// `bool` was measured costing a developer machine twelve days: AppContainer
+    /// was disabled on SEANDESKTOP from 2026-08-17 by one abandoned lease file,
+    /// every sandboxed command was refused, and the sentence naming the lease
+    /// was only ever emitted into an error nobody had a reason to trigger.
+    ///
+    /// It deliberately does NOT call `is_available()` first. That would put the
+    /// 15-second guarded real-spawn probe behind a status read, which is the
+    /// `#125` hang wearing a different hat. The slot is CLEARED on every
+    /// success (`record_probe_outcome(None)`), so a recorded cause already
+    /// means "the last probe on this host failed" and reading it costs a
+    /// mutex acquisition.
+    ///
+    /// `None` therefore means one of two honest things -- available, or never
+    /// probed -- and never a placeholder. An invented reason would be worse
+    /// than silence here, because it would stop the operator looking.
+    fn unavailable_reason(&self) -> Option<String> {
+        last_probe_failure()
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
+
+    /// What this backend is known NOT to do, stated by the product itself.
+    ///
+    /// Both entries are measured, both are open, and neither is being fixed
+    /// here: `#368`'s remedy is AppContainer ACL work that a recorded decision
+    /// puts out of scope (`.planning/DECISIONS.md` Q-368-honesty), and `#369`'s
+    /// is lease-recovery work with the same disposition. The capability
+    /// booleans above answer `true` to `confines_filesystem`,
+    /// `enforces_read_deny` and `owns_descendants_hard`, and every one of those
+    /// answers is accurate for the case somebody thought to ask about; neither
+    /// defect below is visible in any of them. So the product says them out
+    /// loud instead.
+    fn known_limitations(&self) -> Vec<&'static str> {
+        vec![
+            super::super::APPCONTAINER_CONCURRENT_IDENTITY_LIMITATION,
+            super::super::APPCONTAINER_WEDGED_LEASE_LIMITATION,
+        ]
+    }
+
     /// PowerShell (`powershell.exe` / `pwsh.exe`) cannot load .NET / GAC
     /// assemblies under the Low-integrity restricted token (STATUS_DLL_NOT_FOUND,
     /// 0xC0000135). See FerroxLabs/wayland#413 / #324.
