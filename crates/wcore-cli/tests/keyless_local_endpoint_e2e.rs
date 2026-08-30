@@ -260,3 +260,31 @@ fn a_remote_endpoint_without_a_key_is_still_refused() {
         cap.stderr
     );
 }
+
+/// NEGATIVE CONTROL, #1211 — the same refusal for a public host SPELLED to look
+/// local. Every byte after the `?` is query, so this request goes to
+/// `api.openai.com`; the gate used to read the authority past the `?`, take the
+/// last `@`-separated part, see `127.0.0.1`, waive the credential and dispatch
+/// the user's prompt to the public host (observed: "API error 421", not "No API
+/// key found"). Driven through the real binary because the defect was in what
+/// the SHIPPED path decided, not in the predicate read on its own.
+#[test]
+fn a_public_host_spelled_as_loopback_in_the_query_is_still_refused() {
+    let dir = case_dir("query-userinfo");
+    let cap = run_headless(&dir, "https://api.openai.com?x=@127.0.0.1");
+
+    assert_ne!(
+        cap.status,
+        Some(0),
+        "a public host with no credential must refuse to start however its URL \
+         is spelled. stdout:\n{}\nstderr:\n{}",
+        cap.stdout,
+        cap.stderr
+    );
+    assert!(
+        cap.stderr.contains("No API key found"),
+        "the refusal must still name the missing credential -- reaching the \
+         network at all means the exemption fired on a public host. stderr:\n{}",
+        cap.stderr
+    );
+}

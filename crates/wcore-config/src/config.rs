@@ -2678,12 +2678,16 @@ impl Config {
                 .map(|e| CredentialSource::CatalogEnvVar(e.env_var.clone()))
                 .unwrap_or(CredentialSource::OutOfBand)
         };
-        // #1173 — the three conditions of the keyless self-hosted exemption,
-        // named once. See the `None if` arm below for why each is required.
-        let declared_keyless_self_hosted_endpoint = (cli.base_url.is_some()
-            || provider_config.base_url.is_some())
-            && compat.keyless_self_hosted()
-            && crate::self_hosted::is_self_hosted_base_url(&base_url);
+        // #1173 — the keyless self-hosted exemption. The three conditions live
+        // in `self_hosted::declared_keyless_self_hosted_endpoint` and nowhere
+        // else; #1212 was this gate and `resolve_council_provider` deciding
+        // differently because only one of them spelled them out.
+        let declared_keyless_self_hosted_endpoint =
+            crate::self_hosted::declared_keyless_self_hosted_endpoint(
+                cli.base_url.is_some() || provider_config.base_url.is_some(),
+                &compat,
+                &base_url,
+            );
         let (mut api_key, mut credential_source) = match resolve_api_key_with_source(
             cli.api_key.as_deref(),
             account_id.as_deref(),
@@ -3567,6 +3571,26 @@ pub fn resolve_council_provider(
         .map(str::to_string)
         .unwrap_or(raw_model);
 
+    let compat_defaults = if let Some(entry) = catalog_entry.as_ref() {
+        ProviderCompat::from_catalog_entry(&entry.id, entry.api_path.as_deref())
+    } else {
+        compat_defaults_for(provider)
+    };
+    let user_compat = provider_config.compat.clone().unwrap_or_default();
+    let mut compat = ProviderCompat::merge(compat_defaults, user_compat.clone());
+
+    // F-088: align the advertised effort capability with what the resolved
+    // model actually accepts (only when the user hasn't pinned it explicitly).
+    if provider == ProviderType::OpenAI
+        && user_compat.supports_effort.is_none()
+        && compat.supports_effort.unwrap_or(false)
+        && !model.is_empty()
+        && !openai_model_accepts_effort(&model)
+    {
+        compat.supports_effort = Some(false);
+        compat.effort_levels = Some(vec![]);
+    }
+
     // Credentials: inline config key → store → env var (per provider), plus the
     // catalog entry's own env var as a fallback — exactly Config::resolve's
     // chain, with no CLI key (the council never takes a CLI `--api-key`).
@@ -3602,6 +3626,21 @@ pub fn resolve_council_provider(
         // keyless BYO member the council skips (not fatal).
         Err(_) => match catalog_env_key.clone() {
             Some(key) => key,
+            // #1212 — except when it is the same keyless self-hosted endpoint
+            // `Config::resolve` now starts happily on. A council member pointed
+            // at a local Ollama has no remote credential to find and must not be
+            // dropped before spawn for lacking one. Same predicate, same three
+            // conditions, so the two gates cannot drift apart again. There is no
+            // CLI rung here, so the declaration can only come from
+            // `[providers.<name>] base_url`.
+            None if crate::self_hosted::declared_keyless_self_hosted_endpoint(
+                provider_config.base_url.is_some(),
+                &compat,
+                &base_url,
+            ) =>
+            {
+                String::new()
+            }
             None => return Err(CouncilProviderError::Keyless(provider_id.to_string())),
         },
     };
@@ -3616,26 +3655,6 @@ pub fn resolve_council_provider(
         .as_ref()
         .and_then(PromptCachingConfig::min_prefix_tokens)
         .unwrap_or(DEFAULT_CACHE_MIN_PREFIX_TOKENS);
-
-    let compat_defaults = if let Some(entry) = catalog_entry.as_ref() {
-        ProviderCompat::from_catalog_entry(&entry.id, entry.api_path.as_deref())
-    } else {
-        compat_defaults_for(provider)
-    };
-    let user_compat = provider_config.compat.clone().unwrap_or_default();
-    let mut compat = ProviderCompat::merge(compat_defaults, user_compat.clone());
-
-    // F-088: align the advertised effort capability with what the resolved
-    // model actually accepts (only when the user hasn't pinned it explicitly).
-    if provider == ProviderType::OpenAI
-        && user_compat.supports_effort.is_none()
-        && compat.supports_effort.unwrap_or(false)
-        && !model.is_empty()
-        && !openai_model_accepts_effort(&model)
-    {
-        compat.supports_effort = Some(false);
-        compat.effort_levels = Some(vec![]);
-    }
 
     let resolved_model = if model.is_empty() {
         None
