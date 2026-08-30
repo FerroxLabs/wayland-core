@@ -4229,11 +4229,28 @@ impl ProtocolEmitter for GatingProtocolWriter {
             // Only synthesize the gate when the tool will actually be parked.
             // Under Force (or an auto-approved tool/grant) the engine auto-runs
             // the tool, so a gate frame here would be a false gate.
-            if !self.approval.is_auto_approved_tool_cmd(
-                reason,
-                Some(&tool.name),
-                tool.args.get("command").and_then(|value| value.as_str()),
-            ) {
+            //
+            // wayland#1195: the posture check alone is NOT the parked-ness
+            // predicate. `execute_tool_calls_with_approval` parks on two
+            // further grounds that no approval posture can lift — an
+            // `AskUserQuestion` (which needs an answer, not a permission) and
+            // a call the path-boundary classifier escalated (#1099) — and it
+            // emits `ToolRequest` for both. Suppressing the gate frame there
+            // left the engine parked on a request the host was never shown:
+            // measured under `force`, an `AskUserQuestion` produced a
+            // `tool_request` and then silence for the life of the turn. So the
+            // suppression is skipped for exactly the reasons the engine parks
+            // on regardless of posture. The TUI's `ChannelEmitter` never had
+            // this hole; it synthesizes unconditionally.
+            let parks_regardless_of_posture =
+                tool.name == "AskUserQuestion" || tool.escalation.is_some();
+            if parks_regardless_of_posture
+                || !self.approval.is_auto_approved_tool_cmd(
+                    reason,
+                    Some(&tool.name),
+                    tool.args.get("command").and_then(|value| value.as_str()),
+                )
+            {
                 if let Ok(mut seen) = self.synthesized.lock() {
                     seen.insert(call_id.clone());
                 }
