@@ -380,6 +380,163 @@ else
   printf "%s\n" "$out" | sed "s/^/       | /"
 fi
 
+
+# ── wayland#1216 — THE FLOOR IS PER-LEG, AND A PRESERVED ATTEMPT IS NOT ──────
+#    COVERAGE. Both directions on every case: the aggregate gate could not see
+#    that the leg running the whole workspace suite contributed nothing,
+#    because ANY leg's upload satisfied `EXPECTED_MIN: 1`.
+
+leg_case() {
+  # leg_case <name> <expected_exit> <reports_dir> <required_legs>
+  local name=$1 want=$2 dir=$3 legs=$4
+  local out rc
+  out=$(EVIDENCE_DIR="$dir" EXPECTED_MIN=1 LABEL="ci matrix" MIN_TESTS=1 \
+        UPSTREAM_RESULT=success REQUIRED_LEGS="$legs" \
+        FLAKE_GATE_TODAY=2026-08-28 bash "$SCRIPT" 2>&1)
+  rc=$?
+  if [ "$rc" -eq "$want" ]; then
+    PASS=$((PASS + 1)); printf "ok   %-58s exit=%s\n" "$name" "$rc"
+  else
+    FAIL=$((FAIL + 1)); printf "FAIL %-58s exit=%s want=%s\n" "$name" "$rc" "$want"
+    printf "%s\n" "$out" | sed "s/^/       | /"
+  fi
+}
+
+# THE REPRODUCTION. Two legs are in scope; the one that runs the whole
+# workspace suite uploaded nothing, and the OTHER one uploaded a real report.
+# The aggregate floor is satisfied — this is the run wayland#1216 describes.
+mkdir -p "$TMP/legs/nextest-junit-macos-latest"
+printf "%s\n" "$REAL" > "$TMP/legs/nextest-junit-macos-latest/junit.xml"
+leg_case "aggregate floor alone: the silent leg is invisible -> GREEN" 0 \
+  "$TMP/legs" ""
+leg_case "named leg contributed nothing -> RED" 1 \
+  "$TMP/legs" "nextest-junit-linux-containerized ci-linux success"
+
+# L1b. THE EXIT CODE IS NOT THE PROPERTY. The arm above is satisfied by a red
+# for ANY reason, and the headline case of wayland#1216 -- the leg uploaded no
+# artifact, so `download-artifact` created no subdirectory for it -- used to
+# red through `set -e` aborting on `find` over a missing path, BEFORE the
+# annotation was written. Same exit code, no leg named, nothing a reader could
+# act on, and it would have evaporated the moment anyone relaxed `set -e`. So
+# the annotation itself is asserted, on the arm where the directory is ABSENT
+# rather than merely empty.
+leg_says() {
+  # leg_says <name> <expected_exit> <reports_dir> <required_legs> <needle>
+  local name=$1 want=$2 dir=$3 legs=$4 needle=$5
+  local out rc
+  out=$(EVIDENCE_DIR="$dir" EXPECTED_MIN=1 LABEL="ci matrix" MIN_TESTS=1 \
+        UPSTREAM_RESULT=success REQUIRED_LEGS="$legs" \
+        FLAKE_GATE_TODAY=2026-08-28 bash "$SCRIPT" 2>&1)
+  rc=$?
+  if [ "$rc" -eq "$want" ] && printf "%s" "$out" | grep -q -- "$needle"; then
+    PASS=$((PASS + 1)); printf "ok   %-58s exit=%s\n" "$name" "$rc"
+  else
+    FAIL=$((FAIL + 1)); printf "FAIL %-58s exit=%s want=%s needle=%s\n" \
+      "$name" "$rc" "$want" "$needle"
+    printf "%s\n" "$out" | sed "s/^/       | /"
+  fi
+}
+[ ! -d "$TMP/legs/nextest-junit-linux-containerized" ] || {
+  echo "FAIL fixture: the absent-directory arm needs the leg dir ABSENT"; FAIL=$((FAIL + 1)); }
+leg_says "absent leg dir NAMES the leg, not a bare set -e abort" 1 \
+  "$TMP/legs" "nextest-junit-linux-containerized ci-linux success" \
+  "NO TEST SIGNAL FROM ci-linux"
+# ...and its control: the SAME needle on the arm where the directory exists but
+# is empty, so a needle that could never match anything is not what passed L1b.
+mkdir -p "$TMP/legs/empty-control"
+leg_says "control: present-but-empty leg dir names the leg too" 1 \
+  "$TMP/legs" "empty-control ci-linux success" \
+  "NO TEST SIGNAL FROM ci-linux"
+# ...and the negative control: a leg that DID report must not carry the needle,
+# or the assertion above would pass on a script that annotates unconditionally.
+leg_says "control: a reporting leg does not emit that annotation" 0 \
+  "$TMP/legs" "nextest-junit-macos-latest ci success" \
+  "required leg   : nextest-junit-macos-latest"
+rmdir "$TMP/legs/empty-control"
+
+# L2. The control for L1: the same run with the leg's report present must pass,
+#     so L1 is the missing leg and not the mechanism being permanently red.
+mkdir -p "$TMP/legs/nextest-junit-linux-containerized"
+printf "%s\n" "$REAL" > "$TMP/legs/nextest-junit-linux-containerized/junit.xml"
+leg_case "named leg reported -> GREEN" 0 \
+  "$TMP/legs" "nextest-junit-linux-containerized ci-linux success"
+
+# L3. A CANCELLED or SKIPPED leg is not required to have reported. Without
+#     this the gate would be permanently red on every lane push that skips a
+#     conditioned platform, which is a gate someone switches off.
+rm -rf "$TMP/legs/nextest-junit-linux-containerized"
+leg_case "skipped leg is not required to report -> GREEN" 0 \
+  "$TMP/legs" "nextest-junit-linux-containerized ci-linux skipped"
+leg_case "cancelled leg is not required to report -> GREEN" 0 \
+  "$TMP/legs" "nextest-junit-linux-containerized ci-linux cancelled"
+# ...and the same leg with any other result is still required, so L3 is the
+# result and not the leg name being ignored.
+leg_case "failed leg that reported nothing is still RED" 1 \
+  "$TMP/legs" "nextest-junit-linux-containerized ci-linux failure"
+
+# L4. A leg whose directory holds nextest's zero-match junit.xml has reported a
+#     FILE and no coverage. Same rule as the aggregate MIN_TESTS gate, applied
+#     per leg — otherwise the per-leg floor is the file-count gate again.
+mkdir -p "$TMP/legs/nextest-junit-linux-containerized"
+printf "%s\n" "$EMPTY" > "$TMP/legs/nextest-junit-linux-containerized/junit.xml"
+leg_case "named leg reported a zero-test junit -> RED" 1 \
+  "$TMP/legs" "nextest-junit-linux-containerized ci-linux success"
+
+# L5. PRESERVED ATTEMPTS ARE NOT COVERAGE. `outer-attempt-*.xml` is the JUnit
+#     of an attempt an outer retry loop preserved (wayland#1177). Counting it
+#     would let a leg's FAILURES stand in for the coverage they are supposed to
+#     prove — and here it is the leg's ONLY file.
+rm -f "$TMP/legs/nextest-junit-linux-containerized/junit.xml"
+mkdir -p "$TMP/legs/nextest-junit-linux-containerized/outer-attempts"
+printf "%s\n" "$REAL" > "$TMP/legs/nextest-junit-linux-containerized/outer-attempts/outer-attempt-1.xml"
+leg_case "a leg whose only file is a preserved attempt -> RED" 1 \
+  "$TMP/legs" "nextest-junit-linux-containerized ci-linux success"
+# ...and the control: add the real report back beside it and the leg passes.
+printf "%s\n" "$REAL" > "$TMP/legs/nextest-junit-linux-containerized/junit.xml"
+leg_case "preserved attempt beside a real report -> GREEN" 0 \
+  "$TMP/legs" "nextest-junit-linux-containerized ci-linux success"
+
+# L6. The same exclusion on the AGGREGATE counters. A whole run whose only XML
+#     is a preserved attempt certifies nothing, and used to satisfy
+#     EXPECTED_MIN: 1 + MIN_TESTS: 1 on its own.
+mkdir -p "$TMP/attempts-only/nextest-junit-linux-containerized/outer-attempts"
+printf "%s\n" "$REAL" > "$TMP/attempts-only/nextest-junit-linux-containerized/outer-attempts/outer-attempt-1.xml"
+run_case "only preserved attempts, no report -> RED" 1 "$TMP/attempts-only" 1 success
+# ...control: the identical file NOT named outer-attempt-* is real evidence.
+mkdir -p "$TMP/attempts-control/leg"
+printf "%s\n" "$REAL" > "$TMP/attempts-control/leg/junit.xml"
+run_case "the same XML under a normal name -> GREEN" 0 "$TMP/attempts-control" 1 success
+
+# L6b. THE COUNT EXCLUSION, GRADED ON ITS OWN. L6 above reds through MIN_TESTS,
+# not through EXPECTED_MIN: at MIN_TESTS=1 a directory holding nothing but
+# preserved attempts fails the test-case floor whether or not the FILE count
+# excludes them, so deleting `! -name outer-attempt-*.xml` from the `FOUND=`
+# line leaves L6 green. Measured, not assumed. e2e.yml computes EXPECTED_MIN
+# from its scope and routinely asks for more than one report, so the file count
+# is a live floor there — this arm holds it at 2 with one real report beside one
+# preserved attempt, which is exactly "a leg's failures inflating the number
+# meant to prove its coverage" (wayland#1216 c2).
+mkdir -p "$TMP/count-excl/leg/outer-attempts"
+printf "%s\n" "$REAL" > "$TMP/count-excl/leg/junit.xml"
+printf "%s\n" "$REAL" > "$TMP/count-excl/leg/outer-attempts/outer-attempt-1.xml"
+run_case "a preserved attempt does not count toward EXPECTED_MIN" 1 "$TMP/count-excl" 2 success
+# ...control: replace the preserved attempt with a second REAL report and the
+# same EXPECTED_MIN=2 is met, so L6b's red is the exclusion and not the floor
+# being unreachable.
+mkdir -p "$TMP/count-ctrl/leg"
+printf "%s\n" "$REAL" > "$TMP/count-ctrl/leg/junit.xml"
+printf "%s\n" "$REAL" > "$TMP/count-ctrl/leg/junit-two.xml"
+run_case "two real reports meet the same EXPECTED_MIN=2" 0 "$TMP/count-ctrl" 2 success
+
+# L7. Blank lines and comments in REQUIRED_LEGS are ignored rather than read as
+#     a leg named "" that can never report — a parser that failed here would
+#     make the gate permanently red on a formatting change.
+leg_case "blank lines and comments in REQUIRED_LEGS -> GREEN" 0 \
+  "$TMP/legs" "
+# a comment
+nextest-junit-linux-containerized ci-linux success
+"
+
 echo "---"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

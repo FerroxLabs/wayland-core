@@ -29,9 +29,24 @@
 #                   that as evidence, which is wayland#1115 again one layer
 #                   down.
 #   HINT            optional extra sentence appended to the failure annotation
+#   REQUIRED_LEGS   optional. One line per leg that MUST have reported, as
+#                   `<artifact-subdirectory> <job-name> <job-result>`. Blank
+#                   lines and `#` comments are ignored. See the per-leg block
+#                   below for why an aggregate floor cannot do this job.
 #
 # Exit 0 when at least EXPECTED_MIN reports exist AND they carry at least
-# MIN_TESTS test cases between them, 1 otherwise.
+# MIN_TESTS test cases between them AND every leg named in REQUIRED_LEGS
+# contributed at least one report holding at least one test case, 1 otherwise.
+#
+# ── A PRESERVED ATTEMPT IS NOT COVERAGE (wayland#1216) ──────────────────────
+#
+# `outer-attempt-*.xml` is EXCLUDED from every count in this file. Those files
+# are the JUnit of an attempt an outer retry loop preserved (wayland#1177);
+# `grade-retry-flakes.sh` owns them and `grade-failing-set.sh` already skips
+# them for the same reason. Counting them here inflates the number that is
+# meant to prove the suite RAN with the number of times part of it FAILED, so a
+# leg that reported nothing could be covered by another leg's preserved
+# failures.
 set -euo pipefail
 
 : "${EVIDENCE_DIR:?EVIDENCE_DIR is required}"
@@ -42,13 +57,14 @@ MIN_TESTS="${MIN_TESTS:-1}"
 HINT="${HINT:-}"
 
 mkdir -p "$EVIDENCE_DIR"
-FOUND=$(find "$EVIDENCE_DIR" -type f -name "*.xml" | sort)
+# `! -name outer-attempt-*.xml` is load-bearing, not tidiness — see the header.
+FOUND=$(find "$EVIDENCE_DIR" -type f -name "*.xml" ! -name "outer-attempt-*.xml" | sort)
 COUNT=$(printf "%s" "$FOUND" | grep -c . || true)
 # A REPORT IS NOT A TEST. `grep -c` exits 1 when no report holds a test case,
 # which is exactly the state this gate exists to fail on, so `|| true` keeps
 # `pipefail` from turning that into a bare script error instead of the named
 # annotation below.
-TESTS=$({ find "$EVIDENCE_DIR" -type f -name "*.xml" -exec grep -oh "<testcase" {} + 2>/dev/null || true; } | grep -c . || true)
+TESTS=$({ find "$EVIDENCE_DIR" -type f -name "*.xml" ! -name "outer-attempt-*.xml" -exec grep -oh "<testcase" {} + 2>/dev/null || true; } | grep -c . || true)
 
 echo "suite              : $LABEL"
 echo "upstream result    : $UPSTREAM_RESULT"
@@ -63,6 +79,69 @@ fi
 
 if [ "$TESTS" -lt "$MIN_TESTS" ]; then
   echo "::error title=NO TEST SIGNAL ($LABEL)::${LABEL} produced ${COUNT} JUnit report(s) holding ${TESTS} test case(s), fewer than the ${MIN_TESTS} expected. The files exist and certify NOTHING: nextest writes a junit.xml with tests=0 for a run whose filter matched no test at all (an unset cargo feature, a renamed test, a typo in -E), so an artifact proves the command ran, never that a test did. The upstream job result was '${UPSTREAM_RESULT}'. ${HINT}"
+  exit 1
+fi
+
+# ── THE FLOOR IS PER-LEG, NOT PER-RUN (wayland#1216) ───────────────────────
+#
+# The two gates above are AGGREGATE: every leg's artifact is downloaded into
+# one directory and counted together. `EXPECTED_MIN: 1` over that aggregate is
+# satisfied the moment ANY leg uploads a junit.xml, so the leg that runs the
+# whole workspace suite can contribute NOTHING and the required `report` check
+# still goes green — silently, because the upload uses
+# `if-no-files-found: ignore`, so a leg that died before its test step simply
+# creates no artifact. That is wayland#1115 one level finer: not "no suite ran"
+# but "the suite did not run".
+#
+# Raising EXPECTED_MIN would not fix it. A count cannot say WHICH leg reported,
+# and the `ci` matrix legs are conditioned per platform, so any fixed number is
+# either unreachable on a lane push or satisfied by the wrong legs. The name is
+# the only thing that identifies a leg, so the floor is keyed on the artifact
+# subdirectory `actions/download-artifact` creates for it.
+#
+# A leg whose job was CANCELLED or SKIPPED is not required to have reported —
+# the same rule the aggregate gate already applies to its own upstream — so
+# this cannot turn a conditioned platform into a permanent red.
+REQUIRED_LEGS="${REQUIRED_LEGS:-}"
+LEG_FAILURES=0
+while read -r leg_dir leg_job leg_result; do
+  [ -n "${leg_dir:-}" ] || continue
+  case "$leg_dir" in \#*) continue ;; esac
+  leg_job="${leg_job:-unknown}"
+  leg_result="${leg_result:-unknown}"
+  if [ "$leg_result" = "cancelled" ] || [ "$leg_result" = "skipped" ]; then
+    echo "required leg   : $leg_dir ($leg_job) was $leg_result — not required to report"
+    continue
+  fi
+  # THE LEG THAT REPORTED NOTHING HAS NO DIRECTORY AT ALL. That is the
+  # headline case of wayland#1216 -- `actions/download-artifact` creates a
+  # subdirectory per artifact, and a leg that died before its test step
+  # uploaded no artifact for one to be created from. `find` over a path that
+  # is not there exits 1, and under `set -euo pipefail` that aborts the script
+  # BEFORE the annotation below is written: exit 1 with no diagnostic, no leg
+  # named, no reason a reader could act on. Right exit code, wrong mechanism,
+  # and it would evaporate the moment anyone relaxed `set -e`. So the absent
+  # directory is READ AS ZERO here and falls through to the named failure.
+  leg_root="$EVIDENCE_DIR/$leg_dir"
+  if [ -d "$leg_root" ]; then
+    leg_found=$(find "$leg_root" -type f -name "*.xml" ! -name "outer-attempt-*.xml" | sort)
+    leg_count=$(printf "%s" "$leg_found" | grep -c . || true)
+    leg_tests=$({ find "$leg_root" -type f -name "*.xml" ! -name "outer-attempt-*.xml" -exec grep -oh "<testcase" {} + 2>/dev/null || true; } | grep -c . || true)
+  else
+    echo "required leg   : $leg_dir uploaded no artifact at all — no $leg_root exists"
+    leg_count=0
+    leg_tests=0
+  fi
+  echo "required leg   : $leg_dir ($leg_job, result $leg_result) -> $leg_count report(s), $leg_tests test case(s)"
+  if [ "$leg_count" -lt 1 ] || [ "$leg_tests" -lt 1 ]; then
+    echo "::error title=NO TEST SIGNAL FROM $leg_job ($LABEL)::The leg '${leg_job}' finished with result '${leg_result}' and contributed ${leg_count} JUnit report(s) holding ${leg_tests} test case(s) to ${EVIDENCE_DIR}/${leg_dir}. Another leg's upload cannot stand in for it: this leg is named here because it runs coverage no other leg runs (wayland#1216). A leg that dies before its test step uploads nothing at all, silently, because the upload is if-no-files-found: ignore. ${HINT}"
+    LEG_FAILURES=$((LEG_FAILURES + 1))
+  fi
+done <<REQUIRED_LEGS_EOF
+$REQUIRED_LEGS
+REQUIRED_LEGS_EOF
+
+if [ "$LEG_FAILURES" -ne 0 ]; then
   exit 1
 fi
 
