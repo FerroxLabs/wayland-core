@@ -3295,11 +3295,34 @@ fn cache_hit(
 /// `a_gate_admitted_path_costs_one_probe_per_workspace_directory` and tracked
 /// as FerroxLabs/wayland-core#398.
 ///
-/// A git control directory's own store leaves are FIXED names, so this cannot
-/// miss a gitfile-named store however the checkout is spelled. It CAN miss an
-/// `objects/info/alternates` borrow whose target directory is named something
-/// else entirely — a real but narrower shape, tracked as FerroxLabs/wayland-core#394 rather than
-/// closed by widening this into a per-path tree walk.
+/// **What this gate can hide is a CLASS, not a list, and the earlier wording
+/// here was wrong.** It said a control directory's own store leaves are fixed
+/// names so a gitfile-named store could not escape. They are fixed as WRITTEN
+/// — but [`StoreScan::push_store`] CANONICALIZES before it stores, and this
+/// gate is applied to the QUERY path. So the two disagree for any store whose
+/// RESOLVED path carries no such component, however it was discovered, and
+/// `is_vcs_content_store` then answers `false` for every path beneath it.
+///
+/// Two routes reach that state today, and they are examples of the class
+/// rather than its definition:
+///
+/// * an `objects/info/alternates` borrow whose target directory is named
+///   anything (`git clone --shared` writes `.../objects`, a hand-written entry
+///   need not);
+/// * a store LEAF that is a SYMLINK to a directory named anything — `git`
+///   supports `.git/objects` as a link and putting an object database on
+///   another filesystem that way is ordinary practice. MEASURED, not reasoned:
+///   the same `<root>/odb` object is REFUSED when `<root>/.git/objects` links
+///   to it and ADMITTED when `<root>/vendor/pkg/.git/objects` does
+///   (`tests/vfs_nested_named_store_deny.rs`'s
+///   `the_same_symlinked_store_leaf_is_refused_at_the_root_and_admitted_when_nested`).
+///
+/// Graded as a PARTITION of the scan's own output by this very predicate —
+/// `tests::a_discovered_store_the_lexical_gate_cannot_see_is_admitted` — so a
+/// THIRD route needs no new case: its store lands in the hidden half and is
+/// asserted there. Tracked as FerroxLabs/wayland-core#394 rather than closed by
+/// widening this into a per-path tree walk, which is the cost
+/// FerroxLabs/wayland-core#398 measures.
 fn store_shaped(path: &Path) -> bool {
     path.components().any(|component| {
         matches!(component, std::path::Component::Normal(name)

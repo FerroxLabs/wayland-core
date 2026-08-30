@@ -278,3 +278,60 @@ async fn the_same_alternates_borrow_is_refused_at_the_root_and_admitted_when_nes
          invert this to `!when_nested` and grade c2 `met` — do not delete it"
     );
 }
+
+/// **The N+1 the `alternates` pair above did NOT cover, on the same axis.**
+///
+/// `store_shaped`'s doc used to say a control directory's own store leaves are
+/// FIXED names, so a gitfile-named store could not escape the gate. They are
+/// fixed as WRITTEN; `push_store` CANONICALIZES before it stores. A `.git`
+/// whose `objects` leaf is a SYMLINK — which `git` supports, and which is how
+/// an object database is routinely put on another filesystem — therefore enters
+/// the arm-3 store list under its TARGET's name, and the gate is applied to the
+/// query path.
+///
+/// Same construction as `the_same_alternates_borrow_is_refused_at_the_root_and_
+/// admitted_when_nested`: the SAME target `<root>/odb`, the same object, only
+/// the DECLARING control directory differs. Root REFUSES, nested ADMITS.
+/// Carried by FerroxLabs/wayland-core#394, whose scope note said the shape
+/// needed a hand-written `alternates` entry — it does not.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_same_symlinked_store_leaf_is_refused_at_the_root_and_admitted_when_nested() {
+    async fn read_ok(control: &Path) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let borrowed = root.join("odb/ab/cd1234");
+        write(&borrowed, b"\x78\x01borrowed-blob");
+        let owner = root.join(control);
+        std::fs::create_dir_all(&owner).unwrap();
+        std::os::unix::fs::symlink(root.join("odb"), owner.join("objects")).unwrap();
+        // Wrong-refusal control, in the same fixture and asserted first.
+        let ordinary = root.join("main.rs");
+        write(&ordinary, b"fn main() {}\n");
+        let fs = deny_fs(&root);
+        assert!(
+            fs.read(&ordinary).await.is_ok(),
+            "wrong-refusal control for `{}`: an ordinary workspace file must \
+             stay readable",
+            control.display()
+        );
+        fs.read(&borrowed).await.is_ok()
+    }
+
+    let at_root = read_ok(Path::new(".git")).await;
+    let when_nested = read_ok(Path::new("vendor/pkg/.git")).await;
+
+    assert!(
+        !at_root,
+        "control: a store leaf symlinked from the ROOT `.git` must be refused \
+         whatever its target is named — if this is now admitted, arm 2 has \
+         regressed and the asymmetry below is not core#394's"
+    );
+    assert!(
+        when_nested,
+        "core#390 c2 / core#394: the SAME object database, reached through a \
+         `.git/objects` SYMLINK, is refused when the root declares it and \
+         admitted when a nested checkout does. When #394 closes, invert this \
+         to `!when_nested` — do not delete it"
+    );
+}

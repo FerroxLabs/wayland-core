@@ -2712,6 +2712,122 @@ fn every_weak_resolver_site_states_which_resolver_and_why() {
 }
 
 // ===========================================================================
+// FerroxLabs/wayland-core#394 — what arm 3's LEXICAL gate can HIDE, graded as
+// a partition of the scan's own output rather than as a list of the ways to
+// hide something.
+// ===========================================================================
+
+/// **The gate and the store list are built from different paths, so they can
+/// disagree — and the disagreement is a CLASS.**
+///
+/// `store_shaped` is applied to the QUERY path. The list it guards is built by
+/// [`StoreScan::push_store`], which CANONICALIZES before it stores. A store
+/// whose resolved path carries no `VCS_CONTENT_STORES` leaf component is
+/// therefore unreachable through the gate: `is_vcs_content_store` answers
+/// `false` for every path beneath it, no matter which discovery route put it in
+/// the list.
+///
+/// This grades that as a PARTITION of `discover_nested_content_stores`'s own
+/// output by the gate's OWN predicate. It deliberately does not enumerate the
+/// routes — "which spellings can produce an oddly-named store" is undecidable
+/// over the open alphabet of control-file contents and symlink targets, exactly
+/// the shape that made the previous sweeps of this predicate wrong. "Is this
+/// discovered store visible to the gate that guards it" is decidable and total,
+/// and a route nobody has thought of yet lands in one half or the other and is
+/// asserted there without a new case.
+///
+/// Both halves are load-bearing. If a future change made the gate reject a
+/// store-shaped store, `visible` reddens. When FerroxLabs/wayland-core#394
+/// closes, `hidden` reddens — INVERT it to `is_vcs_content_store(..) == true`,
+/// do not delete it.
+#[test]
+fn a_discovered_store_the_lexical_gate_cannot_see_is_admitted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+
+    // NO `.git` at the root: arm 2 must find nothing, so every answer below is
+    // arm 3's and the gate is the only thing that can change it.
+    let mkdir = |p: &Path| std::fs::create_dir_all(p).unwrap();
+    let put = |p: &std::path::PathBuf| {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"\x78\x01blob").unwrap();
+    };
+
+    // ROUTE A — a nested checkout with an ordinary store directory. Its
+    // resolved path ends in `objects`, so the gate can see it.
+    mkdir(&root.join("a/.git/objects/ab"));
+    put(&root.join("a/.git/objects/ab/cd1234"));
+
+    // ROUTE B — an `objects/info/alternates` borrow naming a directory that is
+    // not store-shaped.
+    mkdir(&root.join("b/.git/objects/info"));
+    std::fs::write(
+        root.join("b/.git/objects/info/alternates"),
+        "../../../odb-alt\n",
+    )
+    .unwrap();
+    put(&root.join("odb-alt/ab/cd1234"));
+
+    // ROUTE C — a store LEAF that is a SYMLINK to a directory that is not
+    // store-shaped. `git` supports this; the leaf is spelled `objects` but
+    // `push_store` canonicalizes and stores the TARGET. BEST-EFFORT: creating a
+    // directory symlink needs a privilege on Windows, and route B already
+    // guarantees the hidden half is non-empty everywhere, so a host that cannot
+    // make one still grades the partition.
+    mkdir(&root.join("c/.git"));
+    put(&root.join("odb-link/ab/cd1234"));
+    #[cfg(unix)]
+    let _ = std::os::unix::fs::symlink(root.join("odb-link"), root.join("c/.git/objects"));
+    #[cfg(windows)]
+    let _ = std::os::windows::fs::symlink_dir(root.join("odb-link"), root.join("c/.git/objects"));
+
+    // The wrong-refusal control, asserted first: an ordinary workspace file
+    // must be admitted, or every `false` below is a guard that answers nothing.
+    let policy = WorkspacePolicy::contained(&root);
+    let ordinary = root.join("a/src/lib.rs");
+    put(&ordinary);
+    assert!(
+        !policy.is_vcs_content_store(&ordinary),
+        "control: an ordinary workspace file must not be called a content store"
+    );
+
+    let discovered = discover_nested_content_stores(&root).stores;
+    let (visible, hidden): (Vec<PathBuf>, Vec<PathBuf>) =
+        discovered.iter().cloned().partition(|s| store_shaped(s));
+
+    println!("GATE PARTITION: visible={visible:?} hidden={hidden:?}");
+
+    // ANTI-VACUITY, both halves. An empty `visible` would pass its loop without
+    // grading arm 3 at all; an empty `hidden` would silently retire the gap
+    // this test exists to pin, and #394 would close by the fixture drifting
+    // rather than by the predicate changing.
+    assert!(
+        !visible.is_empty() && !hidden.is_empty(),
+        "the fixture must produce BOTH a gate-visible and a gate-hidden store, \
+         got visible={visible:?} hidden={hidden:?}"
+    );
+
+    for store in &visible {
+        assert!(
+            policy.is_vcs_content_store(&store.join("ab/cd1234")),
+            "a store the scan discovered AND the gate can see must be refused: \
+             {}",
+            store.display()
+        );
+    }
+    for store in &hidden {
+        assert!(
+            !policy.is_vcs_content_store(&store.join("ab/cd1234")),
+            "core#394: {} is in the arm-3 store list but `store_shaped` cannot \
+             see it, so the gate should be short-circuiting the query to \
+             `false`. If this is now REFUSED the gap has closed — invert this \
+             assertion and grade core#390 c2 `met`, do not delete it",
+            store.display()
+        );
+    }
+}
+
+// ===========================================================================
 // PROBE -- not a gate. Run by hand under `strace -f -c` to count the syscalls
 // `vcs_content_stores` charges per TRAVERSED DIRECTORY, which is the shape
 // `grep_policy::scope_for` calls it in. `WL_PROBE_DIRS` sets the loop count so
