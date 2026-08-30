@@ -45,16 +45,41 @@ WHAT A LEDGER FILE IS
     `evidence` is ONE machine-resolvable token, never prose:
         test:<path>::<test name>   file exists AND declares `fn <name>`
         symbol:<path>::<name>      file exists AND declares that item
-        file:<path>:<line>         file exists AND has at least <line> lines
+        file:<path>:<line>:<text>  file exists AND <text> occurs EXACTLY once
+                                   in it, within ANCHOR_WINDOW lines of <line>
         file:<path>                file exists
         commit:<sha>               resolves to a commit object
         absent:<path>::<text>      file exists AND does NOT contain <text>
 
-    Prefer `test:` and `symbol:` over `file:<path>:<line>`. A line number is
-    the weakest anchor here: it survives an edit that moves the code it names,
-    so it can go on pointing at nothing in particular while staying green.
-    `file:` with a line is for evidence that is genuinely positional -- a
-    workflow step, a table row -- and the prose should say what is there.
+    Prefer `test:` and `symbol:` over any `file:` anchor. `file:` with a line
+    is for evidence that is genuinely positional -- a workflow step, a table
+    row, a floor inside a shell block -- and the prose should say what is
+    there.
+
+    A BARE `file:<path>:<line>` IS REFUSED. It used to be accepted on a
+    line-count check -- "the file exists and has at least <line> lines" -- so
+    ANY number below the file's length passed forever, and the anchor rotted
+    silently the moment anybody edited above it. That is not a weak drift
+    check; it is no drift check at all, in the one gate whose entire purpose
+    is to catch drift. Measured on FerroxLabs/wayland#1134, which is what
+    produced #1198: `ci.yml:1806` was recorded for "a shared-process LIB leg
+    runs in CI, floored" and landed on a bare `#` inside an unrelated
+    retry-evidence comment ~230 lines above that step; `ci.yml:1888` was
+    recorded for the INTEGRATION leg and landed inside the swarm
+    delegated-dispatch filterset, a different step again. Both read green, and
+    one was already wrong at the commit the entry records as last_verified.
+
+    So a line anchor now carries the CONTENT that line is supposed to hold,
+    and three separate ways of being vacuous are each closed:
+      * the text is in the file AT ALL -- otherwise the evidence is gone
+        rather than merely displaced, and the claim needs re-verifying, not
+        re-anchoring.
+      * it occurs EXACTLY ONCE. A fragment like `);` or `}}` matches within a
+        few lines of anywhere in a 39k-line file, so it can never register a
+        move -- it reads like an anchor and pins nothing.
+      * that one occurrence is within ANCHOR_WINDOW lines of <line>. Otherwise
+        the recorded position is stale; the failure names the line the content
+        moved TO, so re-anchoring is a one-token edit.
     `absent:` is for a criterion whose whole content is that something is
     GONE -- a deleted allowlist entry, a removed flag, a retired code path.
     `commit:<sha>` is the wrong anchor for those: it proves a deletion once
@@ -265,7 +290,30 @@ def parse_ledger(path):
 TEST_EV = re.compile(r"^test:(?P<p>[^:]+(?::[^:]+)*?)::(?P<n>[A-Za-z0-9_]+)$")
 SYM_EV = re.compile(r"^symbol:(?P<p>[^:]+(?::[^:]+)*?)::(?P<n>[A-Za-z0-9_]+)$")
 DECL = r"\b(?:fn|struct|enum|union|const|static|type|trait|mod|def|class|macro_rules!)\s+%s\b"
-FILE_EV = re.compile(r"^file:(?P<p>.+?)(?::(?P<l>\d+))?$")
+# Tried in this order. The line form is matched before the bare-path form so
+# a trailing `:1806` is read as a position and refused, not silently swallowed
+# into a path that then fails as "no such file" for the wrong reason.
+FILE_FRAG_EV = re.compile(r"^file:(?P<p>.+?):(?P<l>\d+):(?P<frag>.+)$")
+FILE_LINE_EV = re.compile(r"^file:(?P<p>.+?):(?P<l>\d+)$")
+FILE_EV = re.compile(r"^file:(?P<p>.+)$")
+
+# How far the anchored CONTENT may sit from the line the ledger names before
+# the anchor counts as stale. Not zero: an edit inside the same block shifts a
+# line by a few without touching what the entry claims, and a zero window
+# would red the gate on every unrelated insertion above it -- which trains
+# people to widen the window rather than fix the anchor. Not large either: the
+# unit a positional anchor names -- a workflow step, a shell floor, a table
+# row -- is smaller than this, and two consecutive ones are not, so a hit this
+# close is still the place the entry meant.
+ANCHOR_WINDOW = 20
+
+# The shortest fragment that can pin anything. This is the floor under a
+# MECHANICAL conversion of an old bare anchor: at wayland#1198 the line under
+# four of the thirty live anchors was blank, `);`, `}},` or `#`, and copying
+# that out as the fragment would have reproduced the defect being fixed with
+# extra steps. Uniqueness rejects most of them; this rejects the rest without
+# needing the file to be long enough for a duplicate to exist.
+MIN_FRAGMENT = 3
 COMMIT_EV = re.compile(r"^commit:(?P<s>[0-9a-f]{7,40})$")
 ABSENT_EV = re.compile(r"^absent:(?P<p>[^:]+(?::[^:]+)*?)::(?P<n>.+)$")
 SLUG = re.compile(r"^(?P<slug>[a-z0-9][a-z0-9-]*?)-(?P<num>\d+)\.md$")
@@ -299,6 +347,67 @@ def _is_shallow(root):
     ).stdout.strip() == "true"
 
 
+def _resolve_file(root, path, line, frag):
+    """`file:` evidence. See the module docstring for why a bare line is out.
+
+    Returns None when the anchor holds, else the reason it does not -- phrased
+    so the reader can fix it without opening this script, because the whole
+    cost of tightening an anchor grammar lands on whoever hits the message.
+    """
+    p = os.path.join(root, path)
+    if not os.path.isfile(p):
+        return "no such file: %s" % path
+    if line is None:
+        return None
+    line = int(line)
+    lines = open(p, encoding="utf-8", errors="replace").read().split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # a trailing newline terminates a line, it does not add one
+    n = len(lines)
+    if line > n:
+        return "%s has %d lines; evidence cites line %d" % (path, n, line)
+    here = lines[line - 1].strip()
+
+    if frag is None:
+        return (
+            "%s:%d is a BARE line anchor. A line number on its own is a "
+            "position, not a claim: the only thing checkable about it is that "
+            "the file is that long, so every number below its length passed "
+            "forever while the anchor rotted (FerroxLabs/wayland#1198). Carry "
+            "the content as well -- file:%s:%d:<a substring that occurs "
+            "exactly once in the file>. Line %d reads: %r"
+            % (path, line, path, line, line, here))
+
+    if len(frag.strip()) < MIN_FRAGMENT:
+        return ("%s:%d anchors on %r, which is too short to pin anything. Use "
+                "at least %d non-space characters of what is actually there. "
+                "Line %d reads: %r"
+                % (path, line, frag, MIN_FRAGMENT, line, here))
+
+    hits = [i + 1 for i, t in enumerate(lines) if frag in t]
+    if not hits:
+        return ("%s does not contain %r anywhere -- the evidence is gone, not "
+                "merely moved, so re-verify the claim before re-anchoring it. "
+                "Line %d now reads: %r" % (path, frag, line, here))
+    if len(hits) > 1:
+        shown = ", ".join(str(h) for h in hits[:6])
+        return ("%s contains %r on %d lines (%s%s). A fragment that matches "
+                "more than once pins nothing: a near-enough hit turns up "
+                "beside almost any line, so the anchor can never register a "
+                "move. Lengthen it until it is unique."
+                % (path, frag, len(hits), shown,
+                   ", ..." if len(hits) > 6 else ""))
+
+    got = hits[0]
+    if abs(got - line) > ANCHOR_WINDOW:
+        return ("%s: the anchored content has MOVED -- cited at line %d, it is "
+                "now at line %d (%+d, window is +/-%d). The claim may well "
+                "still hold; the position recorded for it does not. Re-anchor "
+                "to file:%s:%d:%s"
+                % (path, line, got, got - line, ANCHOR_WINDOW, path, got, frag))
+    return None
+
+
 def resolve_evidence(root, ev, git, shallow=False):
     """-> None if it resolves, else why it does not."""
     m = TEST_EV.match(ev)
@@ -319,17 +428,10 @@ def resolve_evidence(root, ev, git, shallow=False):
         if not re.search(DECL % re.escape(m.group("n")), t):
             return "%s declares no `%s`" % (m.group("p"), m.group("n"))
         return None
-    m = FILE_EV.match(ev)
+    m = FILE_FRAG_EV.match(ev) or FILE_LINE_EV.match(ev) or FILE_EV.match(ev)
     if m:
-        p = os.path.join(root, m.group("p"))
-        if not os.path.isfile(p):
-            return "no such file: %s" % m.group("p")
-        if m.group("l"):
-            n = sum(1 for _ in open(p, encoding="utf-8", errors="replace"))
-            if int(m.group("l")) > n:
-                return "%s has %d lines; evidence cites line %s" % (
-                    m.group("p"), n, m.group("l"))
-        return None
+        g = m.groupdict()
+        return _resolve_file(root, g["p"], g.get("l"), g.get("frag"))
     m = ABSENT_EV.match(ev)
     if m:
         p = os.path.join(root, m.group("p"))
@@ -359,7 +461,8 @@ def resolve_evidence(root, ev, git, shallow=False):
             return "%s does not resolve to a commit in this tree" % m.group("s")
         return None
     return ("%r is not a machine-resolvable evidence token. Use "
-            "test:<path>::<name>, symbol:<path>::<name>, file:<path>[:<line>], "
+            "test:<path>::<name>, symbol:<path>::<name>, "
+            "file:<path>:<line>:<content>, file:<path>, "
             "absent:<path>::<text> or commit:<sha>." % ev)
 
 
@@ -755,13 +858,37 @@ ledger gate's own self-test, and it must stay green in every arm.
 """
 
 
+def _t_rs():
+    """The fixture source, and the line numbers of its anchors.
+
+    Long enough that "within ANCHOR_WINDOW lines" is a real constraint rather
+    than something a three-line file satisfies by accident. The line numbers
+    are DERIVED from the text and never written down: a self-test for a
+    positional-anchor gate that hardcoded its own positional anchors would be
+    committing the exact defect the gate now refuses.
+    """
+    body = ["pub struct Boundary;",
+            "#[test]",
+            "fn the_boundary_is_probed() { assert!(true); }"]
+    body += ["// filler a%03d" % i for i in range(1, 121)]
+    uniq = len(body) + 1
+    body.append("const ANCHORED_ONCE: u8 = 1;")
+    body += ["// filler b%03d" % i for i in range(1, 121)]
+    twice = len(body) + 1
+    body.append("const ANCHORED_TWICE: u8 = 2;")
+    body += ["// filler c%03d" % i for i in range(1, 121)]
+    body.append("const ANCHORED_TWICE: u8 = 2;")
+    return "\n".join(body) + "\n", uniq, twice
+
+
+_T_RS, _UNIQ, _TWICE = _t_rs()
+
+
 def _fixture(root, body, name="wayland-7.md", extra=None):
     d = os.path.join(root, LEDGER_DIR)
     os.makedirs(d, exist_ok=True)
     os.makedirs(os.path.join(root, "src"), exist_ok=True)
-    open(os.path.join(root, "src", "t.rs"), "w").write(
-        "pub struct Boundary;\n"
-        "#[test]\nfn the_boundary_is_probed() { assert!(true); }\n")
+    open(os.path.join(root, "src", "t.rs"), "w").write(_T_RS)
     for cmd in (["init", "-q"], ["add", "-A"],
                 ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "f"]):
         subprocess.run(["git", "-C", root] + cmd,
@@ -797,6 +924,10 @@ issues need ledger files exactly like the first tracker's.
 """
 
 
+def _ident(b):
+    return b
+
+
 def self_test():
     cases = []
 
@@ -807,16 +938,60 @@ def self_test():
         # file) reads as a passing gate. Every RED arm names its own message.
         cases.append((label, mutate, must_fire, offline, inj, expect))
 
-    case("clean control, both trackers covered", lambda b: b, False)
-    case("control again, offline", lambda b: b, False, offline=True)
+    case("clean control, both trackers covered", _ident, False)
+    case("control again, offline", _ident, False, offline=True)
     case("met criterion cites a test that does not exist",
          lambda b: b.replace("::the_boundary_is_probed\"",
                              "::a_test_that_was_deleted\"", 1), True,
          expect="declares no `fn a_test_that_was_deleted`")
     case("met criterion cites a file line past EOF",
          lambda b: b.replace('"test:src/t.rs::the_boundary_is_probed"',
-                             '"file:src/t.rs:9000"'), True,
+                             '"file:src/t.rs:9000:pub struct Boundary"'), True,
          expect="evidence cites line 9000")
+
+    # ── file: anchors, both directions (FerroxLabs/wayland#1198) ─────────────
+    # These come in pairs on purpose. Each RED arm is reddened by ONE property
+    # -- presence, uniqueness, position, length -- and has a GREEN arm next to
+    # it differing only in that property, so no arm rides on another's
+    # coverage and none of them can be satisfied by a checker that simply
+    # refuses every file: anchor.
+    def anchor(tok):
+        return lambda b: b.replace('"test:src/t.rs::the_boundary_is_probed"',
+                                   '"%s"' % tok)
+
+    case("file anchor: content is on the line it names",
+         anchor("file:src/t.rs:%d:const ANCHORED_ONCE" % _UNIQ), False)
+    case("file anchor: content is gone from the file entirely",
+         anchor("file:src/t.rs:%d:const ANCHORED_ONCE_BUT_DELETED" % _UNIQ),
+         True, expect="the evidence is gone, not merely moved")
+
+    # The window, proven at its own edge and one line past it. A pair that
+    # differs by a single line is the only way to show the window is neither
+    # zero (which would red on any edit above) nor unbounded (which would make
+    # the line number decorative and the check a plain `contains`).
+    case("file anchor: content at the far EDGE of the window, still green",
+         anchor("file:src/t.rs:%d:const ANCHORED_ONCE" % (_UNIQ - ANCHOR_WINDOW)),
+         False)
+    case("file anchor: content ONE line past the window has drifted",
+         anchor("file:src/t.rs:%d:const ANCHORED_ONCE"
+                % (_UNIQ - ANCHOR_WINDOW - 1)), True,
+         expect="has MOVED -- cited at line")
+
+    case("file anchor: a fragment matching two lines pins neither",
+         anchor("file:src/t.rs:%d:const ANCHORED_TWICE" % _TWICE), True,
+         expect="A fragment that matches more than once pins nothing")
+    case("file anchor: a fragment too short to pin anything",
+         anchor("file:src/t.rs:%d:;" % _UNIQ), True,
+         expect="too short to pin anything")
+
+    # THE defect #1198 was filed for. A line number with no content was the
+    # accepted form until now, and it could not fail: this arm is the proof
+    # that it does.
+    case("BARE line anchor -- the wayland#1198 defect itself",
+         anchor("file:src/t.rs:%d" % _UNIQ), True,
+         expect="is a BARE line anchor")
+    case("bare `file:<path>` with no line at all is still fine",
+         anchor("file:src/t.rs"), False)
     case("met criterion with no evidence at all",
          lambda b: b.replace('    evidence: "test:src/t.rs::the_boundary_is_probed"\n',
                              ""), True, expect="is `met` with no evidence")
@@ -892,13 +1067,13 @@ def self_test():
                       "FerroxLabs/wayland-core": {9: "open"}},
               "scoped": {"FerroxLabs/wayland": [7], "FerroxLabs/wayland-core": [9]}})
     case("an unmet criterion on an issue GitHub says is CLOSED",
-         lambda b: b, True,
+         _ident, True,
          inj={"all": {"FerroxLabs/wayland": {7: "closed"},
                       "FerroxLabs/wayland-core": {9: "open"}},
               "scoped": {"FerroxLabs/wayland": [], "FerroxLabs/wayland-core": [9]}},
          expect="carries an unmet criterion, but")
     case("a ledger file for an issue that does not exist",
-         lambda b: b, True,
+         _ident, True,
          inj={"all": {"FerroxLabs/wayland": {}, "FerroxLabs/wayland-core": {9: "open"}},
               "scoped": {"FerroxLabs/wayland": [], "FerroxLabs/wayland-core": [9]}},
          expect="which does not exist in that tracker")
@@ -907,10 +1082,14 @@ def self_test():
     results = []
     for label, mutate, must_fire, offline, inj, expect in cases:
         body = mutate(_CLEAN)
-        # Two arms deliberately leave the file alone and vary the TRACKER
-        # state instead; for every other red arm an unchanged body means the
-        # mutation stopped applying and the arm proves nothing.
-        if must_fire and body == _CLEAN and inj is _INJ_CLEAN:
+        # Four arms deliberately leave the file alone -- two controls and two
+        # that vary the TRACKER state instead -- and say so by passing _ident.
+        # For every other arm, RED OR GREEN, an unchanged body means the
+        # mutation stopped applying and the arm proves nothing. Restricting
+        # this to red arms (as it did until #1198) leaves every green arm able
+        # to pass as a second copy of the clean control, which is the same
+        # vacuity one rung down.
+        if mutate is not _ident and body == _CLEAN:
             print("  %-56s MUTATION DID NOT APPLY -- the arm tests nothing"
                   % label[:56])
             ok = False

@@ -9,7 +9,8 @@ criteria:
   - id: c1
     text: "The round-trip test destructures LlmRequest with no `..`, so a new field is a compile error rather than silent coverage loss"
     state: met
-    evidence: "file:crates/wcore-agent/tests/session_journal_test/foundation_cases.rs:189"
+    evidence: "file:crates/wcore-agent/tests/session_journal_test/foundation_cases.rs:190:let LlmRequest {"
+    note: "RE-ANCHORED 2026-08-30 for wayland#1198: moved one line off the trailing comment onto the exhaustive destructuring itself, which is the thing that must stay `..`-free."
     owner: core
   - id: c2
     text: "Every field is asserted BY VALUE, and the assertion itself fails if the expected value equals Default"

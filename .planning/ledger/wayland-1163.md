@@ -9,9 +9,9 @@ criteria:
   - id: c1
     text: "An unpriceable model reports its saving as unknown instead of manufacturing a zero baseline"
     state: met
-    evidence: "file:crates/wcore-agent/src/cache_ledger.rs:174"
+    evidence: "file:crates/wcore-agent/src/cache_ledger.rs:174:Absent on the wire (#1163)"
     owner: core
-    note: "uncached_equivalent_usd is Option<f64>"
+    note: "RE-ANCHORED 2026-08-30 for wayland#1198: same line, but the field name alone appears on TWO structs (:174 and :640) and so pinned neither; the fragment is now the doc sentence unique to the per-turn field. uncached_equivalent_usd is Option<f64>"
   - id: c2
     text: "The RENDERED verdict says unknown, not a negative number"
     state: met

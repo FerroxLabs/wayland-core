@@ -21,9 +21,9 @@ criteria:
   - id: c3
     text: "If the cap genuinely cannot be measured, that is recorded as a stated NOT-MEASURABLE with the reason, the way Matrix and MS Teams are"
     state: met
-    evidence: "file:docs/delivery-semantics.md:418"
+    evidence: "file:docs/delivery-semantics.md:420:#### The WhatsApp bridge now has a row, because the guard can now reach it"
     owner: core
-    note: "The prose at docs/delivery-semantics.md:417-426 states the number is UNVERIFIED and cannot be sourced, and says why. This is a disclosure, NOT a substitute for c1 or c2 - it is the honest interim only."
+    note: "RE-ANCHORED 2026-08-30 for wayland#1198: was :418, the tail of the Matrix/Teams paragraph; core#360 is the WhatsApp bridge, and its own NOT-MEASURABLE disclosure opens at :420. The prose at docs/delivery-semantics.md:417-426 states the number is UNVERIFIED and cannot be sourced, and says why. This is a disclosure, NOT a substitute for c1 or c2 - it is the honest interim only."
   - id: c4
     text: "A section 4.2 declaration row exists for the bridge, or the reason it cannot have one is enforced by a test rather than by a comment"
     state: met
