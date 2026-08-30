@@ -49,6 +49,21 @@
 //!    (`tests/grep_vcs_named_store_deny.rs`). `.git/HEAD` and `.git/refs` are
 //!    NOT stores and stay searchable, matching the `git rev-parse` carve-out
 //!    the OS deny list already makes.
+//!
+//!    The SAME rule is enforced a second time, from the other direction,
+//!    by this session's [`WorkspacePolicy::denies_read_content`] --
+//!    FerroxLabs/wayland-core#375. The static arms above answer per path
+//!    and stand with no policy at all; the policy ask prunes the traversal
+//!    at the DIRECTORY level by the exact predicate the VFS read-deny
+//!    uses, so a store reached under any parent name is covered without
+//!    `grep_policy` growing a second name list. Naming the store's CONTROL
+//!    directory (`Grep(path=".git")`, `Grep(path=".svn")`) walked straight
+//!    into `.git/lfs/objects/**` and `.svn/pristine/**`, which -- unlike
+//!    git's zlib-compressed loose objects -- hold committed file content
+//!    VERBATIM. Neither arm substitutes for the other: the static one
+//!    covers the unconfined top-level entry point, which has no policy to
+//!    ask; the policy one covers a store no lexical spelling can name.
+//!    Both must hold.
 //! 5. **Surviving match content is scrubbed** with `wcore_safety::PIIScrubber`.
 //!    This is not belt-and-braces: the engine's central `redact_tool_output`
 //!    ALREADY runs that scrubber over every tool result, but its
@@ -63,10 +78,11 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::path_validation::lex_normalize;
 use crate::workspace_policy::{
-    is_secret_path_static, is_vcs_content_store_static, vcs_content_stores,
+    WorkspacePolicy, is_secret_path_static, is_vcs_content_store_static, vcs_content_stores,
 };
 
 /// Cap on the number of withheld filenames named in the footer. A name is not
@@ -170,11 +186,21 @@ impl Filtered {
 /// Decide, from the filesystem, which files this search may report on.
 ///
 /// `resolved` is the already-validated, absolute, lexically normalized search
-/// target produced by `validate_search_root`. `base` is the search's anchor —
-/// the jail root for a sandboxed session, the process cwd otherwise — and is
-/// where arm-2 store resolution starts, because a `.git` ABOVE the search
-/// target can name a store INSIDE it.
-pub(crate) fn scope_for(resolved: &Path, base: &Path) -> GrepScope {
+/// target produced by `validate_search_root`. `base` is the search's anchor
+/// -- the jail root for a sandboxed session, the process cwd otherwise --
+/// and is where arm-2 store resolution starts, because a `.git` ABOVE the
+/// search target can name a store INSIDE it.
+///
+/// `policy` is this session's workspace policy when it has one (`None` for
+/// the unconfined top-level `Tool::execute` entry point, which installs no
+/// `SecretDenyFs` either, so the two layers still agree). It prunes the walk
+/// by the same predicate the VFS deny uses; the static arms stand whether or
+/// not a policy is present, so neither substitutes for the other.
+pub(crate) fn scope_for(
+    resolved: &Path,
+    base: &Path,
+    policy: Option<Arc<WorkspacePolicy>>,
+) -> GrepScope {
     let mut named_stores = anchor_named_stores(resolved, base);
     if !resolved.is_dir() {
         named_stores.sort();
@@ -205,6 +231,22 @@ pub(crate) fn scope_for(resolved: &Path, base: &Path) -> GrepScope {
         .standard_filters(true)
         .require_git(false)
         .follow_links(false)
+        // Rule 4 (#375). Pruned at the DIRECTORY level: everything inside a
+        // content store is denied, so cutting the subtree is the same answer as
+        // asking per file at O(directories) instead of O(files) — and the
+        // per-file ask would be a canonicalization of every file in the tree.
+        // A file can only be inside a store by being under the store
+        // directory, so nothing escapes the coarser cut. Symlinks are not
+        // followed here, and a symlink entry is not `is_file()`, so it never
+        // reaches `allowed` either way.
+        .filter_entry(move |entry| {
+            if !entry.file_type().is_some_and(|kind| kind.is_dir()) {
+                return true;
+            }
+            policy
+                .as_ref()
+                .is_none_or(|policy| !policy.denies_read_content(entry.path()))
+        })
         .build()
         .flatten()
     {

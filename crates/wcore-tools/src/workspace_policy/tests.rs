@@ -2428,3 +2428,224 @@ fn a_dangling_symlink_into_the_repo_control_surface_is_refused() {
         "CONTROL: a dangling link landing outside the control surface must stay writable"
     );
 }
+
+/// FerroxLabs/wayland-core#383 — the #356 dangling-symlink escape, still live
+/// on the THIRD predicate in this file.
+///
+/// `is_project_secret` kept `canon_for_scope` when #356 moved
+/// `is_skill_source_path` and `is_repo_control_path` onto
+/// `canon_existing_ancestor`, so the identical shape passed straight through a
+/// security refusal. `std::fs::canonicalize` fails on a link whose target does
+/// not exist yet; `canon_for_scope` then falls back to canonicalizing the
+/// PARENT and re-attaching the leaf, which judges where the LINK sits rather
+/// than where the write would land.
+///
+/// The direction that matters is the WRITE. A secret that does not exist has
+/// nothing to leak, so the read direction was never open — but a `Full`-posture
+/// channel / remote session installs `SecretDenyFs` with NO `SandboxedFs`
+/// wrapper to pre-canonicalize, so a `Write` of `<root>/notes.txt` that lands
+/// as `<root>/.env` through a dangling link reached the disk.
+///
+/// All three arms the ticket measured are asserted here, plus two controls, so
+/// a change that simply refused every symlink cannot pass this test.
+#[test]
+#[cfg(unix)]
+fn a_dangling_symlink_to_a_not_yet_existing_project_secret_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let policy = WorkspacePolicy::contained(&root);
+
+    // ARM 1 (CONTROL, green before the fix): the direct name.
+    let direct = root.join(".env");
+    assert!(
+        policy.is_project_secret(&direct),
+        "CONTROL: a project secret named directly must be refused"
+    );
+
+    // ARM 2 (CONTROL, green before the fix): a link whose target EXISTS
+    // canonicalizes, so it was already caught.
+    std::fs::write(&direct, b"TOKEN=live\n").unwrap();
+    let live_link = root.join("live-notes.txt");
+    std::os::unix::fs::symlink(&direct, &live_link).unwrap();
+    assert!(
+        policy.is_project_secret(&live_link),
+        "CONTROL: a benign-named link to an EXISTING project secret must be refused"
+    );
+
+    // ARM 3 (THE DEFECT): the same link with the target not yet created. This
+    // is the write a Full-posture session performs when it creates the secret.
+    std::fs::remove_file(&direct).unwrap();
+    assert!(
+        !direct.exists(),
+        "the point of this arm is that .env is absent"
+    );
+    let dangling = root.join("notes.txt");
+    std::os::unix::fs::symlink(&direct, &dangling).unwrap();
+    assert!(
+        policy.is_project_secret(&dangling),
+        "a DANGLING symlink to a not-yet-existing project secret was not refused \
+         — the predicate judged where the LINK sits, not where the write lands"
+    );
+
+    // CONTROL: a dangling link landing on an ORDINARY name stays writable. The
+    // fix resolves links; it does not blanket-refuse unresolvable ones.
+    let ordinary = root.join("ordinary-link.txt");
+    std::os::unix::fs::symlink(root.join("not-yet.txt"), &ordinary).unwrap();
+    assert!(
+        !policy.is_project_secret(&ordinary),
+        "CONTROL: a dangling link to an ordinary path must stay writable"
+    );
+
+    // CONTROL: the #667 scope carve-out survives. A host secret OUTSIDE the
+    // workspace root is deliberately NOT a project secret, dangling or not.
+    let outside = tempfile::tempdir().expect("outside");
+    let outside_root = std::fs::canonicalize(outside.path()).unwrap();
+    let escape = root.join("escape.txt");
+    std::os::unix::fs::symlink(outside_root.join(".env"), &escape).unwrap();
+    assert!(
+        !policy.is_project_secret(&escape),
+        "CONTROL: a secret outside the workspace root stays outside this predicate"
+    );
+}
+
+/// #383 c3 — the SECOND predicate `SecretDenyFs::guard` asks must resolve the
+/// same way, or the guard answers two different questions about where one path
+/// lands.
+///
+/// Without this the resolver switch would be graded on `is_project_secret`
+/// alone and `is_vcs_content_store` would keep the weaker one: a `Write` that
+/// lands inside `.git/objects` through a dangling link would be refused by
+/// neither predicate, which is #244's own gap re-opened through #356's shape.
+#[test]
+#[cfg(unix)]
+fn a_dangling_symlink_into_a_vcs_content_store_is_refused() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(root.join(".git").join("objects").join("ab")).unwrap();
+    let policy = WorkspacePolicy::contained(&root);
+
+    // CONTROL: named directly, always refused.
+    let direct = root.join(".git").join("objects").join("ab").join("cdef");
+    assert!(
+        policy.is_vcs_content_store(&direct),
+        "CONTROL: an object path named directly must be refused"
+    );
+
+    // THE DEFECT: the object does not exist yet and is reached through a link.
+    let dangling = root.join("obj.bin");
+    std::os::unix::fs::symlink(&direct, &dangling).unwrap();
+    assert!(
+        policy.is_vcs_content_store(&dangling),
+        "a DANGLING symlink into `.git/objects` was not recognised as a content \
+         store — the predicate judged where the LINK sits"
+    );
+
+    // CONTROL: `.git/HEAD` and `.git/refs` stay readable, so this is not
+    // passing because everything under `.git` became a store.
+    assert!(
+        !policy.is_vcs_content_store(&root.join(".git").join("HEAD")),
+        "CONTROL: `.git/HEAD` must stay readable (the `git rev-parse` carve-out)"
+    );
+}
+
+/// A line that opens a function body — the boundary
+/// [`every_weak_resolver_site_states_which_resolver_and_why`] stops its
+/// look-back at.
+fn is_fn_signature(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") {
+        return false;
+    }
+    trimmed.starts_with("fn ")
+        || trimmed.starts_with("async fn ")
+        || (trimmed.starts_with("pub") && trimmed.contains(" fn "))
+}
+
+/// FerroxLabs/wayland-core#383 c3 — every REMAINING `canon_for_scope` call site
+/// in this file states which resolver it uses and why.
+///
+/// #356 moved two predicates onto `canon_existing_ancestor` and its ledger note
+/// asserted the file then held one resolver. It did not: `is_project_secret`
+/// and `is_vcs_content_store` — both halves of a security refusal — kept the
+/// weaker one, seventy lines away, with nothing at either site to say a choice
+/// had been made. #383 moved those two as well. The sites that remain are
+/// advisory mirrors and `$HOME` lookups where the weak resolver is correct, and
+/// this test is what stops the NEXT author reintroducing the trap by picking
+/// whichever resolver is nearer.
+///
+/// A prose rule in a doc comment does not do this. "A comment is not a guard":
+/// the same class was documented once already and the next call site repeated
+/// it anyway.
+#[test]
+fn every_weak_resolver_site_states_which_resolver_and_why() {
+    const SOURCE: &str = include_str!("../workspace_policy.rs");
+    const MARKER: &str = "resolver: `canon_for_scope`";
+
+    let lines: Vec<&str> = SOURCE.lines().collect();
+    let mut sites = 0usize;
+    let mut unlabelled: Vec<String> = Vec::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        // Comments (including the doc comment on the function itself) name the
+        // resolver without calling it.
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if !line.contains("canon_for_scope(") {
+            continue;
+        }
+        // Its own definition.
+        if line.contains("fn canon_for_scope(") {
+            continue;
+        }
+        sites += 1;
+        // Scoped to the ENCLOSING function, not a fixed line count. A fixed
+        // window was the first shape of this test and it was VACUOUS: deleting
+        // the note from `is_session_read_granted` still passed, because twelve
+        // lines up sat the note belonging to `is_read_reachable` next door.
+        // The instrument has to stop where the function does.
+        let start = lines[..index]
+            .iter()
+            .rposition(|above| is_fn_signature(above))
+            .map_or(0, |at| at + 1);
+        if !lines[start..index]
+            .iter()
+            .any(|above| above.contains(MARKER))
+        {
+            unlabelled.push(format!("line {}: {}", index + 1, trimmed));
+        }
+    }
+
+    // Known-positive control. An `include_str!` that pulled the wrong file, or
+    // a rename of the resolver, would find nothing and this test would pass by
+    // scanning air.
+    assert!(
+        sites >= 5,
+        "the scan found only {sites} `canon_for_scope` call sites — the \
+         instrument is looking at the wrong thing"
+    );
+    assert!(
+        SOURCE.contains("fn canon_for_scope("),
+        "known-positive control: the resolver's own definition must be in the \
+         file being scanned"
+    );
+    assert!(
+        unlabelled.is_empty(),
+        "these `canon_for_scope` call sites do not say which resolver they use \
+         or why — add a `{MARKER}` note, or move them onto \
+         `canon_existing_ancestor`:\n{}",
+        unlabelled.join("\n")
+    );
+
+    // The two predicates #383 moved must NOT have come back.
+    for guard in [
+        "is_project_secret_resolved(&canon_for_scope",
+        "is_vcs_content_store_resolved(&canon_for_scope",
+    ] {
+        assert!(
+            !SOURCE.contains(guard),
+            "a `SecretDenyFs` guard predicate is back on the weak resolver: {guard}"
+        );
+    }
+}
