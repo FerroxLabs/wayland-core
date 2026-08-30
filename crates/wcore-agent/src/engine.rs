@@ -1338,6 +1338,118 @@ mod output_sizing_tests {
         );
     }
 
+    /// FerroxLabs/wayland#1218 c2 — the ask and the reserve the ceiling
+    /// withheld must AGREE, across the whole band where #1179's scaling made
+    /// them disagree.
+    ///
+    /// The band is the ticket's own: 4,096..49,152. Below 24,576 the scaled
+    /// `output_reserve` is under `UNKNOWN_CAP` = 8,192, and below 49,152 it is
+    /// under gpt-4o's 16,384 output ceiling, so in that band the pre-flight
+    /// guard could certify an input while this function asked for more output
+    /// than the ceiling had held back for it.
+    ///
+    /// Graded at the input the guard ACTUALLY admits — `input_ceiling_for_window`
+    /// — because that is where the ticket's own arithmetic evaluated it: its
+    /// "total ask 13,245 on an 8,192 slot" is ceiling 5,053 + ask 8,192. A
+    /// smaller input leaves more room and is allowed to use it; clamping the
+    /// ask to the reserve at EVERY input would cut a 200k-window Claude turn
+    /// from its real 64,000-token output ceiling to the 23,000-token
+    /// compaction reserve, which is a regression, not a fix. See
+    /// `.planning/DECISIONS.md` Q-1218.
+    #[test]
+    fn the_output_ask_never_outgrows_the_reserve_the_ceiling_withheld() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        // An unlisted model: the arm with no catalogued output ceiling, which
+        // is the one the ticket measured.
+        let (provider, model) = ("openai-compat", "qwen3:8b");
+        assert!(
+            wcore_config::limits::model_output_ceiling(provider, model).is_none(),
+            "control: this test is about the UNLISTED arm; {model} is now catalogued \
+             and the case it grades has moved"
+        );
+        for window in (4_096usize..=49_152).step_by(64) {
+            let r = cfg.scaled_reserves(window);
+            let withheld = r.output_reserve + r.emergency_buffer;
+            let ceiling = cfg.input_ceiling_for_window(window);
+            assert_eq!(
+                ceiling,
+                window - withheld,
+                "window {window}: the ceiling is exactly what the reserves left"
+            );
+            let ask = size_output_cap(
+                64_000,
+                provider,
+                model,
+                ceiling,
+                false,
+                Some(u32::try_from(window).unwrap()),
+            ) as usize;
+            assert!(
+                ask <= withheld,
+                "window {window}: the guard admits {ceiling} input tokens having \
+                 withheld {withheld} for the output, and the ask is {ask} — the \
+                 ceiling certified a request that cannot fit"
+            );
+            // The property the ticket's TITLE is about, over every input the
+            // guard admits rather than only the worst one.
+            for est in [0, 1, ceiling / 2, ceiling.saturating_sub(1), ceiling] {
+                let ask = size_output_cap(
+                    64_000,
+                    provider,
+                    model,
+                    est,
+                    false,
+                    Some(u32::try_from(window).unwrap()),
+                ) as usize;
+                assert!(
+                    est + ask <= window,
+                    "window {window}, input {est}: total ask {} exceeds the whole \
+                     window",
+                    est + ask
+                );
+            }
+        }
+    }
+
+    /// #1218 c3 — the two cases the ticket MEASURED, stated as the figures it
+    /// stated them in, so a re-grade reads the same arithmetic.
+    #[test]
+    fn the_measured_1218_overflows_no_longer_hold() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        for (window, ceiling, reserve) in [
+            (8_192usize, 5_053usize, 2_730usize),
+            (16_384, 10_104, 5_461),
+        ] {
+            assert_eq!(
+                cfg.input_ceiling_for_window(window),
+                ceiling,
+                "window {window}"
+            );
+            assert_eq!(
+                cfg.scaled_reserves(window).output_reserve,
+                reserve,
+                "window {window}"
+            );
+            let ask = size_output_cap(
+                64_000,
+                "openai-compat",
+                "qwen3:8b",
+                ceiling,
+                false,
+                Some(u32::try_from(window).unwrap()),
+            ) as usize;
+            assert_ne!(
+                ask, 8_192,
+                "window {window}: this is the ticket's measured ask, on the input \
+                 its measurement used"
+            );
+            assert!(
+                ceiling + ask <= window,
+                "window {window}: {ceiling} + {ask} must fit"
+            );
+        }
+    }
+
     /// The clamp is IDENTITY wherever the window in force is the catalogued
     /// one, which is every registry model absent a narrowing. Without this the
     /// fix would silently cut a 128k-output model to its 20,000-token compaction
@@ -7016,8 +7128,13 @@ impl AgentEngine {
         let args_result = micro::compact_tool_call_args(&mut self.messages, &self.compact_config);
         // #1150 c4: the accumulated tool-RESULT ceiling, mirroring
         // `run_compaction` step 0b.
-        let results_result =
-            micro::bound_accumulated_tool_results(&mut self.messages, &self.compact_config);
+        let results_result = micro::bound_accumulated_tool_results(
+            &mut self.messages,
+            &self.compact_config,
+            // #1200 — the SAME resolved window every other boundary
+            // uses, learned narrowing included.
+            Some(self.compaction_window_now()),
+        );
         let result = micro::microcompact(&mut self.messages, &self.compact_config);
         if result.cleared_count + results_result.cleared_count > 0 {
             // Token-opt (diff-resend): clearing a tool-result body can remove
@@ -18386,15 +18503,16 @@ impl AgentEngine {
         self.autocompact_threshold_now() as u64
     }
 
-    /// The emergency hard-stop limit, as tokens, for this engine's config and
-    /// currently-active model (GH#635). Same `self.model` reasoning as
-    /// [`Self::autocompact_threshold_tokens`].
+    /// The emergency hard-stop limit, as tokens, on the window that will
+    /// actually serve this turn (GH#635, FerroxLabs/wayland#1210).
+    ///
+    /// #1210: this was the fourth window-derived boundary and the only one that
+    /// re-resolved the window from config + model alone, so the figure reported
+    /// to operators beside the NARROWED autocompact threshold could be 8x it.
+    /// It now shares `compaction_window_now` with the threshold, the pre-flight
+    /// ceiling and the smart-compact fraction, so the four cannot disagree.
     fn emergency_limit_tokens(&self) -> u64 {
-        emergency::emergency_limit(
-            &self.compact_config,
-            self.compat.provider_type(),
-            &self.model,
-        ) as u64
+        emergency::emergency_limit(&self.compact_config, self.compaction_window_now()) as u64
     }
 
     /// Record one completed LLM round-trip into the cache/compaction ledger.
@@ -18671,8 +18789,13 @@ impl AgentEngine {
         // bounds their SUM. Monotone + epoch-quantized like step 0, so a
         // bounded result never changes bytes again and the boundary advances
         // in batches rather than once per turn inside the cached prefix.
-        let results_result =
-            micro::bound_accumulated_tool_results(&mut self.messages, &self.compact_config);
+        let results_result = micro::bound_accumulated_tool_results(
+            &mut self.messages,
+            &self.compact_config,
+            // #1200 — the SAME resolved window every other boundary
+            // uses, learned narrowing included.
+            Some(self.compaction_window_now()),
+        );
         if results_result.cleared_count > 0 {
             self.output.emit_info(&format!(
                 "Dropped {} tool result(s) over the accumulated budget (~{} tokens freed)",
@@ -19059,23 +19182,17 @@ impl AgentEngine {
         }
 
         // 3. Emergency check (skip if autocompact just succeeded)
-        if !compacted
-            && emergency::is_at_emergency_limit(
-                self.compact_state.last_input_tokens,
-                &self.compact_config,
-                self.compat.provider_type(),
-                &self.model,
-            )
-        {
+        //
+        // #1210 — ONE window for the test and for the number the user is shown,
+        // and it is the narrowed one `emergency_limit_tokens` reports. Two
+        // calls used to resolve it independently from config + model; both were
+        // blind to a learned served window, so this backstop sat 8x above the
+        // ceiling that had already fired.
+        let emergency_limit = self.emergency_limit_tokens();
+        if !compacted && self.compact_state.last_input_tokens >= emergency_limit {
             return Err(AgentError::ContextTooLong {
                 input_tokens: self.compact_state.last_input_tokens,
-                // GH#635 — the reported limit comes from the SAME extracted
-                // function that just fired, not an inline re-derivation.
-                limit: emergency::emergency_limit(
-                    &self.compact_config,
-                    self.compat.provider_type(),
-                    &self.model,
-                ),
+                limit: emergency_limit as usize,
             });
         }
 

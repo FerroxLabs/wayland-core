@@ -24,15 +24,14 @@ pub const EMERGENCY_USER_MESSAGE: &str =
 /// This check is independent of `CompactConfig.enabled`; the emergency
 /// safety net is always active.
 ///
-/// `provider` / `model` are the POST-swap effective pair — see
+/// `window` is the window IN FORCE for the turn being checked — see
 /// [`emergency_limit`].
 pub fn is_at_emergency_limit(
     last_input_tokens: u64,
     config: &CompactConfig,
-    provider: &str,
-    model: &str,
+    window: usize,
 ) -> bool {
-    last_input_tokens as usize >= emergency_limit(config, provider, model)
+    last_input_tokens as usize >= emergency_limit(config, window)
 }
 
 /// The emergency hard-stop limit in tokens:
@@ -42,14 +41,25 @@ pub fn is_at_emergency_limit(
 /// as a distance from a real boundary rather than as a bare token count. It is
 /// the SAME arithmetic [`is_at_emergency_limit`] tests against — extracted, not
 /// re-derived, so the reported limit can never drift from the enforced one.
-/// GH#635 extends that guarantee to the DENOMINATOR: the window comes from
-/// [`CompactConfig::effective_context_window`] inside this function, so a
-/// reporter and an enforcer cannot end up on different windows.
+/// GH#635 extended that guarantee to the DENOMINATOR. FerroxLabs/wayland#1210
+/// finished the job: this function used to resolve the window ITSELF, from
+/// `config` + `provider` + `model`, which made it the ONE window-derived
+/// boundary that could never see FerroxLabs/wayland#1172's learned served
+/// window. On an unlisted model with a corroborated 8,192-token served window
+/// that produced an enforced autocompact threshold of 3,688 and a pre-flight
+/// ceiling of 5,053 - both narrowed - beside a reported and enforced emergency
+/// limit of 29,768, unnarrowed and 8x the window every other boundary was
+/// using. The exemption was never a decision; nothing anywhere wrote it down.
 ///
-/// `provider` / `model` must be the POST-swap effective pair (the same values
-/// fed to `size_output_cap` and the #255 pre-flight guard).
-pub fn emergency_limit(config: &CompactConfig, provider: &str, model: &str) -> usize {
-    config.emergency_limit_for_window(config.effective_context_window(provider, model))
+/// So the window is now an ARGUMENT. There is no resolution left inside this
+/// function to get wrong, and no second window a caller can reach: the engine
+/// passes `AgentEngine::compaction_window_now`, the same chokepoint
+/// `resolve_preflight_window` and `autocompact_threshold_now` are built on.
+///
+/// `window` must therefore be the window in force for the turn - the POST-swap
+/// effective window, narrowed by any corroborated served-window evidence.
+pub fn emergency_limit(config: &CompactConfig, window: usize) -> usize {
+    config.emergency_limit_for_window(window)
 }
 
 #[cfg(test)]
@@ -83,8 +93,7 @@ mod tests {
         assert!(!is_at_emergency_limit(
             190_000,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
     }
 
@@ -95,8 +104,7 @@ mod tests {
         assert!(is_at_emergency_limit(
             198_000,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
     }
 
@@ -107,8 +115,7 @@ mod tests {
         assert!(is_at_emergency_limit(
             197_000,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
     }
 
@@ -130,20 +137,21 @@ mod tests {
             ..default_config()
         };
         assert_eq!(
-            emergency_limit(&config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+            emergency_limit(
+                &config,
+                config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+            ),
             7_600
         );
         assert!(!is_at_emergency_limit(
             6_000,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
         assert!(is_at_emergency_limit(
             7_600,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
         // The hard stop is LAST: it must sit above the pre-flight ceiling, or
         // the guard it exists to back up can never fire.
@@ -156,8 +164,7 @@ mod tests {
         assert!(!is_at_emergency_limit(
             0,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
     }
 
@@ -172,20 +179,17 @@ mod tests {
         assert!(!is_at_emergency_limit(
             89_999,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
         assert!(is_at_emergency_limit(
             90_000,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
         assert!(is_at_emergency_limit(
             95_000,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
     }
 
@@ -199,8 +203,7 @@ mod tests {
         assert!(is_at_emergency_limit(
             198_000,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
     }
 
@@ -220,7 +223,10 @@ mod tests {
             emergency_buffer: 5_000,
             ..default_config()
         };
-        let limit = emergency_limit(&config, UNKNOWN_PROVIDER, UNKNOWN_MODEL);
+        let limit = emergency_limit(
+            &config,
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        );
         assert!(
             limit > 0,
             "a zero limit refuses the first turn of every session"
@@ -229,22 +235,19 @@ mod tests {
         assert!(!is_at_emergency_limit(
             1,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
         assert!(is_at_emergency_limit(
             917,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
         // An empty context is no longer at the hard stop, which is the whole
         // point: `0 >= 0` used to be true and refuse the session on turn one.
         assert!(!is_at_emergency_limit(
             0,
             &config,
-            UNKNOWN_PROVIDER,
-            UNKNOWN_MODEL
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
         ));
     }
 
@@ -265,20 +268,21 @@ mod tests {
         // outranks the registry.
         let config = CompactConfig::default();
         assert_eq!(
-            emergency_limit(&config, "openai-chatgpt", "gpt-5.4"),
+            emergency_limit(
+                &config,
+                config.effective_context_window("openai-chatgpt", "gpt-5.4")
+            ),
             1_047_000
         );
         assert!(!is_at_emergency_limit(
             197_000,
             &config,
-            "openai-chatgpt",
-            "gpt-5.4"
+            config.effective_context_window("openai-chatgpt", "gpt-5.4")
         ));
         assert!(is_at_emergency_limit(
             1_047_000,
             &config,
-            "openai-chatgpt",
-            "gpt-5.4"
+            config.effective_context_window("openai-chatgpt", "gpt-5.4")
         ));
     }
 
@@ -296,8 +300,15 @@ mod tests {
         // outranks the registry.
         let config = CompactConfig::default();
         // 128_000 − 3_000
-        assert_eq!(emergency_limit(&config, "openai", "gpt-4o"), 125_000);
-        assert!(is_at_emergency_limit(126_000, &config, "openai", "gpt-4o"));
+        assert_eq!(
+            emergency_limit(&config, config.effective_context_window("openai", "gpt-4o")),
+            125_000
+        );
+        assert!(is_at_emergency_limit(
+            126_000,
+            &config,
+            config.effective_context_window("openai", "gpt-4o")
+        ));
     }
 
     /// An explicitly configured window outranks the registry here too.
@@ -313,14 +324,16 @@ mod tests {
             ..default_config()
         };
         assert_eq!(
-            emergency_limit(&config, "openai-chatgpt", "gpt-5.4"),
+            emergency_limit(
+                &config,
+                config.effective_context_window("openai-chatgpt", "gpt-5.4")
+            ),
             197_000
         );
         assert!(is_at_emergency_limit(
             198_000,
             &config,
-            "openai-chatgpt",
-            "gpt-5.4"
+            config.effective_context_window("openai-chatgpt", "gpt-5.4")
         ));
     }
 
@@ -338,7 +351,10 @@ mod tests {
         use crate::compact::auto::autocompact_threshold;
         let config = default_config();
         let threshold = autocompact_threshold(&config, "openai-chatgpt", "gpt-5.4");
-        let limit = emergency_limit(&config, "openai-chatgpt", "gpt-5.4");
+        let limit = emergency_limit(
+            &config,
+            config.effective_context_window("openai-chatgpt", "gpt-5.4"),
+        );
         assert!(
             threshold < limit,
             "threshold {threshold} must stay below the hard stop {limit}"

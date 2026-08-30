@@ -5,7 +5,7 @@ use crate::types::SkillSource;
 
 // Skill listing gets 1% of the context window (in characters)
 pub const SKILL_BUDGET_CONTEXT_PERCENT: f64 = 0.01;
-pub const CHARS_PER_TOKEN: usize = 4;
+pub use wcore_config::compact::CHARS_PER_TOKEN;
 /// Fallback listing budget when the caller does not know the context window.
 ///
 /// FerroxLabs/wayland#1150 deleted the fabricated 200,000-token window from

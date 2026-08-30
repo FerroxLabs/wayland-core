@@ -35,7 +35,11 @@ fn tc_2_5_01_below_emergency_threshold() {
     // 190k < 197k → false
     let config = arithmetic_config();
     assert!(
-        !is_at_emergency_limit(190_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        !is_at_emergency_limit(
+            190_000,
+            &config,
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+        ),
         "190k tokens should be below the 197k emergency limit"
     );
 }
@@ -47,7 +51,11 @@ fn tc_2_5_02_above_emergency_threshold() {
     // 198k >= 197k → true
     let config = arithmetic_config();
     assert!(
-        is_at_emergency_limit(198_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        is_at_emergency_limit(
+            198_000,
+            &config,
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+        ),
         "198k tokens should exceed the 197k emergency limit"
     );
 }
@@ -59,7 +67,11 @@ fn tc_2_5_03_at_exact_emergency_threshold() {
     // 197k >= 197k → true
     let config = arithmetic_config();
     assert!(
-        is_at_emergency_limit(197_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        is_at_emergency_limit(
+            197_000,
+            &config,
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+        ),
         "197k tokens should trigger at exactly the emergency limit"
     );
 }
@@ -82,11 +94,19 @@ fn tc_2_5_04_small_context_window() {
         ..CompactConfig::default()
     };
     assert!(
-        !is_at_emergency_limit(6_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        !is_at_emergency_limit(
+            6_000,
+            &config,
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+        ),
         "6k is below the scaled 7,600 hard stop on an 8k window"
     );
     assert!(
-        is_at_emergency_limit(7_600, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        is_at_emergency_limit(
+            7_600,
+            &config,
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+        ),
         "an 8k context window must still have a reachable hard stop"
     );
     assert!(
@@ -105,7 +125,11 @@ fn emergency_check_ignores_enabled_flag() {
         ..CompactConfig::default()
     };
     assert!(
-        is_at_emergency_limit(198_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        is_at_emergency_limit(
+            198_000,
+            &config,
+            config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+        ),
         "emergency check must fire regardless of the enabled flag"
     );
 }
@@ -135,8 +159,11 @@ fn autocompact_fires_before_emergency() {
     let token_count: u64 = 170_000;
     let autocompact_triggers =
         should_autocompact(token_count, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL);
-    let emergency_triggers =
-        is_at_emergency_limit(token_count, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL);
+    let emergency_triggers = is_at_emergency_limit(
+        token_count,
+        &config,
+        config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+    );
 
     assert!(
         autocompact_triggers && !emergency_triggers,
@@ -162,8 +189,7 @@ fn both_trigger_near_limit() {
     assert!(is_at_emergency_limit(
         token_count,
         &config,
-        UNKNOWN_PROVIDER,
-        UNKNOWN_MODEL
+        config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
     ));
 }
 
@@ -184,11 +210,18 @@ fn gh635_large_window_model_is_not_stopped_at_the_200k_default() {
     // registry.
     let config = CompactConfig::default();
     assert!(
-        !is_at_emergency_limit(197_000, &config, "openai-chatgpt", "gpt-5.4"),
+        !is_at_emergency_limit(
+            197_000,
+            &config,
+            config.effective_context_window("openai-chatgpt", "gpt-5.4")
+        ),
         "a 197k session on a 1,050,000-token model has ~850k tokens of headroom"
     );
     assert_eq!(
-        emergency_limit(&config, "openai-chatgpt", "gpt-5.4"),
+        emergency_limit(
+            &config,
+            config.effective_context_window("openai-chatgpt", "gpt-5.4")
+        ),
         1_047_000,
         "1_050_000 - 3_000"
     );
@@ -196,8 +229,7 @@ fn gh635_large_window_model_is_not_stopped_at_the_200k_default() {
     assert!(is_at_emergency_limit(
         1_047_000,
         &config,
-        "openai-chatgpt",
-        "gpt-5.4"
+        config.effective_context_window("openai-chatgpt", "gpt-5.4")
     ));
 }
 
@@ -216,11 +248,18 @@ fn gh635_explicit_operator_window_is_honoured_over_the_registry() {
         ..CompactConfig::default()
     };
     assert!(
-        is_at_emergency_limit(198_000, &config, "openai-chatgpt", "gpt-5.4"),
+        is_at_emergency_limit(
+            198_000,
+            &config,
+            config.effective_context_window("openai-chatgpt", "gpt-5.4")
+        ),
         "an operator who pinned 200k must still be stopped at 197k"
     );
     assert_eq!(
-        emergency_limit(&config, "openai-chatgpt", "gpt-5.4"),
+        emergency_limit(
+            &config,
+            config.effective_context_window("openai-chatgpt", "gpt-5.4")
+        ),
         197_000
     );
 }

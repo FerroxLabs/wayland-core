@@ -525,9 +525,13 @@ pub trait Tool: Send + Sync {
         None
     }
 
-    /// Max result size in chars before truncation
+    /// Max result size in chars before truncation.
+    ///
+    /// The figure lives in `wcore_config` because the accumulated-tool-result
+    /// ceiling is sized against it (FerroxLabs/wayland#1200); two copies of it
+    /// would silently unsize that ceiling.
     fn max_result_size(&self) -> usize {
-        50_000
+        wcore_config::compact::MAX_TOOL_RESULT_BYTES
     }
 
     /// Tool category for protocol classification

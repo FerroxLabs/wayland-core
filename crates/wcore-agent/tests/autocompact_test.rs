@@ -792,7 +792,11 @@ fn an_operator_set_small_window_still_has_a_reachable_threshold() {
     // Ordering invariant: autocompact must get its chance before the emergency
     // hard stop refuses the request outright.
     assert!(
-        threshold < emergency_limit(&config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        threshold
+            < emergency_limit(
+                &config,
+                config.effective_context_window(UNKNOWN_PROVIDER, UNKNOWN_MODEL)
+            ),
         "autocompact ({threshold}) must fire below the emergency limit"
     );
 }

@@ -590,6 +590,83 @@ impl CompactConfig {
         window.saturating_sub(self.scaled_reserves(window).emergency_buffer)
     }
 
+    /// FerroxLabs/wayland#1200 — the accumulated tool-result ceiling AT
+    /// `window`, or today's flat constants when no window is known.
+    ///
+    /// [`ToolResultsConfig::total_budget_bytes`] and
+    /// [`ToolResultsConfig::keep_recent`] are ABSOLUTE figures, and at their
+    /// shipped defaults their worst case is 120,000 + 4 x
+    /// [`MAX_TOOL_RESULT_BYTES`] = 320,000 bytes, about 80,000 tokens - roughly
+    /// 2.4x the entire 32,768-token window this release assumes for an unlisted
+    /// model. The pass's guarantee ("carried bytes stop growing with the
+    /// session") was true; the guarantee a 32k user needs ("carried bytes fit
+    /// the window") was neither claimed nor delivered.
+    ///
+    /// Two terms, so both are bounded here. Bounding only the budget leaves the
+    /// protected tail dominating at a small window, which is why #1150 c4 left
+    /// this open rather than half-closing it:
+    ///
+    /// 1. **The budget** is capped at half the bytes the pre-flight guard will
+    ///    actually admit ([`Self::input_ceiling_for_window`] x
+    ///    [`CHARS_PER_TOKEN`]). The ceiling, not the raw window, because
+    ///    carried results are INPUT and the ceiling is the boundary that admits
+    ///    input; a bound the guard aborts past is not a bound.
+    /// 2. **The protected tail** keeps its COUNT and gains a BYTE cap, the
+    ///    other half. Capping the count instead would drop the tail to one
+    ///    result on any window under ~100k even when the results are small,
+    ///    and a stubbed working set is how #1172's re-read loop starts. Capping
+    ///    the bytes leaves a normal session's four results all protected and
+    ///    bites only on the pathological one this ticket measured.
+    ///
+    /// The newest result is protected unconditionally at the use site, so the
+    /// worst case carries one result at the ingestion cap however small the
+    /// window is - see [`Self::worst_case_carried_tool_result_bytes`] and the
+    /// named gap recorded with it.
+    ///
+    /// Identity above a ~103,000-token window, so no large-window sizing moves.
+    pub fn tool_result_bounds(&self, window: Option<usize>) -> ToolResultBounds {
+        let tr = &self.tool_results;
+        let Some(window) = window else {
+            return ToolResultBounds {
+                total_budget_bytes: tr.total_budget_bytes,
+                protected_tail_bytes: None,
+                keep_recent: tr.keep_recent,
+            };
+        };
+        let admissible = self
+            .input_ceiling_for_window(window)
+            .saturating_mul(CHARS_PER_TOKEN);
+        let half = admissible / 2;
+        ToolResultBounds {
+            total_budget_bytes: tr.total_budget_bytes.min(half),
+            protected_tail_bytes: Some(half),
+            keep_recent: tr.keep_recent,
+        }
+    }
+
+    /// #1200 c2 — the WORST-CASE bytes a bounded conversation can still carry
+    /// in tool results, stated as the arithmetic the ticket stated it in:
+    /// `total_budget_bytes + keep_recent x max_result_size`.
+    ///
+    /// The tail term is `min(cap, keep_recent x MAX_TOOL_RESULT_BYTES)` raised
+    /// to at least [`MAX_TOOL_RESULT_BYTES`], because
+    /// `bound_accumulated_tool_results` protects the newest result
+    /// unconditionally. NAMED GAP: below a window whose admissible input is
+    /// under [`MAX_TOOL_RESULT_BYTES`] (about 25,000 tokens of ceiling), that
+    /// one result is the binding term and it is NOT window-derived - the
+    /// per-result ingestion cap lives in `wcore_tools::Tool::max_result_size`
+    /// and is a fixed 50,000 chars. Nothing here can close that.
+    pub fn worst_case_carried_tool_result_bytes(&self, window: Option<usize>) -> usize {
+        let b = self.tool_result_bounds(window);
+        let tail = match b.protected_tail_bytes {
+            Some(cap) => cap
+                .min(b.keep_recent.saturating_mul(MAX_TOOL_RESULT_BYTES))
+                .max(MAX_TOOL_RESULT_BYTES),
+            None => b.keep_recent.saturating_mul(MAX_TOOL_RESULT_BYTES),
+        };
+        b.total_budget_bytes.saturating_add(tail)
+    }
+
     /// #1179 — is `window` big enough for compaction to be worth pointing at?
     ///
     /// Both boundaries must clear core's own [`BASELINE_TURN_TOKENS`]. A
@@ -685,6 +762,19 @@ impl CompactConfig {
 /// A distinct type rather than a tuple so a caller cannot silently swap two of
 /// three same-typed fields — the failure would be a boundary that is merely
 /// wrong rather than one that does not compile.
+/// FerroxLabs/wayland#1200 — the accumulated tool-result ceiling in force for
+/// one window. See [`CompactConfig::tool_result_bounds`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolResultBounds {
+    /// Byte ceiling on the SUM of every tool result outside the protected tail.
+    pub total_budget_bytes: usize,
+    /// Byte ceiling on the protected tail itself, or `None` when no window is
+    /// known and the tail is bounded by its COUNT alone (today's behaviour).
+    pub protected_tail_bytes: Option<usize>,
+    /// Newest tool results eligible for protection, as a count.
+    pub keep_recent: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScaledReserves {
     /// Tokens held back for the model's output.
@@ -726,6 +816,19 @@ impl Default for CompactConfig {
 }
 
 // --- Default value functions ---
+
+/// Bytes per token, at the char/4 heuristic every estimator in the workspace
+/// uses. Owned HERE because wcore-config sits below every consumer:
+/// `wcore_skills::prompt::CHARS_PER_TOKEN` re-exports it rather than restating
+/// it, which is what stopped the skills budget drifting onto a different
+/// window (FerroxLabs/wayland#1199).
+pub const CHARS_PER_TOKEN: usize = 4;
+
+/// Worst-case bytes a SINGLE tool result can carry: the per-result truncation
+/// cap applied at ingestion. `wcore_tools::Tool::max_result_size` returns this,
+/// so the ceiling arithmetic in [`CompactConfig::tool_result_bounds`] and the
+/// cap it is sized against cannot drift apart (FerroxLabs/wayland#1200).
+pub const MAX_TOOL_RESULT_BYTES: usize = 50_000;
 
 fn default_output_reserve() -> usize {
     20_000

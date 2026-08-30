@@ -647,6 +647,7 @@ fn bounded_result_stub(name: &str, original_bytes: usize) -> String {
 pub fn bound_accumulated_tool_results(
     messages: &mut [Message],
     config: &CompactConfig,
+    window: Option<usize>,
 ) -> MicrocompactResult {
     let none = MicrocompactResult {
         cleared_count: 0,
@@ -656,6 +657,11 @@ pub fn bound_accumulated_tool_results(
     if !config.enabled || !tr.enabled {
         return none;
     }
+    // FerroxLabs/wayland#1200 — the ceiling in force for the window this turn
+    // is actually being sized against. `None` keeps the flat constants, which
+    // is what every caller that has no window gets.
+    let bounds = config.tool_result_bounds(window);
+    let total_budget_bytes = bounds.total_budget_bytes;
 
     let tool_names = build_tool_name_map(messages);
 
@@ -670,12 +676,31 @@ pub fn bound_accumulated_tool_results(
             }
         }
     }
-    if total <= tr.total_budget_bytes {
+    if total <= total_budget_bytes {
         return none;
     }
 
     // Candidates: not already stubbed, and outside the protected tail.
-    let protected = tr.keep_recent.min(all.len());
+    //
+    // #1200 — the tail is bounded by BYTES as well as by count when a window is
+    // known. Its count term is what made the worst case 4 x 50,000 bytes on a
+    // window that holds 32,768 tokens. The NEWEST result is protected whatever
+    // its size: stubbing what the model is about to reason over is how the
+    // re-read loop #1172 reports begins, and one result at the ingestion cap is
+    // a bound this crate cannot lower.
+    let mut protected = bounds.keep_recent.min(all.len());
+    if let Some(cap) = bounds.protected_tail_bytes {
+        while protected > 1 {
+            let tail: usize = all[all.len() - protected..]
+                .iter()
+                .map(|&(_, _, l, _)| l)
+                .sum();
+            if tail <= cap {
+                break;
+            }
+            protected -= 1;
+        }
+    }
     let candidates: Vec<(usize, usize, usize)> = all[..all.len() - protected]
         .iter()
         .filter(|(_, _, _, stubbed)| !*stubbed)
@@ -689,7 +714,7 @@ pub fn bound_accumulated_tool_results(
     let mut running = total;
     let mut need = 0usize;
     for &(mi, bi, len) in &candidates {
-        if running <= tr.total_budget_bytes {
+        if running <= total_budget_bytes {
             break;
         }
         let name = result_tool_name(messages, mi, bi, &tool_names);
@@ -2068,8 +2093,8 @@ mod tests {
             "precondition: the long session must start far over the ceiling"
         );
 
-        let result = bound_accumulated_tool_results(&mut short, &config);
-        bound_accumulated_tool_results(&mut long, &config);
+        let result = bound_accumulated_tool_results(&mut short, &config, None);
+        bound_accumulated_tool_results(&mut long, &config, None);
 
         assert!(result.cleared_count > 0, "the ceiling must have bitten");
         assert!(
@@ -2105,7 +2130,7 @@ mod tests {
         let keep = config.tool_results.keep_recent;
         let mut msgs = session_with_results(20, 50_000);
 
-        bound_accumulated_tool_results(&mut msgs, &config);
+        bound_accumulated_tool_results(&mut msgs, &config, None);
 
         let bodies: Vec<&String> = msgs
             .iter()
@@ -2131,7 +2156,7 @@ mod tests {
         let mut msgs = session_with_results(4, 1_000);
         let before = msgs.clone();
 
-        let result = bound_accumulated_tool_results(&mut msgs, &config);
+        let result = bound_accumulated_tool_results(&mut msgs, &config, None);
 
         assert_eq!(result.cleared_count, 0);
         assert_eq!(
@@ -2148,10 +2173,10 @@ mod tests {
     fn the_ceiling_is_byte_stable_on_a_second_pass() {
         let config = default_config();
         let mut msgs = session_with_results(20, 50_000);
-        bound_accumulated_tool_results(&mut msgs, &config);
+        bound_accumulated_tool_results(&mut msgs, &config, None);
         let after_first = serde_json::to_string(&msgs).unwrap();
 
-        let second = bound_accumulated_tool_results(&mut msgs, &config);
+        let second = bound_accumulated_tool_results(&mut msgs, &config, None);
 
         assert_eq!(
             second.cleared_count, 0,
@@ -2172,7 +2197,7 @@ mod tests {
         let epoch = config.tool_results.epoch_results;
         let mut msgs = session_with_results(20, 50_000);
 
-        let first = bound_accumulated_tool_results(&mut msgs, &config);
+        let first = bound_accumulated_tool_results(&mut msgs, &config, None);
 
         assert!(
             first.cleared_count > 0,
@@ -2201,7 +2226,7 @@ mod tests {
             msgs.push(user_msg(vec![tool_result_block(&id, &"y".repeat(50_000))]));
         }
 
-        bound_accumulated_tool_results(&mut msgs, &config);
+        bound_accumulated_tool_results(&mut msgs, &config, None);
 
         assert!(
             total_result_bytes(&msgs) <= ceiling,
@@ -2217,7 +2242,7 @@ mod tests {
         let mut msgs = session_with_results(20, 50_000);
         let before = total_result_bytes(&msgs);
 
-        let result = bound_accumulated_tool_results(&mut msgs, &config);
+        let result = bound_accumulated_tool_results(&mut msgs, &config, None);
 
         assert_eq!(result.cleared_count, 0);
         assert_eq!(total_result_bytes(&msgs), before);
