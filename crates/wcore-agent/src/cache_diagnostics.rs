@@ -109,7 +109,34 @@ pub enum CacheBreakCause {
         first_divergent_index: usize,
     },
     TtlExpiry,
+    /// #1206 — the cache did not serve this turn, and nothing we can observe
+    /// explains it, but the numbers positively REFUTE the server: `cache_read`
+    /// is unchanged from the previous turn, so nothing was dropped between the
+    /// two. [`CacheBreakCause::TtlExpiry`] is a claim about the server's TTL;
+    /// making it here would blame the provider for a turn on which the
+    /// provider lost nothing. "We do not know" is the only honest reading, and
+    /// it maps to `InvalidationCause::Unknown` rather than to `expired`.
+    Unattributed,
     FirstRequest,
+}
+
+/// #1206 — why the [`CacheBreakCause::TtlExpiry`] fall-through was rejected on
+/// the turn just checked. Carried from the diagnostic half to the alert half so
+/// the two cannot disagree about the same turn — the measured #1206 turn
+/// produced `PartialMiss { cause: TtlExpiry }` AND an alert carrying
+/// `TtlExpiry`, and a fix that silenced only one of them would leave the other
+/// certifying the same falsehood.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefutedTtl {
+    /// The prefix came back token-for-token AND was already carrying the turn
+    /// on its own last turn. The low ratio is this turn's NEW input, not a
+    /// break: nothing was invalidated, so there is nothing to report.
+    PrefixReused,
+    /// `cache_read` is unchanged, so no invalidation can be inferred — but the
+    /// prefix was not serving the session last turn either, so this is still a
+    /// finding. It is reported with no cause named rather than with a false
+    /// one (the #559 dead-flat `cache_read = 192` signature lives here).
+    Unattributed,
 }
 
 /// Layer E1 — warm-session cache-health warn threshold: a warm round-trip
@@ -162,6 +189,12 @@ pub struct CacheBreakDetector {
     /// `cache_health_warn` on every warm turn (mirrors the
     /// `openai_no_false_alarm` guard in [`Self::compute_diagnostic`]).
     seen_cache_tokens: bool,
+    /// #1206 — how the `TtlExpiry` fall-through was refuted on the turn most
+    /// recently passed to [`check_response`], if it was. `check_cache_health`
+    /// runs AFTER `prev_stats` has already rotated to this turn's numbers, so
+    /// it cannot re-derive the comparison itself; it reads the verdict the
+    /// diagnostic half reached instead.
+    last_refutation: Option<RefutedTtl>,
 }
 
 impl CacheBreakDetector {
@@ -172,6 +205,7 @@ impl CacheBreakDetector {
             prev_stats: None,
             round_trips: 0,
             seen_cache_tokens: false,
+            last_refutation: None,
         }
     }
 
@@ -223,7 +257,10 @@ impl CacheBreakDetector {
     /// Returns `None` if no snapshot was recorded before the call.
     pub fn check_response(&mut self, stats: CacheStats) -> Option<CacheDiagnostic> {
         let current = self.current_snapshot.as_ref()?;
-        let diagnostic = self.compute_diagnostic(current, &stats);
+        let (diagnostic, refutation) = self.compute_diagnostic(current, &stats);
+        // #1206 — set on EVERY turn, including to `None`, so the alert half can
+        // never read a verdict belonging to an earlier turn.
+        self.last_refutation = refutation;
         // Layer E1 — track warmth for check_cache_health.
         self.round_trips += 1;
         if stats.cache_read_tokens > 0 || stats.cache_creation_tokens > 0 {
@@ -260,9 +297,17 @@ impl CacheBreakDetector {
         // set on the engine path (`check_response` returns `None` without it);
         // an unrecorded request has no previous turn to diverge from, which is
         // exactly what `FirstRequest` means.
-        let cause = match self.current_snapshot.as_ref() {
-            Some(current) => self.attribute_cause(current),
-            None => CacheBreakCause::FirstRequest,
+        let cause = match self.last_refutation {
+            // #1206 — the diagnostic half established that this turn's prefix
+            // came back unchanged and was already carrying the session. The
+            // ratio fell because the NEW input grew, which is not a cache
+            // health finding at all.
+            Some(RefutedTtl::PrefixReused) => return None,
+            Some(RefutedTtl::Unattributed) => CacheBreakCause::Unattributed,
+            None => match self.current_snapshot.as_ref() {
+                Some(current) => self.attribute_cause(current),
+                None => CacheBreakCause::FirstRequest,
+            },
         };
         Some(CacheHealthAlert {
             round_trip: self.round_trips,
@@ -273,10 +318,16 @@ impl CacheBreakDetector {
         })
     }
 
-    fn compute_diagnostic(&self, current: &PromptSnapshot, stats: &CacheStats) -> CacheDiagnostic {
+    /// Returns the diagnostic, plus the #1206 refutation that produced it when
+    /// the `TtlExpiry` fall-through was rejected.
+    fn compute_diagnostic(
+        &self,
+        current: &PromptSnapshot,
+        stats: &CacheStats,
+    ) -> (CacheDiagnostic, Option<RefutedTtl>) {
         let Some(prev) = &self.prev_stats else {
             // First request — no previous data to compare
-            return CacheDiagnostic::Healthy { hit_rate: 0.0 };
+            return (CacheDiagnostic::Healthy { hit_rate: 0.0 }, None);
         };
 
         // If provider doesn't support caching (both turns have 0 cache tokens),
@@ -286,18 +337,13 @@ impl CacheBreakDetector {
             && stats.cache_read_tokens == 0
             && stats.cache_creation_tokens == 0
         {
-            return CacheDiagnostic::Healthy { hit_rate: 0.0 };
+            return (CacheDiagnostic::Healthy { hit_rate: 0.0 }, None);
         }
 
         let prev_had_cache = prev.cache_read_tokens > 0 || prev.cache_creation_tokens > 0;
 
-        // Full miss: had cache before, now read tokens dropped to 0
-        if prev_had_cache && stats.cache_read_tokens == 0 {
-            let cause = self.attribute_cause(current);
-            return CacheDiagnostic::FullMiss { cause };
-        }
-
-        // Calculate hit rate
+        // Calculate hit rate. Computed before the full-miss arm because every
+        // arm below can now resolve to `Healthy` (#1206) and therefore needs it.
         let total_input_tokens = stats.total_input_tokens();
         let hit_rate = if total_input_tokens > 0 {
             stats.cache_read_tokens as f64 / total_input_tokens as f64
@@ -305,12 +351,29 @@ impl CacheBreakDetector {
             0.0
         };
 
+        // Full miss: had cache before, now read tokens dropped to 0
+        if prev_had_cache && stats.cache_read_tokens == 0 {
+            let (cause, refuted) = self.attribute_break(current, stats);
+            if refuted == Some(RefutedTtl::PrefixReused) {
+                return (CacheDiagnostic::Healthy { hit_rate }, refuted);
+            }
+            return (CacheDiagnostic::FullMiss { cause }, refuted);
+        }
+
         // Partial miss: cache_read dropped >5% compared to previous
         if prev.cache_read_tokens > 0 {
             let drop_pct = 1.0 - (stats.cache_read_tokens as f64 / prev.cache_read_tokens as f64);
             if drop_pct > 0.05 {
-                let cause = self.attribute_cause(current);
-                return CacheDiagnostic::PartialMiss { hit_rate, cause };
+                // The #1206 shape cannot reach this arm — it requires
+                // `cache_read` to have FALLEN by more than 5%, and the shape is
+                // `cache_read` unchanged. Routed through the same attribution
+                // anyway so there is one place where `TtlExpiry` is decided,
+                // rather than three that have to be kept in agreement.
+                let (cause, refuted) = self.attribute_break(current, stats);
+                if refuted == Some(RefutedTtl::PrefixReused) {
+                    return (CacheDiagnostic::Healthy { hit_rate }, refuted);
+                }
+                return (CacheDiagnostic::PartialMiss { hit_rate, cause }, refuted);
             }
         }
 
@@ -327,11 +390,83 @@ impl CacheBreakDetector {
             && total_input_tokens > 0
             && hit_rate < CACHE_HEALTH_WARN_RATIO
         {
-            let cause = self.attribute_cause(current);
-            return CacheDiagnostic::PartialMiss { hit_rate, cause };
+            let (cause, refuted) = self.attribute_break(current, stats);
+            if refuted == Some(RefutedTtl::PrefixReused) {
+                return (CacheDiagnostic::Healthy { hit_rate }, refuted);
+            }
+            return (CacheDiagnostic::PartialMiss { hit_rate, cause }, refuted);
         }
 
-        CacheDiagnostic::Healthy { hit_rate }
+        (CacheDiagnostic::Healthy { hit_rate }, None)
+    }
+
+    /// #1206 — attribute a break, and reject the `TtlExpiry` fall-through when
+    /// this turn's numbers refute it.
+    ///
+    /// `TtlExpiry` is not a shrug: it is a positive claim that the SERVER
+    /// dropped the cached prefix. A turn whose `cache_read` is unchanged from
+    /// the previous turn's lost nothing — the provider handed back exactly the
+    /// same number of cached tokens it handed back before — so when the ratio
+    /// fell it fell because this turn's NEW input grew. Measured on the real
+    /// module: three turns at `cache_read = 40,000 / input = 500` then one at
+    /// `cache_read = 40,000 / input = 150,000` printed
+    /// `PartialMiss { hit_rate: 0.2105, cause: TtlExpiry }` and wrote a durable
+    /// `expired` invalidation for a turn on which the whole prefix was read
+    /// back.
+    ///
+    /// Only the fall-through is refuted. A NAMED cause (model, system prompt,
+    /// tools, a mutated message) is evidence we produced ourselves and it
+    /// outranks this arithmetic — the #1166 attribution stands untouched.
+    fn attribute_break(
+        &self,
+        current: &PromptSnapshot,
+        stats: &CacheStats,
+    ) -> (CacheBreakCause, Option<RefutedTtl>) {
+        let cause = self.attribute_cause(current);
+        if cause != CacheBreakCause::TtlExpiry {
+            return (cause, None);
+        }
+        match self.refute_ttl(stats) {
+            Some(RefutedTtl::PrefixReused) => (cause, Some(RefutedTtl::PrefixReused)),
+            Some(RefutedTtl::Unattributed) => (
+                CacheBreakCause::Unattributed,
+                Some(RefutedTtl::Unattributed),
+            ),
+            None => (cause, None),
+        }
+    }
+
+    /// #1206 — is the `TtlExpiry` claim refuted by this turn's own numbers, and
+    /// if so, does anything remain to report?
+    ///
+    /// The refutation is exactly the ticket's discriminator: `cache_read`
+    /// unchanged from the previous turn while total input grows. What is LEFT
+    /// after it is the part the ticket does not decide, and it matters: the
+    /// #559 leader session sat at `cache_read = 192` flat while its input grew
+    /// every turn, which is the same shape and is emphatically not healthy. So
+    /// the previous turn's own hit ratio breaks the tie — a prefix that was
+    /// carrying the session last turn and came back intact is reuse, and one
+    /// that was already failing to carry it is still a finding, just not the
+    /// server's fault.
+    fn refute_ttl(&self, stats: &CacheStats) -> Option<RefutedTtl> {
+        let prev = self.prev_stats.as_ref()?;
+        if stats.cache_read_tokens != prev.cache_read_tokens {
+            return None;
+        }
+        let prev_total = prev.total_input_tokens();
+        if stats.total_input_tokens() <= prev_total {
+            return None;
+        }
+        let prev_hit_rate = if prev_total > 0 {
+            prev.cache_read_tokens as f64 / prev_total as f64
+        } else {
+            0.0
+        };
+        if prev_hit_rate >= CACHE_HEALTH_WARN_RATIO {
+            Some(RefutedTtl::PrefixReused)
+        } else {
+            Some(RefutedTtl::Unattributed)
+        }
     }
 
     /// Determine what caused the cache break by comparing prev vs current snapshots.
@@ -1115,6 +1250,167 @@ mod tests {
             .check_cache_health(&stats)
             .expect("warm turn with a dead cache must fire cache_health_warn");
         assert_eq!(alert.cause, CacheBreakCause::ModelChanged);
+    }
+
+    // --- #1206: the TtlExpiry fall-through is refuted, not widened ---
+
+    /// The measured #1206 turn, driven verbatim: three healthy turns at
+    /// `cache_read = 40,000 / input = 500`, then one at `cache_read = 40,000`
+    /// (the same full prefix, still read back) `/ input = 150,000`.
+    ///
+    /// Against today's floor this printed
+    /// `PartialMiss { hit_rate: 0.2105, cause: TtlExpiry }` plus an alert
+    /// carrying the same cause, and `cause_of_diagnostic` turned that into a
+    /// durable `expired` invalidation. Nothing was invalidated: `cache_read` is
+    /// identical to the previous turn's, so the provider dropped nothing.
+    #[test]
+    fn a_prefix_read_back_whole_under_a_flood_of_new_input_is_not_ttl_expiry() {
+        let mut detector = CacheBreakDetector::new();
+        for _ in 0..3 {
+            detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+            detector.check_response(CacheStats {
+                input_tokens: 500,
+                cache_read_tokens: 40_000,
+                cache_creation_tokens: 0,
+            });
+        }
+
+        let stats = CacheStats {
+            input_tokens: 150_000,
+            cache_read_tokens: 40_000,
+            cache_creation_tokens: 0,
+        };
+        detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+        let diag = detector.check_response(stats.clone()).unwrap();
+        assert!(
+            matches!(diag, CacheDiagnostic::Healthy { .. }),
+            "the whole prefix came back; got {diag:?}"
+        );
+        assert_eq!(
+            detector.check_cache_health(&stats),
+            None,
+            "the alert half must not certify what the diagnostic half just refuted"
+        );
+    }
+
+    /// The other half of the same discriminator, and the reason it is not just
+    /// "return Healthy". The #559 leader session sat at `cache_read = 192` flat
+    /// while its input grew every turn — the SAME shape — and it was a dead
+    /// cache, which is the whole reason the #1166 floor exists. The turn stays
+    /// a finding; only the false blame on the server is removed.
+    #[test]
+    fn a_dead_flat_cache_under_growing_input_is_still_a_finding_with_no_named_cause() {
+        let mut detector = CacheBreakDetector::new();
+        for i in 0..3u64 {
+            detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+            detector.check_response(CacheStats {
+                input_tokens: 6_000 + i * 1_000,
+                cache_read_tokens: 192,
+                cache_creation_tokens: 0,
+            });
+        }
+
+        let stats = CacheStats {
+            input_tokens: 9_000,
+            cache_read_tokens: 192,
+            cache_creation_tokens: 0,
+        };
+        detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+        let diag = detector.check_response(stats.clone()).unwrap();
+        match diag {
+            CacheDiagnostic::PartialMiss { cause, .. } => assert_eq!(
+                cause,
+                CacheBreakCause::Unattributed,
+                "a cache that never worked is still a finding, but the server did not lose it"
+            ),
+            other => panic!("expected the floor to still fire, got {other:?}"),
+        }
+        assert_eq!(
+            detector.check_cache_health(&stats).map(|a| a.cause),
+            Some(CacheBreakCause::Unattributed),
+            "the alert must carry the same cause the diagnostic reached"
+        );
+    }
+
+    /// The SECOND instance of the #1206 shape, and the one a fix that only
+    /// touched the floor would leave open: the full-miss arm attributed bare
+    /// too. A turn that read nothing back, on a session whose previous turn
+    /// also read nothing (it only WROTE cache), has an unchanged `cache_read`
+    /// and therefore cannot be evidence that the server expired anything.
+    #[test]
+    fn a_full_miss_whose_cache_read_never_moved_is_not_the_servers_fault() {
+        let mut detector = CacheBreakDetector::new();
+
+        detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+        detector.check_response(CacheStats {
+            input_tokens: 10_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 9_000,
+        });
+
+        detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+        let diag = detector
+            .check_response(CacheStats {
+                input_tokens: 40_000,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            })
+            .unwrap();
+
+        match diag {
+            CacheDiagnostic::FullMiss { cause } => assert_eq!(
+                cause,
+                CacheBreakCause::Unattributed,
+                "cache_read went 0 -> 0: nothing was dropped, so nothing expired"
+            ),
+            other => panic!("expected FullMiss, got {other:?}"),
+        }
+    }
+
+    /// #1206 c4 — a case that sits ON the floor's boundary rather than far from
+    /// it. The two existing healthy tests run at ratios of ~0.99 and 0.8, so
+    /// neither would notice the threshold moving. These two turns differ by one
+    /// token of cached prefix across `CACHE_HEALTH_WARN_RATIO`, and the
+    /// refutation is deliberately kept out of the way: `cache_read` MOVES on
+    /// the failing arm, so the floor is what is being measured.
+    #[test]
+    fn the_floor_still_bites_one_token_below_the_threshold() {
+        fn warm(read_now: u64, uncached_now: u64) -> CacheDiagnostic {
+            let mut detector = CacheBreakDetector::new();
+            for _ in 0..3 {
+                detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+                detector.check_response(CacheStats {
+                    input_tokens: 7_000,
+                    cache_read_tokens: 3_000,
+                    cache_creation_tokens: 0,
+                });
+            }
+            detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+            detector
+                .check_response(CacheStats {
+                    input_tokens: uncached_now,
+                    cache_read_tokens: read_now,
+                    cache_creation_tokens: 0,
+                })
+                .unwrap()
+        }
+
+        // 2_999 / 10_000 = 0.2999 — one token under the line.
+        match warm(2_999, 7_001) {
+            CacheDiagnostic::PartialMiss { hit_rate, cause } => {
+                assert!(hit_rate < CACHE_HEALTH_WARN_RATIO, "hit_rate={hit_rate}");
+                assert_eq!(cause, CacheBreakCause::TtlExpiry);
+            }
+            other => panic!("one token below the threshold must still be a finding: {other:?}"),
+        }
+
+        // 3_001 / 10_000 = 0.3001 — one token over it, and cache_read GREW, so
+        // this is the floor releasing, not the #1206 refutation.
+        let over = warm(3_001, 6_999);
+        assert!(
+            matches!(over, CacheDiagnostic::Healthy { .. }),
+            "one token above the threshold is healthy: {over:?}"
+        );
     }
 
     #[test]

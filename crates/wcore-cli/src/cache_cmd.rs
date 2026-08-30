@@ -200,12 +200,21 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 };
             let s = ledger.summarize();
             let truth = s.cost_truth();
+            // #1205 — a ledger written at an older schema was migrated on read:
+            // at least one field's meaning was reinterpreted and what it
+            // originally recorded cannot be recovered. Measured on the fixed
+            // build, a v0.13.9 ledger verified `trustworthy=true
+            // cost_truth=priced saving_truth=priced` at exit 0 while `report`
+            // printed `saving_usd=-0.061389` off a fabricated zero. Report it,
+            // do not certify it.
+            let certified = truth.is_trustworthy() && !ledger.is_migrated();
             println!(
                 "F23_CACHE=verify trustworthy={} cost_truth={} saving_truth={} \
+                 legacy_schema={} \
                  provider_reported_round_trips={} catalog_priced_round_trips={} \
                  estimated_round_trips={} unpriced_round_trips={} cost_usd={} \
                  session_complete={} session={} path={}",
-                truth.is_trustworthy(),
+                certified,
                 truth.as_str(),
                 // Reported, not enforced: `verify`'s documented contract and
                 // exit code 7 are about whether the BILLED figure is spend. A
@@ -213,6 +222,10 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 // price its counterfactual, so #1163 must not start failing CI
                 // for every session on an unlisted model.
                 s.saving_truth().as_str(),
+                match ledger.migrated_from_schema {
+                    Some(v) => v.to_string(),
+                    None => "none".to_string(),
+                },
                 s.provider_reported_round_trips,
                 s.catalog_priced_round_trips,
                 s.estimated_round_trips,
@@ -222,8 +235,18 @@ pub fn run(args: CacheArgs) -> anyhow::Result<ExitCode> {
                 s.session_id,
                 path.display(),
             );
-            if truth.is_trustworthy() {
+            if certified {
                 Ok(ExitCode::SUCCESS)
+            } else if let Some(found) = ledger.migrated_from_schema {
+                eprintln!(
+                    "wayland-core cache verify: the ledger at {} was written at schema {} and \
+                     migrated on read — its uncached_equivalent_usd field meant \"nothing could \
+                     price this\" there and \"a priced zero\" here, so the saving it recorded \
+                     cannot be recovered and this session must not be certified.",
+                    path.display(),
+                    found,
+                );
+                Ok(ExitCode::from(EXIT_COST_NOT_TRUSTWORTHY))
             } else {
                 eprintln!(
                     "wayland-core cache verify: cost is {} — of {} round-trips, {} were priced \

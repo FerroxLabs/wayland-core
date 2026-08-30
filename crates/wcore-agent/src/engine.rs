@@ -4709,6 +4709,20 @@ pub fn spend_audit_log_path() -> std::path::PathBuf {
 /// The ONE place the engine installs a provider handle. Every constructor and
 /// `rebind_provider` route through it, so there is no code path that leaves the
 /// engine holding an unguarded provider.
+/// #1203 — the id [`AgentEngine::budget_session_id`] yields before a session,
+/// a durable budget authority or a host-supplied id exists.
+///
+/// Both constructors used to hand `install_spend_guard` a fresh
+/// `uuid::Uuid::new_v4()` instead. That is not an identity: it is minted per
+/// engine construction, never persisted, never restored on resume, and
+/// `rebind_provider` — the one call site that got it right — then swapped it
+/// for the real `budget_session_id()` mid-session, so a single `/model` switch
+/// split one conversation into two unrelated keys in
+/// `~/.wayland/budget/spend-audit.jsonl`. The placeholder is now the SAME value
+/// the authority chain falls back to, and it is replaced by
+/// [`AgentEngine::sync_spend_guard_session`] the moment a real id exists.
+pub(crate) const UNBOUND_BUDGET_SESSION_ID: &str = "session-unknown";
+
 fn install_spend_guard(
     provider: Arc<dyn LlmProvider>,
     provider_key: &str,
@@ -4761,7 +4775,12 @@ impl AgentEngine {
             &config.model,
             &config.compat,
             config.budget.spend_mode(),
-            &uuid::Uuid::new_v4().to_string(),
+            // #1203 — a fresh engine has no session, no authority and no
+            // host-supplied id, so this IS what `budget_session_id()` resolves
+            // to right now. `sync_spend_guard_session` re-keys the guard as
+            // soon as one of the three appears, and every audit record is
+            // written at task end, after that has happened.
+            UNBOUND_BUDGET_SESSION_ID,
         );
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
         let confirmer = ToolConfirmer::with_policy(
@@ -5034,7 +5053,12 @@ impl AgentEngine {
             &config.model,
             &config.compat,
             config.budget.spend_mode(),
-            &uuid::Uuid::new_v4().to_string(),
+            // #1203 — the resumed session IS the authority here: with no
+            // durable budget authority installed yet and no host-supplied id,
+            // `budget_session_id()` resolves through `current_session_id()` to
+            // exactly this string. A random uuid here is what made a resume
+            // write its spend under a key the first launch never used.
+            &session.id,
         );
         // #1161 — read the persisted conversation id BEFORE `session` is moved
         // into `current_session` below.
@@ -5668,6 +5692,8 @@ impl AgentEngine {
         self.smart_compact_force = false;
         self.length_wedge_fingerprint = None;
         self.budget_session_id = Some(session_id.clone());
+        // #1203 — the spend audit follows the session the engine is now on.
+        self.sync_spend_guard_session();
         self.style_detector = Mutex::new(crate::style_detector::StyleDetector::new());
         if let Some(state) = &self.session_state {
             state.reset_for_session(
@@ -5810,6 +5836,9 @@ impl AgentEngine {
         self.budget_authority_seed = Some(seed);
         self.budget_tracker = None;
         self.budget_session_id = None;
+        // #1203 — the authority outranks every other id source, so the spend
+        // audit has to move onto it the moment it is installed.
+        self.sync_spend_guard_session();
         Ok(())
     }
 
@@ -5916,6 +5945,8 @@ impl AgentEngine {
         self.budget_authority_seed = None;
         self.budget_tracker = None;
         self.budget_session_id = None;
+        // #1203 — see `install_budget_authority`.
+        self.sync_spend_guard_session();
         Ok(())
     }
 
@@ -5937,6 +5968,20 @@ impl AgentEngine {
     /// runtime identity shared with spawned children.
     pub fn set_budget_session_id(&mut self, session_id: impl Into<String>) {
         self.budget_session_id = Some(session_id.into());
+        // #1203 — a host that binds a runtime identity binds the spend audit
+        // to it too; the two used to be independent.
+        self.sync_spend_guard_session();
+    }
+
+    /// #1203 — re-key the spend guard onto whatever
+    /// [`Self::budget_session_id`] resolves to now.
+    ///
+    /// Called from every site that can change that answer, and once more
+    /// immediately before a task's record is written, so a path nobody thought
+    /// of still emits under the right key.
+    pub(crate) fn sync_spend_guard_session(&self) {
+        self.spend_guard
+            .rebind_session_id(&self.budget_session_id());
     }
 
     fn budget_session_id(&self) -> String {
@@ -5946,7 +5991,7 @@ impl AgentEngine {
         self.budget_session_id
             .clone()
             .or_else(|| self.current_session_id())
-            .unwrap_or_else(|| "session-unknown".to_string())
+            .unwrap_or_else(|| UNBOUND_BUDGET_SESSION_ID.to_string())
     }
 
     /// #388 — whether an actual provider CAP (token or monetary) governs this
@@ -6539,6 +6584,9 @@ impl AgentEngine {
         // A spend MODE still binds: `/model` cannot buy through `local-only`.
         let profile =
             crate::spend_guard::classify_model(self.compat.provider_type(), &model, &self.compat);
+        // #1203 — an escalation record is written durably here, before any task
+        // record is; it must carry the session id too.
+        self.sync_spend_guard_session();
         if let Err(refusal) = self.spend_guard.authorize(
             profile,
             crate::spend_guard::EscalationSource::Operator,
@@ -6644,6 +6692,11 @@ impl AgentEngine {
     /// after every task" true rather than "a record after a task that ended
     /// the way we expected".
     fn emit_task_spend_audit(&self) {
+        // #1203 — the last chance to key the record correctly. Every other sync
+        // site is an event we know about; this one is the write itself, so a
+        // session id that arrived by some path not listed above still lands on
+        // the record instead of a placeholder.
+        self.sync_spend_guard_session();
         let Some(record) = self.spend_guard.finish_task() else {
             return;
         };

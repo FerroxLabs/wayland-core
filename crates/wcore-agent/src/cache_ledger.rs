@@ -71,7 +71,21 @@ use crate::cache_diagnostics::{CacheBreakCause, CacheDiagnostic};
 
 /// On-disk schema version. Bumped when a field's meaning changes; readers
 /// refuse a version they do not understand rather than silently mis-reporting.
-pub const LEDGER_SCHEMA: u32 = 1;
+///
+/// **v1 -> v2 (#1205).** `TurnSample::uncached_equivalent_usd` changed from
+/// `f64` to `Option<f64>` in v0.13.10 without this constant moving, and
+/// `#[serde(default)]` therefore decoded every v1 `0.0` — which meant "nothing
+/// could price this counterfactual" — as `Some(0.0)`, "a genuine priced zero".
+/// Measured on the fixed build against a v0.13.9-format ledger: `cache report`
+/// printed `saving_usd=-0.061389 ... saving_truth=priced`, i.e. it reproduced
+/// #1163 verbatim AND certified the fabricated saving as trustworthy. v1 rows
+/// are migrated by [`load`] rather than refused: their billed `cost_usd` is
+/// still a fact and is worth showing.
+pub const LEDGER_SCHEMA: u32 = 2;
+
+/// The v1 on-disk schema — readable, but only after
+/// [`migrate_v1_counterfactuals`] strips the field whose meaning changed.
+pub const LEDGER_SCHEMA_V1: u32 = 1;
 
 /// Directory name under the Wayland home holding one ledger per session.
 pub const LEDGER_DIR: &str = "cache-ledger";
@@ -277,6 +291,11 @@ pub fn invalidation_cause_of(cause: &CacheBreakCause) -> InvalidationCause {
         // log line renders.
         CacheBreakCause::MessagesChanged { .. } => InvalidationCause::HistoryRewritten,
         CacheBreakCause::TtlExpiry => InvalidationCause::Expired,
+        // #1206 — the detector refused to blame the server on a turn whose
+        // `cache_read` was unchanged. `Unknown` is the vocabulary's own word
+        // for that; mapping it to `Expired` is the falsehood the ticket is
+        // about, and mapping it to `NoMarker` would invent a second one.
+        CacheBreakCause::Unattributed => InvalidationCause::Unknown,
         CacheBreakCause::FirstRequest => InvalidationCause::NoMarker,
     }
 }
@@ -398,6 +417,14 @@ pub enum LedgerError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheLedger {
     pub schema: u32,
+    /// #1205 — set by [`load`] when this ledger came off disk at an OLDER
+    /// schema and was migrated in memory. Not persisted: it is a fact about
+    /// THIS read, and a re-save writes the current schema honestly. Readers use
+    /// it to refuse to CERTIFY a migrated ledger — some of what it recorded
+    /// cannot be recovered, and `trustworthy=true` over it is the claim #1205
+    /// is about.
+    #[serde(skip)]
+    pub migrated_from_schema: Option<u32>,
     /// The engine's `conversation_id` — the same id the Flux sticky-routing
     /// header and `cache_health_warn` telemetry carry.
     pub session_id: String,
@@ -415,6 +442,7 @@ impl CacheLedger {
         let now = now_rfc3339();
         Self {
             schema: LEDGER_SCHEMA,
+            migrated_from_schema: None,
             session_id: session_id.into(),
             started_at: now.clone(),
             updated_at: now,
@@ -426,6 +454,15 @@ impl CacheLedger {
 
     pub fn is_empty(&self) -> bool {
         self.turns.is_empty() && self.compactions.is_empty()
+    }
+
+    /// #1205 — was this ledger written by an older schema and migrated on read?
+    ///
+    /// A migrated ledger has had at least one field's meaning reinterpreted, so
+    /// it must not be certified. `cache verify` reports `trustworthy=false`
+    /// over one even when every round-trip it holds was provider-reported.
+    pub fn is_migrated(&self) -> bool {
+        self.migrated_from_schema.is_some()
     }
 
     /// Next round-trip index (1-based).
@@ -812,23 +849,47 @@ pub fn save(ledger: &CacheLedger, path: &Path) -> Result<(), LedgerError> {
     })
 }
 
-/// Read one ledger, refusing an unknown schema.
+/// #1205 — a v1 row's `uncached_equivalent_usd` is not a price.
+///
+/// v0.13.9 and earlier wrote the field unconditionally as a plain `f64`
+/// (`uncached_equivalent_usd: uncached.usd`), so on disk it conflates three
+/// different facts: a real catalog price, a provider-family CEILING, and
+/// `0.0` meaning "nothing could price this at all". v2 distinguishes them by
+/// ABSENCE, and no v1 row carries the provenance needed to tell them apart —
+/// so every v1 counterfactual is dropped, which is what the ledger's own rule
+/// ("one unknown row makes the session total unknown") already prescribes.
+/// Their `cost_usd` and `cost_source` are untouched: what was billed did not
+/// change meaning.
+fn migrate_v1_counterfactuals(ledger: &mut CacheLedger) {
+    for turn in &mut ledger.turns {
+        turn.uncached_equivalent_usd = None;
+    }
+    ledger.migrated_from_schema = Some(ledger.schema);
+    ledger.schema = LEDGER_SCHEMA;
+}
+
+/// Read one ledger, migrating a schema this build still understands and
+/// refusing one it does not.
 pub fn load(path: &Path) -> Result<CacheLedger, LedgerError> {
     let raw = std::fs::read(path).map_err(|source| LedgerError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    let ledger: CacheLedger =
+    let mut ledger: CacheLedger =
         serde_json::from_slice(&raw).map_err(|source| LedgerError::Malformed {
             path: path.to_path_buf(),
             source,
         })?;
-    if ledger.schema != LEDGER_SCHEMA {
-        return Err(LedgerError::SchemaMismatch {
-            path: path.to_path_buf(),
-            found: ledger.schema,
-            expected: LEDGER_SCHEMA,
-        });
+    match ledger.schema {
+        LEDGER_SCHEMA => {}
+        LEDGER_SCHEMA_V1 => migrate_v1_counterfactuals(&mut ledger),
+        found => {
+            return Err(LedgerError::SchemaMismatch {
+                path: path.to_path_buf(),
+                found,
+                expected: LEDGER_SCHEMA,
+            });
+        }
     }
     Ok(ledger)
 }
@@ -1437,6 +1498,164 @@ mod tests {
         );
         assert_eq!(listed[0].1.session_id, "new");
         assert_eq!(latest(tmp.path()).unwrap().1.session_id, "new");
+    }
+
+    /// The exact bytes v0.13.9 wrote: schema 1, `uncached_equivalent_usd` a
+    /// bare `f64`, and `cost_source: provider_reported`. Confirmed against
+    /// `git show v0.13.9` when #1205 was filed. Hand-written rather than
+    /// serialized from the current struct, because the point of the fixture is
+    /// that the struct has CHANGED underneath it.
+    fn legacy_v1_ledger_json(session: &str) -> serde_json::Value {
+        serde_json::json!({
+            "schema": 1,
+            "session_id": session,
+            "started_at": "2026-07-29T10:00:00.000Z",
+            "updated_at": "2026-07-29T10:05:00.000Z",
+            "session_complete": true,
+            "turns": [{
+                "turn": 0,
+                "round_trip": 1,
+                "ts": "2026-07-29T10:00:01.000Z",
+                "provider": "flux-router",
+                "model": "flux-reasoning",
+                "retention": "ephemeral5m",
+                "uncached_input_tokens": 1_200,
+                "cache_read_tokens": 58_000,
+                "cache_write_tokens": 0,
+                "output_tokens": 400,
+                "cost_usd": 0.061389,
+                "cost_source": "provider_reported",
+                "uncached_equivalent_usd": 0.0,
+                "watermark_tokens": 59_200,
+                "conservative_watermark_tokens": 60_000,
+                "autocompact_threshold_tokens": 150_000,
+                "emergency_limit_tokens": 197_000
+            }],
+            "compactions": []
+        })
+    }
+
+    /// #1205 c1/c4 — a v1 row's `0.0` meant "nothing could price this". Under
+    /// `#[serde(default)]` it decoded as `Some(0.0)`, "a genuine priced zero",
+    /// and the measured consequence was `cache report` printing
+    /// `saving_usd=-0.061389 ... saving_truth=priced` — #1163 reproduced
+    /// verbatim on the build that fixed it, now certified.
+    #[test]
+    fn a_v1_row_does_not_decode_its_zero_counterfactual_as_a_priced_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = ledger_path(tmp.path(), "legacy");
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&legacy_v1_ledger_json("legacy")).unwrap(),
+        )
+        .unwrap();
+
+        let ledger = load(&path).expect("a v1 ledger is readable, not refused");
+        assert_eq!(ledger.migrated_from_schema, Some(1));
+        assert_eq!(ledger.schema, LEDGER_SCHEMA);
+        assert!(ledger.is_migrated());
+        assert_eq!(
+            ledger.turns[0].uncached_equivalent_usd, None,
+            "the v1 zero is not a price"
+        );
+        assert_eq!(
+            ledger.turns[0].cache_saving_usd(),
+            None,
+            "and so there is no saving to report"
+        );
+        // What was BILLED did not change meaning and must survive intact.
+        assert!((ledger.turns[0].cost_usd - 0.061389).abs() < 1e-12);
+        assert_eq!(ledger.turns[0].cost_source, CostSource::ProviderReported);
+
+        let s = ledger.summarize();
+        assert_eq!(s.cache_saving_usd(), None);
+        assert_eq!(s.saving_truth(), CostTruth::Unpriced);
+        assert_eq!(s.counterfactual_unpriced_round_trips, 1);
+        assert_eq!(
+            s.cost_truth(),
+            CostTruth::Priced,
+            "the provider-reported spend is still spend; only the saving is unknown"
+        );
+    }
+
+    /// #1205 — a schema this build has never heard of is still refused. The
+    /// migration must not turn `load` into a function that accepts anything.
+    #[test]
+    fn the_migration_does_not_make_load_accept_every_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("v0.json");
+        let mut v = legacy_v1_ledger_json("ancient");
+        v["schema"] = serde_json::json!(0);
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(matches!(
+            load(&path),
+            Err(LedgerError::SchemaMismatch { found: 0, .. })
+        ));
+    }
+
+    /// #1206 c2 — the whole pipeline the engine uses, from the detector to the
+    /// vocabulary written on disk. `cause_of_diagnostic` is the exact call
+    /// `AgentEngine::record_cache_ledger_turn` makes at engine.rs, and
+    /// `InvalidationCause::Expired` is what it used to return here.
+    #[test]
+    fn a_prefix_reused_under_growing_input_writes_no_expired_invalidation() {
+        use crate::cache_diagnostics::{CacheBreakDetector, CacheStats};
+        use wcore_types::message::{ContentBlock, Role};
+        use wcore_types::tool::ToolDef;
+
+        let messages = vec![wcore_types::message::Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "stable".into(),
+            }],
+        )];
+        let tools: Vec<ToolDef> = Vec::new();
+
+        let mut detector = CacheBreakDetector::new();
+        for _ in 0..3 {
+            detector.record_request("model-a", "prompt", &tools, &messages);
+            detector.check_response(CacheStats {
+                input_tokens: 500,
+                cache_read_tokens: 40_000,
+                cache_creation_tokens: 0,
+            });
+        }
+        detector.record_request("model-a", "prompt", &tools, &messages);
+        let diag = detector
+            .check_response(CacheStats {
+                input_tokens: 150_000,
+                cache_read_tokens: 40_000,
+                cache_creation_tokens: 0,
+            })
+            .unwrap();
+
+        assert_eq!(
+            cause_of_diagnostic(&diag),
+            None,
+            "nothing was invalidated, so nothing may be recorded as one: {diag:?}"
+        );
+        assert_ne!(
+            cause_of_diagnostic(&diag),
+            Some(InvalidationCause::Expired),
+            "and least of all `expired`"
+        );
+    }
+
+    /// #1206 — the cause the detector reaches when it refuses to blame the
+    /// server must not arrive on disk as `expired` either.
+    #[test]
+    fn an_unattributed_break_is_published_as_unknown_not_expired() {
+        assert_eq!(
+            invalidation_cause_of(&CacheBreakCause::Unattributed),
+            InvalidationCause::Unknown
+        );
+        assert_eq!(
+            cause_of_diagnostic(&CacheDiagnostic::FullMiss {
+                cause: CacheBreakCause::Unattributed
+            }),
+            Some(InvalidationCause::Unknown)
+        );
     }
 
     #[test]

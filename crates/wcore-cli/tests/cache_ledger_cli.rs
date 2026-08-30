@@ -108,7 +108,7 @@ fn write_ledger(
 ) {
     std::fs::create_dir_all(dir).unwrap();
     let ledger = serde_json::json!({
-        "schema": 1,
+        "schema": wcore_agent::cache_ledger::LEDGER_SCHEMA,
         "session_id": session,
         "started_at": "2026-07-29T10:00:00.000Z",
         "updated_at": format!("2026-07-29T10:{:02}:00.000Z", turns.len().max(1)),
@@ -902,4 +902,118 @@ fn a_genuinely_negative_saving_is_still_reported_as_a_negative_number() {
          that must stay reportable: {saving}\n{report}"
     );
     assert_eq!(field(&report, "cost", "saving_truth"), "priced");
+}
+
+// ── #1205: a ledger written by v0.13.9 ──────────────────────────────────────
+
+/// The exact on-disk shape v0.13.9 wrote — schema 1, `uncached_equivalent_usd`
+/// a bare `f64`, `cost_source: provider_reported` — reproducing the ledger the
+/// #1205 measurement used. Hand-written, and deliberately NOT routed through
+/// `write_ledger`: `write_ledger` now stamps the CURRENT schema, and a fixture
+/// that moves with the code cannot represent a file an older build left behind.
+fn write_legacy_v1_ledger(dir: &Path, session: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let ledger = serde_json::json!({
+        "schema": 1,
+        "session_id": session,
+        "started_at": "2026-07-29T10:00:00.000Z",
+        "updated_at": "2026-07-29T10:05:00.000Z",
+        "session_complete": true,
+        "turns": [{
+            "turn": 0,
+            "round_trip": 1,
+            "ts": "2026-07-29T10:00:01.000Z",
+            "provider": "flux-router",
+            "model": "flux-reasoning",
+            "retention": "ephemeral5m",
+            "uncached_input_tokens": 1_200,
+            "cache_read_tokens": 58_000,
+            "cache_write_tokens": 0,
+            "output_tokens": 400,
+            "cost_usd": 0.061389,
+            "cost_source": "provider_reported",
+            "uncached_equivalent_usd": 0.0,
+            "watermark_tokens": 59_200,
+            "conservative_watermark_tokens": 60_000,
+            "autocompact_threshold_tokens": 150_000,
+            "emergency_limit_tokens": 197_000
+        }],
+        "compactions": []
+    });
+    std::fs::write(
+        dir.join(format!("{session}.json")),
+        serde_json::to_vec_pretty(&ledger).unwrap(),
+    )
+    .unwrap();
+}
+
+/// #1205 c2 — measured on the build that "fixed" #1163, this exact ledger
+/// printed `F23_CACHE=cost usd=0.061389 uncached_equivalent_usd=0.000000
+/// saving_usd=-0.061389 saving_ratio=unknown cost_truth=priced
+/// saving_truth=priced counterfactual_unpriced_round_trips=0` with no
+/// `saving_warning` line: #1163 reproduced verbatim, and now certified.
+#[test]
+fn a_v0_13_9_ledger_no_longer_reports_a_negative_saving_as_priced() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_legacy_v1_ledger(tmp.path(), "legacy");
+
+    let out = stdout(&run(tmp.path(), &["report"]));
+    assert_eq!(
+        field(&out, "cost", "uncached_equivalent_usd"),
+        "unknown",
+        "the v1 zero was never a price:\n{out}"
+    );
+    assert_eq!(field(&out, "cost", "saving_usd"), "unknown");
+    assert_eq!(field(&out, "cost", "saving_truth"), "unpriced");
+    assert_eq!(
+        field(&out, "cost", "counterfactual_unpriced_round_trips"),
+        "1"
+    );
+    // The billed figure is untouched: provider-reported spend is still spend.
+    assert_eq!(field(&out, "cost", "usd"), "0.061389");
+    assert_eq!(field(&out, "cost", "cost_truth"), "priced");
+    assert!(
+        out.contains("F23_CACHE=saving_warning"),
+        "the operator must be told the saving is unknown:\n{out}"
+    );
+}
+
+/// #1205 c3, both halves: the store total must not sum a legacy `0.0` into the
+/// counterfactual, and `verify` must not certify the session it came from.
+#[test]
+fn a_legacy_ledger_is_not_summed_into_the_store_total_and_does_not_pass_verify() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A perfectly good current-schema session sits beside it, so the assertion
+    // is about the legacy row and not about an empty store.
+    healthy(tmp.path(), "current");
+    write_legacy_v1_ledger(tmp.path(), "legacy");
+
+    let list = stdout(&run(tmp.path(), &["list"]));
+    assert_eq!(field(&list, "total", "sessions"), "2");
+    assert_eq!(
+        field(&list, "total", "uncached_equivalent_usd"),
+        "unknown",
+        "one legacy row makes the store counterfactual unknown, not a floor:\n{list}"
+    );
+
+    let v = run(tmp.path(), &["verify", "--session", "legacy"]);
+    let vo = stdout(&v);
+    assert_eq!(
+        field(&vo, "verify", "trustworthy"),
+        "false",
+        "a migrated ledger is reported, never certified:\n{vo}"
+    );
+    assert_eq!(field(&vo, "verify", "legacy_schema"), "1");
+    assert_eq!(code(&v), 7, "stdout was:\n{vo}");
+
+    // Control: the same command over the CURRENT-schema session still passes,
+    // so `verify` has not simply been broken for everything.
+    let ok = run(tmp.path(), &["verify", "--session", "current"]);
+    assert_eq!(
+        field(&stdout(&ok), "verify", "legacy_schema"),
+        "none",
+        "stdout was:\n{}",
+        stdout(&ok)
+    );
+    assert_eq!(code(&ok), 0, "stdout was:\n{}", stdout(&ok));
 }
