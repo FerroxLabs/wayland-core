@@ -673,6 +673,100 @@ mod tests {
         update_cache_after_write(cache, path, &content);
     }
 
+    /// #1248 c2 + c3, the Edit half — the VFS path, taken whenever a
+    /// `ToolContext` is present.
+    ///
+    /// Same construction as `write::tests::the_vfs_path_names_a_save_the_refusal_displaced`
+    /// and graded on the same observable: the tool is driven through
+    /// `execute_with_ctx` over a real `RealFs`, the save is made from inside
+    /// the exchange to verdict window by the test-only `publish_window` probe
+    /// (the only seam into it), and the assertions are on the surfaced
+    /// `ToolResult` and on what is actually on disk when it comes back.
+    ///
+    /// Edit is graded separately from Write rather than by analogy: the two
+    /// render off SEPARATE match arms, and the Edit arm does not even
+    /// destructure the outcome today.
+    ///
+    /// Unix exchange platforms only, for the reason the Write test's doc gives.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn the_vfs_edit_path_names_a_save_the_refusal_displaced() {
+        const ORIGINAL: &str = "the only copy of the user's bytes\n";
+        const THEIR_SAVE: &[u8] = b"what the user saved while the check was running\n";
+
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, ORIGINAL).unwrap();
+
+        let handed: Arc<std::sync::Mutex<Vec<Option<Vec<u8>>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&handed);
+        let dest = p.clone();
+        let _probe = crate::vfs::publish_window::install(
+            &p,
+            Box::new(move |observed: Option<&[u8]>| {
+                recorded.lock().unwrap().push(observed.map(<[u8]>::to_vec));
+                std::fs::write(&dest, THEIR_SAVE).unwrap();
+                Err("its contents changed on disk".to_owned())
+            }),
+        );
+
+        let ctx = crate::context::ToolContext::test_default();
+        let result = tool(None)
+            .execute_with_ctx(
+                json!({
+                    "file_path": p.to_str().unwrap(),
+                    "old_string": "the only copy",
+                    "new_string": "the only surviving copy",
+                }),
+                &ctx,
+            )
+            .await;
+
+        // Fixture control: the window was entered exactly once, with the
+        // pre-image, so this grades the retraction arm and not a pre-flight
+        // conflict.
+        let entries = handed.lock().unwrap().len();
+        assert_eq!(
+            entries, 1,
+            "the exchange to verdict window was entered {entries} times, not \
+             once, so this does not grade the arm it claims to"
+        );
+        assert_eq!(
+            handed.lock().unwrap()[0].as_deref(),
+            Some(ORIGINAL.as_bytes()),
+            "the verdict was not handed the displaced pre-image"
+        );
+
+        assert!(result.is_error, "reported as a success: {}", result.content);
+        assert_eq!(std::fs::read(&p).unwrap(), ORIGINAL.as_bytes());
+
+        let survivors: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|f| std::fs::read(f).is_ok_and(|b| b == THEIR_SAVE))
+            .collect();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "the displaced save did not survive: {survivors:?}"
+        );
+        assert_ne!(survivors[0], p);
+
+        assert!(
+            result
+                .content
+                .contains(&survivors[0].display().to_string()),
+            "the user is not told where their save went: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("Nothing was changed."),
+            "a refusal that displaced a save still says nothing was changed: {}",
+            result.content
+        );
+    }
+
     // -- Legacy tests (no cache) --
 
     #[tokio::test]

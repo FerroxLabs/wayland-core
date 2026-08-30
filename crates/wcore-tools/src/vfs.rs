@@ -549,6 +549,10 @@ impl VirtualFs for RealFs {
         let data = mutation.contents().to_vec();
         let published = tokio::task::spawn_blocking(move || {
             wcore_config::atomic_write_checked(&path_owned, &data, |displaced| {
+                #[cfg(test)]
+                if let Some(substituted) = publish_window::verdict(&path_owned, displaced) {
+                    return substituted;
+                }
                 if precondition.matches(observation_of(displaced)) {
                     Ok(())
                 } else {
@@ -570,6 +574,65 @@ impl VirtualFs for RealFs {
             Err(_) => Ok(FileMutationOutcome::Conflict {
                 current: self.observe_file(path).await?.observation,
             }),
+        }
+    }
+}
+
+/// #1248 c3 — the one seam into the exchange to verdict window of the publish
+/// [`VirtualFs::compare_exchange_file`] performs.
+///
+/// Reaching the state #1248 is about needs a save by a non-cooperating editor
+/// to land on the published inode strictly BETWEEN the publish exchange and
+/// the restore exchange. Nothing on the vfs side of that window can make that
+/// happen: the only vfs code inside it is the pure
+/// `precondition.matches(observation_of(displaced))`. What is left is a racer
+/// against a window measured in microseconds, which is a flake generator. So
+/// the save is made from inside the verdict itself, which is the one ordering
+/// that is inside the window by construction.
+///
+/// Keyed by DESTINATION, so a probing test cannot contaminate another test's
+/// compare-exchange the way one global switch would. Empty in production —
+/// the whole module is `#[cfg(test)]`, so nothing outside the crate's own unit
+/// tests can put anything in it.
+///
+/// What a probe substitutes is exactly one thing: the REASON the publish is
+/// refused. The exchange, the restore, `keep_displaced`, the [`Refusal`] it
+/// produces, what the outcome carries and what the tool renders off it are all
+/// production code.
+///
+/// [`Refusal`]: wcore_config::Refusal
+#[cfg(test)]
+pub(crate) mod publish_window {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    pub(crate) type Probe =
+        Box<dyn Fn(Option<&[u8]>) -> Result<(), String> + Send + Sync + 'static>;
+
+    fn probes() -> &'static Mutex<HashMap<PathBuf, Probe>> {
+        static PROBES: OnceLock<Mutex<HashMap<PathBuf, Probe>>> = OnceLock::new();
+        PROBES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Take `dest`'s verdict inside the window, or `None` when nothing is
+    /// installed for it — which is every path in every non-probing test.
+    pub(crate) fn verdict(dest: &Path, displaced: Option<&[u8]>) -> Option<Result<(), String>> {
+        let probes = probes().lock().unwrap();
+        probes.get(dest).map(|probe| probe(displaced))
+    }
+
+    /// Install `probe` for `dest` until the returned guard is dropped.
+    pub(crate) fn install(dest: &Path, probe: Probe) -> Guard {
+        probes().lock().unwrap().insert(dest.to_path_buf(), probe);
+        Guard(dest.to_path_buf())
+    }
+
+    pub(crate) struct Guard(PathBuf);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            probes().lock().unwrap().remove(&self.0);
         }
     }
 }
