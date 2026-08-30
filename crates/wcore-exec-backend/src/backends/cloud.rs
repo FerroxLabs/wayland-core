@@ -898,7 +898,7 @@ impl ExecutionBackend for CloudBackend {
                 return Ok(OrphanScan {
                     backend_id: BACKEND_ID.into(),
                     kind: BackendKind::Cloud,
-                    nonce: nonce.into(),
+                    nonce: Some(nonce.into()),
                     method: err.to_string(),
                     found: Vec::new(),
                     // NOT enumerated. Reporting zero orphans because the scan
@@ -911,7 +911,7 @@ impl ExecutionBackend for CloudBackend {
             Ok(found) => Ok(OrphanScan {
                 backend_id: BACKEND_ID.into(),
                 kind: BackendKind::Cloud,
-                nonce: nonce.into(),
+                nonce: Some(nonce.into()),
                 method: format!("GET /apps/<app>/machines?metadata.{NONCE_METADATA_KEY}=<nonce>"),
                 found,
                 enumerated: true,
@@ -919,7 +919,7 @@ impl ExecutionBackend for CloudBackend {
             Err(detail) => Ok(OrphanScan {
                 backend_id: BACKEND_ID.into(),
                 kind: BackendKind::Cloud,
-                nonce: nonce.into(),
+                nonce: Some(nonce.into()),
                 method: format!("vendor machine listing failed: {detail}"),
                 found: Vec::new(),
                 enumerated: false,

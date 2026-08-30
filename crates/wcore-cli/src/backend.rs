@@ -61,10 +61,16 @@ pub enum BackendCmd {
         #[arg(long)]
         backend: Option<String>,
     },
-    /// Enumerate surfaces still carrying a task nonce, per backend.
+    /// Enumerate leftover execution surfaces, per backend.
+    ///
+    /// WITHOUT `--nonce` this is the UNSCOPED scan (core#366): every surface
+    /// this product created, whatever run created it, graded against the live
+    /// task registry so a leftover from a previous run is named as one. WITH
+    /// `--nonce` it is restricted to that one run.
     Orphans {
+        /// Restrict the scan to one run. Omit it to scan every run.
         #[arg(long)]
-        nonce: String,
+        nonce: Option<String>,
     },
     /// F25-05: scan every backend for orphaned execution left behind by a
     /// task, printing the RAW enumeration alongside the count and naming the
@@ -224,7 +230,7 @@ pub async fn run(args: BackendArgs) -> Result<()> {
             receipt_out,
         } => execute(&backend, task.as_deref(), &receipt_out).await,
         BackendCmd::Cancel { task_id, backend } => cancel(&task_id, backend.as_deref()).await,
-        BackendCmd::Orphans { nonce } => orphans(&nonce).await,
+        BackendCmd::Orphans { nonce } => orphans(nonce.as_deref()).await,
         BackendCmd::Scan {
             task_id,
             nonce,
@@ -420,12 +426,22 @@ async fn cancel(task_id: &str, backend: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn orphans(nonce: &str) -> Result<()> {
+async fn orphans(nonce: Option<&str>) -> Result<()> {
     let backends = reference_backends(reference_budget())?;
     let mut unscannable = 0usize;
     let mut found = 0usize;
+    match nonce {
+        Some(nonce) => println!("scope: run {nonce} only"),
+        None => println!(
+            "scope: EVERY run (unscoped, core#366). A row marked LEFTOVER is a surface no \
+             live task in this process carries a nonce for."
+        ),
+    }
     for reference in &backends {
-        let scan = reference.backend.scan_orphans(nonce).await?;
+        let scan = match nonce {
+            Some(nonce) => reference.backend.scan_orphans(nonce).await?,
+            None => reference.backend.scan_orphans_any_nonce().await?,
+        };
         println!(
             "{:<10} enumerated={:<5} found={} via {}",
             scan.backend_id,

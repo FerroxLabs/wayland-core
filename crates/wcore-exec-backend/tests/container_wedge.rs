@@ -399,6 +399,141 @@ async fn a_task_that_exits_125_on_its_own_is_attested_as_a_real_run() {
     );
 }
 
+/// core#366 d5: the UNSCOPED scan reports a leftover from a run this process
+/// has never held the nonce for, and the SCOPED scan — the only one that
+/// existed — cannot see it.
+///
+/// The control is the load-bearing half. Asserting only that the new scan
+/// finds the container would pass against a scan that finds everything, and
+/// would say nothing about the defect, which is not "the scan is missing" but
+/// "the scan is scoped to a nonce no leftover can carry". So both scans run
+/// against the SAME planted container in the same call, and the pair of
+/// answers is the assertion.
+///
+/// Per #365 c5 the leftover is planted by this test on a fresh host, not
+/// waited for on a dirty one, and it is removed before any assertion so a red
+/// leaves the next lane nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_unscoped_scan_finds_a_leftover_from_a_run_this_process_never_made() {
+    let _state = temp_state();
+    if !daemon_answers() {
+        println!("UNEXERCISED — no docker daemon on this host");
+        return;
+    }
+    let name = "wayland-f25-wedge366-unscoped";
+    // A nonce this process cannot be holding: `temp_state()` gave it an empty
+    // registry, so nothing here has ever recorded a task at all.
+    let stranger = "wedge366-nonce-from-a-run-this-process-never-made";
+    remove(name);
+    wedge(name, stranger);
+
+    let backend = ContainerBackend::new(reference_budget()).expect("construct");
+    // The nonce a real caller supplies is always one it already holds — a
+    // fresh run's, or `cancel()`'s entry from the live registry.
+    let scoped = backend
+        .scan_orphans("wedge366-nonce-this-process-is-holding")
+        .await;
+    let unscoped = backend.scan_orphans_any_nonce().await;
+
+    remove(name);
+
+    let scoped = scoped.expect("the scoped scan must answer");
+    assert!(
+        scoped.enumerated,
+        "CONTROL: the scoped scan must really have enumerated, or its empty answer proves \
+         nothing at all: {}",
+        scoped.method
+    );
+    assert!(
+        !scoped.found.iter().any(|row| row.contains(name)),
+        "CONTROL: the nonce-scoped scan must NOT see a leftover carrying a different nonce. If \
+         it does, this test has stopped measuring core#366: {:?}",
+        scoped.found
+    );
+
+    let unscoped = unscoped.expect("the unscoped scan must answer");
+    assert!(
+        unscoped.enumerated,
+        "the unscoped scan must really enumerate; an un-enumerated surface is not a clean \
+         surface: {}",
+        unscoped.method
+    );
+    assert_eq!(
+        unscoped.nonce, None,
+        "an unscoped scan must report NO nonce scope rather than borrowing one"
+    );
+    let row = unscoped
+        .found
+        .iter()
+        .find(|row| row.contains(name))
+        .unwrap_or_else(|| {
+            panic!(
+                "the unscoped scan must FIND the planted leftover. It reported {:?} via {}",
+                unscoped.found, unscoped.method
+            )
+        });
+    assert!(
+        row.contains(stranger),
+        "the row must name the nonce it found, so an operator can tell runs apart: {row}"
+    );
+    assert!(
+        row.contains("LEFTOVER"),
+        "core#366 d3: a surface no live task in this process carries a nonce for must be \
+         REPORTED as a leftover, not merely listed: {row}"
+    );
+}
+
+/// core#366 d3 POLARITY: a container whose task this process IS still holding
+/// must NOT be called a leftover.
+///
+/// Without this, "mark every row LEFTOVER" passes the test above, and the
+/// operator surface becomes noise that names live work as garbage — the same
+/// class of dishonesty as reporting zero for a scan that never ran.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_container_this_process_still_holds_is_not_reported_as_a_leftover() {
+    let _state = temp_state();
+    if !daemon_answers() {
+        println!("UNEXERCISED — no docker daemon on this host");
+        return;
+    }
+    let name = "wayland-f25-wedge366-live";
+    let held = "wedge366-nonce-this-process-holds";
+    remove(name);
+    wedge(name, held);
+    wcore_exec_backend::registry::record(&wcore_exec_backend::registry::LiveTask {
+        task_id: "wedge366-live".into(),
+        nonce: held.into(),
+        backend_id: wcore_exec_backend::backends::container::BACKEND_ID.into(),
+        kind: wcore_exec_backend::contract::BackendKind::Container,
+        pid: None,
+        handle: Some(name.into()),
+        started_unix_ms: 0,
+    })
+    .expect("record a live task");
+
+    let backend = ContainerBackend::new(reference_budget()).expect("construct");
+    let unscoped = backend.scan_orphans_any_nonce().await;
+
+    remove(name);
+    let _ = wcore_exec_backend::registry::forget("wedge366-live");
+
+    let unscoped = unscoped.expect("the unscoped scan must answer");
+    let row = unscoped
+        .found
+        .iter()
+        .find(|row| row.contains(name))
+        .unwrap_or_else(|| {
+            panic!(
+                "control: the unscoped scan must still LIST a live container: {:?}",
+                unscoped.found
+            )
+        });
+    assert!(
+        !row.contains("LEFTOVER"),
+        "a container whose nonce IS in the live registry must not be named a leftover: {row}"
+    );
+}
+
 async fn backend_execute(
     task: &wcore_exec_backend::contract::ExecutionTask,
 ) -> Result<wcore_exec_backend::receipt::ExecutionReceipt, ExecError> {

@@ -335,12 +335,29 @@ pub async fn run_conformance(
         )),
     }
 
-    // 5. An orphan scan for a nonce that never ran must return an empty,
-    //    ENUMERATED answer — not an empty answer because the scan failed.
+    // 5. LIVENESS OF THE SCOPED SCAN — and nothing more than that.
+    //
+    // core#366 d4. This arm used to be titled as though it covered orphan
+    // detection. It cannot, and the limit is structural rather than a matter
+    // of degree: the nonce is chosen precisely BECAUSE nothing ever ran under
+    // it, so `found.is_empty()` is true by construction and that half of the
+    // conjunction can never fail on the axis it appeared to cover. What is
+    // actually load-bearing is `enumerated`: a backend whose docker/ssh/vendor
+    // enumeration is broken reports `false` here and fails, which is a real
+    // failure this arm really does catch.
+    //
+    // The find-an-orphan arm cannot live here. It needs a labelled surface
+    // planted under a nonce this process has never used, which is per-backend
+    // machinery a provider-neutral conformance body has no way to build. It
+    // lives in `tests/container_wedge.rs`, which plants a real `Created`
+    // container and requires the unscoped scan to FIND it.
+    const SCOPED_LIVENESS: &str = "a scoped orphan scan RUNS and enumerates rather than assuming (liveness only: the \
+         nonce is one nothing ran under, so finding nothing is true by construction and \
+         proves no orphan-detection property — core#366)";
     let fresh_nonce = format!("{id_prefix}-nonce-never-used");
     match backend.scan_orphans(&fresh_nonce).await {
         Ok(scan) => checks.push(check(
-            "an orphan scan enumerates rather than assuming, and finds nothing for an unused nonce",
+            SCOPED_LIVENESS,
             scan.enumerated && scan.found.is_empty(),
             format!(
                 "enumerated={} found={} via {}",
@@ -349,11 +366,33 @@ pub async fn run_conformance(
                 scan.method
             ),
         )),
-        Err(e) => checks.push(check(
-            "an orphan scan enumerates rather than assuming, and finds nothing for an unused nonce",
-            false,
-            e.to_string(),
+        Err(e) => checks.push(check(SCOPED_LIVENESS, false, e.to_string())),
+    }
+
+    // 5b. THE UNSCOPED SCAN ANSWERS, AND SAYS WHICH QUESTION IT ANSWERED.
+    //
+    // core#366 d1/d2. A backend that has no unscoped enumeration is allowed to
+    // say so — it reports `enumerated: false`, which this repo reads as "not a
+    // clean surface" and never as zero. What is NOT allowed is answering the
+    // unscoped question while claiming a nonce scope, because a reader that
+    // cannot tell "every run" from "one run" is the confusion that let the
+    // defect stand. `nonce: None` is therefore the assertion, and it fails for
+    // any backend that wires the scoped answer into the unscoped method.
+    const UNSCOPED_SHAPE: &str =
+        "an unscoped orphan scan answers, and reports NO nonce scope rather than borrowing one";
+    match backend.scan_orphans_any_nonce().await {
+        Ok(scan) => checks.push(check(
+            UNSCOPED_SHAPE,
+            scan.nonce.is_none(),
+            format!(
+                "nonce={:?} enumerated={} found={} via {}",
+                scan.nonce,
+                scan.enumerated,
+                scan.found.len(),
+                scan.method
+            ),
         )),
+        Err(e) => checks.push(check(UNSCOPED_SHAPE, false, e.to_string())),
     }
 
     // 6. Cancelling a task that does not exist must be an explicit error, not

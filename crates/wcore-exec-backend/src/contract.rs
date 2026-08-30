@@ -292,13 +292,21 @@ impl CleanupObservation {
     }
 }
 
-/// What an orphan scan found for a given nonce. Plan 25-04 prosecutes this
-/// hostilely; the contract only has to make it answerable per backend kind.
+/// What an orphan scan found. Plan 25-04 prosecutes this hostilely; the
+/// contract only has to make it answerable per backend kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrphanScan {
     pub backend_id: String,
     pub kind: BackendKind,
-    pub nonce: String,
+    /// The nonce the scan was RESTRICTED to, or `None` when it was not
+    /// restricted to one run at all.
+    ///
+    /// A sentinel string was the obvious alternative and is the wrong shape:
+    /// "this scan covered every run" and "this scan covered the run called
+    /// `<sentinel>`" are different facts, and a reader that cannot tell them
+    /// apart is how core#366 went unseen — every caller supplied a nonce that
+    /// could not match a leftover, and the answer read as "no orphans".
+    pub nonce: Option<String>,
     pub method: String,
     pub found: Vec<String>,
     /// False when the scan could not actually enumerate — an unscannable
@@ -334,7 +342,59 @@ pub trait ExecutionBackend: Send + Sync {
     async fn health(&self) -> Result<Health>;
 
     /// Enumerate surfaces still carrying `nonce`.
+    ///
+    /// DELIBERATELY still nonce-scoped. `cancel()` wants exactly one run's
+    /// residue — it re-enumerates by the cancelled task's nonce to check its
+    /// own removal, and widening this would make it report other tasks'
+    /// surfaces as its own leftovers. core#366 d2: this contract does not move.
     async fn scan_orphans(&self, nonce: &str) -> Result<OrphanScan>;
+
+    /// Enumerate every surface THIS PRODUCT created, whatever run created it.
+    ///
+    /// # The question `scan_orphans` structurally cannot answer (core#366)
+    ///
+    /// A nonce is fresh per run, so a scan for the nonce a caller is holding
+    /// can never return a PREVIOUS run's leftover: not from `cancel()`, whose
+    /// nonce comes from the live registry a finished run has already cleared,
+    /// and not from ordinary operation. The product could only ever ask "are
+    /// there orphans from the run whose nonce I already hold". This is the
+    /// other question — "are there surfaces left over from ANY run" — and it
+    /// is the one that finds a task that ran once, wedged, and was never
+    /// submitted again.
+    ///
+    /// # This REPORTS. It does not reclaim (core#366 d6)
+    ///
+    /// DECIDED, not left open. #365's submit-path reclaim may remove a
+    /// conflicting container because it holds the exact task id it is about to
+    /// use, which is a claim on that name. An unscoped scan holds no claim on
+    /// anything it finds: the label says "some wayland run created this", not
+    /// "this run is over". A found surface may belong to a LIVE task in
+    /// another process (the registry is per-process state) or to another
+    /// tenant of a shared daemon, and destroying either would be a worse
+    /// failure than the leak this exists to surface. Reclamation stays with
+    /// the paths that hold a claim.
+    ///
+    /// # The default is "cannot", never "clean"
+    ///
+    /// A backend with no unscoped enumeration answers `enumerated: false` and
+    /// an empty `found`. Per this module's standing rule, an un-enumerated
+    /// surface is NOT a clean surface, and a new backend inherits the honest
+    /// answer rather than a silent zero.
+    async fn scan_orphans_any_nonce(&self) -> Result<OrphanScan> {
+        let capabilities = self.capabilities();
+        Ok(OrphanScan {
+            backend_id: capabilities.backend_id.clone(),
+            kind: capabilities.kind,
+            nonce: None,
+            method: format!(
+                "{} has NO unscoped enumeration: it cannot list the surfaces it created \
+                 without being told which run to look for",
+                capabilities.backend_id
+            ),
+            found: Vec::new(),
+            enumerated: false,
+        })
+    }
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {

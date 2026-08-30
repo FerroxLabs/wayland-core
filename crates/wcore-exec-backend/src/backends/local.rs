@@ -312,7 +312,7 @@ impl ExecutionBackend for LocalBackend {
         Ok(OrphanScan {
             backend_id: BACKEND_ID.into(),
             kind: BackendKind::Local,
-            nonce: nonce.into(),
+            nonce: Some(nonce.into()),
             method: if enumerated {
                 "live-task registry UNION a real enumeration of the host process table".into()
             } else {

@@ -137,7 +137,9 @@ pub fn mechanism_for(kind: BackendKind) -> ReapingMechanism {
 pub struct OrphanEvidence {
     pub backend_id: String,
     pub kind: BackendKind,
-    pub nonce: String,
+    /// `None` when the scan was not restricted to one run. See
+    /// [`OrphanScan::nonce`].
+    pub nonce: Option<String>,
     /// The enumeration that was run, in words an operator can re-run.
     pub method: String,
     pub mechanism: ReapingMechanism,
@@ -228,6 +230,21 @@ pub async fn scan_all(nonce: &str, limits: ResourceBudget) -> Result<Vec<OrphanE
     let mut out = Vec::new();
     for reference in crate::reference_backends(limits)? {
         let scan = reference.backend.scan_orphans(nonce).await?;
+        out.push(OrphanEvidence::from_scan(&scan));
+    }
+    out.sort_by(|a, b| a.backend_id.cmp(&b.backend_id));
+    Ok(out)
+}
+
+/// Scan every reference backend for surfaces it created under ANY nonce.
+///
+/// The companion to [`scan_all`], and the one that can see a leftover from a
+/// run this process never held the nonce for (core#366). A backend with no
+/// unscoped enumeration reports NOT-MEASURED here, never zero.
+pub async fn scan_all_any_nonce(limits: ResourceBudget) -> Result<Vec<OrphanEvidence>> {
+    let mut out = Vec::new();
+    for reference in crate::reference_backends(limits)? {
+        let scan = reference.backend.scan_orphans_any_nonce().await?;
         out.push(OrphanEvidence::from_scan(&scan));
     }
     out.sort_by(|a, b| a.backend_id.cmp(&b.backend_id));
@@ -518,7 +535,7 @@ mod tests {
         OrphanScan {
             backend_id: "local".into(),
             kind: BackendKind::Local,
-            nonce: "n-1".into(),
+            nonce: Some("n-1".into()),
             method: "test".into(),
             found,
             enumerated,

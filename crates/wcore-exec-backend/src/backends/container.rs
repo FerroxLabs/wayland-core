@@ -820,7 +820,7 @@ impl ExecutionBackend for ContainerBackend {
             Ok(found) => Ok(OrphanScan {
                 backend_id: BACKEND_ID.into(),
                 kind: BackendKind::Container,
-                nonce: nonce.into(),
+                nonce: Some(nonce.into()),
                 method: format!("docker ps -a --filter label={NONCE_LABEL}=<nonce>"),
                 found,
                 enumerated: true,
@@ -828,9 +828,62 @@ impl ExecutionBackend for ContainerBackend {
             Err(detail) => Ok(OrphanScan {
                 backend_id: BACKEND_ID.into(),
                 kind: BackendKind::Container,
-                nonce: nonce.into(),
+                nonce: Some(nonce.into()),
                 // An unscannable surface reports enumerated=false. Reporting
                 // zero orphans because the scan failed is how an orphan hides.
+                method: format!("docker ps failed: {detail}"),
+                found: Vec::new(),
+                enumerated: false,
+            }),
+        }
+    }
+
+    /// core#366: the key-presence scan, and the only path that can see a
+    /// leftover this process did not create.
+    ///
+    /// Each row is graded against the LIVE REGISTRY rather than merely listed.
+    /// A container whose nonce no live task in this process carries is the
+    /// thing #365's two leftovers were, and it is what a human had to run
+    /// `docker ps -a` by hand to find. Reported, never removed — see
+    /// [`ExecutionBackend::scan_orphans_any_nonce`] for why.
+    async fn scan_orphans_any_nonce(&self) -> Result<OrphanScan> {
+        match list_all_labelled_containers().await {
+            Ok(rows) => {
+                let live: std::collections::HashSet<String> = registry::list()
+                    .into_iter()
+                    .filter(|task| task.backend_id == BACKEND_ID)
+                    .map(|task| task.nonce)
+                    .collect();
+                let mut found: Vec<String> = rows
+                    .into_iter()
+                    .map(|(name, nonce)| {
+                        if live.contains(&nonce) {
+                            format!("{name} (nonce {nonce}: a task this process still holds)")
+                        } else {
+                            format!(
+                                "{name} (nonce {nonce}: LEFTOVER \u{2014} no live task in this \
+                                 process carries that nonce)"
+                            )
+                        }
+                    })
+                    .collect();
+                found.sort();
+                Ok(OrphanScan {
+                    backend_id: BACKEND_ID.into(),
+                    kind: BackendKind::Container,
+                    nonce: None,
+                    method: format!(
+                        "docker ps -a --filter label={NONCE_LABEL} (KEY PRESENCE, any nonce), \
+                         each row graded against the live-task registry"
+                    ),
+                    found,
+                    enumerated: true,
+                })
+            }
+            Err(detail) => Ok(OrphanScan {
+                backend_id: BACKEND_ID.into(),
+                kind: BackendKind::Container,
+                nonce: None,
                 method: format!("docker ps failed: {detail}"),
                 found: Vec::new(),
                 enumerated: false,
@@ -841,9 +894,39 @@ impl ExecutionBackend for ContainerBackend {
 
 async fn list_containers_with_nonce(nonce: &str) -> std::result::Result<Vec<String>, String> {
     let filter = format!("label={NONCE_LABEL}={nonce}");
+    docker_ps(&filter, "{{.Names}}").await
+}
+
+/// Every container carrying the nonce label AT ALL, as `(name, nonce)`.
+///
+/// The filter differs from [`list_containers_with_nonce`]'s by one character —
+/// no `=<value>` — and that one character is the whole of core#366: docker
+/// matches on KEY PRESENCE when the value is omitted, so this sees a leftover
+/// from a run whose nonce this process has never held. Labels are applied at
+/// CREATE time, so a container that never started carries one too, which is
+/// exactly the `Created` wedge #365 measured.
+async fn list_all_labelled_containers() -> std::result::Result<Vec<(String, String)>, String> {
+    let filter = format!("label={NONCE_LABEL}");
+    let format = format!("{{{{.Names}}}}\t{{{{.Label \"{NONCE_LABEL}\"}}}}");
+    let rows = docker_ps(&filter, &format).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| match row.split_once('\t') {
+            Some((name, nonce)) => (name.trim().to_string(), nonce.trim().to_string()),
+            // The filter demands the label, so a row without one means the
+            // format string stopped rendering it. Say that, rather than
+            // inventing a nonce.
+            None => (row, "<label unreadable>".to_string()),
+        })
+        .collect())
+}
+
+/// One `docker ps -a` round trip. Shared so the scoped and unscoped scans
+/// cannot drift in timeout, argv discipline or blank-line handling.
+async fn docker_ps(filter: &str, format: &str) -> std::result::Result<Vec<String>, String> {
     let mut command = wcore_config::shell::shell_command_argv(
         "docker",
-        &["ps", "-a", "--filter", &filter, "--format", "{{.Names}}"],
+        &["ps", "-a", "--filter", filter, "--format", format],
     );
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());

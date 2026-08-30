@@ -430,7 +430,7 @@ impl ExecutionBackend for SshBackend {
             return Ok(OrphanScan {
                 backend_id: BACKEND_ID.into(),
                 kind: BackendKind::Ssh,
-                nonce: nonce.into(),
+                nonce: Some(nonce.into()),
                 method: format!("{TARGET_ENV} is not set, so no remote host could be scanned"),
                 found: Vec::new(),
                 enumerated: false,
@@ -440,7 +440,7 @@ impl ExecutionBackend for SshBackend {
             Ok(found) => Ok(OrphanScan {
                 backend_id: BACKEND_ID.into(),
                 kind: BackendKind::Ssh,
-                nonce: nonce.into(),
+                nonce: Some(nonce.into()),
                 method: "remote `ps -eo pid,args` filtered on the task nonce".into(),
                 found,
                 enumerated: true,
@@ -448,7 +448,7 @@ impl ExecutionBackend for SshBackend {
             Err(detail) => Ok(OrphanScan {
                 backend_id: BACKEND_ID.into(),
                 kind: BackendKind::Ssh,
-                nonce: nonce.into(),
+                nonce: Some(nonce.into()),
                 method: format!("remote scan failed: {detail}"),
                 found: Vec::new(),
                 enumerated: false,
