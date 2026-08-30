@@ -253,15 +253,25 @@ impl WriteTool {
                     };
                 }
             }
-            Ok(FileMutationOutcome::Conflict { current }) => {
+            Ok(FileMutationOutcome::Conflict {
+                current,
+                intercepted_save,
+            }) => {
                 *attempt = FilesystemWriteAttempt::NotAttempted;
                 let why = match (current, judged.is_some()) {
                     (FileObservation::Absent, true) => "it was deleted",
                     (FileObservation::Present(_), false) => "something else created it",
                     _ => "its contents changed on disk",
                 };
+                // #1248 — the reason is composed from the re-observed state,
+                // as it always was; what the state cannot say is whether the
+                // refusal displaced a save, so that comes off the outcome.
                 return ToolResult {
-                    content: crate::unsaved_work::changed_under_write(file_path, why),
+                    content: crate::unsaved_work::conflict_message(
+                        file_path,
+                        why,
+                        intercepted_save.as_deref(),
+                    ),
                     is_error: true,
                 };
             }
@@ -863,6 +873,123 @@ mod tests {
         assert!(
             result.content.contains(&survivors[0].display().to_string()),
             "the user is not told where the original was preserved: {}",
+            result.content
+        );
+    }
+
+    /// #1248 c2 + c3, through the VFS path — the one `write_through_vfs`
+    /// takes whenever a `ToolContext` is present, which is every dispatched
+    /// tool call.
+    ///
+    /// The criterion's subject is the SURFACED tool text, so the tool is what
+    /// is driven and what is graded: `execute_with_ctx` over a real `RealFs`
+    /// runs a real `compare_exchange_file`, which runs a real
+    /// `atomic_write_checked`, and the assertions are on the `ToolResult` it
+    /// hands back and on the file that is actually on disk when it does.
+    ///
+    /// The save that the retraction displaces is made from inside the
+    /// exchange to verdict window by the test-only `publish_window` probe.
+    /// That is the ONLY seam into the window, for the reason that module's own
+    /// doc gives, and it substitutes exactly one thing: the reason the publish
+    /// is refused. The exchange, the restore, `keep_displaced`, the `Refusal`,
+    /// what `compare_exchange_file` carries out of it and what this tool
+    /// renders off that are all production code.
+    ///
+    /// The new content is a SUPERSET of the pre-image on purpose: a rewrite
+    /// that drops a line is refused by the unsaved-work guard before any of
+    /// this runs, and the test would then grade nothing.
+    ///
+    /// Gated to Linux/macOS because this workspace has no Windows executor,
+    /// NOT because the path is unreachable there. On Windows
+    /// `publish_displacing` returns `Swap::Displaced(backup)` via
+    /// `ReplaceFileW`'s `lpBackupFileName` and `restore` returns
+    /// `Ok(Some(exchanged_out))`, so `intercepted_save` is reachable -- see
+    /// `wcore_config::atomic_io`, which corrects the earlier reading that
+    /// `ReplaceFile` hands nothing back. Windows coverage is
+    /// FerroxLabs/wayland#1268.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn the_vfs_path_names_a_save_the_refusal_displaced() {
+        const ORIGINAL: &str = "the only copy of the user's bytes\n";
+        const REWRITE: &str = "the only copy of the user's bytes\nand a line the agent added\n";
+        const THEIR_SAVE: &[u8] = b"what the user saved while the check was running\n";
+
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, ORIGINAL).unwrap();
+
+        // Every entry into the window, in order, so the fixture control below
+        // can assert it was entered exactly once and with the pre-image.
+        let handed: Arc<std::sync::Mutex<Vec<Option<Vec<u8>>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&handed);
+        let dest = p.clone();
+        let _probe = crate::vfs::publish_window::install(
+            &p,
+            Box::new(move |observed: Option<&[u8]>| {
+                recorded.lock().unwrap().push(observed.map(<[u8]>::to_vec));
+                // Inside the window by construction: the publish exchange has
+                // happened (that is what produced `observed`) and the restore
+                // exchange has not, so this name resolves to the NEW inode and
+                // the save lands on it exactly as an editor's would.
+                std::fs::write(&dest, THEIR_SAVE).unwrap();
+                Err("its contents changed on disk".to_owned())
+            }),
+        );
+
+        let ctx = crate::context::ToolContext::test_default();
+        let result = tool(None)
+            .execute_with_ctx(
+                json!({ "file_path": p.to_str().unwrap(), "content": REWRITE }),
+                &ctx,
+            )
+            .await;
+
+        // Fixture control. Without it every assertion below would also pass on
+        // a conflict classified BEFORE any publish, which is a different arm
+        // and is what c4 pins.
+        let entries = handed.lock().unwrap().len();
+        assert_eq!(
+            entries, 1,
+            "the exchange to verdict window was entered {entries} times, not \
+             once, so this does not grade the arm it claims to"
+        );
+        assert_eq!(
+            handed.lock().unwrap()[0].as_deref(),
+            Some(ORIGINAL.as_bytes()),
+            "the verdict was not handed the displaced pre-image, so no publish \
+             was retracted here"
+        );
+
+        assert!(result.is_error, "reported as a success: {}", result.content);
+
+        // The destination is back to exactly what it held — which is why the
+        // notice cannot be recovered by re-observing it, and has to be carried.
+        assert_eq!(std::fs::read(&p).unwrap(), ORIGINAL.as_bytes());
+
+        // The user's save is on disk, under a name only the refusal knows.
+        let survivors: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|f| std::fs::read(f).is_ok_and(|b| b == THEIR_SAVE))
+            .collect();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "the displaced save did not survive: {survivors:?}"
+        );
+        assert_ne!(survivors[0], p);
+
+        // c2 + c3: the SURFACED text names it, and does not claim the refusal
+        // cost nobody anything.
+        assert!(
+            result.content.contains(&survivors[0].display().to_string()),
+            "the user is not told where their save went: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("Nothing was changed."),
+            "a refusal that displaced a save still says nothing was changed: {}",
             result.content
         );
     }

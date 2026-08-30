@@ -290,7 +290,11 @@ impl IntendedFileMutation {
 }
 
 /// Result of one conditional mutation attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: `Conflict` carries the one fact about a refusal that cannot be
+/// recovered by looking at the filesystem afterwards (#1248), and that fact is
+/// a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileMutationOutcome {
     Applied {
         previous: FileObservation,
@@ -301,6 +305,24 @@ pub enum FileMutationOutcome {
     },
     Conflict {
         current: FileObservation,
+        /// Where a save that this refusal DISPLACED was preserved (#1248).
+        ///
+        /// `None` on every conflict that refused before anything was
+        /// published — the pre-flight classification arms, `InMemoryFs`, the
+        /// containment wrapper — because nothing can have been displaced by a
+        /// publish that never happened. `Some(path)` only ever comes out of
+        /// [`wcore_config::Refusal::intercepted_save`]: a non-cooperating
+        /// editor saved onto the published inode inside the exchange to
+        /// verdict window, and putting the original back took those bytes out
+        /// of the way and kept them there.
+        ///
+        /// This is a field rather than something the caller re-derives
+        /// because it is NOT derivable. After a successful retraction the
+        /// destination holds exactly what it held either way; the refusal is
+        /// the only witness that it cost somebody something. Every renderer
+        /// that says "nothing was changed" off a conflict is telling the truth
+        /// only when this is `None`.
+        intercepted_save: Option<PathBuf>,
     },
 }
 
@@ -526,7 +548,11 @@ impl VirtualFs for RealFs {
         // content precondition is re-enforced atomically below; these decide
         // WHICH outcome a caller is told about, and refuse early.
         if !mutation.postcondition_authority_matches(&observed) {
-            return Ok(FileMutationOutcome::Conflict { current });
+            return Ok(FileMutationOutcome::Conflict {
+                current,
+                // Nothing was published, so nothing can have been displaced.
+                intercepted_save: None,
+            });
         }
         if mutation.already_applied_matches(&observed) {
             return Ok(FileMutationOutcome::AlreadyApplied {
@@ -536,7 +562,11 @@ impl VirtualFs for RealFs {
         if current == FileObservation::Present(mutation.intended)
             || !mutation.precondition_matches(&observed)
         {
-            return Ok(FileMutationOutcome::Conflict { current });
+            return Ok(FileMutationOutcome::Conflict {
+                current,
+                // Nothing was published, so nothing can have been displaced.
+                intercepted_save: None,
+            });
         }
 
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -549,6 +579,10 @@ impl VirtualFs for RealFs {
         let data = mutation.contents().to_vec();
         let published = tokio::task::spawn_blocking(move || {
             wcore_config::atomic_write_checked(&path_owned, &data, |displaced| {
+                #[cfg(test)]
+                if let Some(substituted) = publish_window::verdict(&path_owned, displaced) {
+                    return substituted;
+                }
                 if precondition.matches(observation_of(displaced)) {
                     Ok(())
                 } else {
@@ -567,9 +601,76 @@ impl VirtualFs for RealFs {
             // The publish was retracted: the destination held bytes the
             // precondition does not name. Report what is there NOW, not the
             // stale observation from before the exchange.
-            Err(_) => Ok(FileMutationOutcome::Conflict {
+            //
+            // #1248 — and carry the refusal's own verdict with it. The
+            // re-observation above answers "what is at the destination", which
+            // is the same answer whether or not the retraction displaced
+            // somebody's save; matching this arm as `Err(_)` threw away the
+            // only thing that could tell the two apart and left a preserved
+            // file on disk with nothing naming it.
+            Err(refusal) => Ok(FileMutationOutcome::Conflict {
                 current: self.observe_file(path).await?.observation,
+                intercepted_save: refusal.intercepted_save().map(Path::to_path_buf),
             }),
+        }
+    }
+}
+
+/// #1248 c3 — the one seam into the exchange to verdict window of the publish
+/// [`VirtualFs::compare_exchange_file`] performs.
+///
+/// Reaching the state #1248 is about needs a save by a non-cooperating editor
+/// to land on the published inode strictly BETWEEN the publish exchange and
+/// the restore exchange. Nothing on the vfs side of that window can make that
+/// happen: the only vfs code inside it is the pure
+/// `precondition.matches(observation_of(displaced))`. What is left is a racer
+/// against a window measured in microseconds, which is a flake generator. So
+/// the save is made from inside the verdict itself, which is the one ordering
+/// that is inside the window by construction.
+///
+/// Keyed by DESTINATION, so a probing test cannot contaminate another test's
+/// compare-exchange the way one global switch would. Empty in production —
+/// the whole module is `#[cfg(test)]`, so nothing outside the crate's own unit
+/// tests can put anything in it.
+///
+/// What a probe substitutes is exactly one thing: the REASON the publish is
+/// refused. The exchange, the restore, `keep_displaced`, the [`Refusal`] it
+/// produces, what the outcome carries and what the tool renders off it are all
+/// production code.
+///
+/// [`Refusal`]: wcore_config::Refusal
+#[cfg(test)]
+pub(crate) mod publish_window {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    pub(crate) type Probe =
+        Box<dyn Fn(Option<&[u8]>) -> Result<(), String> + Send + Sync + 'static>;
+
+    fn probes() -> &'static Mutex<HashMap<PathBuf, Probe>> {
+        static PROBES: OnceLock<Mutex<HashMap<PathBuf, Probe>>> = OnceLock::new();
+        PROBES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Take `dest`'s verdict inside the window, or `None` when nothing is
+    /// installed for it — which is every path in every non-probing test.
+    pub(crate) fn verdict(dest: &Path, displaced: Option<&[u8]>) -> Option<Result<(), String>> {
+        let probes = probes().lock().unwrap();
+        probes.get(dest).map(|probe| probe(displaced))
+    }
+
+    /// Install `probe` for `dest` until the returned guard is dropped.
+    pub(crate) fn install(dest: &Path, probe: Probe) -> Guard {
+        probes().lock().unwrap().insert(dest.to_path_buf(), probe);
+        Guard(dest.to_path_buf())
+    }
+
+    pub(crate) struct Guard(PathBuf);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            probes().lock().unwrap().remove(&self.0);
         }
     }
 }
@@ -1503,7 +1604,11 @@ impl VirtualFs for InMemoryFs {
         };
 
         if !mutation.postcondition_authority_matches(&identified) {
-            return Ok(FileMutationOutcome::Conflict { current });
+            return Ok(FileMutationOutcome::Conflict {
+                current,
+                // Nothing was published, so nothing can have been displaced.
+                intercepted_save: None,
+            });
         }
         if mutation.already_applied_matches(&identified) {
             return Ok(FileMutationOutcome::AlreadyApplied {
@@ -1511,10 +1616,18 @@ impl VirtualFs for InMemoryFs {
             });
         }
         if current == FileObservation::Present(mutation.intended) {
-            return Ok(FileMutationOutcome::Conflict { current });
+            return Ok(FileMutationOutcome::Conflict {
+                current,
+                // Nothing was published, so nothing can have been displaced.
+                intercepted_save: None,
+            });
         }
         if !mutation.precondition_matches(&identified) {
-            return Ok(FileMutationOutcome::Conflict { current });
+            return Ok(FileMutationOutcome::Conflict {
+                current,
+                // Nothing was published, so nothing can have been displaced.
+                intercepted_save: None,
+            });
         }
 
         files.insert(path.to_path_buf(), InMemoryFile::new(mutation.contents()));
@@ -2000,6 +2113,8 @@ impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
         {
             return Ok(FileMutationOutcome::Conflict {
                 current: wrapped_observed.observation,
+                // Refused before delegating, so no publish was attempted here.
+                intercepted_save: None,
             });
         }
         let rebound = mutation.with_expected_object(inner_observed.object);

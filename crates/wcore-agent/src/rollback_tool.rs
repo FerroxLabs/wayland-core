@@ -181,10 +181,25 @@ impl Tool for RollbackTool {
             Ok(
                 FileMutationOutcome::Applied { .. } | FileMutationOutcome::AlreadyApplied { .. },
             ) => {}
-            Ok(FileMutationOutcome::Conflict { .. }) => {
+            Ok(FileMutationOutcome::Conflict {
+                intercepted_save, ..
+            }) => {
+                // #1248 — the third consumer of `Conflict`, and it discarded
+                // the same notice the two tool paths did. A rollback refused
+                // over a save that its own retraction displaced leaves those
+                // bytes on disk under a name only this outcome knows.
                 return suspended(
                     &path,
-                    "file changed while rollback was being conditionally committed",
+                    &match intercepted_save {
+                        Some(preserved) => format!(
+                            "file changed while rollback was being conditionally committed; \
+                             a save made while the check was running was displaced by putting \
+                             the original back and is preserved at {}",
+                            preserved.display()
+                        ),
+                        None => "file changed while rollback was being conditionally committed"
+                            .to_owned(),
+                    },
                 );
             }
             Err(error) => {

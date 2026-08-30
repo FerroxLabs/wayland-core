@@ -1532,11 +1532,29 @@ pub fn changed_under_write(display_path: &str, why: &str) -> String {
 /// refusal that destroyed nothing and a refusal that displaced somebody's save
 /// were the same sentence, so the user could not tell them apart.
 pub fn refusal_message(display_path: &str, refusal: &wcore_config::Refusal) -> String {
-    match refusal.intercepted_save() {
-        Some(preserved) => {
-            changed_under_write_displacing_a_save(display_path, refusal.why(), preserved)
-        }
-        None => changed_under_write(display_path, refusal.why()),
+    conflict_message(display_path, refusal.why(), refusal.intercepted_save())
+}
+
+/// The same choice, for a caller that has the two facts without holding a
+/// [`wcore_config::Refusal`] — the VFS path, whose reason is composed from the
+/// outcome it was handed and whose displaced save arrives on
+/// [`crate::vfs::FileMutationOutcome::Conflict`] (#1248).
+///
+/// This is the ONE decision site for the whole distinction, on every path.
+/// [`refusal_message`] is a thin delegation to it. A call site that renders a
+/// refused publish does not choose a sentence: the sentence is a total
+/// function of `intercepted_save`, so a path that forgets the distinction can
+/// only do it by not having the value, never by picking the wrong wording —
+/// which is why the value is carried on the outcome instead of being
+/// re-derived from the filesystem, where it does not exist.
+pub fn conflict_message(
+    display_path: &str,
+    why: &str,
+    intercepted_save: Option<&std::path::Path>,
+) -> String {
+    match intercepted_save {
+        Some(preserved) => changed_under_write_displacing_a_save(display_path, why, preserved),
+        None => changed_under_write(display_path, why),
     }
 }
 
