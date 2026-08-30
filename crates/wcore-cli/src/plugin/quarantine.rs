@@ -1030,6 +1030,10 @@ mod tests {
         let descendant_state = settle(descendant);
         let leader_state = settle(leader);
         let census = process_group_census(leader);
+        // Measurements are already taken, so this tidies up without hiding
+        // anything -- and the kill is what stops a RED arm hanging on a leader
+        // the guard failed to take, instead of reporting it.
+        let _ = child.kill();
         let _ = child.wait();
         reap_group(leader);
 
