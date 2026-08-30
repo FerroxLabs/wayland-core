@@ -1370,6 +1370,36 @@ mod output_sizing_tests {
         }
     }
 
+    /// #1172 c2 - "the shortfall is named to the user, and says the HEAD of the
+    /// prompt is what was lost".
+    ///
+    /// c2's evidence used to be a bare `file:` line pointer into the turn loop,
+    /// which drifted onto unrelated billing code the moment this lane edited
+    /// engine.rs - and a line number cannot assert a sentence anyway. WHICH end
+    /// of the conversation went is the whole point of the notice: a user told
+    /// only "context truncated" reasonably assumes the tail was trimmed and
+    /// that their system prompt and task survived. They did not.
+    #[test]
+    fn the_truncation_notice_says_the_head_of_the_prompt_is_what_was_lost() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        for corroborated in [false, true] {
+            let text = truncation_notice(&evidence(4_050, corroborated), "qwen3:8b", &cfg);
+            assert!(
+                text.contains("HEAD"),
+                "corroborated={corroborated}: the notice must name WHICH end was \
+                 discarded: {text}"
+            );
+            assert!(
+                text.contains("the system prompt and your task are what went"),
+                "corroborated={corroborated}: naming the head is only useful if \
+                 the notice says what was in it: {text}"
+            );
+            // The figures the operator needs to act, on every arm.
+            assert!(text.contains("4050"), "the served figure: {text}");
+            assert!(text.contains("10466"), "the sent figure: {text}");
+        }
+    }
+
     /// wayland-core#353 D10 — the notice must not claim core changed its sizing
     /// on a turn where it did not.
     ///
