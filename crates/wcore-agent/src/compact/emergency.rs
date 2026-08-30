@@ -41,6 +41,20 @@ pub fn is_at_emergency_limit(
 /// as a distance from a real boundary rather than as a bare token count. It is
 /// the SAME arithmetic [`is_at_emergency_limit`] tests against — extracted, not
 /// re-derived, so the reported limit can never drift from the enforced one.
+///
+/// One correction to that sentence, 2026-08-30. Since FerroxLabs/wayland#1210
+/// collapsed the two independent emergency call sites into one,
+/// [`is_at_emergency_limit`] itself has NO production caller:
+/// `AgentEngine::run_compaction` compares `last_input_tokens` against
+/// `AgentEngine::emergency_limit_tokens()` inline, and that is the single
+/// enforcement site. The no-drift guarantee still holds, but it holds because
+/// both the reported figure and the enforced one come from THIS function — not
+/// because production goes through the predicate below. The predicate is kept
+/// as the tested spelling of the comparison and its unit tests grade this
+/// function's arithmetic, which is production-live; the `>=` at the enforcement
+/// site is graded end-to-end instead, by the tests that drive `run_compaction`
+/// to `AgentError::ContextTooLong` (engine_compact_test.rs,
+/// issue_1150_runaway_test.rs, and the inline `run_compaction` tests).
 /// GH#635 extended that guarantee to the DENOMINATOR. FerroxLabs/wayland#1210
 /// finished the job: this function used to resolve the window ITSELF, from
 /// `config` + `provider` + `model`, which made it the ONE window-derived

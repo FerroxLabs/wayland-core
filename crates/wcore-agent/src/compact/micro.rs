@@ -2072,98 +2072,313 @@ mod tests {
 
     /// The #1150 shape: results at the per-result cap accumulating across a
     /// session, no context pressure, nothing else in the pipeline touching
-    /// them. The claim under test is the one the ticket makes — the carried
-    /// size must stop growing with the session — so it is measured at two very
-    /// different session lengths against ONE constant ceiling.
+    /// them. The claim under test is the one the ticket makes — accumulated
+    /// results are not re-sent whole on every turn — measured at two very
+    /// different session lengths against ONE ceiling.
+    ///
+    /// BOTH ARMS. `None` is the unknown-window fallback; `Some(window)` is what
+    /// BOTH production call sites pass (`AgentEngine::run_compaction` step 0b
+    /// and `AgentEngine::compact_now`, each with `compaction_window_now()`).
+    /// Until FerroxLabs/wayland#1200 re-opened this, every tool-result test in
+    /// this file drove `None` — grading the one arm production never takes.
+    ///
+    /// The ceiling is `worst_case_carried_tool_result_bytes` for the arm under
+    /// test rather than a hand-written constant, so the stated ceiling and the
+    /// pass cannot drift apart silently.
+    ///
+    /// The session-length term is stated EXACTLY rather than hidden behind a
+    /// slack constant. The pass leaves one stub per dropped result and never
+    /// re-mutates it (that is what makes it prompt-cache safe), so the carried
+    /// total does grow with the session, by one stub per tool call. The
+    /// previous `+ 20_000` slack was wide enough to swallow exactly that term
+    /// and so read as "does not scale"; it does scale, and
+    /// `the_carried_payload_grows_by_one_stub_per_dropped_result` pins the
+    /// arithmetic.
     #[test]
     fn accumulated_tool_results_are_bounded_across_a_session() {
         let config = default_config();
-        let tr = &config.tool_results;
-        // The guarantee: everything but the protected newest `keep_recent`
-        // results is squeezed under the budget. Both terms are constants, so
-        // the ceiling does not depend on how long the session ran.
-        let ceiling = tr.total_budget_bytes + tr.keep_recent * 50_000;
+        let stub = bounded_result_stub("Read", 50_000).len();
 
-        let mut short = session_with_results(20, 50_000);
-        let mut long = session_with_results(100, 50_000);
-        let unbounded_short = total_result_bytes(&short);
-        let unbounded_long = total_result_bytes(&long);
-        assert!(
-            unbounded_long > ceiling * 10,
-            "precondition: the long session must start far over the ceiling"
+        for window in [None, Some(32_768usize), Some(200_000)] {
+            let ceiling = config.worst_case_carried_tool_result_bytes(window);
+
+            let mut short = session_with_results(20, 50_000);
+            let mut long = session_with_results(100, 50_000);
+            let unbounded_long = total_result_bytes(&long);
+            assert!(
+                unbounded_long > ceiling * 10,
+                "{window:?} precondition: the long session must start far over the \
+                 ceiling"
+            );
+
+            let result = bound_accumulated_tool_results(&mut short, &config, window);
+            let long_result = bound_accumulated_tool_results(&mut long, &config, window);
+
+            assert!(
+                result.cleared_count > 0,
+                "{window:?}: the ceiling must have bitten"
+            );
+            assert!(
+                total_result_bytes(&short) <= ceiling,
+                "{window:?}: 20 results must fit the ceiling: {} > {ceiling}",
+                total_result_bytes(&short)
+            );
+            assert!(
+                total_result_bytes(&long) <= ceiling,
+                "{window:?}: 100 results must fit the SAME ceiling: {} > {ceiling}",
+                total_result_bytes(&long)
+            );
+            // Five times the tool calls must not mean five times the carried
+            // bytes — that difference is what "re-sent whole on every turn"
+            // cost. What remains is the stub term, asserted to the byte rather
+            // than given a slack it could hide inside.
+            let extra_dropped = long_result.cleared_count - result.cleared_count;
+            assert_eq!(
+                total_result_bytes(&long),
+                total_result_bytes(&short) + extra_dropped * stub,
+                "{window:?}: the only growth from 20 to 100 tool calls may be the \
+                 {extra_dropped} extra stubs"
+            );
+            assert!(
+                total_result_bytes(&long) * 20 < unbounded_long,
+                "{window:?}: the long session must shrink by at least 20x, {} vs \
+                 {unbounded_long}",
+                total_result_bytes(&long)
+            );
+        }
+    }
+
+    /// FerroxLabs/wayland#1200 c2, graded on the PRODUCTION path.
+    ///
+    /// `CompactConfig::worst_case_carried_tool_result_bytes` is a pure
+    /// arithmetic predictor with NO production caller. It returns the same
+    /// figure whether or not the pass below honours it, so a test asserting
+    /// only over the predictor cannot fail when the pass stops honouring it —
+    /// and did not: deleting the byte-cap loop in
+    /// `bound_accumulated_tool_results` left the whole wcore-agent +
+    /// wcore-config suite green, c2's own evidence test included.
+    ///
+    /// So the criterion is graded here, by RUNNING the pass and measuring the
+    /// bytes it leaves in the messages, and the predictor is pinned to that
+    /// measurement instead of asserted beside it. Two assertions per case, and
+    /// the PAIR is what removes the blindness:
+    ///
+    /// 1. `carried <= input_ceiling_for_window(window)` — the criterion, on the
+    ///    bytes production actually carries. Against the CEILING because
+    ///    carried results are input and the ceiling is the boundary that admits
+    ///    input; a bound the #255 guard aborts past is not a bound.
+    /// 2. `carried <= worst_case_carried_tool_result_bytes(Some(window))` — the
+    ///    predictor must be a true UPPER BOUND on the pass it describes. A
+    ///    predictor nothing checks against the pass is exactly what c2 shipped.
+    ///
+    /// Session lengths stop at 100 deliberately, and the stop is not a
+    /// convenience: the pass leaves one stub per dropped result, so the carried
+    /// total crosses a 32,768-token model's ceiling at about 238 tool calls.
+    /// That residue is pinned exactly by
+    /// `the_carried_payload_grows_by_one_stub_per_dropped_result` and carried
+    /// as an OPEN remainder — it is not swallowed here by a wider bound.
+    #[test]
+    fn the_pass_leaves_a_payload_the_window_can_admit() {
+        use wcore_config::compact::{CHARS_PER_TOKEN, MAX_TOOL_RESULT_BYTES};
+        let config = default_config();
+
+        for window in [32_768usize, 40_960, 49_152, 65_536, 131_072, 200_000] {
+            let ceiling = config.input_ceiling_for_window(window);
+            let predicted = config.worst_case_carried_tool_result_bytes(Some(window));
+
+            for n in [20usize, 100] {
+                let mut msgs = session_with_results(n, MAX_TOOL_RESULT_BYTES);
+                let before = total_result_bytes(&msgs);
+                assert!(
+                    before / CHARS_PER_TOKEN > window,
+                    "precondition: {n} results must start over the {window}-token \
+                     window, or this case grades nothing"
+                );
+
+                bound_accumulated_tool_results(&mut msgs, &config, Some(window));
+                let carried = total_result_bytes(&msgs);
+
+                assert!(
+                    carried / CHARS_PER_TOKEN <= ceiling,
+                    "window {window}, {n} results: the pass left {carried} bytes = {} \
+                     tokens, and the pre-flight guard admits only {ceiling}",
+                    carried / CHARS_PER_TOKEN
+                );
+                assert!(
+                    carried <= predicted,
+                    "window {window}, {n} results: the pass carries {carried} bytes but \
+                     worst_case_carried_tool_result_bytes predicts {predicted} — the \
+                     predictor no longer bounds the pass it describes"
+                );
+            }
+        }
+    }
+
+    /// #1200 — IDENTITY on a large window, on the PRODUCTION path.
+    ///
+    /// `a_large_window_keeps_todays_flat_tool_result_constants` pins this over
+    /// `tool_result_bounds`' RETURN VALUE. This pins it over what the pass DOES
+    /// with that value, which is the half nothing tested. The closing clause is
+    /// the non-vacuity control: the bound must bite strictly harder at 32,768
+    /// than at 200,000, so a pass that ignores the window entirely cannot
+    /// satisfy the identity above.
+    #[test]
+    fn a_large_window_leaves_the_pass_byte_identical_to_the_unknown_window_arm() {
+        use wcore_config::compact::MAX_TOOL_RESULT_BYTES;
+        let config = default_config();
+        let mut windowed = session_with_results(20, MAX_TOOL_RESULT_BYTES);
+        let mut flat = windowed.clone();
+
+        let w = bound_accumulated_tool_results(&mut windowed, &config, Some(200_000));
+        let f = bound_accumulated_tool_results(&mut flat, &config, None);
+
+        assert_eq!(w.cleared_count, f.cleared_count);
+        assert_eq!(
+            serde_json::to_string(&windowed).unwrap(),
+            serde_json::to_string(&flat).unwrap(),
+            "a 200,000-token window must leave the pass byte-identical to the \
+             unknown-window arm, or the bound is a regression on large models"
         );
 
-        let result = bound_accumulated_tool_results(&mut short, &config, None);
-        bound_accumulated_tool_results(&mut long, &config, None);
+        let mut small = session_with_results(20, MAX_TOOL_RESULT_BYTES);
+        bound_accumulated_tool_results(&mut small, &config, Some(32_768));
+        assert!(
+            total_result_bytes(&small) < total_result_bytes(&windowed),
+            "control: a 32,768-token window must carry strictly less than a \
+             200,000-token one, {} vs {}",
+            total_result_bytes(&small),
+            total_result_bytes(&windowed)
+        );
+    }
 
-        assert!(result.cleared_count > 0, "the ceiling must have bitten");
+    /// The OPEN REMAINDER on #1200, pinned exactly rather than left to be
+    /// rediscovered.
+    ///
+    /// The pass replaces each over-budget result with a stub and never
+    /// re-mutates one — precisely what makes it prompt-cache safe — so the
+    /// carried total is `protected tail + dropped x stub`, which grows WITHOUT
+    /// BOUND in the number of tool calls. Measured on a 32,768-token window:
+    /// 52,470 bytes at 20 calls, 62,870 at 100, 114,870 at 500, 309,870 at
+    /// 2,000 — the last being 77,467 tokens on a 32,768-token window, which is
+    /// the state #1200 reports, reached by a longer session instead of by a
+    /// bigger budget.
+    ///
+    /// #1150 c4's note used to gloss the guarantee as "carried bytes stop
+    /// growing with the session". They do not. The old evidence test hid the
+    /// term behind a 20,000-byte slack, wide enough to swallow the 10,400 bytes
+    /// between a 20-call and a 100-call session. This states the arithmetic, so
+    /// the growth can never again be mistaken for noise.
+    #[test]
+    fn the_carried_payload_grows_by_one_stub_per_dropped_result() {
+        use wcore_config::compact::{CHARS_PER_TOKEN, MAX_TOOL_RESULT_BYTES};
+        const WINDOW: usize = 32_768;
+        let config = default_config();
+        let stub = bounded_result_stub("Read", MAX_TOOL_RESULT_BYTES).len();
+
+        let mut measured = Vec::new();
+        for n in [20usize, 100, 500] {
+            let mut msgs = session_with_results(n, MAX_TOOL_RESULT_BYTES);
+            let dropped =
+                bound_accumulated_tool_results(&mut msgs, &config, Some(WINDOW)).cleared_count;
+            assert_eq!(
+                dropped,
+                n - 1,
+                "n={n}: every result but the newest is dropped"
+            );
+            let carried = total_result_bytes(&msgs);
+            assert_eq!(
+                carried,
+                MAX_TOOL_RESULT_BYTES + dropped * stub,
+                "n={n}: the carried total is the unconditionally-protected newest \
+                 result plus one stub per dropped result"
+            );
+            measured.push(carried);
+        }
+        // A strict inequality, not a slack bound: a change that actually made
+        // the total constant would redden this and force the claim to be
+        // rewritten rather than allowed to drift.
         assert!(
-            total_result_bytes(&short) <= ceiling,
-            "20 results must fit the ceiling: {} > {ceiling}",
-            total_result_bytes(&short)
+            measured[0] < measured[1] && measured[1] < measured[2],
+            "the carried total must be measured GROWING with the session: {measured:?}"
         );
+
+        // And the growth is not academic: it crosses the window's own ceiling.
+        let admissible = config.input_ceiling_for_window(WINDOW) * CHARS_PER_TOKEN;
+        let calls = (admissible - MAX_TOOL_RESULT_BYTES).div_ceil(stub) + 2;
+        let mut over = session_with_results(calls, MAX_TOOL_RESULT_BYTES);
+        bound_accumulated_tool_results(&mut over, &config, Some(WINDOW));
         assert!(
-            total_result_bytes(&long) <= ceiling,
-            "100 results must fit the SAME ceiling: {} > {ceiling}",
-            total_result_bytes(&long)
+            total_result_bytes(&over) > admissible,
+            "the residue must be REAL: {calls} tool calls carry {} bytes against the \
+             {admissible} bytes a {WINDOW}-token window admits",
+            total_result_bytes(&over)
         );
-        // Five times the tool calls must not mean five times the carried
-        // bytes — that difference is what "re-sent whole on every turn" cost.
-        assert!(
-            total_result_bytes(&long) < total_result_bytes(&short) + 20_000,
-            "carried bytes must not scale with session length: {} vs {}",
-            total_result_bytes(&long),
-            total_result_bytes(&short)
-        );
-        assert!(
-            total_result_bytes(&long) * 20 < unbounded_long,
-            "the long session must shrink by at least 20x, {} vs {unbounded_long}",
-            total_result_bytes(&long)
-        );
-        let _ = unbounded_short;
     }
 
     /// The live working set is protected however hard the ceiling bites.
+    ///
+    /// BOTH arms, and they protect different amounts. `None` and a large window
+    /// keep `keep_recent` results; a 32,768-token window additionally BYTE-caps
+    /// the tail, so there it falls to the newest result alone. The invariant
+    /// that holds in every arm — and the one #1172's re-read loop actually
+    /// needs — is that the NEWEST result is never a stub, whatever its size.
     #[test]
     fn the_newest_results_are_never_dropped_by_the_ceiling() {
         let config = default_config();
         let keep = config.tool_results.keep_recent;
-        let mut msgs = session_with_results(20, 50_000);
 
-        bound_accumulated_tool_results(&mut msgs, &config, None);
+        for (window, protected) in [
+            (None, keep),
+            (Some(200_000usize), keep),
+            // The byte cap bites: 4 x 50,000 does not fit half a 32,768-token
+            // window's admissible input, so only the unconditional newest one
+            // survives.
+            (Some(32_768), 1),
+        ] {
+            let mut msgs = session_with_results(20, 50_000);
 
-        let bodies: Vec<&String> = msgs
-            .iter()
-            .flat_map(|m| &m.content)
-            .filter_map(|b| match b {
-                ContentBlock::ToolResult { content, .. } => Some(content),
-                _ => None,
-            })
-            .collect();
-        for body in &bodies[bodies.len() - keep..] {
-            assert!(
-                !body.starts_with(BOUNDED_TOOL_RESULT_PREFIX),
-                "the newest {keep} results must survive, found a stub"
-            );
+            bound_accumulated_tool_results(&mut msgs, &config, window);
+
+            let bodies: Vec<&String> = msgs
+                .iter()
+                .flat_map(|m| &m.content)
+                .filter_map(|b| match b {
+                    ContentBlock::ToolResult { content, .. } => Some(content),
+                    _ => None,
+                })
+                .collect();
+            for body in &bodies[bodies.len() - protected..] {
+                assert!(
+                    !body.starts_with(BOUNDED_TOOL_RESULT_PREFIX),
+                    "{window:?}: the newest {protected} results must survive, found a \
+                     stub"
+                );
+            }
         }
     }
 
     /// Negative control: a session under the budget is left completely alone.
     /// Without this the test above would pass on a pass that stubs everything.
+    ///
+    /// Every arm, the windowed ones included — a bound that fired on a 4,000-byte
+    /// session because a window was known would be a regression, and the
+    /// windowed arm is the one production takes.
     #[test]
     fn a_session_under_the_budget_is_untouched() {
         let config = default_config();
-        let mut msgs = session_with_results(4, 1_000);
-        let before = msgs.clone();
+        for window in [None, Some(32_768usize), Some(200_000)] {
+            let mut msgs = session_with_results(4, 1_000);
+            let before = msgs.clone();
 
-        let result = bound_accumulated_tool_results(&mut msgs, &config, None);
+            let result = bound_accumulated_tool_results(&mut msgs, &config, window);
 
-        assert_eq!(result.cleared_count, 0);
-        assert_eq!(
-            total_result_bytes(&msgs),
-            total_result_bytes(&before),
-            "nothing may be dropped while the sum fits"
-        );
+            assert_eq!(result.cleared_count, 0, "{window:?}");
+            assert_eq!(
+                total_result_bytes(&msgs),
+                total_result_bytes(&before),
+                "{window:?}: nothing may be dropped while the sum fits"
+            );
+        }
     }
 
     /// Monotone: a second pass over an already-bounded history changes ZERO
@@ -2172,21 +2387,26 @@ mod tests {
     #[test]
     fn the_ceiling_is_byte_stable_on_a_second_pass() {
         let config = default_config();
-        let mut msgs = session_with_results(20, 50_000);
-        bound_accumulated_tool_results(&mut msgs, &config, None);
-        let after_first = serde_json::to_string(&msgs).unwrap();
+        // Every arm. The prompt-cache property has to hold on the arm
+        // production actually takes, which is `Some(compaction_window_now())`
+        // at both engine call sites, not on the `None` fallback alone.
+        for window in [None, Some(32_768usize), Some(200_000)] {
+            let mut msgs = session_with_results(20, 50_000);
+            bound_accumulated_tool_results(&mut msgs, &config, window);
+            let after_first = serde_json::to_string(&msgs).unwrap();
 
-        let second = bound_accumulated_tool_results(&mut msgs, &config, None);
+            let second = bound_accumulated_tool_results(&mut msgs, &config, window);
 
-        assert_eq!(
-            second.cleared_count, 0,
-            "a settled history must not re-mutate"
-        );
-        assert_eq!(
-            serde_json::to_string(&msgs).unwrap(),
-            after_first,
-            "a second pass must change zero bytes"
-        );
+            assert_eq!(
+                second.cleared_count, 0,
+                "{window:?}: a settled history must not re-mutate"
+            );
+            assert_eq!(
+                serde_json::to_string(&msgs).unwrap(),
+                after_first,
+                "{window:?}: a second pass must change zero bytes"
+            );
+        }
     }
 
     /// The boundary advances in epoch-sized batches, not one result per turn,
@@ -2195,20 +2415,31 @@ mod tests {
     fn the_ceiling_advances_in_epoch_sized_batches() {
         let config = default_config();
         let epoch = config.tool_results.epoch_results;
-        let mut msgs = session_with_results(20, 50_000);
+        // `None` and a large window; NOT a small one. Quantization rounds the
+        // batch UP and then clamps it to the candidate count, so on a window
+        // small enough that every candidate is consumed the batch saturates and
+        // the property degenerates rather than fails. Grading it there would
+        // weaken the assertion instead of extending it — the small-window
+        // saturation is asserted instead by
+        // `the_carried_payload_grows_by_one_stub_per_dropped_result`
+        // (`dropped == n - 1`).
+        for window in [None, Some(200_000usize)] {
+            let mut msgs = session_with_results(20, 50_000);
 
-        let first = bound_accumulated_tool_results(&mut msgs, &config, None);
+            let first = bound_accumulated_tool_results(&mut msgs, &config, window);
 
-        assert!(
-            first.cleared_count > 0,
-            "non-vacuity: the ceiling must have bitten for the batch size to mean anything"
-        );
-        assert_eq!(
-            first.cleared_count % epoch,
-            0,
-            "the batch must be a whole number of epochs, got {}",
-            first.cleared_count
-        );
+            assert!(
+                first.cleared_count > 0,
+                "{window:?}: non-vacuity: the ceiling must have bitten for the batch \
+                 size to mean anything"
+            );
+            assert_eq!(
+                first.cleared_count % epoch,
+                0,
+                "{window:?}: the batch must be a whole number of epochs, got {}",
+                first.cleared_count
+            );
+        }
     }
 
     /// A tool the operator excluded from `compactable_tools` is still bounded:
@@ -2217,21 +2448,24 @@ mod tests {
     fn the_ceiling_applies_to_tools_outside_the_compactable_list() {
         let mut config = default_config();
         config.compactable_tools = vec!["Read".to_string()];
-        let ceiling =
-            config.tool_results.total_budget_bytes + config.tool_results.keep_recent * 50_000;
-        let mut msgs = Vec::new();
-        for i in 0..20 {
-            let id = format!("t{i}");
-            msgs.push(assistant_msg(vec![tool_use_block(&id, "NotListed")]));
-            msgs.push(user_msg(vec![tool_result_block(&id, &"y".repeat(50_000))]));
+        for window in [None, Some(32_768usize), Some(200_000)] {
+            let ceiling = config.worst_case_carried_tool_result_bytes(window);
+            let mut msgs = Vec::new();
+            for i in 0..20 {
+                let id = format!("t{i}");
+                msgs.push(assistant_msg(vec![tool_use_block(&id, "NotListed")]));
+                msgs.push(user_msg(vec![tool_result_block(&id, &"y".repeat(50_000))]));
+            }
+
+            bound_accumulated_tool_results(&mut msgs, &config, window);
+
+            assert!(
+                total_result_bytes(&msgs) <= ceiling,
+                "{window:?}: an unlisted tool must not be able to escape the ceiling, \
+                 {} > {ceiling}",
+                total_result_bytes(&msgs)
+            );
         }
-
-        bound_accumulated_tool_results(&mut msgs, &config, None);
-
-        assert!(
-            total_result_bytes(&msgs) <= ceiling,
-            "an unlisted tool must not be able to escape the ceiling"
-        );
     }
 
     /// Disabling the pass restores the old (unbounded) behaviour exactly.
@@ -2239,12 +2473,16 @@ mod tests {
     fn the_ceiling_can_be_switched_off() {
         let mut config = default_config();
         config.tool_results.enabled = false;
-        let mut msgs = session_with_results(20, 50_000);
-        let before = total_result_bytes(&msgs);
+        // Every arm: knowing the window must not resurrect a pass the operator
+        // switched off.
+        for window in [None, Some(32_768usize), Some(200_000)] {
+            let mut msgs = session_with_results(20, 50_000);
+            let before = total_result_bytes(&msgs);
 
-        let result = bound_accumulated_tool_results(&mut msgs, &config, None);
+            let result = bound_accumulated_tool_results(&mut msgs, &config, window);
 
-        assert_eq!(result.cleared_count, 0);
-        assert_eq!(total_result_bytes(&msgs), before);
+            assert_eq!(result.cleared_count, 0, "{window:?}");
+            assert_eq!(total_result_bytes(&msgs), before, "{window:?}");
+        }
     }
 }

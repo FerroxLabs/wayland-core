@@ -18,6 +18,7 @@
 | Q-1172c3 / wayland#1172 c3 | what happens when the LEARNED served window is one core cannot compact in (the 4,096 slot) | **NARROW ONTO IT UNCONDITIONALLY AND REFUSE THE RUN OUT LOUD** | No `supports_compaction` escape hatch in `narrow_to_served_window`; the refusal carries `minimum_workable_window` and the `num_ctx` remedy; the truncation notice needs the matching third arm |
 | Q-1218 / wayland#1218 | clamp `size_output_cap` to the withheld RESERVE, or to the room left in the window in force | **TO THE ROOM IN THE WINDOW IN FORCE** | Never clamp the ask to the reserve at every input - that cuts a 200k Claude turn to the compaction reserve |
 | Q-1200 / wayland#1200 | bound the tool-result BUDGET only, or the protected tail too | **BOTH, and record the term that cannot be bounded** | The per-result ingestion cap is not window-derived; the named gap belongs beside the arithmetic, not in a lane report |
+| Q-1255 / wayland#1200 residue | fix the unbounded stub term here, or ticket it | **TICKET IT — FerroxLabs/wayland#1255 — and pin the arithmetic in-tree** | The only fix collapses already-stubbed bodies, which is the one thing the pass promises never to do; that trade is a decision, not a patch |
 | Q-391 / core#244 c4 | is the Windows local-operator shell expected to confine the VCS content store? | **NO — and say so everywhere the product speaks** | Rewrite #244 c4 to its true scope; keep the standing pin test; do not reopen AppContainer |
 
 ## D-SECRET-2 — REFUTED 2026-08-29. Do not build this.
@@ -177,3 +178,41 @@ sized against `admissible - max(admissible/2, MAX_TOOL_RESULT_BYTES)` - room is 
 result rather than pretending it is not there. Below a ceiling of about 12,500 tokens that single
 result exceeds the window on its own and no arithmetic in `wcore-config` can change it; that window
 is unworkable by Q-1172c3's test and is refused by the turn loop, which is where it belongs.
+
+## Why Q-1255 (the THIRD term) is ticketed rather than fixed in this lane
+
+Q-1200 above bounds two terms and names one it cannot bound. Answering this lane's refutation
+turned up a **third** term that neither the ticket's arithmetic nor that decision mentions, because
+until the pass was driven and measured rather than predicted, nobody had looked at what it leaves
+behind:
+
+```
+carried = protected_tail + dropped_results x stub_len          stub_len = 130 bytes
+```
+
+`bound_accumulated_tool_results` replaces each over-budget result with a stub and never re-mutates
+one. Measured on a 32,768-token window at HEAD: 52,470 bytes at 20 tool calls, 62,870 at 100,
+114,870 at 500, **309,870 = 77,467 tokens at 2,000** — 2.36x the whole window. The window's own
+ceiling (80,832 bytes) is crossed at about **238 tool calls**. That is wayland#1150's reported
+symptom, reached by a longer session rather than by a bigger budget, and 2,000 tool calls is an
+ordinary agent session.
+
+**It is not fixed here, and the reason is a real trade rather than a schedule.** The residue exists
+*because* the pass is monotone: an already-stubbed body must never change bytes again, or the
+provider's cached prefix is invalidated on every turn — which is the entire discipline
+wayland#1150 c6 and wayland#559 were built on. The only fix that changes the O(n) is to collapse
+runs of adjacent stubs, and that means re-mutating a stubbed body. A plausible shape is to collapse
+at epoch boundaries only, reusing the `epoch_results` quantization the pass already has, so the
+prefix is rewritten once per epoch instead of once per turn — but the cost of that rewrite has not
+been measured, and improvising it inside a lane answering a refutation is how the first #1200 fix
+came to be graded against a predictor instead of against the pass.
+
+Shortening `bounded_result_stub` is explicitly **not** a fix: it moves the constant, not the
+order of growth.
+
+So: filed as FerroxLabs/wayland#1255 with the measurements and the trade written out, and the
+arithmetic pinned in-tree by `the_carried_payload_grows_by_one_stub_per_dropped_result` so the term
+cannot be rediscovered as a surprise. The corresponding false gloss — that carried bytes "stop
+growing with the session" — has been removed from wayland#1150 c4's ledger note, and the
+`+ 20_000` slack that hid the term (the real difference between a 20-call and a 100-call session is
+10,400 bytes) has been replaced by an equality on it.
