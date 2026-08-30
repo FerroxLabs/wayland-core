@@ -867,6 +867,84 @@ mod tests {
         );
     }
 
+    /// VERIFIER PROBE — wayland#1239 c2 at the surface the ledger grades one
+    /// level below: `WriteTool::execute`, not `refusal_message`.
+    ///
+    /// The save is made from inside `atomic_write_checked`'s exchange->verdict
+    /// window through the same seam #1241 c3 uses, so the exchange, the
+    /// restore exchange, `holds_exactly`, `keep_displaced`, `Refusal`,
+    /// `refusal_message` and the tool's return value are all production code.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn verifier_probe_execute_names_a_displaced_save() {
+        const ORIGINAL: &str = "the only copy of the user's bytes\n";
+        const REWRITE: &str = "the only copy of the user's bytes\nand a line the agent added\n";
+        const THEIRSAVE: &str = "the user's editor saved this mid-check\n";
+
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, ORIGINAL).unwrap();
+
+        let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&entered);
+        let target = p.clone();
+        let tool =
+            tool(None).with_publish_window_probe(Arc::new(move |observed: Option<&[u8]>| {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(
+                    observed,
+                    Some(ORIGINAL.as_bytes()),
+                    "fixture: the verdict was not handed the displaced pre-image"
+                );
+                // A non-cooperating editor saving IN PLACE: the destination
+                // name currently resolves to the published inode.
+                std::fs::write(&target, THEIRSAVE).unwrap();
+                Err("its contents changed on disk".to_owned())
+            }));
+
+        let result = tool
+            .execute(json!({
+                "file_path": p.to_str().unwrap(),
+                "content": REWRITE,
+            }))
+            .await;
+
+        println!("VERIFIER_SURFACED_TEXT: {}", result.content);
+        assert_eq!(
+            entered.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the exchange->verdict window was not entered exactly once"
+        );
+        assert!(result.is_error, "reported as a success: {}", result.content);
+        assert_eq!(
+            std::fs::read(&p).unwrap(),
+            ORIGINAL.as_bytes(),
+            "the destination is not back to what it held"
+        );
+
+        let survivors: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|f| std::fs::read(f).is_ok_and(|b| b == THEIRSAVE.as_bytes()))
+            .collect();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "the intercepted save did not survive: {survivors:?}"
+        );
+        assert!(
+            !result.content.contains("Nothing was changed."),
+            "the TOOL told the user nothing was changed, over a save it had \
+             just displaced: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains(&survivors[0].display().to_string()),
+            "the TOOL did not name where the displaced save went: {}",
+            result.content
+        );
+    }
+
     /// #1241 c4, the classifier half: a round trip that never reached a
     /// verdict must still be handed back for the unchecked fallback to
     /// publish. Fails if the branch above widens to swallow every `Err`.
