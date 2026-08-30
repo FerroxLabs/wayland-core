@@ -227,6 +227,11 @@ mod tests {
     fn a_publishable_endpoint_drops_both_credential_positions() {
         for raw in [
             "https://user:s3cr3t@gateway.example.com/v1",
+            // The USERNAME position, alone, with no password. A gateway that
+            // takes its API key as the user half is a real shape, and without
+            // this row the whole test passes with `set_username` deleted --
+            // measured, so "both positions" in the name was only half pinned.
+            "https://s3cr3t@gateway.example.com/v1",
             "https://gateway.example.com/v1?api_key=s3cr3t",
             "https://gateway.example.com/v1#s3cr3t",
             "https://user:s3cr3t@gateway.example.com/v1?api_key=s3cr3t",
