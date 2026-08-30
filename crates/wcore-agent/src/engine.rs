@@ -8321,7 +8321,7 @@ impl AgentEngine {
     /// Say on the ANSWER stream that the run stopped short, for ONE stated
     /// cause.
     ///
-    /// #388, Expected-Behavior bullet 3 ("clearly mark the task as
+    /// #388, Expected-Behavior bullet 4 ("clearly mark the task as
     /// failed/incomplete"). Extracted from
     /// [`Self::emit_terminated_run_admission`] because the limit exits were
     /// not the only ones that owe this sentence and were the only ones saying
@@ -16531,7 +16531,7 @@ impl AgentEngine {
                     }
                 },
                 Err(GraphError::Cancelled) => GraphExit::Aborted,
-                Err(e) => GraphExit::Failed(format!("orchestration graph failed: {e}")),
+                Err(e) => GraphExit::Failed(e.to_string()),
             };
             drop(cell_guard);
             let outcome = match exit {
@@ -16545,12 +16545,37 @@ impl AgentEngine {
                     self.cache_ledger.finish();
                     return Err(AgentError::UserAborted);
                 }
-                GraphExit::Failed(msg) => {
+                GraphExit::Failed(cause) => {
+                    // #388 bullet 4 ("clearly mark the task as
+                    // failed/incomplete"), for the category bullet 7 names
+                    // "tool/runtime failure". This is a terminal Err exit of
+                    // the run loop on the MAINLINE tool-dispatch path: every
+                    // `Node::AgentCall` is `tokio::spawn`ed by the walker
+                    // (orchestration/graph.rs), so a panic in dispatch that
+                    // falls outside the per-tool `catch_unwind` arrives here
+                    // as `GraphError::AgentFailed { agent: "<join>" }`.
+                    //
+                    // Nothing on this path writes to the ANSWER stream - the
+                    // cause travels out as `Err` and the CLI renders it on
+                    // stderr - so before this line a `-p` run that died here
+                    // ended stdout on the model's last narration and read as
+                    // a finished answer. Same shared helper and wording as
+                    // the provider and compaction exits, so the three cannot
+                    // drift apart.
+                    //
+                    // Emitted FIRST, ahead of `prepare_durable_conversation`,
+                    // whose own `?` would otherwise carry the run out of this
+                    // arm with the admission never written.
+                    self.emit_incomplete_run_admission(&format!(
+                        "the tool run for this turn failed ({cause})"
+                    ));
                     self.prepare_durable_conversation().await?;
                     self.fire_on_session_end(turn + 1).await;
                     self.cache_ledger.finish();
                     self.save_session_mirror();
-                    return Err(AgentError::ApiError(msg));
+                    return Err(AgentError::ApiError(format!(
+                        "orchestration graph failed: {cause}"
+                    )));
                 }
             };
 
@@ -40172,6 +40197,219 @@ mod issue_434_routed_model_tests {
         assert!(
             seen[1].routed_model_hint.is_none(),
             "the hint only resolves a tier alias; a named model decides for itself"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #388 bullet 4 (c10) — the orchestration graph's FAILURE exit.
+//
+// The census behind c10 missed this exit. Every `Node::AgentCall` the walker
+// runs is `tokio::spawn`ed, so a panic in tool dispatch that falls outside the
+// per-tool `catch_unwind` comes back as a `JoinError` and ends the run at
+// `GraphExit::Failed` — a terminal `Err` of the run loop on the ordinary
+// tool-dispatch path (the graph runs on every turn that has tool calls).
+// That arm called no emit at all, so stdout ended on the model's narration.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod issue_388_graph_failure_admission_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_protocol::events::ToolCategory;
+    use wcore_tools::Tool;
+    use wcore_types::tool::ToolResult;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+
+    /// Turn 1 asks for a tool; turn 2 answers and ends. The arm under test
+    /// dies inside turn 1's dispatch, so the second script only ever runs in
+    /// the control.
+    struct ToolThenAnswer {
+        turn: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ToolThenAnswer {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let first = self.turn.fetch_add(1, Ordering::SeqCst) == 0;
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                if first {
+                    let _ = tx
+                        .send(LlmEvent::TextDelta("let me look that up".into()))
+                        .await;
+                    let _ = tx
+                        .send(LlmEvent::ToolUse {
+                            id: "t1".into(),
+                            name: "mock_tool".into(),
+                            input: json!({}),
+                            extra: None,
+                        })
+                        .await;
+                    let _ = tx
+                        .send(LlmEvent::Done {
+                            stop_reason: StopReason::ToolUse,
+                            finish_reason: FinishReason::from_stop_reason(StopReason::ToolUse),
+                            usage: TokenUsage::default(),
+                        })
+                        .await;
+                } else {
+                    let _ = tx.send(LlmEvent::TextDelta("the answer".into())).await;
+                    let _ = tx
+                        .send(LlmEvent::Done {
+                            stop_reason: StopReason::EndTurn,
+                            finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                            usage: TokenUsage::default(),
+                        })
+                        .await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    /// A tool that panics in `is_concurrency_safe` when armed.
+    ///
+    /// That is deliberately NOT the `execute` panic: the dispatcher wraps
+    /// `prepare_effect` and `execute` in `catch_unwind` (orchestration/mod.rs,
+    /// "Wave RB RELIABILITY MAJOR"), and nothing wraps the synchronous trait
+    /// methods. `partition()` calls `is_concurrency_safe` at
+    /// orchestration/mod.rs:697, inside `dispatch_once`, inside the spawned
+    /// `AgentCall` task - so a panic there is the class that actually reaches
+    /// the walker as a `JoinError`. Unarmed, the same tool answers normally,
+    /// which is what makes the control a control.
+    struct QuietTool {
+        panics_in_partition: bool,
+    }
+
+    #[async_trait]
+    impl Tool for QuietTool {
+        fn name(&self) -> &str {
+            "mock_tool"
+        }
+        fn description(&self) -> &str {
+            "mock tool for the #388 graph-failure arm"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            assert!(
+                !self.panics_in_partition,
+                "injected tool-runtime panic in is_concurrency_safe"
+            );
+            true
+        }
+        async fn execute(&self, _input: Value) -> ToolResult {
+            ToolResult {
+                content: "tool ok".to_string(),
+                is_error: false,
+            }
+        }
+    }
+
+    /// Build a real engine over the production `run()` path.
+    fn engine(panics_in_partition: bool) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(QuietTool { panics_in_partition }));
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        let mut engine = super::AgentEngine::new_with_provider(
+            Arc::new(ToolThenAnswer {
+                turn: AtomicUsize::new(0),
+            }),
+            wcore_config::config::Config::default(),
+            registry,
+            sink.clone(),
+        );
+        engine.max_turns = Some(4);
+        (engine, sink)
+    }
+
+    fn answer_stream(handle: &crate::test_utils::TestSinkHandle) -> String {
+        handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// The arm under test. The armed tool panics inside the spawned
+    /// `AgentCall` task, outside the per-tool `catch_unwind`, so the walker
+    /// gets a `JoinError` and returns `GraphError::AgentFailed`.
+    #[tokio::test]
+    async fn a_graph_failure_exit_admits_itself_on_the_answer_stream() {
+        let (mut engine, sink) = engine(true);
+        let handle = sink.handle();
+
+        let err = engine
+            .run("do the thing", "m-388-graph")
+            .await
+            .expect_err("the graph failure arm must end the run as Err");
+        assert!(
+            matches!(&err, super::AgentError::ApiError(m)
+                if m.starts_with("orchestration graph failed:")),
+            "this arm must be the GraphExit::Failed exit, not another Err: {err:?}"
+        );
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("let me look that up"),
+            "the narration must have reached the answer stream, or this test is \
+             not measuring an answer stream at all: {answer:?}"
+        );
+        assert!(
+            answer.contains("[stopped early]"),
+            "#388: a run that ends on a tool/runtime failure must admit it where \
+             the ANSWER went - the cause travels out as Err and is rendered on \
+             stderr, so stdout otherwise ends on the narration and reads as a \
+             finished answer: {answer:?}"
+        );
+        assert!(
+            answer.contains("not an answer"),
+            "the admission must say the partial work is not an answer: {answer:?}"
+        );
+    }
+
+    /// CONTROL, and not decoration: same engine, same tool, same provider
+    /// script, crash cut NOT armed. It stops the test above passing by
+    /// admitting on every run, and it proves the fixture reaches a real
+    /// tool-dispatch turn rather than failing before the graph.
+    #[tokio::test]
+    async fn the_same_run_without_the_crash_carries_no_admission() {
+        let (mut engine, sink) = engine(false);
+        let handle = sink.handle();
+
+        let result = engine
+            .run("do the thing", "m-388-graph-control")
+            .await
+            .expect("the control must complete");
+        assert_eq!(
+            result.turns, 2,
+            "the control must have dispatched the tool and come back for a \
+             second turn, or it never entered the graph at all"
+        );
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("the answer"),
+            "the control must carry the real answer: {answer:?}"
+        );
+        assert!(
+            !answer.contains("[stopped early]"),
+            "a run that completed must not admit failure: {answer:?}"
         );
     }
 }
