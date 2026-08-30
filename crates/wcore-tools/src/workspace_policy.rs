@@ -275,6 +275,20 @@ pub struct WorkspacePolicy {
     /// Interior-mutable and `Arc`-shared for the reason `deny_cache` is: the
     /// policy is held behind an `Arc` by every consumer and cannot be replaced.
     vcs_store_cache: Arc<RwLock<Option<VcsStoreCache>>>,
+    /// FerroxLabs/wayland-core#390 — the arm-3 store list: the stores named by
+    /// control directories NESTED under the root, found by a walk rather than
+    /// by a root-relative join.
+    ///
+    /// A SECOND memo rather than a widening of `vcs_store_cache`, because the
+    /// two have opposite cost profiles and only one of them may be paid on the
+    /// ordinary guard path. Revalidating the root scan is three stats;
+    /// revalidating a walk is one stat per directory in the workspace. Folding
+    /// the walk into `vcs_store_cache` would charge every `Read` of every
+    /// sub-agent that second number, which is exactly the regression #376 was
+    /// filed about — so the walk lives here and is consulted only for a path
+    /// that could be inside a store at all (see
+    /// [`WorkspacePolicy::store_shaped`]).
+    nested_store_cache: Arc<RwLock<Option<VcsStoreCache>>>,
     /// #376 c3 — the injected counters the per-operation cost is graded with. A
     /// wall clock cannot tell a skipped scan from a fast one, and this guard
     /// runs on every Read/exists/list/metadata of every sub-agent.
@@ -578,6 +592,7 @@ impl WorkspacePolicy {
             deny_cache: Arc::new(RwLock::new(None)),
             deny_walks: Arc::new(AtomicU64::new(0)),
             vcs_store_cache: Arc::new(RwLock::new(None)),
+            nested_store_cache: Arc::new(RwLock::new(None)),
             guard_counters: Arc::new(GuardCounters::default()),
         }
     }
@@ -633,6 +648,7 @@ impl WorkspacePolicy {
             deny_cache: Arc::new(RwLock::new(None)),
             deny_walks: Arc::new(AtomicU64::new(0)),
             vcs_store_cache: Arc::new(RwLock::new(None)),
+            nested_store_cache: Arc::new(RwLock::new(None)),
             guard_counters: Arc::new(GuardCounters::default()),
         }
     }
@@ -741,6 +757,7 @@ impl WorkspacePolicy {
             deny_cache: Arc::new(RwLock::new(None)),
             deny_walks: Arc::new(AtomicU64::new(0)),
             vcs_store_cache: Arc::new(RwLock::new(None)),
+            nested_store_cache: Arc::new(RwLock::new(None)),
             guard_counters: Arc::new(GuardCounters::default()),
         })
     }
@@ -1039,9 +1056,52 @@ impl WorkspacePolicy {
         if canon.starts_with(&self.root) && inside_vcs_store(canon) {
             return true;
         }
-        self.vcs_stores_memoized()
+        if self
+            .vcs_stores_memoized()
             .iter()
             .any(|store| canon.starts_with(store))
+        {
+            return true;
+        }
+        // ARM 3 (FerroxLabs/wayland-core#390), gated on a purely LEXICAL test
+        // of the already-resolved path so an ordinary path pays no syscall for
+        // it at all. See [`store_shaped`].
+        if !store_shaped(canon) {
+            return false;
+        }
+        self.nested_stores_memoized()
+            .iter()
+            .any(|store| canon.starts_with(store))
+    }
+
+    /// The arm-3 store list — the stores named by control directories NESTED
+    /// under the root — memoised behind the same witness stamp arm 2 uses
+    /// (FerroxLabs/wayland-core#390 c3).
+    ///
+    /// Reached only from a `store_shaped` path, which is what keeps #376's
+    /// number intact: an ordinary-path guard never calls this, so it still
+    /// costs one resolution, zero scans and three probes.
+    fn nested_stores_memoized(&self) -> Vec<PathBuf> {
+        if let Some(hit) = cache_hit(&self.nested_store_cache, &self.guard_counters) {
+            return hit;
+        }
+        let scan = discover_nested_content_stores(&self.root);
+        self.guard_counters.scans.fetch_add(1, Ordering::Relaxed);
+        self.guard_counters
+            .probes
+            .fetch_add(scan.probes, Ordering::Relaxed);
+        // A workspace with more directories than the deny memo is willing to
+        // stamp keeps rescanning rather than caching a stamp it cannot afford
+        // to revalidate. Slow, never stale: the failure direction is a repeated
+        // walk, not an answer that has stopped tracking the tree.
+        if scan.witnesses.len() <= DENY_CACHE_MAX_DIRS {
+            *self.nested_store_cache.write() = Some(VcsStoreCache {
+                stamped_at: scan.stamped_at,
+                witnesses: scan.witnesses,
+                stores: scan.stores.clone(),
+            });
+        }
+        scan.stores
     }
 
     /// The arm-2 store list, memoised behind a witness stamp
@@ -1092,26 +1152,7 @@ impl WorkspacePolicy {
     /// The memoised store list, but ONLY if a fresh scan would produce the same
     /// one. See [`vcs_stores_memoized`](Self::vcs_stores_memoized).
     fn vcs_store_cache_hit(&self) -> Option<Vec<PathBuf>> {
-        let guard = self.vcs_store_cache.read();
-        let cache = guard.as_ref()?;
-        for (path, seen) in &cache.witnesses {
-            self.guard_counters.probes.fetch_add(1, Ordering::Relaxed);
-            let now = std::fs::symlink_metadata(path)
-                .and_then(|meta| meta.modified())
-                .ok();
-            if now != *seen {
-                return None;
-            }
-            // An absent witness is decided at THIS instant, so there is no
-            // window for it to be unsettled in. A present one carries the same
-            // same-tick hazard `deny_cache_hit` documents.
-            if let Some(now) = now
-                && !stamp_is_settled(now, cache.stamped_at)
-            {
-                return None;
-            }
-        }
-        Some(cache.stores.clone())
+        cache_hit(&self.vcs_store_cache, &self.guard_counters)
     }
 
     /// THE read-content refusal: true when the in-process file tools must not
@@ -3118,21 +3159,29 @@ impl StoreScan {
     /// revalidation that costs as much as the scan it replaces is not a cache.
     /// NOT applicable to a path outside the root (a gitfile's gitdir, a
     /// borrowed alternates store): nothing stamped would move if one appeared.
-    fn witness_if_present(&mut self, path: PathBuf) {
+    ///
+    /// Returns whether the path existed, so the caller can skip everything that
+    /// lives UNDER it: a store leaf cannot be present beneath a control
+    /// directory that is absent, and the control directory's own appearance is
+    /// already witnessed by its parent. That skip is what took the scan of an
+    /// ordinary traversed directory from 16 filesystem syscalls to 5 — the cost
+    /// `grep_policy::scope_for` pays at EVERY directory it walks.
+    fn witness_if_present(&mut self, path: PathBuf) -> bool {
         self.probes += 1;
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            return;
+            return false;
         };
         let Ok(stamp) = meta.modified() else {
-            return;
+            return false;
         };
         if self.witnesses.iter().any(|(seen, _)| *seen == path) {
-            return;
+            return true;
         }
         self.witnesses.push((path.clone(), Some(stamp)));
         if meta.file_type().is_symlink() {
             self.witness_link_target(&path);
         }
+        true
     }
 
     /// Stamp what a symlinked witness POINTS AT, not only the link itself.
@@ -3215,22 +3264,160 @@ impl StoreScan {
     }
 }
 
+/// [`WorkspacePolicy::vcs_store_cache_hit`]'s body, shared with the arm-3 memo
+/// (FerroxLabs/wayland-core#390) so the two cannot answer freshness
+/// differently. Two memos over the same witness discipline is exactly the shape
+/// that drifts, and #376 already had to extract [`stamp_is_settled`] for the
+/// same reason.
+fn cache_hit(
+    cache: &RwLock<Option<VcsStoreCache>>,
+    counters: &GuardCounters,
+) -> Option<Vec<PathBuf>> {
+    let guard = cache.read();
+    let cache = guard.as_ref()?;
+    for (path, seen) in &cache.witnesses {
+        counters.probes.fetch_add(1, Ordering::Relaxed);
+        let now = std::fs::symlink_metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        if now != *seen {
+            return None;
+        }
+        // An absent witness is decided at THIS instant, so there is no window
+        // for it to be unsettled in. A present one carries the same same-tick
+        // hazard `deny_cache_hit` documents.
+        if let Some(now) = now
+            && !stamp_is_settled(now, cache.stamped_at)
+        {
+            return None;
+        }
+    }
+    Some(cache.stores.clone())
+}
+
+/// True when `path` has an ancestor named like a VCS content-store LEAF
+/// (`objects`, `modules`, `lfs`, `store`, `pristine`, `repository`) — the only
+/// shape a store discovered by arm 3 can have.
+///
+/// The gate on arm 3, and purely lexical, so an ordinary path costs nothing:
+/// `<root>/src/deep/deeper/main.rs` has no such ancestor and the walk is never
+/// consulted for it. That is what holds #376's measured guard cost at one
+/// resolution / zero scans / three probes while the nested case is closed.
+///
+/// A git control directory's own store leaves are FIXED names, so this cannot
+/// miss a gitfile-named store however the checkout is spelled. It CAN miss an
+/// `objects/info/alternates` borrow whose target directory is named something
+/// else entirely — a real but narrower shape, tracked separately rather than
+/// closed by widening this into a per-path tree walk.
+fn store_shaped(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(component, std::path::Component::Normal(name)
+            if VCS_CONTENT_STORES
+                .iter()
+                .any(|(_, store)| name == std::ffi::OsStr::new(store)))
+    })
+}
+
+/// FerroxLabs/wayland-core#390 — the stores named by control directories
+/// NESTED under `root`, found by walking rather than by a root-relative join.
+///
+/// Arm 2 asks `<root>/.git` only, so a VENDORED checkout whose `.git` is a
+/// gitfile (`<root>/vendor/pkg/.git` = `gitdir: ../pkg-git`) fell between the
+/// two arms: its store is not lexically a `(control, store)` pair, and the root
+/// never names it. Discovery is the expensive half and it is why the fix was
+/// not a one-line predicate change; the memo is what makes it affordable, and
+/// the memo is only sound because [`StoreScan`] reports the witnesses it read.
+///
+/// Every directory the walk DESCENDS is stamped: a nested `.git` cannot appear
+/// without moving the mtime of the directory that gains it. Stores and control
+/// directories are not descended into — a store's contents cannot hide another
+/// checkout that matters, and walking `.git/objects` is the cost this whole
+/// file exists to avoid. Symlinked directories are not followed, so the walk
+/// terminates on a cycle and cannot leave the tree; a store reached THROUGH a
+/// link is still covered, because `push_store` canonicalizes and the caller
+/// compares canonical paths.
+fn discover_nested_content_stores(root: &Path) -> StoreScan {
+    let mut scan = StoreScan::new();
+    let mut queue = vec![root.to_path_buf()];
+    while let Some(dir) = queue.pop() {
+        // The directory's own mtime is the witness for a control directory
+        // APPEARING in it. Recorded before the scan reads anything under it.
+        scan.witness(dir.clone());
+        scan.scan_control_dirs_in(&dir);
+        scan.probes += 1;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            // `file_type` on a `DirEntry` is served from the readdir buffer on
+            // Linux and does NOT follow a symlink, so this neither costs a
+            // syscall nor leaves the tree.
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let child = entry.path();
+            if is_within_vcs_store_or_control_dir(&child) {
+                continue;
+            }
+            queue.push(child);
+        }
+    }
+    scan
+}
+
 fn scan_vcs_content_stores(root: &Path) -> StoreScan {
     let mut scan = StoreScan::new();
     // Whether ANY control directory exists at all is decided here: creating,
     // removing or re-pointing `<root>/.git` moves the root's own mtime.
     scan.witness(root.to_path_buf());
-    for (dir, store) in VCS_CONTENT_STORES {
-        let control = root.join(dir);
-        // Whether this control directory gains, loses or re-points a store leaf
-        // is settled by its own mtime; whether it exists at all is settled by
-        // the root's, stamped above.
-        scan.witness_if_present(control.clone());
-        scan.push_store(control.join(store));
-    }
-    scan.gitfile_content_stores(root);
-    scan.alternate_object_dirs(root.join(".git/objects"));
+    scan.scan_control_dirs_in(root);
     scan
+}
+
+impl StoreScan {
+    /// The stores one directory NAMES, added to this scan. Shared verbatim
+    /// between the root scan and [`discover_nested_content_stores`]'s walk
+    /// (FerroxLabs/wayland-core#390) so a nested checkout is read by exactly
+    /// the code that reads the root one — the alternative is two discovery
+    /// paths that answer differently, which is the drift #244 was filed about.
+    ///
+    /// The CALLER stamps `dir` itself.
+    fn scan_control_dirs_in(&mut self, dir: &Path) {
+        let mut dot_git = false;
+        let mut done: Vec<&str> = Vec::new();
+        for (control_name, _) in VCS_CONTENT_STORES {
+            if done.contains(control_name) {
+                continue;
+            }
+            done.push(control_name);
+            let control = dir.join(control_name);
+            // Whether this control directory gains, loses or re-points a store
+            // leaf is settled by its own mtime; whether it EXISTS at all is
+            // settled by `dir`'s, which the caller stamped. So an absent
+            // control directory needs no stamp of its own — and nothing under
+            // it can exist, which is why its store leaves are not probed.
+            // MEASURED: probing them anyway cost 16 syscalls per traversed
+            // directory against 8 before the witness bookkeeping landed, and
+            // `grep_policy::scope_for` pays this at every directory of a
+            // `Grep(".")` (FerroxLabs/wayland-core#376 "does not get worse").
+            if !self.witness_if_present(control.clone()) {
+                continue;
+            }
+            dot_git |= *control_name == ".git";
+            for (owner, store) in VCS_CONTENT_STORES {
+                if owner == control_name {
+                    self.push_store(control.join(store));
+                }
+            }
+        }
+        // Both of these read `<dir>/.git`; neither can find anything when it is
+        // not there, and its appearance moves `dir`'s mtime, so skipping them
+        // costs the memo nothing and saves two syscalls per ordinary directory.
+        if dot_git {
+            self.gitfile_content_stores(dir);
+            self.alternate_object_dirs(dir.join(".git/objects"));
+        }
+    }
 }
 
 /// Workspace-relative content stores denied for reads in a secret-deny posture,
