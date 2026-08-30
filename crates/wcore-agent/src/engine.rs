@@ -40218,14 +40218,13 @@ mod issue_388_graph_failure_admission_tests {
 
     use async_trait::async_trait;
     use serde_json::{Value, json};
-    use wcore_providers::{LlmProvider, ProviderError};
-    use wcore_tools::registry::ToolRegistry;
     use wcore_protocol::events::ToolCategory;
+    use wcore_providers::{LlmProvider, ProviderError};
     use wcore_tools::Tool;
-    use wcore_types::tool::ToolResult;
+    use wcore_tools::registry::ToolRegistry;
     use wcore_types::llm::{LlmEvent, LlmRequest};
     use wcore_types::message::{FinishReason, StopReason, TokenUsage};
-
+    use wcore_types::tool::ToolResult;
 
     /// Turn 1 asks for a tool; turn 2 answers and ends. The arm under test
     /// dies inside turn 1's dispatch, so the second script only ever runs in
@@ -40323,7 +40322,9 @@ mod issue_388_graph_failure_admission_tests {
     /// Build a real engine over the production `run()` path.
     fn engine(panics_in_partition: bool) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
         let mut registry = ToolRegistry::new();
-        registry.register(Box::new(QuietTool { panics_in_partition }));
+        registry.register(Box::new(QuietTool {
+            panics_in_partition,
+        }));
         let sink = Arc::new(crate::test_utils::TestSink::new());
         let mut engine = super::AgentEngine::new_with_provider(
             Arc::new(ToolThenAnswer {
