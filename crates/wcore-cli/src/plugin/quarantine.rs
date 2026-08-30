@@ -612,7 +612,6 @@ fn run_hardened(mut cmd: std::process::Command, label: &str, timeout: Duration) 
     // so a descendant is provably alive, in the detached session, with the
     // install about to fail. Returning without this is the #379 leak reached by
     // the drain guard instead of by the wall clock.
-    teardown.disarm();
     let out = join_drain(h_out, "stdout")?;
     let err = join_drain(h_err, "stderr")?;
 
