@@ -190,7 +190,7 @@ async fn a_nested_checkouts_alternates_borrow_is_refused_through_the_vfs() {
 /// still admitted, so the day it is closed the test fails and is inverted the
 /// way c4's was, rather than quietly agreeing with either answer.
 ///
-/// Tracked as FerroxLabs/wayland-core#391.
+/// Tracked as FerroxLabs/wayland-core#394.
 #[tokio::test]
 async fn a_nested_alternates_borrow_named_nothing_store_like_is_still_admitted() {
     let dir = tempfile::tempdir().unwrap();
@@ -209,7 +209,7 @@ async fn a_nested_alternates_borrow_named_nothing_store_like_is_still_admitted()
     let fs = deny_fs(&root);
     assert!(
         fs.read(&borrowed).await.is_ok(),
-        "core#391: this shape is a KNOWN gap in arm 3's lexical gate. If it is \
-         now refused, invert this assertion and close #391 — do not delete it"
+        "core#394: this shape is a KNOWN gap in arm 3's lexical gate. If it is \
+         now refused, invert this assertion and close #394 — do not delete it"
     );
 }

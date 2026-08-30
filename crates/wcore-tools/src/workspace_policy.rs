@@ -3288,7 +3288,7 @@ fn cache_hit(
 /// A git control directory's own store leaves are FIXED names, so this cannot
 /// miss a gitfile-named store however the checkout is spelled. It CAN miss an
 /// `objects/info/alternates` borrow whose target directory is named something
-/// else entirely — a real but narrower shape, tracked separately rather than
+/// else entirely — a real but narrower shape, tracked as FerroxLabs/wayland-core#394 rather than
 /// closed by widening this into a per-path tree walk.
 fn store_shaped(path: &Path) -> bool {
     path.components().any(|component| {
