@@ -1,12 +1,25 @@
-//! FerroxLabs/wayland#1097 — grades the ENGINE CALL SITE, not the registry.
+//! Measurement instrument for FerroxLabs/wayland-core#378 c1.
 //!
-//! `spill_readback_containment.rs` grades `ToolRegistry::spill_storage()` by
-//! calling it directly. That leaves the one production consumer — the #636
-//! shed in `AgentEngine::run_turn` — ungraded: swapping it back to
-//! `StorageDir::os_default()` keeps every existing test green.
+//! #378 c1 asks that the >30s runtime of
+//! `spill_readback_engine_wiring::the_engine_spills_where_this_session_can_read_it_back`
+//! be ATTRIBUTED by measurement — product latency on the spill/read-back path,
+//! or the fixture's own cost — rather than inferred.
 //!
-//! This drives a real `AgentEngine` turn over the context ceiling and reads
-//! the spilled file back through the same jail the session's `Read` uses.
+//! This is a copy of that test's setup with three levers the graded test does
+//! not have:
+//!
+//! * `SPILL_PROBE_BYTES` — the tool-result payload size, so the runtime can be
+//!   measured against the payload and the relationship read off rather than
+//!   guessed at.
+//! * `SPILL_PROBE_CEILING` — the context ceiling. Raising it above the payload
+//!   turns the #636 shed OFF while leaving every other byte of the fixture
+//!   identical, which is the control that separates "the spill path is slow"
+//!   from "handling a payload this size is slow".
+//! * phase timing — fixture construction, `engine.run()`, and the read-back
+//!   through the jail are timed separately.
+//!
+//! It is `#[ignore]`d, so it costs the suite nothing and is run deliberately
+//! with `--run-ignored all`.
 
 mod common;
 
@@ -27,9 +40,10 @@ fn silent_output() -> Arc<dyn OutputSink> {
     Arc::new(TerminalSink::new(true))
 }
 
-/// The path the shed put in front of the model, pulled out of the persisted
-/// history exactly as the model would read it.
-fn spilled_path(engine: &AgentEngine) -> std::path::PathBuf {
+/// The path the shed put in front of the model, or `None` when the shed did not
+/// fire. The graded test panics here; the probe must be able to time a run in
+/// which no spill happened, because that run is the control.
+fn spilled_path(engine: &AgentEngine) -> Option<std::path::PathBuf> {
     for message in engine.conversation_messages() {
         for block in &message.content {
             if let ContentBlock::ToolResult { content, .. } = block
@@ -37,15 +51,25 @@ fn spilled_path(engine: &AgentEngine) -> std::path::PathBuf {
                     .lines()
                     .find_map(|l| l.strip_prefix("Full output saved to: "))
             {
-                return std::path::PathBuf::from(line.trim());
+                return Some(std::path::PathBuf::from(line.trim()));
             }
         }
     }
-    panic!("no spilled tool result in the persisted history — the shed never ran");
+    None
 }
 
 #[tokio::test]
-async fn the_engine_spills_where_this_session_can_read_it_back() {
+#[ignore = "measurement instrument for wayland-core#378; run with --run-ignored all"]
+async fn timing_probe() {
+    let t0 = std::time::Instant::now();
+    let payload: usize = std::env::var("SPILL_PROBE_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(480_000);
+    let ceiling: usize = std::env::var("SPILL_PROBE_CEILING")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60_000);
     let workspace = tempfile::tempdir().expect("workspace");
     let policy = Arc::new(WorkspacePolicy::contained(workspace.path()));
 
@@ -86,31 +110,13 @@ async fn the_engine_spills_where_this_session_can_read_it_back() {
 
     let mut config = test_config();
     config.compact.enabled = false;
-    config.compact.context_window = Some(25_000);
+    config.compact.context_window = Some(ceiling);
     config.compact.output_reserve = 10_000;
     config.compact.emergency_buffer = 10_000;
 
     let mut registry = ToolRegistry::new();
-    // wayland-core#378: 60_000, not 480_000. The graded property is that the
-    // shed FIRES and that this session's own jail can read the spilled file
-    // back -- neither depends on the payload being half a megabyte. The
-    // over-ceiling RATIO is what makes the shed fire, and it is preserved
-    // exactly: the old fixture was 480_000 chars (120_000 tok) against a
-    // 60_000 - 10_000 - 10_000 = 40_000 tok effective ceiling, i.e. 3x over;
-    // this one is 60_000 chars (15_000 tok) against 25_000 - 10_000 - 10_000
-    // = 5_000 tok, also 3x over.
-    //
-    // MEASURED on hetzner-dsm, this binary alone, phase-timed: the cost is
-    // ~linear in the payload and sits almost entirely inside `engine.run()`
-    // (fixture construction 0.001-0.002 s, read-back through the jail
-    // 0.000-0.001 s, i.e. under 0.005% of the total between them). At
-    // 480_000 the turn cost 48.5 / 48.6 / 52.7 s run-alone and was killed at
-    // 60 s under host load; at 60_000 it is 5.9 s. The shed is NOT the cost:
-    // with the ceiling raised so the shed never fires, the SAME 480_000
-    // payload still cost 48.0 s, indistinguishable from the shed-on arm.
-    // Shrinking the payload is therefore the only lever that moves the
-    // runtime without changing what is graded.
-    let huge = "x".repeat(60_000);
+    let huge = "x".repeat(payload);
+    let t_setup = t0.elapsed();
     registry.register(Box::new(
         MockTool::new("mock_tool", &huge, false).with_max_result_size(600_000),
     ));
@@ -124,13 +130,26 @@ async fn the_engine_spills_where_this_session_can_read_it_back() {
         .await
         .expect("run");
 
+    let t_run = t0.elapsed();
     let path = spilled_path(&engine);
-    let jail = SandboxedFs::new(RealFs, workspace.path());
-    let bytes = jail.read(&path).await.unwrap_or_else(|err| {
-        panic!(
-            "the engine told the model to read {} and this session's own file tools refused: {err}",
-            path.display()
-        )
-    });
-    assert!(!bytes.is_empty());
+    let shed = path.is_some();
+    let mut read_bytes = 0usize;
+    if let Some(path) = path {
+        let jail = SandboxedFs::new(RealFs, workspace.path());
+        let bytes = jail.read(&path).await.unwrap_or_else(|err| {
+            panic!(
+                "the engine told the model to read {} and this session's own file tools refused: {err}",
+                path.display()
+            )
+        });
+        read_bytes = bytes.len();
+    }
+    let t_end = t0.elapsed();
+    eprintln!(
+        "PHASE bytes={payload} ceiling={ceiling} shed={shed} read={read_bytes} setup_s={:.3} run_s={:.3} readback_s={:.3} total_s={:.3}",
+        t_setup.as_secs_f64(),
+        (t_run - t_setup).as_secs_f64(),
+        (t_end - t_run).as_secs_f64(),
+        t_end.as_secs_f64()
+    );
 }
