@@ -3817,12 +3817,15 @@ async fn teardown_runtime_mcp_for_replace(
     }
 
     let defer_cold = engine.defer_cold_config();
-    let Some(registry) = engine.registry_mut() else {
+    // FerroxLabs/wayland#1234, the N+2. Stripping the server's tools and
+    // withdrawing its manager from `McpCatalogRefresh` are ONE operation, so
+    // the cleanup-failure return below cannot leave the server absent from the
+    // registry and still registered for refresh -- the state in which its next
+    // `tools/list_changed` puts every removed tool straight back.
+    let Some(_removed_tools) = engine.retire_runtime_mcp_server(name, &defer_cold) else {
         return Err("registry busy".to_string());
     };
     let _ = lifecycle.mark_stopping(name);
-    let _removed_tools = registry.remove_mcp_server(name);
-    registry.refresh_tool_search_catalog(&defer_cold);
 
     let matching: Vec<_> = dynamic_managers
         .iter()
@@ -3902,7 +3905,14 @@ async fn remove_runtime_mcp_server(
     }
 
     let defer_cold = engine.defer_cold_config();
-    let Some(registry) = engine.registry_mut() else {
+    // FerroxLabs/wayland#1234, the N+2. The registry claim, the tool removal
+    // and the catalog withdrawal are ONE operation. Splitting them is what let
+    // the `CleanupUnverified` return below hand the host a receipt listing the
+    // removed tools while the manager stayed registered with
+    // `McpCatalogRefresh` -- and a cleanup failure is precisely when the
+    // transport is still alive to announce `tools/list_changed` and put them
+    // all back. `None` is the busy registry, and nothing has been touched.
+    let Some(removed_tools) = engine.retire_runtime_mcp_server(&command.name, &defer_cold) else {
         emit_mcp_removal_receipt(
             &command,
             McpRemovalOutcome::RegistryBusy,
@@ -3914,8 +3924,6 @@ async fn remove_runtime_mcp_server(
     };
 
     let _ = lifecycle.mark_stopping(&command.name);
-    let removed_tools = registry.remove_mcp_server(&command.name);
-    registry.refresh_tool_search_catalog(&defer_cold);
 
     let matching: Vec<_> = dynamic_managers
         .iter()
@@ -9362,6 +9370,7 @@ mod tests {
     struct GrowingTestTransport {
         tools: std::sync::Mutex<Vec<String>>,
         tools_changed: std::sync::atomic::AtomicBool,
+        close_fails: std::sync::atomic::AtomicBool,
     }
 
     impl GrowingTestTransport {
@@ -9369,12 +9378,21 @@ mod tests {
             Self {
                 tools: std::sync::Mutex::new(initial.iter().map(|n| n.to_string()).collect()),
                 tools_changed: std::sync::atomic::AtomicBool::new(false),
+                close_fails: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
         fn register_and_announce(&self, name: &str) {
             self.tools.lock().unwrap().push(name.to_string());
             self.tools_changed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Make `close()` refuse, so a removal takes the `CleanupUnverified`
+        /// branch with the transport still reporting alive — the state a real
+        /// wedged child leaves behind.
+        fn fail_close(&self) {
+            self.close_fails
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
@@ -9400,6 +9418,11 @@ mod tests {
             Ok(())
         }
         async fn close(&self) -> Result<(), McpError> {
+            if self.close_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(McpError::Transport(
+                    "test fixture: transport refused to close".to_string(),
+                ));
+            }
             Ok(())
         }
         fn take_tools_changed(&self) -> bool {
@@ -11410,6 +11433,111 @@ mod tests {
         );
     }
 
+    /// FerroxLabs/wayland#1234, the N+2 — a removal whose transport cleanup
+    /// could not be verified must not resurrect its tools either.
+    ///
+    /// The N and N+1 were both *drops that forgot the withdrawal*, and the
+    /// newtype closes that shape: the live set has no removal but `withdraw`.
+    /// This branch is the other half of the same defect and the newtype cannot
+    /// see it, because nothing is dropped. `remove_runtime_mcp_server` strips
+    /// the server's tools from the registry FIRST and only reaches
+    /// `dynamic_managers.withdraw` at the end, so a `close_server` failure
+    /// returns between the two: the host is told `cleanup_unverified` with the
+    /// tools listed as removed, the manager is still registered with
+    /// `McpCatalogRefresh`, and the next `tools/list_changed` from that still
+    /// alive transport puts every one of those tools back into the live
+    /// registry — the exact user-visible symptom #1234 reports.
+    ///
+    /// A cleanup failure is precisely when the transport IS likely alive, so
+    /// this is the branch on which the liveness guard cannot help.
+    #[tokio::test]
+    async fn a_removal_whose_cleanup_is_unverified_does_not_resurrect_its_tools() {
+        let (mut engine, mut managers, fixture, defer_cold) = live_runtime_mcp_fixture();
+        fixture.fail_close();
+        let server_config = to_mcp_server_config(
+            "stdio",
+            Some("unused-test-command".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("valid test server config");
+        let mut runtime_diagnostics = RuntimeDiagnosticsState::from_launch(
+            &wcore_config::config::Config::default(),
+            &wcore_config::resolution_provenance::ConfigResolutionProvenance::default(),
+            None,
+            wcore_protocol::diagnostics::RuntimeEngineMode::Unknown,
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::Unknown,
+        );
+        assert!(
+            runtime_diagnostics.record_runtime_declaration("warehouse", &server_config),
+            "the fixture server must be admissible for removal"
+        );
+        let lifecycle = McpLifecycleCatalog::new();
+        let mut removal_ledger = McpRemovalLedger::default();
+        let writer = CapturingProtocolEmitter::default();
+
+        remove_runtime_mcp_server(
+            RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION,
+                request_id: "req-1234-cleanup-unverified".to_string(),
+                name: "warehouse".to_string(),
+            },
+            &mut removal_ledger,
+            &mut runtime_diagnostics,
+            &lifecycle,
+            &mut engine,
+            &mut managers,
+            &writer,
+        )
+        .await;
+
+        // Known-positive control that the CLEANUP-FAILURE branch is the one
+        // that ran: on the success branch the manager is dropped from the live
+        // set and the lifecycle completes, so both of these would be false.
+        assert!(
+            !managers.is_empty(),
+            "control: an unverified cleanup keeps the manager for a retry, so \
+             this test must be exercising that branch and not the happy path"
+        );
+        assert!(
+            writer.events.lock().unwrap().iter().any(|event| matches!(
+                event,
+                ProtocolEvent::McpRemovalResult {
+                    outcome: McpRemovalOutcome::CleanupUnverified,
+                    ..
+                }
+            )),
+            "control: the removal must have reported an unverified cleanup, or \
+             this test is not on the branch it names"
+        );
+        assert!(
+            engine.tools().get("warehouse_reserve").is_none(),
+            "control: the removal did strip the server's tools, so a tool that \
+             comes back below came back through the refresh"
+        );
+
+        fixture.register_and_announce("warehouse_audit_export");
+        let refresh = engine.mcp_catalog_refresh().expect("refresh installed");
+        let registry = engine.registry_mut().expect("registry must be mutable");
+        assert!(
+            refresh.apply(registry, &defer_cold).await.is_empty(),
+            "a server the host was told is being removed must not be polled, \
+             however its transport cleanup ended"
+        );
+        assert!(
+            engine.tools().get("warehouse_audit_export").is_none(),
+            "an unverified cleanup must not resurrect the removed server's tools"
+        );
+        assert!(
+            engine.tools().get("warehouse_reserve").is_none(),
+            "nor restore the ones the removal already reported as removed"
+        );
+    }
+
     /// One runtime-added MCP server, connected through the production
     /// `integrate_deferred_mcp` path so it is registered with the catalog
     /// refresh exactly as a live session registers it.
@@ -11526,6 +11654,47 @@ mod tests {
             engine_src.matches(forget).count(),
             1,
             "retire_runtime_mcp_server must be the engine's only withdrawal"
+        );
+
+        // FerroxLabs/wayland#1234, the N+2 -- the other half of the same
+        // defect, which the newtype cannot see because nothing is DROPPED.
+        // Both json-stream removal paths stripped the server's tools from the
+        // registry as their own statement and only reached
+        // `dynamic_managers.withdraw` at the end, so every early return in
+        // between -- `CleanupUnverified` is the live one -- left the server
+        // gone from the registry and still registered for refresh, and its
+        // next `tools/list_changed` put the tools back. The property asserted
+        // is the same inversion the live set got: dropping a runtime server's
+        // tools is not something this file can do on its own, because the only
+        // call that does it also withdraws.
+        let reg_remove = concat!("registry.remove_mcp_", "server(");
+        assert_eq!(
+            main_src.matches(reg_remove).count(),
+            0,
+            "main.rs must not drop an MCP server's tools without retiring the \
+             server: every early return between the two halves is a window in \
+             which the refresh restores what the removal just reported gone"
+        );
+        // Known-positive control for that zero: the needle is real, and it
+        // occurs exactly once in the workspace path that is allowed to have
+        // it -- inside the retirement, beside the withdrawal it is fused to.
+        assert_eq!(
+            engine_src.matches(reg_remove).count(),
+            1,
+            "control: the needle must match something, or the zero above is \
+             a typo asserting nothing"
+        );
+        let retirement = engine_src
+            .split(concat!("fn retire_runtime_mcp_", "server("))
+            .nth(1)
+            .expect("the engine publishes one retirement")
+            .split("\n    /// ")
+            .next()
+            .expect("the retirement body ends at the next item");
+        assert!(
+            retirement.contains(reg_remove) && retirement.contains(forget),
+            "the tool removal and the catalog withdrawal must be ONE operation, \
+             not two statements a caller can return between"
         );
 
         // FerroxLabs/wayland#1234 — the removal half.
