@@ -4,54 +4,81 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Two hand-cut authority parsers miss the backslash spelling: the WebFetch prompt calls https://evil.example\\@github.com Trusted, and provider_info.local calls a public endpoint local"
 status: open
-last_verified_commit: 65b95a87
+last_verified_commit: 1775bc762
 criteria:
   - id: c1
     text: "web_fetch_risk(\"https://evil.example\\@github.com/x\") is Risk::External"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/tui/permission/components/webfetch.rs::risk_external_for_every_authority_smuggling_spelling"
     owner: core
-    note: "Filed 2026-08-30 by lane f13-sec-credgate, found by the elimination sweep the wayland#1211 fix required (after replacing the hand-cut authority in is_self_hosted_base_url, every other by-hand authority cut in the repo was grepped; wcore-mcp's SSE origin gate was already hardened, these two were not). Nothing has been done. MEASURED, not modelled, from a throwaway probe over the real web_fetch_risk / host_of with url::Url::parse in the same call: `PROBE risk=Trusted host_of=\"github.com\" whatwg_host=Some(\"evil.example\") url=https://evil.example\\@github.com/x`. crates/wcore-cli/src/tui/permission/components/webfetch.rs:62 cuts the authority at the first of '/', '?', '#', so #1211's query spelling is already handled -- the control row in the same probe: `PROBE risk=External host_of=\"evil.example\" whatwg_host=Some(\"evil.example\") url=https://evil.example?z=@github.com`. A backslash is not in that delimiter set, and for a special scheme the WHATWG parser maps it to '/', so the dialed host is evil.example."
+    note: "The criterion's exact string is the FIRST row of the list, not a neighbour: `r\"https://evil.example\\@github.com/x\"`. `web_fetch_risk` now takes BOTH the scheme and the host from one `dialed_scheme_host` parse, so the verdict is a function of the address reqwest dials. RED ARM 2026-08-30 (mutation M4): the pre-#1243 hand cut restored inside `web_fetch_risk` -- proven to land on EXECUTABLE code by printing the whole function body before and after the edit (the `strip_prefix(\"https://\")` / `split(['/','?','#'])` / `rsplit('@')` chain, between `pub fn web_fetch_risk` and the ALLOWLIST fold), never a doc comment -- gives verbatim `assertion left == right failed: smuggled authority classified as trusted: https://evil.example\\@github.com/x, left: Trusted, right: External`. Restored with `git checkout --`, touched, re-run green."
   - id: c2
     text: "host_of (webfetch.rs) renders the host the request is actually dialed against, so the prompt title for that URL is not github.com"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-cli/src/tui/permission/components/webfetch.rs::title_names_the_host_actually_dialed_not_the_smuggled_one"
     owner: core
-    note: "Filed 2026-08-30 by lane f13-sec-credgate. Nothing has been done; the measurement is on c1 (`host_of=\"github.com\"` against `whatwg_host=Some(\"evil.example\")`). host_of is webfetch.rs:158-166 and repeats the same cut, so the approval prompt titles the fetch `github.com` while reqwest dials evil.example -- the user approves a host they were never shown."
+    note: "Graded through the RENDERED TITLE, not through `host_of`'s return value: the test builds the real permission card, calls `WebFetchComponent.title()`, and asserts the line reads `Fetch evil.example` and explicitly NOT `Fetch github.com` -- the sentence the criterion actually makes. It also asserts the badge on the same card reads `external`, so the two halves of the prompt cannot disagree. RED ARM (mutation M5, `host_of`'s body alone restored to the hand cut, printed lines 157-173 before and after to prove it landed on executable code) is PERFECTLY DISCRIMINATING -- `19 tests run: 18 passed, 1 failed`, exactly this test -- and the failure text is the defect verbatim: `assertion left == right failed: title: Fetch github.com, left: \"Fetch github.com\", right: \"Fetch evil.example\"`. Restored, touched, re-run green."
   - id: c3
     text: "provider_info.local is false for https://evil.example\\@127.0.0.1/v1"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-protocol/src/events.rs::route_info_is_not_local_for_an_authority_smuggled_loopback"
     owner: core
-    note: "Filed 2026-08-30 by lane f13-sec-credgate. Nothing has been done. SECOND SITE, and the more dangerous direction: a PUBLIC endpoint reports local: true, i.e. the flag tells the user their prompt never left the machine on the one shape where it did. crates/wcore-protocol/src/events.rs:1948 split_endpoint cuts at ['?','#'] then at '/', consumed by host_of at :1975 and is_local_endpoint at :1999. MEASURED from a probe over the real functions, with three controls in the same call -- the query spelling that IS handled, a genuine loopback, and a plain public host: `PROBE local=true host_of=\"127.0.0.1\" url=https://evil.example\\@127.0.0.1/v1` / `PROBE local=false host_of=\"evil.example\" url=https://evil.example?z=@127.0.0.1` / `PROBE local=true host_of=\"127.0.0.1\" url=http://127.0.0.1:11434/v1` / `PROBE local=false host_of=\"api.openai.com\" url=https://api.openai.com/v1`. The dialed host for row one, from url::Url::parse: `PROBE2 whatwg_host=Some(\"evil.example\") url=https://evil.example\\@127.0.0.1/v1`. docs/json-stream-protocol.md:2174 promises of this flag: 'local is decided against a parsed IP literal, never a string prefix ... this flag is what a user trusts to conclude their prompt never left the machine.' The IP literal IS parsed; the string it is parsed from is not."
+    note: "The criterion's exact string is the first row. The test grades the PUBLISHED event, `RouteInfo::from_endpoint(...)`, not the private predicate, and asserts two independent things per row: `!route.local`, and that the scrubbed `base_url` published alongside it names the dialed host -- because publishing `https://127.0.0.1/v1` for a request that reached evil.example is the same defect wearing the other hat. TWO separate red arms, landing on two different lines and reddening two different assertions of this test. M6: `is_local_endpoint`'s authority reading replaced by the pre-#1243 hand cut, re-typed through the SAME `match` so only the READING differs -- `public endpoint reported local: https://evil.example\\@127.0.0.1/v1` (events.rs:3436). M7: the `publishable_endpoint` early return deleted from `scrub_base_url`, leaving the hand-cut fallback -- `published base_url must name the dialed host for https://evil.example\\@127.0.0.1/v1: https://127.0.0.1/v1` (events.rs:3412). Both printed before/after to prove they landed on executable code; under each, `route_info_is_still_local_for_a_genuine_loopback_endpoint` stayed GREEN (`9 tests run: 8 passed, 1 failed`), so neither mutation is a blanket break. Restored with `git checkout --` and touched after every mutation AND every restore."
   - id: c4
     text: "All three take the host from a URL parser rather than a hand-cut authority, so the class is closed rather than the one spelling"
-    state: not-met
+    state: met
+    evidence: "absent:crates/wcore-cli/src/tui/permission/components/webfetch.rs::rsplit"
     owner: core
-    note: "Filed 2026-08-30 by lane f13-sec-credgate. Nothing has been done. The house pattern already exists twice: crates/wcore-mcp/src/transport/sse.rs whatwg_tuple_origin (with resolve_endpoint_backslash_at_smuggle_rejected at :864, the same bypass caught in an audit) and, as of this lane, crates/wcore-config/src/self_hosted.rs is_self_hosted_base_url -- which was measured against this exact string and returns false: `PROBE2 ... self_hosted=false url=https://evil.example\\@127.0.0.1/v1`. Note wcore-protocol deliberately holds no url dependency today, so closing site B is a dependency decision as well as a code change; that is the reason this is its own ticket and not a hunk in the #1211 fix."
+    note: "All three now route through ONE module, `crates/wcore-types/src/url_authority.rs` (`dialed_host` / `dialed_host_str` / `dialed_scheme_host` / `publishable_endpoint`), which delegates to `url::Url` -- the WHATWG parser reqwest itself dials with. It lives in wcore-types because that is the lowest crate all three callers already depend on; wcore-protocol's lack of a `url` dep, which the ticket flagged as a dependency decision, is resolved that way rather than by duplicating the parse. `wcore-config::self_hosted::is_self_hosted_base_url` (the #1211 fix) was MIGRATED onto it too, so the unified predicate was extended, not forked -- a third hand-cut parser is exactly what created this bug class. This token re-reads webfetch.rs every run and reds if the cut is resurrected; known-positive control run in the same call: `grep -c rsplit` returns 0 for webfetch.rs and 2 for events.rs, so the query is not silently failing. HONEST REMAINDER, not hidden: those 2 hits in events.rs are `split_endpoint`, retained ONLY as `scrub_base_url`'s redaction fallback for a string that does not parse as a URL at all (nothing reqwest could have dialed either, so there is no dialed host to be wrong about). Its doc comment now says so and forbids anyone asking it which host a request reaches. It is not on the `is_local_endpoint` path any more."
   - id: c5
     text: "A test at each site carries the backslash spelling alongside a wrong-refusal control (an ordinary allowlisted URL still reads Trusted; a genuine loopback endpoint still reads local: true), shown RED against today's hand cut"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-protocol/src/events.rs::route_info_is_still_local_for_a_genuine_loopback_endpoint"
     owner: core
-    note: "Filed 2026-08-30 by lane f13-sec-credgate. Nothing has been done. Both sites already have a polarity block to extend: webfetch.rs:223 (`web_fetch_risk: the pure classifier`) and the wcore-protocol events tests at events.rs:2297."
+    note: "Both controls exist and BOTH were shown non-vacuous by their own mutation, which is the point of the criterion -- a classifier that answered External/false for everything would pass the positive tests and quietly destroy the feature. Site B control (this anchor): `http://127.0.0.1:11434/v1`, `localhost`, `[::1]`, `192.168.1.50`, `10.0.0.7`, `ollama.local` still read `local: true`; RED under mutation M8 (`is_local_endpoint`'s Ipv4 arm forced to `false`) -- `http://127.0.0.1:11434/v1 must be reported as a local route`, and it took the pre-existing `route_info_locality_separates_local_from_cloud_on_one_provider_id` down with it, which is the correct blast radius. Site A control: `risk_still_trusted_for_genuinely_allowlisted_urls` in webfetch.rs -- github.com, api.github.com, docs.rs, crates.io, raw.githubusercontent.com, honest `user@github.com` userinfo, and `HTTPS://GitHub.COM/x`. It is RED under mutation M4, and the reason is itself a finding: the old hand cut required a lowercase literal `https://` prefix, so it de-trusted an uppercase scheme. The shared parser also has its own eight-test block; four of them go RED under mutation M9 (`dialed_host` replaced by the pre-#1211/#1243 hand cut), e.g. `https://evil.example\\@github.com/x, left: Some(\"github.com\"), right: Some(\"evil.example\")`. Every mutation restored with `git checkout --` and touched."
 ---
 
 For a special scheme the WHATWG parser maps `\` to a path separator, so
 `https://evil.example\@github.com/x` is a request to `evil.example`. Two
-hand-cut authority parsers stop at `/`, `?` and `#` but not at `\`, take the
-last `@`-separated part of what is left, and get `github.com`.
+hand-cut authority parsers stopped at `/`, `?` and `#` but not at `\`, took
+the last `@`-separated part of what was left, and got `github.com`.
 
-#1211's query-string spelling is already handled at both. It is specifically
-the backslash spelling that is open.
+Closed 2026-08-30 by lane f13-w2-provider-url. All five criteria met as
+written. The fix EXTENDS the unified predicate #1211/#1212 created rather than
+adding a third hand cut: the parse moved down into
+`crates/wcore-types/src/url_authority.rs` and `is_self_hosted_base_url` was
+migrated onto it in the same pass.
 
-Bounded at both sites: neither is an allow/deny decision. Site A is the risk
-LABEL and the prompt TITLE, and the user is still prompted; site B is a
-diagnostic field. But the label exists so a user can skim-approve a trusted
-host, and the docs promise site B is exactly what a user trusts about whether
-their prompt left the machine.
+SPELLINGS COVERED, and why that set is CLOSED. The tests carry the backslash
+spelling (with and without a path, with a port, and against a second allowlist
+entry), #1211's query spelling, the `#` fragment sibling, honest userinfo
+pointed the other way (`https://github.com@evil.example/x`), a password
+containing `@`, and an embedded tab inside the authority. The set is closed by
+CONSTRUCTION, not by enumeration: the host is no longer chosen by a delimiter
+list of ours at all -- it comes from the WHATWG authority state machine, which
+also strips C0 controls and ASCII whitespace anywhere in the input, applies
+IDNA, canonicalises IPv4 in four radices, and rejects forbidden code points.
+Those rows are regressions, not the mechanism.
 
-Filed by lane f13-sec-credgate while closing wayland#1211 and #1212. Searched
-for an existing carrier first, by symptom (`webfetch authority`,
-`web_fetch_risk`, `backslash`, `userinfo`, `host_of allowlist`), by originating
-issue (`1211`), and by component (all 132 open FerroxLabs/wayland and 55 open
-FerroxLabs/wayland-core issues filtered on webfetch / allowlist / authority /
-host / url / permission / spoof / origin). Nothing carried it. Both sites are
-one ticket on purpose -- one defect class, one fix pattern, and splitting them
-is how a future lane closes one and leaves the other.
+SITES: NOT closed, and this is an allowlist with named gaps. The class is "a
+hand cut of an authority followed by a last-`@` selection, used as a security
+or display oracle for a URL that will be dialed". After this lane, `grep -rn`
+for `rsplit_once('@')` / `rsplit('@')` plus a `split(['/','?','#'])` cut leaves
+TWO such sites in the tree, both outside this ticket's stated scope:
+`crates/wcore-cli/src/doctor/mod.rs:1011-1021` (`host_of`, a `/doctor`
+diagnostic over the user's own configured base_url) and
+`crates/wcore-browser/src/policy.rs:1155-1170`
+(`strip_pattern_decorations`, which normalises an operator-supplied ALLOWLIST
+PATTERN -- the URL being matched against it already comes from
+`Url::host_str()`). Four further `split(['/','?','#'])` cuts exist
+(`tui/widgets/sources_block.rs:92`, `tui/commands/at_ref_parse.rs:178`,
+`tui/tool_formatters/web_fetch.rs:105`, `tui/tool_formatters/web.rs:214`) but
+none of them strips userinfo, so they cannot collapse a smuggled authority onto
+an allowlisted NAME -- they display the whole `evil.example\@github.com`
+string. `crates/wcore-channel-email/src/smtp.rs:327` and
+`crates/wcore-types/src/model_aliases.rs:515` split an email address and a
+model id, not a URL authority, and are out of class. Known-positive control for
+that sweep, in the same call: the query matched events.rs:1988 and sse.rs:909,
+both real occurrences.
+
+handoff: FerroxLabs/wayland#1252

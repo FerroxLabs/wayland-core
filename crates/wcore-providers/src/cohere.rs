@@ -22,6 +22,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use wcore_config::compat::join_endpoint;
 use wcore_config::debug::DebugConfig;
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{
@@ -133,7 +134,10 @@ impl LlmProvider for CohereProvider {
         &self,
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-        let url = format!("{}/chat", self.base_url);
+        // #1217 c3: the untrimmed-slash half of the same defect — a base
+        // spelled `https://api.cohere.com/v1/` built `//chat`. One joiner,
+        // shared with every other wire, rather than a local trim.
+        let url = join_endpoint(&self.base_url, "/chat");
         let model = self.resolved_model(request);
         let body = build_cohere_body(request, &model);
 

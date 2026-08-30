@@ -16,7 +16,7 @@
 //! counts as a credential; the only thing a `true` may unlock is the
 //! *requirement* for one on an endpoint the user explicitly pointed us at.
 
-use url::{Host, Url};
+use wcore_types::url_authority::{Host, dialed_host};
 
 use crate::compat::ProviderCompat;
 
@@ -28,25 +28,25 @@ use crate::compat::ProviderCompat;
 /// real cloud provider with a missing key still surfaces a clear `MissingApiKey`
 /// rather than silently sending a bogus bearer and getting a 401.
 ///
-/// The host comes from the same URL parser the HTTP client itself is built on,
-/// so this predicate cannot disagree with the address the request actually goes
-/// to. Hand-cutting the authority is what FerroxLabs/wayland#1211 was: taking
+/// The host comes from [`wcore_types::url_authority::dialed_host`] — the one
+/// authority parser, the same one the HTTP client is built on — so this
+/// predicate cannot disagree with the address the request actually goes to.
+/// Hand-cutting the authority is what FerroxLabs/wayland#1211 was: taking
 /// everything before the first `/` and then the LAST `@`-separated part read
 /// `https://api.openai.com?x=@127.0.0.1` as loopback, because the `@` lived in
 /// the QUERY and the cut never stopped at `?`. Also cutting at `?` and `#`
 /// would still have been wrong — for a special scheme the WHATWG parser treats
 /// `\` as a path separator, so `https://api.openai.com\@127.0.0.1` is a request
-/// to `api.openai.com` that a hand-rolled cut reads as loopback too.
+/// to `api.openai.com` that a hand-rolled cut reads as loopback too. #1243
+/// found the same cut open at two more sites, which is why the parse moved
+/// down into `wcore-types` where all four callers reach it.
 ///
 /// A string with no host — scheme-less, relative, or unparsable — is NOT
 /// self-hosted. The only thing this predicate can unlock is the waiver of a
 /// credential requirement, so an address we cannot resolve fails closed.
 #[must_use]
 pub fn is_self_hosted_base_url(base_url: &str) -> bool {
-    let Ok(parsed) = Url::parse(base_url) else {
-        return false;
-    };
-    match parsed.host() {
+    match dialed_host(base_url) {
         // The parser lowercases and IDNA-normalises the host of a special
         // scheme; the extra fold keeps the comparison honest for any other.
         Some(Host::Domain(domain)) => {
