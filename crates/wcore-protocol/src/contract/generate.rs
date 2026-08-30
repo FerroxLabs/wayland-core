@@ -120,6 +120,18 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // never in. The event is purely additive and nothing existing changes shape, so
 // `major` holds at 1 — but the minor has to move, because an added type is
 // undiscoverable to a host pinned below the version that introduced it.
+// 22 -> 23: wayland-core#314 c5 adds one event, `grant_refused`. Exactly the
+// same shape as 21 -> 22 and for exactly the same reason, one surface over: a
+// refused `grant_path` / `grant_workspace_capability` announced itself only as
+// an `info` frame of English prose, so the only way a host could branch on a
+// refusal was to match our wording, and the only way it could tell "refused"
+// from "not yet" was the absence of a frame. The event names the SURFACE that
+// refused and the REASON (`local_opt_in_required` vs `policy_rejected` — two
+// different remedies for the user), and carries the host's own `grant_id` as
+// the correlation key, `null` for the capability command which has none.
+// Purely additive: nothing existing changes shape, so `major` holds at 1, and
+// the minor has to move because an added type is undiscoverable to a host
+// pinned below it.
 pub const CONTRACT_MINOR: u64 = 23;
 pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/23";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";

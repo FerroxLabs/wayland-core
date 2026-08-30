@@ -367,10 +367,15 @@ fn every_command_fixture_round_trips_to_the_variant_it_names() {
 // CONTRACT_MINOR bump it requires, rather than a number that drifts.
 // 67 -> 68 events: wayland#1088 adds `set_mode_refused`, the typed nack for a
 // wire `set_mode` the local-opt-in gate turns down.
+// 68 -> 69 events: wayland-core#314 c5 adds `grant_refused`, the typed nack for
+// a `grant_path` / `grant_workspace_capability` the launcher opt-in or the
+// workspace policy turns down. Same shape as `set_mode_refused` one surface
+// over, and the literal is retyped here on purpose: widening the producer
+// surface stays a decision someone made, next to the CONTRACT_MINOR bump.
 #[test]
-fn inventory_is_exactly_twenty_nine_commands_and_sixty_eight_events() {
+fn inventory_is_exactly_twenty_nine_commands_and_sixty_nine_events() {
     assert_eq!(COMMAND_SPECS.len(), 29);
-    assert_eq!(EVENT_SPECS.len(), 68);
+    assert_eq!(EVENT_SPECS.len(), 69);
     assert_eq!(
         COMMAND_SPECS
             .iter()
@@ -385,7 +390,7 @@ fn inventory_is_exactly_twenty_nine_commands_and_sixty_eight_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        68
+        69
     );
 }
 
@@ -474,9 +479,9 @@ fn manifest_pins_generator_and_all_three_digests() {
     // receipts, plus wayland#372's dispatched-route event. Additive; see the
     // CONTRACT_MINOR 1.19 -> 1.21 note in `generate.rs`.
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 29);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 68);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 69);
     assert_eq!(manifest["counts"]["commands"], 29);
-    assert_eq!(manifest["counts"]["events"], 68);
+    assert_eq!(manifest["counts"]["events"], 69);
     assert_eq!(manifest["counts"]["child_types"], 3);
     assert_eq!(
         manifest["child_types"],
@@ -566,8 +571,8 @@ fn manifest_publishes_a_wire_shape_for_every_command_and_event() {
     );
     assert_eq!(
         shapes.len(),
-        29 + 68 + 1,
-        "29 commands, 68 events, and the legacy sub-agent compatibility branch"
+        29 + 69 + 1,
+        "29 commands, 69 events, and the legacy sub-agent compatibility branch"
     );
     // The correlation anchors every later tool frame is matched against. A
     // rename here is the exact break regeneration used to bless.
