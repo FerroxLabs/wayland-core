@@ -111,8 +111,7 @@ async fn pooled_session_systems(baked_date: &str, turns: usize) -> Vec<String> {
             .await
             .expect("the recording provider answers cleanly");
     }
-    let out = systems.lock().expect("recorder mutex").clone();
-    out
+    systems.lock().expect("recorder mutex").clone()
 }
 
 #[tokio::test]
