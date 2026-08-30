@@ -11380,6 +11380,36 @@ mod tests {
         );
     }
 
+    /// FerroxLabs/wayland#1234, the N+1 — the engine-side retirement the TUI's
+    /// two removal sites now share.
+    ///
+    /// Before this, `/mcp remove` in the TUI dropped the manager from its own
+    /// map and removed the server's tools from the registry, and never called
+    /// `forget_runtime_server`, so `McpCatalogRefresh` kept its `Arc` and went
+    /// on polling a server the operator had removed.
+    #[tokio::test]
+    async fn retiring_a_runtime_server_withdraws_it_from_the_catalog_refresh() {
+        let (mut engine, _managers, fixture, defer_cold) = live_runtime_mcp_fixture();
+        let removed = engine
+            .retire_runtime_mcp_server("warehouse", &defer_cold)
+            .expect("the registry is free in this fixture");
+        assert!(
+            removed.contains(&"warehouse_reserve".to_string()),
+            "retiring must drop the server's tools; got {removed:?}"
+        );
+        fixture.register_and_announce("warehouse_audit_export");
+        let refresh = engine.mcp_catalog_refresh().expect("refresh installed");
+        let registry = engine.registry_mut().expect("registry must be mutable");
+        assert!(
+            refresh.apply(registry, &defer_cold).await.is_empty(),
+            "a retired server must not be polled at all"
+        );
+        assert!(
+            engine.tools().get("warehouse_audit_export").is_none(),
+            "a retired server must not resurrect its tools"
+        );
+    }
+
     /// One runtime-added MCP server, connected through the production
     /// `integrate_deferred_mcp` path so it is registered with the catalog
     /// refresh exactly as a live session registers it.
@@ -11465,9 +11495,37 @@ mod tests {
         // Built from fragments for the same reason as `needle`: this file is
         // one of the files the lint counts, so a literal here would be a hit.
         let forget = concat!("forget_runtime_", "server(");
-        assert!(
-            tui_src.contains(forget),
-            "a rolled-back /mcp add must leave nothing in the refresh"
+        // FerroxLabs/wayland#1234, the N+1 this fix went looking for. The TUI
+        // did its own forget on the `/mcp add` ROLLBACK and not on `/mcp
+        // remove`, so a server removed from the TUI stayed registered with the
+        // catalog refresh for the life of the session -- the same defect
+        // #1234 reports on the json-stream path, on a second entry point.
+        // Both TUI sites now go through
+        // `AgentEngine::retire_runtime_mcp_server`, which drops the server's
+        // tools from the registry and withdraws its manager from the refresh
+        // as ONE operation, so the property to assert is that the TUI can no
+        // longer perform the registry half on its own.
+        assert_eq!(
+            tui_src
+                .matches(concat!("registry.remove_mcp_", "server("))
+                .count(),
+            0,
+            "the TUI must not drop an MCP server's tools without retiring the \
+             server; doing exactly that is how /mcp remove left it registered \
+             with the catalog refresh"
+        );
+        assert_eq!(
+            tui_src
+                .matches(concat!("retire_runtime_mcp_", "server("))
+                .count(),
+            2,
+            "both TUI removal sites -- the /mcp add rollback and /mcp remove \
+             -- go through the fused retirement"
+        );
+        assert_eq!(
+            engine_src.matches(forget).count(),
+            1,
+            "retire_runtime_mcp_server must be the engine's only withdrawal"
         );
 
         // FerroxLabs/wayland#1234 — the removal half.

@@ -3236,14 +3236,10 @@ impl TuiEngine {
         if !published {
             // Roll the refresh admission back with the registration, so a
             // withdrawn server cannot be polled and cannot leave a stale
-            // config behind for a later re-add to inherit.
-            if let Some(refresh) = catalog_refresh.as_ref() {
-                refresh.forget_runtime_server(&name);
-            }
-            if let Some(registry) = guard.registry_mut() {
-                registry.remove_mcp_server(&name);
-                registry.refresh_tool_search_catalog(&defer_cold);
-            }
+            // config behind for a later re-add to inherit. wayland#1234: ONE
+            // operation, so a rollback cannot drop the tools and leave the
+            // manager registered with the refresh.
+            let _ = guard.retire_runtime_mcp_server(&name, &defer_cold);
             drop(guard);
             match manager.close_server(&name).await {
                 Ok(_) => {
@@ -3413,7 +3409,15 @@ impl TuiEngine {
         drop(runtimes);
         let mut guard = engine.lock().await;
         let defer_cold = guard.defer_cold_config();
-        let Some(registry) = guard.registry_mut() else {
+        // FerroxLabs/wayland#1234, the N+1 the json-stream fix went looking
+        // for. This path dropped the manager from `runtime_mcp` and removed
+        // its tools from the registry, and never withdrew it from
+        // `McpCatalogRefresh` — so a server removed from the TUI stayed
+        // registered for the life of the session, exactly as `RemoveMcpServer`
+        // did. `retire_runtime_mcp_server` makes the two one operation, and
+        // claims the registry before it withdraws anything, so a `RegistryBusy`
+        // refusal leaves the session untouched instead of half-removed.
+        let Some(removed_tools) = guard.retire_runtime_mcp_server(&name, &defer_cold) else {
             runtime_mcp.lock().await.insert(name.clone(), runtime);
             let _ = lifecycle.cancel_stopping(&name);
             let _ = tx.send(ProtocolEvent::McpRemovalResult {
@@ -3425,8 +3429,6 @@ impl TuiEngine {
             });
             return None;
         };
-        let removed_tools = registry.remove_mcp_server(&name);
-        registry.refresh_tool_search_catalog(&defer_cold);
         drop(guard);
         if let Err(error) = runtime.manager.close_server(&name).await {
             runtime_mcp.lock().await.insert(name.clone(), runtime);

@@ -5573,6 +5573,37 @@ impl AgentEngine {
         Arc::get_mut(&mut self.tools)
     }
 
+    /// FerroxLabs/wayland#1234 — retire a runtime-added MCP server from every
+    /// structure THIS ENGINE owns, as one operation.
+    ///
+    /// The engine owns both the tool registry and the `McpCatalogRefresh`, and
+    /// a removal has to touch both: drop the server's tools from the registry,
+    /// and withdraw its manager from the refresh so it stops being polled.
+    /// `McpCatalogRefresh` keeps its own `Arc<McpManager>` from
+    /// `register_runtime_server`, so a caller that did only the first left the
+    /// removed server registered for the life of the session — which is what
+    /// #1234 reports on the json-stream `RemoveMcpServer` path, and what the
+    /// TUI's `/mcp remove` did on the same shape until this existed.
+    ///
+    /// The two halves are ordered so a refusal cannot half-perform: the
+    /// registry is claimed FIRST, and nothing is withdrawn if it is busy.
+    /// `None` means a turn holds the registry and the caller must refuse the
+    /// removal rather than complete part of it.
+    pub fn retire_runtime_mcp_server(
+        &mut self,
+        name: &str,
+        defer_cold: &wcore_config::tools::DeferColdConfig,
+    ) -> Option<Vec<String>> {
+        let refresh = self.mcp_catalog_refresh();
+        let registry = self.registry_mut()?;
+        let removed_tools = registry.remove_mcp_server(name);
+        registry.refresh_tool_search_catalog(defer_cold);
+        if let Some(refresh) = refresh {
+            refresh.forget_runtime_server(name);
+        }
+        Some(removed_tools)
+    }
+
     /// Wire the mid-session MCP catalogue refresh (post-construction setter,
     /// matching `set_agent_registry`). Bootstrap calls this once it has both
     /// the connected managers and the `builtin_names` / server-config
