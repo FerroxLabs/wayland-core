@@ -623,7 +623,10 @@ impl CompactConfig {
     /// window is - see [`Self::worst_case_carried_tool_result_bytes`] and the
     /// named gap recorded with it.
     ///
-    /// Identity above a ~103,000-token window, so no large-window sizing moves.
+    /// Identity wherever the guard admits at least 2 x
+    /// `total_budget_bytes` of input (a ceiling of about 60,000 tokens), so no
+    /// large-window sizing moves - pinned by
+    /// `a_large_window_keeps_todays_flat_tool_result_constants`.
     pub fn tool_result_bounds(&self, window: Option<usize>) -> ToolResultBounds {
         let tr = &self.tool_results;
         let Some(window) = window else {
@@ -637,8 +640,16 @@ impl CompactConfig {
             .input_ceiling_for_window(window)
             .saturating_mul(CHARS_PER_TOKEN);
         let half = admissible / 2;
+        // The tail's worst case is not `half`: the NEWEST result is protected
+        // unconditionally at the use site, so when `half` is under the
+        // per-result ingestion cap the tail can still carry one whole
+        // MAX_TOOL_RESULT_BYTES. Sizing the budget against `half` instead of
+        // against that worst case left 120,000 + 50,000 = 90,416 bytes on a
+        // 32,768-token window whose guard admits 80,832 - over the ceiling,
+        // which is the state #1200 reports, merely smaller.
+        let worst_tail = half.max(MAX_TOOL_RESULT_BYTES);
         ToolResultBounds {
-            total_budget_bytes: tr.total_budget_bytes.min(half),
+            total_budget_bytes: tr.total_budget_bytes.min(admissible.saturating_sub(worst_tail)),
             protected_tail_bytes: Some(half),
             keep_recent: tr.keep_recent,
         }
@@ -1243,6 +1254,79 @@ epoch_turns = 6
     /// `UNVERIFIED_CONTEXT_WINDOW` arm of
     /// `CompactConfig::effective_context_window` (compact.rs) back to
     /// `DEFAULT_CONTEXT_WINDOW`.
+    /// FerroxLabs/wayland#1200 c2 - on a 32,768-token window the WORST-CASE
+    /// carried tool-result payload must fit the window.
+    ///
+    /// The ticket's arithmetic, verbatim: `total_budget_bytes` = 120,000 and
+    /// `keep_recent` = 4, each protected result able to carry
+    /// `Tool::max_result_size()` = 50,000 chars, so the worst case is
+    /// 120,000 + 4 x 50,000 = 320,000 bytes, about 80,000 tokens - 2.4x the
+    /// entire 32,768-token window the same release assumes for an unlisted
+    /// model. Both terms are absolute, so no window makes either smaller.
+    ///
+    /// Graded against the CEILING rather than the raw window: carried results
+    /// are input, and the boundary that admits input is
+    /// `input_ceiling_for_window`. A payload that fits the window but not the
+    /// ceiling is aborted by the #255 guard, which is not "fits".
+    #[test]
+    fn the_worst_case_carried_tool_results_fit_a_32k_window() {
+        const WINDOW: usize = 32_768;
+        let cfg = CompactConfig::default();
+
+        // The RED figure, stated as the ticket stated it, and asserted as a
+        // precondition so this test cannot silently start grading a config
+        // whose flat constants already fit.
+        let unbounded = cfg.worst_case_carried_tool_result_bytes(None);
+        assert_eq!(
+            unbounded,
+            120_000 + 4 * MAX_TOOL_RESULT_BYTES,
+            "precondition: the unknown-window fallback is still the ticket's \
+             120,000 + 4 x 50,000"
+        );
+        assert!(
+            unbounded / CHARS_PER_TOKEN > WINDOW,
+            "precondition: the flat constants really do overflow a {WINDOW}-token \
+             window ({} tokens), or this test grades nothing",
+            unbounded / CHARS_PER_TOKEN
+        );
+
+        let bounded = cfg.worst_case_carried_tool_result_bytes(Some(WINDOW));
+        let ceiling = cfg.input_ceiling_for_window(WINDOW);
+        assert!(
+            bounded / CHARS_PER_TOKEN <= ceiling,
+            "the worst-case carried payload is {} bytes = {} tokens, and the \
+             pre-flight guard admits only {ceiling} tokens on a {WINDOW}-token \
+             window",
+            bounded,
+            bounded / CHARS_PER_TOKEN
+        );
+        // And a fortiori inside the window itself, which is the sentence the
+        // criterion is written in.
+        assert!(bounded / CHARS_PER_TOKEN <= WINDOW);
+    }
+
+    /// #1200 - the bound must be IDENTITY on a large window, or it is a
+    /// regression dressed as a fix. A 200,000-token window admits far more
+    /// than 120,000 bytes of results, so the shipped constants must survive
+    /// untouched there.
+    #[test]
+    fn a_large_window_keeps_todays_flat_tool_result_constants() {
+        let cfg = CompactConfig::default();
+        let big = cfg.tool_result_bounds(Some(200_000));
+        assert_eq!(
+            big.total_budget_bytes, cfg.tool_results.total_budget_bytes,
+            "a 200k window must not shrink the shipped budget"
+        );
+        assert_eq!(big.keep_recent, cfg.tool_results.keep_recent);
+        // The small window is the one that moves.
+        let small = cfg.tool_result_bounds(Some(32_768));
+        assert!(
+            small.total_budget_bytes < cfg.tool_results.total_budget_bytes,
+            "control: the bound must actually bite somewhere, or the identity \
+             above is vacuous"
+        );
+    }
+
     #[test]
     fn unknown_model_falls_back_to_the_unverified_window() {
         let cfg = CompactConfig::default();

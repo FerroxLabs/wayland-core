@@ -15,6 +15,9 @@
 | Q7 | Windows merge freeze for Lane W | **YES — a declared window, opened after Lane 0.1 is read** | Serializes the single Windows box |
 | Q-113 | core#113 | **CLOSE AS REFUTED**, recording deny-by-default as the decision | Record posted on #113 2026-08-29; the close is queued on FerroxLabs/wayland#1229, with wayland-core#364 filed independently for the same act -- both open, maintainer to dedupe |
 | Q-338c4 | core#338 credential surface | **Deny `/dev/tty` via `setsid`, in the SAME change as layer 1** | Layer 1 alone makes the test green while `credential.helper` stays open |
+| Q-1172c3 / wayland#1172 c3 | what happens when the LEARNED served window is one core cannot compact in (the 4,096 slot) | **NARROW ONTO IT UNCONDITIONALLY AND REFUSE THE RUN OUT LOUD** | No `supports_compaction` escape hatch in `narrow_to_served_window`; the refusal carries `minimum_workable_window` and the `num_ctx` remedy; the truncation notice needs the matching third arm |
+| Q-1218 / wayland#1218 | clamp `size_output_cap` to the withheld RESERVE, or to the room left in the window in force | **TO THE ROOM IN THE WINDOW IN FORCE** | Never clamp the ask to the reserve at every input - that cuts a 200k Claude turn to the compaction reserve |
+| Q-1200 / wayland#1200 | bound the tool-result BUDGET only, or the protected tail too | **BOTH, and record the term that cannot be bounded** | The per-result ingestion cap is not window-derived; the named gap belongs beside the arithmetic, not in a lane report |
 | Q-391 / core#244 c4 | is the Windows local-operator shell expected to confine the VCS content store? | **NO — and say so everywhere the product speaks** | Rewrite #244 c4 to its true scope; keep the standing pin test; do not reopen AppContainer |
 
 ## D-SECRET-2 — REFUTED 2026-08-29. Do not build this.
@@ -104,3 +107,73 @@ than it delivers. #244 c4's text now states the scope at which the property hold
 so the day it closes, someone re-grades instead of quietly agreeing. Scope of the "no": Linux (bwrap)
 and macOS (sandbox-exec) both enforce read-deny at their shipping default, so the exemption is inert
 there, and every non-local principal on Windows is still refused.
+
+## Why Q-1172c3 refuses rather than narrows-and-bricks (the 4,096 decision)
+This was the explicit blocker on wayland#1172 c3, and it was parked twice: the ticket's own close
+note says "wiring the learned window into the guard today makes a small-window run fail outright,
+because the fixed buffers saturate to zero at 4,096". Three options, and the third is taken.
+
+**A. Keep the `supports_compaction` gate (the status quo until this release).** A corroborated
+4,096-token served window was deliberately NOT narrowed onto, so core went on sizing against
+`UNVERIFIED_CONTEXT_WINDOW` = 32,768 - 8x the window the endpoint had been OBSERVED to serve - and
+kept sending ~10.5k-token prompts that Ollama silently truncated. This is the state wayland#1172
+refused to let #1150 close, and it fails on the FAIL-OPEN side: the model answers fluently from a
+context that no longer holds the system prompt or the task. Declining to narrow did not avoid a
+brick, it hid one.
+
+**B. Narrow unconditionally and let the boundaries fall where they fall.** At 4,096 with
+`MAX_RESERVE_FRACTION = 0.55` the scaled input ceiling is 2,527 and the autocompact threshold 1,844,
+both under `BASELINE_TURN_TOKENS` = 3,118. Every run would terminate at the pre-flight guard before
+the user's first turn, with a generic overflow error. Neither degradation rung can recover it -
+rung 1 sheds tool RESULTS and rung 2 truncates or drops MESSAGES, while `est(&[]) == overhead` -
+because the floor is the system prompt plus the tool schemas, which compaction does not touch.
+Louder than A, and correct about the window, but it reads to the operator as a product bug.
+
+**C. TAKEN: narrow unconditionally, AND refuse the endpoint out loud, once, with the number that
+fixes it.** The escape hatch is gone from `narrow_to_served_window`, so nothing sizes against a
+window the endpoint has been observed not to serve. `unworkable_window_refusal` terminates the run
+at the TURN-LOOP TOP, before `run_compaction`, naming `minimum_workable_window` (6,929 at the
+default reserves, computed rather than hardcoded) and the `num_ctx` / `OLLAMA_CONTEXT_LENGTH` /
+`[compact] context_window` remedy.
+
+The reason C is not B with better copy: B's failure arrives from the pre-flight guard AFTER a prompt
+has been assembled, and its message is about token counts. C's arrives before the provider is called
+at all - zero requests are sent, so no prompt the endpoint would truncate ever leaves - and its
+message is about the endpoint's configuration, which is the only thing the operator can act on.
+
+**What this obliges, and why the two could not be sequenced apart.** The gate's removal and the
+refusal had to land together: A alone is the reported defect, B alone is a worse-looking version of
+it. It also obliges the truncation notice to grow a third arm, because "Core is now sizing this
+session against the {served}-token window" becomes false in the one case C is about - that is
+wayland-core#382 c1, and the arm reads "Core cannot size a session against N tokens at all".
+
+## Why Q-1218 clamps to the window, not to the reserve
+wayland#1218's title is "the scaled `output_reserve` is decoupled from the `max_tokens` core actually
+sends", which reads as an instruction to clamp the ask to the reserve. Doing that literally is a
+regression: on a 200,000-token window the scaled reserve is 20,000 tokens, so a Claude turn with a
+real 64,000-token output ceiling would be cut to under a third of it on every turn, on every large
+model, to fix a defect that only exists below a 49,152-token window.
+
+What the ticket actually measures is an OVERFLOW - "total ask 13,245 on an 8,192 slot" is
+ceiling 5,053 + ask 8,192 - so the property is `admitted input + asked output <= window`, and
+`room(window_in_force) = window - est - WINDOW_BUFFER` delivers exactly that at every input, not
+only the worst one. It is also IDENTITY wherever the window in force is the catalogued window, which
+is every registry model absent a #1172 narrowing, so no large-window sizing moves. Pinned by
+`a_window_in_force_that_is_the_catalogued_one_changes_no_sizing`, which would fail under the
+literal reading.
+
+## Why Q-1200 bounds both terms and names the one it cannot
+wayland#1200's worst case is `total_budget_bytes + keep_recent x max_result_size` = 120,000 +
+4 x 50,000 = 320,000 bytes, about 80,000 tokens on a 32,768-token window. Bounding only the budget
+leaves the protected tail dominating - 200,000 bytes of it - so the ticket would be half-closed with
+a number that still does not fit. Capping the tail by COUNT instead of by BYTES was rejected: it
+drops the tail to one result on any window under ~100,000 even when the results are small, and a
+stubbed working set is how the re-read loop wayland#1172 reports begins.
+
+The term that cannot be bounded here is named rather than hidden: the NEWEST tool result is
+protected unconditionally, and its size is the per-result ingestion cap
+(`wcore_tools::Tool::max_result_size` = 50,000 chars), which is not window-derived. So the budget is
+sized against `admissible - max(admissible/2, MAX_TOOL_RESULT_BYTES)` - room is left for that one
+result rather than pretending it is not there. Below a ceiling of about 12,500 tokens that single
+result exceeds the window on its own and no arithmetic in `wcore-config` can change it; that window
+is unworkable by Q-1172c3's test and is refused by the turn loop, which is where it belongs.

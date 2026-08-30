@@ -7128,12 +7128,14 @@ impl AgentEngine {
         let args_result = micro::compact_tool_call_args(&mut self.messages, &self.compact_config);
         // #1150 c4: the accumulated tool-RESULT ceiling, mirroring
         // `run_compaction` step 0b.
+        // #1200 — the SAME resolved window every other boundary uses,
+        // learned narrowing included. Resolved BEFORE the mutable borrow of
+        // self.messages below, not inlined into the call.
+        let result_window = Some(self.compaction_window_now());
         let results_result = micro::bound_accumulated_tool_results(
             &mut self.messages,
             &self.compact_config,
-            // #1200 — the SAME resolved window every other boundary
-            // uses, learned narrowing included.
-            Some(self.compaction_window_now()),
+            result_window,
         );
         let result = micro::microcompact(&mut self.messages, &self.compact_config);
         if result.cleared_count + results_result.cleared_count > 0 {
@@ -18789,12 +18791,14 @@ impl AgentEngine {
         // bounds their SUM. Monotone + epoch-quantized like step 0, so a
         // bounded result never changes bytes again and the boundary advances
         // in batches rather than once per turn inside the cached prefix.
+        // #1200 — the SAME resolved window every other boundary uses,
+        // learned narrowing included. Resolved BEFORE the mutable borrow of
+        // self.messages below, not inlined into the call.
+        let result_window = Some(self.compaction_window_now());
         let results_result = micro::bound_accumulated_tool_results(
             &mut self.messages,
             &self.compact_config,
-            // #1200 — the SAME resolved window every other boundary
-            // uses, learned narrowing included.
-            Some(self.compaction_window_now()),
+            result_window,
         );
         if results_result.cleared_count > 0 {
             self.output.emit_info(&format!(
@@ -24489,6 +24493,75 @@ mod compact_tests {
     }
 
     // -- Emergency check fires when at limit --
+
+    /// FerroxLabs/wayland#1210 c2 - on a CORROBORATED 8,192-token learned
+    /// window the reported emergency limit and the autocompact threshold must
+    /// derive from the SAME window.
+    ///
+    /// The defect was that they did not. `emergency_limit` re-resolved the
+    /// window itself from `config` + `provider` + `model`, so it was the one
+    /// window-derived boundary that never reached `narrow_to_served_window`.
+    /// The ticket measured the gap on exactly this configuration: an unlisted
+    /// model whose `effective_context_window` is `UNVERIFIED_CONTEXT_WINDOW` =
+    /// 32,768, with a corroborated 8,192 served window. Everything else
+    /// narrowed - autocompact threshold 3,688, pre-flight ceiling 5,053 - while
+    /// the emergency limit stayed at 29,768, the unnarrowed 32,768 minus its
+    /// buffer, and 29,768 is the figure operators are SHOWN.
+    ///
+    /// Graded as an IDENTITY against the window, not as an inequality: the
+    /// criterion says "derive from the same window", and any number of wrong
+    /// windows satisfy "smaller than 29,768".
+    #[test]
+    fn the_emergency_limit_and_the_autocompact_threshold_share_one_window() {
+        const LEARNED: usize = 8_192;
+        let config = CompactConfig::default();
+        let mut state = CompactState::new();
+        // Corroborate through the tracker rather than by poking a field: the
+        // Shortfall arm carries its own corroboration, so one qualifying
+        // observation is enough and no private state is reached into.
+        state
+            .served_window
+            .observe("test/test-model", 20_000, LEARNED as u64)
+            .expect("precondition: a gross shortfall must produce evidence");
+        assert_eq!(
+            state.served_window.sizing_window(),
+            Some(LEARNED as u64),
+            "precondition: the evidence must be CORROBORATED, or this test \
+             grades the un-narrowed path and passes for the wrong reason"
+        );
+
+        let engine = make_compact_engine(config.clone(), state, vec![]);
+        let base = config.effective_context_window(engine.compat.provider_type(), &engine.model);
+        assert_eq!(
+            base,
+            wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW,
+            "precondition: an unlisted model, which is the arm #1210 measured"
+        );
+        assert!(
+            base > LEARNED,
+            "precondition: the learned window must actually narrow something"
+        );
+
+        assert_eq!(
+            engine.emergency_limit_tokens() as usize,
+            config.emergency_limit_for_window(LEARNED),
+            "the emergency limit must be derived from the LEARNED window"
+        );
+        assert_eq!(
+            engine.autocompact_threshold_now(),
+            config.autocompact_threshold_for_window(LEARNED),
+            "and so must the threshold - the same window, not merely a smaller \
+             number"
+        );
+        // The measured figure the ticket reported, stated so a re-grade reads
+        // the same arithmetic it did.
+        assert_ne!(
+            engine.emergency_limit_tokens() as usize,
+            config.emergency_limit_for_window(base),
+            "29,768 was the reported and ENFORCED limit while every other \
+             boundary had narrowed to 8,192"
+        );
+    }
 
     #[tokio::test]
     async fn emergency_fires_when_at_limit() {
