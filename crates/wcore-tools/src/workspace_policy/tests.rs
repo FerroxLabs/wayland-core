@@ -2649,3 +2649,49 @@ fn every_weak_resolver_site_states_which_resolver_and_why() {
         );
     }
 }
+
+// ===========================================================================
+// PROBE -- not a gate. Run by hand under `strace -f -c` to count the syscalls
+// `vcs_content_stores` charges per TRAVERSED DIRECTORY, which is the shape
+// `grep_policy::scope_for` calls it in. `WL_PROBE_DIRS` sets the loop count so
+// two runs can be differenced and every one-off cost cancels.
+// ===========================================================================
+
+#[test]
+#[ignore = "measurement probe, driven by WL_PROBE_DIRS under strace"]
+fn probe_vcs_content_stores_per_traversed_directory() {
+    let n: usize = std::env::var("WL_PROBE_DIRS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    // KNOWN-POSITIVE CONTROL, in the same run: a real store at the root must be
+    // found, or the probe is timing a function that answers nothing.
+    std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+    assert!(
+        !vcs_content_stores(root).is_empty(),
+        "control: the scan must find <root>/.git/objects"
+    );
+
+    // The ordinary traversed directory: no control directory of any kind.
+    let dir = root.join("src/deep/deeper");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(
+        vcs_content_stores(&dir).is_empty(),
+        "control: an ordinary directory names no store"
+    );
+
+    let start = std::time::Instant::now();
+    let mut sink = 0usize;
+    for _ in 0..n {
+        sink += vcs_content_stores(&dir).len();
+    }
+    let elapsed = start.elapsed();
+    println!(
+        "PROBE dirs={n} sink={sink} total={:?} per_dir_us={:.3}",
+        elapsed,
+        elapsed.as_secs_f64() * 1e6 / (n as f64)
+    );
+}
