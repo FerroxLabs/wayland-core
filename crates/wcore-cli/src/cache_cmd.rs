@@ -518,7 +518,8 @@ fn resolve(
             Ok(ledger) => return Ok((path, ledger)),
             Err(e) => {
                 anyhow::bail!(
-                    "session '{id}' recorded conversation id '{conversation_id}', but its ledger                      could not be read: {e}"
+                    "session '{id}' recorded conversation id '{conversation_id}', but its ledger \
+                        could not be read: {e}"
                 );
             }
         }
@@ -528,7 +529,10 @@ fn resolve(
     // the keys. The old message named a path that had never existed and said
     // nothing else.
     anyhow::bail!(
-        "no cache ledger for '{id}' in {}. Ledgers are keyed by the engine's internal          conversation id, not by the session id you set with --session-id; session '{id}' is          either unknown to the session store at {} or was recorded by a build that did not          persist its conversation id. Run `wayland-core cache list` to see the ids that exist.",
+        "no cache ledger for '{id}' in {}. Ledgers are keyed by the engine's internal \
+            conversation id, not by the session id you set with --session-id; session '{id}' is \
+            either unknown to the session store at {} or was recorded by a build that did not \
+            persist its conversation id. Run `wayland-core cache list` to see the ids that exist.",
         dir.display(),
         manager.directory().display(),
     )

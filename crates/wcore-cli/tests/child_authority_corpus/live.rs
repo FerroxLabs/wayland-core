@@ -1672,7 +1672,9 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
             Outcome::NotExpressible,
             "no verdict — the governed repository could not be created",
             format!(
-                "this dimension requires an isolated-mutation child, whose workspace is a git                  worktree of the run's repository, and the repository could not be created on                  this host: {reason}"
+                "this dimension requires an isolated-mutation child, whose workspace is a git \
+                    worktree of the run's repository, and the repository could not be created on \
+                    this host: {reason}"
             ),
         )
         .with_live(LiveEvidence {

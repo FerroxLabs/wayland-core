@@ -82,13 +82,65 @@ NEEDS = JOB["needs"]
 STEPS = JOB["steps"]
 
 EXPR = re.compile(r"\$\{\{\s*needs\.([A-Za-z0-9_-]+)\.result\s*\}\}")
-STEP_IF = re.compile(
-    r"^\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)"
-    r"\s*==\s*'([^']*)'\s*\}\}$"
+# A step gate, as an `&&` chain of clauses this harness can actually evaluate.
+# Anything it cannot read raises rather than being skipped -- a gate nobody
+# grades is how #325 happened in the first place.
+STEP_IF_WRAP = re.compile(r"^\$\{\{(.*)\}\}$", re.S)
+CLAUSE_DECIDE = re.compile(
+    r"^steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)\s*(==|!=)\s*'([^']*)'$"
+)
+CLAUSE_INPUT = re.compile(
+    r"^github\.event\.inputs\.([A-Za-z0-9_-]+)\s*(==|!=)\s*'([^']*)'$"
 )
 
 
-def render(value, results):
+def gate_clauses(expr, step_name):
+    """Parse a step `if:` into clauses, or refuse to grade it."""
+    m = STEP_IF_WRAP.match(expr.strip())
+    if not m:
+        raise AssertionError(
+            "step %r is gated on %r, which this harness cannot evaluate. "
+            "Teach it the new form rather than letting the step go "
+            "silently ungraded." % (step_name, expr)
+        )
+    out = []
+    for raw in m.group(1).split("&&"):
+        clause = raw.strip()
+        d, i = CLAUSE_DECIDE.match(clause), CLAUSE_INPUT.match(clause)
+        if d:
+            step_id, output, op, literal = d.groups()
+            if step_id != "decide":
+                raise AssertionError("step %r reads outputs of %r, not the decision"
+                                     % (step_name, step_id))
+            out.append(("decide", output, op, literal))
+        elif i:
+            out.append(("input",) + i.groups())
+        else:
+            raise AssertionError(
+                "step %r is gated on clause %r, which this harness cannot "
+                "evaluate. Teach it the new form rather than letting the step "
+                "go silently ungraded." % (step_name, clause)
+            )
+    return out
+
+
+def gate_passes(clauses, outputs, inputs):
+    for clause in clauses:
+        if clause[0] == "decide":
+            _, output, op, literal = clause
+            actual = outputs.get(output)
+        else:
+            _, name, op, literal = clause
+            actual = inputs.get(name)
+        if (actual == literal) != (op == "=="):
+            return False
+    return True
+
+
+DECIDE_OUT = re.compile(r"\$\{\{\s*steps\.decide\.outputs\.([A-Za-z0-9_-]+)\s*\}\}")
+
+
+def render(value, results, outputs=None):
     """Substitute `${{ needs.X.result }}` the way the runner would.
 
     An id that is not in `needs:` is a WIRING DEFECT here, deliberately louder
@@ -103,7 +155,8 @@ def render(value, results):
             "GitHub expands that to the empty string, so the tracker would be "
             "deciding from a roster with a hole in it." % (missing[0], NEEDS)
         )
-    return EXPR.sub(lambda m: results[m.group(1)], value)
+    value = EXPR.sub(lambda m: results[m.group(1)], value)
+    return DECIDE_OUT.sub(lambda m: (outputs or {}).get(m.group(1), ""), value)
 
 
 def job_results_pairs(value):
@@ -146,7 +199,12 @@ for step in STEPS:
                  % (step.get("name", "?"), declared, read),
                  declared == read and read in NEEDS,
                  "declared %r but reads %r" % (declared, read))
-want("every step that acts carries its own JOB_RESULTS block", blocks == 3, blocks)
+# Every step that ACTS -- the decision, and each gated step -- must carry its
+# own roster. Counted from the YAML rather than hardcoded, so adding a step
+# without a roster fails here instead of quietly moving the expected number.
+ACTING = [s for s in STEPS if s.get("id") == "decide" or "if" in s]
+want("every step that acts carries its own JOB_RESULTS block",
+     blocks == len(ACTING), "%d block(s) for %d acting step(s)" % (blocks, len(ACTING)))
 
 decide_steps = [s for s in STEPS if s.get("id") == "decide"]
 want("exactly one step produces the decision", len(decide_steps) == 1, len(decide_steps))
@@ -181,7 +239,7 @@ const core = {
 """
 
 
-def run_job(results, existing_issues):
+def run_job(results, existing_issues, inputs=None):
     """-> (outputs, [step name], [api calls]) for one synthetic run."""
     tmp = tempfile.mkdtemp(prefix="soak-tracker-run-")
     gh_out = os.path.join(tmp, "github_output")
@@ -192,6 +250,7 @@ def run_job(results, existing_issues):
     for key, value in (DECIDE.get("env") or {}).items():
         env[key] = render(str(value), results)
 
+    inputs = {"tracker_rehearsal": "false"} if inputs is None else inputs
     proc = subprocess.run(
         ["bash", "-c", DECIDE["run"]],
         cwd=ROOT, env=env, capture_output=True, text=True,
@@ -203,24 +262,24 @@ def run_job(results, existing_issues):
             k, _, v = line.partition("=")
             outputs[k.strip()] = v.strip()
 
-    ran, calls = [], []
+    ran, calls, verdicts = [], [], []
     for step in STEPS:
         if step is DECIDE or "if" not in step:
             continue
-        m = STEP_IF.match(str(step["if"]).strip())
-        if not m:
-            raise AssertionError(
-                "step %r is gated on %r, which this harness cannot evaluate. "
-                "Teach it the new form rather than letting the step go "
-                "silently ungraded." % (step.get("name"), step["if"])
-            )
-        step_id, output, literal = m.groups()
-        if step_id != "decide":
-            raise AssertionError("step %r reads outputs of %r, not the decision"
-                                 % (step.get("name"), step_id))
-        if outputs.get(output) != literal:
+        clauses = gate_clauses(str(step["if"]), step.get("name"))
+        if not gate_passes(clauses, outputs, inputs):
             continue
         ran.append(step.get("name"))
+
+        if "run" in step:
+            senv = dict(os.environ)
+            for key, value in (step.get("env") or {}).items():
+                senv[key] = render(str(value), results, outputs)
+            shell = subprocess.run(["bash", "-c", step["run"]], cwd=ROOT,
+                                   env=senv, capture_output=True, text=True)
+            verdicts.append((step.get("name"), shell.returncode,
+                             shell.stdout + shell.stderr))
+            continue
 
         body = step["with"]["script"]
         js = os.path.join(tmp, "step.js")
@@ -228,7 +287,7 @@ def run_job(results, existing_issues):
             fh.write(STUB_HEAD % (json.dumps(existing_issues), body))
         senv = dict(os.environ)
         for key, value in (step.get("env") or {}).items():
-            senv[key] = render(str(value), results)
+            senv[key] = render(str(value), results, outputs)
         node = subprocess.run(["node", js], capture_output=True, text=True, env=senv)
         marker = [l for l in node.stdout.splitlines() if l.startswith("@@CALLS@@")]
         if not marker:
@@ -236,7 +295,7 @@ def run_job(results, existing_issues):
                                  % (node.stdout, node.stderr))
         calls.extend(json.loads(marker[-1][len("@@CALLS@@"):]))
 
-    return outputs, ran, calls, proc
+    return outputs, ran, calls, proc, verdicts
 
 
 OPEN_TRACKER = [{
@@ -258,7 +317,7 @@ def kinds(calls):
 # Run 33053333326, replayed: the reporting job green, the self-hosted
 # live-acceptance job red. That run posted the word GREEN and closed #319.
 try:
-    outputs, ran, calls, proc = run_job(SIBLING_RED, OPEN_TRACKER)
+    outputs, ran, calls, proc, verdicts = run_job(SIBLING_RED, OPEN_TRACKER)
 except AssertionError as exc:
     bad("a run whose sibling failed reaches a decision", exc)
     outputs, ran, calls = {}, [], []
@@ -292,7 +351,7 @@ want("the report lands on the tracker issue, not a new one",
 # Same red run with no tracker open yet: three consecutive reds produced ZERO
 # issues under the old wiring, so "posts a red report" has to include opening
 # one.
-outputs, ran, calls, _ = run_job(SIBLING_RED, [])
+outputs, ran, calls, _, verdicts = run_job(SIBLING_RED, [])
 created = next((c for c in calls if c["call"] == "create"), None)
 want("with no tracker open, the red run OPENS one",
      created is not None
@@ -307,7 +366,7 @@ want("the opened issue keeps the label narrowing the reporter is bound by",
 #
 # A guard that never closes anything would pass every assertion above. A
 # genuinely all-green run must still close the tracker.
-outputs, ran, calls, _ = run_job(GREEN, OPEN_TRACKER)
+outputs, ran, calls, _, verdicts = run_job(GREEN, OPEN_TRACKER)
 want("an all-green run decides `close`", outputs.get("action") == "close", outputs)
 want("an all-green run runs the close step and not the report step",
      any("Close" in (n or "") for n in ran)
@@ -318,14 +377,50 @@ want("an all-green run actually closes the tracker",
 want("an all-green run opens nothing", "create" not in kinds(calls), kinds(calls))
 
 # ── the roster holes the plumbing can produce ────────────────────────────────
-outputs, ran, calls, _ = run_job(
+outputs, ran, calls, _, verdicts = run_job(
     dict(GREEN, **{"keyring-blob-size": ""}), OPEN_TRACKER)
 want("an empty result -- a mistyped needs id -- closes nothing and reports nothing",
      outputs.get("action") == "none" and ran == [], (outputs, ran))
 
-outputs, ran, calls, _ = run_job(
+outputs, ran, calls, _, verdicts = run_job(
     dict(GREEN, **{"windows-live-acceptance": "skipped"}), OPEN_TRACKER)
 want("a skipped sibling closes nothing", outputs.get("action") == "none", outputs)
+
+
+# ── 4. the REHEARSAL path -- what run 33265083678 actually executed ──────────
+#
+# `tracker_rehearsal=true` makes BOTH issue-writing steps inert, so the real
+# dispatch could demonstrate the DECISION and the always()/needs plumbing but
+# not the posting. That is exactly why the rehearsal has to ASSERT: these cases
+# grade the assertion, in both directions, off GitHub.
+
+VERDICT = "Rehearsal verdict - assert the red sibling did not close anything"
+KEYRING_RED = dict(GREEN, **{"keyring-blob-size": "failure"})
+REHEARSING = {"tracker_rehearsal": "true"}
+
+outputs, ran, calls, _, verdicts = run_job(KEYRING_RED, OPEN_TRACKER, REHEARSING)
+want("a rehearsal with a red sibling still decides `report`",
+     outputs.get("action") == "report", outputs)
+want("a rehearsal runs the verdict step", VERDICT in ran, ran)
+want("a rehearsal writes NOTHING to the tracker", calls == [], calls)
+want("neither issue-writing step runs during a rehearsal",
+     not [n for n in ran if n != VERDICT], ran)
+want("the verdict PASSES when the premise holds and the decision is report",
+     [rc for _, rc, _ in verdicts] == [0], verdicts)
+
+# The premise guard: a rehearsal in which keyring-blob-size did NOT fail proves
+# nothing, and must refuse rather than report a green rehearsal.
+outputs, ran, calls, _, verdicts = run_job(SIBLING_RED, OPEN_TRACKER, REHEARSING)
+want("a rehearsal without its named red sibling REFUSES to grade",
+     [rc for _, rc, _ in verdicts] == [1], verdicts)
+want("the refusal says the premise is absent",
+     any("premise absent" in out.lower() for _, _, out in verdicts), verdicts)
+want("a refused rehearsal still writes nothing", calls == [], calls)
+
+outputs, ran, calls, _, verdicts = run_job(GREEN, OPEN_TRACKER, REHEARSING)
+want("an all-green rehearsal closes nothing", calls == [], calls)
+want("an all-green rehearsal fails rather than passing as a proof",
+     [rc for _, rc, _ in verdicts] == [1], verdicts)
 
 print()
 print("soak-tracker-run: %d passed, %d failed" % (PASS, FAIL))

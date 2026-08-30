@@ -1401,7 +1401,8 @@ fn assemble(
             } else {
                 let blocker = blockers.get(&key).cloned().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "leg {key} has neither per-trial records nor a named blocker;                          silence about a leg is refused rather than defaulted"
+                        "leg {key} has neither per-trial records nor a named blocker; \
+                            silence about a leg is refused rather than defaulted"
                     )
                 })?;
                 (

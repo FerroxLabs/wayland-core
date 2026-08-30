@@ -1503,7 +1503,9 @@ fn enforce_approval_gate_contract(
         .ok_or_else(|| std::io::Error::other("EVENT_SPECS must declare approval_required"))?;
     if declared.correlation != "call_id" {
         return Err(std::io::Error::other(format!(
-            "approval_required declares correlation={:?}, but `resume_token` is the bridge              secret and is EMPTY on an ordinary tool gate. The public handle is `call_id`              (`correlation_id` always equals it), and an ordinary gate is answered with              tool_approve/tool_deny keyed by call_id.",
+            "approval_required declares correlation={:?}, but `resume_token` is the bridge \
+                secret and is EMPTY on an ordinary tool gate. The public handle is `call_id` (`correlation_id` always equals it), and an ordinary gate is answered with \
+                tool_approve/tool_deny keyed by call_id.",
             declared.correlation
         ))
         .into());
@@ -1526,7 +1528,9 @@ fn enforce_approval_gate_contract(
             && correlation_id != call_id
         {
             return Err(std::io::Error::other(format!(
-                "{path}: correlation_id {correlation_id:?} != call_id {call_id:?}.                  `ProtocolEvent::ApprovalRequired::correlation_id` always equals `call_id`."
+                "{path}: correlation_id {correlation_id:?} != call_id {call_id:?}. \
+                 `ProtocolEvent::ApprovalRequired::correlation_id` always equals \
+                 `call_id`."
             ))
             .into());
         }
@@ -1544,7 +1548,10 @@ fn enforce_approval_gate_contract(
         .unwrap_or_default();
     if !token.is_empty() {
         return Err(std::io::Error::other(format!(
-            "events/approval_required.json publishes resume_token={token:?}, but the canonical              row is an ordinary tool gate and an ordinary gate has NO bridge entry, so its              resume_token is the empty string. A host that echoes a token it read here answers              with approval_resume, which resolves nothing, and the tool hangs until its TTL."
+            "events/approval_required.json publishes resume_token={token:?}, but the canonical \
+                row is an ordinary tool gate and an ordinary gate has NO bridge entry, so its \
+                resume_token is the empty string. A host that echoes a token it read here answers \
+                with approval_resume, which resolves nothing, and the tool hangs until its TTL."
         ))
         .into());
     }

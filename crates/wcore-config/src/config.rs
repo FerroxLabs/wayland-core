@@ -12090,7 +12090,8 @@ mod prompt_caching_default_tests {
             if compat.cache_message_breakpoints() {
                 assert!(
                     prompt_caching_on_by_default(provider),
-                    "{provider:?} honours cache breakpoints but defaults prompt_caching OFF —                      the engine would mark boundaries the adapter then drops"
+                    "{provider:?} honours cache breakpoints but defaults prompt_caching OFF — \
+                     the engine would mark boundaries the adapter then drops"
                 );
             }
         }

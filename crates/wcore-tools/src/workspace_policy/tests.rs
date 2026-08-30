@@ -2320,7 +2320,8 @@ fn a_parent_dir_after_a_missing_component_still_reaches_the_skill_load_path() {
     );
     assert!(
         policy.is_skill_source_path(&missing.join("..").join("report.html")),
-        "a `..` after a missing component walked back into the load path and the          refusal did not see it"
+        "a `..` after a missing component walked back into the load path and the \
+            refusal did not see it"
     );
 
     // Known-positive control: the identical shape landing somewhere ordinary is
@@ -2371,7 +2372,8 @@ fn a_dangling_symlink_into_the_skill_load_path_is_refused() {
     std::os::unix::fs::symlink(skill.join("brief.html"), &dangling).unwrap();
     assert!(
         policy.is_skill_source_path(&dangling),
-        "a DANGLING symlink into a skill load path was not recognised — the          refusal judged where the LINK sits, not where the path leads"
+        "a DANGLING symlink into a skill load path was not recognised — the \
+            refusal judged where the LINK sits, not where the path leads"
     );
 
     // CONTROL: a dangling link landing somewhere ordinary stays writable. The

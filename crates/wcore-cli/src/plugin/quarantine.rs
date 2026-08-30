@@ -336,18 +336,29 @@ fn normalize_copy(src: &Path, dst: &Path, copied: &mut u64, cap: u64) -> Result<
 /// `DETACHED_PROCESS` child back on the USER'S OWN console, and attaching by
 /// EXPLICIT pid works too, so reparenting the child onto a console-less
 /// process is not a remedy either. `FreeConsole` then `AttachConsole` also
-/// defeats giving the child a console of its own (`CREATE_NO_WINDOW`).
+/// defeats giving the child a console of its own (`CREATE_NO_WINDOW`), and
+/// Win32 hands `AllocConsole()` to a console-less process outright.
 /// A `setsid`'d unix child has no such move: `TIOCSCTTY` refuses a terminal
 /// that is already another session's controlling terminal.
 ///
-/// So on Windows this is a REDUCTION (the child is not created on the user's
-/// console, and never has it by default), not the elimination unix gets. #338
-/// c2's own `text:` field opens `ON UNIX:` and names the Windows
-/// non-delivery — `.planning/ledger/wayland-core-338.md`, one `grep` away, so
-/// this sentence is checkable rather than asserted. It did not, when this
-/// comment first claimed it did: the field was byte-identical to base and only
-/// the criterion's STATE had moved, which is the same overstatement in a
-/// different file. The Windows remainder is tracked as
+/// A second measurement says what the hardening DOES buy, on Windows 11 26200,
+/// 2026-08-29, driving the production `build_git_command` —
+/// `crates/wcore-cli/tests/quarantine_terminal_authority_windows.rs`: an
+/// UNHARDENED child's `GetConsoleProcessList` contains this process's pid, a
+/// hardened `cmd` child is DENIED `CONOUT$`, and a hardened `git` running a
+/// `!`-alias reports a console that does NOT contain our pid — three pids of
+/// its own, allocated by the MSYS2 `sh` Git for Windows runs aliases through.
+///
+/// So on Windows this is a REDUCTION, not the elimination unix gets: the
+/// property is "the child does not end up on the USER'S console", not "the
+/// child can have no console at all". A prompt is still possible in a console
+/// the child made for itself; it just cannot land on the terminal the install
+/// was launched from. #338 c2's own `text:` field opens `ON UNIX:` and names
+/// the Windows non-delivery — `.planning/ledger/wayland-core-338.md`, one
+/// `grep` away, so this sentence is checkable rather than asserted. It did not,
+/// when this comment first claimed it did: the field was byte-identical to base
+/// and only the criterion's STATE had moved, which is the same overstatement in
+/// a different file. The Windows remainder is tracked as
 /// FerroxLabs/wayland-core#389. Do not restore the analogy sentence: an
 /// overstated security guarantee is worse than an understated one, because it
 /// stops the next person looking.
