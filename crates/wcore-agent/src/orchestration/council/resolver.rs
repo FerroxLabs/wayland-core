@@ -307,6 +307,35 @@ mod tests {
         assert_eq!(family("openrouter:openai/gpt-5"), family("openai:gpt-5"));
     }
 
+    /// #1212 — a keyless SELF-HOSTED member must survive into the runnable
+    /// pool. `resolvable_specs` is what the auto Assembler builds a council
+    /// from, so a spec dropped here never spawns. It WAS dropped:
+    /// `resolve_council_provider` re-implemented the credential chain without
+    /// the #1173 exemption `Config::resolve` applies, so a member pointed at a
+    /// local Ollama was lost while the identical config ran on the main CLI
+    /// path. The `cohere` row is the control in the same assertion — a
+    /// genuinely keyless BYO member is still dropped, so this cannot be
+    /// satisfied by a pool that stopped filtering.
+    #[test]
+    fn a_keyless_self_hosted_member_stays_in_the_runnable_pool() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                base_url: Some("http://127.0.0.1:11434".to_string()),
+                ..Default::default()
+            },
+        );
+        let r = CouncilProviderResolver::new(Config::default(), providers);
+        let runnable = r.resolvable_specs(&["openai".to_string(), "cohere".to_string()]);
+        assert_eq!(
+            runnable,
+            vec!["openai".to_string()],
+            "the keyless self-hosted member must stay runnable, and the genuinely \
+             keyless BYO member must still be dropped"
+        );
+    }
+
     #[test]
     fn resolvable_specs_keeps_keyed_drops_keyless_and_dedups() {
         let r = CouncilProviderResolver::new(
