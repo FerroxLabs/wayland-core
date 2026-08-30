@@ -18,8 +18,8 @@ narrowed hard, because deliberate column padding is everywhere in this codebase
 and must not be flagged:
 
   * the character before the run must be a lowercase letter, a comma, a
-    semicolon, an apostrophe, a closing paren, a backtick, or a sentence-ending
-    `.`, `!` or `?`;
+    semicolon, an apostrophe, a closing paren, a backtick, a sentence-ending
+    `.`, `!` or `?`, or an em/en dash;
   * the character after the run must be a lowercase letter, an apostrophe or a
     backtick -- or an opening paren, but ONLY when a backtick precedes the run,
     because a lowercase word before `(` is the two-column install hint
@@ -48,6 +48,16 @@ output, where interior runs of spaces are indentation and mean something.  Also
 not covered: raw strings spanning several source lines, non-space runs, and
 anything outside a `"` literal.
 
+The boundary classes are an ALLOWLIST and three separate rounds have found a
+collapse that fell outside the class as it then stood, so a bare `OK` from this
+gate has repeatedly been read as "the tree is clean" when it only ever meant
+"nothing this gate looks at is wrong".  Every successful run therefore also
+prints the SIZE OF ITS OWN BLIND ZONE — the interior 4+ space runs inside graded
+literals that the boundary narrowing declined to examine.  That number is not a
+failure and is not expected to be zero; it exists so the next reader can see
+how much of the tree the OK does not speak for, and can enumerate it rather
+than assume it.
+
 Usage:
     check-message-whitespace.py [ROOT ...]
     check-message-whitespace.py --self-test
@@ -66,10 +76,30 @@ import sys
 # `.`/`!`/`?`: a second collapse survived the first repair pass in the very same
 # file, one sentence apart from the one it fixed, only because the character to
 # the left of the run was a full stop -- "!= call_id {b}.          `Approval...`".
-# Two spaces after a full stop is typography; four is the collapse.  Measured
-# over the tree: this widening reports exactly one literal, and that literal is
-# the defect.
-MANGLED = re.compile(r"[a-z,;')`.!?]( {4,})[a-z'`]")
+# Two spaces after a full stop is typography; four is the collapse.  So does an
+# EM or EN DASH, and that one was the third recurrence of a single root cause: a
+# fourth collapse sat three source lines below one an earlier pass had repaired,
+# in the same run of `assert!` statements, and survived only because the
+# character to its left was `—` rather than `;`.  Measured over the tree each time:
+# the `.`/`!`/`?` widening reported exactly one literal and the `—`/`–` widening
+# exactly two, and all three were the defect.
+#
+# THIS CLASS IS AN ALLOWLIST, NOT A CLOSED SET, and it is deliberately not
+# closed.  Enumerated over the whole tree (this is what `unreported_runs` counts
+# and what `main` prints on success): of the interior 4+ space runs this gate
+# does not report, exactly TWELVE have a prose character on the RIGHT, and after
+# the dash widening not one of them is a defect — seven sit behind a `:` (the
+# `next:` / `bound:` / `retry:` column separator in cron.rs and its siblings),
+# three behind an upper-case status word (`  ON       conversation history ...`
+# in doctor/mod.rs), one behind a `|` in the TUI banner art, and one is
+# `"bundle        intact"`, which the three-word floor holds out.  Admitting `:`
+# or an upper-case letter on the left re-admits all eleven of those, which is
+# precisely the column padding the narrowing exists to allow.  So the NAMED
+# REMAINING GAPS on the left are: `:`, upper-case letters, digits, `]`/`}`, and
+# typographic quotes and ellipsis.  The first two are excluded with measured
+# false positives; the rest are simply absent from this tree today, and should
+# be admitted the same way the dash was — measure first, then widen.
+MANGLED = re.compile(r"[a-z,;')`.!?—–]( {4,})[a-z'`]")
 # A backtick-quoted identifier, a run, then a parenthesised aside -- the shape
 # that survived the first repair pass, in which NEITHER boundary character is a
 # prose letter.  The left boundary is restricted to a backtick deliberately: a
@@ -78,6 +108,10 @@ MANGLED = re.compile(r"[a-z,;')`.!?]( {4,})[a-z'`]")
 # fixtures in wcore-memory ("INSERT INTO evolved_prompts        (id, ...)"),
 # all of which are column padding and measured to be quiet under this pair.
 MANGLED_TICK_PAREN = re.compile(r"`( {4,})\(")
+
+# Every interior run of 4+ spaces, with no boundary narrowing whatsoever.
+# Used only to SIZE the blind zone, never to fail a run.
+ANY_RUN = re.compile(r" {4,}")
 
 SKIP_DIRS = {".git", "target", "node_modules", ".venv"}
 
@@ -110,6 +144,29 @@ def offending_runs(literal: str) -> list[tuple[int, str]]:
                 continue
             found[m.start(1)] = m.group(1)
     return sorted(found.items())
+
+
+def unreported_runs(literal: str) -> int:
+    """How many interior 4+ space runs in `literal` this gate declines to grade.
+
+    The boundary classes in `MANGLED` are an allowlist, so `offending_runs`
+    returning nothing has never meant the literal is clean.  This counts what
+    was skipped, on the same literals `offending_runs` grades and with the same
+    leading/trailing pads excluded, so `main` can print the size of its own
+    blind zone instead of letting `OK` stand in for it.
+    """
+    body = literal[1:-1]
+    if "\\n" in body or "\\t" in body or "\n" in body or "\t" in body:
+        return 0
+    reported = {offset - 1 for offset, _ in offending_runs(literal)}
+    skipped = 0
+    for m in ANY_RUN.finditer(body):
+        # A run at either end is padding around the message, not inside it.
+        if m.start() == 0 or m.end() == len(body):
+            continue
+        if m.start() not in reported:
+            skipped += 1
+    return skipped
 
 
 def iter_literals(text: str):
@@ -242,14 +299,16 @@ def iter_rs_files(roots):
 
 
 def scan_tree(roots):
-    problems, scanned = [], 0
+    problems, scanned, blind = [], 0, 0
     for path in iter_rs_files(roots):
         scanned += 1
         with open(path, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
+        for literal, _ in iter_literals(text):
+            blind += unreported_runs(literal)
         for lineno, literal, runs in scan_text(text):
             problems.append((path, lineno, literal, runs))
-    return problems, scanned
+    return problems, scanned, blind
 
 
 SELF_TEST_CASES = [
@@ -416,11 +475,42 @@ SELF_TEST_CASES = [
         '    println!("  the migration ran to completion.          DONE");',
         0,
     ),
+    # --- an EM/EN DASH on the LEFT of the run.  Third recurrence of the same
+    # --- root cause: the repair pass that closed the full-stop half left a
+    # --- fourth collapse three source lines below one it had just fixed, in
+    # --- the same run of `assert!` statements, because the character to the
+    # --- left of the run was a dash and not a prose letter.
+    (
+        "an em dash before the run and a lowercase word after it",
+        '    let s = "two full connect deadlines must be IN this window —              '
+        'otherwise the bound is measuring a turn that never dialled";',
+        1,
+    ),
+    (
+        "an en dash before the run",
+        '    let s = "the adapter drops the boundaries the engine marked –          '
+        'the cache never warms on this path";',
+        1,
+    ),
+    (
+        "an em dash before a correctly written continuation stays quiet",
+        'let e = format!(\n    "{p} honours cache breakpoints but defaults prompt_caching OFF — \\\n'
+        '                the engine would mark boundaries the adapter then drops",\n);',
+        0,
+    ),
+    (
+        "an em dash before an upper-case second column is still a column",
+        '    println!("  session persistence —          UNAVAILABLE on this host");',
+        0,
+    ),
 ]
 
 
 DEFECT_LINE = '    anyhow::bail!("Ledgers are keyed by the engine\'s internal          conversation id");\n'
 CLEAN_LINE = '    anyhow::bail!("no cache ledger for this id in that dir");\n'
+# A run the boundary narrowing declines to grade: `:` on the left is the column
+# separator this gate must not report, so this line is quiet AND blind.
+PADDED_LINE = '    println!("  next:    driven externally and not from the clock");\n'
 
 
 def _tree_cases() -> list[tuple[str, bool]]:
@@ -456,14 +546,26 @@ def _tree_cases() -> list[tuple[str, bool]]:
         with open(other, "w", encoding="utf-8") as fh:
             fh.write(DEFECT_LINE)
 
-        problems, scanned = scan_tree([d])
+        problems, scanned, _ = scan_tree([d])
         results.append(("a directory root finds the defect under it", (len(problems), scanned) == (1, 2)))
 
-        problems, scanned = scan_tree([bad])
+        problems, scanned, _ = scan_tree([bad])
         results.append(("a FILE root is scanned, not silently skipped", (len(problems), scanned) == (1, 1)))
 
-        problems, scanned = scan_tree([good])
+        problems, scanned, blind = scan_tree([good])
         results.append(("a clean file root is graded and reports nothing", (len(problems), scanned) == (0, 1)))
+        results.append(("a clean file has an EMPTY blind zone, not an unmeasured one", blind == 0))
+
+        # The blind-zone count is the one number that says how much of the tree
+        # an OK does not speak for.  If it silently went to zero, OK would go
+        # back to reading as "clean", so it is graded in both directions.
+        padded = os.path.join(d, "padded.rs")
+        with open(padded, "w", encoding="utf-8") as fh:
+            fh.write(PADDED_LINE)
+        problems, scanned, blind = scan_tree([padded])
+        results.append(
+            ("column padding is counted as blind, not reported", (len(problems), scanned, blind) == (0, 1, 1))
+        )
 
         results.append(("a directory with no Rust in it exits 2, not OK", quiet("x", empty) == 2))
         results.append(("a missing root exits 2, not OK", quiet("x", os.path.join(d, "nope")) == 2))
@@ -499,7 +601,7 @@ def main(argv: list[str]) -> int:
         return self_test()
     roots = [a for a in argv[1:] if not a.startswith("-")] or ["crates"]
     try:
-        problems, scanned = scan_tree(roots)
+        problems, scanned, blind = scan_tree(roots)
     except ValueError as exc:
         print(f"FAIL: {exc}")
         return 2
@@ -519,6 +621,13 @@ def main(argv: list[str]) -> int:
         )
         return 1
     print(f"OK: no message literal carries collapsed continuation whitespace ({scanned} file(s)).")
+    # The boundary classes are an allowlist, so OK means "this gate found
+    # nothing", never "the tree is clean".  Print how much it did not look at.
+    print(
+        f"    blind zone: {blind} interior run(s) of 4+ spaces sit outside the boundary\n"
+        "    classes and were NOT graded.  This is not a failure; it is the part of\n"
+        "    the tree this OK does not speak for."
+    )
     return 0
 
 

@@ -29773,7 +29773,8 @@ mod audit_2026_05_22_tests {
         // in the wall clock.
         assert!(
             elapsed >= connect * 2,
-            "control: two full connect deadlines must be IN this {elapsed:?} —              otherwise the bound above is measuring a turn that never dialled"
+            "control: two full connect deadlines must be IN this {elapsed:?} — \
+                otherwise the bound above is measuring a turn that never dialled"
         );
     }
 
