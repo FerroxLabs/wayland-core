@@ -8490,20 +8490,32 @@ impl AgentEngine {
     /// `effective_context_window`, so an operator's `[compact] context_window`
     /// keeps the precedence it has always had.
     fn autocompact_threshold_now(&self) -> usize {
+        self.compact_config
+            .autocompact_threshold_for_window(self.compaction_window_now())
+    }
+
+    /// The window every compaction boundary for THIS turn is derived from:
+    /// `effective_context_window` (catalogued, or the operator's `[compact]
+    /// context_window`), narrowed by #1172's learned served window when there
+    /// is corroborated evidence for one.
+    ///
+    /// Extracted so the threshold's VALUE and the trigger's DECISION cannot end
+    /// up on different windows — the shape #1179 c2 was: the decision consulted
+    /// `supports_compaction` only inside `narrow_to_served_window`, so a
+    /// configured window never met the gate at all.
+    fn compaction_window_now(&self) -> usize {
         let base = self
             .compact_config
             .effective_context_window(self.compat.provider_type(), &self.model);
-        let window = self
-            .narrow_to_served_window(Some(base as u64))
-            .unwrap_or(base as u64);
-        self.compact_config
-            .autocompact_threshold_for_window(window as usize)
+        self.narrow_to_served_window(Some(base as u64))
+            .unwrap_or(base as u64) as usize
     }
 
     /// [`Self::autocompact_threshold_now`] as the trigger `should_autocompact`
     /// spells, `config.enabled` included.
     fn should_autocompact_now(&self, tokens: u64) -> bool {
-        self.compact_config.enabled && tokens as usize >= self.autocompact_threshold_now()
+        self.compact_config
+            .should_autocompact_at(self.compaction_window_now(), tokens as usize)
     }
 
     /// THE one reconciliation of every window source, for the #255 pre-flight

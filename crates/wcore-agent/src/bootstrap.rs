@@ -2344,6 +2344,29 @@ impl AgentBootstrap {
                 self.config.model,
                 wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW,
             ));
+        } else if let Some(window) = skills_context_window
+            && !self.config.compact.supports_compaction(window)
+        {
+            // #1179 c2 — the window is KNOWN (the operator set `[compact]
+            // context_window`, or the catalogue has one) and is too small for
+            // compaction to work inside. `should_autocompact_at` refuses it, and
+            // a silent refusal on a window the operator chose is
+            // indistinguishable from compaction being broken. Same surface and
+            // the same reason as the unknown-window notice above: with
+            // `RUST_LOG` unset a `warn!` here reaches nobody (#1130).
+            self.output.emit_info(&format!(
+                "The {window}-token context window in play for model `{}` is too small for \
+                 automatic compaction: core's own system prompt and tool schemas cost \
+                 about {} tokens before you have typed anything, and the autocompact \
+                 trigger at this window would sit at {}. Firing there would summarize a \
+                 conversation that has not started, every turn, and reclaim nothing - so \
+                 automatic compaction is OFF for this session. The emergency context \
+                 limit still applies. Raise the server's context length, or `[compact] \
+                 context_window`, to give compaction room to work.",
+                self.config.model,
+                wcore_config::compact::BASELINE_TURN_TOKENS,
+                self.config.compact.autocompact_threshold_for_window(window),
+            ));
         }
         let mut prompt_cache = crate::context::SystemPromptCache::new();
         let system_prompt = crate::context::build_system_prompt(

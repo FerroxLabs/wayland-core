@@ -91,16 +91,23 @@ pub enum CompactError {
 ///
 /// `provider` / `model` are the POST-swap effective pair — see
 /// [`autocompact_threshold`].
+///
+/// #1179 c2: delegates to [`CompactConfig::should_autocompact_at`], which
+/// carries `supports_compaction` — so a window too small to compact inside is
+/// refused here too, not only where #1172's LEARNED window is admitted. The
+/// window this resolves is `effective_context_window`, which an operator's
+/// `[compact] context_window` sets directly, and that is the path the refusal
+/// used to miss.
 pub fn should_autocompact(
     last_input_tokens: u64,
     config: &CompactConfig,
     provider: &str,
     model: &str,
 ) -> bool {
-    if !config.enabled {
-        return false;
-    }
-    last_input_tokens as usize >= autocompact_threshold(config, provider, model)
+    config.should_autocompact_at(
+        config.effective_context_window(provider, model),
+        last_input_tokens as usize,
+    )
 }
 
 /// The autocompact trigger threshold in tokens, for the POST-swap effective
