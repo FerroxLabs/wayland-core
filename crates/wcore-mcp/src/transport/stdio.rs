@@ -99,25 +99,10 @@ pub struct StdioTransport {
     rpc_timeout: Duration,
 }
 
-/// The MCP notification a server sends when its tool list changes.
-pub(crate) const TOOLS_LIST_CHANGED: &str = "notifications/tools/list_changed";
-
-/// Is this id-less inbound line the `tools/list_changed` notification?
-///
-/// Parsed as a generic JSON value rather than a typed notification struct:
-/// the only field that matters is `method`, and a malformed or unrelated
-/// notification must be a plain `false`, never an error that kills the reader.
-pub(crate) fn notified_tools_changed(line: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(line)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("method")
-                .and_then(|method| method.as_str())
-                .map(|method| method == TOOLS_LIST_CHANGED)
-        })
-        .unwrap_or(false)
-}
+// FerroxLabs/wayland#1175 — `notified_tools_changed` moved to
+// `super` (transport/mod.rs): SSE and Streamable HTTP now detect the same
+// notification, and one copy of the predicate is the point.
+use super::notified_tools_changed;
 
 /// Quote a single shell argument so it survives `sh -c` / `cmd /C` parsing.
 ///
