@@ -652,7 +652,7 @@ fn storage_name(id: &str) -> String {
         })
         .collect();
     let digest = item_digest("id", id.as_bytes());
-    format!("{}-{}", &sanitized, &digest[..12])
+    format!("{}-{}", sanitized, &digest[..12])
 }
 
 // ---------------------------------------------------------------------------

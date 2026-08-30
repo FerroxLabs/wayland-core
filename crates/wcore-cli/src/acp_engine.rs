@@ -1064,7 +1064,7 @@ impl EngineTurnEngine {
     /// supervisor (one process per profile), not this overlay.
     fn engine_inputs_for(&self, agent: Option<&str>) -> (Config, Vec<String>) {
         let Some(manifest) = agent
-            .and_then(|id| self.roster.as_ref().map(|r| (id, r)))
+            .zip(self.roster.as_ref())
             .and_then(|(id, r)| r.resolve(id))
         else {
             return (self.config.clone(), Vec::new());

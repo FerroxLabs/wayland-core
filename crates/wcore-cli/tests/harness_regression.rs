@@ -465,7 +465,7 @@ async fn r003_no_model_guard() {
     );
     eprintln!(
         "[R-003] stderr_dump (tail): {}",
-        &stderr_dump
+        stderr_dump
             .lines()
             .rev()
             .take(5)
