@@ -4,24 +4,32 @@
 //!
 //! `.config/nextest.toml` names two binaries in a `retries = 0` override. A
 //! bare list is an enumeration, and an enumeration rots: the third caller of
-//! [`run_contained_probe`] somebody adds next month inherits
+//! [`VACUITY_SOURCE`] somebody adds next month inherits
 //! `[profile.ci] retries = 2` and can be retried into a pass having proved no
 //! containment property at all, which is the exact defect #362 records.
 //!
 //! So the list is not trusted. This test DERIVES the set of binaries that can
-//! produce a vacuous containment result — the files under `tests/` that call
+//! produce a vacuous containment result — the integration-test files that call
 //! the one function that panics on one — and requires the config to cover it.
 //!
 //! It cannot resolve a nextest filterset, so it checks the literal spelling.
 //! That is the same limitation, and the same remedy, as
 //! `scripts/check-windows-attribution.py`.
+//!
+//! # Why the whole workspace and not this crate
+//!
+//! `wcore_sandbox::test_support` is `pub mod`, unconditionally, and SEVEN
+//! crates depend on `wcore-sandbox`. A derivation that read only this crate's
+//! `tests/` would have granted every one of them a silent exemption, which is
+//! the same shape of gap as the nonce-scoped scan in core#366: a query that
+//! cannot see the thing it is supposed to find.
 
 use std::path::{Path, PathBuf};
 
 /// The ONLY function that turns "the probe never ran" into a test failure.
 /// Its two panic sites are what make an absent forbidden marker a failure
-/// rather than a silent pass, so a binary that calls it is a binary whose
-/// failure can mean "nothing was tested".
+/// rather than a silent pass, so a file that calls it is a file whose failure
+/// can mean "nothing was tested".
 const VACUITY_SOURCE: &str = "run_contained_probe";
 
 fn repo_root() -> PathBuf {
@@ -32,15 +40,16 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Integration-test binary names in THIS crate that call [`VACUITY_SOURCE`].
+/// True when `body` calls [`VACUITY_SOURCE`] from CODE rather than merely
+/// naming it in prose.
 ///
-/// # Why this does not simply grep for the name
+/// # Why this does not simply search for the name
 ///
 /// The first version of this file did, and it FAILED ON ITSELF: the doc
-/// comments above quote `run_contained_probe`, so the checker derived its own
-/// binary as a caller. A search that matches prose is the same instrument
-/// error as a mutation harness matching a doc comment that quotes the call it
-/// meant to mutate.
+/// comments above quote the function, so the checker derived its own binary as
+/// a caller. A search that matches prose is the same instrument error as a
+/// mutation harness matching a doc comment that quotes the call it meant to
+/// mutate.
 ///
 /// So comment lines are dropped, and what is matched is CODE SYNTAX: a call
 /// `run_contained_probe(`, or a path mention `::run_contained_probe` which is
@@ -48,37 +57,66 @@ fn repo_root() -> PathBuf {
 /// over-inclusion here demands more coverage and under-inclusion silently
 /// grants an exemption — the two errors are not symmetric.
 ///
-/// NAMED GAP, since this is an allowlist and not a proof: a caller that binds
-/// the function to a local and invokes it through that binding
+/// NAMED GAP, since this is an allowlist and not a proof: a caller that reaches
+/// the function through a re-export under a DIFFERENT name is not matched. A
+/// caller that binds it to a local and invokes it through that binding
 /// (`let probe = run_contained_probe; probe(..)` after a bare `use`) matches
-/// the path form and is caught; one that reaches it through a re-export under
-/// a different name is not.
-fn binaries_that_can_report_a_vacuous_probe() -> Vec<String> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+/// the path form and is caught.
+fn calls_the_vacuity_source(body: &str) -> bool {
     let call = format!("{VACUITY_SOURCE}(");
     let path_mention = format!("::{VACUITY_SOURCE}");
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//"))
+        .any(|line| line.contains(&call) || line.contains(&path_mention))
+}
+
+fn read_rs_files(dir: &Path) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("this crate has a tests/ directory") {
+    for entry in entries {
         let path = entry.expect("readable dir entry").path();
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        let body = std::fs::read_to_string(&path).expect("readable test source");
-        let uses_it = body
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.starts_with("//"))
-            .any(|line| line.contains(&call) || line.contains(&path_mention));
-        if uses_it {
-            out.push(
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .expect("utf-8 file stem")
-                    .to_owned(),
-            );
-        }
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("utf-8 file stem")
+            .to_owned();
+        out.push((
+            stem,
+            std::fs::read_to_string(&path).expect("readable source"),
+        ));
     }
+    out
+}
+
+/// Every `crates/<crate>/tests/*.rs` in the workspace, as `(binary name, body)`.
+/// A file directly under `tests/` is one nextest binary whose name is the file
+/// stem, which is exactly the operand `binary(=...)` takes.
+fn workspace_integration_test_files() -> Vec<(String, String)> {
+    let crates = repo_root().join("crates");
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&crates).expect("the workspace has a crates/ directory") {
+        let path = entry.expect("readable dir entry").path();
+        out.extend(read_rs_files(&path.join("tests")));
+    }
+    out
+}
+
+/// Integration-test binary names anywhere in the workspace that call
+/// [`VACUITY_SOURCE`].
+fn binaries_that_can_report_a_vacuous_probe() -> Vec<String> {
+    let mut out: Vec<String> = workspace_integration_test_files()
+        .into_iter()
+        .filter(|(_, body)| calls_the_vacuity_source(body))
+        .map(|(name, _)| name)
+        .collect();
     out.sort();
+    out.dedup();
     out
 }
 
@@ -162,4 +200,65 @@ fn every_binary_that_can_report_a_vacuous_containment_probe_is_unretryable() {
             );
         }
     }
+}
+
+/// The remaining way to reach the vacuity source is from a UNIT test, which
+/// lives in its crate's lib binary rather than in a `tests/` binary of its own.
+/// `binary(=<file stem>)` cannot name one, so the mechanism above cannot cover
+/// it — and a mechanism that silently does not cover a case is the defect this
+/// file exists to prevent.
+///
+/// Nothing does this today. This asserts that, so the day somebody does, the
+/// failure says what to do instead of the pin quietly missing them.
+#[test]
+fn no_unit_test_reaches_the_vacuity_source_where_the_pin_cannot_name_it() {
+    let crates = repo_root().join("crates");
+    let mut offenders = Vec::new();
+    let mut scanned = 0usize;
+    let mut stack = vec![crates];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.expect("readable dir entry").path();
+            if path.is_dir() {
+                // `tests/` is covered by the derivation above; `target` is not
+                // source at all.
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name != "tests" && name != "target" {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            // The definition itself is not a caller.
+            if path.ends_with("src/test_support.rs") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("readable source");
+            scanned += 1;
+            if calls_the_vacuity_source(&body) {
+                offenders.push(path);
+            }
+        }
+    }
+
+    // CONTROL: a walk that found no files would make the assertion below
+    // vacuous. `crates/` has hundreds of `.rs` files.
+    assert!(
+        scanned > 100,
+        "CONTROL: the walk scanned only {scanned} .rs files under crates/, so an empty offender \
+         list would prove nothing. Did the layout move?"
+    );
+    assert!(
+        offenders.is_empty(),
+        "core#362 c4: {offenders:?} reach `{VACUITY_SOURCE}` from library source rather than from \
+         a `tests/` file. A unit test lives in its crate's lib binary, which `binary(=<stem>)` \
+         cannot name, so the `retries = 0` pin in .config/nextest.toml does NOT cover it and a \
+         vacuous containment result there can still be retried into a pass. Move the call into a \
+         `tests/` binary and pin that binary, or extend the pin mechanism to name lib binaries."
+    );
 }
