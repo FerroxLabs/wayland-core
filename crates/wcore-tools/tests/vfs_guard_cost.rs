@@ -15,6 +15,28 @@
 //!   SandboxedFs+guard    39 syscalls     24      (one whole `exists()`)
 //! ```
 //!
+//! FerroxLabs/wayland-core#390 re-measured the OTHER call shape this function
+//! has — `grep_policy::scope_for` calls `vcs_content_stores(dir)` once per
+//! TRAVERSED DIRECTORY of a `Grep(".")`, where no memo applies because the root
+//! is different every time. Same instrument, differential `strace -f -c` over
+//! the `probe_vcs_content_stores_per_traversed_directory` loop at
+//! `WL_PROBE_DIRS=100` and `1100`, hetzner:
+//!
+//! ```text
+//!   origin/integ/f13 (before StoreScan)                 8 syscalls / directory
+//!   + lane/f13-sec-secrets (StoreScan landed)          17 syscalls / directory
+//!   + this file's arm-3 change (#390)                   5 syscalls / directory
+//! ```
+//!
+//! The middle row is a real 2.1x regression on a shape NEITHER lane measured:
+//! #376's memo made the ordinary GUARD path cheaper while making the untouched
+//! per-directory path twice as expensive, because `StoreScan`'s witness
+//! bookkeeping (`symlink_metadata` per probed leaf, link-target stamping)
+//! runs whether or not anything is found. `scan_control_dirs_in` closes it by
+//! not probing store leaves under a control directory that is absent — which is
+//! every directory of an ordinary tree — and lands BELOW the pre-StoreScan
+//! figure.
+//!
 //! The 24 were: two INDEPENDENT canonicalizations of the same path (6 readlink
 //! each, one per predicate) plus a full rebuild of the arm-2 store list on
 //! every call (6 `exists` for the root-relative store leaves, 1 `metadata` for
@@ -89,10 +111,11 @@ async fn one_ordinary_path_guard_resolves_once_and_does_not_rescan() {
     assert_eq!(resolves, 1, "one guard must resolve the path exactly once");
     assert_eq!(scans, 1, "the first guard scans");
     assert_eq!(
-        first_probes, 17,
+        first_probes, 12,
         "the store scan's filesystem probe count moved; if that is intended, \
          update this number and re-measure the syscall figures in this file's \
-         header"
+         header. 17 before core#390: the five store leaves under a control \
+         directory that does not exist are no longer probed"
     );
 
     const N: u64 = 50;
@@ -357,4 +380,77 @@ async fn the_warm_memo_still_answers_both_directions() {
             "the store stayed denied? got {refusal:?}"
         );
     }
+}
+
+/// FerroxLabs/wayland-core#390 c3 — arm 3's walk is NOT on the ordinary path.
+///
+/// c3 reads: "Whatever caching the fix introduces is measured against #376's
+/// complaint: the per-operation cost of `is_vcs_content_store` does not get
+/// worse than it is today, stated as a number." The number is the one
+/// `one_ordinary_path_guard_resolves_once_and_does_not_rescan` pins — one
+/// resolution, one scan, three warm probes — and this test is what keeps arm 3
+/// from moving it: the nested walk is reached only for a path that lexically
+/// carries a store-leaf name.
+///
+/// The second half is the KNOWN-POSITIVE CONTROL, in the same test. Without it
+/// an arm 3 that never ran at all would pass the first half, and this test
+/// would be pinning the absence of a feature rather than the shape of its cost.
+#[tokio::test]
+async fn an_ordinary_path_never_pays_for_the_nested_store_walk() {
+    let (_dir, root) = fixture();
+    // A vendored checkout, so the walk has something to find and cannot be
+    // trivially cheap.
+    std::fs::create_dir_all(root.join("vendor/pkg-git/objects/12")).unwrap();
+    std::fs::write(root.join("vendor/pkg-git/objects/12/3456"), b"blob").unwrap();
+    std::fs::create_dir_all(root.join("vendor/pkg")).unwrap();
+    std::fs::write(root.join("vendor/pkg/.git"), b"gitdir: ../pkg-git\n").unwrap();
+
+    let policy = Arc::new(WorkspacePolicy::contained(&root));
+    let fs = stack(&policy, &root);
+    let ordinary = root.join("src/deep/deeper/main.rs");
+    tokio::time::sleep(SETTLE).await;
+
+    fs.exists(&ordinary).await.expect("ordinary path readable");
+    let (_, scans_after_first, probes_after_first) = policy.guard_cost();
+    assert_eq!(
+        scans_after_first, 1,
+        "the first ordinary guard scans ONCE — the root scan. If this is 2 the \
+         nested walk is running on the ordinary path and core#376 has regressed"
+    );
+
+    const N: u64 = 20;
+    for _ in 0..N {
+        fs.exists(&ordinary).await.expect("ordinary path readable");
+    }
+    let (_, scans, probes) = policy.guard_cost();
+    assert_eq!(
+        scans, 1,
+        "core#390 c3: an ordinary-path guard must never reach the nested store \
+         walk, warm or cold"
+    );
+    assert_eq!(
+        probes - probes_after_first,
+        N * 3,
+        "core#390 c3: an ordinary-path guard still costs exactly three warm \
+         probes with arm 3 present"
+    );
+
+    // KNOWN-POSITIVE CONTROL: a store-shaped path DOES reach the walk, and the
+    // walk DOES find the vendored store. A gate that never opens proves nothing
+    // about what it is gating.
+    let vendored = root.join("vendor/pkg-git/objects/12/3456");
+    assert!(
+        matches!(
+            fs.read(&vendored).await,
+            Err(wcore_tools::vfs::VfsError::SecretDenied { .. })
+        ),
+        "control: the vendored store must be refused, or the gate above is \
+         guarding a walk that finds nothing"
+    );
+    let (_, scans_with_walk, _) = policy.guard_cost();
+    assert!(
+        scans_with_walk > scans,
+        "control: a store-shaped path must actually reach the nested walk \
+         (scans {scans} -> {scans_with_walk})"
+    );
 }
