@@ -3633,6 +3633,41 @@ fn mcp_removal_cleanup_outcome(cleanup_failures: &[String]) -> McpRemovalOutcome
     }
 }
 
+/// FerroxLabs/wayland#1234 — drop a runtime-added MCP manager from EVERY live
+/// structure that holds it, as one operation.
+///
+/// `McpCatalogRefresh` keeps its own `Arc<McpManager>` from
+/// `register_runtime_server`, so removing a server used to mean two
+/// independent statements — drop it from `dynamic_managers`, and (only on the
+/// TUI's `/mcp add` rollback) `forget_runtime_server`. Both host-protocol
+/// removal paths did the first and not the second, and the removed server's
+/// manager stayed registered for the life of the session.
+///
+/// That was a leak rather than a resurrection only because
+/// `McpManager::refresh_signalled_tools` skips a transport whose `is_alive()`
+/// is false. That is a liveness flag, not the withdrawal a removal is supposed
+/// to perform: `is_alive() -> true` after `close()` is the trait DEFAULT, and
+/// the correct answer for a stateless HTTP transport, so any transport that
+/// takes it turns this back into a live re-registration bug — an operator
+/// removes a server, the server announces `tools/list_changed`, and its tools
+/// come back into the live registry.
+///
+/// Fusing the two is the fix rather than adding the missing line at each
+/// removal site: after this there is no statement that drops the manager
+/// without also withdrawing it, so a removal path added later cannot omit the
+/// withdrawal by forgetting it existed.
+fn withdraw_runtime_mcp_manager(
+    name: &str,
+    engine: &mut wcore_agent::engine::AgentEngine,
+    dynamic_managers: &mut Vec<Arc<McpManager>>,
+) {
+    if let Some(refresh) = engine.mcp_catalog_refresh() {
+        refresh.forget_runtime_server(name);
+    }
+    dynamic_managers
+        .retain(|manager| !(manager.hosts_server(name) || manager.health().contains_key(name)));
+}
+
 /// wayland#1165 — the teardown half of `AddMcpServer { replace: true }`.
 ///
 /// wayland#605 deliberately made a duplicate add of a READY server a no-op:
@@ -3713,8 +3748,7 @@ async fn teardown_runtime_mcp_for_replace(
         let _ = lifecycle.mark_cleanup_unverified(name, reason.clone());
         return Err(reason);
     }
-    dynamic_managers
-        .retain(|manager| !(manager.hosts_server(name) || manager.health().contains_key(name)));
+    withdraw_runtime_mcp_manager(name, engine, dynamic_managers);
     runtime_diagnostics.remove_runtime_declaration(name);
     let _ = lifecycle.complete_stopping(name);
     Ok(())
@@ -3814,9 +3848,7 @@ async fn remove_runtime_mcp_server(
         );
         return;
     }
-    dynamic_managers.retain(|manager| {
-        !(manager.hosts_server(&command.name) || manager.health().contains_key(&command.name))
-    });
+    withdraw_runtime_mcp_manager(&command.name, engine, dynamic_managers);
     runtime_diagnostics.remove_runtime_declaration(&command.name);
     let _ = lifecycle.complete_stopping(&command.name);
 
@@ -11115,6 +11147,121 @@ mod tests {
         assert!(engine.tools().get("locked_tool").is_none());
     }
 
+    /// FerroxLabs/wayland#1234 — a removed runtime server must stop being
+    /// polled by the catalog refresh REGARDLESS of what its transport says
+    /// about liveness.
+    ///
+    /// Before the fix the two host-protocol removal paths dropped the manager
+    /// from `dynamic_managers` and never called `forget_runtime_server`, so
+    /// `McpCatalogRefresh` kept its own `Arc<McpManager>` and went on polling
+    /// the removed server. The only thing standing between that and a live
+    /// resurrection was `refresh_signalled_tools` skipping a transport whose
+    /// `is_alive()` is false — and `is_alive() -> true` is the trait DEFAULT.
+    /// This fixture takes that default deliberately, which is why the assertion
+    /// below is about the withdrawal and not about liveness.
+    #[tokio::test]
+    async fn a_removed_runtime_server_is_not_refreshed_even_when_its_transport_reports_alive() {
+        // The transport this fixture hands the manager never overrides
+        // `is_alive`, so the liveness guard cannot be what stops the refresh.
+        assert!(
+            SharedTransport(Arc::new(GrowingTestTransport::new(&[]))).is_alive(),
+            "the fixture must take the is_alive trait default, or this test \
+             proves the liveness guard instead of the withdrawal"
+        );
+
+        // ARM A — the server is removed through the production withdrawal.
+        let (mut engine, mut managers, fixture, defer_cold) = live_runtime_mcp_fixture();
+        withdraw_runtime_mcp_manager("warehouse", &mut engine, &mut managers);
+        assert!(
+            managers.is_empty(),
+            "the removal must drop the manager from the live set"
+        );
+        fixture.register_and_announce("warehouse_audit_export");
+        let refresh = engine.mcp_catalog_refresh().expect("refresh installed");
+        let registry = engine.registry_mut().expect("registry must be mutable");
+        assert!(
+            refresh.apply(registry, &defer_cold).await.is_empty(),
+            "a removed server must not be polled at all"
+        );
+        assert!(
+            engine.tools().get("warehouse_audit_export").is_none(),
+            "a removed server's tools must not come back into the live registry"
+        );
+
+        // ARM B / POSITIVE CONTROL — same fixture, same announcement, no
+        // removal. The tool DOES come back, so arm A is the withdrawal working
+        // and not a fixture that never announced anything.
+        let (mut engine, _managers, fixture, defer_cold) = live_runtime_mcp_fixture();
+        fixture.register_and_announce("warehouse_audit_export");
+        let refresh = engine.mcp_catalog_refresh().expect("refresh installed");
+        let registry = engine.registry_mut().expect("registry must be mutable");
+        assert_eq!(
+            refresh.apply(registry, &defer_cold).await,
+            vec!["warehouse".to_string()],
+            "control: a server still registered IS polled"
+        );
+        assert!(
+            engine.tools().get("warehouse_audit_export").is_some(),
+            "control: a live server's late tool reaches the registry"
+        );
+    }
+
+    /// One runtime-added MCP server, connected through the production
+    /// `integrate_deferred_mcp` path so it is registered with the catalog
+    /// refresh exactly as a live session registers it.
+    fn live_runtime_mcp_fixture() -> (
+        wcore_agent::engine::AgentEngine,
+        Vec<Arc<McpManager>>,
+        Arc<GrowingTestTransport>,
+        wcore_config::tools::DeferColdConfig,
+    ) {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine.set_mcp_catalog_refresh(Arc::new(wcore_mcp::tool_proxy::McpCatalogRefresh::new(
+            Vec::new(),
+            engine.tool_names(),
+            HashMap::new(),
+        )));
+
+        let fixture = Arc::new(GrowingTestTransport::new(&["warehouse_reserve"]));
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "warehouse",
+            false,
+            Box::new(SharedTransport(fixture.clone())) as Box<dyn McpTransport>,
+            vec![tool("warehouse_reserve")],
+        )]));
+        let server_config = to_mcp_server_config(
+            "stdio",
+            Some("unused-test-command".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("valid test server config");
+        let resolved = HashMap::from([("warehouse".to_string(), server_config)]);
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        let mut reservations = lifecycle_reservations(&resolved);
+        assert!(integrate_deferred_mcp(
+            &mut engine,
+            manager.clone(),
+            &resolved,
+            &mut reservations,
+            &writer,
+            &mut dynamic_managers,
+            &mut inert_late_binder(),
+            &mut Vec::new(),
+        ));
+        assert!(engine.tools().get("warehouse_reserve").is_some());
+        assert!(engine.tools().get("warehouse_audit_export").is_none());
+        (engine, dynamic_managers, fixture, defer_cold)
+    }
+
     /// The wiring, counted. A helper nothing calls is not a fix, and the
     /// failure this guards is specifically a runtime-add site left bare —
     /// which is what #1175 reports for all three of them.
@@ -11141,9 +11288,43 @@ mod tests {
             1,
             "the TUI `/mcp add` path must join the refresh"
         );
+        // Built from fragments for the same reason as `needle`: this file is
+        // one of the files the lint counts, so a literal here would be a hit.
+        let forget = concat!("forget_runtime_", "server(");
         assert!(
-            tui_src.contains("forget_runtime_server("),
+            tui_src.contains(forget),
             "a rolled-back /mcp add must leave nothing in the refresh"
+        );
+
+        // FerroxLabs/wayland#1234 — the removal half, counted as a SHAPE
+        // rather than as a list of sites. Both host-protocol removal paths
+        // used to drop the manager from `dynamic_managers` inline and never
+        // withdraw it from the refresh; fixing them by adding the missing line
+        // twice would leave the next removal path free to omit it again. So
+        // the lint is: main.rs has exactly ONE place that drops a runtime
+        // manager, and that place also forgets it.
+        let drop_manager = concat!("!(manager.hosts_", "server(name)");
+        assert_eq!(
+            main_src.matches(drop_manager).count(),
+            1,
+            "exactly one place in main.rs may drop a runtime MCP manager \
+             (withdraw_runtime_mcp_manager); a second one is a removal path \
+             that can forget the catalog withdrawal"
+        );
+        assert_eq!(
+            main_src.matches(forget).count(),
+            1,
+            "that one place must be the only forget_runtime_server call site"
+        );
+        let helper = main_src
+            .split("fn withdraw_runtime_mcp_manager(")
+            .nth(1)
+            .expect("the single withdrawal helper exists");
+        let body = &helper[..helper.find("\n}\n").expect("helper body ends")];
+        assert!(
+            body.contains(forget) && body.contains(drop_manager),
+            "dropping the manager and withdrawing it from the refresh must be \
+             ONE operation, not two statements a caller can split"
         );
         assert!(
             !engine_src.contains("if refresh.is_empty() {"),
