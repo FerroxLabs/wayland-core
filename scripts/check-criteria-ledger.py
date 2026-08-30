@@ -307,6 +307,17 @@ FILE_EV = re.compile(r"^file:(?P<p>.+)$")
 # close is still the place the entry meant.
 ANCHOR_WINDOW = 20
 
+# The offsets the self-test's window arms use. LITERAL, and deliberately not
+# written as `ANCHOR_WINDOW` / `ANCHOR_WINDOW + 1`: derived offsets move with
+# the constant, so narrowing the window would carry the "far edge, still green"
+# arm inward with it and that arm could never red -- a test using its own
+# subject as its ruler, which is this gate's defect one rung down. Measured:
+# before this split, setting ANCHOR_WINDOW = 0 left the whole self-test green.
+# A self-test arm checks these two against the live constant, so retuning the
+# window fails loudly here instead of quietly disarming the pair.
+_WINDOW_EDGE = 20
+_WINDOW_PAST = 21
+
 # The shortest fragment that can pin anything. This is the floor under a
 # MECHANICAL conversion of an old bare anchor: at wayland#1198 the line under
 # four of the thirty live anchors was blank, `);`, `}},` or `#`, and copying
@@ -364,6 +375,8 @@ def _resolve_file(root, path, line, frag):
     if lines and lines[-1] == "":
         lines.pop()  # a trailing newline terminates a line, it does not add one
     n = len(lines)
+    if line < 1:
+        return "%s: line %d is not a line; lines are numbered from 1" % (path, line)
     if line > n:
         return "%s has %d lines; evidence cites line %d" % (path, n, line)
     here = lines[line - 1].strip()
@@ -970,11 +983,11 @@ def self_test():
     # zero (which would red on any edit above) nor unbounded (which would make
     # the line number decorative and the check a plain `contains`).
     case("file anchor: content at the far EDGE of the window, still green",
-         anchor("file:src/t.rs:%d:const ANCHORED_ONCE" % (_UNIQ - ANCHOR_WINDOW)),
+         anchor("file:src/t.rs:%d:const ANCHORED_ONCE" % (_UNIQ - _WINDOW_EDGE)),
          False)
     case("file anchor: content ONE line past the window has drifted",
          anchor("file:src/t.rs:%d:const ANCHORED_ONCE"
-                % (_UNIQ - ANCHOR_WINDOW - 1)), True,
+                % (_UNIQ - _WINDOW_PAST)), True,
          expect="has MOVED -- cited at line")
 
     case("file anchor: a fragment matching two lines pins neither",
@@ -1138,6 +1151,14 @@ def self_test():
     results.append(("control after the vacuity arms (still green)",
                     False, code != 0, code == 0))
     ok &= code == 0
+
+    # The window pair is calibrated by hand (see _WINDOW_EDGE). If someone
+    # retunes ANCHOR_WINDOW without moving them, the "far edge" arm stops
+    # sitting at the edge and the pair silently stops testing the boundary.
+    calibrated = (_WINDOW_EDGE, _WINDOW_PAST) == (ANCHOR_WINDOW, ANCHOR_WINDOW + 1)
+    results.append(("window arms calibrated to the live ANCHOR_WINDOW",
+                    False, not calibrated, calibrated))
+    ok &= calibrated
 
     for label, must, got, good in results:
         print("  %-56s expected %-5s got %-5s  %s"
