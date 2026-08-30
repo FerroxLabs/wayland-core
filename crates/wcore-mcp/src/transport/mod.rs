@@ -315,10 +315,10 @@ mod tests {
         block.lines().any(|line| {
             let mut rest = line.trim_start();
             for modifier in ["pub(crate)", "pub", "async", "unsafe", "extern"] {
-                if let Some(stripped) = rest.strip_prefix(modifier) {
-                    if stripped.starts_with(char::is_whitespace) {
-                        rest = stripped.trim_start();
-                    }
+                if let Some(stripped) = rest.strip_prefix(modifier)
+                    && stripped.starts_with(char::is_whitespace)
+                {
+                    rest = stripped.trim_start();
                 }
             }
             rest.starts_with("fn take_tools_changed")
