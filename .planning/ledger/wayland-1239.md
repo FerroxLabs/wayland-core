@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "atomic_write_checked destroys a concurrent save that lands inside the exchange-to-verdict window, and the refusal is byte-identical to one that lost nothing"
 status: open
-last_verified_commit: 21549260
+last_verified_commit: 8ace76d61
 criteria:
   - id: c1
     text: "A save that lands on the displaced inode inside the exchange-to-verdict window is not silently destroyed on the refusal path: it is preserved on disk, or the caller is told, or the write is not refused over it"
