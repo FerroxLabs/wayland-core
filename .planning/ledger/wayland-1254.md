@@ -26,6 +26,11 @@ criteria:
     state: not-met
     owner: core
     note: "Filed 2026-08-30 by lane f13-w2-provider-url. Nothing has been done. Both directions are named for the reason this repo keeps re-learning: a change that renders EVERYTHING as degraded, or that reds preflight on any NOTE at all, satisfies the positive half and destroys the gate. preflight.sh already carries a self-testing precedent in its inline DRIFT GUARD; the sibling scripts (check-criteria-ledger.py --self-test) exit 0 with 'self-test: both directions proven' and are the pattern to copy."
+  - id: c5
+    text: "just push fails on a tree where bash scripts/preflight.sh fails -- verified by making a ledger last_verified_commit a non-ancestor and confirming just push refuses (today push chains neither preflight nor ledger-check, and there are no git hooks)"
+    state: not-met
+    owner: core
+    note: "Filed 2026-08-30 by lane f13-w2-provider-url as the N+1 for the anchor failure that started this. THE SAME SHAPE ONE STEP EARLIER: c1/c2 are the gate ran and misreported; c5 is the gate was not run when the tree changed under it. MEASURED: justfile:236 is `push *ARGS: lint-fix fmt _auto-commit-fixes test`, the string `preflight` appears NOWHERE in the 594-line justfile, and `ls .git/hooks | grep -v sample` plus `git config core.hooksPath` are both empty. AGENTS.md mandates `just push` over `git push`, and the `ledger-check` recipe sits five lines away in the same file un-chained. So the exact sequence that produced this lane's refutation -- gate green, squash, push -- has no step that re-runs the gate, and a last_verified_commit is precisely the assertion a squash invalidates without touching a tracked file. Filed with c1-c4 rather than separately because the fix owner and fix site are identical and splitting them is how one gets closed and the other left; that is the reasoning wayland#1252 gives for its Sites A and B."
 ---
 
 `scripts/preflight.sh` exists so a lane can predict CI's host-side gates in 2-3
