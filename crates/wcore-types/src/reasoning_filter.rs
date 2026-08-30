@@ -41,9 +41,43 @@
 //! - Handles nested same-name blocks via a depth counter.
 //! - Accepts attributes inside the opening tag (`<thinking attr="x">`).
 //! - Self-closing form (`<think/>`) is stripped with no content drop.
-//! - An unclosed tag eats to the end of the stream (`v0.9.0` choice — we
-//!   would rather hide a runaway reasoning tail than leak it; the next
-//!   stream resets the filter and recovers).
+//! - An unclosed tag eats input WHILE THE STREAM IS RUNNING (`v0.9.0`
+//!   choice — we would rather hide a runaway reasoning tail than leak it),
+//!   but it no longer eats it PERMANENTLY: see [`ReasoningFilter::finish`].
+//!
+//! End-of-stream decision (FerroxLabs/wayland#1221, #1222)
+//! -------------------------------------------------------
+//! `process` alone is a LOSSY view of the stream: at any instant it may be
+//! holding an undecided `<`-prefix (`MaybeOpenTag`) or sitting inside a
+//! reasoning block that has not closed yet (`InThinking`). Dropping that
+//! held-back text was tolerable while the filter fed a RENDERING only. It
+//! stopped being tolerable when `wcore-agent`'s engine put the filter on the
+//! DURABLE conversation record (508405d4): an answer that merely mentions
+//! `<thinking>` in prose had everything after that word deleted from stored
+//! history, from the session mirror, from the journal, and from the text
+//! replayed upstream on the next request.
+//!
+//! [`ReasoningFilter::finish`] is the drain that makes the filter total, and
+//! the decision it encodes — taken explicitly rather than left implicit, per
+//! wayland#1222 c3 — is:
+//!
+//! * `MaybeOpenTag` pending: the stream ended before the prefix could become
+//!   a tag, so it never was one. EMIT it verbatim (`the answer is 5 <`).
+//! * `InThinking` / `MaybeCloseTag` with an OPEN block: the block never
+//!   closed, so we never actually saw a reasoning block — we saw prose that
+//!   contained a tag-shaped word. RECOVER it: emit the raw bytes consumed
+//!   since (and including) the opening tag, and retract the same span from
+//!   the capture buffer so it is not ALSO reported as reasoning.
+//!
+//! The alternative — keep the strip and make it display-only — is rejected:
+//! wayland#908 c1 is "reasoning tags no longer leak into answers, history or
+//! hosts", and a display-only filter un-meets its history clause. Recovery at
+//! end of stream is the only disjunct that holds both.
+//!
+//! Recovery is deliberately biased toward KEEPING text. A runaway reasoning
+//! tail that a provider truly failed to close is now visible in history
+//! rather than silently deleted; that is the trade #1221 asks for, because a
+//! visible artefact is recoverable and a deleted answer is not.
 
 /// State of the filter's parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +131,20 @@ pub struct ReasoningFilter {
     /// `false` there and the separator condition is bit-for-bit the one that
     /// shipped.
     captured_any: bool,
+    /// wayland#1221 — the RAW bytes consumed since the outermost currently
+    /// OPEN reasoning block began, opening tag included. `None` whenever no
+    /// block is open. [`ReasoningFilter::finish`] emits this verbatim when
+    /// the stream ends with the block still open, which is what makes an
+    /// unclosed tag recoverable instead of permanently lossy. Cleared the
+    /// moment the outermost block closes — a block that CLOSED is a real
+    /// reasoning block and stays stripped.
+    raw_open: Option<String>,
+    /// wayland#1221 — `captured.len()` at the instant the outermost open
+    /// block began, recorded BEFORE the inter-block `\n` separator is
+    /// pushed. On a `finish` with a block still open, `captured` is truncated
+    /// back to here so the recovered prose is not ALSO handed to the caller
+    /// as reasoning. Meaningless while `raw_open` is `None`.
+    captured_open_start: usize,
 }
 
 impl Default for ReasoningFilter {
@@ -113,6 +161,8 @@ impl ReasoningFilter {
             captured: String::new(),
             prev_block_committed: true,
             captured_any: false,
+            raw_open: None,
+            captured_open_start: 0,
         }
     }
 
@@ -152,6 +202,54 @@ impl ReasoningFilter {
         out
     }
 
+    /// wayland#1221 / wayland#1222 — drain everything the filter is still
+    /// holding back, and return it as user-visible text.
+    ///
+    /// Call ONCE at the end of a stream, after the last [`Self::process`] and
+    /// before [`Self::take_captured`]. Without it `process` is a lossy view:
+    /// the concatenation of every `process` return is NOT the input minus the
+    /// reasoning blocks, because an undecided `<`-prefix and an unclosed
+    /// reasoning block are both still sitting in the filter. On the durable
+    /// history path that shortfall is permanent data loss, not a rendering
+    /// glitch.
+    ///
+    /// Two things can be held back, and the decision for each is recorded in
+    /// the module docs above:
+    ///
+    /// * an ambiguous `<`-prefix (`the answer is 5 <`, `result: <th`) — the
+    ///   stream ended before it could become a tag, so it was never a tag.
+    ///   Returned verbatim.
+    /// * an OPEN reasoning block that never closed — returned verbatim as
+    ///   the raw bytes from the `<` of its opening tag onward, and the same
+    ///   span is retracted from the capture buffer so it is reported once,
+    ///   as text, and not twice.
+    ///
+    /// Idempotent: after a `finish` the filter holds nothing back, so a
+    /// second call returns `""`. It does NOT clear `captured` (drain that
+    /// with [`Self::take_captured`]) and it does not reset the filter for a
+    /// new stream (use [`Self::reset`] for that).
+    pub fn finish(&mut self) -> String {
+        // An unclosed block wins over `pending`: while a block is open the
+        // pending buffer is a SUFFIX of `raw_open` (every char fed inside the
+        // block is appended there, tag characters included), so returning
+        // both would duplicate it.
+        if let Some(raw) = self.raw_open.take() {
+            // `take_captured_delta` may have already drained part of this
+            // block to a streaming consumer, in which case the recorded start
+            // is past the end of what is left. `min` keeps the truncation
+            // in-bounds; the already-drained prefix cannot be retracted.
+            let start = self.captured_open_start.min(self.captured.len());
+            self.captured.truncate(start);
+            self.captured_open_start = 0;
+            self.pending.clear();
+            self.state = FilterState::Text;
+            self.prev_block_committed = true;
+            return raw;
+        }
+        self.state = FilterState::Text;
+        std::mem::take(&mut self.pending)
+    }
+
     /// Reset the filter to its initial state. Call at turn boundaries
     /// (`StreamStart`) so a leftover pending buffer from a previous
     /// stream cannot leak into a new one.
@@ -165,9 +263,20 @@ impl ReasoningFilter {
         self.captured.clear();
         self.prev_block_committed = true;
         self.captured_any = false;
+        self.raw_open = None;
+        self.captured_open_start = 0;
     }
 
     fn feed_char(&mut self, ch: char, out: &mut String) {
+        // wayland#1221 — while a reasoning block is open, keep the RAW bytes
+        // alongside the stripped/captured views so `finish` can put them back
+        // verbatim if the block never closes. The opening tag itself is
+        // seeded by the `CompleteOpen` arm below (its characters were already
+        // consumed into `pending` before we knew it was a tag), so this only
+        // covers what follows it.
+        if let Some(raw) = self.raw_open.as_mut() {
+            raw.push(ch);
+        }
         match self.state.clone() {
             FilterState::Text => {
                 if ch == '<' {
@@ -183,11 +292,19 @@ impl ReasoningFilter {
                 match classify_open(&self.pending) {
                     OpenClass::CompleteOpen { self_closing } => {
                         // `<think>` or `<think/>` or `<thinking attr="x">`.
-                        self.pending.clear();
+                        // wayland#1221 — keep the literal before clearing:
+                        // if this block never closes, `finish` puts these
+                        // exact bytes back into the output.
+                        let tag_literal = std::mem::take(&mut self.pending);
                         if self_closing {
                             // `<think/>` — nothing to drop, return to Text.
                             self.state = FilterState::Text;
                         } else {
+                            // wayland#1221 — recorded BEFORE the separator
+                            // push below, so a truncation back to here also
+                            // removes the `\n` this block introduced.
+                            self.captured_open_start = self.captured.len();
+                            self.raw_open = Some(tag_literal);
                             // v0.9.3 — entering a fresh reasoning block.
                             // If a prior block was committed AND we already
                             // have captured content, separate the two with
@@ -270,6 +387,10 @@ impl ReasoningFilter {
                             // block prepends `\n` to keep blocks readable
                             // in the captured body.
                             self.prev_block_committed = true;
+                            // wayland#1221 — a block that CLOSED is a real
+                            // reasoning block: drop the raw copy so `finish`
+                            // has nothing to recover for it.
+                            self.raw_open = None;
                             self.state = FilterState::Text;
                         } else {
                             self.state = FilterState::InThinking { depth: depth - 1 };
