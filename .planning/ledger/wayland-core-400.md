@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "sandbox status never says the backend refuses PowerShell, while four production sites silently downgrade the shell"
 status: open
-last_verified_commit: ab4b5a0b
+last_verified_commit: bb8706ee
 criteria:
   - id: c1
     text: "sandbox status states, in both the human and the --json arm, that the active backend refuses PowerShell whenever blocks_powershell() is true"
@@ -48,6 +48,37 @@ real `SandboxRegistry`. It delegates `execute`, `name`, `is_available`,
 trait defaults `vec![]` and `None`. Any future status read taken through that
 decorator would report a backend with no known limitations and no reason for
 being unavailable, which is precisely the reassurance #368 c6 was filed about.
+
+TOTAL OVER THE TRAIT, so those are not two somebody stopped at. Re-derived
+2026-08-30 by the resuming fix lane, which read every default rather than
+assuming the unnamed ones were harmless: `SandboxBackend` declares 17 items,
+the decorator forwards 5, and the other 12 inherit their defaults. THREE of
+those inherit in a NON-CONSERVATIVE direction, not two.
+
+The third is `availability_probe_is_startup_safe`, whose default is `true`,
+and it is behavioural rather than disclosure. `AppContainerBackend` overrides
+it to `false` (crates/wcore-sandbox/src/backends/appcontainer/windows_impl/
+process.rs:382) precisely because its probe is a 15s wall-clock-guarded real
+spawn, and `select_without_startup_probe` (crates/wcore-sandbox/src/lib.rs:731)
+reads it to keep that spawn off the `--json-stream` readiness path. Through the
+decorator that answer flips to `true`, which would put the guarded spawn back
+on a startup path -- the #125 hang class. It is latent for the same reason the
+other two are (nothing selects a backend through this decorator), and it cannot
+be delegated today even by an author who wanted to: `SandboxRegistry` exposes no
+`availability_probe_is_startup_safe`, so closing it needs a registry accessor as
+well as a forwarding method.
+
+The remaining nine are safe, checked individually and not by assumption:
+`execute_with_cwd_authority` returns `PolicyNotSupported`; `probe_hard_containment`
+returns `PolicyNotSupported`; `execute_with_workspace_authority` delegates to the
+former; `hard_containment_identity` defaults `None`, which the trait documents as
+structurally incapable of minting hard containment; `confines_filesystem`,
+`owns_descendants_hard`, `binds_cwd_authority` and `binds_workspace_authority`
+default `false`, i.e. they UNDER-claim containment; and `execute_streaming`'s
+default drives `self.execute`, which the decorator does forward. So the hazard
+through this decorator is the disclosure pair PLUS the startup-probe answer, and
+that is a statement about all 17 items rather than about the ones that were
+noticed first.
 
 It is NOT reached today: the decorator is Anvil's gate-closure executor and
 nothing projects `SandboxStatus` through it, so this is a latent hole, not a live
