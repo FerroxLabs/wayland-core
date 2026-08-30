@@ -4255,6 +4255,11 @@ pub struct AgentEngine {
     /// to (see `is_unserved_request_failure`). Reset at every turn entry and
     /// disclosed at every turn exit by `report_unserved_resends`.
     unserved_resends: u32,
+    /// Set by `emit_incomplete_run_admission`, cleared at every turn entry.
+    /// Read only by `admit_unspoken_run_failure`, so the run-loop backstop can
+    /// tell a turn that already said it stopped short from one that ended
+    /// silently. #388 bullet 4.
+    admitted_incomplete_this_turn: bool,
     midflight_monitor: MidFlightMonitor,
     /// v0.6.1 CRIT-1: opt-in policy gate. When `Some`, every tool call
     /// in `dispatch_once` is checked against the `PolicyEngine` before
@@ -4898,6 +4903,7 @@ impl AgentEngine {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -5202,6 +5208,7 @@ impl AgentEngine {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -8294,7 +8301,7 @@ impl AgentEngine {
     ///
     /// A wrong answer must become an admission. This is the admission, and it
     /// goes where the answer went.
-    fn emit_terminated_run_admission(&self, turn: usize, stop_reason: StopReason) {
+    fn emit_terminated_run_admission(&mut self, turn: usize, stop_reason: StopReason) {
         // `StopReason::MaxTurns` is the shared verdict for SEVERAL terminal
         // guards - the turn cap, the runaway-loop breaker, the consecutive-
         // failure breaker and the pre-send budget denial all land on it. Only
@@ -8333,13 +8340,55 @@ impl AgentEngine {
     ///
     /// One body, one wording, so the admission a failure exit gives and the
     /// admission a limit exit gives cannot drift apart.
-    fn emit_incomplete_run_admission(&self, cause: &str) {
+    fn emit_incomplete_run_admission(&mut self, cause: &str) {
         let admission = format!(
             "\n\n[stopped early] I did not finish this: {cause}. Anything above is \
              partial work, not an answer."
         );
         self.output
             .emit_text_delta(&admission, &self.current_msg_id);
+        self.admitted_incomplete_this_turn = true;
+    }
+
+    /// #388 bullet 4, enforced ONCE for the whole run loop instead of once per
+    /// exit.
+    ///
+    /// `run_inner_impl` has 32 `return Err` sites. Three earlier fixes closed
+    /// three buckets of them by editing the exit itself, and each rested on a
+    /// census asserting that nothing else was left — a census that was wrong
+    /// twice. A per-site fix can only ever be as sound as the count behind it,
+    /// so the guarantee lives here: whatever `Err` a turn ends on, if nothing
+    /// has already said so on the ANSWER stream, this does. The exits that DO
+    /// admit keep their own, more specific cause;
+    /// `admitted_incomplete_this_turn` is what stops the two doubling up.
+    ///
+    /// `UserAborted` is the one deliberate exclusion, and it is graded rather
+    /// than asserted (`a_cancelled_run_carries_no_admission`): the stop was the
+    /// user's own request, the mid-stream cancel arm already emits "Run
+    /// cancelled while receiving provider output.", and the host is told
+    /// through `RecoveryLifecycle::Cancelled` rather than through an error.
+    fn admit_unspoken_run_failure(&mut self, error: &AgentError) {
+        if self.admitted_incomplete_this_turn {
+            return;
+        }
+        let cause = match error {
+            AgentError::UserAborted => return,
+            AgentError::SessionAuthority(detail) => {
+                format!("this session's persistence authority failed ({detail})")
+            }
+            AgentError::ContextTooLong {
+                input_tokens,
+                limit,
+            } => format!(
+                "the context reached {input_tokens} tokens against a limit of {limit} and \
+                 could not be reduced"
+            ),
+            AgentError::Provider(detail) => {
+                format!("the provider call for this turn failed ({detail})")
+            }
+            AgentError::ApiError(detail) => format!("this turn ended on an error ({detail})"),
+        };
+        self.emit_incomplete_run_admission(&cause);
     }
 
     async fn finish_run_terminated_inner(
@@ -12333,6 +12382,7 @@ impl AgentEngine {
         recovered_provider_round: Option<crate::provider_recovery::RecoveredProviderRound>,
     ) -> Result<AgentResult, AgentError> {
         self.unserved_resends = 0;
+        self.admitted_incomplete_this_turn = false;
         let result = self
             .run_inner_impl(
                 user_turn,
@@ -12343,6 +12393,9 @@ impl AgentEngine {
                 recovered_provider_round,
             )
             .await;
+        if let Err(error) = &result {
+            self.admit_unspoken_run_failure(error);
+        }
         self.report_unserved_resends();
         result
     }
@@ -21202,6 +21255,7 @@ mod set_config_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -23083,6 +23137,7 @@ mod phase6_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -23414,6 +23469,7 @@ mod compact_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -25574,6 +25630,7 @@ mod plan_mode_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -26038,6 +26095,7 @@ mod hook_integration_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -27213,6 +27271,7 @@ mod approval_bridge_engine_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -28517,6 +28576,7 @@ mod user_model_writeback_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -40411,6 +40471,301 @@ mod issue_388_graph_failure_admission_tests {
         assert!(
             !answer.contains("[stopped early]"),
             "a run that completed must not admit failure: {answer:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #388 bullet 4 (c12) — the exits no per-site census covers.
+//
+// c8, c10 and c11 each closed one bucket of `run_inner_impl`'s terminal `Err`
+// exits by editing the exit itself, and each rested on a census asserting that
+// nothing else was left. That census was wrong twice (29 -> 32 sites), so the
+// property is re-stated here as something a census cannot get wrong: EVERY
+// `Err` a turn ends on says so on the answer stream, enforced once in
+// `run_inner` rather than 32 times inside it.
+//
+// The arm measured below is a `SessionAuthority` exit — the bucket all three
+// earlier criteria excluded on the reasoning that internal faults have "no
+// answer stream guaranteed live". This test is the disproof: the narration
+// reaches the stream and then the run dies, so before the backstop stdout
+// ended on the model's last sentence and read as a finished answer. That is
+// the reported defect, on the bucket that was argued away.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod issue_388_silent_internal_exit_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    const NARRATION: &str = "let me look that up";
+
+    /// What the provider does after it has narrated.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Tail {
+        /// An `LlmEvent::Error` carrying `JOURNAL_AUTHORITY_ERROR_PREFIX`.
+        /// `run_inner_impl` turns exactly this into
+        /// `AgentError::SessionAuthority` (engine.rs, the `LlmEvent::Error`
+        /// arm guarded by `is_journal_authority_error`) — a terminal `Err`
+        /// exit reached mid-stream, after the narration is already out.
+        JournalAuthorityFailure,
+        /// Cancel the run's own token and then go quiet, so the turn ends on
+        /// `AgentError::UserAborted` from the cancel arm of the receive
+        /// `select!` — also mid-stream, also after the narration.
+        CancelMidStream,
+        /// End the turn normally.
+        EndTurn,
+    }
+
+    struct NarrateThen {
+        tail: Tail,
+        cancel: tokio_util::sync::CancellationToken,
+        /// Read by the cancel arm ONLY, so the cancel lands strictly after the
+        /// narration has reached the sink. Cancelling straight after `send`
+        /// races the engine's receive loop and exits at an earlier cancel
+        /// check with an empty answer stream — which would make this control
+        /// pass for the wrong reason.
+        sink: Arc<crate::test_utils::TestSink>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for NarrateThen {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            let tail = self.tail;
+            let cancel = self.cancel.clone();
+            let handle = self.sink.handle();
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta(NARRATION.into())).await;
+                match tail {
+                    Tail::JournalAuthorityFailure => {
+                        let _ = tx
+                            .send(LlmEvent::Error(format!(
+                                "{}the writer lease was revoked",
+                                crate::journal_provider::JOURNAL_AUTHORITY_ERROR_PREFIX
+                            )))
+                            .await;
+                    }
+                    Tail::CancelMidStream => {
+                        for _ in 0..2000 {
+                            if narration_landed(&handle) {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        }
+                        assert!(
+                            narration_landed(&handle),
+                            "the cancel control must cancel AFTER the narration is on the \
+                             stream, or it is not testing a mid-stream abort"
+                        );
+                        cancel.cancel();
+                        // Hold the channel open so the receive `select!` has
+                        // to choose the cancel branch rather than end-of-
+                        // stream. Dropped when the run returns.
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                    Tail::EndTurn => {
+                        let _ = tx
+                            .send(LlmEvent::Done {
+                                stop_reason: StopReason::EndTurn,
+                                finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                                usage: TokenUsage::default(),
+                            })
+                            .await;
+                    }
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    /// A provider that refuses the dispatch outright, the way an HTTP 400
+    /// does. This is c8's own exit — the one that ALREADY admits from inside
+    /// `run_inner_impl` — and it is here to hold the backstop to exactly one
+    /// admission.
+    struct RefusesDispatch;
+
+    #[async_trait]
+    impl LlmProvider for RefusesDispatch {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            Err(ProviderError::Api {
+                status: 400,
+                message: "malformed request".into(),
+            })
+        }
+    }
+
+    fn narration_landed(handle: &crate::test_utils::TestSinkHandle) -> bool {
+        answer_stream(handle).contains(NARRATION)
+    }
+
+    fn engine_over(
+        provider: Arc<dyn LlmProvider>,
+    ) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        engine_over_with_sink(provider, sink)
+    }
+
+    fn engine_over_with_sink(
+        provider: Arc<dyn LlmProvider>,
+        sink: Arc<crate::test_utils::TestSink>,
+    ) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            sink.clone(),
+        );
+        engine.max_turns = Some(2);
+        (engine, sink)
+    }
+
+    fn narrating_engine(tail: Tail) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        let (mut engine, sink) = engine_over_with_sink(
+            Arc::new(NarrateThen {
+                tail,
+                cancel: cancel.clone(),
+                sink: sink.clone(),
+            }),
+            sink,
+        );
+        if tail == Tail::CancelMidStream {
+            engine.set_cancel_token(cancel);
+        }
+        (engine, sink)
+    }
+
+    fn answer_stream(handle: &crate::test_utils::TestSinkHandle) -> String {
+        handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// SUBJECT. An internal-authority failure mid-stream is a terminal `Err`
+    /// exit of the run loop that no `emit_incomplete_run_admission` call site
+    /// covers, so without the `run_inner` backstop stdout ends on the
+    /// narration and reads as a finished answer.
+    #[tokio::test]
+    async fn an_internal_authority_exit_admits_itself_on_the_answer_stream() {
+        let (mut engine, sink) = narrating_engine(Tail::JournalAuthorityFailure);
+        let handle = sink.handle();
+
+        let err = engine
+            .run("do the thing", "m-388-authority")
+            .await
+            .expect_err("the authority arm must end the run as Err");
+        assert!(
+            matches!(&err, super::AgentError::SessionAuthority(m)
+                if m.contains("writer lease was revoked")),
+            "this arm must be a SessionAuthority exit, not another Err: {err:?}"
+        );
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("let me look that up"),
+            "the narration must have reached the answer stream, or this test is \
+             not measuring an answer stream at all: {answer:?}"
+        );
+        assert!(
+            answer.contains("[stopped early]"),
+            "#388 bullet 4: a run that ends on ANY terminal Err must say so \
+             where the answer went. The cause travels out as Err and is \
+             rendered on stderr, so stdout otherwise ends on the narration: \
+             {answer:?}"
+        );
+    }
+
+    /// CONTROL. The same fixture, same narration, no failure. Stops the
+    /// subject passing by admitting on every run, and proves the backstop is
+    /// not simply appended to every turn.
+    #[tokio::test]
+    async fn the_same_stream_without_the_authority_failure_carries_no_admission() {
+        let (mut engine, sink) = narrating_engine(Tail::EndTurn);
+        let handle = sink.handle();
+
+        engine
+            .run("do the thing", "m-388-authority-control")
+            .await
+            .expect("the control must complete");
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("let me look that up"),
+            "the control must carry the narration: {answer:?}"
+        );
+        assert!(
+            !answer.contains("[stopped early]"),
+            "a run that completed must not admit failure: {answer:?}"
+        );
+    }
+
+    /// CONTROL, and the one criterion-bearing exclusion. `UserAborted` is the
+    /// one terminal `Err` the backstop deliberately stays silent on: the stop
+    /// was the user's own, the receive arm already emits "Run cancelled while
+    /// receiving provider output.", and the host is told through
+    /// `RecoveryLifecycle::Cancelled` rather than through an error. The
+    /// exclusion is a decision, so it is graded rather than asserted in prose.
+    #[tokio::test]
+    async fn a_cancelled_run_carries_no_admission() {
+        let (mut engine, sink) = narrating_engine(Tail::CancelMidStream);
+        let handle = sink.handle();
+
+        let err = engine
+            .run("do the thing", "m-388-cancel")
+            .await
+            .expect_err("the cancel arm must end the run as Err");
+        assert!(
+            matches!(&err, super::AgentError::UserAborted),
+            "this control must be the abort exit, not another Err: {err:?}"
+        );
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("let me look that up"),
+            "the abort must still have reached a real mid-stream exit: {answer:?}"
+        );
+        assert!(
+            !answer.contains("[stopped early]"),
+            "an abort the user asked for is announced as a cancellation, not \
+             as an unexplained stop: {answer:?}"
+        );
+    }
+
+    /// OVER-CORRECTION GUARD. c8's exit already admits from inside
+    /// `run_inner_impl`. A backstop that does not notice would append a
+    /// second admission to the same answer stream, so the count is asserted,
+    /// not the presence.
+    #[tokio::test]
+    async fn an_exit_that_already_admitted_admits_exactly_once() {
+        let (mut engine, sink) = engine_over(Arc::new(RefusesDispatch));
+        let handle = sink.handle();
+
+        engine
+            .run("do the thing", "m-388-once")
+            .await
+            .expect_err("a refused dispatch must end the run as Err");
+
+        let answer = answer_stream(&handle);
+        assert_eq!(
+            answer.matches("[stopped early]").count(),
+            1,
+            "the run must admit exactly once: the exit's own admission, not \
+             that one plus the backstop's: {answer:?}"
         );
     }
 }
