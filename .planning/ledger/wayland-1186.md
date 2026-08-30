@@ -9,15 +9,15 @@ criteria:
   - id: c1
     text: "telegram: a credential exists and a boundary probe sends at max_message_len() and at +1 against the real platform"
     state: met
-    evidence: "file:docs/delivery-semantics.md:834"
+    evidence: "file:docs/delivery-semantics.md:525:LIVE_CAP_OVER scalars=4097"
     owner: maintainer
-    note: "MEASURED 2026-08-29: 4096 accepted, 4097 refused with 400 Bad Request message is too long. telegram.cap_measured is now live. RESIDUAL: the probe was driven in ASCII, so whether the platform counts characters or UTF-16 code units is STILL OPEN and must not be read as settled."
+    note: "RE-ANCHORED 2026-08-30 for wayland#1198: was :834, prose about the DISCORD idempotency correction -- a different platform and a different claim. It now cites the telegram probe's over-cap arm, which is the `+1 against the real platform` half of this criterion. MEASURED 2026-08-29: 4096 accepted, 4097 refused with 400 Bad Request message is too long. telegram.cap_measured is now live. RESIDUAL: the probe was driven in ASCII, so whether the platform counts characters or UTF-16 code units is STILL OPEN and must not be read as settled."
   - id: c2
     text: "sms (Twilio): a credential exists and a boundary probe sends at max_message_len() and at +1 against the real platform"
     state: met
-    evidence: "file:docs/delivery-semantics.md:838"
+    evidence: "file:docs/delivery-semantics.md:965:sms.cap_measured = live"
     owner: maintainer
-    note: "MEASURED 2026-08-29: 1600 accepted, 1601 refused with 400 code 21617. Twilio names the unit itself, so unlike telegram the unit is unambiguous. sms.cap_measured is now live."
+    note: "RE-ANCHORED 2026-08-30 for wayland#1198: was :838, a BLANK line -- it passed on the line count alone and asserted nothing whatever. This file records the sms verdict but, unlike telegram at :523-525, carries NO probe transcript for it, so :965 is the strongest anchor the tree offers and it is weaker than telegram's. The at-and-+1 measurement (1600 accepted, 1601 refused with 400 code 21617) survives only in this note. Flagged, not re-graded: the state of this criterion belongs to #1186's lane. MEASURED 2026-08-29: 1600 accepted, 1601 refused with 400 code 21617. Twilio names the unit itself, so unlike telegram the unit is unambiguous. sms.cap_measured is now live."
   - id: c3
     text: "matrix: the declared 16384 cap is verified against the real platform limit"
     state: superseded
@@ -37,9 +37,9 @@ criteria:
   - id: c6
     text: "Any credential that cannot be obtained is recorded with its reason, so cap_measured = no stays an honest disclosure"
     state: met
-    evidence: "file:docs/delivery-semantics.md:412"
+    evidence: "file:docs/delivery-semantics.md:415:**Neither correction is a measurement**, and both remain `cap_measured = no`"
     owner: core
-    note: "docs/delivery-semantics.md records for matrix and msteams that neither correction is a measurement and why the real limit is on something the client cannot compute. The WhatsApp bridge disclosure sits at :417-426. The Meta app-cap reason still needs recording on the ticket itself."
+    note: "RE-ANCHORED 2026-08-30 for wayland#1198: moved three lines onto the sentence that states the disclosure, rather than the sentence above it about the Matrix arithmetic. docs/delivery-semantics.md records for matrix and msteams that neither correction is a measurement and why the real limit is on something the client cannot compute. The WhatsApp bridge disclosure sits at :417-426. The Meta app-cap reason still needs recording on the ticket itself."
 ---
 
 Split out of `wayland#934` so its `c5` blocker is a shopping list rather than a

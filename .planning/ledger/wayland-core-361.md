@@ -28,7 +28,7 @@ criteria:
     text: "Both assertions survive: the anti-vacuity control at mod.rs:5744 and the fragment assertion at :5749"
     state: met
     owner: core
-    evidence: "file:crates/wcore-agent/src/orchestration/mod.rs:5782"
+    evidence: "file:crates/wcore-agent/src/orchestration/mod.rs:5782:a truncation-split token left the fragment {fragment} on the wire"
     note: "Both are present and unmodified, now at :5775 (control) and :5780 (fragment); only the token binding above them changed. Nothing was relaxed, removed or `#[serial]`-isolated, and the test still runs in the shared-process lib leg. The red arm proves both are live: the control fires first at 5775:9, and the stranded head it prints (`apr-00000000-0000-4000-80`) contains the 16-char fragment the second assertion looks for."
   - id: c5
     text: "A red arm is quoted verbatim: the fixture failing before the change, from a real run"

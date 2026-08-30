@@ -9,9 +9,9 @@ criteria:
   - id: c1
     text: "A user-chosen session id resolves against a ledger keyed by the internal conversation UUID"
     state: met
-    evidence: "file:crates/wcore-cli/src/cache_cmd.rs:440"
+    evidence: "file:crates/wcore-cli/src/cache_cmd.rs:471:fn resolve("
     owner: core
-    note: "cache_cmd::resolve tries the ledger key first, then bridges via Session::conversation_id"
+    note: "cache_cmd::resolve tries the ledger key first, then bridges via Session::conversation_id. RE-ANCHORED 2026-08-30 during the integ/f13 merge of lane/f13-keystone-1198: the fragment is unchanged and still occurs exactly once, but `fn resolve(` moved 440 -> 471 because the cache-ledger lanes merged ahead of it inserted 31 lines above it in cache_cmd.rs. Content move only; the claim was not re-graded."
   - id: c2
     text: "The resolution is verified through the real binary, not the library"
     state: met

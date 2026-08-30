@@ -27,9 +27,9 @@ criteria:
   - id: c4
     text: "The replacement treats output equal to context as models.dev saying unknown, never as a ceiling"
     state: met
-    evidence: "file:scripts/check-model-limits-freshness.py:781"
+    evidence: "file:scripts/check-model-limits-freshness.py:988:PASS when the vendor's output == context (UNKNOWN, not a ceiling)"
     owner: core
-    note: "Enforcement at scan_passthrough:288 treats output == context as models.dev saying UNKNOWN; the control at :781-787 requires the grok-4.6 degenerate row to PASS rather than be graded."
+    note: "RE-ANCHORED 2026-08-30 for wayland#1198: was :781, a `}}` closing an unrelated bedrock fixture block. It now cites the negative control that asserts the treatment, which is what reds if `output == context` is ever read as a ceiling again. Enforcement at scan_passthrough:288 treats output == context as models.dev saying UNKNOWN; the control at :781-787 requires the grok-4.6 degenerate row to PASS rather than be graded."
   - id: c5
     text: "The third preserved rule holds: no static arm is added for an open-weights family served at wildly different limits by different hosts"
     state: not-met

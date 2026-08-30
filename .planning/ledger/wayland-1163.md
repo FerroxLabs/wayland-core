@@ -11,7 +11,7 @@ criteria:
     state: met
     evidence: "symbol:crates/wcore-agent/src/cache_ledger.rs::cache_saving_usd"
     owner: core
-    note: "uncached_equivalent_usd is Option<f64>. RE-ANCHORED 2026-08-29 off the bare line number onto LedgerSummary::cache_saving_usd, the accessor that returns None when the counterfactual is unknown; a struct FIELD is not a resolvable symbol for the gate, and a line number drifts. HOLDS FOR A SESSION THIS BUILD RECORDED; for a session an OLDER build recorded it did not, and that is c4."
+    note: "uncached_equivalent_usd is Option<f64>. RE-ANCHORED 2026-08-29 off the bare line number onto LedgerSummary::cache_saving_usd, the accessor that returns None when the counterfactual is unknown; a struct FIELD is not a resolvable symbol for the gate, and a line number drifts. HOLDS FOR A SESSION THIS BUILD RECORDED; for a session an OLDER build recorded it did not, and that is c4. MERGE 2026-08-30 with the wayland#1198 anchor pass, which had independently converted this same token to file:crates/wcore-agent/src/cache_ledger.rs:174:Absent on the wire (#1163). The symbol: anchor is kept, because #1198's own grammar prefers symbol: over any file: form and a symbol cannot drift at all. #1198's finding is kept with it, and is exactly why a file: form was the wrong answer here: the field name uncached_equivalent_usd appears on TWO structs at this tree -- TurnSample at cache_ledger.rs:190 and LedgerSummary at :677 -- so neither a bare line nor the field name pins anything, and LedgerSummary::cache_saving_usd is the one uniquely named item that expresses the criterion's own sentence (reports its saving as unknown)."
   - id: c2
     text: "The RENDERED verdict says unknown, not a negative number"
     state: met

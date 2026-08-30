@@ -33,7 +33,7 @@ criteria:
   - id: c5
     text: "The deny-by-default browsing posture is recorded as a decision on the issue"
     state: met
-    evidence: "file:.planning/DECISIONS.md:16"
+    evidence: "file:.planning/DECISIONS.md:16:| Q-113 | core#113 |"
     owner: core
     note: "SPLIT 2026-08-29: the old c5 asked for two different things -- a record and a close -- and only one of them was ever a maintainer act. The record is core's and is now DONE. Line 16 of .planning/DECISIONS.md is the Q-113 row taking the decision (close as refuted, recording deny-by-default), and the core lane posted that record as a comment on the issue on 2026-08-29, so the in-tree decision and the issue now agree -- previously the latest comment on #113 was a verification write-up and the posture appeared nowhere a reader of the issue could find it. The close is c6"
   - id: c6
