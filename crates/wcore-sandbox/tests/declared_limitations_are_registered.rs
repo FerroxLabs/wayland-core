@@ -98,9 +98,10 @@ fn every_known_limitations_override_is_registered_for_read_grading() {
     // anything and the exclusion would become a silent no-op that could hide a
     // real override behind the same path.
     excluded_seen.sort();
+    let mut excluded_expected = vec![REGISTRY_DELEGATE.to_owned(), TRAIT_DEFAULT.to_owned()];
+    excluded_expected.sort();
     assert_eq!(
-        excluded_seen,
-        vec![REGISTRY_DELEGATE.to_owned(), TRAIT_DEFAULT.to_owned()],
+        excluded_seen, excluded_expected,
         "the two non-override declaration sites must both still be found; if \
          one moved, update TRAIT_DEFAULT / REGISTRY_DELEGATE rather than \
          leaving an exclusion that matches nothing"
