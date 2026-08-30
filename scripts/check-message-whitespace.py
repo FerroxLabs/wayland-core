@@ -18,7 +18,8 @@ narrowed hard, because deliberate column padding is everywhere in this codebase
 and must not be flagged:
 
   * the character before the run must be a lowercase letter, a comma, a
-    semicolon, an apostrophe, a closing paren or a backtick;
+    semicolon, an apostrophe, a closing paren, a backtick, or a sentence-ending
+    `.`, `!` or `?`;
   * the character after the run must be a lowercase letter, an apostrophe or a
     backtick -- or an opening paren, but ONLY when a backtick precedes the run,
     because a lowercase word before `(` is the two-column install hint
@@ -58,11 +59,17 @@ import os
 import re
 import sys
 
-# The mangled shape: prose word, 4+ spaces, prose word.  A backtick now counts
-# as a prose boundary on the LEFT, because this codebase quotes identifiers in
+# The mangled shape: prose word, 4+ spaces, prose word.  A backtick counts as a
+# prose boundary on the LEFT, because this codebase quotes identifiers in
 # backticks mid-sentence and "`call_id`          always equals it" is the same
-# collapse as "internal          conversation".
-MANGLED = re.compile(r"[a-z,;')`]( {4,})[a-z'`]")
+# collapse as "internal          conversation".  So does a SENTENCE-ENDING
+# `.`/`!`/`?`: a second collapse survived the first repair pass in the very same
+# file, one sentence apart from the one it fixed, only because the character to
+# the left of the run was a full stop -- "!= call_id {b}.          `Approval...`".
+# Two spaces after a full stop is typography; four is the collapse.  Measured
+# over the tree: this widening reports exactly one literal, and that literal is
+# the defect.
+MANGLED = re.compile(r"[a-z,;')`.!?]( {4,})[a-z'`]")
 # A backtick-quoted identifier, a run, then a parenthesised aside -- the shape
 # that survived the first repair pass, in which NEITHER boundary character is a
 # prose letter.  The left boundary is restricted to a backtick deliberately: a
@@ -94,7 +101,12 @@ def offending_runs(literal: str) -> list[tuple[int, str]]:
     for pattern in (MANGLED, MANGLED_TICK_PAREN):
         for m in pattern.finditer(literal):
             # A run right after a leading label is column padding, not prose.
-            if len(literal[: m.start(1)].strip().split()) < 3:
+            # The OPENING QUOTE is dropped before counting: it is not a word,
+            # and counting it made the documented three-word floor a two-word
+            # one, so `"  step 1.          initial import"` was reported as
+            # prose.  A self-test case grades each side of the boundary.
+            before = literal[: m.start(1)].lstrip('"').strip()
+            if len(before.split()) < 3:
                 continue
             found[m.start(1)] = m.group(1)
     return sorted(found.items())
@@ -359,6 +371,49 @@ SELF_TEST_CASES = [
     (
         "a raw string is documented as not covered and stays quiet",
         '    let s = r"the refusal did not see it and the guard          stayed quiet";',
+        0,
+    ),
+    # --- sentence-ending punctuation on the LEFT of the run.  The first repair
+    # --- pass left a second collapse in generate.rs one sentence away from the
+    # --- one it fixed, because a full stop was not a prose boundary here.
+    (
+        "a full stop before the run and a backtick after it",
+        '    let s = "correlation_id {a} does not equal call_id {b}.                  `ApprovalRequired` equals it";',
+        1,
+    ),
+    (
+        "a full stop before the run and a lowercase word after it",
+        '    let s = "there is no cache ledger row for that id.          run cache list to see them";',
+        1,
+    ),
+    (
+        "a question mark before the run",
+        '    let s = "why did the gate stay quiet about it?          a continuation line carries no quote";',
+        1,
+    ),
+    (
+        "an exclamation mark before the run",
+        '    let s = "the sandbox refused to start at all!          the probe never ran on this host";',
+        1,
+    ),
+    (
+        "a full stop right after a leading label is still column padding",
+        '    println!("  step 1.          initial import");',
+        0,
+    ),
+    (
+        "two words before the run is a label column, not prose",
+        '    println!("the ledger          has no row for it");',
+        0,
+    ),
+    (
+        "three words before the run is prose",
+        '    println!("the cache ledger          has no row for it");',
+        1,
+    ),
+    (
+        "an upper-case second column after a full stop is still a column",
+        '    println!("  the migration ran to completion.          DONE");',
         0,
     ),
 ]

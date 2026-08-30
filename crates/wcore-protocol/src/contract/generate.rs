@@ -1528,7 +1528,9 @@ fn enforce_approval_gate_contract(
             && correlation_id != call_id
         {
             return Err(std::io::Error::other(format!(
-                "{path}: correlation_id {correlation_id:?} != call_id {call_id:?}.                  `ProtocolEvent::ApprovalRequired::correlation_id` always equals `call_id`."
+                "{path}: correlation_id {correlation_id:?} != call_id {call_id:?}. \
+                 `ProtocolEvent::ApprovalRequired::correlation_id` always equals \
+                 `call_id`."
             ))
             .into());
         }
