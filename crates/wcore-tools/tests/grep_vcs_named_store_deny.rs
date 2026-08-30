@@ -181,13 +181,17 @@ async fn grep_cannot_harvest_an_alternates_borrowed_store() {
 #[tokio::test]
 async fn grep_cannot_harvest_a_nested_gitfile_named_store() {
     let (_dir, root, store_file) = nested_gitfile_fixture();
-    // MEASUREMENT, not a claim: `vcs_content_stores` reads only `<root>/.git`,
-    // so the point-predicate cannot see a VENDORED gitfile's store. Grep can,
-    // because it TRAVERSES, and denying a real object store is never a wrong
-    // refusal — so Grep is deliberately stricter here than the VFS.
+    // FerroxLabs/wayland-core#390 c4 — INVERTED, not deleted. This assertion
+    // used to record the opposite: the point-predicate could NOT see a VENDORED
+    // gitfile's store, so Grep was deliberately stricter than the VFS. #390's
+    // arm 3 closed that asymmetry, and the two layers are re-tied HERE so a
+    // regression in either one is caught by the other's test.
     assert!(
-        !WorkspacePolicy::contained(&root).is_vcs_content_store(&store_file),
-        "if the point-predicate has grown a nested arm, this note is stale"
+        WorkspacePolicy::contained(&root).is_vcs_content_store(&store_file),
+        "core#390 c4: the point-predicate must now see a VENDORED \
+         gitfile-named store, so Grep and the VFS agree. If arm 3 has been \
+         removed this assertion inverts BACK, and vfs_nested_named_store_deny \
+         goes red with it"
     );
 
     let ctx = contained_ctx(&root);
