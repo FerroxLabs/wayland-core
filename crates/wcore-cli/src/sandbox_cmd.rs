@@ -357,8 +357,17 @@ mod disclosure_tests {
         fn is_available(&self) -> bool {
             true
         }
+        // EVERY disclosure method is delegated, and that is load-bearing
+        // rather than tidy: a decorator that forgets one falls back to the
+        // trait default — an empty list, or no reason — and reports a backend
+        // with nothing wrong with it. That is a live shape in this workspace
+        // (`SessionSandboxBackend`, FerroxLabs/wayland-core#400), and here it
+        // would silently make the assertions below vacuous.
         fn known_limitations(&self) -> Vec<&'static str> {
             self.0.known_limitations()
+        }
+        fn unavailable_reason(&self) -> Option<String> {
+            self.0.unavailable_reason()
         }
         async fn execute(
             &self,
@@ -377,40 +386,168 @@ mod disclosure_tests {
     /// `AppContainerBackend::known_limitations` be replaced with `Vec::new()`
     /// while `sandbox status --json` on real Windows returned
     /// `"known_limitations":[]` and every test stayed green.
-    fn assert_declared_limitations_reach_the_operator(
+    fn assert_disclosure_reaches_the_operator(
         backend: Arc<dyn wcore_sandbox::backends::SandboxBackend>,
+        declares: &[&str],
     ) {
         let name = backend.name();
+        assert!(
+            !declares.is_empty(),
+            "row `{name}` is registered and declares no method, so this loop \
+             grades nothing for it"
+        );
+
+        // Read the backend BEFORE it is wrapped, so what the operator ends up
+        // seeing is compared against what the backend actually said rather
+        // than against the wrapper's echo of it.
         let declared: Vec<String> = backend
             .known_limitations()
             .into_iter()
             .map(str::to_owned)
             .collect();
-        assert!(
-            !declared.is_empty(),
-            "backend `{name}` is registered as declaring a known limitation \
-             and declared none; an empty list is what an operator reads as a \
-             clean bill of health"
-        );
+        let reason = backend.unavailable_reason();
 
         let registry = SandboxRegistry::new(Arc::new(AvailabilityStub(backend)));
         let status = SandboxStatus::project(&registry);
         let json = status.to_json();
         let human = super::render_status_human(&status);
-        for text in &declared {
-            assert!(
-                json["known_limitations"]
-                    .as_array()
-                    .is_some_and(|entries| entries.iter().any(|v| v == text)),
-                "backend `{name}` declares {text:?} and the --json arm a host \
-                 integration reads does not carry it: {json}"
-            );
-            assert!(
-                human.contains(text.as_str()),
-                "backend `{name}` declares {text:?} and the human arm an \
-                 operator reads does not print it: {human}"
-            );
+
+        for method in declares {
+            match *method {
+                "known_limitations" => {
+                    assert!(
+                        !declared.is_empty(),
+                        "backend `{name}` is registered as declaring a known \
+                         limitation and declared none; an empty list is what an \
+                         operator reads as a clean bill of health"
+                    );
+                    for text in &declared {
+                        assert!(
+                            json["known_limitations"]
+                                .as_array()
+                                .is_some_and(|entries| entries.iter().any(|v| v == text)),
+                            "backend `{name}` declares {text:?} and the --json \
+                             arm a host integration reads does not carry it: {json}"
+                        );
+                        assert!(
+                            human.contains(text.as_str()),
+                            "backend `{name}` declares {text:?} and the human \
+                             arm an operator reads does not print it: {human}"
+                        );
+                    }
+                }
+                "unavailable_reason" => {
+                    // Equality in BOTH directions, so this holds whether or
+                    // not a cause happens to be recorded on the host running
+                    // the test: a backend that says nothing must not have a
+                    // reason invented for it, and one that says something must
+                    // not have it dropped. `Some` is exercised non-vacuously
+                    // on every target by
+                    // `an_unavailable_reason_reaches_both_operator_arms_through_the_registry`.
+                    assert_eq!(
+                        status.unavailable_reason, reason,
+                        "backend `{name}` says its unavailability is {reason:?} \
+                         and the status an operator reads says {:?}; #369's harm \
+                         was twelve days of a cause that existed and could not \
+                         be read",
+                        status.unavailable_reason
+                    );
+                    if let Some(why) = &reason {
+                        assert_eq!(
+                            json["unavailable_reason"], *why,
+                            "backend `{name}` knows why it is unavailable and \
+                             the --json arm does not carry it: {json}"
+                        );
+                        assert!(
+                            human.contains(why.as_str()),
+                            "backend `{name}` knows why it is unavailable and \
+                             the human arm does not print it: {human}"
+                        );
+                    }
+                }
+                other => panic!(
+                    "row `{name}` declares `{other}`, which is in \
+                     `DISCLOSURE_METHODS` and has no arm here. Add one — this \
+                     panic IS the guard: a disclosure method nothing projects \
+                     is exactly how `known_limitations` was deletable with \
+                     every test green."
+                ),
+            }
         }
+    }
+
+    /// A backend's `unavailable_reason` must survive the whole path an
+    /// operator reads it through — backend → `SandboxRegistry` →
+    /// `SandboxStatus` → BOTH arms — and this grades the PATH with a sentinel
+    /// rather than any one backend's wording.
+    ///
+    /// # The N+1 this exists to make impossible, measured not imagined
+    ///
+    /// `#368` c6's fix made that path total for `known_limitations` and left
+    /// its sibling exactly as it was. Every assertion on `unavailable_reason`
+    /// built a `SandboxStatus` BY HAND, so nothing traversed the registry:
+    /// replacing `SandboxRegistry::unavailable_reason`'s delegate with `None`
+    /// compiles (`CHECK_EXIT=0`) and leaves the entire `wcore-sandbox` +
+    /// `wcore-cli` suite green (3927 tests, `RED1_TESTS_EXIT=0`), while the
+    /// identical mutation on the `known_limitations` delegate reddens
+    /// `every_declaring_backends_disclosure_reaches_both_operator_arms`
+    /// (`CTL_TESTS_EXIT=100`). Same file, adjacent functions, opposite
+    /// outcomes — a coverage hole, not a broken instrument.
+    ///
+    /// The backend below is unavailable AND says why, which is the state
+    /// `#369` measured lasting twelve days on a developer machine.
+    #[test]
+    fn an_unavailable_reason_reaches_both_operator_arms_through_the_registry() {
+        const SENTINEL: &str = "SENTINEL-CAUSE: the probe failed and the backend recorded why";
+
+        struct Wedged;
+
+        #[async_trait::async_trait]
+        impl wcore_sandbox::backends::SandboxBackend for Wedged {
+            fn name(&self) -> &'static str {
+                "sentinel_wedged"
+            }
+            fn is_available(&self) -> bool {
+                false
+            }
+            fn unavailable_reason(&self) -> Option<String> {
+                Some(SENTINEL.to_owned())
+            }
+            async fn execute(
+                &self,
+                _manifest: &wcore_sandbox::SandboxManifest,
+                _cmd: wcore_sandbox::SandboxCommand,
+            ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+                unreachable!("an unavailable backend is never executed by a status read")
+            }
+        }
+
+        let registry = SandboxRegistry::new(Arc::new(Wedged));
+        let status = SandboxStatus::project(&registry);
+        assert_eq!(
+            status.unavailable_reason.as_deref(),
+            Some(SENTINEL),
+            "the registry dropped the backend's recorded cause before the \
+             status was even built"
+        );
+
+        let json = status.to_json();
+        assert_eq!(
+            json["unavailable_reason"], SENTINEL,
+            "a host integration and every script read this arm and nothing \
+             else: {json}"
+        );
+
+        let human = super::render_status_human(&status);
+        assert!(
+            human.contains(SENTINEL),
+            "an operator at a terminal reads this arm and nothing else: {human}"
+        );
+        assert!(
+            human.contains("UNAVAILABLE"),
+            "the cause must be headed as an unavailability, or it reads as \
+             prose beside a row of booleans: {human}"
+        );
     }
 
     /// TOTAL over the declaring backends, not over the ones somebody
@@ -420,54 +557,74 @@ mod disclosure_tests {
     /// unrecognised row panics rather than being skipped.
     #[test]
     fn every_declaring_backends_disclosure_reaches_both_operator_arms() {
-        use wcore_sandbox::backends::BACKENDS_THAT_DECLARE_LIMITATIONS;
+        use wcore_sandbox::backends::BACKENDS_THAT_DISCLOSE;
         use wcore_sandbox::backends::windows_job_object::WindowsJobObjectBackend;
 
         assert!(
-            !BACKENDS_THAT_DECLARE_LIMITATIONS.is_empty(),
+            !BACKENDS_THAT_DISCLOSE.is_empty(),
             "positive control: an empty table would make this loop vacuous"
         );
         let mut graded = 0usize;
-        for row in BACKENDS_THAT_DECLARE_LIMITATIONS {
+        let mut unconstructible = 0usize;
+        for row in BACKENDS_THAT_DISCLOSE {
+            // A row whose type does not exist on this target is ASSERTED
+            // absent, never skipped: a skip is how a row stops being graded
+            // with nothing going red. `constructible_here` is derived from the
+            // row's own `declared_on`, so it cannot disagree with the arms
+            // below without one of them panicking.
+            if !row.declared_on.constructible_here() {
+                unconstructible += 1;
+                continue;
+            }
             match row.name {
                 "windows_job_object" => {
-                    assert_declared_limitations_reach_the_operator(Arc::new(
-                        WindowsJobObjectBackend::new(),
-                    ));
+                    assert_disclosure_reaches_the_operator(
+                        Arc::new(WindowsJobObjectBackend::new()),
+                        row.declares,
+                    );
                     graded += 1;
                 }
+                // On Windows `AppContainerBackend` IS the real backend; off
+                // Windows the same path resolves to the compile stub, and the
+                // two are separate rows because they disclose different
+                // things.
                 #[cfg(windows)]
                 "appcontainer" => {
-                    assert_declared_limitations_reach_the_operator(Arc::new(
-                        wcore_sandbox::backends::appcontainer::AppContainerBackend::new(),
-                    ));
+                    assert_disclosure_reaches_the_operator(
+                        Arc::new(wcore_sandbox::backends::appcontainer::AppContainerBackend::new()),
+                        row.declares,
+                    );
                     graded += 1;
                 }
-                // Off Windows the type in that row does not exist, and the row
-                // says so. Asserted rather than skipped: a row that is NOT
-                // windows-only and has no arm here must fail, not vanish.
                 #[cfg(not(windows))]
-                "appcontainer" => assert!(
-                    row.windows_only,
-                    "row `{}` is not windows-only and has no arm on this target",
-                    row.name
-                ),
+                "appcontainer_stub" => {
+                    assert_disclosure_reaches_the_operator(
+                        Arc::new(wcore_sandbox::backends::appcontainer::AppContainerBackend::new()),
+                        row.declares,
+                    );
+                    graded += 1;
+                }
                 other => panic!(
-                    "backend `{other}` declares known limitations and nothing \
-                     here projects them to the operator. Add an arm — this \
-                     panic IS the guard: #368 c6 was graded `met` while \
-                     exactly one backend's declaration was unread, and \
-                     deleting it left every test green."
+                    "backend `{other}` is constructible on this target, \
+                     discloses {:?}, and nothing here projects it to the \
+                     operator. Add an arm — this panic IS the guard: #368 c6 \
+                     was graded `met` while exactly one backend's declaration \
+                     was unread, and deleting it left every test green.",
+                    row.declares
                 ),
             }
         }
-        #[cfg(windows)]
-        assert_eq!(graded, BACKENDS_THAT_DECLARE_LIMITATIONS.len());
-        #[cfg(not(windows))]
+        assert_eq!(
+            graded + unconstructible,
+            BACKENDS_THAT_DISCLOSE.len(),
+            "every row is either graded here or asserted unconstructible on \
+             this target; {graded} graded and {unconstructible} unconstructible \
+             does not account for all of them"
+        );
         assert!(
             graded >= 1,
-            "at least one declaring backend must be constructible on every \
-             target, or this test proves nothing off Windows"
+            "no row was constructible on this target, so this test proves \
+             nothing here"
         );
     }
 }

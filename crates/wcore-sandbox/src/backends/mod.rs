@@ -634,22 +634,73 @@ mod tests {
     }
 }
 
-/// One backend that overrides [`SandboxBackend::known_limitations`].
+/// The DISCLOSURE SURFACE: the [`SandboxBackend`] methods whose entire value to
+/// an operator is that they are READ, along
+/// backend → [`crate::SandboxRegistry`] → `SandboxStatus` → both arms of
+/// `wayland-core sandbox status`.
+///
+/// Nothing the product DOES changes when one of them is dropped somewhere on
+/// that path, which is precisely why a drop stays invisible. `#368` c6 was
+/// graded `met` while `AppContainerBackend::known_limitations` could be
+/// replaced with `Vec::new()` — it compiled, emptied `known_limitations` in
+/// `sandbox status --json` on real Windows, and left every test green. That
+/// hole was closed for `known_limitations` and MEASURED STILL OPEN for its
+/// sibling: replacing `SandboxRegistry::unavailable_reason`'s delegate with
+/// `None` compiles and leaves the whole `wcore-sandbox` + `wcore-cli` suite
+/// (3927 tests) green, while an operator's only read of a wedged backend's
+/// cause — the twelve silent days of `#369` — goes back to being unreadable.
+///
+/// So this is the SET, and the two checks below are total over the SURFACE
+/// rather than over the one method somebody happened to fix. `#400` c1 adds
+/// `blocks_powershell` to it.
+pub const DISCLOSURE_METHODS: &[&str] = &["known_limitations", "unavailable_reason"];
+
+/// Which targets a disclosing type is constructible on.
+///
+/// A row whose type does not exist here must be ASSERTED unconstructible by
+/// whoever enumerates the table, never quietly skipped — a skip is how a row
+/// stops being graded without anything going red.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeclaringBackend {
+pub enum DeclaredOn {
+    /// Constructible on every target.
+    EveryTarget,
+    /// `cfg(windows)` only — the real Windows backends.
+    WindowsOnly,
+    /// `cfg(not(windows))` only — the compile stubs, which disclose that their
+    /// `available false` is a fact about the BUILD and not about the host.
+    NonWindowsOnly,
+}
+
+impl DeclaredOn {
+    /// Whether the declaring type exists on the target being compiled.
+    pub const fn constructible_here(self) -> bool {
+        match self {
+            Self::EveryTarget => true,
+            Self::WindowsOnly => cfg!(windows),
+            Self::NonWindowsOnly => !cfg!(windows),
+        }
+    }
+}
+
+/// One file in this crate that overrides at least one [`DISCLOSURE_METHODS`]
+/// method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisclosingBackend {
     /// The backend's own [`SandboxBackend::name`].
     pub name: &'static str,
     /// The file, relative to this crate's `src/`, that carries the override.
     /// Scanned, not decorative — see
     /// `tests/declared_limitations_are_registered.rs`.
     pub source_file: &'static str,
-    /// Whether the declaring type exists only under `cfg(windows)`. A row that
-    /// is `true` must be asserted UNCONSTRUCTIBLE off Windows by whoever
-    /// enumerates this table, rather than quietly skipped.
-    pub windows_only: bool,
+    /// Which targets [`Self::name`]'s type exists on.
+    pub declared_on: DeclaredOn,
+    /// The subset of [`DISCLOSURE_METHODS`] this file overrides. Scanned
+    /// against the source, so it cannot drift from what the file actually
+    /// declares.
+    pub declares: &'static [&'static str],
 }
 
-/// Every backend in this workspace that declares a known limitation.
+/// Every override of a [`DISCLOSURE_METHODS`] method in this crate.
 ///
 /// # Why a table, and why it is scanned
 ///
@@ -662,29 +713,40 @@ pub struct DeclaringBackend {
 /// override WAS asserted — so the hole was exactly one backend wide, and a
 /// third backend added tomorrow would open it again.
 ///
-/// So the coverage question is inverted into a decidable one. Not "did somebody
-/// remember to grade this backend's declaration?", which is undecidable over an
-/// open set of future backends, but two total ones:
+/// So the coverage question is inverted into decidable ones. Not "did somebody
+/// remember to grade this?", which is undecidable over an open set of future
+/// backends AND of future disclosure methods, but three total ones:
 ///
-/// 1. *Is every `known_limitations` override in this crate's source listed
-///    here?* — answered by scanning `src/` in
-///    `tests/declared_limitations_are_registered.rs`.
-/// 2. *Does every row here survive to BOTH arms of `sandbox status`?* —
-///    answered by projecting each row in
-///    `wcore_cli::sandbox_cmd::disclosure_tests`, which panics on a row it has
-///    no arm for rather than skipping it.
+/// 1. *Is every override of every [`DISCLOSURE_METHODS`] method in this crate's
+///    source listed here, against the right method?* — answered by scanning
+///    `src/` in `tests/declared_limitations_are_registered.rs`.
+/// 2. *Does every row here survive to BOTH arms of `sandbox status`, for every
+///    method it declares?* — answered by projecting each row through a real
+///    [`crate::SandboxRegistry`] in `wcore_cli::sandbox_cmd::disclosure_tests`,
+///    which panics on a row — or a method — it has no arm for rather than
+///    skipping it.
+/// 3. *Does every FIELD of `SandboxStatus` reach the `--json` arm?* — answered
+///    by `every_status_field_reaches_the_json_arm`, one level further out.
 ///
-/// Adding a backend that declares a limitation and wiring neither reddens (1);
+/// Adding a backend that discloses something and wiring neither reddens (1);
 /// wiring (1) and not (2) reddens (2).
-pub const BACKENDS_THAT_DECLARE_LIMITATIONS: &[DeclaringBackend] = &[
-    DeclaringBackend {
+pub const BACKENDS_THAT_DISCLOSE: &[DisclosingBackend] = &[
+    DisclosingBackend {
         name: "windows_job_object",
         source_file: "backends/windows_job_object.rs",
-        windows_only: false,
+        declared_on: DeclaredOn::EveryTarget,
+        declares: &["known_limitations"],
     },
-    DeclaringBackend {
+    DisclosingBackend {
         name: "appcontainer",
         source_file: "backends/appcontainer/windows_impl/process.rs",
-        windows_only: true,
+        declared_on: DeclaredOn::WindowsOnly,
+        declares: &["known_limitations", "unavailable_reason"],
+    },
+    DisclosingBackend {
+        name: "appcontainer_stub",
+        source_file: "backends/appcontainer.rs",
+        declared_on: DeclaredOn::NonWindowsOnly,
+        declares: &["unavailable_reason"],
     },
 ];
