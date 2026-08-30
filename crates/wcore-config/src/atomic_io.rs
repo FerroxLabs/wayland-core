@@ -354,12 +354,35 @@ fn keep_displaced(tmp: tempfile::TempPath, displaced: &Path) -> std::io::Result<
 ///   rates moved; the GUARANTEE did not, and neither did the direction of
 ///   this declaration.
 ///
-///   So what Windows ships is: *a save is never lost SILENTLY.* Every
-///   degrade is counted by [`degraded_publish_count`] and logged at `error!`
-///   before the racy publish runs, so the window in which bytes can be lost
-///   is always announced. That is the property
+///   So what Windows ships is: *every degrade is COUNTED, and logged at
+///   `error!` before the racy publish runs.* That is the property
 ///   `a_refused_replacefilew_is_counted_and_not_silent` grades, and it is
 ///   what a caller on Windows may rely on. It is NOT "no save is lost".
+///
+///   **AND IT IS NOT "the operator is always told".** An earlier draft of this
+///   paragraph said the window "is always announced"; that was measured false
+///   in two ways at once and is corrected here rather than deleted, because a
+///   declaration that overstates is the exact defect `#370` was split out of
+///   `#342` to fix, and repeating it one notch smaller would be the same
+///   mistake:
+///
+///   * `degraded_publish_count()` has NO production caller. Nothing in the
+///     shipped product reads it; the only references outside these docs are in
+///     its own unit test. A counter no code reads is a number, not an
+///     observable, and calling it one is how `#342` c3 happened.
+///   * the `error!` reaches an operator only where tracing reaches stdio. In
+///     the TUI it does not: `wcore-cli/src/main.rs` routes tracing to a
+///     non-blocking FILE writer whenever the alt-screen is entered, because
+///     the alt-screen owns the terminal and nothing may reach stdio, not even
+///     an error. So in the TUI the announcement is in a log file the operator
+///     has no reason to open, and under the JSON stream protocol it is on a
+///     stderr the host may be discarding.
+///
+///   `#370`'s own contract offered three options — counted, logged where the
+///   operator actually sees it, or surfaced in the TOOL RESULT. Only the first
+///   is shipped. The third is the one that survives all three output modes and
+///   it is NOT taken here; the residual stays on `#370` rather than being
+///   written off by a sentence that implies it was done.
 ///
 /// - **Everything else** — [`Swap::Unsupported`], and the caller falls back to
 ///   re-check-then-rename.

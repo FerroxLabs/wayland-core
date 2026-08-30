@@ -21,7 +21,7 @@ criteria:
   - id: c3
     text: "--self-test proves both directions: an anchor whose content moved goes red, and a correct anchor stays green"
     state: met
-    evidence: "file:scripts/check-criteria-ledger.py:988:file anchor: content ONE line past the window has drifted"
+    evidence: "file:scripts/check-criteria-ledger.py:1115:file anchor: content ONE line past the window has drifted"
     owner: core
     note: "The moved-content arm. Its paired green arm is at :985 and the two differ by ONE line -- the fragment sits at the far edge of the window in the green arm and one line past it in the red one -- so the pair proves the window is neither zero (which would red on any edit above an anchor) nor unbounded (which would make the line number decorative). Seven more file: arms land beside them, each reddened by a DIFFERENT property so none rides on another`s coverage: content present, content unique, content in window, fragment length, the bare-line refusal itself, past-EOF, and `file:<path>` with no line staying green. The harness`s own anti-vacuity guard was widened in the same change: it refused an unchanged fixture only for RED arms, which left every GREEN arm able to pass as a second copy of the clean control; arms that deliberately do not mutate now say so by passing _ident, and every other arm is checked."
 ---
