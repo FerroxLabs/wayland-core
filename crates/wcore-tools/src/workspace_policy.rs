@@ -3280,10 +3280,20 @@ fn cache_hit(
 /// (`objects`, `modules`, `lfs`, `store`, `pristine`, `repository`) — the only
 /// shape a store discovered by arm 3 can have.
 ///
-/// The gate on arm 3, and purely lexical, so an ordinary path costs nothing:
+/// The gate on arm 3, and purely lexical, so a path it REFUSES costs nothing:
 /// `<root>/src/deep/deeper/main.rs` has no such ancestor and the walk is never
 /// consulted for it. That is what holds #376's measured guard cost at one
 /// resolution / zero scans / three probes while the nested case is closed.
+///
+/// What a path it ADMITS costs is a different number and it is NOT constant.
+/// These leaf names are also ordinary project directory names — a Terraform
+/// `modules/`, a Redux `store/`, an asset `objects/` — and a guard on one
+/// revalidates one witness per directory the walk descended. MEASURED at
+/// exactly 1.000 probe per workspace directory (19 warm probes at 8
+/// directories, 59 at 48; 3 at both sizes before arm 3 landed), graded as a
+/// SLOPE by `tests/vfs_guard_cost.rs`'s
+/// `a_gate_admitted_path_costs_one_probe_per_workspace_directory` and tracked
+/// as FerroxLabs/wayland-core#398.
 ///
 /// A git control directory's own store leaves are FIXED names, so this cannot
 /// miss a gitfile-named store however the checkout is spelled. It CAN miss an
@@ -3377,10 +3387,18 @@ impl StoreScan {
             // settled by `dir`'s, which the caller stamped. So an absent
             // control directory needs no stamp of its own — and nothing under
             // it can exist, which is why its store leaves are not probed.
-            // MEASURED: probing them anyway cost 16 syscalls per traversed
-            // directory against 8 before the witness bookkeeping landed, and
-            // `grep_policy::scope_for` pays this at every directory of a
-            // `Grep(".")` (FerroxLabs/wayland-core#376 "does not get worse").
+            // MEASURED, and stated in ONE unit — TOTAL syscalls charged per
+            // traversed directory, differenced over `WL_PROBE_DIRS` 100 / 1100
+            // / 2100 so every one-off cost cancels. Probing the leaves of an
+            // absent control directory anyway cost 17 (16 `statx` + 1
+            // `openat`) against the pre-`StoreScan` 8 (7 `statx` + 1
+            // `openat`); skipping them costs 5 (5 `statx`, no `openat` — the
+            // `alternates` read is skipped with it). `grep_policy::scope_for`
+            // pays this at every directory of a `Grep(".")`
+            // (FerroxLabs/wayland-core#376 "does not get worse"). The
+            // `statx`-only sub-count is 16, which is why this comment and the
+            // header of `tests/vfs_guard_cost.rs` once disagreed by one; both
+            // now quote the total.
             if !self.witness_if_present(control.clone()) {
                 continue;
             }

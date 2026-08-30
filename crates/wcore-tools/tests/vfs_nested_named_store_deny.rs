@@ -213,3 +213,68 @@ async fn a_nested_alternates_borrow_named_nothing_store_like_is_still_admitted()
          now refused, invert this assertion and close #394 — do not delete it"
     );
 }
+
+/// **The gap above is on core#390 c2's OWN axis, not beside it.**
+///
+/// c2 reads "the same holds for an `objects/info/alternates` borrow declared by
+/// a NESTED checkout, not only by the workspace root". The axis it names is
+/// root-versus-nested, and this test drives that axis with everything else held
+/// fixed: the SAME borrow target, `<root>/odb`, named by the same relative
+/// spelling, holding the same object — declared once by the root's `.git` and
+/// once by a nested checkout's.
+///
+/// The root declaration is REFUSED and the nested one is ADMITTED
+/// (`a_nested_alternates_borrow_named_nothing_store_like_is_still_admitted`,
+/// one function up). Arm 2's store list is consulted with no lexical pre-gate,
+/// so `push_store` puts a borrow target of ANY name into it; arm 3's is reached
+/// only through `store_shaped`. That is a difference between root and nested,
+/// which is precisely what c2 says must not exist — so c2 is graded `not-met`
+/// with core#394 as its carrier rather than `met` with a footnote.
+///
+/// When #394 closes, this test and its sibling flip together: the sibling's
+/// `is_ok` becomes a refusal and this pair becomes a symmetry assertion.
+#[tokio::test]
+async fn the_same_alternates_borrow_is_refused_at_the_root_and_admitted_when_nested() {
+    async fn read_ok(spelling: &str, control: &Path) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let borrowed = root.join("odb/ab/cd1234");
+        write(&borrowed, b"\x78\x01borrowed-blob");
+        let owner = root.join(control);
+        std::fs::create_dir_all(owner.join("objects/info")).unwrap();
+        std::fs::write(owner.join("objects/info/alternates"), spelling).unwrap();
+        // Wrong-refusal control, in the same fixture: an ordinary workspace
+        // file must stay readable in BOTH arms, or the difference below is a
+        // guard that refuses everything rather than one that discriminates.
+        let ordinary = root.join("main.rs");
+        write(&ordinary, b"fn main() {}\n");
+        let fs = deny_fs(&root);
+        assert!(
+            fs.read(&ordinary).await.is_ok(),
+            "wrong-refusal control for `{}`: an ordinary workspace file must \
+             stay readable",
+            control.display()
+        );
+        fs.read(&borrowed).await.is_ok()
+    }
+
+    // `<root>/.git/objects` + `../../odb` and
+    // `<root>/vendor/pkg/.git/objects` + `../../../../odb` both resolve to
+    // `<root>/odb`. Same target, same object, same VFS: only the DECLARING
+    // control directory differs.
+    let at_root = read_ok("../../odb\n", Path::new(".git")).await;
+    let when_nested = read_ok("../../../../odb\n", Path::new("vendor/pkg/.git")).await;
+
+    assert!(
+        !at_root,
+        "control: a borrow declared by the ROOT must be refused whatever the \
+         target is named — if this is now admitted, arm 2 has regressed and \
+         the asymmetry below is not the one core#394 is about"
+    );
+    assert!(
+        when_nested,
+        "core#390 c2 / core#394: the SAME borrow declared by a nested checkout \
+         is admitted while the root declaration is refused. When #394 closes, \
+         invert this to `!when_nested` and grade c2 `met` — do not delete it"
+    );
+}

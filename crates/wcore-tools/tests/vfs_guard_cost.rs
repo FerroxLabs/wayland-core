@@ -22,11 +22,19 @@
 //! the `probe_vcs_content_stores_per_traversed_directory` loop at
 //! `WL_PROBE_DIRS=100` and `1100`, hetzner:
 //!
+//! Every figure below is TOTAL syscalls charged per traversed directory — not
+//! the `statx` sub-count — differenced over three operation counts (100 / 1100
+//! / 2100), `1 passed` asserted in every run, identical across two repetitions:
+//!
 //! ```text
-//!   origin/integ/f13 (before StoreScan)                 8 syscalls / directory
-//!   + lane/f13-sec-secrets (StoreScan landed)          17 syscalls / directory
-//!   + this file's arm-3 change (#390)                   5 syscalls / directory
+//!  4c55f5ac6  origin/integ/f13 (before StoreScan)   8 / dir = 7 statx + 1 openat
+//!  1b9cb34d5  + lane/f13-sec-secrets (StoreScan)   17 / dir = 16 statx + 1 openat
+//!  875bf32cb  + this file's arm-3 change (#390)     5 / dir = 5 statx
 //! ```
+//!
+//! Naming the unit is not pedantry: this header and `scan_control_dirs_in`'s
+//! comment carried 17 and 16 for the same measurement for two commits, because
+//! one quoted the total and the other the `statx` sub-count.
 //!
 //! The middle row is a real 2.1x regression on a shape NEITHER lane measured:
 //! #376's memo made the ordinary GUARD path cheaper while making the untouched
@@ -452,5 +460,109 @@ async fn an_ordinary_path_never_pays_for_the_nested_store_walk() {
         scans_with_walk > scans,
         "control: a store-shaped path must actually reach the nested walk \
          (scans {scans} -> {scans_with_walk})"
+    );
+}
+
+/// FerroxLabs/wayland-core#398 — **what the arm-3 gate ADMITS costs, measured
+/// as a slope rather than pinned as a constant.**
+///
+/// `store_shaped` is a lexical any-component test over the store LEAF names in
+/// `VCS_CONTENT_STORES` — `objects`, `modules`, `lfs`, `store`, `pristine`,
+/// `repository`. Every one of those is also an ordinary project directory name
+/// (a Terraform `modules/`, a Redux `store/`, an asset `objects/`), so a
+/// workspace containing no nested checkout anywhere still has paths that open
+/// the gate. Each guard on such a path revalidates the nested walk's witness
+/// set, and the walk stamps ONE witness per directory it descended.
+///
+/// So the admitted path's cost is not a constant and must not be pinned as one.
+/// It is graded as a SLOPE: two workspaces differing by `EXTRA` ordinary
+/// directories must differ by exactly `EXTRA` warm probes on the admitted path.
+/// The NON-admitted path staying at three in both is the known-positive
+/// control — it proves the difference is the gate's doing and not the fixture's.
+///
+/// This is deliberately the whole CLASS and not the `modules` instance: nothing
+/// here asks whether a particular directory name is a false positive, which is
+/// undecidable over the open alphabet of project layouts. It asks whether an
+/// admitted path's cost depends on workspace size, which is decidable and
+/// total. A fix that makes arm 3 O(1) in the workspace turns the slope to zero
+/// and reddens this test — that is the intended way for it to go red.
+#[tokio::test]
+async fn a_gate_admitted_path_costs_one_probe_per_workspace_directory() {
+    /// Warm probes charged to ONE guard on the gate-admitted path and to ONE
+    /// guard on the ordinary path, in a workspace carrying `extra` ordinary
+    /// directories. Both memos are warm before either measurement starts.
+    async fn warm_cost(extra: usize) -> (u64, u64) {
+        let dir = tempfile::tempdir().expect("workspace");
+        let root = std::fs::canonicalize(dir.path()).expect("canonical root");
+        std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+        std::fs::write(root.join(".git/objects/ab/cdef"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("src/deep/deeper")).unwrap();
+        std::fs::write(root.join("src/deep/deeper/main.rs"), b"fn main() {}\n").unwrap();
+        // A BENIGN directory whose name is a store leaf: no control directory,
+        // no gitfile, no store — an ordinary Terraform layout.
+        std::fs::create_dir_all(root.join("modules/vpc")).unwrap();
+        std::fs::write(root.join("modules/vpc/main.tf"), b"# terraform\n").unwrap();
+        for i in 0..extra {
+            std::fs::create_dir_all(root.join(format!("pkg{i}"))).unwrap();
+        }
+
+        let policy = Arc::new(WorkspacePolicy::contained(&root));
+        let fs = stack(&policy, &root);
+        let admitted = root.join("modules/vpc/main.tf");
+        let ordinary = root.join("src/deep/deeper/main.rs");
+        tokio::time::sleep(SETTLE).await;
+
+        // Warm both memos before measuring anything.
+        fs.exists(&ordinary).await.expect("ordinary path readable");
+        fs.exists(&admitted).await.expect("admitted path readable");
+        let (_, scans_warm, before) = policy.guard_cost();
+
+        fs.exists(&admitted).await.expect("admitted path readable");
+        let (_, scans_mid, mid) = policy.guard_cost();
+        fs.exists(&ordinary).await.expect("ordinary path readable");
+        let (_, scans_end, after) = policy.guard_cost();
+
+        // A rescan would inflate the probe count with cold-scan work and the
+        // slope would stop meaning what it says. Assert the memos held.
+        assert_eq!(
+            (scans_warm, scans_mid),
+            (scans_end, scans_end),
+            "a memo rebuilt during the warm measurement — the figures below \
+             would be cold-scan cost, not revalidation cost"
+        );
+        (mid - before, after - mid)
+    }
+
+    const SMALL: usize = 8;
+    const EXTRA: usize = 40;
+
+    let (admitted_small, ordinary_small) = warm_cost(SMALL).await;
+    let (admitted_large, ordinary_large) = warm_cost(SMALL + EXTRA).await;
+    println!(
+        "GATE COST: dirs={SMALL} admitted={admitted_small} ordinary={ordinary_small} | \
+         dirs={} admitted={admitted_large} ordinary={ordinary_large}",
+        SMALL + EXTRA
+    );
+
+    // CONTROL: the path the gate REFUSES is flat. #376's number is untouched.
+    assert_eq!(
+        (ordinary_small, ordinary_large),
+        (3, 3),
+        "control: a path the arm-3 gate does not admit must still cost exactly \
+         three warm probes at any workspace size — if this moved, the slope \
+         below is measuring the fixture and not the gate"
+    );
+
+    assert_eq!(
+        admitted_large - admitted_small,
+        EXTRA as u64,
+        "core#398: a guard on a path the arm-3 gate admits costs ONE filesystem \
+         probe per directory in the workspace ({admitted_small} at {SMALL} \
+         directories, {admitted_large} at {}). `store_shaped` opens on ordinary \
+         project directory names, so this is what an ordinary read of \
+         `modules/vpc/main.tf` pays. If this difference is now zero the cost has \
+         been made independent of workspace size and core#398 is closed — delete \
+         nothing, invert this assertion.",
+        SMALL + EXTRA
     );
 }
