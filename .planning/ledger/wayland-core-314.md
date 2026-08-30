@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "grant_path, revoke_path and grant_workspace_capability are missing from the published desktop contract schema"
 status: open
-last_verified_commit: f0060a2e8
+last_verified_commit: d8b422fe3
 criteria:
   - id: c1
     text: "Every ProtocolCommand variant is published with a schema branch and a fixture, enforced by an exhaustive match that fails to compile when a variant is added"
