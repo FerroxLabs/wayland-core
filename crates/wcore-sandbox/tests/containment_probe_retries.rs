@@ -37,7 +37,7 @@
 //!
 //! Two hand-drawn regions that are meant to tile a space do not tile it, and
 //! nothing in the code says so. So the shape changed rather than the region:
-//! there is now ONE walk, it visits every `.rs` file under `crates/`, and each
+//! there is now ONE walk, it visits every `.rs` file cargo compiles, and each
 //! file is CLASSIFIED — either into the integration binaries that can carry it
 //! ([`Compiled::IntegrationBinaries`]) or into a target `binary(=<stem>)`
 //! cannot name ([`Compiled::NotNameableByBinaryFilter`]). The classifier is
@@ -45,6 +45,21 @@
 //! buckets sum to the number of files walked. "Which directories do I skip"
 //! is undecidable over an open alphabet of layouts; "every file lands in
 //! exactly one of two buckets" is decidable and checkable, and the check runs.
+//!
+//! # Two more assumptions a reviewer found, and where they went
+//!
+//! * **The walk was rooted at `crates/`.** Correct for today's layout and
+//!   silent about a member placed anywhere else — a guard cannot fail on a
+//!   file it never visits. The roots are now the `[workspace] members` of the
+//!   root `Cargo.toml`: what cargo compiles, rather than what a directory name
+//!   suggests.
+//! * **The lib-target test exempted `src/test_support.rs` by path suffix**, so
+//!   it exempted ANY crate's file of that name — including one nobody has
+//!   written yet, in a crate this pin does not cover. The exemption is now the
+//!   DEFINITION site of [`VACUITY_SOURCE`]: the one file that must mention the
+//!   function because it declares it. A control asserts exactly one file in
+//!   the workspace does, so a rename or a second copy reddens instead of
+//!   quietly widening the exemption.
 
 use std::path::{Path, PathBuf};
 
@@ -60,6 +75,37 @@ fn repo_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("crates/<crate> has a workspace root two levels up")
         .to_path_buf()
+}
+
+/// The workspace's member directories, read from the root `Cargo.toml`.
+///
+/// Cargo's own answer to "what is the workspace". `exclude`d trees
+/// (`examples/`, `templates/`) are absent for the right reason: cargo does not
+/// compile them, so nothing there can be retried into a pass.
+fn workspace_member_dirs() -> Vec<PathBuf> {
+    let root = repo_root();
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("readable Cargo.toml");
+    let mut in_members = false;
+    let mut out: Vec<PathBuf> = Vec::new();
+    for raw in manifest.lines() {
+        let line = raw.trim();
+        if !in_members {
+            in_members = line.starts_with("members = [");
+            continue;
+        }
+        if line == "]" {
+            break;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(member) = line.split('"').nth(1) {
+            out.push(root.join(member));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// True when `body` calls [`VACUITY_SOURCE`] from CODE rather than merely
@@ -84,6 +130,22 @@ fn repo_root() -> PathBuf {
 /// caller that binds it to a local and invokes it through that binding
 /// (`let probe = run_contained_probe; probe(..)` after a bare `use`) matches
 /// the path form and is caught.
+/// True when `body` DECLARES [`VACUITY_SOURCE`] rather than calling it.
+///
+/// The one file that must mention the function is the one that defines it, and
+/// it is not a caller. The previous exemption was the path suffix
+/// `src/test_support.rs`, which exempts ANY crate's file of that name — a
+/// silent, growing hole in a check whose whole purpose is that no caller gets
+/// a silent exemption. A definition is decidable from the body, so the
+/// exemption is exactly one file wide and a control counts it.
+fn defines_the_vacuity_source(body: &str) -> bool {
+    let declaration = format!("fn {VACUITY_SOURCE}(");
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//"))
+        .any(|line| line.contains(&declaration))
+}
+
 fn calls_the_vacuity_source(body: &str) -> bool {
     let call = format!("{VACUITY_SOURCE}(");
     let path_mention = format!("::{VACUITY_SOURCE}");
@@ -139,26 +201,26 @@ fn integration_binary_roots(crate_dir: &Path) -> Vec<String> {
     out
 }
 
-/// Classify one `.rs` file living under `crates/`. `rel` is relative to
-/// `crates/`, so its first component is the crate directory.
+/// Classify one `.rs` file. `rel` is relative to the MEMBER CRATE it lives in,
+/// so `tests/...` is the integration-test shape.
 ///
 /// Every path yields a variant. A file under a crate's `tests/` subtree that
 /// belongs to a crate with no integration binary at all cannot be named by
 /// `binary(=...)` either, and is classified as such rather than being dropped —
 /// the fail-closed direction, since that answer makes the file an OFFENDER
 /// somebody has to deal with instead of an exemption nobody sees.
-fn classify(crates_root: &Path, rel: &Path) -> Compiled {
+fn classify(crate_dir: &Path, rel: &Path) -> Compiled {
     let parts: Vec<&str> = rel
         .components()
         .filter_map(|c| c.as_os_str().to_str())
         .collect();
     // <crate>/tests/... is the only integration-test shape.
-    if parts.len() >= 3 && parts[1] == "tests" {
-        let rest = &parts[2..];
+    if parts.len() >= 2 && parts[0] == "tests" {
+        let rest = &parts[1..];
         if rest.len() == 1 {
             return Compiled::IntegrationBinaries(vec![rest[0].trim_end_matches(".rs").to_owned()]);
         }
-        let roots = integration_binary_roots(&crates_root.join(parts[0]));
+        let roots = integration_binary_roots(crate_dir);
         if roots.is_empty() {
             return Compiled::NotNameableByBinaryFilter;
         }
@@ -167,40 +229,43 @@ fn classify(crates_root: &Path, rel: &Path) -> Compiled {
     Compiled::NotNameableByBinaryFilter
 }
 
-/// One walk, every `.rs` file under `crates/`, each classified.
+/// One walk per workspace member, every `.rs` file cargo compiles, each
+/// classified.
 ///
 /// `target` is excluded because it is build output rather than source — the
 /// only exclusion, and it removes no source file. Everything that remains is
 /// classified; nothing is skipped.
 fn workspace_rs_files() -> Vec<(PathBuf, Compiled, String)> {
-    let crates_root = repo_root().join("crates");
     let mut out = Vec::new();
-    let mut stack = vec![crates_root.clone()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries {
-            let path = entry.expect("readable dir entry").path();
-            if path.is_dir() {
-                if path.file_name().and_then(|n| n.to_str()) != Some("target") {
-                    stack.push(path);
+    for crate_dir in workspace_member_dirs() {
+        let mut stack = vec![crate_dir.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    if path.file_name().and_then(|n| n.to_str()) != Some("target") {
+                        stack.push(path);
+                    }
+                    continue;
                 }
-                continue;
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&crate_dir)
+                    .expect("walked from the member crate")
+                    .to_path_buf();
+                let compiled = classify(&crate_dir, &rel);
+                let body = std::fs::read_to_string(&path).expect("readable source");
+                out.push((path, compiled, body));
             }
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let rel = path
-                .strip_prefix(&crates_root)
-                .expect("walked from crates/")
-                .to_path_buf();
-            let compiled = classify(&crates_root, &rel);
-            let body = std::fs::read_to_string(&path).expect("readable source");
-            out.push((path, compiled, body));
         }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.dedup_by(|a, b| a.0 == b.0);
     out
 }
 
@@ -242,9 +307,19 @@ fn zero_retry_filters(config: &str) -> Vec<(String, String)> {
 fn total_classification(files: &[(PathBuf, Compiled, String)]) {
     assert!(
         files.len() > 100,
-        "CONTROL: the walk found only {} .rs files under crates/, so an empty result would \
-         prove nothing. Did the layout move?",
+        "CONTROL: the walk found only {} .rs files across the workspace members, so an empty \
+         result would prove nothing. Did the layout move?",
         files.len()
+    );
+    // CONTROL: the roots come from cargo's member list, and a parse that
+    // returned almost nothing would narrow the walk to almost nothing while
+    // every assertion below still passed.
+    let members = workspace_member_dirs();
+    assert!(
+        members.len() > 20,
+        "CONTROL: parsed only {} workspace member(s) out of the root Cargo.toml. Did the \
+         manifest format change?",
+        members.len()
     );
     let bucketed = files
         .iter()
@@ -361,9 +436,27 @@ fn no_unit_test_reaches_the_vacuity_source_where_the_pin_cannot_name_it() {
     let files = workspace_rs_files();
     total_classification(&files);
 
+    // CONTROL: the exemption below must be exactly one file wide. If the
+    // helper were renamed the count would be 0 and every real caller in a lib
+    // target would be reported as an offender (loud, and the safe direction);
+    // if it were copied into a second crate the count would be 2 and this
+    // fires rather than exempting both.
+    let definitions: Vec<&PathBuf> = files
+        .iter()
+        .filter(|(_, _, body)| defines_the_vacuity_source(body))
+        .map(|(path, _, _)| path)
+        .collect();
+    assert_eq!(
+        definitions.len(),
+        1,
+        "CONTROL: exactly one file in the workspace may DECLARE `{VACUITY_SOURCE}`; found \
+         {definitions:?}. The exemption below is the definition site, so a second declaration \
+         would silently widen it."
+    );
+
     let offenders: Vec<&PathBuf> = files
         .iter()
-        .filter(|(path, _, _)| !path.ends_with("src/test_support.rs"))
+        .filter(|(_, _, body)| !defines_the_vacuity_source(body))
         .filter(|(_, compiled, _)| *compiled == Compiled::NotNameableByBinaryFilter)
         .filter(|(_, _, body)| calls_the_vacuity_source(body))
         .map(|(path, _, _)| path)

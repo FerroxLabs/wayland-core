@@ -419,21 +419,57 @@ pub async fn enumerate_process_table(nonce: &str) -> ProcessTableScan {
         return ProcessTableScan::CannotDetermine { reason };
     }
 
+    // EXCLUDE THE SCANNER'S WHOLE LINEAGE, not merely its own pid.
+    //
+    // `wayland-core backend scan --task-id <nonce>` carries the nonce on its
+    // own argv, so the scanner matches itself and reports an orphan that does
+    // not exist. Plan 25-01 hit that on the remote scanner and it recurred
+    // here the moment the local scan started reading the real process table;
+    // excluding `me` closed it, and only it.
+    //
+    // The nonce is on the argv of everything that INVOKED the scanner too --
+    // the shell, the ssh session, the CI step. A reviewer running this scan
+    // over ssh got their own ssh command line back as a MEASURED orphan,
+    // which on the scriptable F25-05 gate is a non-zero exit over nothing at
+    // all. "Which wrappers should I skip" is undecidable over an open
+    // alphabet of shells and runners; "is this row an ancestor of the process
+    // asking the question" is decidable, and the answer is already in the
+    // table, because the enumeration carries ppid. An ancestor of a LIVE
+    // scanner is by construction not a leaked task: it is what started the
+    // scanner and is waiting on it.
+    let lineage = self_and_ancestors(&all, me);
     ProcessTableScan::Enumerated {
         rows: all
             .into_iter()
             .filter(|line| line.contains(nonce))
-            // EXCLUDE OURSELVES. `wayland-core backend scan --task-id <nonce>`
-            // carries the nonce on its own argv, so the scanner matches itself
-            // and reports one orphan that does not exist. Plan 25-01 hit this
-            // exact defect on the remote scanner, and it recurred here the
-            // moment the local scan started reading the real process table.
-            // Measured on hetzner-dsm: scanner=1, independent enumeration=0,
-            // and the one row was the scanner.
-            .filter(|line| row_pid(line) != Some(me))
+            .filter(|line| !row_pid(line).is_some_and(|pid| lineage.contains(&pid)))
             .map(|line| line.trim().to_string())
             .collect(),
     }
+}
+
+/// The pid asking the question, plus every ancestor of it the enumeration can
+/// see.
+///
+/// Walks the `ppid` column upward and stops on a pid it has already seen, so a
+/// table captured mid-reparent -- or a malformed one -- cannot loop. This
+/// NARROWS the exclusion to one chain; it never widens it to "anything that
+/// looks like a wrapper", and a row the walk does not reach is untouched.
+fn self_and_ancestors(rows: &[&str], me: u32) -> Vec<u32> {
+    let mut lineage = vec![me];
+    let mut current = me;
+    while let Some(parent) = rows
+        .iter()
+        .find(|row| row_pid(row) == Some(current))
+        .and_then(|row| row_ppid(row))
+    {
+        if parent == 0 || lineage.contains(&parent) {
+            break;
+        }
+        lineage.push(parent);
+        current = parent;
+    }
+    lineage
 }
 
 /// The instrument's self-test. `None` means command lines are genuinely visible.
@@ -487,9 +523,53 @@ fn row_pid(row: &str) -> Option<u32> {
     row.split_whitespace().next().and_then(|f| f.parse().ok())
 }
 
+/// The parent pid column. Second on every arm: Unix is
+/// `pid ppid pgid <elapsed> args`, Windows is `pid ppid CommandLine`.
+fn row_ppid(row: &str) -> Option<u32> {
+    row.split_whitespace().nth(1).and_then(|f| f.parse().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scan must not report the processes that STARTED it.
+    ///
+    /// A reviewer ran the scoped scan over ssh and got their own ssh command
+    /// line back as a MEASURED orphan: the nonce is on the scanner's argv, and
+    /// therefore on the argv of every wrapper that invoked it. On the
+    /// scriptable `backend scan` gate that is a non-zero exit over nothing.
+    #[test]
+    fn the_scanners_whole_lineage_is_excluded_not_only_its_own_pid() {
+        // `pid ppid pgid etimes args`, the Linux shape.
+        let rows = vec![
+            "1 0 1 999 /sbin/init",
+            "100 1 100 500 sshd: user [priv] -- backend scan --task-id NONCE-X",
+            "200 100 200 400 bash -lc wayland-core backend scan --task-id NONCE-X",
+            "300 200 300 300 wayland-core backend scan --task-id NONCE-X",
+            "400 1 400 100 /usr/bin/leaked-task --nonce NONCE-X",
+        ];
+        let lineage = self_and_ancestors(&rows, 300);
+        assert_eq!(
+            lineage,
+            vec![300, 200, 100, 1],
+            "the walk must reach every ancestor, not stop at the immediate parent"
+        );
+        // CONTROL, the load-bearing half: a genuine leftover that is NOT in
+        // the lineage must stay visible. An exclusion that hid it would turn
+        // this scanner into the silent zero the whole module exists to refuse.
+        assert!(
+            !lineage.contains(&400),
+            "a leftover outside the scanner's ancestry must remain reportable"
+        );
+    }
+
+    /// A malformed or mid-reparent table must not spin.
+    #[test]
+    fn a_cyclic_parent_chain_terminates() {
+        let rows = vec!["10 20 10 5 a", "20 10 20 5 b"];
+        assert_eq!(self_and_ancestors(&rows, 10), vec![10, 20]);
+    }
 
     #[test]
     fn ssh_and_cloud_are_not_claimed_kernel_backed() {

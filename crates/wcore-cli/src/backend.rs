@@ -664,3 +664,55 @@ async fn scan(task_id: Option<&str>, nonce: Option<&str>, json: bool) -> Result<
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// core#366 d2: no operator input means the WIDER question.
+    ///
+    /// This one-line mapping is the whole of the CLI's half of the fix, and a
+    /// reviewer found it constructed in exactly ONE place in the tree and
+    /// never in a test — `OrphanScope::AnyNonce` appeared nowhere else but two
+    /// match arms. Flipping it back to a nonce scope compiles, and restores the
+    /// shipped defect at the surface rather than in the dispatcher: `backend
+    /// scan` with no `--task-id` would again ask "is there residue under a
+    /// nonce I am holding", which a previous run's leftover can never carry.
+    ///
+    /// The asymmetry is the reason the default is this way round and not the
+    /// other: an unscoped scan that finds nothing is a slower TRUE answer,
+    /// while a scoped scan that finds nothing over a real leftover is a FALSE
+    /// one, and it is the false one that shipped.
+    #[test]
+    fn absent_operator_input_means_the_unscoped_scan() {
+        assert_eq!(
+            orphan_scope(None),
+            OrphanScope::AnyNonce,
+            "core#366 d2: `backend scan` / `backend orphans` with no nonce must ask about \
+             EVERY run. A nonce default here can only ever answer about a run this process is \
+             already holding, which is the MEASURED zero this ticket records."
+        );
+        assert_eq!(
+            orphan_scope(None).nonce(),
+            None,
+            "the default scope must name no run at all; a sentinel string would read as a run \
+             called <sentinel>"
+        );
+    }
+
+    /// The control: an explicit nonce still narrows, and narrows to exactly
+    /// what the operator typed. Without this, `orphan_scope` returning
+    /// `AnyNonce` unconditionally would pass the test above while making
+    /// `--task-id` silently inert.
+    #[test]
+    fn an_explicit_nonce_still_scopes_the_scan_to_that_run() {
+        assert_eq!(
+            orphan_scope(Some("d2-cli-nonce")),
+            OrphanScope::Nonce("d2-cli-nonce")
+        );
+        assert_eq!(
+            orphan_scope(Some("d2-cli-nonce")).nonce(),
+            Some("d2-cli-nonce")
+        );
+    }
+}

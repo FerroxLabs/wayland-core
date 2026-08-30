@@ -16,7 +16,7 @@
 
 use wcore_exec_backend::backends::container::{ContainerBackend, NONCE_LABEL};
 use wcore_exec_backend::conformance::{reference_budget, reference_task, run_conformance};
-use wcore_exec_backend::contract::ExecutionBackend;
+use wcore_exec_backend::contract::{ExecutionBackend, OrphanScope};
 use wcore_exec_backend::error::ExecError;
 
 fn temp_state() -> tempfile::TempDir {
@@ -531,6 +531,96 @@ async fn a_container_this_process_still_holds_is_not_reported_as_a_leftover() {
     assert!(
         !row.contains("LEFTOVER"),
         "a container whose nonce IS in the live registry must not be named a leftover: {row}"
+    );
+}
+
+/// core#366 d2: the leftover survives the WHOLE chain the operator surface
+/// uses — `orphan::scan_all(OrphanScope::AnyNonce, ..)`, through
+/// `ExecutionBackend::scan_orphans_in_scope`, into the unscoped enumeration.
+///
+/// # Why this exists beside the test above rather than instead of it
+///
+/// The test above calls `ContainerBackend::scan_orphans_any_nonce()` directly.
+/// That is the right shape for d5 — it measures the enumeration — but it skips
+/// both links between the CLI and the enumeration, and a reviewer proved the
+/// cost: mutating `scan_orphans_in_scope`'s unscoped arm to
+/// `self.scan_orphans("<a nonce nobody holds>")` COMPILED, left the whole
+/// suite green at 4068 passed, and restored `count 0 (MEASURED)` on the
+/// shipped binary against a real labelled leftover. The two links carried the
+/// defect and no test crossed them.
+///
+/// The pair of answers is again the assertion, for the same reason as above:
+/// finding the container proves nothing on its own, because a scan that finds
+/// everything would also find it. What is load-bearing is that the SCOPED
+/// question — the only one this chain could ask before core#366 — still cannot
+/// see it, in the same call, over the same planted container.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_operator_chain_finds_the_leftover_end_to_end() {
+    let _state = temp_state();
+    if !daemon_answers() {
+        println!("UNEXERCISED \u{2014} no docker daemon on this host");
+        return;
+    }
+    let name = "wayland-f25-wedge366-chain";
+    let stranger = "wedge366-chain-nonce-from-a-run-this-process-never-made";
+    remove(name);
+    wedge(name, stranger);
+
+    let unscoped =
+        wcore_exec_backend::orphan::scan_all(OrphanScope::AnyNonce, reference_budget()).await;
+    let scoped = wcore_exec_backend::orphan::scan_all(
+        OrphanScope::Nonce("wedge366-chain-nonce-this-process-is-holding"),
+        reference_budget(),
+    )
+    .await;
+
+    remove(name);
+
+    let unscoped = unscoped.expect("the unscoped chain must answer");
+    let scoped = scoped.expect("the scoped chain must answer");
+
+    let container = |evidence: &Vec<wcore_exec_backend::orphan::OrphanEvidence>| {
+        evidence
+            .iter()
+            .find(|e| e.kind == wcore_exec_backend::contract::BackendKind::Container)
+            .cloned()
+            .expect("CONTROL: scan_all must include the container backend")
+    };
+    let unscoped_row = container(&unscoped);
+    let scoped_row = container(&scoped);
+
+    // CONTROL, the load-bearing half: the scoped chain really enumerated and
+    // really could not see the leftover. Without it, a chain that answered
+    // nothing at all would satisfy the assertion below.
+    assert!(
+        scoped_row.is_observed(),
+        "CONTROL: the scoped chain must really have enumerated: {}",
+        scoped_row.method
+    );
+    assert!(
+        !scoped_row.rows.iter().any(|row| row.contains(name)),
+        "CONTROL: the nonce-scoped chain must NOT see a leftover carrying another nonce, or          this test has stopped measuring core#366: {:?}",
+        scoped_row.rows
+    );
+    assert_eq!(
+        scoped_row.nonce.as_deref(),
+        Some("wedge366-chain-nonce-this-process-is-holding"),
+        "the evidence must declare the scope it was taken in"
+    );
+
+    assert_eq!(
+        unscoped_row.nonce, None,
+        "an unscoped row must report NO nonce scope rather than borrowing one: a dispatcher          that quietly substitutes a nonce here is the mutation this test exists to catch"
+    );
+    assert!(
+        unscoped_row
+            .rows
+            .iter()
+            .any(|row| row.contains(name) && row.contains("LEFTOVER")),
+        "core#366: `backend scan` reaches the enumeration through exactly this chain, and it          must report the planted leftover. It reported count={:?} rows={:?} via {}",
+        unscoped_row.orphan_count,
+        unscoped_row.rows,
+        unscoped_row.method
     );
 }
 

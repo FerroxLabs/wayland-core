@@ -344,7 +344,25 @@ pub enum OrphanScope<'a> {
     AnyNonce,
 }
 
-impl OrphanScope<'_> {
+impl<'a> OrphanScope<'a> {
+    /// The run this scope names, or `None` when it names no single run.
+    ///
+    /// # The one place the MEANING of a scope is written down
+    ///
+    /// [`ExecutionBackend::scan_orphans_in_scope`] routes a scope to an
+    /// enumeration, and [`OrphanScan::nonce`] records the scope the answer
+    /// came back in. Those are two hand-written statements about the same
+    /// fact, and until they were checked against each other a dispatch arm
+    /// could answer a NARROWER question than it was asked and nothing would
+    /// say so — see the guard in `scan_orphans_in_scope`, whose red arm is
+    /// exactly that mutation.
+    pub fn nonce(&self) -> Option<&'a str> {
+        match *self {
+            OrphanScope::Nonce(nonce) => Some(nonce),
+            OrphanScope::AnyNonce => None,
+        }
+    }
+
     /// The scope in words, for an operator-facing line.
     pub fn label(&self) -> String {
         match self {
@@ -447,10 +465,36 @@ pub trait ExecutionBackend: Send + Sync {
     /// choosing the scoped question stays possible; what is no longer possible
     /// is getting it by default and never knowing there was another one.
     async fn scan_orphans_in_scope(&self, scope: OrphanScope<'_>) -> Result<OrphanScan> {
-        match scope {
-            OrphanScope::Nonce(nonce) => self.scan_orphans(nonce).await,
-            OrphanScope::AnyNonce => self.scan_orphans_any_nonce().await,
+        let scan = match scope {
+            OrphanScope::Nonce(nonce) => self.scan_orphans(nonce).await?,
+            OrphanScope::AnyNonce => self.scan_orphans_any_nonce().await?,
+        };
+        // FAIL CLOSED ON THE ROUTING ITSELF (core#366 d2).
+        //
+        // Making the scope a parameter moved the caller set from a note to the
+        // compiler, and left exactly one hand-written decision behind: these
+        // two arms. A reviewer mutated the unscoped arm to
+        // `self.scan_orphans("<a nonce nobody holds>")`. It compiled, the
+        // whole suite stayed green, and `backend scan` went back to reporting
+        // `count 0 (MEASURED)` over a real labelled leftover — the defect this
+        // ticket exists to close, fully restored, invisibly.
+        //
+        // So the routing is not trusted either. The scan states the scope it
+        // was taken in; the caller stated the scope it asked for; a dispatch
+        // that answers a different question than it was asked is an ERROR
+        // here rather than a MEASURED zero downstream. The asymmetry is the
+        // usual one: a loud failure costs an operator a re-run, while a quiet
+        // narrower answer is indistinguishable from a clean host.
+        if scan.nonce.as_deref() != scope.nonce() {
+            return Err(ExecError::Exec(format!(
+                "core#366 d2: a scan asked in scope `{}` came back declaring scope {:?}. A scan                  that answers a narrower question than the caller asked reports zero over a                  leftover it never looked for, which is precisely this defect. backend={}                  method={}",
+                scope.label(),
+                scan.nonce,
+                scan.backend_id,
+                scan.method
+            )));
         }
+        Ok(scan)
     }
 }
 
