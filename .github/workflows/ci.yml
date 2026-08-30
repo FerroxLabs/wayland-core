@@ -2819,13 +2819,22 @@ jobs:
       # "zero reports is a failure" rule this step has always enforced; the ci
       # matrix legs are conditioned per platform, so a per-leg count would be a
       # different (and riskier) gate than the one being preserved here.
-      # THE GATE USED TO SKIP ITSELF ON EVERY LANE PUSH (wayland#1177 c1).
-      # This `if:` named ONLY `needs.ci` -- the macOS matrix, which is opt-in
-      # behind a `[ci-darwin]` commit marker and is therefore `skipped` on an
-      # ordinary `lane/**` push. `ci-linux` is the job that runs the whole
-      # workspace nextest suite, and its result was not consulted, so the one
-      # step that reads the downloaded evidence excluded itself exactly when
-      # the evidence existed.
+      # THE GATE COULD SKIP ITSELF WHILE THE EVIDENCE EXISTED (wayland#1177 c1).
+      # This `if:` named ONLY `needs.ci` -- the macOS/Windows matrix, which is
+      # admitted by a runner budget and by a `[ci-darwin]` commit marker, and is
+      # therefore `skipped` on some pushes. `ci-linux` is the job that runs the
+      # whole workspace nextest suite, and its result was NOT consulted, so on
+      # any run where that matrix skipped, the one step that reads the
+      # downloaded evidence excluded itself -- including when the evidence was
+      # sitting in the artifact it had just downloaded.
+      #
+      # HOW OFTEN THAT HAPPENS IS NOT CHARACTERISED AND IS NOT CLAIMED HERE:
+      # measured skipped on run 33303418632 (lane/f13-w3-test-infra-probe) and
+      # measured RUNNING on run 33309835036 (lane/f13-w3-test-infra) minutes
+      # later, both plain `lane/**` pushes with no `[ci-darwin]` marker. The
+      # defect does not depend on the rate: a gate whose execution is decided
+      # by an unrelated job's admission is inert whenever that job is not
+      # admitted.
       #
       # MEASURED end to end on run 33303418632 (branch
       # lane/f13-w3-test-infra-probe, 2026-08-30). A probe test was made to
