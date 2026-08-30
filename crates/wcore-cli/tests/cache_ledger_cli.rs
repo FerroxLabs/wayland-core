@@ -1050,6 +1050,59 @@ fn a_current_schema_session_with_an_unpriced_counterfactual_still_verifies() {
     assert_eq!(code(&verified), 0, "and it must exit 0:\n{v}");
 }
 
+/// wayland#1205 c3, NARROWNESS at the certification surface.
+///
+/// The refusal keys on rows the migration DEMOTED, not on the file's version.
+/// A v1 ledger whose counterfactual was a real, non-zero figure loses nothing
+/// on load, so there is no guessed meaning to refuse and `verify` must still
+/// certify it. Round 2's over-correction probe made the launder counter count
+/// every v1 turn and all 19 tests here stayed green — this is the one that
+/// objects: with that mutation the count is 1, `trustworthy` flips to false,
+/// and `verify` refuses every pre-schema-2 ledger in existence.
+#[test]
+fn a_legacy_ledger_whose_counterfactual_survived_the_migration_still_verifies() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_v1_ledger(
+        tmp.path(),
+        "legacy-priced",
+        vec![turn_json(
+            1,
+            6_620,
+            7_232,
+            0,
+            0.061389,
+            // v1 wrote a real number here, so the migration has nothing to
+            // demote: `Some(0.09)` means the same thing in v1 and v2.
+            0.09,
+            "provider_reported",
+            None,
+            14_752,
+        )],
+    );
+
+    let verified = run(tmp.path(), &["verify"]);
+    let v = stdout(&verified);
+    assert_eq!(
+        field(&v, "verify", "laundered_counterfactual_round_trips"),
+        "0",
+        "premise: nothing was demoted on load — a non-zero v1 counterfactual \
+         is unambiguous:\n{v}"
+    );
+    assert_eq!(
+        field(&v, "verify", "saving_truth"),
+        "priced",
+        "premise: the saving really is computed against a baseline the writer \
+         knew, so this is the case the refusal must NOT catch:\n{v}"
+    );
+    assert_eq!(
+        field(&v, "verify", "trustworthy"),
+        "true",
+        "the #1205 refusal is about guessed field meanings, not about the \
+         schema stamp; refusing every legacy file is the over-correction:\n{v}"
+    );
+    assert_eq!(code(&verified), 0, "and it must exit 0:\n{v}");
+}
+
 /// Known-negative for the test above: a REAL negative saving — a session that
 /// writes cache and never reads it back — must still print as a negative
 /// number. Rendering every saving as `unknown` would satisfy the assertions

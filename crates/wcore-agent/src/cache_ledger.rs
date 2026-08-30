@@ -1563,6 +1563,45 @@ mod tests {
         assert_eq!(s.counterfactual_unpriced_round_trips, 0);
     }
 
+    /// wayland#1205 c3, NARROWNESS — `laundered_counterfactual_round_trips`
+    /// counts the turns the migration DEMOTED, not every turn in a v1 file.
+    ///
+    /// Round 2's over-correction probe moved the counter outside the `if` and
+    /// the whole suite stayed green: `verify` could have been made to refuse
+    /// every pre-schema-2 ledger, including ones whose figures survived the
+    /// migration intact, with nothing objecting. A mixed file is what tells
+    /// the two apart, so it is the one graded here.
+    #[test]
+    fn the_launder_count_counts_only_the_turns_the_migration_demoted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("legacy-mixed.json");
+        let mut v = legacy_v1_ledger_json(0.02);
+        let mut priced = v["turns"][0].clone();
+        priced["uncached_equivalent_usd"] = serde_json::json!(0.05);
+        let zeroed = v["turns"][0].clone();
+        v["turns"] = serde_json::json!([zeroed, priced]);
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+
+        let back = load(&path).unwrap();
+        // Premises, so the count cannot be right by accident.
+        assert_eq!(back.turns.len(), 2, "premise: two v1 turns in the file");
+        assert_eq!(
+            back.turns[0].uncached_equivalent_usd, None,
+            "premise: turn 0 carried the v1 zero and WAS demoted"
+        );
+        assert_eq!(
+            back.turns[1].uncached_equivalent_usd,
+            Some(0.05),
+            "premise: turn 1 carried a real figure and was NOT demoted"
+        );
+        assert_eq!(
+            back.laundered_counterfactual_round_trips, 1,
+            "only a demoted row is a figure this build had to guess the \
+             meaning of; counting the surviving one too would make `verify` \
+             refuse every pre-schema-2 ledger"
+        );
+    }
+
     /// The version is what makes the two zeros distinguishable, so a build
     /// that writes the new meaning must not stamp the old version.
     #[test]

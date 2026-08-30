@@ -101,7 +101,7 @@ fn cache_read_dropped(current: u64, previous: u64) -> bool {
 
 /// wayland#1206 — keep the absolute floor's fall-through off the server.
 ///
-/// [`CacheBreakDetector::attribute_cause`] ends in [`CacheBreakCause::TtlExpiry`]
+/// [`CacheBreakDetector::attribute_cause_raw`] ends in [`CacheBreakCause::TtlExpiry`]
 /// whenever nothing about the request diverged, so EVERY turn the #1166
 /// absolute floor catches on a stable prefix was being reported as a
 /// server-side expiry — and written durably into the cache ledger as
@@ -364,16 +364,14 @@ impl CacheBreakDetector {
         // applies. `prior_cache_read_tokens` is the previous turn's figure:
         // `check_response` has already rotated `prev_stats` onto THIS turn by
         // the time the engine calls us.
-        let cause = floor_cause(
-            match self.current_snapshot.as_ref() {
-                Some(current) => self.attribute_cause(current),
-                None => CacheBreakCause::FirstRequest,
-            },
-            cache_read_dropped(
-                stats.cache_read_tokens,
-                self.prior_cache_read_tokens.unwrap_or(0),
-            ),
+        let cache_read_fell = cache_read_dropped(
+            stats.cache_read_tokens,
+            self.prior_cache_read_tokens.unwrap_or(0),
         );
+        let cause = match self.current_snapshot.as_ref() {
+            Some(current) => self.attributed_cause(current, cache_read_fell),
+            None => CacheBreakCause::FirstRequest,
+        };
         Some(CacheHealthAlert {
             round_trip: self.round_trips,
             input_tokens: total_input_tokens,
@@ -401,9 +399,23 @@ impl CacheBreakDetector {
 
         let prev_had_cache = prev.cache_read_tokens > 0 || prev.cache_creation_tokens > 0;
 
-        // Full miss: had cache before, now read tokens dropped to 0
+        // wayland#1206 — computed ONCE, from the previous turn's figure, and
+        // handed to every attribution below. An expiry destroys cached tokens,
+        // so it shows up as a DROP; this boolean is what separates a turn that
+        // may name the server's TTL from one that may not.
+        let cache_read_fell = cache_read_dropped(stats.cache_read_tokens, prev.cache_read_tokens);
+
+        // Full miss: had cache before, now read tokens dropped to 0.
+        //
+        // wayland#1206, second instance — `prev_had_cache` is satisfied by
+        // cache_CREATION alone, so this arm is reached on turn 2 of any
+        // session where the provider wrote a prefix and did not serve it back
+        // (a below-minimum prefix, a rejected marker, a moved prefix). There
+        // `cache_read` is 0 -> 0: nothing was destroyed, so nothing expired.
+        // `attributed_cause` rewrites that fall-through to `PrefixNotCached`
+        // and leaves a real collapse (40_000 -> 0) as the `TtlExpiry` it is.
         if prev_had_cache && stats.cache_read_tokens == 0 {
-            let cause = self.attribute_cause(current);
+            let cause = self.attributed_cause(current, cache_read_fell);
             return CacheDiagnostic::FullMiss { cause };
         }
 
@@ -416,8 +428,8 @@ impl CacheBreakDetector {
         };
 
         // Partial miss: cache_read dropped >5% compared to previous
-        if cache_read_dropped(stats.cache_read_tokens, prev.cache_read_tokens) {
-            let cause = self.attribute_cause(current);
+        if cache_read_fell {
+            let cause = self.attributed_cause(current, cache_read_fell);
             return CacheDiagnostic::PartialMiss { hit_rate, cause };
         }
 
@@ -446,18 +458,32 @@ impl CacheBreakDetector {
             // server's TTL for it. The drop branch above already returned, so
             // `cache_read` did not fall; the boolean is recomputed rather than
             // assumed so a future reordering cannot silently make it a lie.
-            let cause = floor_cause(
-                self.attribute_cause(current),
-                cache_read_dropped(stats.cache_read_tokens, prev.cache_read_tokens),
-            );
+            let cause = self.attributed_cause(current, cache_read_fell);
             return CacheDiagnostic::PartialMiss { hit_rate, cause };
         }
 
         CacheDiagnostic::Healthy { hit_rate }
     }
 
-    /// Determine what caused the cache break by comparing prev vs current snapshots.
-    fn attribute_cause(&self, current: &PromptSnapshot) -> CacheBreakCause {
+    /// The ONLY attribution entry point. Every verdict-producing site goes
+    /// through here, so the `TtlExpiry` fall-through cannot escape the floor
+    /// rule at a site someone forgot to guard.
+    ///
+    /// wayland#1206, second instance. The rewrite shipped at two of the three
+    /// attribution sites and the third — `compute_diagnostic`'s FULL-miss arm —
+    /// kept calling [`Self::attribute_cause_raw`] bare. That arm has no
+    /// warm-session gate and `prev_had_cache` is satisfied by cache_CREATION
+    /// alone, so turn 2 of any session where the provider wrote a prefix and
+    /// did not serve it back arrived with `cache_read` 0 -> 0 and was reported
+    /// as a server-side expiry. Making the guarded form the only reachable one
+    /// closes the class instead of patching a third instance of it.
+    fn attributed_cause(&self, current: &PromptSnapshot, cache_read_fell: bool) -> CacheBreakCause {
+        floor_cause(self.attribute_cause_raw(current), cache_read_fell)
+    }
+
+    /// Determine what caused the cache break by comparing prev vs current
+    /// snapshots. Unguarded — call [`Self::attributed_cause`] instead.
+    fn attribute_cause_raw(&self, current: &PromptSnapshot) -> CacheBreakCause {
         let Some(prev) = &self.prev_snapshot else {
             return CacheBreakCause::FirstRequest;
         };
@@ -1170,6 +1196,117 @@ mod tests {
             crate::cache_ledger::cause_of_diagnostic(&diag),
             Some(wcore_providers::cache_observation::InvalidationCause::Expired),
             "and it must still be recorded as `expired`"
+        );
+    }
+
+    /// wayland#1206 c1/c2, SECOND instance — the FULL-miss arm.
+    ///
+    /// Found by the round-2 verifier. Strictly larger and cheaper to hit than
+    /// the 240k trace round 1 closed: `prev_had_cache` is satisfied by
+    /// cache_CREATION alone and this arm has no warm-session gate, so it is
+    /// reached on TURN 2 of any session where the provider wrote a cache entry
+    /// and did not serve it back — a below-minimum prefix, a rejected marker,
+    /// a moved prefix. `cache_read` is 0 on both turns while total input grows
+    /// 10_000 -> 30_000, which is c1's sentence verbatim, and the arm answered
+    /// `FullMiss { TtlExpiry }` / `InvalidationCause::Expired`.
+    #[test]
+    fn a_full_miss_with_flat_zero_cache_read_is_not_attributed_to_expiry() {
+        let mut detector = CacheBreakDetector::new();
+
+        // Turn 1: the provider WRITES a prefix and serves nothing back.
+        detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+        detector.check_response(CacheStats {
+            input_tokens: 10_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 9_000,
+        });
+
+        // Turn 2: byte-identical request, still nothing served back, more input.
+        detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+        let stats = CacheStats {
+            input_tokens: 30_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        };
+
+        // Premises first, so this cannot pass by drifting off c1's shape.
+        assert!(
+            !cache_read_dropped(0, 0),
+            "premise: cache_read is UNCHANGED turn over turn (0 -> 0), so no \
+             cached tokens were destroyed and no expiry is visible"
+        );
+        assert!(
+            stats.total_input_tokens() > 10_000,
+            "premise: total input grew, which is the other half of c1"
+        );
+
+        let diag = detector.check_response(stats).unwrap();
+        assert!(
+            matches!(diag, CacheDiagnostic::FullMiss { .. }),
+            "premise: this is the FULL-miss arm — the one that shipped with no \
+             floor guard. got {diag:?}"
+        );
+        assert!(
+            matches!(
+                diag,
+                CacheDiagnostic::FullMiss {
+                    cause: CacheBreakCause::PrefixNotCached
+                }
+            ),
+            "c1: cache_read was unchanged at 0 while total input grew 10_000 \
+             -> 30_000. Nothing expired — the prefix was written and never \
+             served. got {diag:?}"
+        );
+
+        // c2 — the DURABLE consequence, read off the function engine.rs feeds
+        // into the ledger write, not inferred from the enum.
+        let recorded = crate::cache_ledger::cause_of_diagnostic(&diag);
+        assert_ne!(
+            recorded,
+            Some(wcore_providers::cache_observation::InvalidationCause::Expired),
+            "c2: no InvalidationCause::Expired may be written for this turn"
+        );
+        assert_eq!(
+            recorded,
+            Some(wcore_providers::cache_observation::InvalidationCause::PrefixNotCached),
+            "and the honest fall-through must be what lands in the ledger"
+        );
+    }
+
+    /// Narrowness control for the arm above: the FULL-miss rewrite must only
+    /// touch the `TtlExpiry` fall-through. A real divergence on a 0 -> 0 turn
+    /// is a positive finding about THIS request and must survive — otherwise
+    /// the #1206 repair becomes the #1166 Defect 4 it exists to undo, one
+    /// cause over.
+    #[test]
+    fn a_full_miss_with_flat_zero_cache_read_still_names_a_real_divergence() {
+        let mut detector = CacheBreakDetector::new();
+        detector.record_request("model-a", "prompt", &make_tools(), &make_messages(2));
+        detector.check_response(CacheStats {
+            input_tokens: 10_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 9_000,
+        });
+
+        // Same 0 -> 0 shape, but the dispatched model moved: a different cache
+        // pool, and a client-side cause the detector knows by name.
+        detector.record_request("model-b", "prompt", &make_tools(), &make_messages(2));
+        let diag = detector
+            .check_response(CacheStats {
+                input_tokens: 30_000,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                diag,
+                CacheDiagnostic::FullMiss {
+                    cause: CacheBreakCause::ModelChanged
+                }
+            ),
+            "the fall-through rewrite must not launder a real attribution into \
+             PrefixNotCached. got {diag:?}"
         );
     }
 
