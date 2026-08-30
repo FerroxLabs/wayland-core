@@ -3739,7 +3739,8 @@ mod tests {
         let mut app = App::new();
         // This is the exact JSON shape that ChannelSink::emit_error now produces
         // via ProtocolEvent::Error { msg_id: None, error: ErrorInfo { code:
-        // "sub_agent_error", message: "...", retryable: false } }.
+        // "sub_agent_error", message: "...", retryable: false,
+        // category: tool_runtime } } (wayland#1237).
         apply_event(
             &mut app,
             ProtocolEvent::SubAgentEvent {
