@@ -15,7 +15,7 @@ criteria:
   - id: c2
     text: "The shortfall is named to the user, and says the HEAD of the prompt is what was lost"
     state: met
-    evidence: "file:crates/wcore-agent/src/engine.rs:15795:Servers drop the HEAD of the conversation first"
+    evidence: "file:crates/wcore-agent/src/engine.rs:15926:Servers drop the HEAD of the conversation first"
     owner: core
     note: "RE-ANCHORED 2026-08-30 for wayland#1198: was engine.rs:15348, drifted onto a FluxRouter web_search sources comment. The notice is emitted at :15761 and the sentence this criterion is about -- that the HEAD of the prompt is what was lost -- is at :15764. Upgraded from the corpus test, which evidences DETECTION rather than the user-facing notice this criterion is about. engine.rs:15348-15351 is the emit_info site that names the shortfall and says the HEAD of the prompt is what was lost. SOFT SPOT: no test asserts the notice STRING - grep for the phrase returns the production site only."
   - id: c3
