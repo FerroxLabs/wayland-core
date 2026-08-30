@@ -873,7 +873,7 @@ impl ExecutionBackend for ContainerBackend {
                     kind: BackendKind::Container,
                     nonce: None,
                     // DERIVED from the filter that actually ran, never
-                    // restated. This lane's own M1 red arm mutated the filter
+                    // restated. A red arm in this lane mutated the filter
                     // to a value scope and the hand-written method string
                     // still claimed "KEY PRESENCE": an operator-facing account
                     // of an enumeration that can disagree with the enumeration
