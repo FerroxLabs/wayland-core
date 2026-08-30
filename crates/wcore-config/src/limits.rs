@@ -30,13 +30,115 @@ mod passthrough;
 
 use catalogue::CATALOGUE_CEILINGS;
 
+/// FerroxLabs/wayland#1232 -- every open-weights id carried by the `if`-chain
+/// families, tagged with the provider that OPERATES it when its hosts disagree
+/// too widely for one static figure to be true of all of them.
+///
+/// WHY A GATE AND NOT A DELETION. AGENTS.md's third model-limits rule forbids a
+/// static arm for an open-weights id served at wildly different limits by
+/// different hosts, and on the 2026-08-30 models.dev pull seven of these span
+/// 3.5x-8.2x across 19-64 endpoints. Deleting those arms is NOT free, and not
+/// symmetric with the Qwen precedent: an arm revokes `should_omit_max_tokens`,
+/// but that omission only exists on an OMIT-SAFE preset (`gemini`,
+/// `openrouter`, `flux-router`). DeepSeek's and MiniMax's own endpoints are
+/// plain `openai_compat_provider` presets, which are NOT omit-safe -- so on the
+/// vendor's own API a missing arm restores no natural ceiling at all. It drops
+/// output to `UNKNOWN_CAP` (8,192) and the window to `UNVERIFIED_CONTEXT_WINDOW`
+/// (32,768): the 47x cut #1157 was filed to fix, re-introduced.
+///
+/// So the defect is not the figures, it is the KEY -- #1232's own words, "keyed
+/// on the model id alone, with no provider in the key". Scoping the seven to
+/// their vendor gives every caller the right answer at once:
+///
+///   * the vendor's endpoint keeps the vendor's verified figures, unchanged;
+///   * an omit-safe reseller route (`openrouter` / `flux-router`) resolves
+///     `None`, which RESTORES the omission and lets that host apply its own
+///     natural ceiling -- the outcome a deletion was wanted for;
+///   * any other host resolves `None` too, so the window falls to
+///     `UNVERIFIED_CONTEXT_WINDOW` (32,768, below every measured host) and the
+///     output to `UNKNOWN_CAP` (8,192, which IS the measured host floor for
+///     both families: nebius serves minimax-m2.5 at 8,192 and deepinfra serves
+///     deepseek-v4-pro at 8,192). It errs LOW, where a wrong high number is
+///     ceiling death (#165).
+///
+/// THE FIVE ROWS THAT ARE NOT GATED are the point of measuring instead of
+/// exempting the family: `deepseek-v4-flash-vision-exp` (1.05x),
+/// `deepseek-v4-pro-0813` (1.05x), `minimax-m2.5-highspeed` (1.0x),
+/// `minimax-m2.7` (1.3x) and `minimax-m2.7-highspeed` (1.02x) have hosts that
+/// AGREE, so gating them would replace a real ceiling with a low guess for no
+/// benefit -- the harm this rule exists to prevent, in the other direction.
+///
+/// ORDERED LONGEST-FRAGMENT-FIRST, and the ordering is load-bearing: the lookup
+/// is a substring match, so `deepseek-v4-flash-vision-exp` must be tested
+/// BEFORE `deepseek-v4-flash` or it inherits the gated row's verdict and loses
+/// an arm its hosts agree on. `open_weights_rows_are_longest_fragment_first`
+/// asserts that structurally rather than trusting this sentence.
+///
+/// Spreads measured on the 2026-08-30 models.dev pull (`host_spread` over every
+/// provider, vendor and third-party alike); control: `claude-opus-5` is
+/// 1,000,000 -> 1,000,000 across 31 hosts, i.e. 1.0x, and is not an
+/// open-weights id at all.
+const OPEN_WEIGHTS_HOST_SPREAD: &[(&str, Option<&str>)] = &[
+    // --- hosts AGREE: the arm stays keyed on the id alone. ---
+    ("deepseek-v4-flash-vision-exp", None), // 1.05x over 12 hosts
+    ("deepseek-v4-pro-0813", None),         // 1.05x over 27 hosts
+    ("minimax-m2.5-highspeed", None),       // 1.00x over 11 hosts
+    ("minimax-m2.7-highspeed", None),       // 1.02x over 15 hosts
+    ("minimax-m2.7", None),                 // 1.30x over 38 hosts
+    // --- hosts DISAGREE: vendor-operated providers only. ---
+    ("deepseek-v4-flash-0731", Some("deepseek")), // 5.1x over 35 hosts
+    ("deepseek-v4-flash", Some("deepseek")),      // 8.0x over 61 hosts
+    ("deepseek-v4-pro", Some("deepseek")),        // 8.2x over 64 hosts
+    ("minimax-m2.1", Some("minimax")),            // 5.1x over 24 hosts
+    ("minimax-m2.5", Some("minimax")),            // 3.5x over 44 hosts
+    ("minimax-m3", Some("minimax")),              // 4.0x over 43 hosts
+    ("minimax-m2", Some("minimax")),              // 5.1x over 19 hosts
+];
+
+/// The vendor that operates `m`'s open-weights family, when the family's hosts
+/// disagree widely enough that a globally-keyed arm is forbidden. `None` for
+/// every other id, including the open-weights ids whose hosts agree.
+///
+/// `m` must already be lowercased, as `model_output_ceiling` does.
+pub(crate) fn host_variable_open_weights_vendor(m: &str) -> Option<&'static str> {
+    OPEN_WEIGHTS_HOST_SPREAD
+        .iter()
+        .find(|(fragment, _)| m.contains(fragment))
+        .and_then(|&(_, vendor)| vendor)
+}
+
+/// Whether `provider` is the vendor that operates the family, including that
+/// vendor's own tenant spellings (`minimax-cn`, `minimax-coding-plan`, which
+/// models.dev publishes as separate provider rows carrying the same figures).
+///
+/// A prefix match, not a substring one: a third-party host whose id merely
+/// CONTAINS the vendor name must not inherit the vendor's ceiling.
+fn provider_operates(provider: &str, vendor: &str) -> bool {
+    let p = provider.to_ascii_lowercase();
+    p == vendor
+        || p.strip_prefix(vendor)
+            .is_some_and(|rest| rest.starts_with('-'))
+}
+
 /// Returns `(max_output_tokens, context_window)` for a known model, or `None`
 /// when the model is unknown (caller must fail open).
 ///
-/// `provider` is accepted for future provider-scoped disambiguation; today the
-/// model id is distinctive enough to match on alone.
-pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> {
+/// `provider` disambiguates the open-weights families whose hosts disagree --
+/// see [`OPEN_WEIGHTS_HOST_SPREAD`]. Every other family is served by its vendor
+/// alone (or by resellers that republish the vendor's figures), so the model id
+/// is distinctive enough to match on alone and `provider` is not consulted.
+pub fn model_output_ceiling(provider: &str, model: &str) -> Option<(u32, u32)> {
     let m = model.to_ascii_lowercase();
+
+    // FerroxLabs/wayland#1232 -- the provider-scoped gate, ahead of EVERY arm
+    // below so no later arm can hand one of these figures to a host that does
+    // not serve it. `None` here is the honest answer, not a fallback: the
+    // caller then fails open exactly as it does for any unlisted model.
+    if let Some(vendor) = host_variable_open_weights_vendor(&m)
+        && !provider_operates(provider, vendor)
+    {
+        return None;
+    }
 
     // --- Anthropic Claude (4.x/5 era; older 3.x deliberately excluded) ---
     // The 1M-context generation (Opus 4.6/4.7/4.8, Opus 5, Sonnet 4.6, Sonnet 5,
@@ -846,7 +948,12 @@ mod tests {
 
         let mut wrong = Vec::new();
         for &(id, want_out, want_ctx) in PASSTHROUGH_VENDOR_MODELS {
-            match model_output_ceiling("passthrough", id) {
+            // #1232 -- the host-variable open-weights ids are provider-scoped,
+            // so probe them under the vendor that operates them. Read from the
+            // same const the gate reads, so the two cannot drift.
+            let probe = super::host_variable_open_weights_vendor(&id.to_ascii_lowercase())
+                .unwrap_or("passthrough");
+            match model_output_ceiling(probe, id) {
                 Some((out, ctx)) if (out, ctx) == (want_out, want_ctx) => {}
                 Some((out, ctx)) => wrong.push(format!(
                     "{id}: the chain resolves output {out} / context {ctx}, \
@@ -869,6 +976,169 @@ mod tests {
              update `limits/passthrough.rs` and say which vendor rows you \
              checked:\n  {}",
             wrong.join("\n  ")
+        );
+    }
+
+    /// #1232 -- the lookup is a substring match, so the ORDER of
+    /// `OPEN_WEIGHTS_HOST_SPREAD` is semantics, not tidiness: a fragment that
+    /// contains another must be tested first or the longer id can never reach
+    /// its own row and silently inherits the shorter one's verdict. Asserted
+    /// structurally so the claim in that const's doc cannot quietly go false --
+    /// this is the exact shape that let `deepseek-v4-flash-vision-exp` be
+    /// mistaken for `deepseek-v4-flash` in the first draft of the gate.
+    #[test]
+    fn open_weights_rows_are_longest_fragment_first() {
+        let rows = super::OPEN_WEIGHTS_HOST_SPREAD;
+        let mut shadowed = Vec::new();
+        for (i, (long, _)) in rows.iter().enumerate() {
+            for (j, (short, _)) in rows.iter().enumerate() {
+                if i == j || !long.contains(short) {
+                    continue;
+                }
+                if i > j {
+                    shadowed.push(format!(
+                        "`{long}` contains `{short}` but is listed after it, so \
+                         `{long}` can never reach its own row"
+                    ));
+                }
+            }
+        }
+        assert!(shadowed.is_empty(), "{}", shadowed.join("\n  "));
+    }
+
+    /// #1232 -- the seven open-weights ids whose hosts disagree resolve their
+    /// vendor's figures ON THE VENDOR'S OWN ENDPOINT and nothing anywhere else.
+    ///
+    /// This is the test the issue's third acceptance box asks for: it fails if
+    /// a later change re-globalises one of the seven (the third-party arm
+    /// stops being `None`) AND it fails if a later change deletes one outright
+    /// (the vendor arm stops resolving). Both directions matter, because
+    /// deletion is the obvious reading of AGENTS.md rule 3 and it is the wrong
+    /// one here -- DeepSeek's and MiniMax's own presets are not omit-safe, so a
+    /// deleted arm gives their users `UNKNOWN_CAP` (8,192), not a natural
+    /// ceiling.
+    #[test]
+    fn host_variable_open_weights_arms_are_provider_scoped() {
+        use super::passthrough::PASSTHROUGH_VENDOR_MODELS;
+        use std::collections::BTreeMap;
+
+        let vendor_figures: BTreeMap<&str, (u32, u32)> = PASSTHROUGH_VENDOR_MODELS
+            .iter()
+            .map(|&(id, out, ctx)| (id, (out, ctx)))
+            .collect();
+
+        let gated: Vec<&str> = super::OPEN_WEIGHTS_HOST_SPREAD
+            .iter()
+            .filter(|(_, vendor)| vendor.is_some())
+            .map(|&(fragment, _)| fragment)
+            .collect();
+        let ungated: Vec<&str> = super::OPEN_WEIGHTS_HOST_SPREAD
+            .iter()
+            .filter(|(_, vendor)| vendor.is_none())
+            .map(|&(fragment, _)| fragment)
+            .collect();
+
+        // NON-VACUITY. Both arms of this test loop over a list; an empty list
+        // asserts nothing, and a gate that scoped EVERYTHING would pass the
+        // first loop while destroying the five rows the second loop protects.
+        assert_eq!(
+            gated.len(),
+            7,
+            "the 2026-08-30 pull measured SEVEN rule-3 violations: {gated:?}"
+        );
+        assert_eq!(
+            ungated.len(),
+            5,
+            "five open-weights rows have hosts that AGREE and must stay \
+             globally keyed: {ungated:?}"
+        );
+
+        // Third-party shapes: two omit-safe reseller routes (where `None`
+        // restores `should_omit_max_tokens` and the host's own ceiling), and
+        // three non-omit-safe ones (where `None` errs low instead of high).
+        const THIRD_PARTY: [&str; 5] = [
+            "openrouter",
+            "flux-router",
+            "openai-compat",
+            "nebius",
+            "deepinfra",
+        ];
+
+        for id in &gated {
+            let vendor = super::host_variable_open_weights_vendor(id)
+                .expect("a gated row reports its vendor");
+            let want = *vendor_figures
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} must have a PASSTHROUGH_VENDOR_MODELS row"));
+            assert_eq!(
+                model_output_ceiling(vendor, id),
+                Some(want),
+                "{id}: the vendor `{vendor}` operates this model and must keep \
+                 its verified figures -- deleting the arm would hand its users \
+                 UNKNOWN_CAP (8,192), because that preset is not omit-safe"
+            );
+            for host in THIRD_PARTY {
+                assert_eq!(
+                    model_output_ceiling(host, id),
+                    None,
+                    "{id} resolved an arm on `{host}`, which does not operate \
+                     it. AGENTS.md rule 3: this id is served from {} to {} \
+                     across dozens of endpoints, so one static figure reaches \
+                     hosts that serve neither",
+                    "its floor",
+                    "its ceiling"
+                );
+            }
+        }
+
+        // CONTROL 1 -- the five whose hosts AGREE are untouched on every
+        // provider. Without this the test would pass just as well against a
+        // gate that scoped the whole family, which is the over-correction
+        // AGENTS.md's rule warns about in its second half.
+        for id in &ungated {
+            let want = *vendor_figures
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} must have a PASSTHROUGH_VENDOR_MODELS row"));
+            for host in [
+                "deepseek",
+                "minimax",
+                "openrouter",
+                "openai-compat",
+                "nebius",
+            ] {
+                assert_eq!(
+                    model_output_ceiling(host, id),
+                    Some(want),
+                    "{id} lost its arm on `{host}`, but its hosts agree within \
+                     1.3x -- gating it replaces a real ceiling with a low guess"
+                );
+            }
+        }
+
+        // CONTROL 2 -- a vendor-only id is outside this gate entirely, on any
+        // provider string. Proves the gate is keyed on the id, not on the
+        // provider argument suddenly mattering everywhere.
+        for host in ["anthropic", "openrouter", "nebius", "passthrough"] {
+            assert_eq!(
+                model_output_ceiling(host, "claude-opus-5"),
+                Some((128_000, 1_000_000)),
+                "claude-opus-5 is not open-weights; `{host}` must not change it"
+            );
+        }
+
+        // CONTROL 3 -- vendor tenants keep the arm; a host whose NAME merely
+        // contains the vendor's does not. `provider_operates` is a prefix match
+        // for exactly this reason.
+        assert_eq!(
+            model_output_ceiling("minimax-coding-plan", "minimax-m2.5"),
+            Some((128_000, 204_800)),
+            "the vendor's own tenant rows publish the vendor's figures"
+        );
+        assert_eq!(
+            model_output_ceiling("minimaxproxy", "minimax-m2.5"),
+            None,
+            "a reseller whose id merely starts with the vendor's name must not \
+             inherit the vendor's ceiling"
         );
     }
 

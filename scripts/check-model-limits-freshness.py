@@ -91,6 +91,9 @@ DEFAULT_LIMITS = "crates/wcore-config/src/limits/catalogue.rs"
 # #1176: the passthrough coverage contract for the `if`-chain families. Same
 # fail-closed parse as the catalogue table.
 DEFAULT_PASSTHROUGH = "crates/wcore-config/src/limits/passthrough.rs"
+# #1232 -- the `if`-chain file itself. NOT `DEFAULT_LIMITS`, which points at
+# the catalogue TABLE; `OPEN_WEIGHTS_HOST_SPREAD` lives beside the chain.
+DEFAULT_CHAIN = "crates/wcore-config/src/limits.rs"
 
 # Vendor-operated providers, per family. "First-party" means the vendor runs the
 # endpoint (or is a first-party tenant of it) -- these are the only rows allowed
@@ -224,15 +227,54 @@ HOST_SPREAD_RATIO = 2.0
 # Keyed on the exact MODEL ID -- one instance per line, never a family. A line
 # for `minimax-m2.5` says nothing about `minimax-m4`, and that is deliberate:
 # an exemption keyed on the class is a gate that cannot catch the next one.
-OPEN_WEIGHTS_ARM_DEBT = {
-    "deepseek-v4-flash": ("2026-11-30", "gh#1232"),
-    "deepseek-v4-flash-0731": ("2026-11-30", "gh#1232"),
-    "deepseek-v4-pro": ("2026-11-30", "gh#1232"),
-    "minimax-m2": ("2026-11-30", "gh#1232"),
-    "minimax-m2.1": ("2026-11-30", "gh#1232"),
-    "minimax-m2.5": ("2026-11-30", "gh#1232"),
-    "minimax-m3": ("2026-11-30", "gh#1232"),
-}
+#
+# EMPTY SINCE #1232 WAS ANSWERED, and deliberately kept rather than deleted:
+# the mechanism is what catches the NEXT host-variable arm, and an empty dict
+# is the honest record that nothing is currently owed. The seven lines that
+# stood here were discharged by scoping those arms to the vendor that operates
+# them (`OPEN_WEIGHTS_HOST_SPREAD` in limits.rs) rather than by removing them --
+# see `provider_scoped_arms` below for why removal was the wrong reading.
+OPEN_WEIGHTS_ARM_DEBT: dict[str, tuple[str, str]] = {}
+
+
+def provider_scoped_arms(limits_path: str) -> set[str]:
+    """The open-weights ids whose arm is keyed on the PROVIDER as well as the id.
+
+    Read from `OPEN_WEIGHTS_HOST_SPREAD` in limits.rs rather than restated here,
+    so this exemption cannot outlive the code that earns it: un-scope an arm in
+    Rust and the id drops out of this set on the very next run, and rule 3
+    starts failing it again with no edit to this file.
+
+    Rule 3's premise is that `model_output_ceiling` is keyed on the id ALONE, so
+    the figure reaches every host serving that name. For a scoped id that
+    premise is false: the vendor's own endpoint gets the vendor's verified
+    figures and every other host gets `None`. `None` is what rule 3 wants -- on
+    an omit-safe route it restores `should_omit_max_tokens` and the host's own
+    natural ceiling, and on any other route it errs LOW (32,768 window / 8,192
+    output) instead of high.
+
+    Failing CLOSED on a parse failure is deliberate: a silently empty set would
+    re-report seven discharged rows and read as a regression.
+    """
+    src = open(limits_path, encoding="utf-8").read()
+    m = re.search(
+        r"const OPEN_WEIGHTS_HOST_SPREAD: &\[\(&str, Option<&str>\)\] = &\[(.*?)\n\];",
+        src,
+        re.S,
+    )
+    if not m:
+        raise SystemExit(
+            "FATAL: could not locate `const OPEN_WEIGHTS_HOST_SPREAD` in "
+            f"{limits_path}. The gate cannot verify a scoping it cannot read -- "
+            "failing closed."
+        )
+    return {
+        frag
+        for frag, vendor in re.findall(
+            r'^\s*\("([^"]+)",\s*(None|Some\("[^"]+"\))\),', m.group(1), re.M
+        )
+        if vendor != "None"
+    }
 
 # Specialty modalities the chain deliberately excludes: they are MUCH smaller
 # than the text tier and an over-claim would 400 them, so they fail open to the
@@ -362,7 +404,7 @@ def open_weights_family(mid: str):
 
 
 def scan_open_weights_arms(catalogue: dict, rows, today=None,
-                           debt=None) -> list[Finding]:
+                           debt=None, scoped=None) -> list[Finding]:
     """AGENTS.md rule 3 over the arms that EXIST, not only over demands.
 
     `scan_passthrough`'s open-weights branch sits inside `if mid not in table`,
@@ -381,6 +423,7 @@ def scan_open_weights_arms(catalogue: dict, rows, today=None,
       * a listed row past its expiry FAILS exactly as an unlisted one does.
     """
     debt = OPEN_WEIGHTS_ARM_DEBT if debt is None else debt
+    scoped = set() if scoped is None else scoped
     today = today or datetime.date.today().isoformat()
     findings: list[Finding] = []
     listed_and_violating = set()
@@ -401,6 +444,21 @@ def scan_open_weights_arms(catalogue: dict, rows, today=None,
                  f"different hosts' -- forbids that arm: `model_output_ceiling` "
                  f"is keyed on the id alone, so the figure reaches every host "
                  f"serving the same name.")
+        # #1232 -- a PROVIDER-SCOPED arm does not have rule 3's premise. It is
+        # not debt and it does not expire: the arm reaches the vendor that
+        # operates the model and nobody else, which is what the rule is for.
+        # Checked before the debt path so a scoped id never needs a dated line.
+        if mid in scoped:
+            findings.append(Finding("REPORT", (
+                f"`{mid}` is an OPEN-WEIGHTS id ({family}) served at {low} to "
+                f"{high} ({high / low:.1f}x) across {len(hosts)} endpoints, and "
+                f"its arm is PROVIDER-SCOPED (OPEN_WEIGHTS_HOST_SPREAD, "
+                f"gh#1232): the vendor's own endpoint resolves the verified "
+                f"figures and every other host resolves None. Rule 3 forbids an "
+                f"arm 'keyed on the id alone'; this one is not. NOT a failure, "
+                f"and NOT debt -- nothing expires.")))
+            listed_and_violating.add(mid)
+            continue
         entry = debt.get(mid)
         if entry is None:
             findings.append(Finding("FAIL", shape + (
@@ -1084,6 +1142,45 @@ def self_test() -> int:
     owcase("a debt line that no longer matches is stale, not a failure",
            agree, OW_ROWS, DEBT_OK, False, True)
 
+    # P22. #1232. An arm that violates rule 3 by SPREAD but is PROVIDER-SCOPED
+    #      is a REPORT, not a FAIL, and carries no expiry: rule 3's premise
+    #      ("keyed on the id alone") is false for it.
+    found = scan_open_weights_arms(disagree, OW_ROWS, today="2026-08-30",
+                                   debt={}, scoped={"minimax-m2.5"})
+    ok = (not any(f.kind == "FAIL" for f in found)
+          and any(f.kind == "REPORT" for f in found))
+    print(f"  [{'ok' if ok else 'BROKEN'}] REPORT, not FAIL, when the arm is "
+          f"provider-scoped")
+    if not ok:
+        failures.append("provider-scoped arm is reported, not failed")
+    # P23. THE CONTROL FOR P22, and the trap that killed the env-globals debt
+    #      file: scoping a DIFFERENT id must not excuse this one. If this ever
+    #      passes, the exemption has become class-keyed.
+    found = scan_open_weights_arms(disagree, OW_ROWS, today="2026-08-30",
+                                   debt={}, scoped={"minimax-m4"})
+    ok = any(f.kind == "FAIL" for f in found)
+    print(f"  [{'ok' if ok else 'BROKEN'}] a scoped id does not excuse a "
+          f"different unscoped arm")
+    if not ok:
+        failures.append("scoped exemption is id-keyed")
+    # P24. The set is READ FROM RUST, so it cannot outlive the code. Parsed
+    #      against the real limits.rs, with the ungated rows as the control: a
+    #      parser that silently matched everything would return 12, and one that
+    #      silently matched nothing would return 0 and read as "no scoping".
+    try:
+        real_scoped = provider_scoped_arms(DEFAULT_CHAIN)
+    except SystemExit:
+        real_scoped = None
+    ok = (real_scoped is not None
+          and "minimax-m2.5" in real_scoped
+          and "minimax-m2.7" not in real_scoped
+          and "minimax-m2.5-highspeed" not in real_scoped)
+    print(f"  [{'ok' if ok else 'BROKEN'}] provider_scoped_arms reads limits.rs "
+          f"and excludes the rows whose hosts agree "
+          f"({len(real_scoped) if real_scoped is not None else 'PARSE FAILED'} scoped)")
+    if not ok:
+        failures.append("provider_scoped_arms parses the Rust const")
+
     # P13. THE CONTROL FOR P12, and the reason the suppression is a MEASUREMENT
     #      rather than a family-wide exemption. Same family, same floor, but
     #      every host agrees: the id is armable and its absence is the #165
@@ -1213,7 +1310,8 @@ def main() -> int:
 
     findings = (scan(catalogue, entries)
                 + scan_passthrough(catalogue, passthrough)
-                + scan_open_weights_arms(catalogue, passthrough))
+                + scan_open_weights_arms(catalogue, passthrough,
+                                         scoped=provider_scoped_arms(DEFAULT_CHAIN)))
     return report(findings, len(entries), len(passthrough))
 
 
