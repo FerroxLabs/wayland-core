@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Lane pre-flight: everything CI's ci-linux job checks on the HOST, before it
-# builds the container image.
+# builds the container image, plus the Desktop contract corpus gate (see its
+# own block below for why that one is here and not in GATES).
 #
 # WHY THIS EXISTS. Lanes gate on hetzner because CI's Linux leg takes ~67
 # minutes to report what hetzner reports in 2-3. But "gate on hetzner" was
@@ -70,7 +71,46 @@ if missing:
 print(f"drift guard: ok ({len(in_ci)} host-side gate script(s) in ci.yml, all covered)")
 PY
 
+# ── DESKTOP CONTRACT CORPUS ────────────────────────────────────────────────
+# NOT in GATES above, because GATES is a mirror of ci.yml's HOST-side steps and
+# this one runs inside ci-linux's container. It is here because of how a lane
+# gets it wrong, measured on lane/f13-w2-mcp-transports, 2026-08-30:
+#
+#   The corpus hashes a fixed list of source files (`SOURCE_INPUTS`) BY PATH,
+#   read from disk at test time. `crates/wcore-cli/src/main.rs` is one of them.
+#   A lane added 773 lines to that file, ran `cargo nextest run -p wcore-mcp
+#   -p wcore-cli`, ran this pre-flight, got 0 from both, and reported green.
+#   `cargo nextest run -p wcore-protocol` was 100: two corpus tests red.
+#
+# The lane's mistake was choosing which crates to test, and the class of that
+# mistake is not closable by telling lanes to also run -p wcore-protocol, or by
+# diffing the changed-file list against SOURCE_INPUTS -- both of those are
+# proxies that need a correct base, a matching path spelling, and someone to
+# have remembered. The question asked here instead is the one that actually
+# decides, and it is total: IS THE CHECKED-IN CORPUS CURRENT WITH THE TREE ON
+# DISK, RIGHT NOW. No diff, no base, no path list, no crate selection. Any
+# staleness reddens here whatever the lane edited and whatever it chose to test.
+#
+# It is the REAL generator, not a reimplementation of the digest -- a second
+# implementation of a hash is a thing that drifts silently, and the binary that
+# writes the corpus is the only honest oracle for whether the corpus is current.
+#
+# Remedy when it fails is printed by the binary: `wcore-contract diff` to see
+# which manifest keys moved, then `wcore-contract generate` and commit
+# crates/wcore-protocol/contracts/desktop/v1/. Only fixture_digest and
+# source_inputs_digest may move for a source-hash rebase; schema_digest moving
+# means a WIRE change and is not a re-pin.
+CORPUS_GATE="cargo run -q -p wcore-protocol --bin wcore-contract -- check"
+
 fail=0
+if out="$($CORPUS_GATE 2>&1)"; then
+  printf '  ok    %s\n' "$CORPUS_GATE"
+else
+  printf '  FAIL  %s\n' "$CORPUS_GATE"
+  printf '%s\n' "$out" | tail -25 | sed 's/^/        /'
+  fail=1
+fi
+
 for cmd in "${GATES[@]}"; do
   if out="$($cmd 2>&1)"; then
     printf '  ok    %s\n' "$cmd"

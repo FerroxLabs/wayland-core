@@ -3394,6 +3394,14 @@ impl TuiEngine {
         drop(runtimes);
         let mut guard = engine.lock().await;
         let defer_cold = guard.defer_cold_config();
+        // wayland#1213 c4 — taken before `registry_mut` borrows the engine and
+        // used once the transport is closed. `/mcp remove` in the TUI dropped
+        // the registry entry and left the McpCatalogRefresh entry, and its
+        // config, behind: the next `notifications/tools/list_changed` from that
+        // server re-registered the tools the operator had just taken away. The
+        // headless `RemoveMcpServer` path has withdrawn since #1213 c4; this
+        // one, on the documented interactive route, never did.
+        let catalog_refresh = guard.mcp_catalog_refresh();
         let Some(registry) = guard.registry_mut() else {
             runtime_mcp.lock().await.insert(name.clone(), runtime);
             let _ = lifecycle.cancel_stopping(&name);
@@ -3424,6 +3432,12 @@ impl TuiEngine {
                 removed_tools,
             });
             return None;
+        }
+        // Only on the arm where the transport is proven closed, matching the
+        // headless path: on `CleanupUnverified` the manager stays in place and
+        // the name stays reserved, so nothing is withdrawn there either.
+        if let Some(refresh) = catalog_refresh.as_ref() {
+            refresh.forget_runtime_server(&name);
         }
         let _ = lifecycle.complete_stopping_generation(&name, generation);
         let config = runtime.config;
