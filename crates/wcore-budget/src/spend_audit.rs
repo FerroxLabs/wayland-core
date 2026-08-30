@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::spend::{
-    EscalationRecord, ModelSpendProfile, SPEND_SCHEMA_VERSION, SpendMode, SpendRefusal,
+    EscalationRecord, ModelSpendProfile, SPEND_SCHEMA_VERSION, SessionIdentity, SpendMode,
+    SpendRefusal,
 };
 
 /// One provider dispatch, as the audit sees it.
@@ -283,7 +284,8 @@ pub struct SpendAuditor {
 #[derive(Debug)]
 struct AuditorState {
     task_id: String,
-    session_id: String,
+    /// #1203 — the SHARED run identity, read when the record is sealed.
+    session: SessionIdentity,
     mode: SpendMode,
     baseline_model: String,
     started_unix_ms: u64,
@@ -299,7 +301,7 @@ impl SpendAuditor {
     #[must_use]
     pub fn new(
         task_id: impl Into<String>,
-        session_id: impl Into<String>,
+        session_id: impl Into<SessionIdentity>,
         mode: SpendMode,
         baseline: &ModelSpendProfile,
         started_unix_ms: u64,
@@ -307,7 +309,7 @@ impl SpendAuditor {
         Self {
             inner: Mutex::new(AuditorState {
                 task_id: task_id.into(),
-                session_id: session_id.into(),
+                session: session_id.into(),
                 mode,
                 baseline_model: baseline.label(),
                 started_unix_ms,
@@ -369,7 +371,7 @@ impl SpendAuditor {
         Some(SpendAuditRecord {
             schema_version: SPEND_SCHEMA_VERSION,
             task_id: state.task_id.clone(),
-            session_id: state.session_id.clone(),
+            session_id: state.session.get(),
             mode: state.mode,
             baseline_model: state.baseline_model.clone(),
             started_unix_ms: state.started_unix_ms,

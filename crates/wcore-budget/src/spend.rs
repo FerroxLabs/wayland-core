@@ -22,8 +22,66 @@
 //! [`ModelSpendProfile`]. That keeps the decision table testable in isolation
 //! AND keeps `wcore-budget` at the bottom of the graph.
 
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// The run's session identity, shared by every component that stamps it onto a
+/// durable spend record.
+///
+/// FerroxLabs/wayland#1203 — this is a HANDLE, not a copy. The spend-audit
+/// trail used to be keyed by whatever string happened to be in scope when the
+/// guard was constructed, which on the engine's two constructors was a
+/// throwaway `uuid::Uuid::new_v4()` minted before any session existed and never
+/// revisited. A copy taken at construction can only ever be right by luck: the
+/// authoritative identity is not known until the session (or the budget
+/// authority) is bound, which happens AFTER the engine is built.
+///
+/// Reading it at WRITE time instead of at construction time is what makes the
+/// key correct by construction rather than by remembering to re-sync: whatever
+/// the run's authoritative identity is when a record is sealed is the key that
+/// record carries. Cloning shares the identity — that is the point, and it is
+/// why `EscalationGate: Clone` clones the handle rather than the string.
+#[derive(Clone, Debug)]
+pub struct SessionIdentity(Arc<Mutex<String>>);
+
+impl SessionIdentity {
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(Arc::new(Mutex::new(id.into())))
+    }
+
+    /// The identity as of now. Called at record-construction time.
+    #[must_use]
+    pub fn get(&self) -> String {
+        self.0.lock().clone()
+    }
+
+    /// Publish a new authoritative identity to every holder of this handle.
+    pub fn set(&self, id: impl Into<String>) {
+        *self.0.lock() = id.into();
+    }
+}
+
+impl From<&str> for SessionIdentity {
+    fn from(id: &str) -> Self {
+        Self::new(id)
+    }
+}
+
+impl From<String> for SessionIdentity {
+    fn from(id: String) -> Self {
+        Self::new(id)
+    }
+}
+
+impl From<&String> for SessionIdentity {
+    fn from(id: &String) -> Self {
+        Self::new(id.clone())
+    }
+}
 
 /// How one provider/model pair is billed.
 ///
@@ -332,7 +390,7 @@ pub enum EscalationError {
 /// turned off within a week.
 #[derive(Debug, Clone)]
 pub struct EscalationGate {
-    session_id: String,
+    session_id: SessionIdentity,
     authorized: ModelSpendProfile,
     /// Every escalation authorized in this run, in order.
     history: Vec<EscalationRecord>,
@@ -340,7 +398,7 @@ pub struct EscalationGate {
 
 impl EscalationGate {
     #[must_use]
-    pub fn new(session_id: impl Into<String>, baseline: ModelSpendProfile) -> Self {
+    pub fn new(session_id: impl Into<SessionIdentity>, baseline: ModelSpendProfile) -> Self {
         Self {
             session_id: session_id.into(),
             authorized: baseline,
@@ -464,7 +522,7 @@ impl EscalationGate {
         }
         let record = EscalationRecord {
             schema_version: SPEND_SCHEMA_VERSION,
-            session_id: self.session_id.clone(),
+            session_id: self.session_id.get(),
             from: self.authorized.clone(),
             to: requested.clone(),
             source,

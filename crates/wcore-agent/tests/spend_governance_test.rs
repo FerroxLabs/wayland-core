@@ -528,3 +528,151 @@ async fn no_paid_mode_refuses_a_metered_model_at_the_engine() {
         "paid_model_refused"
     );
 }
+
+// ── FerroxLabs/wayland#1203 ─────────────────────────────────────────────────
+
+/// A session record for the resume arm, built through serde so the test does
+/// not have to name every field of `Session` (and does not go stale when one is
+/// added).
+fn session_named(id: &str) -> wcore_agent::session::Session {
+    serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "id": id,
+        "created_at": "2026-08-30T00:00:00Z",
+        "updated_at": "2026-08-30T00:00:00Z",
+        "provider": "anthropic",
+        "model": wcore_types::model_aliases::ANTHROPIC_SONNET,
+        "cwd": ".",
+        "conversation_id": "conv-1203",
+    }))
+    .expect("a session record the engine can resume")
+}
+
+/// #1203 c2 — the spend-audit key is the run's identity, not a per-construction
+/// throwaway.
+///
+/// The three paths that can install a spend guard are exercised against ONE
+/// conversation: a fresh construction, a `--resume` of the same session, and a
+/// `rebind_provider` (the `/model` provider swap). All records — task records
+/// and the escalation record alike — must carry the same key, because the
+/// operator sees one conversation.
+///
+/// Before the fix this test reads three different keys: two random uuids (one
+/// per construction) and the real session id from the rebind.
+#[tokio::test]
+#[serial_test::serial]
+async fn one_conversations_spend_records_share_one_key_across_a_resume_and_a_rebind() {
+    const SESSION: &str = "sess-1203-shared";
+    let home = HomeGuard::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = || -> Arc<dyn LlmProvider> {
+        Arc::new(CountingProvider {
+            calls: Arc::clone(&calls),
+        })
+    };
+
+    // 1. Fresh construction. `set_budget_session_id` is the production seam —
+    //    `AgentSpawner` calls it, and `init_session` reaches the same
+    //    resolution through the budget authority.
+    let mut fresh = AgentEngine::new_with_provider(
+        provider(),
+        config_with_mode(wcore_types::model_aliases::ANTHROPIC_SONNET, None),
+        ToolRegistry::new(),
+        null_output(),
+    );
+    fresh.set_budget_session_id(SESSION);
+    let _ = fresh.run("first", "m1").await;
+    drop(fresh);
+
+    // 2. A resume of the SAME session, in a new engine — a second launch.
+    let mut resumed = AgentEngine::resume_with_provider(
+        provider(),
+        config_with_mode(wcore_types::model_aliases::ANTHROPIC_SONNET, None),
+        ToolRegistry::new(),
+        null_output(),
+        session_named(SESSION),
+    );
+    let _ = resumed.run("second", "m2").await;
+
+    // 3. An in-session `/model` escalation and a provider rebind: both replace
+    //    or re-key the guard, and neither may re-key the log.
+    resumed.set_model(wcore_types::model_aliases::ANTHROPIC_OPUS);
+    resumed.rebind_provider(
+        provider(),
+        ProviderCompat::anthropic_defaults(),
+        wcore_types::model_aliases::ANTHROPIC_OPUS.to_string(),
+    );
+    let _ = resumed.run("third", "m3").await;
+
+    let lines = home.audit_lines();
+    let keys: BTreeSet<String> = lines
+        .iter()
+        .filter_map(|v| v["payload"]["session_id"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        lines.len() >= 4,
+        "the three tasks and the operator escalation must all be on disk: {lines:#?}"
+    );
+    assert_eq!(
+        keys,
+        BTreeSet::from([SESSION.to_owned()]),
+        "one conversation must produce ONE spend-audit key across a fresh \
+         construction, a resume and a rebind; a session whose spend is filed \
+         under several keys can never be totalled: {lines:#?}"
+    );
+}
+
+/// #1203 — the negative half, so the fix cannot be read as "always use the
+/// session id". With durable sessions off there IS no authoritative id, and the
+/// key must NOT collapse to a shared placeholder that merges every unsessioned
+/// conversation on the host into one bucket. It stays the engine's own
+/// conversation id: unique per conversation, and stable across a rebind.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_unsessioned_run_keys_its_own_conversation_and_two_of_them_do_not_collide() {
+    let home = HomeGuard::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = || -> Arc<dyn LlmProvider> {
+        Arc::new(CountingProvider {
+            calls: Arc::clone(&calls),
+        })
+    };
+
+    for label in ["a", "b"] {
+        let mut engine = AgentEngine::new_with_provider(
+            provider(),
+            config_with_mode(wcore_types::model_aliases::ANTHROPIC_SONNET, None),
+            ToolRegistry::new(),
+            null_output(),
+        );
+        let conversation = engine.conversation_id().to_owned();
+        let _ = engine.run(label, "m1").await;
+        engine.rebind_provider(
+            provider(),
+            ProviderCompat::anthropic_defaults(),
+            wcore_types::model_aliases::ANTHROPIC_SONNET.to_string(),
+        );
+        let _ = engine.run(label, "m2").await;
+        let keys: BTreeSet<String> = home
+            .audit_lines()
+            .iter()
+            .filter_map(|v| v["payload"]["session_id"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            keys.contains(&conversation),
+            "an unsessioned run must file under its own conversation id \
+             ({conversation}), not a shared placeholder: {keys:?}"
+        );
+    }
+
+    let keys: BTreeSet<String> = home
+        .audit_lines()
+        .iter()
+        .filter_map(|v| v["payload"]["session_id"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        keys.len(),
+        2,
+        "two unsessioned conversations must not share one audit key: {keys:?}"
+    );
+}

@@ -121,6 +121,11 @@ pub struct SpendGuard {
     gate: Mutex<EscalationGate>,
     auditor: Mutex<Arc<SpendAuditor>>,
     sink: Arc<dyn SpendAuditSink>,
+    /// #1203 — the run's session identity, shared with the gate and with every
+    /// auditor this guard opens. Held here so a task opened AFTER the engine
+    /// learned its authoritative id inherits it from the handle rather than
+    /// from the previous record's copy of it.
+    session: wcore_budget::SessionIdentity,
 }
 
 impl std::fmt::Debug for SpendGuard {
@@ -136,24 +141,36 @@ impl SpendGuard {
     #[must_use]
     pub fn new(
         mode: SpendMode,
-        session_id: impl Into<String>,
+        session_id: impl Into<wcore_budget::SessionIdentity>,
         baseline: ModelSpendProfile,
         sink: Arc<dyn SpendAuditSink>,
     ) -> Self {
-        let session_id = session_id.into();
+        let session: wcore_budget::SessionIdentity = session_id.into();
         let auditor = Arc::new(SpendAuditor::new(
             format!("task-{}", uuid::Uuid::new_v4()),
-            session_id.clone(),
+            session.clone(),
             mode,
             &baseline,
             now_unix_ms(),
         ));
         Self {
             policy: SpendPolicy::new(mode),
-            gate: Mutex::new(EscalationGate::new(session_id, baseline)),
+            gate: Mutex::new(EscalationGate::new(session.clone(), baseline)),
             auditor: Mutex::new(auditor),
             sink,
+            session,
         }
+    }
+
+    /// #1203 — the run's shared session identity.
+    ///
+    /// Handed out so the engine can PUBLISH the authoritative id onto it as
+    /// soon as one exists, and so a `rebind_provider` can carry the SAME
+    /// identity into the replacement guard instead of resolving a fresh string
+    /// that may disagree with the one already on disk.
+    #[must_use]
+    pub fn session(&self) -> wcore_budget::SessionIdentity {
+        self.session.clone()
     }
 
     #[must_use]
@@ -287,10 +304,12 @@ impl SpendGuard {
             let gate = self.gate.lock();
             *slot = Arc::new(SpendAuditor::new(
                 format!("task-{}", uuid::Uuid::new_v4()),
-                record
-                    .as_ref()
-                    .map(|r| r.session_id.clone())
-                    .unwrap_or_default(),
+                // #1203 — from the shared handle, not from the record just
+                // sealed: the successor task must follow the run's identity
+                // forward, including a change made since the predecessor
+                // opened. Copying the predecessor's key froze the FIRST id of
+                // the run onto every later task.
+                self.session.clone(),
                 self.policy.mode(),
                 gate.authorized(),
                 now_unix_ms(),

@@ -4936,20 +4936,34 @@ pub fn spend_audit_log_path() -> std::path::PathBuf {
 /// The ONE place the engine installs a provider handle. Every constructor and
 /// `rebind_provider` route through it, so there is no code path that leaves the
 /// engine holding an unguarded provider.
+///
+/// #1203 — `session` is a SHARED handle, never a copied string. Two of the
+/// three call sites are constructors that run BEFORE the run has an
+/// authoritative identity (the budget authority is bound in `init_session`,
+/// after the engine exists), so no string available at those sites can be the
+/// right key. They used to pass `uuid::Uuid::new_v4().to_string()`, which is
+/// why one conversation's spend could never be totalled: a fresh launch and
+/// each `--resume` filed under different random keys, and a `/model` rebind —
+/// which DID resolve the real id — silently split a single session in two.
+/// The handle removes the choice: the guard reads it when a record is sealed,
+/// and [`AgentEngine::publish_spend_session`] is the single writer.
 fn install_spend_guard(
     provider: Arc<dyn LlmProvider>,
     provider_key: &str,
     model: &str,
     compat: &wcore_config::compat::ProviderCompat,
     mode: wcore_budget::SpendMode,
-    session_id: &str,
+    session: &wcore_budget::SessionIdentity,
 ) -> (Arc<dyn LlmProvider>, Arc<crate::spend_guard::SpendGuard>) {
     let baseline = crate::spend_guard::classify_model(provider_key, model, compat);
     let sink: Arc<dyn wcore_budget::SpendAuditSink> = Arc::new(
         wcore_budget::JsonlSpendAuditSink::new(spend_audit_log_path()),
     );
     let guard = Arc::new(crate::spend_guard::SpendGuard::new(
-        mode, session_id, baseline, sink,
+        mode,
+        session.clone(),
+        baseline,
+        sink,
     ));
     let wrapped: Arc<dyn LlmProvider> = Arc::new(crate::spend_guard::SpendGuardProvider::new(
         provider,
@@ -4980,6 +4994,18 @@ impl AgentEngine {
         // on `self.config` solely for the live gate's transient `AgentSpawner`.
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
+        // #282: mint the stable Flux conversation id once per engine, and do
+        // it BEFORE the spend guard so both can be seeded from one value.
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        // #1203 — seed the spend-audit identity with the conversation id
+        // rather than a throwaway uuid nothing else can see. No authoritative
+        // budget-session id exists yet on this path (there is no session and no
+        // budget authority until `init_session` runs), so this is the best key
+        // available; `publish_spend_session` overwrites it with the real one
+        // the moment there is one, and a run with durable sessions DISABLED
+        // keeps a key that is at least unique per conversation and stable
+        // across a `/model` rebind.
+        let spend_session = wcore_budget::SessionIdentity::new(&conversation_id);
         // #174 — install the spend guard BEFORE the struct literal partially
         // moves `config`.
         let (provider, spend_guard) = install_spend_guard(
@@ -4988,7 +5014,7 @@ impl AgentEngine {
             &config.model,
             &config.compat,
             config.budget.spend_mode(),
-            &uuid::Uuid::new_v4().to_string(),
+            &spend_session,
         );
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
         let confirmer = ToolConfirmer::with_policy(
@@ -5175,8 +5201,7 @@ impl AgentEngine {
             web_search: false,
             pending_hook_actions: Vec::new(),
             pending_hook_phase_consumptions: Vec::new(),
-            // #282: mint the stable Flux conversation id once per engine.
-            conversation_id: uuid::Uuid::new_v4().to_string(),
+            conversation_id,
             flux_loop_collisions: 0,
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
@@ -5254,6 +5279,19 @@ impl AgentEngine {
         // `new_with_provider` for the rationale).
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
+        // #1161 — read the persisted conversation id BEFORE `session` is moved
+        // into `current_session` below.
+        let resumed_conversation_id = session
+            .conversation_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // #1203 — a resume DOES have the authoritative identity in hand:
+        // `session.id` is exactly what `bind_budget_authority` will bind and
+        // therefore exactly what `budget_session_id()` will resolve to for the
+        // rest of the run. Seeding from it is what makes a resumed
+        // conversation append to the same spend-audit key it wrote under
+        // before, instead of opening a new one per launch.
+        let spend_session = wcore_budget::SessionIdentity::new(&session.id);
         // #174 — see `new_with_provider`: guard installed before the literal
         // partially moves `config`.
         let (provider, spend_guard) = install_spend_guard(
@@ -5262,14 +5300,8 @@ impl AgentEngine {
             &config.model,
             &config.compat,
             config.budget.spend_mode(),
-            &uuid::Uuid::new_v4().to_string(),
+            &spend_session,
         );
-        // #1161 — read the persisted conversation id BEFORE `session` is moved
-        // into `current_session` below.
-        let resumed_conversation_id = session
-            .conversation_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
         let confirmer = ToolConfirmer::with_policy(
             config.smart_approval_policy(),
@@ -6168,14 +6200,46 @@ impl AgentEngine {
         self.budget_session_id = Some(session_id.into());
     }
 
-    fn budget_session_id(&self) -> String {
+    /// The run's authoritative identity, or `None` when none has been
+    /// established yet.
+    ///
+    /// #1203 — split out of [`Self::budget_session_id`] so the difference
+    /// between "the real id" and "the `session-unknown` placeholder" is
+    /// visible to callers that must not persist the placeholder. The
+    /// spend-audit key is one of those: writing `session-unknown` would merge
+    /// every unsessioned conversation on the host into a single bucket, which
+    /// is a worse accounting failure than the random uuid #1203 is about.
+    fn authoritative_session_id(&self) -> Option<String> {
         if let Some(authority) = self.budget_authority.as_ref() {
-            return authority.lock().budget_session_id().to_owned();
+            return Some(authority.lock().budget_session_id().to_owned());
         }
         self.budget_session_id
             .clone()
             .or_else(|| self.current_session_id())
-            .unwrap_or_else(|| "session-unknown".to_string())
+    }
+
+    /// #1203 — the SINGLE writer of the spend guard's session identity.
+    ///
+    /// Deliberately a publish from the authoritative resolver rather than a
+    /// list of sync calls at the places that can change the identity: any
+    /// future path that binds, rebinds or switches the run's session goes
+    /// through [`Self::authoritative_session_id`], so it cannot leave the
+    /// audit key behind without also making the budget ledger disagree with
+    /// itself.
+    fn publish_spend_session(&self) {
+        if let Some(id) = self.authoritative_session_id() {
+            self.spend_guard.session().set(id);
+        }
+    }
+
+    fn budget_session_id(&self) -> String {
+        match self.authoritative_session_id() {
+            Some(id) => {
+                self.spend_guard.session().set(&id);
+                id
+            }
+            None => "session-unknown".to_string(),
+        }
     }
 
     /// #388 — whether an actual provider CAP (token or monetary) governs this
@@ -6768,6 +6832,9 @@ impl AgentEngine {
         // A spend MODE still binds: `/model` cannot buy through `local-only`.
         let profile =
             crate::spend_guard::classify_model(self.compat.provider_type(), &model, &self.compat);
+        // #1203 — an escalation record is durable too, and carries the same
+        // key, so it is published on the same rule as the task record.
+        self.publish_spend_session();
         if let Err(refusal) = self.spend_guard.authorize(
             profile,
             crate::spend_guard::EscalationSource::Operator,
@@ -6873,6 +6940,9 @@ impl AgentEngine {
     /// after every task" true rather than "a record after a task that ended
     /// the way we expected".
     fn emit_task_spend_audit(&self) {
+        // #1203 — the record is sealed here, so the key it carries is
+        // published here: whatever identity the run holds NOW.
+        self.publish_spend_session();
         let Some(record) = self.spend_guard.finish_task() else {
             return;
         };
@@ -6888,6 +6958,16 @@ impl AgentEngine {
         if !record.refusals.is_empty() || !record.escalations.is_empty() {
             self.output.emit_info(&record.summary());
         }
+    }
+
+    /// #282 / #1203 — the engine's stable conversation id.
+    ///
+    /// Exposed so a caller can join a spend-audit record to the conversation it
+    /// belongs to on a run with durable sessions OFF, where there is no session
+    /// id to join on and the conversation id is the audit key.
+    #[must_use]
+    pub fn conversation_id(&self) -> &str {
+        &self.conversation_id
     }
 
     /// The active model identifier (used by the TUI status bar + tests).
@@ -6932,13 +7012,20 @@ impl AgentEngine {
         // is the new authorized baseline. Routed through the same installer as
         // the constructors: there must be no way to reach `self.provider` with
         // an unguarded handle.
+        // #1203 — carry the SAME identity handle into the replacement guard,
+        // after republishing the authoritative id onto it. This site already
+        // resolved the real id; what it could not do was make the two
+        // constructors agree with it, which is how one uninterrupted session
+        // used to appear in the log as two unrelated ones.
+        self.publish_spend_session();
+        let session = self.spend_guard.session();
         let (wrapped, spend_guard) = install_spend_guard(
             provider,
             compat.provider_type(),
             &model,
             &compat,
             self.spend_guard.mode(),
-            &self.budget_session_id(),
+            &session,
         );
         self.provider = wrapped;
         self.spend_guard = spend_guard;

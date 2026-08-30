@@ -52,7 +52,7 @@ pub use execution::{
 };
 pub use spend::{
     EscalationError, EscalationGate, EscalationRecord, ModelBilling, ModelSpendProfile,
-    SPEND_SCHEMA_VERSION, SpendMode, SpendPolicy, SpendRefusal,
+    SPEND_SCHEMA_VERSION, SessionIdentity, SpendMode, SpendPolicy, SpendRefusal,
 };
 pub use spend_audit::{
     JsonlSpendAuditSink, MemorySpendAuditSink, SpendAuditDispatch, SpendAuditError,
