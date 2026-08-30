@@ -649,7 +649,9 @@ impl CompactConfig {
         // which is the state #1200 reports, merely smaller.
         let worst_tail = half.max(MAX_TOOL_RESULT_BYTES);
         ToolResultBounds {
-            total_budget_bytes: tr.total_budget_bytes.min(admissible.saturating_sub(worst_tail)),
+            total_budget_bytes: tr
+                .total_budget_bytes
+                .min(admissible.saturating_sub(worst_tail)),
             protected_tail_bytes: Some(half),
             keep_recent: tr.keep_recent,
         }
