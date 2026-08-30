@@ -345,6 +345,15 @@ fn keep_displaced(tmp: tempfile::TempPath, displaced: &Path) -> std::io::Result<
 ///   on the VFS path (0.7%), and in 4 of 24 executions the editor's own
 ///   `rename` was instead refused outright with `ERROR_ACCESS_DENIED`.
 ///
+///   RE-MEASURED 2026-08-30 on the same host, AFTER `FerroxLabs/wayland`#1202
+///   changed `Swap` semantics on this exact path, N = 20 per arm at
+///   `retries = 0` with the Windows `ignore` forced: the Edit arm was red in
+///   **6 of 20** and lost **3 of 302** interleaved saves (1.0%); the VFS arm
+///   was red in **8 of 20** and lost **1 of 219** (0.5%); the other 11 reds
+///   were the editor rename refused outright. 14 of 40 executions red. The
+///   rates moved; the GUARANTEE did not, and neither did the direction of
+///   this declaration.
+///
 ///   So what Windows ships is: *a save is never lost SILENTLY.* Every
 ///   degrade is counted by [`degraded_publish_count`] and logged at `error!`
 ///   before the racy publish runs, so the window in which bytes can be lost
