@@ -3,7 +3,7 @@ issue: 1206
 repo: FerroxLabs/wayland
 kind: defect
 title: "The #1166 absolute floor reports PartialMiss{TtlExpiry} and writes a durable 'expired' invalidation on a healthy turn"
-status: open
+status: closed
 last_verified_commit: 7a7cf1f6
 criteria:
   - id: c1

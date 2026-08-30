@@ -3,7 +3,7 @@ issue: 1219
 repo: FerroxLabs/wayland
 kind: defect
 title: "In --json-stream an egress consent prompt is never sent to the host: the turn stalls 300s, then fails claiming the user declined"
-status: open
+status: closed
 last_verified_commit: 58eb9eac
 criteria:
   - id: c1

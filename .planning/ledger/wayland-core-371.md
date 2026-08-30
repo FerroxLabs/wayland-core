@@ -3,7 +3,7 @@ issue: 371
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "The UNIX half of the harness-ownership guard leaks the tree: harness_owns_spawned_trees fails 3/3 on integ/f13 and reddens every lane gate"
-status: open
+status: closed
 last_verified_commit: 1798076f
 criteria:
   - id: c1

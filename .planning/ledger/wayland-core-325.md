@@ -3,7 +3,7 @@ issue: 325
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "nightly-windows-soak closes its tracker issue from a job that cannot see half the run's failures"
-status: open
+status: closed
 last_verified_commit: 43848f75
 criteria:
   - id: c1

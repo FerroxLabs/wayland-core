@@ -3,7 +3,7 @@ issue: 1207
 repo: FerroxLabs/wayland
 kind: defect
 title: "#1166's ticket Defect 5 -- cache diagnostics off by default -- has no ledger criterion and was never graded"
-status: open
+status: closed
 last_verified_commit: f45e5bd83
 criteria:
   - id: c1

@@ -3,7 +3,7 @@ issue: 1205
 repo: FerroxLabs/wayland
 kind: defect
 title: "A cache ledger written by v0.13.9 reproduces #1163 verbatim on the fixed build, and the fix now certifies the fabricated saving as trustworthy"
-status: open
+status: closed
 last_verified_commit: 7a7cf1f6
 criteria:
   - id: c1

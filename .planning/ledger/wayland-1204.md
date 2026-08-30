@@ -3,7 +3,7 @@ issue: 1204
 repo: FerroxLabs/wayland
 kind: defect
 title: "The #1162 error message ships with runs of literal spaces mid-sentence, and the same collapse appears in acp.rs and main.rs"
-status: open
+status: closed
 last_verified_commit: 782064d63
 criteria:
   - id: c1

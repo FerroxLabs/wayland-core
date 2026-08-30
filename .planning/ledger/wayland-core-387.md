@@ -3,7 +3,7 @@ issue: 387
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "wl#1164's bash resolution breaks three Windows tests on any host with Git for Windows"
-status: open
+status: closed
 last_verified_commit: b52fb934
 criteria:
   - id: c1

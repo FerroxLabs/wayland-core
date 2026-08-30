@@ -3,7 +3,7 @@ issue: 353
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "A single anomalous usage report can trigger a spurious compaction: the Regression verdict needs corroboration before it moves the autocompact trigger"
-status: open
+status: closed
 last_verified_commit: 43848f75
 criteria:
   - id: c1

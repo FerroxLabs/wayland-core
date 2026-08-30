@@ -3,7 +3,7 @@ issue: 365
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "Container backend latches on a leftover container name, and attests a run that never happened"
-status: open
+status: closed
 last_verified_commit: e7123ee9
 criteria:
   - id: c1

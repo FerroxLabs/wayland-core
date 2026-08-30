@@ -3,7 +3,7 @@ issue: 383
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "is_project_secret still uses the weaker resolver, so a dangling symlink to a not-yet-existing project secret is not refused"
-status: open
+status: closed
 last_verified_commit: 3b860623
 criteria:
   - id: c1

@@ -3,7 +3,7 @@ issue: 1165
 repo: FerroxLabs/wayland
 kind: feature
 title: "Opt-in: /mcp add --replace to deliberately reconfigure a connected server"
-status: open
+status: closed
 last_verified_commit: 43848f75
 criteria:
   - id: c1

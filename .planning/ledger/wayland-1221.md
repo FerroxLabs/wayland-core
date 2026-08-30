@@ -3,7 +3,7 @@ issue: 1221
 repo: FerroxLabs/wayland
 kind: defect
 title: "An assistant answer that merely mentions a reasoning-tag name in prose has everything after that word deleted from durable history"
-status: open
+status: closed
 last_verified_commit: f72d97de
 criteria:
   - id: c1

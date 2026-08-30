@@ -3,7 +3,7 @@ issue: 1242
 repo: FerroxLabs/wayland
 kind: defect
 title: "Display-side reasoning filters still have no end-of-stream flush, so the screen and the stored turn disagree"
-status: open
+status: closed
 last_verified_commit: 8ace76d61
 criteria:
   - id: c1

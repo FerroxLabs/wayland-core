@@ -3,7 +3,7 @@ issue: 1198
 repo: FerroxLabs/wayland
 kind: defect
 title: "check-criteria-ledger.py cannot detect drift in a file:<path>:<line> anchor, which is the drift it exists to catch"
-status: open
+status: closed
 last_verified_commit: da0c8a31
 criteria:
   - id: c1

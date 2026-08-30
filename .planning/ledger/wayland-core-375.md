@@ -3,7 +3,7 @@ issue: 375
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "GrepTool reads a VCS content store in plaintext when the store's parent is named as the search path"
-status: open
+status: closed
 last_verified_commit: 3b860623
 criteria:
   - id: c1

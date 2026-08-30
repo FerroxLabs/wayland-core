@@ -3,7 +3,7 @@ issue: 1241
 repo: FerroxLabs/wayland
 kind: defect
 title: "The Write tool converts a refusal it could not roll back into an unchecked republish and reports success"
-status: open
+status: closed
 last_verified_commit: 09d06e1ff
 criteria:
   - id: c1

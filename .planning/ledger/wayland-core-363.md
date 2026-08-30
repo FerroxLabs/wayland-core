@@ -2,7 +2,7 @@
 issue: 363
 repo: FerroxLabs/wayland-core
 title: "[Bug]: A Telegram forum-topic target is sent as reply_to_message_id, never as message_thread_id"
-status: open
+status: closed
 kind: defect
 last_verified_commit: 0df4c47d
 criteria:

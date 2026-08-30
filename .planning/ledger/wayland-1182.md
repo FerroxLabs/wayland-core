@@ -3,7 +3,7 @@ issue: 1182
 repo: FerroxLabs/wayland
 kind: defect
 title: "The workspace-walk instrument check declares itself dead under load: a wall-clock ratio decides whether the control is alive"
-status: open
+status: closed
 last_verified_commit: 856df7d0
 criteria:
   - id: c1

@@ -3,7 +3,7 @@ issue: 376
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "SecretDenyFs rebuilds the VCS content-store list from the filesystem on every ordinary path operation"
-status: open
+status: closed
 last_verified_commit: 3b860623
 criteria:
   - id: c1

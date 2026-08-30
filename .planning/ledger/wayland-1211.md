@@ -3,7 +3,7 @@ issue: 1211
 repo: FerroxLabs/wayland
 kind: defect
 title: "is_self_hosted_base_url reads the authority past a query string, so a public host spelled with ?x=@127.0.0.1 is treated as self-hosted"
-status: open
+status: closed
 last_verified_commit: 65b95a87
 criteria:
   - id: c1

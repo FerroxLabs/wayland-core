@@ -3,7 +3,7 @@ issue: 354
 repo: FerroxLabs/wayland-core
 kind: defect
 title: "MCP malware gate: make the OSV fail-open an explicit operator choice (strict/permissive)"
-status: open
+status: closed
 last_verified_commit: b92b9656e
 criteria:
   - id: c1
