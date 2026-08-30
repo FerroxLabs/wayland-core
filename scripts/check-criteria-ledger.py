@@ -1227,6 +1227,99 @@ def self_test():
                     False, code != 0, code == 0))
     ok &= code == 0
 
+    # ── A RESURRECTION INTRODUCED BY A MERGE (FerroxLabs/wayland#1220 c3) ──
+    #
+    # `absent:` exists because a deletion graded off a COMMIT HASH proves the
+    # deletion happened once and never re-checks. The event it was written for
+    # was not an ordinary edit: merge 9c9f27b0 restored the line from the other
+    # side of a resolution, and `git log -S` — the instrument the lane graded
+    # itself with — SKIPS MERGES BY DEFAULT, so it reported nothing and the
+    # criterion went on reading met over a file that still had the entry in it.
+    #
+    # The arms below build that exact history rather than describing it: a
+    # branch cut BEFORE the deletion, editing the same lines, merged back with
+    # each of the two resolutions. `-X theirs` resurrects, `-X ours` does not,
+    # and the two differ in NOTHING else.
+    def _merge_resurrection(resolution):
+        needle = "contained_construction_does_not_walk_the_workspace"
+        body = _CLEAN.replace(
+            '"test:src/t.rs::the_boundary_is_probed"',
+            '"absent:.config/flaky-allowlist.txt::%s"' % needle)
+        assert body != _CLEAN, "the merge arm's own mutation stopped applying"
+        with tempfile.TemporaryDirectory() as td:
+            def g(*a):
+                return subprocess.run(
+                    ["git", "-C", td, "-c", "user.email=t@t",
+                     "-c", "user.name=t"] + list(a),
+                    capture_output=True, text=True)
+
+            allow = os.path.join(td, ".config", "flaky-allowlist.txt")
+            os.makedirs(os.path.dirname(allow), exist_ok=True)
+            # The merge BASE: the entry is present, with a neighbour that is
+            # never touched, so a wholesale revert and a partial resolution are
+            # distinguishable.
+            open(allow, "w").write(
+                "2026-10-15  wcore-tools::%s  gh#1182  the base\n"
+                "2026-10-15  other::test  gh#1  the untouched neighbour\n" % needle)
+            _fixture(td, body, extra={"wayland-core-9.md": _CORE_9})
+            main = g("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+            g("branch", "lane")
+            # The deletion (c461293f's shape).
+            open(allow, "w").write(
+                "2026-10-15  other::test  gh#1  the untouched neighbour\n")
+            g("add", "-A")
+            g("commit", "-qm", "clear the fixed flaky-allowlist entry")
+            deleted_at = g("rev-parse", "--short", "HEAD").stdout.strip()
+
+            # The lane, cut BEFORE the deletion, rewording the same line. The
+            # hunks overlap, so the merge has to be resolved rather than
+            # auto-combined -- which is where the line came back.
+            g("checkout", "-q", "lane")
+            open(allow, "w").write(
+                "2026-10-15  wcore-tools::%s  gh#1182  reworded on the lane\n"
+                "2026-10-15  other::test  gh#1  the untouched neighbour\n" % needle)
+            g("add", "-A")
+            g("commit", "-qm", "reword the entry on the lane")
+            g("checkout", "-q", main)
+            merged = g("merge", "--no-edit", "-q", "-X", resolution, "lane")
+            merge_sha = g("rev-parse", "--short", "HEAD").stdout.strip()
+
+            # THE CONTROL, and the reason this arm exists. `git log -S` is run
+            # exactly as the lane ran it, on the merged tree.
+            log_s = g("log", "--oneline", "-S", needle).stdout
+            code, out = run(td, injected=_INJ_CLEAN)
+            present = needle in open(allow, encoding="utf-8").read()
+            return {
+                "merge_ok": merged.returncode == 0,
+                "present": present,
+                "log_s_sees_merge": merge_sha in log_s,
+                "log_s_sees_anything": deleted_at in log_s,
+                "fired": code != 0,
+                "out": "\n".join(out),
+            }
+
+    r = _merge_resurrection("theirs")
+    good = (r["merge_ok"] and r["present"] and r["fired"]
+            and "still contains" in r["out"])
+    results.append(("MERGE resurrected the entry -- the gate reds", True,
+                    r["fired"], good))
+    ok &= good
+    # The instrument that let this through, measured on the same tree rather
+    # than asserted: `-S` must find the ordinary commits and must NOT report
+    # the merge. If it ever does see the merge, this arm has stopped being a
+    # reproduction and the pair below is grading something else.
+    control = r["log_s_sees_anything"] and not r["log_s_sees_merge"]
+    results.append(("control: `git log -S` is blind to that merge", False,
+                    not control, control))
+    ok &= control
+
+    r = _merge_resurrection("ours")
+    good = (r["merge_ok"] and not r["present"] and not r["fired"])
+    results.append(("the SAME merge resolved the other way -- green", False,
+                    r["fired"], good))
+    ok &= good
+
     # The window pair is calibrated by hand (see _WINDOW_EDGE). If someone
     # retunes ANCHOR_WINDOW without moving them, the "far edge" arm stops
     # sitting at the edge and the pair silently stops testing the boundary.

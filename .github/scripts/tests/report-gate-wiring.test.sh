@@ -152,6 +152,26 @@ else
   bad "[profile.ci] no longer retries — grade-retry-flakes.sh is now dead code, remove it or the retries"
 fi
 
+
+# ── wayland#1216 — the per-leg floor is only a gate while it is WIRED. ──────
+# The mechanism lives in assert-test-evidence.sh and is inert unless ci.yml
+# names a leg, so the name is asserted here rather than only in the script's
+# own self-test.
+want_grep "the shared evidence gate implements a per-leg floor" \
+  "$GATE" "REQUIRED_LEGS"
+want_grep "the shared evidence gate excludes preserved attempts from the count" \
+  "$GATE" '! -name "outer-attempt-*.xml"'
+want_grep "ci.yml names the workspace-suite leg as required" \
+  "$CI" "nextest-junit-linux-containerized ci-linux"
+# The name has to match the artifact the leg actually uploads. A typo here is a
+# leg that is required and can never report, which is a permanently-red gate.
+want_grep "the required leg name matches the uploaded artifact name" \
+  "$CI" "name: nextest-junit-linux-containerized"
+# ...and the report job must still fire when `ci` was skipped but the required
+# leg ran, or the floor is unreachable on exactly those runs.
+want_grep "the evidence step fires on ci-linux's own result too" \
+  "$CI" "needs.ci-linux.result != 'cancelled'"
+
 echo "---"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
