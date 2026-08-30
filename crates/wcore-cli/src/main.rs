@@ -11322,6 +11322,22 @@ mod tests {
                     continue;
                 }
                 let source = std::fs::read_to_string(&path).expect("read rust source");
+                // A TEST FIXTURE IS NOT A CALL SITE. This lint's own
+                // `a_comment_is_not_a_registration` holds the string
+                // "refresh.register_runtime_server(&mgr, &configs);" as a
+                // fixture, twice, in this very file. Counting raw text scored
+                // those as two production registrations and gave main.rs two
+                // registrations of SLACK — enough that deleting the real
+                // AddMcpServer registration left the count passing. MEASURED:
+                // with the AddMcpServer call at main.rs replaced by
+                // `let _unused = refresh;`, this test was still green. That is
+                // the #1175 residual verbatim ("a FOURTH bare runtime-add path
+                // would leave the count at 2 and pass"), reintroduced by the
+                // guard's own fixtures. Production code is what ships, so the
+                // inline test modules are removed before anything is counted —
+                // on BOTH sides, since a construction in a test is not a
+                // runtime-add path either.
+                let source = strip_cfg_test_modules(&source);
                 // A COMMENT IS NOT A CALL. Counting raw text let the negative
                 // control below be satisfied by `// refresh.register_runtime_
                 // server(...)`, which is the same trap the #1175 transport
@@ -11446,6 +11462,101 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// `source` with every column-zero `#[cfg(test)]` item removed.
+    ///
+    /// Brace-counted from the item's own opening brace, so a nested `mod` or a
+    /// braced string inside the test module cannot end the strip early. An
+    /// UNBALANCED brace would run the strip to end-of-file, which deletes more
+    /// than it should and can only ever make the add-side guard MORE likely to
+    /// go red — the safe direction for a lint.
+    ///
+    /// Column zero is the discriminator, matching the rest of this module: an
+    /// inline unit-test module in this tree is written at the top level of its
+    /// file. A `#[cfg(test)]` on an indented item is left in place, which is a
+    /// named gap rather than a claim.
+    fn strip_cfg_test_modules(source: &str) -> String {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut kept: Vec<&str> = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i].trim_end() != "#[cfg(test)]" {
+                kept.push(lines[i]);
+                i += 1;
+                continue;
+            }
+            // Skip forward to the item's body and then past its close.
+            let mut depth = 0i32;
+            let mut opened = false;
+            let mut j = i;
+            while j < lines.len() {
+                let code = match lines[j].find("//") {
+                    Some(at) => &lines[j][..at],
+                    None => lines[j],
+                };
+                depth += code.matches('{').count() as i32;
+                depth -= code.matches('}').count() as i32;
+                if code.contains('{') {
+                    opened = true;
+                }
+                if opened && depth <= 0 {
+                    break;
+                }
+                // A `#[cfg(test)] use ...;` has no body at all.
+                if !opened && code.trim_end().ends_with(';') && j > i {
+                    break;
+                }
+                j += 1;
+            }
+            i = j + 1;
+        }
+        kept.join("\n")
+    }
+
+    /// The stripper decides what the add-side guard is allowed to see, so it
+    /// is graded directly rather than trusted.
+    #[test]
+    fn a_test_fixture_is_not_a_production_call_site() {
+        let needle = concat!("register_runtime_", "server(");
+        let source = "\
+fn production() {
+    refresh.register_runtime_server(&mgr, &configs);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fixture() {
+        let real = \"    refresh.register_runtime_server(&mgr, &configs);\";
+        assert!(real.contains(\"x\"));
+    }
+}
+";
+        let stripped = strip_cfg_test_modules(source);
+        assert_eq!(
+            stripped.matches(needle).count(),
+            1,
+            "the test module's fixture was counted as a production call site, \
+             which is the slack that let a deleted registration pass: {stripped}"
+        );
+        // POSITIVE CONTROL: the production call must SURVIVE, or the stripper
+        // satisfies the count above by deleting everything.
+        assert!(
+            stripped.contains("fn production"),
+            "the stripper ate production code: {stripped}"
+        );
+        // NEGATIVE CONTROL: a file with no test module is returned intact.
+        let plain = "fn only() {\n    refresh.register_runtime_server(&m, &c);\n}\n";
+        assert_eq!(strip_cfg_test_modules(plain).matches(needle).count(), 1);
+        // A `#[cfg(test)]` on a non-module item must not swallow the rest of
+        // the file.
+        let attr_use = "#[cfg(test)]\nuse std::io;\n\nfn after() {\n    refresh.register_runtime_server(&m, &c);\n}\n";
+        assert_eq!(
+            strip_cfg_test_modules(attr_use).matches(needle).count(),
+            1,
+            "a `#[cfg(test)] use` swallowed the production code after it"
+        );
     }
 
     #[test]
