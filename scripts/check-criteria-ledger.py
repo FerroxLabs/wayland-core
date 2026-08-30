@@ -996,6 +996,13 @@ def self_test():
     case("file anchor: a fragment too short to pin anything",
          anchor("file:src/t.rs:%d:;" % _UNIQ), True,
          expect="too short to pin anything")
+    # Line 0. `line > n` does not catch it and Python's negative indexing would
+    # quietly read from the END of the file. Found by a red arm on the guard,
+    # which was added without an arm covering it -- which is the same "checked
+    # nowhere" this gate is for.
+    case("file anchor: line 0 is not a line",
+         anchor("file:src/t.rs:0:const ANCHORED_ONCE"), True,
+         expect="is not a line; lines are numbered from 1")
 
     # THE defect #1198 was filed for. A line number with no content was the
     # accepted form until now, and it could not fail: this arm is the proof
