@@ -534,8 +534,11 @@ impl Tool for EditTool {
         }) {
             Ok(Ok(())) => {}
             Ok(Err(why)) => {
+                // #1239 — a refusal that displaced somebody's save is not the
+                // same event as one that displaced nothing, and must not be
+                // reported with the same sentence.
                 return ToolResult {
-                    content: crate::unsaved_work::changed_under_write(file_path, &why),
+                    content: crate::unsaved_work::refusal_message(file_path, &why),
                     is_error: true,
                 };
             }

@@ -234,21 +234,15 @@ impl TerminalSink {
             Err(_) => (text.to_string(), String::new()),
         }
     }
-}
 
-impl OutputSink for TerminalSink {
-    fn emit_text_delta(&self, text: &str, _msg_id: &str) {
-        if text.is_empty() {
-            return;
-        }
-        // #908 — split inline reasoning out of the visible lane before any of
-        // the marker/spinner bookkeeping below, which is keyed on "the user
-        // saw assistant text". The withheld body is rendered as thinking
-        // rather than deleted, so the local reader loses nothing.
-        let (visible, captured) = self.split_reasoning(text);
-        if !captured.is_empty() {
-            self.formatter.thinking(&captured);
-        }
+    /// Put already-filtered text on the visible lane, with the marker and
+    /// spinner bookkeeping that goes with "the user saw assistant text".
+    ///
+    /// Split out of [`OutputSink::emit_text_delta`] for #1242: the
+    /// end-of-stream drain has text to show that has ALREADY been through the
+    /// filter, and putting it back through `process` would re-parse the very
+    /// tag the drain just recovered and swallow it a second time.
+    fn show(&self, visible: &str) {
         // A chunk the filter consumed WHOLE (pure reasoning, or the leading
         // half of a tag straddling the boundary) is not assistant text: it
         // must not fire the turn marker or set `wrote_text`, or a
@@ -256,7 +250,7 @@ impl OutputSink for TerminalSink {
         if visible.is_empty() {
             return;
         }
-        let text = visible.as_str();
+        let text = visible;
         // First delta of the turn: tear down spinner + emit assistant marker.
         if self.first_delta_pending.swap(false, Ordering::AcqRel) {
             self.stop_thinking_spinner();
@@ -279,6 +273,23 @@ impl OutputSink for TerminalSink {
         self.wrote_text.store(true, Ordering::Release);
         self.last_byte_newline
             .store(text.ends_with('\n'), Ordering::Release);
+    }
+}
+
+impl OutputSink for TerminalSink {
+    fn emit_text_delta(&self, text: &str, _msg_id: &str) {
+        if text.is_empty() {
+            return;
+        }
+        // #908 — split inline reasoning out of the visible lane before any of
+        // the marker/spinner bookkeeping below, which is keyed on "the user
+        // saw assistant text". The withheld body is rendered as thinking
+        // rather than deleted, so the local reader loses nothing.
+        let (visible, captured) = self.split_reasoning(text);
+        if !captured.is_empty() {
+            self.formatter.thinking(&captured);
+        }
+        self.show(&visible);
     }
 
     fn emit_thinking(&self, text: &str, _msg_id: &str) {
@@ -338,6 +349,20 @@ impl OutputSink for TerminalSink {
         cache_read_tokens: u64,
         finish_reason: FinishReason,
     ) {
+        // #1242 — drain whatever the reasoning filter is still holding and
+        // SHOW it. `process` is a lossy view of the stream: an undecided
+        // `<`-prefix and an unclosed reasoning block are both withheld while
+        // the stream runs, and used to be dropped when it ended. The engine's
+        // history-side twin has drained since #1222, so without this the
+        // terminal and the stored turn disagree about the same answer.
+        //
+        // Before the spinner teardown and the stats line, so recovered text
+        // lands where the rest of the answer did rather than after the footer.
+        let recovered = match self.reasoning.lock() {
+            Ok(mut filter) => filter.finish(),
+            Err(_) => String::new(),
+        };
+        self.show(&recovered);
         // If the stream ended without any text (e.g. tool-only turn or
         // immediate error), ensure the spinner is down before printing stats.
         self.stop_thinking_spinner();

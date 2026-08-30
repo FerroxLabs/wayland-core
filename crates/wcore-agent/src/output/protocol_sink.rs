@@ -472,6 +472,37 @@ impl ProtocolSink {
     /// what recovers an UNCLOSED `<think>` - the filter deliberately eats to
     /// end of stream rather than leak a runaway tail, and without this flush
     /// that tail would be silently deleted instead of shown.
+    /// #1242 - drain whatever the filter is still WITHHOLDING and put it on
+    /// the wire as one last `text_delta`, before the `stream_end` that closes
+    /// the message.
+    ///
+    /// `process` is a lossy view of the stream: it holds back an undecided
+    /// `<`-prefix and everything after an opening reasoning tag that has not
+    /// closed. The engine's history-side filter has drained that since #1222,
+    /// so a host that did not get the same drain renders a DIFFERENT answer
+    /// from the one stored in the turn.
+    ///
+    /// The wire shape is deliberately the one already in the contract rather
+    /// than a new event: a `text_delta` on the in-flight `msg_id`, emitted
+    /// BEFORE `stream_end`. The message is still open at that point, so a host
+    /// that appends deltas needs no change at all, and a host that ignores it
+    /// renders exactly what it renders today - the same turn, truncated. See
+    /// `docs/json-stream-protocol.md`.
+    ///
+    /// Ordered before [`Self::flush_reasoning`], because `finish` retracts the
+    /// unclosed block's span from the capture buffer: draining reasoning first
+    /// would report the same bytes twice, once as thinking and once as text.
+    fn drain_withheld_text(&self, msg_id: &str) {
+        let recovered = self.reasoning.lock().finish();
+        if recovered.is_empty() {
+            return;
+        }
+        let _ = self.writer.emit(&ProtocolEvent::TextDelta {
+            text: recovered,
+            msg_id: msg_id.to_string(),
+        });
+    }
+
     fn flush_reasoning(&self, msg_id: &str) {
         let captured = self.reasoning.lock().take_captured_delta();
         if !captured.is_empty() {
@@ -921,8 +952,10 @@ impl OutputSink for ProtocolSink {
         cache_read_tokens: u64,
         finish_reason: FinishReason,
     ) {
-        // #1129: an unclosed reasoning block reaches the host instead of
-        // vanishing with the turn.
+        // #1242: text the filter is still withholding, then #1129: an
+        // unclosed reasoning block reaches the host instead of vanishing with
+        // the turn.
+        self.drain_withheld_text(msg_id);
         self.flush_reasoning(msg_id);
         let _ = self.writer.emit(&ProtocolEvent::StreamEnd {
             msg_id: msg_id.to_string(),
@@ -961,8 +994,9 @@ impl OutputSink for ProtocolSink {
         agent_run_id: Option<&str>,
         usage_delta: Option<&wcore_types::message::TokenUsage>,
     ) {
-        // #1129: same unclosed-block flush as the plain `emit_stream_end`.
-        // Both overrides are live producer paths, so the flush is on both.
+        // #1129 / #1242: same two drains as the plain `emit_stream_end`.
+        // Both overrides are live producer paths, so both are on both.
+        self.drain_withheld_text(msg_id);
         self.flush_reasoning(msg_id);
         let _ = self.writer.emit(&ProtocolEvent::StreamEnd {
             msg_id: msg_id.to_string(),

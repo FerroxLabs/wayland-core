@@ -569,12 +569,24 @@ impl ProtocolToMessageStream {
                 finish_reason,
                 ..
             } => {
+                // #1242 — drain what the filter is still withholding and
+                // queue it as one last `TextDelta` AHEAD of the terminal.
+                // `poll_next` drains `pending` before it yields anything else,
+                // so the recovered text reaches the host in stream order and
+                // is not stranded behind `done`. Without it an ACP host is
+                // shown less than the engine stored for the same turn.
+                let recovered = self.reasoning.finish();
+                if !recovered.is_empty() {
+                    self.pending
+                        .push_back(MessageEvent::TextDelta { text: recovered });
+                }
                 self.done = true;
-                Some(MessageEvent::Done {
+                self.pending.push_back(MessageEvent::Done {
                     stop_reason: stop_reason_str(finish_reason).to_string(),
                     // #787: stamp the per-turn id so the host can dedup terminals.
                     turn_id: msg_id,
-                })
+                });
+                self.pending.pop_front()
             }
             ProtocolEvent::Error { msg_id, error, .. } => {
                 self.done = true;

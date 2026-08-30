@@ -65,8 +65,9 @@ pub fn atomic_write<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result
 ///
 /// `accept` is handed the bytes the destination held **at the instant the new
 /// bytes were published** — `None` if it held nothing — and returning
-/// `Err(why)` retracts the publish. `Ok(Err(why))` therefore means the
-/// destination is exactly as it was and `why` says what was found instead.
+/// `Err(why)` retracts the publish. `Ok(Err(refusal))` therefore means the
+/// destination is exactly as it was and [`Refusal::why`] says what was found
+/// instead.
 ///
 /// # Why an exchange and not a re-check
 ///
@@ -82,12 +83,29 @@ pub fn atomic_write<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result
 /// is no second observation to be stale. A save that lost the race is then
 /// detected with certainty and put back by a second exchange.
 ///
-/// The cost is a bounded window, between the exchange and the verdict, in
-/// which a crash would leave the new contents published where a re-check would
-/// have refused. The destination is never torn — it holds either the old bytes
-/// or the new ones at every instant — and the window is the same read the
-/// re-check performed anyway, so this is a change of which whole state
-/// survives a crash, not of whether a whole state does.
+/// # What the exchange does NOT close (#1239)
+///
+/// It closes the check-then-write race, which is the one #1155 measured: the
+/// bytes judged ARE the bytes displaced, so no verdict is ever taken against a
+/// stale reading. It does not leave the caller with no window at all. Between
+/// the exchange and the verdict the destination NAME resolves to the NEW
+/// bytes, and two things can happen in it:
+///
+/// * a **crash** leaves the new contents published where a re-check would have
+///   refused. The destination is never torn — it holds either the old bytes or
+///   the new ones at every instant — so this is a change of which whole state
+///   survives a crash, not of whether a whole state does;
+/// * a **save by a non-cooperating editor** lands on the published inode. The
+///   refusal path then puts the original back, which DISPLACES that save. It
+///   used to be deleted with the rest of the leftovers, and the refusal handed
+///   back was byte-identical to one that had cost nobody anything — the user
+///   could not tell a lossy refusal from a clean one. The restore is an
+///   exchange too, so it hands that save back; it is now preserved on disk and
+///   named in [`Refusal::intercepted_save`].
+///
+/// The window is therefore narrowed — from `read`→`rename` down to
+/// `exchange`→`verdict` — and what remains inside it is accounted for rather
+/// than silently discarded.
 ///
 /// Where no exchange primitive exists (see [`exchange`]) this falls back to the
 /// re-check, which is racy but no worse than what it replaced.
@@ -95,7 +113,7 @@ pub fn atomic_write_checked<P: AsRef<Path>>(
     path: P,
     contents: &[u8],
     accept: impl FnOnce(Option<&[u8]>) -> Result<(), String>,
-) -> std::io::Result<Result<(), String>> {
+) -> std::io::Result<Result<(), Refusal>> {
     let path = path.as_ref();
     let dest = long_path_safe_dest(path)?;
     let dest = dest.as_ref();
@@ -111,18 +129,43 @@ pub fn atomic_write_checked<P: AsRef<Path>>(
             };
             if let Err(why) = verdict {
                 // Retract, by the inverse of the step that published.
-                if let Err(e) = restore(&displaced, dest) {
-                    // The publish stands and the displaced file is the only
-                    // copy of what it replaced, so it must not be unlinked.
-                    let kept = keep_displaced(tmp, &displaced)?;
-                    return Err(std::io::Error::other(format!(
-                        "{why}, and the original could not be put back ({e}); \
-                         it is preserved at {}",
-                        kept.display()
-                    )));
+                let put_back = match restore(&displaced, dest) {
+                    Ok(put_back) => put_back,
+                    Err(e) => {
+                        // The publish stands and the displaced file is the only
+                        // copy of what it replaced, so it must not be unlinked.
+                        let kept = keep_displaced(tmp, &displaced)?;
+                        return Err(std::io::Error::other(RollbackFailed {
+                            why,
+                            cause: e.to_string(),
+                            preserved_at: kept,
+                        }));
+                    }
+                };
+                match put_back {
+                    // #1239 — the restore is an exchange too, so this name now
+                    // holds whatever `dest` held at the instant it ran. That is
+                    // `contents` unless somebody saved onto the published inode
+                    // INSIDE the exchange→verdict window; unlinking their bytes
+                    // is the loss this arm exists to refuse.
+                    Some(captured) => {
+                        if !holds_exactly(&captured, contents) {
+                            let kept = keep_displaced(tmp, &captured)?;
+                            return Ok(Err(Refusal {
+                                why,
+                                intercepted_save: Some(kept),
+                            }));
+                        }
+                        discard_displaced(tmp, &captured);
+                    }
+                    // The restore overwrote rather than exchanged, so nothing
+                    // came back to judge and `displaced` was consumed by it.
+                    None => discard_displaced(tmp, &displaced),
                 }
-                discard_displaced(tmp, &displaced);
-                return Ok(Err(why));
+                return Ok(Err(Refusal {
+                    why,
+                    intercepted_save: None,
+                }));
             }
             discard_displaced(tmp, &displaced);
             Ok(Ok(()))
@@ -136,11 +179,133 @@ pub fn atomic_write_checked<P: AsRef<Path>>(
                 Err(e) => return Err(e),
             };
             if let Err(why) = accept(observed.as_deref()) {
-                return Ok(Err(why));
+                // Nothing was published, so nothing can have been displaced.
+                return Ok(Err(Refusal {
+                    why,
+                    intercepted_save: None,
+                }));
             }
             tmp.persist(dest).map(Ok).map_err(|e| e.error)
         }
     }
+}
+
+/// A checked publish that was retracted, and what the retraction cost.
+///
+/// `Ok(Err(Refusal))` still means what it always meant: the destination is
+/// exactly as it was. What it never meant, and what the caller could not see,
+/// is that the retraction itself is free. The exchange→verdict window is a
+/// window in which the destination name resolves to the NEW bytes, and a
+/// non-cooperating editor saving in place during it writes into them; putting
+/// the original back displaces that save (#1239).
+///
+/// [`Self::intercepted_save`] is that distinction, given a name rather than
+/// left to the caller to sniff out of a message: `None` — the overwhelmingly
+/// common case — means the refusal displaced nothing, and `Some(path)` means
+/// somebody else's bytes were taken out of the way and are preserved there.
+/// A caller that renders "nothing was changed" off a refusal is telling the
+/// truth only in the `None` case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    why: String,
+    intercepted_save: Option<PathBuf>,
+}
+
+impl Refusal {
+    /// What the verdict found instead of the bytes it was given to expect.
+    pub fn why(&self) -> &str {
+        &self.why
+    }
+
+    /// Where a save that arrived inside the exchange→verdict window was
+    /// preserved, if there was one.
+    pub fn intercepted_save(&self) -> Option<&Path> {
+        self.intercepted_save.as_deref()
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.intercepted_save {
+            Some(at) => write!(
+                f,
+                "{}; a save made while the check was running was displaced by \
+                 putting the original back and is preserved at {}",
+                self.why,
+                at.display()
+            ),
+            None => f.write_str(&self.why),
+        }
+    }
+}
+
+/// The guard reached a verdict, the verdict REFUSED, and the publish could not
+/// be retracted.
+///
+/// This is emphatically NOT "the write never happened", which is the other
+/// meaning [`atomic_write_checked`] can return `Err` with. The new bytes are
+/// published at the destination and the pre-image survives only under
+/// [`Self::preserved_at`]. `WriteTool`'s direct path read every `Err` as the
+/// first meaning, republished the bytes unchecked and reported success for a
+/// write its own guard had refused (#1241), so the two meanings are now told
+/// apart by TYPE — recover it with [`rollback_failure`] — rather than by
+/// matching on the message text.
+#[derive(Debug)]
+pub struct RollbackFailed {
+    why: String,
+    cause: String,
+    preserved_at: PathBuf,
+}
+
+impl RollbackFailed {
+    /// What the verdict found, i.e. why the publish was refused.
+    pub fn why(&self) -> &str {
+        &self.why
+    }
+
+    /// Where the pre-image — the destination's contents before the refused
+    /// publish — is preserved. Nothing else holds a copy.
+    pub fn preserved_at(&self) -> &Path {
+        &self.preserved_at
+    }
+}
+
+impl std::fmt::Display for RollbackFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Unchanged wording: #1202's test reads the preserved path back out of
+        // this text, and so does anything already logging it.
+        write!(
+            f,
+            "{}, and the original could not be put back ({}); it is preserved at {}",
+            self.why,
+            self.cause,
+            self.preserved_at.display()
+        )
+    }
+}
+
+impl std::error::Error for RollbackFailed {}
+
+/// Recover a [`RollbackFailed`] from the `io::Error` [`atomic_write_checked`]
+/// wrapped it in, or `None` if the error is the other kind — a tempfile round
+/// trip that never reached a verdict at all.
+///
+/// The one supported way to tell the two apart. Sniffing the message text is
+/// not: it makes the wording load-bearing, and it fails open — an unrecognised
+/// string reads as "never reached a verdict", which is the answer that
+/// republishes unchecked.
+pub fn rollback_failure(error: &std::io::Error) -> Option<&RollbackFailed> {
+    error.get_ref()?.downcast_ref::<RollbackFailed>()
+}
+
+/// Does the file at `path` hold exactly these bytes?
+///
+/// Unreadable counts as "no". This decides whether a displaced file is the
+/// copy of `contents` this module published a moment ago (discard it) or
+/// somebody else's save (keep it), and a file that cannot be read is not
+/// provably ours — on a data-loss guard the fail-safe answer is to keep.
+fn holds_exactly(path: &Path, contents: &[u8]) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| bytes == contents)
 }
 
 /// A sibling temp file holding `contents`, fsynced, and already wearing the
@@ -180,12 +345,20 @@ enum Swap {
     Unsupported,
 }
 
-/// Put `displaced` back at `dest`, undoing a [`Swap::Displaced`] publish.
+/// Put `displaced` back at `dest`, undoing a [`Swap::Displaced`] publish, and
+/// hand back the name under which whatever `dest` held AT THE INSTANT OF THE
+/// RESTORE now lives.
 ///
 /// The inverse of whichever primitive published, so it inherits that
 /// primitive's atomicity: a second `RENAME_EXCHANGE` / `RENAME_SWAP` where the
-/// publish was one, and a replacing rename on Windows where the publish was
+/// publish was one, and `ReplaceFileW` again on Windows where the publish was
 /// `ReplaceFileW`.
+///
+/// Because it is an exchange, it is also an OBSERVATION, and that is what the
+/// returned path is for (#1239). It should hold the bytes this module
+/// published; anything else is a save that landed inside the exchange→verdict
+/// window, and the caller must not unlink it. `None` means the restore
+/// overwrote rather than exchanged, so there was nothing to hand back.
 ///
 /// A non-exchange is a FAILURE, not a rollback (#1202). `publish_displacing`
 /// answers `Vacant` when the destination name no longer resolves and
@@ -196,9 +369,9 @@ enum Swap {
 /// destination was untouched — silent data loss behind a false refusal, which
 /// is the fail-open this module refuses everywhere else.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn restore(displaced: &Path, dest: &Path) -> std::io::Result<()> {
+fn restore(displaced: &Path, dest: &Path) -> std::io::Result<Option<PathBuf>> {
     match publish_displacing(displaced, dest)? {
-        Swap::Displaced(_) => Ok(()),
+        Swap::Displaced(exchanged_out) => Ok(Some(exchanged_out)),
         Swap::Vacant => Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "the destination name no longer exists, so nothing was exchanged back",
@@ -210,9 +383,24 @@ fn restore(displaced: &Path, dest: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Windows restores with `ReplaceFileW` again rather than with a plain
+/// replacing rename, for the same reason the publish uses it: the rename
+/// DESTROYS whatever the destination holds, and inside the exchange→verdict
+/// window that can be somebody's save (#1239). `ReplaceFileW` moves it to a
+/// backup name instead, which is the observation this returns.
+///
+/// The plain rename is kept as the fallback for the two answers that are not
+/// an exchange. `Vacant` — the destination name has gone — is a genuine
+/// restore there rather than the failure it is on the exchange platforms: a
+/// replacing rename against an absent destination simply puts the pre-image
+/// back, which is what this platform has always done and what #1202's test
+/// asserts. Nothing was displaced in that case, so there is nothing to return.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn restore(displaced: &Path, dest: &Path) -> std::io::Result<()> {
-    std::fs::rename(displaced, dest)
+fn restore(displaced: &Path, dest: &Path) -> std::io::Result<Option<PathBuf>> {
+    match publish_displacing(displaced, dest)? {
+        Swap::Displaced(exchanged_out) => Ok(Some(exchanged_out)),
+        Swap::Vacant | Swap::Unsupported => std::fs::rename(displaced, dest).map(|()| None),
+    }
 }
 
 /// Drop the leftovers of a completed publish.
@@ -229,8 +417,10 @@ fn discard_displaced(tmp: tempfile::TempPath, displaced: &Path) {
     drop(tmp);
 }
 
-/// Keep the displaced pre-image on disk and name it, for the one path where
-/// the publish stands and it is the only surviving copy.
+/// Keep a displaced file on disk and name it, for the two paths where it is
+/// the only surviving copy of somebody's bytes: a publish that stands because
+/// the rollback failed (#1202), and a save that the rollback itself displaced
+/// (#1239).
 fn keep_displaced(tmp: tempfile::TempPath, displaced: &Path) -> std::io::Result<PathBuf> {
     if displaced == &*tmp {
         return Ok(tmp.keep()?);
@@ -674,7 +864,11 @@ mod tests {
 
         let r = atomic_write_checked(&p, b"ours", |_| Err("changed".to_owned())).unwrap();
 
-        assert_eq!(r, Err("changed".to_owned()));
+        let refusal = r.expect_err("the publish was not refused");
+        assert_eq!(refusal.why(), "changed");
+        // The control for #1239: nobody else wrote, so the retraction cost
+        // nothing and the refusal says so.
+        assert_eq!(refusal.intercepted_save(), None);
         assert_eq!(std::fs::read(&p).unwrap(), b"theirs");
         // The rolled-back destination is the ORIGINAL file, not a copy of it:
         // an editor holding it open must not find itself writing to an inode
@@ -696,6 +890,181 @@ mod tests {
             .filter(|n| n != "f.txt")
             .collect();
         assert!(strays.is_empty(), "left behind {strays:?}");
+    }
+
+    /// #1239. A save that lands inside the exchange→verdict window is
+    /// displaced by the rollback, and used to be deleted with the leftovers —
+    /// leaving a refusal byte-identical to one that had cost nobody anything.
+    ///
+    /// The window is driven directly rather than sampled: the check closure IS
+    /// the window. It runs after the exchange has published and before the
+    /// verdict is acted on, so a `std::fs::write` made from inside it lands
+    /// exactly where a non-cooperating editor's in-place save would — on the
+    /// inode the destination NAME currently resolves to, which is the one this
+    /// module is about to exchange back out and drop.
+    ///
+    /// Three arms, as the report measured them:
+    ///
+    /// * `ARM_A` — the save happens, the verdict refuses. The save must not
+    ///   vanish, and the refusal must not read like `ARM_B`'s.
+    /// * `ARM_B` — CONTROL. Nobody else writes; the same verdict refuses. The
+    ///   refusal here is the honest "this cost nothing" one, and the two being
+    ///   indistinguishable was half the defect.
+    /// * `ARM_C` — SENSITIVITY CONTROL. The identical save, with a verdict
+    ///   that ACCEPTS. It survives and is published, which proves the probe
+    ///   can observe survival at all and that the loss in `ARM_A` is
+    ///   attributable to the rollback rather than to the exchange or the
+    ///   fixture.
+    #[test]
+    fn a_save_made_inside_the_verdict_window_survives_the_rollback() {
+        const ORIGINAL: &[u8] = b"original";
+        const OURS: &[u8] = b"ours";
+        const THEIRS: &[u8] = b"THEIRSAVE";
+
+        /// One arm. `save` is the concurrent in-place save, made from inside
+        /// the window; `refuse` is the verdict.
+        fn arm(
+            save: bool,
+            refuse: bool,
+        ) -> (tempfile::TempDir, std::io::Result<Result<(), Refusal>>) {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().join("f.txt");
+            std::fs::write(&p, ORIGINAL).unwrap();
+            let outcome = atomic_write_checked(&p, OURS, |observed| {
+                assert_eq!(
+                    observed,
+                    Some(ORIGINAL),
+                    "fixture: the check was not handed the displaced pre-image"
+                );
+                if save {
+                    // In place: truncate and rewrite the SAME inode, which is
+                    // what an editor that does not unlink does, and which is
+                    // the inode the destination name points at right now.
+                    std::fs::write(&p, THEIRS).unwrap();
+                }
+                if refuse {
+                    Err("changed under write".to_owned())
+                } else {
+                    Ok(())
+                }
+            });
+            (dir, outcome)
+        }
+
+        fn surviving(dir: &Path, bytes: &[u8]) -> Vec<PathBuf> {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|f| std::fs::read(f).is_ok_and(|b| b == bytes))
+                .collect()
+        }
+
+        // ARM_C first: it is the control that proves the probe can see a
+        // concurrent save survive. If it fails, nothing below means anything.
+        let (dir_c, out_c) = arm(true, false);
+        assert_eq!(
+            out_c.expect("ARM_C: the round trip failed").as_ref(),
+            Ok(&()),
+            "ARM_C: the accepting verdict did not publish"
+        );
+        assert_eq!(
+            std::fs::read(dir_c.path().join("f.txt")).unwrap(),
+            THEIRS,
+            "ARM_C: the probe cannot observe a concurrent save surviving, so \
+             it cannot testify to one being destroyed either"
+        );
+
+        // ARM_B: nobody else wrote. The refusal is honest and costs nothing.
+        let (dir_b, out_b) = arm(false, true);
+        let ref_b = out_b
+            .expect("ARM_B: the round trip failed")
+            .expect_err("ARM_B: the publish was not refused");
+        assert_eq!(ref_b.why(), "changed under write");
+        assert_eq!(
+            ref_b.intercepted_save(),
+            None,
+            "ARM_B: a refusal that displaced nothing must not claim it did"
+        );
+        assert_eq!(std::fs::read(dir_b.path().join("f.txt")).unwrap(), ORIGINAL);
+        let strays_b: Vec<_> = std::fs::read_dir(dir_b.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "f.txt")
+            .collect();
+        assert!(strays_b.is_empty(), "ARM_B left behind {strays_b:?}");
+
+        // ARM_A: the save landed in the window and the verdict refused.
+        let (dir_a, out_a) = arm(true, true);
+        let ref_a = out_a
+            .expect("ARM_A: the round trip failed")
+            .expect_err("ARM_A: the publish was not refused");
+
+        // The destination is still exactly as it was — the contract that
+        // `Ok(Err(_))` has always carried, and which is not what broke.
+        assert_eq!(std::fs::read(dir_a.path().join("f.txt")).unwrap(), ORIGINAL);
+
+        // c1: their bytes are on disk somewhere. Found by scanning, because
+        // the displaced save lives under whatever name `keep_displaced`
+        // settled on.
+        let survivors = surviving(dir_a.path(), THEIRS);
+        assert_eq!(
+            survivors.len(),
+            1,
+            "ARM_A: the save made inside the verdict window was destroyed; the \
+             directory holds {:?}",
+            std::fs::read_dir(dir_a.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect::<Vec<_>>()
+        );
+
+        // c1: and the caller is told where.
+        assert_eq!(
+            ref_a.intercepted_save(),
+            Some(survivors[0].as_path()),
+            "ARM_A: the refusal does not name where the displaced save was kept"
+        );
+
+        // c2: THE property. ARM_A and ARM_B were byte-identical — same return
+        // value, same destination bytes, same directory listing — so nothing
+        // the caller could read told a lossy refusal from a harmless one.
+        assert_ne!(
+            ref_a, ref_b,
+            "a refusal that destroyed someone's save is indistinguishable from \
+             one that destroyed nothing"
+        );
+        assert_ne!(ref_a.to_string(), ref_b.to_string());
+        assert!(
+            ref_a
+                .to_string()
+                .contains(&survivors[0].display().to_string()),
+            "the rendered refusal does not carry the preserved path: {ref_a}"
+        );
+    }
+
+    /// #1241 c4. The OTHER meaning of `Err` out of [`atomic_write_checked`] —
+    /// a tempfile round trip that never reached a verdict — must not be
+    /// mistaken for a refusal that could not be rolled back.
+    ///
+    /// The classifier is what decides whether `WriteTool`'s direct path
+    /// publishes unchecked, and it fails in the dangerous direction if it
+    /// answers `Some` for everything: a genuine round-trip failure would then
+    /// be reported as a refusal and the write would never land. The error here
+    /// is produced by the real code — a destination whose parent does not
+    /// exist, so the sibling temp file cannot be staged.
+    #[test]
+    fn an_error_that_never_reached_a_verdict_is_not_a_rollback_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let nowhere = dir.path().join("no-such-dir").join("f.txt");
+
+        let e = atomic_write_checked(&nowhere, b"ours", |_| Ok(()))
+            .expect_err("staging a temp file in a directory that does not exist should fail");
+
+        assert!(
+            rollback_failure(&e).is_none(),
+            "a round trip that never reached a verdict was classified as a \
+             refusal whose rollback failed: {e}"
+        );
     }
 
     /// #1202. A rollback that exchanged NOTHING is a restore FAILURE, not a
@@ -800,7 +1169,9 @@ mod tests {
             // the pre-image simply comes back. The refusal is honest there, so
             // the outcome is the ordinary `Ok(Err(why))` and the survivor is
             // the destination itself.
-            assert_eq!(outcome.unwrap(), Err("changed under the write".to_owned()));
+            let refusal = outcome.unwrap().expect_err("the publish was not refused");
+            assert_eq!(refusal.why(), "changed under the write");
+            assert_eq!(refusal.intercepted_save(), None);
             assert_eq!(survivors[0], p);
         }
     }

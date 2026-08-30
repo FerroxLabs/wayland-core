@@ -288,6 +288,47 @@ impl WriteTool {
     }
 }
 
+/// #1241 — which of `atomic_write_checked`'s two `Err` meanings this is, and
+/// therefore whether the direct Write path may publish unchecked.
+///
+/// `Ok(error)` — the tempfile round trip never reached a verdict at all: a
+/// cross-device rename, a directory that will not hold a sibling temp file.
+/// Nothing was published and no verdict was taken, so the unchecked fallback
+/// is still the right answer and still reports success.
+///
+/// `Err(report)` — the guard RAN, the verdict REFUSED, and the publish could
+/// not be retracted. Since #1202 that is a reachable meaning of the same
+/// `Err`, and it is the opposite situation: the new bytes are already
+/// published and the pre-image survives only under the name the error carries.
+/// Falling through would rewrite bytes that are already there, throw the
+/// refusal away, and report `Updated <path>` — success, for a write this
+/// tool's own guard had just refused, with no mention that a concurrent change
+/// was seen or that the user's original is sitting under a `.tmpXXXXXX`
+/// sibling that nothing will ever clean up.
+///
+/// Told apart by TYPE, never by the message text: an unrecognised string would
+/// read as "never reached a verdict", which is the answer that republishes.
+///
+/// Deliberately no cache update and no `note_written` on the report path. The
+/// bytes on disk are not this tool's to claim authorship of, and a cache entry
+/// left stale fails CLOSED at the next edit.
+fn unpublished_or_unrolled(
+    file_path: &str,
+    error: std::io::Error,
+) -> Result<std::io::Error, ToolResult> {
+    match wcore_config::rollback_failure(&error) {
+        Some(unrolled) => Err(ToolResult {
+            content: crate::unsaved_work::refused_but_not_rolled_back(
+                file_path,
+                unrolled.why(),
+                unrolled.preserved_at(),
+            ),
+            is_error: true,
+        }),
+        None => Ok(error),
+    }
+}
+
 #[async_trait]
 impl Tool for WriteTool {
     fn name(&self) -> &str {
@@ -454,19 +495,28 @@ impl Tool for WriteTool {
             }) {
                 Ok(Ok(())) => None,
                 Ok(Err(why)) => {
+                    // #1239 — as in edit.rs: say so when the retraction
+                    // displaced a save, instead of the wording that promises
+                    // nothing was changed.
                     return ToolResult {
-                        content: crate::unsaved_work::changed_under_write(file_path, &why),
+                        content: crate::unsaved_work::refusal_message(file_path, &why),
                         is_error: true,
                     };
                 }
-                Err(e) => Some(e),
+                Err(e) => match unpublished_or_unrolled(file_path, e) {
+                    Ok(never_reached_a_verdict) => Some(never_reached_a_verdict),
+                    Err(report) => return report,
+                },
             };
 
         if let Some(e) = unpublishable {
             // Fallback: direct write if the tempfile round trip fails at all
             // (a cross-device rename, or a directory that will not hold a
             // sibling). The guard above did not run, so this is the one path
-            // that publishes unchecked — unchanged from before this fix.
+            // that publishes unchecked. #1241 narrowed WHICH errors get here —
+            // a refusal that could not be rolled back is diverted above — so
+            // the premise in this comment is true again: reaching this line
+            // means no verdict was ever taken.
             if let Err(e) = std::fs::write(path, content) {
                 return ToolResult {
                     content: format!("Failed to write file: {}", e),
@@ -605,6 +655,174 @@ mod tests {
         WriteTool::new(cache).with_unsaved_guard(Arc::new(
             crate::unsaved_work::UnsavedWorkGuard::new_isolated(),
         ))
+    }
+
+    /// #1241 c2 + c3. A refusal whose rollback exchanged NOTHING must not
+    /// reach the unchecked fallback, and what the user is told must carry the
+    /// name the pre-image was preserved under.
+    ///
+    /// The error is not hand-built. It comes out of a real
+    /// `atomic_write_checked` run in the state the ticket names — the
+    /// destination NAME disappearing between the two exchanges, driven
+    /// directly by deleting it from inside the check closure, which is the one
+    /// ordering that places the unlink inside the window — and is then handed
+    /// to the very function the direct Write path's `Err` arm calls.
+    ///
+    /// Unix only: `Swap::Displaced` on the exchange platforms is
+    /// `RENAME_EXCHANGE` / `RENAME_SWAP`, and Windows restores with
+    /// `ReplaceFileW`, which succeeds against an absent destination and so
+    /// cannot reach this state.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_refusal_that_could_not_be_rolled_back_is_not_a_fallback() {
+        const ORIGINAL: &[u8] = b"the only copy of the user's bytes";
+
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, ORIGINAL).unwrap();
+
+        let mut handed = None;
+        let error = wcore_config::atomic_write_checked(&p, b"ours", |observed| {
+            handed = observed.map(<[u8]>::to_vec);
+            std::fs::remove_file(&p).unwrap();
+            Err("its contents changed on disk".to_owned())
+        })
+        .expect_err("the rollback should have failed with the destination gone");
+
+        assert_eq!(
+            handed.as_deref(),
+            Some(ORIGINAL),
+            "fixture: the check was not handed the displaced pre-image, so this \
+             never reached a rollback at all"
+        );
+
+        let report = unpublished_or_unrolled("/w/f.txt", error)
+            .expect_err("a refusal that could not be rolled back was sent to the fallback");
+
+        assert!(report.is_error, "reported as a success: {}", report.content);
+        assert!(
+            !report.content.starts_with("Updated "),
+            "reported as an update: {}",
+            report.content
+        );
+
+        // c2: the text names where the pre-image is, and that name is real.
+        let survivors: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|f| std::fs::read(f).is_ok_and(|b| b == ORIGINAL))
+            .collect();
+        assert_eq!(survivors.len(), 1, "the pre-image did not survive");
+        assert!(
+            report.content.contains(&survivors[0].display().to_string()),
+            "the user is not told where the original was preserved: {}",
+            report.content
+        );
+    }
+
+    /// #1241 c4, the classifier half: a round trip that never reached a
+    /// verdict must still be handed back for the unchecked fallback to
+    /// publish. Fails if the branch above widens to swallow every `Err`.
+    #[test]
+    fn a_round_trip_that_never_reached_a_verdict_is_handed_to_the_fallback() {
+        let dir = tempdir().unwrap();
+        let nowhere = dir.path().join("no-such-dir").join("f.txt");
+        let error = wcore_config::atomic_write_checked(&nowhere, b"ours", |_| Ok(()))
+            .expect_err("staging a temp file under a missing directory should fail");
+
+        let handed_back = unpublished_or_unrolled("/w/f.txt", error)
+            .expect("a genuine round-trip failure was swallowed as a refusal");
+        assert_eq!(handed_back.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// #1241 c4. The other meaning of `Err` — a round trip that never reached
+    /// a verdict — must still fall through to the unchecked write, publish,
+    /// and report success.
+    ///
+    /// The trigger is the one the fallback's own comment names: a directory
+    /// that will not hold a sibling temp file. It is built by nesting until
+    /// the destination path is as long as the platform will accept, so that
+    /// the destination itself opens but `.tmpXXXXXX` beside it is one
+    /// character too long. That works regardless of who is running the test,
+    /// which a permission-based fixture would not — every one of these runs as
+    /// root on the build host, where a mode-0555 directory is no obstacle.
+    ///
+    /// Unix only: the search is over `PATH_MAX`, and Windows' equivalent is
+    /// lifted by `long_path_safe_dest` on the very path under test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_round_trip_that_never_reached_a_verdict_still_publishes_unchecked() {
+        /// A directory that will hold `f` but not a `.tmpXXXXXX` sibling.
+        /// Found by measurement rather than by arithmetic over a `PATH_MAX`
+        /// this crate would have to guess at.
+        fn dir_that_refuses_a_sibling_temp_file(base: &Path) -> Option<std::path::PathBuf> {
+            let mut dir = base.to_path_buf();
+            loop {
+                let next = dir.join("d".repeat(100));
+                if std::fs::create_dir(&next).is_err() {
+                    break;
+                }
+                dir = next;
+            }
+            // The last 100-char step failed, so the limit is inside the next
+            // hundred characters. Walk down from there and take the first
+            // length that shows both halves of the property.
+            for len in (1..=99).rev() {
+                let candidate = dir.join("d".repeat(len));
+                if std::fs::create_dir(&candidate).is_err() {
+                    continue;
+                }
+                let refuses_a_sibling = tempfile::NamedTempFile::new_in(&candidate).is_err();
+                let holds_the_destination = std::fs::write(candidate.join("f"), b"probe").is_ok();
+                if refuses_a_sibling && holds_the_destination {
+                    let _ = std::fs::remove_file(candidate.join("f"));
+                    return Some(candidate);
+                }
+            }
+            None
+        }
+
+        let base = tempdir().unwrap();
+        let Some(dir) = dir_that_refuses_a_sibling_temp_file(base.path()) else {
+            panic!(
+                "no path length on this filesystem refuses a sibling temp file \
+                 while still opening the destination, so this test cannot \
+                 reach the fallback it grades"
+            );
+        };
+        let dest = dir.join("f");
+
+        // Fixture control, restated at the moment of use: if the round trip
+        // can be staged here then nothing below measures the fallback.
+        assert!(
+            tempfile::NamedTempFile::new_in(&dir).is_err(),
+            "the fixture directory accepts a sibling temp file after all"
+        );
+
+        let tool = tool(None);
+        let result = tool
+            .execute(json!({
+                "file_path": dest.to_str().unwrap(),
+                "content": "published unchecked",
+            }))
+            .await;
+
+        assert!(
+            !result.is_error,
+            "a round trip that never reached a verdict was reported as a \
+             failure: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("used direct write"),
+            "the fallback did not run: {}",
+            result.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "published unchecked",
+            "the fallback did not publish"
+        );
     }
 
     fn make_cache() -> Arc<RwLock<FileStateCache>> {

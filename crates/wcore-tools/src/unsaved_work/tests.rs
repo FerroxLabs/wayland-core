@@ -2443,3 +2443,75 @@ fn the_agents_own_lines_do_not_shelter_the_users() {
         "must not claim the agent's own line as the user's work: {refusal}"
     );
 }
+
+/// #1239 c2, at the surface the user actually reads.
+///
+/// Both refusals below come out of a real `atomic_write_checked` run, refuse
+/// for the same reason, and leave the destination byte-identical. The only
+/// difference between them is whether putting the original back displaced
+/// somebody's save — and until #1239 that difference reached the user as
+/// nothing at all: the same sentence, ending "Nothing was changed.", over a
+/// save that had just been unlinked.
+///
+/// [`refusal_message`] is the single place that choice is made, and both tool
+/// call sites (`edit.rs` and `write.rs`) go through it.
+#[test]
+fn a_refusal_that_displaced_a_save_does_not_read_like_one_that_did_not() {
+    fn refusal(concurrent_save: bool) -> (tempfile::TempDir, wcore_config::Refusal) {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, b"original").unwrap();
+        // The check closure IS the exchange->verdict window: it runs after the
+        // publish and before the verdict is acted on, so a `fs::write` from
+        // inside it lands on the inode the destination name resolves to right
+        // now — exactly where a non-cooperating editor's in-place save lands.
+        let refusal = wcore_config::atomic_write_checked(&p, b"ours", |_| {
+            if concurrent_save {
+                std::fs::write(&p, b"THEIRSAVE").unwrap();
+            }
+            Err("its contents changed on disk".to_owned())
+        })
+        .expect("the round trip failed")
+        .expect_err("the publish was not refused");
+        (dir, refusal)
+    }
+
+    let (dir_a, lossy) = refusal(true);
+    let (_dir_b, clean) = refusal(false);
+
+    let preserved = lossy
+        .intercepted_save()
+        .expect("the displaced save was not preserved")
+        .to_path_buf();
+    assert_eq!(std::fs::read(&preserved).unwrap(), b"THEIRSAVE");
+    assert_eq!(
+        std::fs::read(dir_a.path().join("f.txt")).unwrap(),
+        b"original",
+        "the destination is not as it was, which is a different defect"
+    );
+
+    let lossy_text = refusal_message("/w/f.txt", &lossy);
+    let clean_text = refusal_message("/w/f.txt", &clean);
+
+    assert_ne!(
+        lossy_text, clean_text,
+        "the user is told the same thing whether or not their save was \
+         displaced"
+    );
+    assert!(
+        lossy_text.contains(&preserved.display().to_string()),
+        "the user is not told where the displaced save went: {lossy_text}"
+    );
+    assert!(
+        !lossy_text.contains("Nothing was changed."),
+        "the user is told nothing was changed, over a save that was just taken \
+         out of the way: {lossy_text}"
+    );
+
+    // The control keeps the wording it has always had, and there it is true.
+    assert!(
+        clean_text.contains("Nothing was changed."),
+        "the honest refusal lost its wording: {clean_text}"
+    );
+    assert_eq!(clean.intercepted_save(), None);
+}
