@@ -158,3 +158,71 @@ async fn a_local_operator_shell_reads_the_store_on_a_non_enforcing_backend() {
          do not delete it. Got:\n{store}"
     );
 }
+
+/// THE THIRD ARM OF THE SAME GATE, which neither test above reaches and which
+/// c4's rewritten text now names explicitly rather than leaving to a note.
+///
+/// `bash.rs` refuses on `shell_requires_os_read_deny() &&
+/// !enforces_read_deny() && !bypasses_containment()`. The first two conjuncts
+/// are what the two tests above split. The THIRD is `SandboxRegistry::dangerous`
+/// -- the operator's explicit no-sandbox launch, session AUTHORITY rather than a
+/// backend capability -- and it admits the shell for a NON-local principal, the
+/// very principal the fail-closed arm refuses.
+///
+/// Without this measurement, a c4 clause reading "the shell is REFUSED for every
+/// principal but the local operator" would be FALSE and nothing in the suite
+/// would say so. It is measured here so the exclusion carried by the field is a
+/// fact and not a narration.
+#[tokio::test]
+async fn a_dangerous_no_sandbox_session_admits_the_shell_for_a_non_local_principal() {
+    use wcore_types::execution_policy::{
+        ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, PolicySource,
+        resolve_dangerous_launch,
+    };
+
+    let (_dir, root) = workspace();
+    let policy = WorkspacePolicy::contained(&root);
+    assert!(
+        policy.shell_requires_os_read_deny(),
+        "precondition: the SAME non-local-operator policy the fail-closed arm \
+         uses, or this is not the same gate"
+    );
+
+    let baseline = BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Default);
+    let grant = resolve_dangerous_launch(
+        &baseline,
+        DangerousLaunchRequest::cli(60, "core-244-c4-third-arm"),
+        10_000,
+    )
+    .unwrap();
+    let registry = SandboxRegistry::dangerous(&grant);
+    assert!(
+        registry.bypasses_containment(),
+        "precondition: the Dangerous launch must be the containment-bypass \
+         session, or this test is about the wrong arm"
+    );
+    assert!(
+        !registry.enforces_read_deny(),
+        "precondition: the no-sandbox backend must not claim read-deny, or the \
+         refusal would be skipped for the OTHER conjunct and this arm is vacuous"
+    );
+
+    let ctx = ToolContext::test_default()
+        .with_sandbox(Arc::new(registry))
+        .with_workspace(Arc::new(policy));
+
+    let store = run(&ctx, &root, &read_cmd(".git/objects/ab/cdef")).await;
+    eprintln!("DANGEROUS_NON_LOCAL_STORE_READ:\n{store}");
+    assert!(
+        !store.contains(REFUSAL),
+        "the Dangerous bypass arm must NOT refuse -- if it now does, c4's \
+         Dangerous exclusion is stale and must be DELETED from the field. \
+         Got:\n{store}"
+    );
+    assert!(
+        store.contains(ROOT_OBJECT),
+        "the Dangerous bypass arm is expected to read the store outright; if it \
+         no longer does, re-grade c4 rather than editing this assertion. \
+         Got:\n{store}"
+    );
+}

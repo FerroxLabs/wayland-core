@@ -37,7 +37,7 @@
 //!    argument INSIDE a store, but `.git` and `<vendor>/.git` are not
 //!    themselves stores — so naming the directory one component up walked
 //!    into `.git/objects` and `.git/lfs` in plaintext. The predicate is
-//!    The predicate is BOTH arms of `WorkspacePolicy::is_vcs_content_store`,
+//!    BOTH arms of `WorkspacePolicy::is_vcs_content_store`,
 //!    not a second copy of either: `is_vcs_content_store_static` per path for
 //!    the lexical arm, and `vcs_content_stores(dir)` for the arm that RESOLVES
 //!    the stores a `.git` merely NAMES — a gitfile's `gitdir:`/`commondir` and
