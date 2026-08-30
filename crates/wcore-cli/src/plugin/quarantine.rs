@@ -409,6 +409,98 @@ pub fn harden_against_credential_prompt(cmd: &mut std::process::Command) {
     }
 }
 
+/// The Windows console-attribution notice (`#389` c2), as a pure function so
+/// its WORDING is gradeable separately from its emission.
+///
+/// # Why this exists at all, and why it is not a fix
+///
+/// `#389` c1 asked for the property: a quarantine child that calls
+/// `AttachConsole` cannot end up on the operator's console. That was MEASURED
+/// FALSE and both obvious remedies were measured foreclosed with it —
+/// reparenting is defeated by `AttachConsole(<pid>)`, and giving the child its
+/// own console is defeated by `FreeConsole()` first. Windows has no
+/// session-leader equivalent, so with process-creation flags alone the
+/// property is not reachable, and the AppContainer route that might reach it
+/// is CLOSED by a recorded decision and is not to be reopened.
+///
+/// So `#389` c2's branch is taken instead: the prompt is LABELLED. This does
+/// not stop a determined child re-attaching; it makes the operator able to
+/// ATTRIBUTE whatever then appears. That is a smaller claim than c1's and it
+/// is stated as one — see `.planning/DECISIONS.md` Q-389c2 for the choice and
+/// its cost.
+///
+/// Emitted only on Windows: on unix `setsid(2)` removes the prompt outright,
+/// so a notice there would announce a window that does not exist.
+#[cfg(windows)]
+pub fn console_attribution_notice(args: &[&str]) -> String {
+    format!(
+        "wayland-core: plugin quarantine is now running `git {}`. Anything \
+         that appears on this console before the next `wayland-core:` line \
+         comes from that git or from a credential helper it started — NOT \
+         from wayland-core. wayland-core will never ask for a password here.",
+        args.join(" ")
+    )
+}
+
+/// Where a notice was, or was not, delivered.
+///
+/// A STRUCT with one field per sink, and deliberately not a `Vec` of the sinks
+/// that worked. A list can be short and read as complete; this cannot omit a
+/// sink, because omitting one would not compile.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct NoticeDelivery {
+    /// This process's stderr. Where a host integration reads us.
+    pub stderr: bool,
+    /// `CONOUT$` — the console the quarantine child reaches with
+    /// `AttachConsole`, and therefore the sink a credential prompt appears on.
+    /// `Err` carries the OS reason, which on a console-less host is the
+    /// benign case: no console exists for a prompt to reach either.
+    pub operator_console: std::result::Result<(), String>,
+}
+
+/// Put the notice on EVERY sink an operator could be reading it from.
+///
+/// # Why stderr alone was the wrong sink
+///
+/// `build_git_command` gives git `Stdio::piped()` for both its streams, so a
+/// credential prompt does not come back through them at all: it reaches the
+/// operator on `CONOUT$`, the console the child re-attaches to. The notice was
+/// an `eprintln!`, i.e. wayland-core's stderr. Those two sinks COINCIDE only
+/// when wayland-core's own stderr happens to be that console — and under the
+/// TUI, under the JSON stream protocol, and under any host integration that
+/// pipes us, it is not. In exactly those configurations the operator got the
+/// prompt with no notice attached to it, which is the unattributable prompt
+/// `#389` c2 exists to prevent. A notice that is absent precisely when the
+/// thing it attributes is visible is worse than no notice, because it is
+/// believed.
+///
+/// So the notice now goes where the PROMPT goes, and stderr is kept as well
+/// rather than swapped: a host integration reading our stderr is a real
+/// operator surface too, and on a console-less host it is the only one.
+///
+/// The invariant this establishes, and the one the test grades: **whenever a
+/// console exists, the notice reaches it.** No console means no console for a
+/// prompt either, so that leg is honest rather than vacuous.
+#[cfg(windows)]
+pub fn announce_on_every_operator_sink(notice: &str) -> NoticeDelivery {
+    use std::io::Write as _;
+    eprintln!("{notice}");
+    // `CONOUT$` through `OpenOptions` rather than a raw `CreateFileW`: std
+    // opens it with OPEN_EXISTING and a shared mode the console accepts, so
+    // this needs no new `windows-sys` feature and no `unsafe` on a path that
+    // runs in production.
+    let operator_console = std::fs::OpenOptions::new()
+        .write(true)
+        .open("CONOUT$")
+        .and_then(|mut console| writeln!(console, "{notice}"))
+        .map_err(|e| e.to_string());
+    NoticeDelivery {
+        stderr: true,
+        operator_console,
+    }
+}
+
 /// Build the `git` command `run_git` runs, hardened, without spawning it.
 ///
 /// Split out so a test grades the WIRING and not just the function: an
@@ -425,6 +517,16 @@ pub fn build_git_command(args: &[&str], cwd: Option<&Path>) -> std::process::Com
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     harden_against_credential_prompt(&mut cmd);
+    // #389 c2. Emitted HERE, in the builder, and not in `run_git`, for the
+    // same reason this function exists at all: this is the one choke point
+    // every quarantine `git` spawn passes through, and it is the point the
+    // wiring test already grades. The failure that matters is a spawn with no
+    // notice; a notice for a command that is built and then not spawned is a
+    // harmless extra line. So it fails loud rather than quiet.
+    #[cfg(windows)]
+    {
+        announce_on_every_operator_sink(&console_attribution_notice(args));
+    }
     cmd
 }
 

@@ -149,6 +149,14 @@ fn conout() -> String {
 
 /// The half that runs in the spawned child.
 fn run_as_probe() {
+    // #389 c2 wiring. Built and dropped, never spawned: what is under test is
+    // that the PRODUCTION builder announces itself, and this runs inside a
+    // child whose stderr the parent captures, which an in-process assertion
+    // cannot do (libtest owns this process's stderr).
+    drop(wcore_cli::plugin::quarantine::build_git_command(
+        &["fetch", "--depth", "1"],
+        None,
+    ));
     println!("CONSOLE_WINDOW_AT_CREATION={}", console_window());
     println!("CONOUT_BEFORE={}", conout());
     println!(
@@ -266,6 +274,28 @@ fn probe_through_production_git() -> String {
     }
 }
 
+/// The probe's STDERR, which is where the `#389` c2 attribution notice goes.
+///
+/// A second spawn rather than a parameter on [`probe`] so the existing arms
+/// keep `Stdio::null()` and cannot be perturbed by this one.
+fn probe_stderr() -> String {
+    let exe = std::env::current_exe().expect("current test binary");
+    let mut cmd = Command::new(exe);
+    cmd.arg(TEST_NAME)
+        .arg("--exact")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(PROBE_ENV, "1")
+        .env(PARENT_PID_ENV, std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    match cmd.output() {
+        Ok(out) => String::from_utf8_lossy(&out.stderr).into_owned(),
+        Err(e) => format!("SPAWN_FAILED={e}\n"),
+    }
+}
+
 /// Pull one `KEY=value` field out of a probe report.
 ///
 /// Searched ANYWHERE in the line, not anchored at its start: libtest writes
@@ -280,6 +310,126 @@ fn field<'a>(report: &'a str, key: &str) -> Option<&'a str> {
         let idx = l.find(&needle)?;
         Some(l[idx + needle.len()..].trim())
     })
+}
+
+/// `#389` c2, the branch actually taken: a quarantine-originated prompt is
+/// LABELLED, so the operator can attribute it.
+///
+/// # What this asserts, and what it deliberately does not
+///
+/// It does NOT assert that a prompt cannot reach the operator's console —
+/// `quarantine_child_has_no_console_at_creation_on_windows` measures that it
+/// can, and that pin stays. It asserts the property c2 asks for instead: that
+/// before any quarantine `git` is spawned, the operator has been told that
+/// what follows is git's and not wayland-core's.
+///
+/// # What THIS arm grades, stated exactly
+///
+/// The CONTENT of the notice, and the WIRING — that `build_git_command` emits
+/// one at all — observed through a PIPE, because libtest owns this process's
+/// stderr and a child's is the only stderr this test can read.
+///
+/// A pipe is NOT the sink the credential prompt reaches. `build_git_command`
+/// gives git `Stdio::piped()`, so the prompt goes to `CONOUT$`; this arm
+/// therefore observes the notice in precisely the configuration where an
+/// operator could not. That gap is real and is graded by its own arm,
+/// `the_notice_reaches_the_console_the_prompt_reaches`, which asserts the
+/// `CONOUT$` leg against an independent console oracle. Neither arm is
+/// sufficient alone: this one proves the builder announces, that one proves
+/// the announcement lands where the prompt does.
+#[test]
+fn a_quarantine_git_announces_itself_on_the_operators_console() {
+    if std::env::var_os(PROBE_ENV).is_some() {
+        run_as_probe();
+        return;
+    }
+
+    // Content, from the pure function: the notice must name the tool, deny
+    // authorship of any prompt, and say wayland-core never asks here.
+    let notice =
+        wcore_cli::plugin::quarantine::console_attribution_notice(&["fetch", "--depth", "1"]);
+    for needle in [
+        "wayland-core:",
+        "git fetch --depth 1",
+        "NOT from wayland-core",
+        "never ask for a password",
+    ] {
+        assert!(
+            notice.contains(needle),
+            "the attribution notice must contain {needle:?}; it is {notice:?}"
+        );
+    }
+
+    // Wiring, from a real child of the real builder.
+    let err = probe_stderr();
+    assert!(
+        !err.contains("SPAWN_FAILED"),
+        "fixture: the probe child did not run, so nothing below was \
+         measured:\n{err}"
+    );
+    assert!(
+        err.contains("wayland-core: plugin quarantine is now running `git fetch --depth 1`"),
+        "`build_git_command` built a quarantine git command without announcing \
+         it on the operator's console, so a prompt raised inside that command \
+         is unattributable again (core#389 c2). child stderr:\n{err}"
+    );
+}
+
+/// `#389` c2, the half a pipe cannot see: the notice must land on the sink the
+/// PROMPT lands on.
+///
+/// # The defect this closes
+///
+/// The notice was an `eprintln!` — wayland-core's stderr. The prompt reaches
+/// the operator on `CONOUT$`, because `build_git_command` pipes git's own two
+/// streams. Those sinks coincide only when wayland-core's stderr happens to BE
+/// that console; under the TUI, under the JSON stream protocol, and under any
+/// host integration that pipes us, they do not, and the operator got the
+/// prompt with no notice attached. A notice absent exactly when the thing it
+/// attributes is visible is worse than none, because it is believed.
+///
+/// # Why this is not vacuous on a console-less host
+///
+/// Console presence is measured INDEPENDENTLY, by `GetConsoleProcessList`,
+/// rather than inferred from the delivery result — asking the delivery whether
+/// delivery worked would be the tautology this file exists to avoid. Both legs
+/// then assert something: with a console the notice MUST reach it; without one
+/// the delivery MUST report the failure, and that leg is honest rather than a
+/// skip, because a host with no console has no console for a prompt to reach
+/// either.
+///
+/// Deleting the `CONOUT$` write does not make this green — `NoticeDelivery`
+/// has one field per sink, so removing the sink removes the field and the
+/// deletion is a compile error rather than a silent pass.
+#[test]
+fn the_notice_reaches_the_console_the_prompt_reaches() {
+    if std::env::var_os(PROBE_ENV).is_some() {
+        run_as_probe();
+        return;
+    }
+    let notice = wcore_cli::plugin::quarantine::console_attribution_notice(&["--version"]);
+    let delivered = wcore_cli::plugin::quarantine::announce_on_every_operator_sink(&notice);
+    assert!(
+        delivered.stderr,
+        "stderr is the sink a host integration reads and must never be dropped"
+    );
+
+    // The INDEPENDENT oracle. Not the delivery's own opinion of itself.
+    let mut pids = [0u32; 64];
+    let attached = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } != 0;
+
+    if attached {
+        assert!(
+            delivered.operator_console.is_ok(),
+            "a console IS attached to this process, so a quarantine child can              AttachConsole to it and prompt there — and the notice that              attributes that prompt did not reach it: {:?}",
+            delivered.operator_console
+        );
+    } else {
+        assert!(
+            delivered.operator_console.is_err(),
+            "no console is attached, so `CONOUT$` cannot open; a delivery              reporting success here would be reporting a sink that does not              exist, which is the reassurance this whole ticket is about"
+        );
+    }
 }
 
 #[test]

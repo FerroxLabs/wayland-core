@@ -106,6 +106,21 @@ impl Default for WindowsJobObjectBackend {
 // (swarm's delegated-dispatch gate refuses on `enforces_read_deny` first
 // regardless). Understating a containment claim is the safe direction; a
 // separate lane may raise it behind a `cfg(windows)` live probe.
+/// The declared Windows containment posture, as product text (`#368`, `#369`).
+///
+/// Deliberately says what IS in force as well as what is not: a limitation
+/// that lists only absences reads as "there is no sandbox at all", which is
+/// its own inaccuracy and makes an operator discount the whole notice.
+pub(crate) const WINDOWS_NO_FILESYSTEM_SANDBOX_LIMITATION: &str = "there is NO filesystem sandbox on this backend, by design and not by \
+     accident: a Job Object bounds the process TREE, not the filesystem. Treat \
+     every command run through it -- the agent's Bash tool included -- as \
+     having the full authority of your user account, able to read and write \
+     anywhere you can, regardless of the workspace policy. In force: \
+     kill-on-close process-tree ownership and a scrubbed child environment. \
+     NOT in force: OS filesystem confinement, OS network denial, OS secret \
+     read-deny. `WAYLAND_SANDBOX=appcontainer` selects the strict backend, \
+     which enforces them and has its own declared limitations.";
+
 #[async_trait]
 impl SandboxBackend for WindowsJobObjectBackend {
     fn name(&self) -> &'static str {
@@ -118,6 +133,27 @@ impl SandboxBackend for WindowsJobObjectBackend {
     /// AppContainer probe from the Windows session-startup path.
     fn is_available(&self) -> bool {
         true
+    }
+
+    /// What the Windows DEFAULT backend does not do, said in the product.
+    ///
+    /// # Not a defect report -- a declaration
+    ///
+    /// Unlike the AppContainer entries, this one tracks nothing, because there
+    /// is nothing to track: a recorded decision says Windows ships WITHOUT a
+    /// filesystem sandbox and the Job Object default is intended, and that
+    /// decision is closed. What was open is only whether the product SAYS so.
+    ///
+    /// It matters because the honest reading of the capability row is
+    /// counter-intuitive in exactly the dangerous direction:
+    /// `bypasses_containment false` looks like containment, and it means only
+    /// that a real backend was selected. Measured on real Windows, a command
+    /// under this backend wrote outside the workspace while that field read
+    /// `false`. The `NOTE:` block in `wayland-core sandbox status` says this in
+    /// prose for a human; this string is the same fact in the `--json` output,
+    /// where a host integration or a script can act on it.
+    fn known_limitations(&self) -> Vec<&'static str> {
+        vec![WINDOWS_NO_FILESYSTEM_SANDBOX_LIMITATION]
     }
 
     async fn execute(
@@ -174,6 +210,77 @@ mod tests {
             !backend.blocks_powershell(),
             "without the Low-integrity token PowerShell loads fine"
         );
+    }
+
+    /// The default backend must SAY it does not confine the filesystem, not
+    /// merely answer `false` to a question the reader has to know to ask.
+    ///
+    /// This is the honesty half of `#368`/`#369` for the backend that is
+    /// actually selected on Windows. It grades the two properties that make
+    /// the notice load-bearing: it must deny filesystem confinement in words,
+    /// and it must correct the specific misreading that
+    /// `bypasses_containment false` implies containment -- by naming what IS
+    /// enforced, so the reader can tell the notice apart from "no sandbox at
+    /// all" and does not discount it.
+    ///
+    /// The prose is not pinned verbatim; an honest rewording must not redden.
+    #[test]
+    fn the_relaxed_backend_declares_that_it_does_not_confine_the_filesystem() {
+        let backend = WindowsJobObjectBackend::new();
+        let declared = backend.known_limitations();
+        assert!(
+            !declared.is_empty(),
+            "a backend whose `confines_filesystem` is false must say so in \
+             words; the boolean alone is what let a measured write escape \
+             while the status row read reassuringly"
+        );
+        let joined = declared.join(" ");
+        assert!(
+            joined.contains("NO filesystem sandbox"),
+            "the declaration must deny filesystem confinement outright: \
+             {joined:?}"
+        );
+        assert!(
+            joined.contains("full authority of your user account"),
+            "the declaration must state the CONSEQUENCE, not just the absent \
+             mechanism: {joined:?}"
+        );
+        assert!(
+            joined.contains("In force:"),
+            "a notice that lists only absences reads as 'no sandbox at all' \
+             and gets discounted; it must name what IS enforced: {joined:?}"
+        );
+        assert!(
+            !backend.confines_filesystem(),
+            "the declaration and the boolean must agree, or one of them is \
+             lying and the reader cannot tell which"
+        );
+    }
+
+    /// The trait DEFAULT must stay silent. A backend with nothing recorded has
+    /// to say nothing rather than reassure anybody, or `known_limitations`
+    /// becomes a place where an empty list reads as a clean bill of health.
+    #[test]
+    fn a_backend_that_records_nothing_declares_nothing() {
+        struct Bare;
+        #[async_trait]
+        impl SandboxBackend for Bare {
+            fn name(&self) -> &'static str {
+                "bare"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            async fn execute(
+                &self,
+                _manifest: &SandboxManifest,
+                _cmd: crate::SandboxCommand,
+            ) -> Result<crate::SandboxOutput> {
+                unreachable!("never executed")
+            }
+        }
+        assert!(Bare.known_limitations().is_empty());
+        assert!(Bare.unavailable_reason().is_none());
     }
 
     /// Selection must never spend a startup probe on this backend, and must

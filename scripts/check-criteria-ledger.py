@@ -651,9 +651,10 @@ class TrackerError(Exception):
 GH_LIMIT = 4000
 
 
-def gh_issues(repo, label, state):
+def gh_issues(repo, label, state, with_body=False):
+    fields = "number,title,state,body" if with_body else "number,title,state"
     args = ["gh", "issue", "list", "-R", repo, "--state", state,
-            "--limit", str(GH_LIMIT), "--json", "number,title,state"]
+            "--limit", str(GH_LIMIT), "--json", fields]
     if label:
         args += ["--label", label]
     try:
@@ -679,18 +680,54 @@ def gh_issues(repo, label, state):
     return rows
 
 
+# A criterion id as an issue body DECLARES one: at the head of a list item or a
+# heading, optionally bold/code-quoted, followed by a separator. Deliberately
+# NOT a bare `c3` anywhere in prose -- "see c3 above" is a reference, not a
+# declaration, and a detector that counted it would redden a ledger for a
+# criterion its issue never defined.
+_DECLARED_ID = re.compile(
+    r"^[ \t]*(?:[-*+]|#{1,6})[ \t]*(?:\*\*|`|__)?[ \t]*(c[0-9]{1,2})"
+    r"(?:\*\*|`|__)?[ \t]*(?=[-\u2014:.)\s])", re.M)
+
+
+def declared_criterion_ids(body):
+    """-> sorted [id] the issue body DECLARES, or [] if it declares no list.
+
+    Returns a list only when the detected ids are exactly `c1..cN` for some
+    N >= 2. That contiguity requirement is the false-positive guard: a real
+    acceptance list is complete and starts at c1, whereas an incidental `- c3`
+    in prose is not, and this gate reddening somebody else's ledger over a
+    stray bullet is worse than it declining to judge that issue. An issue this
+    returns [] for is COUNTED as unjudgeable and reported as such, never
+    silently treated as covered.
+    """
+    ids = {m.lower() for m in _DECLARED_ID.findall(body or "")}
+    if len(ids) < 2:
+        return []
+    ordered = sorted(ids, key=lambda t: int(t[1:]))
+    if ordered != ["c%d" % i for i in range(1, len(ordered) + 1)]:
+        return []
+    return ordered
+
+
 def load_trackers(injected):
-    """-> ({repo: {num: state}}, {repo: set(open in-scope nums)}, [notes]).
+    """-> (state, scoped, notes, bodies).
+
+    state   {repo: {num: state}}
+    scoped  {repo: set(open in-scope nums)}
+    bodies  {repo: {num: body text}} -- the input to `declared_criterion_ids`.
 
     `injected` short-circuits the network for --self-test's fixtures. It has
     no command-line switch on purpose -- see main().
     """
     if injected is not None:
-        return injected["all"], {k: set(v) for k, v in injected["scoped"].items()}, []
-    allstate, scoped, notes = {}, {}, []
+        return (injected["all"],
+                {k: set(v) for k, v in injected["scoped"].items()}, [],
+                injected.get("bodies", {}))
+    allstate, scoped, notes, bodies = {}, {}, [], {}
     for repo, label in TRACKERS:
         op = gh_issues(repo, label, "open")
-        every = gh_issues(repo, None, "all")
+        every = gh_issues(repo, None, "all", with_body=True)
         if not every:
             raise TrackerError(
                 "%s: the tracker query reached ZERO issues in any state. That is "
@@ -702,12 +739,13 @@ def load_trackers(injected):
                          "(%d issues in all states), so this is a real zero."
                          % (repo, len(every)))
         allstate[repo] = {int(i["number"]): i["state"].lower() for i in every}
+        bodies[repo] = {int(i["number"]): (i.get("body") or "") for i in every}
         scoped[repo] = {int(i["number"]) for i in op}
         # Belt and braces against the same class: whatever the all-states query
         # says, an issue the OPEN query just returned is open and exists.
         for i in op:
             allstate[repo][int(i["number"])] = "open"
-    return allstate, scoped, notes
+    return allstate, scoped, notes, bodies
 
 
 # ── the gate ─────────────────────────────────────────────────────────────────
@@ -797,7 +835,7 @@ def run(root, offline=False, injected=None, quiet=False):
             "--offline before believing the ledger is complete.")
     else:
         try:
-            allstate, scoped, notes = load_trackers(injected)
+            allstate, scoped, notes, bodies = load_trackers(injected)
         except TrackerError as e:
             say()
             say("FAIL: %s" % e)
@@ -825,10 +863,40 @@ def run(root, offline=False, injected=None, quiet=False):
                         "caught an entire tracker going invisible."
                         % (repo, n, LEDGER_DIR, repo.split("/")[-1], n))
 
+        # CRITERION COVERAGE. The check above is FILE-level: it asks whether an
+        # open issue has a ledger file at all. It cannot see a ledger that has
+        # a file and drops one of the issue's own criteria -- and that is not
+        # hypothetical. FerroxLabs/wayland-core#389 declares c1..c4; its ledger
+        # carried c1..c3, so c4 ("the residual pin is inverted rather than
+        # deleted") was outstanding work that NO gate could count, in the one
+        # gate whose purpose is that nothing outstanding goes uncounted.
+        #
+        # The shape, not the instance: a dropped criterion is invisible
+        # wherever coverage is measured per FILE. So coverage is measured per
+        # CRITERION wherever the issue declares them, and the count of issues
+        # where it could not is printed -- a zero here must never be readable
+        # as "everything was checked".
+        judged, unjudgeable = 0, 0
         for rec in records:
             repo, num = rec.get("repo"), rec.get("issue")
             if repo not in allstate or not str(num).isdigit():
                 continue
+            declared = declared_criterion_ids(
+                bodies.get(repo, {}).get(int(num), ""))
+            if declared:
+                judged += 1
+                have = {str(c.get("id", "")).lower() for c in rec["criteria"]}
+                gap = [d for d in declared if d not in have]
+                if gap:
+                    problems.append(
+                        "CRITERION COVERAGE: %s#%s declares %s and %s has no "
+                        "row for %s. A criterion the ledger drops is work "
+                        "nothing can count -- the file-level coverage check "
+                        "above passes on it, because the file exists."
+                        % (repo, num, ", ".join(declared), rec["path"],
+                           ", ".join(gap)))
+            else:
+                unjudgeable += 1
             gh_state = allstate[repo].get(int(num))
             if gh_state is None:
                 problems.append(
@@ -869,6 +937,13 @@ def run(root, offline=False, injected=None, quiet=False):
                     "DIVERGENCE: %s carries an unmet criterion, but %s#%s is "
                     "CLOSED. That is the failure this ledger exists to catch: "
                     "22 closed, 9 met." % (rec["path"], repo, num))
+
+        # Said out loud, because the alternative reading of a silent zero is
+        # "every criterion is covered", and that is false for most issues here.
+        say("criterion coverage: %d ledger(s) graded against their issue's own "
+            "declared c-ids; %d issue(s) declare no id list and CANNOT be "
+            "graded that way -- a dropped criterion is still invisible on "
+            "those." % (judged, unjudgeable))
 
     if problems:
         say()
@@ -963,6 +1038,38 @@ _INJ_CLEAN = {
             "FerroxLabs/wayland-core": {9: "open"}},
     "scoped": {"FerroxLabs/wayland": [7], "FerroxLabs/wayland-core": [9]},
 }
+
+# #7's body, declaring c1..c3 the way a real acceptance list does. `_CLEAN`
+# carries exactly c1, c2, c3, so this is the GREEN side of the criterion
+# coverage pair. The trailing prose mentions `c2` mid-sentence and `- see c9`
+# as a reference rather than a declaration: if either were counted the clean
+# control would go red, so the control is also the false-positive arm.
+_BODY_7 = """## Acceptance
+
+- **c1** - the boundary is probed rather than asserted against itself
+- **c2** - the second half is not built yet
+- **c3** - the credentialled probe cannot run here
+
+Note that c2 is the expensive one, and - see c9 in the sibling issue for the
+transport question.
+"""
+
+_INJ_BODIES = dict(_INJ_CLEAN, bodies={
+    "FerroxLabs/wayland": {7: _BODY_7},
+    "FerroxLabs/wayland-core": {9: ""},
+})
+
+# The same issue with a FOURTH criterion declared. `_CLEAN` still carries only
+# c1..c3, so this injection is the RED side: the ledger file exists, the
+# file-level coverage check is satisfied by it, and c4 is uncounted work.
+_INJ_BODIES_C4 = dict(_INJ_CLEAN, bodies={
+    "FerroxLabs/wayland": {
+        7: _BODY_7.replace(
+            "\nNote that c2",
+            "- **c4** - the residual pin is inverted rather than deleted\n"
+            "\nNote that c2")},
+    "FerroxLabs/wayland-core": {9: ""},
+})
 _CORE_9 = """---
 issue: 9
 repo: FerroxLabs/wayland-core
@@ -988,15 +1095,35 @@ def _ident(b):
 def self_test():
     cases = []
 
-    def case(label, mutate, must_fire, offline=False, inj=_INJ_CLEAN, expect=None):
+    def case(label, mutate, must_fire, offline=False, inj=_INJ_CLEAN,
+             expect=None, says=None):
         # `expect` is not decoration. A red arm that fires for the WRONG reason
         # proves nothing about the check it was written for, and a mutation
         # that silently stops applying (one did, on the first run of this
         # file) reads as a passing gate. Every RED arm names its own message.
-        cases.append((label, mutate, must_fire, offline, inj, expect))
+        cases.append((label, mutate, must_fire, offline, inj, expect, says))
 
     case("clean control, both trackers covered", _ident, False)
     case("control again, offline", _ident, False, offline=True)
+
+    # ── criterion coverage, both directions (wayland-core#389 c4) ────────────
+    # The GREEN arm is also the false-positive arm: #7's body declares c1..c3
+    # in list position AND mentions `c2` and `- see c9` in prose, so a detector
+    # that counted a reference as a declaration would redden here. The RED arm
+    # differs by exactly one declared criterion.
+    case("criterion coverage: ledger carries every declared c-id",
+         _ident, False, inj=_INJ_BODIES)
+    case("criterion coverage: issue declares c4 and the ledger drops it",
+         _ident, True, inj=_INJ_BODIES_C4,
+         expect="CRITERION COVERAGE: FerroxLabs/wayland#7 declares c1, c2, "
+                "c3, c4 and")
+    # A criterion coverage check that could only ever be satisfied by an issue
+    # with no parseable list would be the vacuous version of itself. This
+    # asserts the gate SAYS how many it could not judge, so a silent zero is
+    # never readable as full coverage.
+    case("criterion coverage: the unjudgeable count is reported",
+         _ident, False, inj=_INJ_BODIES,
+         says="1 issue(s) declare no id list")
     case("met criterion cites a test that does not exist",
          lambda b: b.replace("::the_boundary_is_probed\"",
                              "::a_test_that_was_deleted\"", 1), True,
@@ -1168,10 +1295,12 @@ def self_test():
 
     ok = True
     results = []
-    for label, mutate, must_fire, offline, inj, expect in cases:
+    for label, mutate, must_fire, offline, inj, expect, says in cases:
         body = mutate(_CLEAN)
-        # Four arms deliberately leave the file alone -- two controls and two
-        # that vary the TRACKER state instead -- and say so by passing _ident.
+        # Several arms deliberately leave the file alone -- the two controls,
+        # the two that vary the TRACKER state, and the three criterion-coverage
+        # arms that vary the injected issue BODY -- and say so by passing
+        # _ident.
         # For every other arm, RED OR GREEN, an unchanged body means the
         # mutation stopped applying and the arm proves nothing. Restricting
         # this to red arms (as it did until #1198) leaves every green arm able
@@ -1191,6 +1320,13 @@ def self_test():
             good = False
             print("  %-56s fired, but not for its own reason (%r absent)"
                   % (label[:56], expect))
+        # `says` is for a GREEN arm that must still have PRINTED something --
+        # a check whose whole value is the number it reports can pass by not
+        # reporting it, and that is the vacuity one rung below "did it fire".
+        if good and says and says not in "\n".join(out):
+            good = False
+            print("  %-56s passed without printing %r"
+                  % (label[:56], says))
         ok &= good
         results.append((label, must_fire, fired, good))
 
