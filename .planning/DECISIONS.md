@@ -15,7 +15,57 @@
 | Q7 | Windows merge freeze for Lane W | **YES — a declared window, opened after Lane 0.1 is read** | Serializes the single Windows box |
 | Q-113 | core#113 | **CLOSE AS REFUTED**, recording deny-by-default as the decision | Record posted on #113 2026-08-29; the close is queued on FerroxLabs/wayland#1229, with wayland-core#364 filed independently for the same act -- both open, maintainer to dedupe |
 | Q-338c4 | core#338 credential surface | **Deny `/dev/tty` via `setsid`, in the SAME change as layer 1** | Layer 1 alone makes the test green while `credential.helper` stays open |
+| Q-379 / core#379 | the TEARDOWN of the session Q-338c4 creates | **Kill the process GROUP whenever a quarantine `git` run is ABANDONED — owned by the run's SCOPE, never by its branches** | `Child::kill` is not a teardown once the child is a session leader; branch-by-branch is how the gap was made; see D-379 below |
 | Q-391 / core#244 c4 | is the Windows local-operator shell expected to confine the VCS content store? | **NO — and say so everywhere the product speaks** | Rewrite #244 c4 to its true scope; keep the standing pin test; do not reopen AppContainer |
+
+## D-379 — the teardown Q-338c4 owed and did not record
+
+MASTER-PLAN.md:202 obliged "Layers 1+2 as ONE change, teardown decided in the same change".
+Layers 1+2 landed; the teardown did not, and Q-338c4 above did not mention it. This is that
+decision, written where it should have been written, one row up.
+
+**What was wrong.** `harden_against_credential_prompt` puts every quarantine `git` child in a
+NEW SESSION. The abort paths in `run_git` did `child.kill(); child.wait()` — one pid. Every
+helper `git` spawned (credential, askpass, transport) inherited the new group, so no group
+signal reached them, and with no controlling terminal no hangup would either. The hardening
+therefore made those helpers strictly LESS reachable than before it: previously they shared our
+group and our terminal.
+
+**Taken: kill the group.** `terminate_hardened_tree` sends `SIGKILL` to `-pgid`, where the pgid
+is the child's pid because `setsid` made it both session and group leader. Safe after the direct
+child has been reaped, because a pid is not recycled while it is still in use as a process-group
+id, so the signal reaches our surviving members or nothing at all.
+
+**On every ABANDONED run — which is NOT the same set as every failing one.** The first form of
+this decision said "on every FAILING exit" and that was wrong in both directions, so it is
+restated here rather than left to be discovered.
+
+WRONG IN ONE DIRECTION: `run_hardened` ends with `Err` on a nonzero `git` status, and that exit
+deliberately does NOT tear down. `git` ran to completion and said no; both pipes reached EOF, so
+nothing it spawned is holding our stdio; and `git`'s own `git-credential-cache--daemon` is in that
+group and is shared with the user's other `git` operations. Killing it because a clone failed
+would be the same regression as killing it because a clone succeeded.
+
+WRONG IN THE OTHER: the plan counted TWO abandoning exits and there were three. The wall-clock
+timeout is the one #379 measured; the drain-grace exit — `git` already exited AND reaped, a
+helper's background worker still holding the inherited pipe — is the second; and `try_wait`
+returning `Err` was the third, propagated with `?`, abandoning a child that is still RUNNING and
+unreaped. That third exit sat in the same function throughout and a teardown written as a line
+copied into the two known branches would not have covered it.
+
+**So the teardown is owned by the SCOPE.** `HardenedTree` is armed once, immediately after the
+spawn, and its `Drop` tears the session down; every `Err` path — including one nobody has written
+yet — inherits that without being told. There is exactly ONE `disarm` site, reached only after
+both pipes have hit EOF, and it is the single place this codebase claims a tree is finished rather
+than abandoned. Enumerating branches is how #338 opened this hole; the decision is deliberately
+not to enumerate them again.
+
+**Not claimed.** A descendant that calls `setsid`/`setpgid` for itself leaves the group and no
+group signal can reach it; that is a sandbox's job, not a teardown's. On Windows the hardening
+creates no session and no group — `DETACHED_PROCESS` is a creation-time console decision — so
+there is nothing for a group signal to address there. Windows did not regress (it had no group
+teardown to lose) but it has no teardown either; that gap is stated in the code and on the ledger
+rather than covered by the wording of this row.
 
 ## D-SECRET-2 — REFUTED 2026-08-29. Do not build this.
 MASTER-PLAN.md §8 recommended splitting `reached` per tracker "to close the one hole in the
