@@ -304,13 +304,13 @@ SELF_TEST_CASES = [
         1,
     ),
     (
-        "a defect AFTER a hashed raw string is still found",
-        '    let re = r#"he said "no"          twice"#;\n    let s = "the refusal did not see it and the guard          stayed quiet";',
+        "a defect AFTER a raw string holding an odd number of quotes",
+        '    let re = r#"a bare " lives here;"#;\n    let s = "the refusal did not see it and the guard          stayed quiet";',
         1,
     ),
     (
-        "a lifetime does not swallow the literal after it",
-        "    fn f<'a>(x: &'a str) -> &'a str { x }\n    let s = \"the refusal did not see it and the guard          stayed quiet\";",
+        "one lifetime does not pair with an apostrophe in the next message",
+        "    fn f<'a>(x: &str) {}\n    let s = \"Ledgers are keyed by the engine's internal          conversation id\";",
         1,
     ),
     (
@@ -324,14 +324,19 @@ SELF_TEST_CASES = [
         1,
     ),
     (
-        "a run inside a line comment is not a message",
-        '    // the refusal did not see it and the guard          stayed quiet\n    let s = "ordinary prose is fine here";',
-        0,
+        "an unclosed quote in a line comment does not eat the next message",
+        '    // the operator said "run it and see\n    let s = "the refusal did not see it and the guard          stayed quiet";',
+        1,
     ),
     (
         "a run inside a block comment is not a message",
         '    /* the refusal did not see it and the guard          stayed quiet */\n    let s = "ordinary prose is fine here";',
         0,
+    ),
+    (
+        "an unclosed quote in a block comment does not eat the next message",
+        '    /* the operator said "run it */\n    let s = "the refusal did not see it and the guard          stayed quiet";',
+        1,
     ),
     (
         "a nested block comment closes at the right place",
@@ -359,6 +364,60 @@ SELF_TEST_CASES = [
 ]
 
 
+DEFECT_LINE = '    anyhow::bail!("Ledgers are keyed by the engine\'s internal          conversation id");\n'
+CLEAN_LINE = '    anyhow::bail!("no cache ledger for this id in that dir");\n'
+
+
+def _tree_cases() -> list[tuple[str, bool]]:
+    """Grade scan_tree's ROOT HANDLING, which no line case can reach.
+
+    os.walk yields nothing for a file, so before this was graded the gate
+    printed OK and exited 0 for any single file handed to it, defect and all.
+    Every case below distinguishes "graded and found nothing" from "graded
+    nothing", which is the failure the file case is an instance of.
+    """
+    import contextlib
+    import io
+    import tempfile
+
+    def quiet(*argv):
+        """main()'s exit code without its report on this run's stdout."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            return main(list(argv))
+
+    results = []
+    with tempfile.TemporaryDirectory() as d:
+        sub = os.path.join(d, "sub")
+        os.makedirs(sub)
+        bad = os.path.join(d, "bad.rs")
+        good = os.path.join(sub, "good.rs")
+        other = os.path.join(d, "notes.txt")
+        empty = os.path.join(d, "empty")
+        os.makedirs(empty)
+        with open(bad, "w", encoding="utf-8") as fh:
+            fh.write(DEFECT_LINE)
+        with open(good, "w", encoding="utf-8") as fh:
+            fh.write(CLEAN_LINE)
+        with open(other, "w", encoding="utf-8") as fh:
+            fh.write(DEFECT_LINE)
+
+        problems, scanned = scan_tree([d])
+        results.append(("a directory root finds the defect under it", (len(problems), scanned) == (1, 2)))
+
+        problems, scanned = scan_tree([bad])
+        results.append(("a FILE root is scanned, not silently skipped", (len(problems), scanned) == (1, 1)))
+
+        problems, scanned = scan_tree([good])
+        results.append(("a clean file root is graded and reports nothing", (len(problems), scanned) == (0, 1)))
+
+        results.append(("a directory with no Rust in it exits 2, not OK", quiet("x", empty) == 2))
+        results.append(("a missing root exits 2, not OK", quiet("x", os.path.join(d, "nope")) == 2))
+        results.append(("a non-.rs file root exits 2, not OK", quiet("x", other) == 2))
+        results.append(("a file root with a defect exits 1", quiet("x", bad) == 1))
+        results.append(("a file root with no defect exits 0", quiet("x", good) == 0))
+    return results
+
+
 def self_test() -> int:
     failures = 0
     for label, line, expected in SELF_TEST_CASES:
@@ -367,10 +426,16 @@ def self_test() -> int:
         if got != expected:
             failures += 1
         print(f"  {status} {label} (want {expected}, got {got})")
+    tree_cases = _tree_cases()
+    for label, ok in tree_cases:
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}")
+        if not ok:
+            failures += 1
+    total = len(SELF_TEST_CASES) + len(tree_cases)
     if failures:
-        print(f"SELF-TEST FAILED: {failures} of {len(SELF_TEST_CASES)} case(s)")
+        print(f"SELF-TEST FAILED: {failures} of {total} case(s)")
         return 1
-    print(f"SELF-TEST OK: {len(SELF_TEST_CASES)} cases")
+    print(f"SELF-TEST OK: {total} cases")
     return 0
 
 
