@@ -452,8 +452,11 @@ pub fn build_git_command(args: &[&str], cwd: Option<&Path>) -> std::process::Com
 ///   is a creation-time console decision — so there is nothing here for a group
 ///   signal to address and descendants remain reachable only through a Job
 ///   Object. Windows never regressed the way unix did (it had no group teardown
-///   to lose), but it has no teardown either. Tracked as its own remainder;
-///   see the ledger entry for #379.
+///   to lose), but it has no teardown either, and composing a Job Object with
+///   the console flag is not free -- `WindowsJobObject::create_suspended` SETS
+///   `creation_flags` rather than OR-ing them, so a naive composition drops
+///   `DETACHED_PROCESS` and reopens #338. Tracked as its own remainder with
+///   that trap recorded: `FerroxLabs/wayland-core#393`.
 ///
 /// The cost is deliberate and bounded to the FAILING exits. `git`'s own
 /// `git-credential-cache--daemon` is in this group when `git` started one, and

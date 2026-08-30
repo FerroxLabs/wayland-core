@@ -15,7 +15,41 @@
 | Q7 | Windows merge freeze for Lane W | **YES — a declared window, opened after Lane 0.1 is read** | Serializes the single Windows box |
 | Q-113 | core#113 | **CLOSE AS REFUTED**, recording deny-by-default as the decision | Record posted on #113 2026-08-29; the close is queued on FerroxLabs/wayland#1229, with wayland-core#364 filed independently for the same act -- both open, maintainer to dedupe |
 | Q-338c4 | core#338 credential surface | **Deny `/dev/tty` via `setsid`, in the SAME change as layer 1** | Layer 1 alone makes the test green while `credential.helper` stays open |
+| Q-379 / core#379 | the TEARDOWN of the session Q-338c4 creates | **Kill the process GROUP, on every FAILING exit of a quarantine `git` run and on no other** | `Child::kill` is not a teardown once the child is a session leader; see D-379 below |
 | Q-391 / core#244 c4 | is the Windows local-operator shell expected to confine the VCS content store? | **NO — and say so everywhere the product speaks** | Rewrite #244 c4 to its true scope; keep the standing pin test; do not reopen AppContainer |
+
+## D-379 — the teardown Q-338c4 owed and did not record
+
+MASTER-PLAN.md:202 obliged "Layers 1+2 as ONE change, teardown decided in the same change".
+Layers 1+2 landed; the teardown did not, and Q-338c4 above did not mention it. This is that
+decision, written where it should have been written, one row up.
+
+**What was wrong.** `harden_against_credential_prompt` puts every quarantine `git` child in a
+NEW SESSION. The abort paths in `run_git` did `child.kill(); child.wait()` — one pid. Every
+helper `git` spawned (credential, askpass, transport) inherited the new group, so no group
+signal reached them, and with no controlling terminal no hangup would either. The hardening
+therefore made those helpers strictly LESS reachable than before it: previously they shared our
+group and our terminal.
+
+**Taken: kill the group.** `terminate_hardened_tree` sends `SIGKILL` to `-pgid`, where the pgid
+is the child's pid because `setsid` made it both session and group leader. Safe after the direct
+child has been reaped, because a pid is not recycled while it is still in use as a process-group
+id, so the signal reaches our surviving members or nothing at all.
+
+**On every FAILING exit, and only those.** Two exits abandon a tree, not one: the wall-clock
+timeout, and the drain-grace exit where `git` has already exited and been reaped and a helper's
+background worker still holds the inherited pipe. The second is the one the plan did not name and
+is graded separately. The SUCCESSFUL exit deliberately does not tear down: `git`'s own
+`git-credential-cache--daemon` is in that group, it is shared with the user's other `git`
+operations, and killing it after an install that worked would be a regression. A drained pipe is
+also evidence that no descendant is holding our stdio.
+
+**Not claimed.** A descendant that calls `setsid`/`setpgid` for itself leaves the group and no
+group signal can reach it; that is a sandbox's job, not a teardown's. On Windows the hardening
+creates no session and no group — `DETACHED_PROCESS` is a creation-time console decision — so
+there is nothing for a group signal to address there. Windows did not regress (it had no group
+teardown to lose) but it has no teardown either; that gap is stated in the code and on the ledger
+rather than covered by the wording of this row.
 
 ## D-SECRET-2 — REFUTED 2026-08-29. Do not build this.
 MASTER-PLAN.md §8 recommended splitting `reached` per tracker "to close the one hole in the

@@ -120,8 +120,8 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // never in. The event is purely additive and nothing existing changes shape, so
 // `major` holds at 1 — but the minor has to move, because an added type is
 // undiscoverable to a host pinned below the version that introduced it.
-pub const CONTRACT_MINOR: u64 = 22;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/22";
+pub const CONTRACT_MINOR: u64 = 23;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/23";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases

@@ -780,6 +780,55 @@ pub enum SetModeRefusalReason {
     LocalOptInRequired,
 }
 
+/// Which host grant surface refused. #314 c5.
+///
+/// The surface is part of the machine signal because `grant_path` and
+/// `grant_workspace_capability` are answered by different host UI: one is a
+/// folder in the workspace list, the other an executable in the capability
+/// list. A host that had to read English to tell them apart was pinning our
+/// wording, which is the thing this variant exists to stop.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantSurface {
+    /// The `grant_path` command.
+    Path,
+    /// The `grant_workspace_capability` command.
+    WorkspaceCapability,
+}
+
+impl GrantSurface {
+    /// The human prefix for this surface's refusal line.
+    ///
+    /// This is the ONLY place the refusal prose is built. It is derived from
+    /// the typed frame rather than written beside it, so a refusal cannot be
+    /// announced to a human without the machine-readable frame existing: there
+    /// is no literal left to copy.
+    pub fn refusal_prefix(self) -> &'static str {
+        match self {
+            GrantSurface::Path => "path grant refused",
+            GrantSurface::WorkspaceCapability => "workspace capability grant refused",
+        }
+    }
+}
+
+/// Why a host grant was refused. #314 c5.
+///
+/// Deliberately NOT a free-form string: the refusal used to reach the host as
+/// an untyped `info` frame, so the only way to branch on it was to match our
+/// English. Additive per the W0 host decoder contract -- a host that does not
+/// know `grant_refused` drops the line, and the `workspace_policy` receipt
+/// that precedes every refusal (#314 c4) is unchanged.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantRefusalReason {
+    /// The local launcher did not opt in (`--allow-host-path-grants` /
+    /// `--allow-host-workspace-grants`). The request never reached the policy.
+    LocalOptInRequired,
+    /// The launcher opted in and the workspace policy itself rejected the
+    /// request. `detail` carries the policy's own message.
+    PolicyRejected,
+}
+
 /// Events emitted by the agent to the client (Agent -> Client)
 ///
 /// `Clone` is derived (Wave 2) so the in-process TUI bridge can fan an
@@ -1339,6 +1388,23 @@ pub enum ProtocolEvent {
         /// The mode still in force — the refusal changes nothing.
         effective: crate::commands::SessionMode,
         reason: SetModeRefusalReason,
+    },
+    /// A host grant (`grant_path` / `grant_workspace_capability`) was refused.
+    /// #314 c5.
+    ///
+    /// Always preceded by the `workspace_policy` receipt (#314 c4), so the
+    /// pair is "here is what you can reach" followed by "and here is why the
+    /// thing you asked for is not in it". The `info` line that follows carries
+    /// the same content for a human and is derived from these fields.
+    GrantRefused {
+        /// The `grant_id` the host correlated the request with. `None` for
+        /// `grant_workspace_capability`, which carries no id on the wire.
+        grant_id: Option<String>,
+        surface: GrantSurface,
+        reason: GrantRefusalReason,
+        /// Human detail -- the policy's own message, or the missing flag.
+        /// NOT the machine signal; branch on `reason`.
+        detail: String,
     },
     /// W8a A.7: ExecutionBudget cap exceeded — singular event per
     /// session, fires once when the first cap trips. Always-emitted +

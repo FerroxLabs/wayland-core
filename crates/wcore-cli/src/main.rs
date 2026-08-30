@@ -45,8 +45,8 @@ use wcore_protocol::commands::{
     MCP_LIFECYCLE_VERSION, ProtocolCommand, RemoveMcpServerCommand, ResumeTurnAction,
 };
 use wcore_protocol::events::{
-    BudgetGrantRefusalReason, FinishReason, McpRemovalOutcome, ProtocolEvent, RecoveryLifecycle,
-    RecoveryReconcileReason, RecoveryUnavailableReason,
+    BudgetGrantRefusalReason, FinishReason, GrantRefusalReason, GrantSurface, McpRemovalOutcome,
+    ProtocolEvent, RecoveryLifecycle, RecoveryReconcileReason, RecoveryUnavailableReason,
 };
 use wcore_protocol::execution_policy::{
     ExecutionPolicyChangeReason, ExecutionPolicySequence, ExecutionPolicySequenceError,
@@ -4289,28 +4289,31 @@ fn emit_path_grant(
         access,
         expires_at_ms,
     } = request;
-    if !launch_authorized {
-        // #314 D-1. The receipt is documented as unconditional after a
-        // `grant_path` (json-stream-protocol.md 2.3.3) and `emit_path_revoke`
-        // already emits it in BOTH its arms. Skipping it here made ABSENCE the
-        // only refusal signal a host had, and an absent frame is
-        // indistinguishable from a slow or dropped one -- so the host cannot
-        // tell "refused" from "not yet". Emitting an unchanged receipt costs
-        // one frame and makes the documented invariant true: after any
-        // grant/revoke, `workspace_policy` is the authoritative answer to
-        // "what can this chat reach".
-        emit_workspace_policy_receipt(policy, receipt, writer);
-        let _ = writer.emit(&ProtocolEvent::Info {
-            msg_id: String::new(),
-            message: "path grant refused: the local launcher did not opt in with --allow-host-path-grants".to_string(),
-        });
-        return;
-    }
+    // #314 c5. This handler has exactly ONE refusal exit. Both causes -- the
+    // launcher opt-in and the policy's own rejection -- are folded into the
+    // `Err` of a single `Result` that only `emit_grant_refusal` consumes, so a
+    // third cause added later cannot reach the wire as prose without going
+    // through the typed frame. This replaced two hand-written `Info` refusals
+    // that a host could only branch on by matching our English.
     let write = matches!(access, wcore_protocol::commands::PathGrantAccess::Write);
     let expires_at =
         expires_at_ms.map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
-    match policy.grant_session_read_root_full(&root, write, Some(grant_id), expires_at) {
+    let correlation = grant_id.clone();
+    let outcome: Result<std::path::PathBuf, (GrantRefusalReason, String)> = if !launch_authorized {
+        Err((
+            GrantRefusalReason::LocalOptInRequired,
+            "the local launcher did not opt in with --allow-host-path-grants".to_string(),
+        ))
+    } else {
+        policy
+            .grant_session_read_root_full(&root, write, Some(grant_id), expires_at)
+            .map_err(|error| (GrantRefusalReason::PolicyRejected, error.to_string()))
+    };
+    match outcome {
         Ok(granted) => {
+            // #314 D-1. The receipt is documented as unconditional after a
+            // `grant_path` (json-stream-protocol.md 2.3.3) and
+            // `emit_path_revoke` already emits it in BOTH its arms.
             emit_workspace_policy_receipt(policy, receipt, writer);
             // #1104: the parenthetical is the grant's own access, not a fixed
             // string. A write grant announced as "read-only" would be the
@@ -4325,15 +4328,47 @@ fn emit_path_grant(
                 ),
             });
         }
-        Err(error) => {
-            // #314 D-1 -- see the launcher-refusal arm above.
-            emit_workspace_policy_receipt(policy, receipt, writer);
-            let _ = writer.emit(&ProtocolEvent::Info {
-                msg_id: String::new(),
-                message: format!("path grant refused: {error}"),
-            });
-        }
+        Err((reason, detail)) => emit_grant_refusal(
+            GrantSurface::Path,
+            reason,
+            Some(correlation),
+            detail,
+            policy,
+            receipt,
+            writer,
+        ),
     }
+}
+
+/// #314 c5. The ONE place a host grant refusal reaches the wire.
+///
+/// Order matters and is the same order every other grant/revoke exit uses:
+/// the `workspace_policy` receipt first (#314 c4 -- "what can this chat
+/// reach"), then the typed `grant_refused` frame, then the human line. The
+/// human line is BUILT FROM the typed frame rather than written beside it, so
+/// the refusal prose no longer exists as a literal anywhere in this file and
+/// a new refusal site has nothing to copy: it must construct the `Err` these
+/// handlers return, and this function is its only consumer.
+fn emit_grant_refusal(
+    surface: GrantSurface,
+    reason: GrantRefusalReason,
+    grant_id: Option<String>,
+    detail: String,
+    policy: &wcore_tools::workspace_policy::WorkspacePolicy,
+    receipt: &mut wcore_types::workspace_trust::WorkspacePolicyReceipt,
+    writer: &dyn ProtocolEmitter,
+) {
+    emit_workspace_policy_receipt(policy, receipt, writer);
+    let _ = writer.emit(&ProtocolEvent::GrantRefused {
+        grant_id,
+        surface,
+        reason,
+        detail: detail.clone(),
+    });
+    let _ = writer.emit(&ProtocolEvent::Info {
+        msg_id: String::new(),
+        message: format!("{}: {detail}", surface.refusal_prefix()),
+    });
 }
 
 fn emit_path_revoke(
@@ -4381,16 +4416,18 @@ fn emit_workspace_capability_grant(
     executable: &str,
     writer: &dyn ProtocolEmitter,
 ) {
-    if !launch_authorized {
-        // #314 D-1 -- same reasoning as `emit_path_grant`.
-        emit_workspace_policy_receipt(policy, receipt, writer);
-        let _ = writer.emit(&ProtocolEvent::Info {
-            msg_id: String::new(),
-            message: "workspace capability grant refused: the local launcher did not opt in with --allow-host-workspace-grants".to_string(),
-        });
-        return;
-    }
-    match policy.grant_session_capability(executable) {
+    // #314 c5 -- one refusal exit, as in `emit_path_grant`.
+    let outcome = if !launch_authorized {
+        Err((
+            GrantRefusalReason::LocalOptInRequired,
+            "the local launcher did not opt in with --allow-host-workspace-grants".to_string(),
+        ))
+    } else {
+        policy
+            .grant_session_capability(executable)
+            .map_err(|error| (GrantRefusalReason::PolicyRejected, error.to_string()))
+    };
+    match outcome {
         Ok(capability) => {
             // Same receipt shape as every other grant/revoke exit -- built by
             // one helper so the four paths cannot drift apart.
@@ -4403,14 +4440,15 @@ fn emit_workspace_capability_grant(
                 ),
             });
         }
-        Err(error) => {
-            // #314 D-1 -- see `emit_path_grant`.
-            emit_workspace_policy_receipt(policy, receipt, writer);
-            let _ = writer.emit(&ProtocolEvent::Info {
-                msg_id: String::new(),
-                message: format!("workspace capability grant refused: {error}"),
-            });
-        }
+        Err((reason, detail)) => emit_grant_refusal(
+            GrantSurface::WorkspaceCapability,
+            reason,
+            None,
+            detail,
+            policy,
+            receipt,
+            writer,
+        ),
     }
 }
 
@@ -7619,6 +7657,176 @@ mod tests {
             info_messages(&writer)
         );
         assert_eq!(receipt_count(&writer), 1);
+    }
+
+    /// Every `grant_refused` frame this writer saw, as
+    /// `(grant_id, surface, reason)`. #314 c5.
+    fn refusals(
+        writer: &CapturingProtocolEmitter,
+    ) -> Vec<(Option<String>, GrantSurface, GrantRefusalReason)> {
+        writer
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                ProtocolEvent::GrantRefused {
+                    grant_id,
+                    surface,
+                    reason,
+                    ..
+                } => Some((grant_id.clone(), *surface, *reason)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// #314 c5. All FOUR refusal exits, in ONE test, each asserted on the
+    /// TYPED frame rather than on prose.
+    ///
+    /// The observable is deliberately NOT the `info` line the old tests above
+    /// grade: those pass unchanged while a host still has nothing to branch on,
+    /// which is exactly why c5 outlived c4. What is graded here is that a host
+    /// which never reads English can tell WHICH surface refused and WHY.
+    ///
+    /// The two causes are distinguished, not merged: `LocalOptInRequired` never
+    /// reached the policy, `PolicyRejected` did. A fix that reported one reason
+    /// for both would satisfy "a typed frame exists" and still leave the host
+    /// unable to tell "turn on the flag" from "pick a different folder".
+    #[test]
+    fn every_grant_refusal_exit_is_machine_readable_not_prose() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let missing = dir.path().join("no-such-folder");
+
+        let path_request = |grant_id: &str, root: &std::path::Path| PathGrantRequest {
+            grant_id: grant_id.to_string(),
+            root: root.to_string_lossy().into_owned(),
+            access: wcore_protocol::commands::PathGrantAccess::Read,
+            expires_at_ms: None,
+        };
+
+        // Exit 1 of 4 -- grant_path, launcher never opted in.
+        let w = CapturingProtocolEmitter::default();
+        let mut receipt = grant_test_receipt();
+        emit_path_grant(
+            false,
+            &policy,
+            &mut receipt,
+            path_request("g-launcher", &missing),
+            &w,
+        );
+        assert_eq!(
+            refusals(&w),
+            vec![(
+                Some("g-launcher".to_string()),
+                GrantSurface::Path,
+                GrantRefusalReason::LocalOptInRequired
+            )],
+            "grant_path refused by the launcher must publish a typed frame \
+             carrying the host's own grant_id"
+        );
+
+        // Exit 2 of 4 -- grant_path, launcher opted in, POLICY refused.
+        let w = CapturingProtocolEmitter::default();
+        let mut receipt = grant_test_receipt();
+        emit_path_grant(
+            true,
+            &policy,
+            &mut receipt,
+            path_request("g-policy", &missing),
+            &w,
+        );
+        assert_eq!(
+            refusals(&w),
+            vec![(
+                Some("g-policy".to_string()),
+                GrantSurface::Path,
+                GrantRefusalReason::PolicyRejected
+            )],
+            "a POLICY refusal must be a different reason from a LAUNCHER \
+             refusal, or the host cannot tell the two remedies apart"
+        );
+
+        // Exit 3 of 4 -- capability, launcher never opted in. No grant_id
+        // exists on this command, so the correlation key is null rather than
+        // an invented value.
+        let w = CapturingProtocolEmitter::default();
+        let mut receipt = grant_test_receipt();
+        emit_workspace_capability_grant(false, &policy, &mut receipt, "cargo", &w);
+        assert_eq!(
+            refusals(&w),
+            vec![(
+                None,
+                GrantSurface::WorkspaceCapability,
+                GrantRefusalReason::LocalOptInRequired
+            )]
+        );
+
+        // Exit 4 of 4 -- capability, launcher opted in, POLICY refused.
+        let w = CapturingProtocolEmitter::default();
+        let mut receipt = grant_test_receipt();
+        emit_workspace_capability_grant(
+            true,
+            &policy,
+            &mut receipt,
+            "wayland-core-no-such-executable",
+            &w,
+        );
+        assert_eq!(
+            refusals(&w),
+            vec![(
+                None,
+                GrantSurface::WorkspaceCapability,
+                GrantRefusalReason::PolicyRejected
+            )]
+        );
+    }
+
+    /// NEGATIVE CONTROL for #314 c5 -- blocks an always-fires fix.
+    ///
+    /// A refusal event emitted on the SUCCESS path would satisfy the test
+    /// above (which only ever inspects refusal runs) while telling every host
+    /// that a granted folder was denied. The receipt and the human line must
+    /// still be there, so this also proves the restructure did not drop the
+    /// success path on the floor.
+    #[test]
+    fn a_granted_path_emits_no_refusal_frame() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let grantable = dir.path().join("shared");
+        std::fs::create_dir_all(&grantable).expect("mkdir");
+        let policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path())
+            .with_local_operator_principal();
+        let mut receipt = grant_test_receipt();
+        let writer = CapturingProtocolEmitter::default();
+
+        emit_path_grant(
+            true,
+            &policy,
+            &mut receipt,
+            PathGrantRequest {
+                grant_id: "g-ok".to_string(),
+                root: grantable.to_string_lossy().into_owned(),
+                access: wcore_protocol::commands::PathGrantAccess::Read,
+                expires_at_ms: None,
+            },
+            &writer,
+        );
+
+        assert_eq!(
+            refusals(&writer),
+            vec![],
+            "a GRANTED folder must not publish a refusal"
+        );
+        assert_eq!(receipt_count(&writer), 1);
+        assert!(
+            info_messages(&writer)
+                .iter()
+                .any(|m| m.starts_with("folder granted for this session:")),
+            "the success line must survive the c5 restructure: {:?}",
+            info_messages(&writer)
+        );
     }
 
     /// NEGATIVE CONTROL -- passes in BOTH arms. A GRANTED path still emits

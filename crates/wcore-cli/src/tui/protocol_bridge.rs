@@ -1127,6 +1127,12 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         // in-process TUI sets its mode through the local /mode path, which is
         // not gated on the wire opt-in, so there is nothing here to render.
         | ProtocolEvent::SetModeRefused { .. }
+        // #314 c5: a host grant refusal. `grant_path` /
+        // `grant_workspace_capability` are JSON-stream host commands the
+        // in-process TUI cannot originate, so there is no refusal here to
+        // render; the derived `info` line that follows it still reaches a TUI
+        // user, so nothing is lost by ignoring the typed frame.
+        | ProtocolEvent::GrantRefused { .. }
         // Budget grant commands are accepted only by the JSON-stream host
         // loop; the in-process TUI cannot originate one. Keep the event
         // exhaustively accepted without synthesizing local grant authority.
