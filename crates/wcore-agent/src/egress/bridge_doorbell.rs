@@ -61,6 +61,17 @@ impl ConsentDoorbell for BridgeConsentDoorbell {
         // resolve — a model-known `call_id` can no longer self-approve. A uuid
         // keeps concurrent asks (even to the same host) from colliding. The
         // `egress:` prefix lets the TUI/host recognize this as egress consent.
+        // wayland#1219: ask BEFORE registering a pending approval. On a sink
+        // that cannot render one (`--json-stream` without
+        // `with_hitl_suspend`), `emit_approval_required` below is a silent
+        // no-op: nothing reaches the host, nothing resolves the oneshot, and
+        // `rx.await` blocks until the TTL reaper cancels it ~300s later —
+        // which the policy then reported as a decline of a prompt that was
+        // never shown. Return a decision that says so, immediately.
+        if !self.sink.approval_surface_available() {
+            return ConsentDecision::Unavailable;
+        }
+
         let call_id = format!("egress:{}", uuid::Uuid::new_v4());
         let prompt = format!("Allow network access to `{registrable}`? ({reason})");
         // Structured context so a host UI can render richly and a resolver can
@@ -86,9 +97,10 @@ impl ConsentDoorbell for BridgeConsentDoorbell {
 
         // Surface the prompt. GHSA-8r7g: emit the secret `resume_token` (what
         // the host echoes back to resolve over the wire), with `call_id` as the
-        // public correlation handle. A no-op on sinks without an approval
-        // surface (then the request only resolves via TTL → deny), so this
-        // doorbell is only installed where a real surface exists.
+        // public correlation handle. This emit is a no-op on a sink without an
+        // approval surface; wayland#1219 replaced the comment that merely
+        // ASSERTED "only installed where a real surface exists" with the
+        // `approval_surface_available()` check above, which enforces it.
         self.sink
             .emit_approval_required(&call_id, &resume_token, &prompt, &context);
 
@@ -100,11 +112,49 @@ impl ConsentDoorbell for BridgeConsentDoorbell {
                     ConsentDecision::Once
                 }
             }
-            // Explicit deny, or the channel closed / TTL-cancelled (operator
-            // walked away): fail-closed.
-            Ok(_) | Err(_) => ConsentDecision::No,
+            // wayland#1219: fail-closed either way, but say which happened.
+            // `cancellation` is `Some` ONLY when the bridge resolved this
+            // itself with no host answer (#1083) — TTL reap or host-stream
+            // EOF. That is silence, not a decline, and reporting it as a
+            // decline is the lie this ticket is about. `None` means a human
+            // or host actually decided: that is a real `No`.
+            Ok(outcome) => {
+                if outcome.cancellation.is_some() {
+                    ConsentDecision::Unanswered
+                } else {
+                    ConsentDecision::No
+                }
+            }
+            // Sender dropped without resolving — nothing was ever decided.
+            Err(_) => ConsentDecision::Unanswered,
         }
     }
+}
+
+/// wayland#1219 — install [`BridgeConsentDoorbell`] on `policy`, but ONLY if
+/// `output` can actually render an approval the operator can answer.
+///
+/// This is the enforcement point for the doorbell's own premise. Before
+/// wayland#1219, bootstrap wired the doorbell unconditionally onto every
+/// session egress policy; on the `--json-stream` path the sink's
+/// hitl_suspend gate was permanently shut, so an `Ask` verdict stalled for
+/// the whole `DEFAULT_APPROVAL_TTL` and then denied with "declined at the
+/// consent prompt".
+///
+/// Returns whether a doorbell was installed. Declining to install leaves the
+/// policy in its documented no-doorbell posture: a data-less GET to a new
+/// domain is allowed, and the `Exfil` verdict stays hard-denied regardless —
+/// so this never widens the exfil boundary.
+pub fn install_consent_doorbell(
+    policy: &super::policy::AgentEgressPolicy,
+    bridge: Arc<ApprovalBridge>,
+    output: Arc<dyn OutputSink>,
+) -> bool {
+    if !output.approval_surface_available() {
+        return false;
+    }
+    policy.set_doorbell(Arc::new(BridgeConsentDoorbell::new(bridge, output)));
+    true
 }
 
 #[cfg(test)]
@@ -112,10 +162,16 @@ mod tests {
     use super::*;
     use crate::approval::ApprovalOutcome;
     use crate::output::null_sink::NullSink;
+    use crate::test_utils::TestSink;
 
+    /// wayland#1219: these used to run over `NullSink`, whose
+    /// `emit_approval_required` is the trait's no-op default. That is exactly
+    /// the mute surface this ticket is about — the doorbell now refuses to
+    /// park on one, so the once/always/no cases need a sink that really
+    /// renders. `TestSink` does.
     fn doorbell() -> (Arc<ApprovalBridge>, BridgeConsentDoorbell) {
         let bridge = Arc::new(ApprovalBridge::new());
-        let db = BridgeConsentDoorbell::new(bridge.clone(), Arc::new(NullSink));
+        let db = BridgeConsentDoorbell::new(bridge.clone(), Arc::new(TestSink::new()));
         (bridge, db)
     }
 
@@ -182,8 +238,12 @@ mod tests {
         assert_eq!(decision, ConsentDecision::Always);
     }
 
+    /// wayland#1219: `ApprovalOutcome::cancelled()` is the TTL reaper's
+    /// outcome, not an operator's. It now maps to `Unanswered`, and this test
+    /// was renamed to say what it actually drives — it never exercised a
+    /// human deny.
     #[tokio::test]
-    async fn deny_is_no() {
+    async fn a_reaped_approval_is_unanswered_not_a_decline() {
         let (bridge, db) = doorbell();
         let resolver = {
             let bridge = bridge.clone();
@@ -200,6 +260,85 @@ mod tests {
         };
         let decision = db.ask("evil.test", "evil.test", "data-less GET").await;
         resolver.await.unwrap();
+        assert_eq!(
+            decision,
+            ConsentDecision::Unanswered,
+            "a bridge-reaped approval is silence, not a decline"
+        );
+    }
+
+    /// An operator who really said no. `ApprovalOutcome` with no
+    /// `cancellation` is the shape a host/operator decision has (#1083).
+    #[tokio::test]
+    async fn an_operator_deny_is_no() {
+        let (bridge, db) = doorbell();
+        let resolver = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                loop {
+                    let pending = bridge.pending_tokens().await;
+                    if let Some(token) = pending.first() {
+                        bridge
+                            .resolve(
+                                token,
+                                ApprovalOutcome {
+                                    approved: false,
+                                    modifications: None,
+                                    cancellation: None,
+                                },
+                            )
+                            .await;
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        let decision = db.ask("evil.test", "evil.test", "data-less GET").await;
+        resolver.await.unwrap();
         assert_eq!(decision, ConsentDecision::No);
+    }
+
+    /// wayland#1219 — the doorbell must not park on a sink that cannot render
+    /// the prompt. `NullSink` inherits the trait's no-op
+    /// `emit_approval_required`, which is precisely the `--json-stream`
+    /// situation the ticket reports.
+    #[tokio::test]
+    async fn a_mute_sink_is_unavailable_and_does_not_park() {
+        let bridge = Arc::new(ApprovalBridge::new());
+        let db = BridgeConsentDoorbell::new(bridge.clone(), Arc::new(NullSink));
+        let decision = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            db.ask("react.dev", "react.dev", "data-less GET"),
+        )
+        .await
+        .expect("the doorbell parked on a sink with no approval surface");
+        assert_eq!(decision, ConsentDecision::Unavailable);
+        assert!(
+            bridge.pending_tokens().await.is_empty(),
+            "a request that can never be shown must not be registered"
+        );
+    }
+
+    /// wayland#1219 — the install guard, both arms.
+    #[test]
+    fn the_install_guard_refuses_a_mute_sink_and_accepts_a_real_one() {
+        use crate::egress::classify::AllowList;
+        use crate::egress::policy::AgentEgressPolicy;
+
+        let mute = AgentEgressPolicy::enforcing(AllowList::default());
+        let installed =
+            install_consent_doorbell(&mute, Arc::new(ApprovalBridge::new()), Arc::new(NullSink));
+        assert!(!installed, "installed a blocking doorbell over a mute sink");
+        assert!(!mute.has_doorbell());
+
+        let real = AgentEgressPolicy::enforcing(AllowList::default());
+        let installed = install_consent_doorbell(
+            &real,
+            Arc::new(ApprovalBridge::new()),
+            Arc::new(TestSink::new()),
+        );
+        assert!(installed);
+        assert!(real.has_doorbell());
     }
 }

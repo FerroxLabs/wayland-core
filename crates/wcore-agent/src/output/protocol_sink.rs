@@ -1066,6 +1066,15 @@ impl OutputSink for ProtocolSink {
         self.streaming_tools_enabled
     }
 
+    /// wayland#1219: this sink can render an approval EXACTLY when the
+    /// hitl_suspend gate below is open. Same field, one source of truth —
+    /// a blocking caller (the egress consent doorbell) asks this instead of
+    /// assuming, and the answer cannot drift from what
+    /// `emit_approval_required` actually does.
+    fn approval_surface_available(&self) -> bool {
+        self.hitl_suspend_enabled
+    }
+
     /// W7 S4: emit `ProtocolEvent::ApprovalRequired` when the sink was
     /// configured with `with_hitl_suspend(true)`. Default-off so hosts
     /// that haven't learned about the new variant stay undisturbed.

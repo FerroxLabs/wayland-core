@@ -333,6 +333,11 @@ impl OutputSink for RecordingSink {
     fn emit_error(&self, _msg: &str, _retryable: bool) {}
     fn emit_info(&self, _msg: &str) {}
 
+    /// wayland#1219: this sink records the approval, so it has a surface.
+    fn approval_surface_available(&self) -> bool {
+        true
+    }
+
     fn emit_approval_required(
         &self,
         call_id: &str,

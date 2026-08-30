@@ -93,6 +93,14 @@ impl AgentEgressPolicy {
         }
     }
 
+    /// wayland#1219: whether a consent doorbell is currently wired. The
+    /// install guard (`install_consent_doorbell`) decides NOT to wire one on a
+    /// sink with no approval surface; without this accessor that decision is
+    /// unobservable and therefore ungradeable.
+    pub fn has_doorbell(&self) -> bool {
+        self.doorbell.read().map(|s| s.is_some()).unwrap_or(false)
+    }
+
     /// Resolve an `Ask` verdict (a data-less read to a new destination).
     ///
     /// With no doorbell wired (headless / one-shot / tests) → allow: nothing
@@ -119,6 +127,31 @@ impl AgentEgressPolicy {
                     "Egress to `{host}` was declined at the consent prompt. \
                      Approve it next time, or add it under \
                      `[security] egress_allow = [..]` in your config."
+                ),
+            },
+            // wayland#1219: the prompt was shown and nothing came back. The
+            // old code funnelled this into the `No` arm above, so a user who
+            // simply did not answer within the 300s approval TTL was told
+            // they had declined.
+            ConsentDecision::Unanswered => EgressDecision::Deny {
+                reason: format!(
+                    "Egress to `{host}` was refused because no answer to the \
+                     consent prompt came back before it timed out (or the host \
+                     disconnected while it was open). Approve it when prompted, \
+                     or add it under `[security] egress_allow = [..]` in your \
+                     config."
+                ),
+            },
+            // wayland#1219: the prompt was never rendered. Still fail-closed,
+            // but the user is told the truth — the old code reached the arm
+            // above and blamed them for declining something they never saw.
+            ConsentDecision::Unavailable => EgressDecision::Deny {
+                reason: format!(
+                    "Egress to `{host}` needs your approval, but this session \
+                     has no way to show a consent prompt, so it was refused \
+                     without asking you. Add it under \
+                     `[security] egress_allow = [..]` in your config, or run \
+                     in a session with an approval surface."
                 ),
             },
         }

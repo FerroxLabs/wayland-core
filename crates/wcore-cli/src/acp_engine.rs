@@ -206,6 +206,15 @@ impl OutputSink for RelaySink {
     ) {
         self.with_sink(|s| s.emit_provider_circuit_event(primary, fallback, state, error));
     }
+    /// wayland#1219: delegate the predicate to whatever sink is currently
+    /// relayed to, for the same reason `emit_approval_required` is delegated
+    /// — with no sink attached there is nobody to answer.
+    fn approval_surface_available(&self) -> bool {
+        let mut available = false;
+        self.with_sink(|s| available = s.approval_surface_available());
+        available
+    }
+
     fn emit_approval_required(
         &self,
         call_id: &str,

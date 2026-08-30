@@ -286,6 +286,25 @@ pub trait OutputSink: Send + Sync {
     ) {
     }
 
+    /// wayland#1219: whether this sink can actually deliver an
+    /// `ApprovalRequired` frame to a human who can answer it.
+    ///
+    /// [`emit_approval_required`](Self::emit_approval_required) is a silent
+    /// no-op on most sinks (the trait default) and on a [`ProtocolSink`] that
+    /// was not built with `with_hitl_suspend(true)`. A caller that merely
+    /// announces an approval does not care. A caller that BLOCKS on the
+    /// answer does: on a mute sink the request is never rendered, nothing
+    /// resolves it, and it hangs until the approval TTL reaps it — which the
+    /// egress path then reported to the user as "declined at the consent
+    /// prompt", a prompt that was never shown.
+    ///
+    /// So any blocking approval caller must ask this FIRST. Default `false`:
+    /// a sink opts in only by overriding, because silence is the default
+    /// behaviour of the emit methods themselves.
+    fn approval_surface_available(&self) -> bool {
+        false
+    }
+
     /// W7 S4: emit ApprovalRequired (host renders modal). Default
     /// no-op; `ProtocolSink` overrides and gates on
     /// `with_hitl_suspend(true)`.

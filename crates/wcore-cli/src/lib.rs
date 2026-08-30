@@ -4,6 +4,12 @@
 // reachable from integration tests under `tests/`.
 
 pub mod approval_resume;
+
+// wayland#1219: the `--json-stream` output-sink construction. In the lib so
+// `tests/issue_1219_*.rs` drives the sink the runtime actually builds — the
+// bug was a capability the production builder never switched on, which a test
+// that builds its own sink can never see.
+pub mod json_stream_sink;
 pub mod plugin;
 
 // Shared packaged-process execution-policy and static-plugin link seam.
