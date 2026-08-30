@@ -13639,6 +13639,16 @@ impl AgentEngine {
             // per-attempt reset inside `'stream` is the only assignment that
             // can be observed, so an initialiser here would be dead.
             let mut raw_text_chars: usize;
+            // wayland#1221 c3 — how much text survived the history filter,
+            // sampled at the END OF THE STREAM and not at the end of the turn.
+            // The two are different: `assistant_text` also collects the
+            // grounding-sources block a Flux web_search turn renders into it
+            // (below), which never passed through the filter and never counted
+            // toward `raw_text_chars`. Comparing the turn-final length would
+            // let that block mask a strip and silence the notice. Declared
+            // without an initial value for the same reason as the counter
+            // above: only the per-attempt assignment can be observed.
+            let mut filtered_text_chars: usize;
             let mut thinking_text = String::new();
             // C-4b — an opaque provider signature covering this turn's
             // reasoning (Gemini `thoughtSignature` on a thought part). Kept
@@ -13675,6 +13685,7 @@ impl AgentEngine {
                 assistant_text.clear();
                 assistant_reasoning.reset();
                 raw_text_chars = 0;
+                filtered_text_chars = 0;
                 thinking_text.clear();
                 let _ = thinking_signature.take();
                 tool_calls.clear();
@@ -14985,6 +14996,26 @@ impl AgentEngine {
                     }
                 }
 
+                // wayland#1222 — the provider stream for this attempt is
+                // over, so drain whatever the history filter is still holding
+                // back. `process` is a LOSSY view on its own: at the last
+                // delta the filter may be sitting on an undecided `<`-prefix
+                // (`the answer is 5 <`) or inside a reasoning block the model
+                // never closed. Both used to be discarded, and since 508405d4
+                // put this filter on the DURABLE record that discard is
+                // permanent history loss rather than a rendering glitch
+                // (wayland#1221). `finish` returns the held-back bytes; for an
+                // unclosed block it returns the raw text from the opening tag
+                // onward, which is what makes "Use the <thinking> tag to wrap
+                // reasoning." survive whole.
+                //
+                // Unconditional, and BEFORE the attempt-outcome classification
+                // below: a retried attempt clears `assistant_text` and resets
+                // the filter at the top of `'stream`, so a flush on a failed
+                // attempt cannot survive into the next one.
+                assistant_text.push_str(&assistant_reasoning.finish());
+                filtered_text_chars = assistant_text.chars().count();
+
                 // AUDIT A3 / E-C2 — classify the attempt outcome.
                 // A clean `Done` is success. A mid-stream `LlmEvent::Error`
                 // OR a channel that closed with no `Done` (truncated /
@@ -16004,6 +16035,35 @@ impl AgentEngine {
                      chat-completions streaming format and that the model name is valid)."
                 };
                 self.emit_error(message, false);
+            } else if raw_text_chars > filtered_text_chars {
+                // wayland#1221 c3 — the empty-turn notice above is the ONLY
+                // guard that ever announced an over-strip, and it fires only
+                // when the strip is TOTAL (`assistant_text.is_empty()`). A
+                // PARTIAL strip is the shape that actually bites: the turn is
+                // non-empty, so nothing above fires, and the user has no way
+                // to know the stored record is shorter than the answer they
+                // just read. This is that second guard.
+                //
+                // What remains strippable after the wayland#1222 flush above
+                // is exactly reasoning that CLOSED — a real `<think>…</think>`
+                // block — plus the bare tags themselves. That is deliberate
+                // (wayland#908 c1), but "deliberate" is not "announced": the
+                // stripped body is what the provider replays on every later
+                // turn, so the user is entitled to know it left.
+                //
+                // Counted in chars on both sides: `raw_text_chars` is the char
+                // count of the raw text deltas, `filtered_text_chars` is what
+                // the filter let through, sampled right after the flush.
+                // Emitted through the
+                // output sink rather than `tracing`, because RUST_LOG is unset
+                // on a default install and a `warn!` would reach nobody.
+                let removed = raw_text_chars - filtered_text_chars;
+                self.output.emit_info(&format!(
+                    "{removed} characters of this reply were inline reasoning \
+                     (<think>, <thought>, <reasoning>) and are NOT stored in the \
+                     conversation history; the answer above is what a resumed session \
+                     and the next request will see."
+                ));
             }
 
             // …and do not COMMIT the empty turn either. The error above is the
