@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "Typed failure category on ErrorInfo: core can name three of #388's five and reports all of them as prose"
 status: open
-last_verified_commit: 5639e5ff
+last_verified_commit: c511d32b7
 criteria:
   - id: c1
     text: "ErrorInfo carries a typed failure category covering the three #388 names core can decide: context/token limit, tool/runtime failure, local Wayland error"
