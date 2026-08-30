@@ -506,7 +506,7 @@ impl ProtocolSink {
     /// `take_captured` once rather than `take_captured_delta` per chunk - so
     /// the order is kept here rather than made a per-sink decision.
     fn drain_withheld_text(&self, msg_id: &str) {
-        let recovered = String::new();
+        let recovered = self.reasoning.lock().finish();
         if recovered.is_empty() {
             return;
         }
