@@ -398,6 +398,39 @@ pub fn harden_against_credential_prompt(cmd: &mut std::process::Command) {
     }
 }
 
+/// The Windows console-attribution notice (`#389` c2), as a pure function so
+/// its WORDING is gradeable separately from its emission.
+///
+/// # Why this exists at all, and why it is not a fix
+///
+/// `#389` c1 asked for the property: a quarantine child that calls
+/// `AttachConsole` cannot end up on the operator's console. That was MEASURED
+/// FALSE and both obvious remedies were measured foreclosed with it —
+/// reparenting is defeated by `AttachConsole(<pid>)`, and giving the child its
+/// own console is defeated by `FreeConsole()` first. Windows has no
+/// session-leader equivalent, so with process-creation flags alone the
+/// property is not reachable, and the AppContainer route that might reach it
+/// is CLOSED by a recorded decision and is not to be reopened.
+///
+/// So `#389` c2's branch is taken instead: the prompt is LABELLED. This does
+/// not stop a determined child re-attaching; it makes the operator able to
+/// ATTRIBUTE whatever then appears. That is a smaller claim than c1's and it
+/// is stated as one — see `.planning/DECISIONS.md` Q-389c2 for the choice and
+/// its cost.
+///
+/// Emitted only on Windows: on unix `setsid(2)` removes the prompt outright,
+/// so a notice there would announce a window that does not exist.
+#[cfg(windows)]
+pub fn console_attribution_notice(args: &[&str]) -> String {
+    format!(
+        "wayland-core: plugin quarantine is now running `git {}`. Anything \
+         that appears on this console before the next `wayland-core:` line \
+         comes from that git or from a credential helper it started — NOT \
+         from wayland-core. wayland-core will never ask for a password here.",
+        args.join(" ")
+    )
+}
+
 /// Build the `git` command `run_git` runs, hardened, without spawning it.
 ///
 /// Split out so a test grades the WIRING and not just the function: an
@@ -414,6 +447,16 @@ pub fn build_git_command(args: &[&str], cwd: Option<&Path>) -> std::process::Com
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     harden_against_credential_prompt(&mut cmd);
+    // #389 c2. Emitted HERE, in the builder, and not in `run_git`, for the
+    // same reason this function exists at all: this is the one choke point
+    // every quarantine `git` spawn passes through, and it is the point the
+    // wiring test already grades. The failure that matters is a spawn with no
+    // notice; a notice for a command that is built and then not spawned is a
+    // harmless extra line. So it fails loud rather than quiet.
+    #[cfg(windows)]
+    {
+        eprintln!("{}", console_attribution_notice(args));
+    }
     cmd
 }
 

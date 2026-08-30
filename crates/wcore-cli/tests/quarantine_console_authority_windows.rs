@@ -117,6 +117,14 @@ fn conout() -> String {
 
 /// The half that runs in the spawned child.
 fn run_as_probe() {
+    // #389 c2 wiring. Built and dropped, never spawned: what is under test is
+    // that the PRODUCTION builder announces itself, and this runs inside a
+    // child whose stderr the parent captures, which an in-process assertion
+    // cannot do (libtest owns this process's stderr).
+    drop(wcore_cli::plugin::quarantine::build_git_command(
+        &["fetch", "--depth", "1"],
+        None,
+    ));
     println!("CONSOLE_WINDOW_AT_CREATION={}", console_window());
     println!("CONOUT_BEFORE={}", conout());
     println!(
@@ -234,6 +242,28 @@ fn probe_through_production_git() -> String {
     }
 }
 
+/// The probe's STDERR, which is where the `#389` c2 attribution notice goes.
+///
+/// A second spawn rather than a parameter on [`probe`] so the existing arms
+/// keep `Stdio::null()` and cannot be perturbed by this one.
+fn probe_stderr() -> String {
+    let exe = std::env::current_exe().expect("current test binary");
+    let mut cmd = Command::new(exe);
+    cmd.arg(TEST_NAME)
+        .arg("--exact")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(PROBE_ENV, "1")
+        .env(PARENT_PID_ENV, std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    match cmd.output() {
+        Ok(out) => String::from_utf8_lossy(&out.stderr).into_owned(),
+        Err(e) => format!("SPAWN_FAILED={e}\n"),
+    }
+}
+
 /// Pull one `KEY=value` field out of a probe report.
 ///
 /// Searched ANYWHERE in the line, not anchored at its start: libtest writes
@@ -248,6 +278,60 @@ fn field<'a>(report: &'a str, key: &str) -> Option<&'a str> {
         let idx = l.find(&needle)?;
         Some(l[idx + needle.len()..].trim())
     })
+}
+
+/// `#389` c2, the branch actually taken: a quarantine-originated prompt is
+/// LABELLED, so the operator can attribute it.
+///
+/// # What this asserts, and what it deliberately does not
+///
+/// It does NOT assert that a prompt cannot reach the operator's console —
+/// `quarantine_child_has_no_console_at_creation_on_windows` measures that it
+/// can, and that pin stays. It asserts the property c2 asks for instead: that
+/// before any quarantine `git` is spawned, the operator has been told on that
+/// same console that what follows is git's and not wayland-core's.
+///
+/// Graded through the PRODUCTION builder inside a child process, because the
+/// notice goes to stderr and libtest owns this process's stderr. If
+/// `build_git_command` stops emitting it — or if a later edit moves the
+/// emission into `run_git` and some other caller of the builder then spawns
+/// unannounced — the child's stderr comes back without the notice and this
+/// fails.
+#[test]
+fn a_quarantine_git_announces_itself_on_the_operators_console() {
+    if std::env::var_os(PROBE_ENV).is_some() {
+        run_as_probe();
+        return;
+    }
+
+    // Content, from the pure function: the notice must name the tool, deny
+    // authorship of any prompt, and say wayland-core never asks here.
+    let notice = wcore_cli::plugin::quarantine::console_attribution_notice(&["fetch", "--depth", "1"]);
+    for needle in [
+        "wayland-core:",
+        "git fetch --depth 1",
+        "NOT from wayland-core",
+        "never ask for a password",
+    ] {
+        assert!(
+            notice.contains(needle),
+            "the attribution notice must contain {needle:?}; it is {notice:?}"
+        );
+    }
+
+    // Wiring, from a real child of the real builder.
+    let err = probe_stderr();
+    assert!(
+        !err.contains("SPAWN_FAILED"),
+        "fixture: the probe child did not run, so nothing below was \
+         measured:\n{err}"
+    );
+    assert!(
+        err.contains("wayland-core: plugin quarantine is now running `git fetch --depth 1`"),
+        "`build_git_command` built a quarantine git command without announcing \
+         it on the operator's console, so a prompt raised inside that command \
+         is unattributable again (core#389 c2). child stderr:\n{err}"
+    );
 }
 
 #[test]
