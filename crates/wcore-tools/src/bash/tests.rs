@@ -2480,6 +2480,47 @@ fn decisive_walk_floor(timeout: Duration, allowance: Duration) -> Duration {
 /// regression still reddens. A mean or a max would let one stall decide.
 const LATENCY_SAMPLES: usize = 3;
 
+/// Run `sample` `LATENCY_SAMPLES` times and return the SMALLEST wall-clock cost
+/// alongside the last value produced.
+///
+/// wayland-core#350 introduced `LATENCY_SAMPLES` and wired it into the two
+/// timeout tests, for the reason recorded on the constant: one sample cannot be
+/// told apart from one scheduler stall. THREE SIBLINGS IN THIS FILE WERE LEFT
+/// ON A SINGLE SAMPLE — `a_cancelled_bash_does_not_wait_for_the_secret_deny_walk`,
+/// `a_cancelled_streaming_bash_does_not_wait_for_the_secret_deny_walk` and
+/// `a_workspace_that_does_not_walk_cancels_promptly_even_on_a_large_tree` —
+/// each asserting the same shape of wall-clock ratio against the same measured
+/// `walk`. They are the same defect, so they get the same statistic from the
+/// same place rather than three copies of the loop.
+///
+/// MEASURED, which is why this is a fix and not tidying: the third of them
+/// reddened run 4 of a ten-run `cargo test --workspace --lib --no-fail-fast`
+/// arm on hetzner-dsm at host load 45-62, at `tests.rs:3031`, and that is a
+/// blocking row on wayland-core#373 c5. The other two were found by sweeping
+/// for the shape rather than by waiting for them to red.
+///
+/// WHY THE MINIMUM IS THE HONEST STATISTIC AND NOT THE CONVENIENT ONE: every
+/// caller is asserting that some work did NOT happen. If that work starts
+/// happening, EVERY sample pays for it, so the minimum stays above the
+/// threshold and the assertion still reds. Only a stall — which is a property
+/// of the host, not of the product — is discarded. A mean or a max would let
+/// one stall decide; a loud skip would report a real regression as a busy host.
+async fn smallest_of_samples<F, Fut, T>(mut sample: F) -> (std::time::Duration, T)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let mut smallest = std::time::Duration::MAX;
+    let mut last = None;
+    for _ in 0..LATENCY_SAMPLES {
+        let started = std::time::Instant::now();
+        let value = sample().await;
+        smallest = smallest.min(started.elapsed());
+        last = Some(value);
+    }
+    (smallest, last.expect("LATENCY_SAMPLES must be at least 1"))
+}
+
 fn grade_manifest_attribution(
     test: &str,
     content: &str,
@@ -2654,11 +2695,10 @@ async fn a_cancelled_bash_does_not_wait_for_the_secret_deny_walk() {
     let ctx = canned_ctx(policy, CannedBackend::enforcing());
     ctx.cancel.cancel();
 
-    let started = std::time::Instant::now();
-    let result = BashTool
-        .execute_with_ctx(json!({"command": "echo hi"}), &ctx)
-        .await;
-    let elapsed = started.elapsed();
+    // Smallest of LATENCY_SAMPLES, not one -- see `smallest_of_samples`.
+    let (elapsed, result) =
+        smallest_of_samples(|| BashTool.execute_with_ctx(json!({"command": "echo hi"}), &ctx))
+            .await;
 
     assert!(
         result.content.contains("cancelled"),
@@ -2667,8 +2707,9 @@ async fn a_cancelled_bash_does_not_wait_for_the_secret_deny_walk() {
     );
     assert!(
         elapsed * 3 < walk,
-        "cancellation waited {elapsed:?} for a walk measured at {walk:?} — the \
-         manifest build is outside the cancellation scope"
+        "cancellation waited {elapsed:?} (smallest of {LATENCY_SAMPLES}) for a \
+         walk measured at {walk:?} — the manifest build is outside the \
+         cancellation scope"
     );
 }
 
@@ -2833,11 +2874,11 @@ async fn a_cancelled_streaming_bash_does_not_wait_for_the_secret_deny_walk() {
     ctx.cancel.cancel();
 
     let sink = crate::NullToolOutputSink;
-    let started = std::time::Instant::now();
-    let result = BashTool
-        .execute_streaming_with_ctx(json!({"command": "echo hi"}), &ctx, &sink)
-        .await;
-    let elapsed = started.elapsed();
+    // Smallest of LATENCY_SAMPLES, not one -- see `smallest_of_samples`.
+    let (elapsed, result) = smallest_of_samples(|| {
+        BashTool.execute_streaming_with_ctx(json!({"command": "echo hi"}), &ctx, &sink)
+    })
+    .await;
 
     assert!(
         result.content.contains("cancelled"),
@@ -2846,8 +2887,9 @@ async fn a_cancelled_streaming_bash_does_not_wait_for_the_secret_deny_walk() {
     );
     assert!(
         elapsed * 3 < walk,
-        "streaming cancellation waited {elapsed:?} for a walk measured at \
-         {walk:?} — the manifest build is outside the cancellation scope"
+        "streaming cancellation waited {elapsed:?} (smallest of \
+         {LATENCY_SAMPLES}) for a walk measured at {walk:?} — the manifest \
+         build is outside the cancellation scope"
     );
 }
 
@@ -3025,32 +3067,31 @@ async fn a_workspace_that_does_not_walk_cancels_promptly_even_on_a_large_tree() 
         &root,
     ));
     // The control's own control: this posture must genuinely skip the walk.
-    let started = std::time::Instant::now();
-    let deny = local.secret_deny_paths_for_backend(true);
-    let local_walk = started.elapsed();
+    // Smallest of LATENCY_SAMPLES, not one -- see `smallest_of_samples`. THIS
+    // is the assertion that reddened the ten-run workspace --lib arm.
+    let (local_walk, deny) =
+        smallest_of_samples(|| async { local.secret_deny_paths_for_backend(true) }).await;
     assert!(
         local_walk * 10 < walk,
-        "trusted_local computed its deny list in {local_walk:?} against a \
-         contained walk of {walk:?} on the SAME tree — expected no walk at all \
-         (deny list: {} entries)",
+        "trusted_local computed its deny list in {local_walk:?} (smallest of \
+         {LATENCY_SAMPLES}) against a contained walk of {walk:?} on the SAME \
+         tree — expected no walk at all (deny list: {} entries)",
         deny.len()
     );
 
     let ctx = canned_ctx(local, CannedBackend::enforcing());
     ctx.cancel.cancel();
 
-    let started = std::time::Instant::now();
-    let result = BashTool
-        .execute_with_ctx(json!({"command": "echo hi"}), &ctx)
-        .await;
-    let elapsed = started.elapsed();
+    let (elapsed, result) =
+        smallest_of_samples(|| BashTool.execute_with_ctx(json!({"command": "echo hi"}), &ctx))
+            .await;
 
     assert!(result.content.contains("cancelled"));
     assert!(
         elapsed * 3 < walk,
-        "the no-walk posture took {elapsed:?} on a tree whose contained walk \
-         costs {walk:?} — the red arm's latency would not be attributable to \
-         the walk"
+        "the no-walk posture took {elapsed:?} (smallest of {LATENCY_SAMPLES}) \
+         on a tree whose contained walk costs {walk:?} — the red arm's latency \
+         would not be attributable to the walk"
     );
 }
 

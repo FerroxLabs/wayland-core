@@ -98,6 +98,90 @@ pub async fn read_body_capped(
     Ok(buf)
 }
 
+/// Test support: loopback addresses that are GUARANTEED to refuse a connection.
+///
+/// # The defect this closes
+///
+/// Four fixtures across this workspace reached for the same idiom: bind an
+/// ephemeral loopback port, read its number, DROP the listener, then connect
+/// and assert the connect was REFUSED. The assumption is that a port which was
+/// free a microsecond ago is still free. On a developer's laptop it holds. On a
+/// shared build host running dozens of test binaries that each bind ephemeral
+/// ports, it does not: the kernel can and does hand that exact port to another
+/// process between the drop and the connect, and the fixture then measures a
+/// LIVE SERVER while asserting a refusal.
+///
+/// MEASURED, not modelled. `cargo test --workspace --lib --no-fail-fast` on
+/// hetzner-dsm reddened on
+/// `attempt_lifecycle::tests::transport_failure_is_finished_before_the_error_escapes`
+/// at `assertion failed: matches!(result.output, Err(ProviderError::Connection(_)))`,
+/// while the same test alone scored 0 failures in 60 isolated runs and the
+/// whole `wcore-providers` lib binary scored 0 in 30 — so the trigger is
+/// cross-binary port contention, not the test.
+///
+/// # Why this type instead of a longer comment or a retry
+///
+/// "Is this port still free?" is not decidable by the test — it is a property
+/// of every other process on the machine, an open set. "Is this port bound by
+/// ME?" is decidable and total, and it is the same observable: a TCP socket
+/// that is BOUND but never `listen()`ed answers a connect with RST, i.e.
+/// `ECONNREFUSED`, and while the socket is held nothing else can bind it. So
+/// the fixture stops assuming the port is free and starts OWNING it.
+///
+/// Proven on this host with its own controls before the type was written:
+/// bound-not-listening → `REFUSED`; a second bind of the same port →
+/// `Address already in use`; the same socket WITH `listen()` → `CONNECTED`
+/// (so the refusal arm is not vacuous); and the old idiom's dropped port →
+/// re-bound and LISTENING by another socket, which is the race itself.
+pub mod refused_port {
+    use std::io;
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    /// A loopback address that refuses every connection for as long as this
+    /// guard is alive, and that no other process can take while it is held.
+    ///
+    /// Drop it only after the assertion that depends on the refusal.
+    #[derive(Debug)]
+    pub struct RefusedPort {
+        // Held, never `listen()`ed. Both facts are load-bearing: holding it
+        // reserves the port, and not listening is what makes the kernel answer
+        // RST instead of completing a handshake.
+        _socket: Socket,
+        addr: SocketAddr,
+    }
+
+    impl RefusedPort {
+        /// Reserve an ephemeral loopback port that will refuse connections.
+        pub fn reserve() -> io::Result<Self> {
+            let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+            // Deliberately NOT `set_reuse_address(true)`: SO_REUSEADDR is what
+            // would let a second binder in, and being unstealable is the whole
+            // point of this type.
+            socket.bind(&SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).into())?;
+            let addr = socket
+                .local_addr()?
+                .as_socket()
+                .ok_or_else(|| io::Error::other("loopback bind did not yield an IP address"))?;
+            Ok(Self {
+                _socket: socket,
+                addr,
+            })
+        }
+
+        /// The reserved address. Connecting to it is refused.
+        pub fn addr(&self) -> SocketAddr {
+            self.addr
+        }
+
+        /// `http://<addr>/`, the form most fixtures want.
+        pub fn url(&self) -> String {
+            format!("http://{}/", self.addr)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,13 +620,43 @@ mod tests {
         assert!(!format!("{:?}", snapshot.events[0]).contains("denied by test policy"));
     }
 
+    /// The guard delivers what the carriers below rely on, and the third arm
+    /// is a POSITIVE CONTROL for the defect rather than a restatement of the
+    /// fix: it demonstrates that the idiom this type replaces really does hand
+    /// the port to somebody else. Without that arm the first two would pass on
+    /// a machine where the race is simply rare, and prove nothing.
+    #[test]
+    fn a_reserved_port_refuses_and_cannot_be_taken_while_the_idiom_it_replaces_can() {
+        use crate::refused_port::RefusedPort;
+
+        let reserved = RefusedPort::reserve().expect("reserve");
+        let err = std::net::TcpStream::connect(reserved.addr())
+            .expect_err("a bound, never-listening port must refuse");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::ConnectionRefused,
+            "want a refusal, got {err:?}"
+        );
+        assert!(
+            std::net::TcpListener::bind(reserved.addr()).is_err(),
+            "the port must stay reserved while the guard is alive, or another \
+             process can start listening on it mid-test"
+        );
+
+        // CONTROL: bind-then-drop leaves the port free for anyone. This is the
+        // exact window that reddened the workspace --lib suite.
+        let doomed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let stale = doomed.local_addr().expect("addr");
+        drop(doomed);
+        let thief = std::net::TcpListener::bind(stale)
+            .expect("the dropped port is re-bindable -- that is the race this type closes");
+        drop(thief);
+    }
+
     #[tokio::test]
     async fn transport_failure_records_one_stable_error_class() {
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
+        let refused = crate::refused_port::RefusedPort::reserve().expect("reserve");
+        let addr = refused.addr();
 
         // The budget must exceed how long the HOST takes to refuse, not how
         // long refusal "ought" to take. Measured on Windows 11 (10.0.26200),
