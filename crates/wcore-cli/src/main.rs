@@ -3633,6 +3633,33 @@ fn mcp_removal_cleanup_outcome(cleanup_failures: &[String]) -> McpRemovalOutcome
     }
 }
 
+/// Withdraw a runtime-added MCP server from the live catalogue refresh.
+///
+/// FerroxLabs/wayland#1213 c4. `McpCatalogRefresh` is what turns a server's
+/// `notifications/tools/list_changed` back into registered tools, and until
+/// wayland#1175 that machinery was a no-op for SSE and Streamable HTTP because
+/// neither transport reported the notification. Now that both do, an entry the
+/// operator removed but that stayed in the refresh is a resurrection path: the
+/// tools of a server the host explicitly took away get re-registered into the
+/// live registry on its next announcement.
+///
+/// `McpManager::close_server` marks the transport dead, and
+/// `refresh_signalled_tools` skips dead transports, so today the withdrawal is
+/// belt to that braces. It is done anyway because the criterion asks for it and
+/// because the belt is the one that does not depend on cleanup having
+/// succeeded: on the `CleanupUnverified` arm the manager is left in place, and
+/// a transport whose `close()` could not be verified is exactly the one whose
+/// liveness nobody should be trusting. It also stops the refresh accumulating a
+/// dead entry, and its config, per add/remove cycle.
+///
+/// Called from every path that withdraws a runtime declaration; the pairing is
+/// graded by `every_runtime_mcp_withdrawal_leaves_the_catalog_refresh`.
+fn withdraw_runtime_mcp_from_refresh(engine: &wcore_agent::engine::AgentEngine, name: &str) {
+    if let Some(refresh) = engine.mcp_catalog_refresh() {
+        refresh.forget_runtime_server(name);
+    }
+}
+
 /// wayland#1165 — the teardown half of `AddMcpServer { replace: true }`.
 ///
 /// wayland#605 deliberately made a duplicate add of a READY server a no-op:
@@ -3716,6 +3743,7 @@ async fn teardown_runtime_mcp_for_replace(
     dynamic_managers
         .retain(|manager| !(manager.hosts_server(name) || manager.health().contains_key(name)));
     runtime_diagnostics.remove_runtime_declaration(name);
+    withdraw_runtime_mcp_from_refresh(engine, name);
     let _ = lifecycle.complete_stopping(name);
     Ok(())
 }
@@ -3818,6 +3846,7 @@ async fn remove_runtime_mcp_server(
         !(manager.hosts_server(&command.name) || manager.health().contains_key(&command.name))
     });
     runtime_diagnostics.remove_runtime_declaration(&command.name);
+    withdraw_runtime_mcp_from_refresh(engine, &command.name);
     let _ = lifecycle.complete_stopping(&command.name);
 
     emit_mcp_removal_receipt(
@@ -11045,6 +11074,128 @@ mod tests {
         );
     }
 
+    /// FerroxLabs/wayland#1213 c4 — the resurrection the ticket names.
+    ///
+    /// #1213 fixed `take_tools_changed` for SSE and Streamable HTTP, which is
+    /// what made this reachable: before it, `refresh_signalled_tools` could
+    /// never fire for a URL transport, so a stale entry in
+    /// `McpCatalogRefresh` was inert. c4 says the withdrawal must land in the
+    /// SAME change, and this is the observable it names — an operator removed
+    /// the server, the server announces a tool anyway, and NOTHING is
+    /// re-registered.
+    ///
+    /// The fixture transport deliberately does not go dead on `close()`.
+    /// `McpManager::close_server` marks the three real transports dead and
+    /// `refresh_signalled_tools` skips dead transports, so a fixture that
+    /// died on close would test that second mechanism instead of this one and
+    /// would pass with the withdrawal removed. Holding it alive isolates the
+    /// withdrawal, and it is the honest model of the arm where cleanup could
+    /// not be verified: there, the manager is left in place and nobody has
+    /// proved the transport dead.
+    #[tokio::test]
+    async fn a_removed_runtime_server_is_not_resurrected_by_a_later_list_changed() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine.set_mcp_catalog_refresh(Arc::new(wcore_mcp::tool_proxy::McpCatalogRefresh::new(
+            Vec::new(),
+            engine.tool_names(),
+            HashMap::new(),
+        )));
+
+        let fixture = Arc::new(GrowingTestTransport::new(&["warehouse_reserve"]));
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "warehouse",
+            false,
+            Box::new(SharedTransport(fixture.clone())) as Box<dyn McpTransport>,
+            vec![tool("warehouse_reserve")],
+        )]));
+        let server_config = to_mcp_server_config(
+            "stdio",
+            Some("unused-test-command".to_string()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("valid test server config");
+        let resolved = HashMap::from([("warehouse".to_string(), server_config.clone())]);
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        let mut reservations = lifecycle_reservations(&resolved);
+        assert!(integrate_deferred_mcp(
+            &mut engine,
+            manager.clone(),
+            &resolved,
+            &mut reservations,
+            &writer,
+            &mut dynamic_managers,
+            &mut inert_late_binder(),
+            &mut Vec::new(),
+        ));
+        assert!(
+            engine.tools().get("warehouse_reserve").is_some(),
+            "precondition: the runtime-added server's tool is live"
+        );
+
+        // The operator removes it through the host command.
+        let mut diagnostics = RuntimeDiagnosticsState::from_launch(
+            &wcore_config::config::Config::default(),
+            &wcore_config::resolution_provenance::ConfigResolutionProvenance::default(),
+            None,
+            wcore_protocol::diagnostics::RuntimeEngineMode::Unknown,
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::Unknown,
+        );
+        assert!(diagnostics.record_runtime_declaration("warehouse", &server_config));
+        let lifecycle = McpLifecycleCatalog::new();
+        let mut removal_ledger = McpRemovalLedger::default();
+        remove_runtime_mcp_server(
+            RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION,
+                request_id: "removal-1".to_string(),
+                name: "warehouse".to_string(),
+            },
+            &mut removal_ledger,
+            &mut diagnostics,
+            &lifecycle,
+            &mut engine,
+            &mut dynamic_managers,
+            &writer,
+        )
+        .await;
+        assert!(
+            engine.tools().get("warehouse_reserve").is_none(),
+            "precondition: removal drops the server's tools from the live registry"
+        );
+        assert!(!diagnostics.has_runtime_declaration("warehouse"));
+
+        // The removed server announces a tool anyway — a hosted server the
+        // operator detached does not stop talking on request.
+        fixture.register_and_announce("warehouse_audit_export");
+        let refresh = engine
+            .mcp_catalog_refresh()
+            .expect("the refresh outlives the removal");
+        let registry = engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable");
+        let refreshed = refresh.apply(registry, &defer_cold).await;
+        assert!(
+            refreshed.is_empty(),
+            "a removed server must not be refreshed at all; refreshed {refreshed:?}"
+        );
+        assert!(
+            engine.tools().get("warehouse_audit_export").is_none(),
+            "the removed server's NEW tool was registered into the live registry"
+        );
+        assert!(
+            engine.tools().get("warehouse_reserve").is_none(),
+            "the removed server's OLD tools came back with the refresh"
+        );
+    }
+
     /// Negative control for the test above, and the #998 guard on the new
     /// door: an operator allowlist of `Some([])` means "disable every tool on
     /// this server" — and must still mean that after a `list_changed` on the
@@ -11115,41 +11266,234 @@ mod tests {
         assert!(engine.tools().get("locked_tool").is_none());
     }
 
-    /// The wiring, counted. A helper nothing calls is not a fix, and the
-    /// failure this guards is specifically a runtime-add site left bare —
-    /// which is what #1175 reports for all three of them.
+    /// The wiring, as a CLASS rather than a census.
+    ///
+    /// A helper nothing calls is not a fix, and the failure this guards is
+    /// specifically a runtime-add site left bare — which is what #1175
+    /// reports for all three of the sites that existed when it was written.
+    ///
+    /// ROUND 1 counted `register_runtime_server(` and compared it to a
+    /// HARDCODED 2. The 0.13.12 close-sweep refuted that in its own words: "a
+    /// FOURTH bare runtime-add path in main.rs would leave the count at 2 and
+    /// pass". It would — the needle it counts is the FIX, so a path that
+    /// never applies the fix subtracts nothing from the total.
+    ///
+    /// The count is now DERIVED from the DEFECT instead: every file under
+    /// `wcore-cli/src` that CONSTRUCTS an `McpManager` must carry at least as
+    /// many refresh registrations as constructions. A fourth bare path adds a
+    /// construction and no registration, and the file goes red. Registration
+    /// is allowed to happen in a different function from the construction —
+    /// the #551 deferred path genuinely does that — so this is a per-FILE
+    /// pairing, not a per-function one.
     #[test]
     fn every_runtime_mcp_add_joins_the_catalog_refresh() {
-        let main_src = include_str!("main.rs");
-        let tui_src = include_str!("tui/engine_bridge.rs");
+        // Needles are assembled at compile time from fragments so that this
+        // test's own source, which `include_str!`/the walk below both read,
+        // never matches itself. (The round-1 lint got its count of 3 from its
+        // own assertion strings.)
+        let constructs = concat!("McpManager::", "connect");
+        let registers = concat!("register_runtime_", "server(");
+
+        // The one construction that legitimately never registers, named with
+        // its reason. This is an ALLOWLIST and is stated as one: `wayland
+        // doctor` dials the config-declared servers to print a health table
+        // and drops the manager at the end of the match arm. There is no
+        // engine and no live session for it to register into. Anything else
+        // that wants an exemption has to be added here, in the open.
+        const EXEMPT: &[(&str, &str)] = &[(
+            "doctor/mod.rs",
+            "throwaway health probe; no engine, manager dropped at the arm",
+        )];
+
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src_dir];
+        let mut constructing: Vec<(String, usize, usize)> = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir)
+                .expect("read wcore-cli/src")
+                .flatten()
+            {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read rust source");
+                let built = source.matches(constructs).count();
+                if built == 0 {
+                    continue;
+                }
+                constructing.push((
+                    path.display().to_string(),
+                    built,
+                    source.matches(registers).count(),
+                ));
+            }
+        }
+
+        // POSITIVE CONTROL on the walk. If it silently found nothing — wrong
+        // root, renamed constructor, a `use` alias — every assertion below
+        // would vacuously pass and this would grade an empty set.
+        for known in ["src/main.rs", "tui/engine_bridge.rs", "doctor/mod.rs"] {
+            assert!(
+                constructing
+                    .iter()
+                    .any(|(path, _, _)| path.ends_with(known)),
+                "the McpManager construction walk did not find {known} — \
+                 discovery is broken and this lint grades an empty set. \
+                 Found: {constructing:?}"
+            );
+        }
+
+        for (path, built, registered) in &constructing {
+            if let Some((_, why)) = EXEMPT.iter().find(|(file, _)| path.ends_with(file)) {
+                // A stale exemption is worse than none: it silently covers
+                // whatever the file grows into next.
+                assert!(
+                    *registered == 0,
+                    "{path} is exempted ({why}) but now registers with the \
+                     catalog refresh — drop the exemption"
+                );
+                continue;
+            }
+            assert!(
+                registered >= built,
+                "{path} constructs {built} McpManager(s) but joins the catalog \
+                 refresh {registered} time(s). A runtime-add path that never \
+                 reaches McpCatalogRefresh has its tools/list_changed ignored \
+                 for the life of the session (FerroxLabs/wayland#1175). Add the \
+                 registration, or add the file to EXEMPT with the reason."
+            );
+        }
+
+        // #1174 — unchanged, and unrelated to the count above.
         let engine_src = include_str!("../../wcore-agent/src/engine.rs");
-
-        // Known-positive control: the strings this test searches for exist.
-        assert!(main_src.contains("fn integrate_deferred_mcp"));
-        assert!(tui_src.contains("register_single_server_tools"));
-
-        // Built from fragments so this file does not match its own needle.
-        let needle = concat!("refresh.register_runtime_", "server(");
-        assert_eq!(
-            main_src.matches(needle).count(),
-            2,
-            "main.rs has exactly two runtime-add paths (AddMcpServer and the \
-             #551 deferred config connect); both must join the refresh"
-        );
-        assert_eq!(
-            tui_src.matches("register_runtime_server(").count(),
-            1,
-            "the TUI `/mcp add` path must join the refresh"
-        );
         assert!(
-            tui_src.contains("forget_runtime_server("),
-            "a rolled-back /mcp add must leave nothing in the refresh"
+            engine_src.contains("fn set_mcp_catalog_refresh"),
+            "known-positive control: the setter this asserts about still exists"
         );
         assert!(
             !engine_src.contains("if refresh.is_empty() {"),
             "set_mcp_catalog_refresh must not skip an empty refresh again (#1174): \
              empty is the state defer_config_mcp produces, and the deferred connect \
              fills it afterwards"
+        );
+    }
+
+    /// The withdrawal half, FerroxLabs/wayland#1213 c4.
+    ///
+    /// #1213 c4 is explicit that implementing `take_tools_changed` for the URL
+    /// transports without this is a live resurrection bug. The add side is
+    /// counted per file above because construction and registration can sit in
+    /// different functions; withdrawal cannot — the function that drops a
+    /// runtime declaration is the function that owns the name at that instant.
+    /// So this is graded per FUNCTION, which catches a fifth withdrawal path in
+    /// a brand-new function that a count over the whole file would not.
+    #[test]
+    fn every_runtime_mcp_withdrawal_leaves_the_catalog_refresh() {
+        let source = include_str!("main.rs");
+        let drops_declaration = concat!("remove_runtime_", "declaration(");
+        let withdraws = concat!("withdraw_runtime_mcp_from_", "refresh(");
+
+        let mut graded = 0usize;
+        for (name, body) in top_level_fn_blocks(source) {
+            if !body.contains(drops_declaration) {
+                continue;
+            }
+            graded += 1;
+            assert!(
+                body.contains(withdraws),
+                "fn {name} withdraws a runtime MCP declaration but leaves the \
+                 server in McpCatalogRefresh. Its tools are then re-registered \
+                 into the live registry on the next notifications/tools/list_changed \
+                 — an operator-removed server resurrected (FerroxLabs/wayland#1213 c4)"
+            );
+        }
+
+        // POSITIVE CONTROL. Both withdrawal paths must have been FOUND; a
+        // splitter that returned nothing would pass the loop vacuously.
+        assert_eq!(
+            graded, 2,
+            "expected exactly the two withdrawal paths \
+             (teardown_runtime_mcp_for_replace and remove_runtime_mcp_server); \
+             found {graded}. A new one is fine — grade it and update this count."
+        );
+    }
+
+    /// Every top-level (column-zero) `fn` in `source`, as `(name, body)`.
+    ///
+    /// Column zero is the discriminator: a nested helper or a test lives
+    /// indented, and the withdrawal paths this grades are free functions.
+    fn top_level_fn_blocks(source: &str) -> Vec<(String, String)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut blocks = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let is_fn_header = ["fn ", "async fn ", "pub fn ", "pub async fn "]
+                .iter()
+                .any(|prefix| line.starts_with(prefix));
+            if !is_fn_header {
+                i += 1;
+                continue;
+            }
+            let name = line
+                .split("fn ")
+                .nth(1)
+                .unwrap_or("")
+                .split(['(', '<', ' '])
+                .next()
+                .unwrap_or("")
+                .to_string();
+            // Brace-count to the end of the body. Line comments are stripped
+            // first so a `//` mentioning a brace cannot skew the depth.
+            let mut depth = 0i32;
+            let mut body = String::new();
+            let mut k = i;
+            let mut opened = false;
+            while k < lines.len() {
+                let code = match lines[k].find("//") {
+                    Some(at) => &lines[k][..at],
+                    None => lines[k],
+                };
+                depth += code.matches('{').count() as i32;
+                depth -= code.matches('}').count() as i32;
+                if code.contains('{') {
+                    opened = true;
+                }
+                body.push_str(lines[k]);
+                body.push('\n');
+                if opened && depth <= 0 {
+                    break;
+                }
+                k += 1;
+            }
+            blocks.push((name, body));
+            i = k + 1;
+        }
+        blocks
+    }
+
+    /// The splitter is the thing that can silently stop finding functions, so
+    /// it is graded directly rather than trusted.
+    #[test]
+    fn the_fn_splitter_scopes_a_body_to_its_own_function() {
+        let source = "fn good() {\n    withdraw();\n}\n\nasync fn bad(x: u8) -> u8 {\n    0\n}\n\n    fn nested() {\n        withdraw();\n    }\n";
+        let blocks = top_level_fn_blocks(source);
+        assert_eq!(
+            blocks.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["good", "bad"],
+            "an indented fn is not a top-level withdrawal path: {blocks:?}"
+        );
+        assert!(blocks[0].1.contains("withdraw();"));
+        // NEGATIVE CONTROL: the second body must NOT borrow the first's call,
+        // or a file with one compliant fn grades every other fn green.
+        assert!(
+            !blocks[1].1.contains("withdraw();"),
+            "the second fn body swallowed the first one's call"
         );
     }
 }
