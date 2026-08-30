@@ -33,9 +33,51 @@
 //!   walk must see a real grandchild on Unix, the Job Object must contain it on
 //!   Windows, and dropping the guard must kill it.
 //! * [`assert_the_behavioural_twins_are_armed`] refuses to let the fuller
-//!   behavioural tests be deleted, `#[ignore]`d, narrowed to another platform
-//!   or listed in a file that silences them without this ratchet going red with
+//!   behavioural tests be deleted, skipped, narrowed to another platform or
+//!   listed in a file that silences them without this ratchet going red with
 //!   them.
+//!
+//! ## Why the twins' attributes are graded by ALLOWLIST
+//!
+//! That second assertion used to name the spellings it refused: `#[ignore` and
+//! `#[cfg(`. `#[cfg_attr(not(target_os = "macos"), ignore)]` matches NEITHER,
+//! and is simultaneously a skip and a platform-condition; so is a file-level
+//! `#![cfg_attr(cond, cfg(any()))]`, which is not `#![cfg(`. Both spellings
+//! leave the twin unrun with this ratchet green, and `cfg_attr(..., ignore)` is
+//! this repo's own house idiom for a platform skip -- twenty-five live sites,
+//! one of whose module docs teaches it.
+//!
+//! Enumerating skips cannot work: the alphabet is open, and an attribute macro
+//! nobody has written yet skips just as well as `#[ignore]`. So the attributes
+//! are graded the other way round. Whitespace is stripped first, then:
+//!
+//! * the file must carry EXACTLY ONE inner attribute, and it must be the gate;
+//! * the twin's own attribute block must be EXACTLY `#[test]`.
+//!
+//! "is a skip" is undecidable over an open alphabet; "is not `#[test]`" is
+//! decidable and total. Any other attribute, in any spelling, reds this ratchet
+//! -- including ones that do not exist yet. Loosening either bound is a
+//! deliberate edit to this file, which is what a ratchet is for.
+//!
+//! ## What this still does not see (named, not hidden)
+//!
+//! The allowlist is closed over ATTRIBUTES. It is not closed over:
+//!
+//! * a body-internal skip -- an early `return`, or a `cfg!(...)` guard around
+//!   the assertions. The twin still runs and still passes, vacuously. That is
+//!   why [`assert_the_guard_actually_owns_the_tree`] below drives the kernel
+//!   check from THIS binary rather than trusting the twins: a hollowed twin
+//!   does not leave the ownership claim unproven.
+//! * a nextest `default-filter` that excludes the twin's binary without naming
+//!   the test. [`QUARANTINE_LISTS`] covers the two by-name lists only.
+//! * a CI job that never invokes the twin's binary at all.
+//!
+//! Grading "the twin RUNS" directly would mean shelling out to
+//! `cargo nextest list` from inside a test nextest is already running: a nested
+//! cargo build under the test harness, which can rebuild, contend on the build
+//! lock, and hard-fail wherever cargo is absent. A gate that cannot be trusted
+//! to pass is worth no more than one that cannot fail, so the static allowlist
+//! plus the named gaps above is the honest instrument.
 //!
 //! ## Why it is not fooled by its own text
 //!
@@ -52,9 +94,10 @@ use std::time::{Duration, Instant};
 use support::process_tree_fixture::{force_kill, spawn_detaching_parent};
 use wcore_types::process_liveness::process_is_alive;
 
-/// The behavioural twins this file leans on, and the ONE platform gate each is
-/// allowed to carry. Together the pair covers every platform, which is what
-/// makes "either twin is `#![cfg]`-gated" acceptable and a THIRD gate not.
+/// The behavioural twins this file leans on, and the ONE inner attribute each
+/// is allowed to carry. Together the pair covers every platform, which is what
+/// makes "either twin is `#![cfg]`-gated" acceptable and a SECOND inner
+/// attribute -- of ANY spelling, not just a second `#![cfg(` -- not.
 ///
 /// `(file, its only permitted inner attribute, the test it must declare)`.
 const BEHAVIOURAL_TWINS: &[(&str, &str, &str)] = &[
@@ -89,6 +132,38 @@ fn repo_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
+/// `s` with every whitespace character removed.
+///
+/// Attribute comparisons run over this, so they are over the attributes
+/// THEMSELVES and not over their formatting: `# [ ignore ]` and `#[ignore]`
+/// normalise to one string, and neither can hide behind a line break.
+fn strip_ws(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// The attribute block the declaration at `decl_at` carries, whitespace removed.
+///
+/// The previous item ends at a `}` (a fn or an impl) or a `;` (a `use` or a
+/// `mod`), whichever is later; with neither, the declaration is the first thing
+/// in the file and the whole head is its attribute block.
+///
+/// Callers pass ALREADY-BLANKED code, so a `}` or a `#[` inside a comment or a
+/// string literal can neither move the boundary nor invent an attribute.
+fn attrs_before(code: &str, decl_at: usize) -> String {
+    let head = &code[..decl_at];
+    let boundary = match (head.rfind('}'), head.rfind(';')) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    let attrs = match boundary {
+        Some(b) => &head[b + 1..],
+        None => head,
+    };
+    strip_ws(attrs)
+}
+
 /// Is `needle` named by a non-comment, non-blank line of `list`?
 ///
 /// Split out so the assertion below and its own positive control run the SAME
@@ -103,11 +178,16 @@ fn list_names(list: &str, needle: &str) -> bool {
 
 /// c3 (FerroxLabs/wayland-core#385). The behavioural twins are the only thing
 /// that can tell a working guard from a stub, so the wrapping ratchet must go
-/// red if either one is deleted, `#[ignore]`d, narrowed to a third platform, or
+/// red if either one is deleted, skipped, narrowed to a third platform, or
 /// listed in a file that silences it.
 ///
 /// This is a SOURCE + CONFIG check on purpose: availability is a static
 /// property, and a test that has been skipped cannot report on itself.
+///
+/// The attribute half is an ALLOWLIST -- exactly one inner attribute, and
+/// exactly `#[test]` on the twin -- because a denylist of skip spellings cannot
+/// be closed. The module doc carries the argument, and names the three channels
+/// this still does not see.
 fn assert_the_behavioural_twins_are_armed() {
     let quarantine: Vec<(&str, String)> = QUARANTINE_LISTS
         .iter()
@@ -140,6 +220,25 @@ fn assert_the_behavioural_twins_are_armed() {
          as quarantining everything its prose mentions"
     );
 
+    // POSITIVE CONTROL for the attribute allowlist, in the same call and on
+    // synthetic sources, so both polarities are proven before the real twins
+    // are graded. A reader that cannot see an added attribute would accept
+    // everything, and "the block is exactly #[test]" would mean nothing.
+    let clean = "fn a() { }\n#[test]\nfn t(";
+    let skipped = "fn a() { }\n#[test]\n#[cfg_attr(any(), ignore)]\nfn t(";
+    assert_eq!(
+        attrs_before(clean, clean.find("fn t(").expect("synthetic decl")),
+        "#[test]",
+        "the attribute reader cannot see a bare #[test] block, so its verdict \
+         on the real twins means nothing"
+    );
+    assert_ne!(
+        attrs_before(skipped, skipped.find("fn t(").expect("synthetic decl")),
+        "#[test]",
+        "the attribute reader missed an added attribute, so every skip spelling \
+         would read as an unadorned #[test]"
+    );
+
     for (rel, gate, test_name) in BEHAVIOURAL_TWINS {
         let path = tests_root().join(rel);
         let src = std::fs::read_to_string(&path).unwrap_or_else(|e| {
@@ -156,22 +255,25 @@ fn assert_the_behavioural_twins_are_armed() {
         // `#[ignore]` or a second `#![cfg(` cannot convict it.
         let code = blank_noncode(&src);
 
+        // Whitespace-insensitive, so an attribute cannot hide in its layout.
+        let dense = strip_ws(&code);
         assert!(
-            code.contains(gate),
+            dense.contains(&strip_ws(gate)),
             "{rel} no longer carries {gate}. The pair covers every platform \
              only while each half keeps its own gate (wayland-core#385 c3)"
         );
-        let gates = code.matches("#![cfg(").count();
+        // ALLOWLIST, not a denylist. `#![cfg_attr(cond, cfg(any()))]` compiles
+        // the whole file out on a platform and is not `#![cfg(`, so counting
+        // cfg gates could never have caught it; counting ALL inner attributes
+        // catches it and everything else of its shape.
+        let inner = dense.matches("#![").count();
         assert_eq!(
-            gates, 1,
-            "{rel} carries {gates} inner cfg gates; exactly one ({gate}) is \
-             allowed, because a second one narrows the twin to a platform \
-             subset and leaves a gap no instrument covers (wayland-core#385 c3)"
-        );
-        assert!(
-            !code.contains("#[ignore"),
-            "{rel} carries #[ignore], so the only behavioural proof of tree \
-             ownership no longer runs (wayland-core#385 c3)"
+            inner, 1,
+            "{rel} carries {inner} inner attributes; exactly one ({gate}) is \
+             allowed. A second one -- in ANY spelling, `#![cfg(`, \
+             `#![cfg_attr(`, or an attribute that does not exist yet -- narrows \
+             the twin to a platform subset or compiles it out entirely, and \
+             leaves a gap no instrument covers (wayland-core#385 c3)"
         );
 
         let decl = format!("fn {test_name}(");
@@ -181,26 +283,25 @@ fn assert_the_behavioural_twins_are_armed() {
                  the wrapping ratchet leans on (wayland-core#385 c3)"
             )
         });
-        // The attributes are whatever sits between the previous `}` (or the
-        // start of the file) and the declaration.
-        let head = &code[..at];
-        let attrs = match head.rfind('}') {
-            Some(b) => &head[b..],
-            None => head,
-        };
+        let attrs = attrs_before(&code, at);
         assert!(
             attrs.contains("#[test]"),
             "`{test_name}` in {rel} is no longer a #[test] (wayland-core#385 c3)"
         );
-        assert!(
-            !attrs.contains("#[cfg("),
-            "`{test_name}` in {rel} carries its own #[cfg(...) gate on top of \
-             the file gate, so it can be compiled out on a platform where the \
-             file still builds (wayland-core#385 c3)"
-        );
-        assert!(
-            !attrs.contains("#[ignore"),
-            "`{test_name}` in {rel} is #[ignore]d (wayland-core#385 c3)"
+        // ALLOWLIST again, and the reason it is not a list of forbidden
+        // spellings: `#[ignore]`, `#[cfg(...)]`, `#[cfg_attr(cond, ignore)]`,
+        // `#[cfg_attr(cond, should_panic)]` and any future skipping attribute
+        // are all simply "not `#[test]`", which is decidable. "is a skip" is
+        // not.
+        assert_eq!(
+            attrs, "#[test]",
+            "`{test_name}` in {rel} carries attributes beyond `#[test]` -- the \
+             block reads as `{attrs}`. Anything other than `#[test]` there can \
+             skip the only behavioural proof of tree ownership, quarantine it, \
+             or narrow it to a platform (`#[ignore]`, `#[cfg(...)]`, \
+             `#[cfg_attr(cond, ignore)]`, `#[cfg_attr(cond, should_panic)]`), \
+             so the block is graded as an allowlist rather than against a list \
+             of spellings that could never be closed (wayland-core#385 c3)"
         );
 
         for (list, body) in &quarantine {
