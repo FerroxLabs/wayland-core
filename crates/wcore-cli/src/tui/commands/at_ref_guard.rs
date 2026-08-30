@@ -334,6 +334,70 @@ mod tests {
         );
     }
 
+    /// Names a re-added local rule in the guard would plausibly carry. They
+    /// are ordinary files today — nothing refuses them — and they exist to
+    /// widen the corpus the delegation test below quantifies over.
+    const GUARD_DRIFT_CANARIES: &[&str] = &[
+        "auth.txt",
+        "token.txt",
+        "session.dat",
+        "vault.yml",
+        "passwords.csv",
+        "private_notes.md",
+        "backup.sql",
+    ];
+
+    /// core#323 c4, graded at the GUARD boundary.
+    ///
+    /// The wcore-tools table
+    /// (`the_shared_denylist_carries_every_name_the_at_attach_guard_denies`)
+    /// pins eleven historical names against the shared predicate. It lives
+    /// below this crate, so it cannot see [`is_secret_path`] and cannot
+    /// notice the guard growing a rule of its OWN again — which is precisely
+    /// the drift #323 closed by deleting the local list. This asserts the
+    /// criterion's own direction: whatever the guard refuses, the shared
+    /// predicate the file tools walk refuses too.
+    ///
+    /// Not a tautology despite the delegation: the two sides are called with
+    /// DIFFERENT inputs. The guard anchors a bare `@name` against a synthetic
+    /// separator; the file tools see a real workspace path. A local rule, or
+    /// an anchoring that admits what a real path would not, breaks it. It is
+    /// corpus-bound, not a proof over all names — a local rule on a name
+    /// absent from all three tables above would still escape.
+    #[test]
+    fn every_name_the_attach_guard_refuses_is_carried_by_the_shared_denylist() {
+        let workspace = Path::new("/w").join("project");
+        let leaked: Vec<&str> = DIVERGENT_SECRET_PATHS
+            .iter()
+            .chain(ATTACHABLE_PATHS.iter())
+            .chain(GUARD_DRIFT_CANARIES.iter())
+            .copied()
+            .filter(|n| {
+                is_secret_path(Path::new(n))
+                    && !wcore_tools::workspace_policy::is_secret_path_static(&workspace.join(n))
+            })
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "the @-attach guard refuses these on a rule of its own; Read, Grep and \
+             the Bash deny walk consult the shared predicate alone and would still \
+             hand them to the model: {leaked:?}"
+        );
+
+        // Wrong-refusal control: the corpus must contain names the guard
+        // ADMITS, or the assertion above is satisfied by a guard that refuses
+        // nothing. Passes on BOTH arms.
+        let admitted = GUARD_DRIFT_CANARIES
+            .iter()
+            .filter(|n| !is_secret_path(Path::new(n)))
+            .count();
+        assert_eq!(
+            admitted,
+            GUARD_DRIFT_CANARIES.len(),
+            "the canaries must be ordinary files today"
+        );
+    }
+
     // ── gitignore ────────────────────────────────────────────────────────
 
     #[test]
