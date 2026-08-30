@@ -238,6 +238,17 @@ want_grep "the preserved attempts are uploaded with the JUnit artifact" \
 want_grep "the retry-flake grader is still invoked from the shared evidence gate" \
   "$ROOT/.github/scripts/assert-test-evidence.sh" "grade-retry-flakes.sh"
 
+# ...and the step that RUNS that gate must not exclude itself on a branch where
+# the macOS matrix is skipped. Measured on run 33303418632: the wrapper
+# preserved outer-attempt-1.xml, the report job downloaded it, and `report`
+# still concluded SUCCESS because this step's `if:` named only `needs.ci`,
+# which is `skipped` on every `lane/**` push that does not opt into
+# `[ci-darwin]`. This is a WIRING check and says so: it proves the condition
+# consults the containerized Linux job, not that the report check reds --
+# that is Part E's job, and a live runner's.
+want_grep "the evidence gate's own condition consults the containerized Linux job" \
+  "$CI" "needs['ci-linux'].result != 'skipped'"
+
 # ── PART D — a setup failure must not masquerade as a test failure ─────────
 #
 # wayland#1177 c1. On run 33227927478 the wrapper died at `mkdir -p

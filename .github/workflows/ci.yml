@@ -2819,13 +2819,39 @@ jobs:
       # "zero reports is a failure" rule this step has always enforced; the ci
       # matrix legs are conditioned per platform, so a per-leg count would be a
       # different (and riskier) gate than the one being preserved here.
+      # THE GATE USED TO SKIP ITSELF ON EVERY LANE PUSH (wayland#1177 c1).
+      # This `if:` named ONLY `needs.ci` -- the macOS matrix, which is opt-in
+      # behind a `[ci-darwin]` commit marker and is therefore `skipped` on an
+      # ordinary `lane/**` push. `ci-linux` is the job that runs the whole
+      # workspace nextest suite, and its result was not consulted, so the one
+      # step that reads the downloaded evidence excluded itself exactly when
+      # the evidence existed.
+      #
+      # MEASURED end to end on run 33303418632 (branch
+      # lane/f13-w3-test-infra-probe, 2026-08-30). A probe test was made to
+      # fail on outer-retry attempt 1 and pass on attempt 2. The wrapper did
+      # its job -- `attempt 1 FAILED (exit 100); preserved its JUnit as
+      # outer-attempt-1.xml`, then `attempt 2 passed` with 17,460 tests green
+      # -- and the report job DID download it: `artifacts downloaded :
+      # junit.xml outer-attempts`, with
+      # `junit-reports/outer-attempts/outer-attempt-1.xml  17459 OK  1 FAIL`
+      # rendered in its own summary. The required `report` check nevertheless
+      # concluded SUCCESS, because THIS STEP was skipped and
+      # grade-retry-flakes.sh never ran. On that run the macOS matrix job's own
+      # result was `skipped` while the containerized Linux job's was `success`.
+      #
+      # A gate that cannot fail is exactly as worthless as one that cannot
+      # pass, and this one could not fail on any branch that does not opt into
+      # the macOS matrix -- which is every lane branch in the release.
       - name: Assert test evidence exists (a skipped test step is not a pass)
-        if: ${{ needs.ci.result != 'cancelled' && needs.ci.result != 'skipped' }}
+        if: >-
+          ${{ (needs.ci.result != 'cancelled' && needs.ci.result != 'skipped')
+              || (needs['ci-linux'].result != 'cancelled' && needs['ci-linux'].result != 'skipped') }}
         env:
           EVIDENCE_DIR: junit-reports
           EXPECTED_MIN: 1
           LABEL: ci matrix (unit + integration)
-          UPSTREAM_RESULT: ${{ needs.ci.result }}
+          UPSTREAM_RESULT: ci=${{ needs.ci.result }} ci-linux=${{ needs['ci-linux'].result }}
           HINT: >-
             A leg that dies before its test step (for example at the Clippy
             step) leaves no artifact. See
