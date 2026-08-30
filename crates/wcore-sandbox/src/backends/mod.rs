@@ -633,3 +633,58 @@ mod tests {
         .expect("receiver drop must cancel the backend execution future");
     }
 }
+
+/// One backend that overrides [`SandboxBackend::known_limitations`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeclaringBackend {
+    /// The backend's own [`SandboxBackend::name`].
+    pub name: &'static str,
+    /// The file, relative to this crate's `src/`, that carries the override.
+    /// Scanned, not decorative — see
+    /// `tests/declared_limitations_are_registered.rs`.
+    pub source_file: &'static str,
+    /// Whether the declaring type exists only under `cfg(windows)`. A row that
+    /// is `true` must be asserted UNCONSTRUCTIBLE off Windows by whoever
+    /// enumerates this table, rather than quietly skipped.
+    pub windows_only: bool,
+}
+
+/// Every backend in this workspace that declares a known limitation.
+///
+/// # Why a table, and why it is scanned
+///
+/// `#368` c6 asks that the product STATE a defect *where an operator reads the
+/// containment posture*. It was graded by asserting the constant existed, and
+/// that grade was vacuous: replacing `AppContainerBackend::known_limitations`
+/// with `Vec::new()` compiles, deletes the `KNOWN LIMITATIONS` block from
+/// `wayland-core sandbox status` on real Windows, and leaves every test green,
+/// because nothing called that method. The sibling `WindowsJobObjectBackend`
+/// override WAS asserted — so the hole was exactly one backend wide, and a
+/// third backend added tomorrow would open it again.
+///
+/// So the coverage question is inverted into a decidable one. Not "did somebody
+/// remember to grade this backend's declaration?", which is undecidable over an
+/// open set of future backends, but two total ones:
+///
+/// 1. *Is every `known_limitations` override in this crate's source listed
+///    here?* — answered by scanning `src/` in
+///    `tests/declared_limitations_are_registered.rs`.
+/// 2. *Does every row here survive to BOTH arms of `sandbox status`?* —
+///    answered by projecting each row in
+///    `wcore_cli::sandbox_cmd::disclosure_tests`, which panics on a row it has
+///    no arm for rather than skipping it.
+///
+/// Adding a backend that declares a limitation and wiring neither reddens (1);
+/// wiring (1) and not (2) reddens (2).
+pub const BACKENDS_THAT_DECLARE_LIMITATIONS: &[DeclaringBackend] = &[
+    DeclaringBackend {
+        name: "windows_job_object",
+        source_file: "backends/windows_job_object.rs",
+        windows_only: false,
+    },
+    DeclaringBackend {
+        name: "appcontainer",
+        source_file: "backends/appcontainer/windows_impl/process.rs",
+        windows_only: true,
+    },
+];
