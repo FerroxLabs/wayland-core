@@ -108,14 +108,53 @@ fn config(model: &str) -> Config {
 const SKILL_DESC: &str = "ISSUE_1150_DESCRIPTION_MARKER a description long enough that a \
 tight character budget must drop it entirely rather than merely trim a word";
 
+/// How many filler skills `plant_skill` writes alongside the marker one, and
+/// the reason this file supplies its own catalogue instead of reading the
+/// operator's.
+///
+/// The window-sensitivity asserted below is only OBSERVABLE once the listing
+/// budget BINDS. With the single marker skill and nothing else,
+/// `format_skills_within_budget` renders full entries under every budget, so a
+/// 200,000-token window and a 32,768-token one produce byte-identical listings
+/// and `an_unknown_window_sizes_the_skill_listing_like_the_window_it_assumes`
+/// fails its own anti-vacuity precondition. Whether it binds was decided by
+/// whatever skills the HOST happened to have installed under `$HOME`, so the
+/// test passed on developer boxes and failed everywhere else: measured red on
+/// the Windows self-hosted runner (whose `HOME` is
+/// `C:\WINDOWS\ServiceProfiles\NetworkService`), red on macOS CI, and
+/// reproduced on Linux by running it with `HOME` pointed at an empty
+/// directory. Not a platform property — a non-hermetic one.
+///
+/// `FILLER_SKILLS` non-bundled entries at the `MAX_LISTING_DESC_CHARS` cap put
+/// the full listing above 11,000 characters: over the 8,000 a 200,000-token
+/// window buys and far over the 1,310 an unlisted model's assumed 32,768-token
+/// window buys. Both budgets therefore bind on every host, and the two
+/// listings cannot coincide no matter what else is installed.
+const FILLER_SKILLS: usize = 40;
+
 fn plant_skill(root: &std::path::Path) {
-    let dir = root.join(".wayland-core").join("skills").join("issue-1150");
+    let skills = root.join(".wayland-core").join("skills");
+    let dir = skills.join("issue-1150");
     std::fs::create_dir_all(&dir).expect("skill dir");
     std::fs::write(
         dir.join("SKILL.md"),
         format!("---\nname: issue-1150-skill\ndescription: {SKILL_DESC}\n---\n\nbody\n"),
     )
     .expect("write SKILL.md");
+
+    // Descriptions at the listing cap, so each entry costs the most the
+    // formatter will ever spend on it and the arithmetic above is a floor.
+    let filler_desc = "d".repeat(wcore_skills::prompt::MAX_LISTING_DESC_CHARS);
+    for i in 0..FILLER_SKILLS {
+        let name = format!("issue-1150-filler-{i:02}");
+        let dir = skills.join(&name);
+        std::fs::create_dir_all(&dir).expect("filler skill dir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {filler_desc}\n---\n\nbody\n"),
+        )
+        .expect("write filler SKILL.md");
+    }
 }
 
 /// Boot one session through the production path. Returns everything the user

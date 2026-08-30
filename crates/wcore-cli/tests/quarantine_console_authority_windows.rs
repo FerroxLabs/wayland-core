@@ -94,6 +94,38 @@ fn shares_console_with_driver() -> bool {
     n > 0 && n <= pids.len() && pids[..n].contains(&driver)
 }
 
+/// Does THIS process have a console AT ALL — window or not?
+///
+/// The gate above used `GetConsoleWindow()`, which is the oracle
+/// `shares_console_with_driver` one screen up already documents as the wrong
+/// one, applied to the driver instead of to the probe. A console created
+/// without a window — `CREATE_NO_WINDOW`, a ConPTY, a process spawned by a
+/// service — is still a console, and `AllocConsole` then FAILS with
+/// `ERROR_ACCESS_DENIED` precisely because one is already attached. The gate
+/// therefore read "no window" as "no console", could not fix it, and refused
+/// the run.
+///
+/// MEASURED on SeanDesktop, Windows 11 build 26200, by running the identical
+/// probe in both contexts:
+///
+/// ```text
+/// ssh session (console has a window)   GetConsoleWindow=0x265d688  ProcessList=2  AllocConsole=false err=5
+/// CreateNoWindow child (no window)     GetConsoleWindow=0          ProcessList=1  AllocConsole=false err=5
+/// ```
+///
+/// The second row is the `ferrox-win-msvc` runner's condition and is what
+/// failed CI run 33291781675: a real console, one process attached, no window
+/// handle. `GetConsoleProcessList` sees it; `GetConsoleWindow` cannot. The
+/// window-handle reading is kept for the REPORT (`console_window()` below),
+/// where it is a measurement rather than a gate.
+fn driver_has_console() -> bool {
+    let mut pids = [0u32; 64];
+    // SAFETY: `pids` is a live, correctly sized buffer and its length is passed
+    // as the count. A process with no console returns 0 and writes nothing.
+    let attached = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) };
+    attached > 0
+}
+
 fn console_window() -> &'static str {
     // SAFETY: no arguments, no state; returns NULL when this process has no
     // console WINDOW — which, per `shares_console_with_driver`, is not the same
@@ -261,14 +293,13 @@ fn quarantine_child_has_no_console_at_creation_on_windows() {
     // binary run as a service or over a pipe may have none, so allocate one —
     // the console the children then contend for is a real one, exactly as the
     // unix sibling opens a real PTY.
-    // SAFETY: argument-free; fails harmlessly when a console already exists,
-    // which the branch guard has already excluded.
-    if unsafe { GetConsoleWindow() }.is_null() {
+    if !driver_has_console() {
+        // SAFETY: argument-free; fails harmlessly when a console already
+        // exists, which the branch guard has already excluded.
         unsafe { AllocConsole() };
     }
     assert!(
-        // SAFETY: as above.
-        !unsafe { GetConsoleWindow() }.is_null(),
+        driver_has_console(),
         "this driver has no console and could not allocate one, so #338's \
          Windows property is unobservable here — the run proves nothing and \
          must not be read as a pass"
