@@ -195,6 +195,45 @@ def _scalar(raw, where, errs):
     return v
 
 
+# A ledger entry IS the evidence for a criterion, so a conflict marker committed
+# into one means a reader cannot tell which of two claims is authoritative --
+# and the gate that exists to keep the ledger trustworthy passed two such files
+# in silence (wayland-core-368.md and wayland-core-374.md, each carrying a lone
+# trailing `||||||| merged common ancestors` left behind by a diff3 resolution
+# that deleted the other sections and forgot this line).
+#
+# Matched at LINE START, as a run of at least the seven characters git writes,
+# followed by a space-and-label or by end of line. `{7,}` rather than exactly
+# seven so a repo-local `conflict-marker-size` cannot walk past the check; the
+# required space-or-end-of-line keeps `<<<<<<<x` from matching.
+#
+# `=======` is the awkward one and is handled separately, by CONTEXT rather
+# than by shape. A bare row of seven equals is also a setext heading underline
+# and an ordinary prose divider, so matching it on shape alone would red this
+# gate on legitimate markdown. It is reported only once an unambiguous marker
+# has already been found in the SAME file.
+# RESIDUAL, stated rather than papered over: a file whose ONLY surviving marker
+# is a bare `=======` is NOT caught by this check.
+CONFLICT_MARK = re.compile(r"^(?:<{7,}|\|{7,}|>{7,})(?: .*)?$")
+CONFLICT_MID = re.compile(r"^={7,}$")
+
+
+def conflict_markers(path, text):
+    """-> [errors]. Git conflict markers committed into a ledger file."""
+    lines = text.split("\n")
+    hits = [(n, ln) for n, ln in enumerate(lines, 1) if CONFLICT_MARK.match(ln)]
+    if not hits:
+        return []
+    hits += [(n, ln) for n, ln in enumerate(lines, 1) if CONFLICT_MID.match(ln)]
+    return [
+        "%s:%d: git conflict marker %r committed into a ledger file. A ledger "
+        "entry is the evidence for a criterion; with a marker in it a reader "
+        "cannot tell which of two claims is authoritative. Resolve the merge "
+        "properly -- do not just delete a side." % (path, n, ln[:48])
+        for n, ln in sorted(hits)
+    ]
+
+
 def parse_ledger(path):
     """-> (record, [errors]). Never raises: a broken file is a FINDING."""
     errs = []
@@ -203,13 +242,18 @@ def parse_ledger(path):
     except OSError as e:
         return None, ["%s: unreadable (%s)" % (path, e)]
 
+    # Before any structural parse, and carried through the early returns below:
+    # a marker can sit in the prose body, which the frontmatter grammar never
+    # looks at, and that is exactly where both real instances were.
+    errs += conflict_markers(path, text)
+
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
-        return None, ["%s: does not open with a `---` frontmatter fence" % path]
+        return None, errs + ["%s: does not open with a `---` frontmatter fence" % path]
     try:
         end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
     except StopIteration:
-        return None, ["%s: frontmatter is never closed by a second `---`" % path]
+        return None, errs + ["%s: frontmatter is never closed by a second `---`" % path]
 
     body = "\n".join(lines[end + 1 :]).strip()
     rec = {"path": path, "criteria": [], "prose": body}
@@ -1045,6 +1089,30 @@ def self_test():
          lambda b: b.replace(
              '    note: "needs a Slack workspace credential the core lane does not hold"\n',
              ""), True, expect="is a suppression")
+    # ── committed git conflict markers, both directions ─────────────────────
+    # Three RED arms, one per unambiguous marker form, because a check that
+    # only ever fires on the form the two real files happened to carry would
+    # be graded by its own instance rather than by its rule. Two GREEN arms,
+    # because `=======` on its own is legitimate markdown and a check that
+    # reds on it would be traded away the first time it fired on real prose.
+    def trailer(extra):
+        return lambda b: b.rstrip("\n") + "\n" + extra + "\n"
+
+    case("conflict marker: the lone trailing `|||||||` both real files carried",
+         trailer("||||||| merged common ancestors"), True,
+         expect="git conflict marker")
+    case("conflict marker: a full three-section conflict in the prose",
+         trailer("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> other"), True,
+         expect="git conflict marker")
+    case("conflict marker: a lone `>>>>>>>` closer with no opener above it",
+         trailer(">>>>>>> lane/some-branch"), True,
+         expect="git conflict marker")
+    case("a setext heading underlined with seven equals stays GREEN",
+         trailer("Summary\n=======\n\nSeven equals under a heading is markdown, "
+                 "not a merge."), False)
+    case("a run of marker characters SHORTER than seven stays GREEN",
+         trailer("Ordered by severity: <<<< worst, >>>> least."), False)
+
     case("frontmatter never closed",
          lambda b: b.replace("---\n\nProse", "\nProse"), True,
          expect="frontmatter is never closed")
