@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The accumulated-tool-result ceiling is a window-independent constant, so it permits about 80,000 tokens on a 32,768-token model"
 status: open
-last_verified_commit: 115cb4c6
+last_verified_commit: 93ae3c4a
 criteria:
   - id: c1
     text: "The tool-result budget is derived from the resolved context window when one is known, with today's constants as the unknown fallback"

@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland
 kind: defect
 title: "The emergency hard-stop limit never sees the learned served window, so the reported last-resort limit can be 8x the one being enforced"
 status: open
-last_verified_commit: 115cb4c6
+last_verified_commit: 93ae3c4a
 criteria:
   - id: c1
     text: "emergency_limit_tokens resolves through the same narrowed window as resolve_preflight_window and autocompact_threshold_now, or the exemption is documented where supports_compaction is defined"
