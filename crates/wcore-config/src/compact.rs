@@ -598,13 +598,14 @@ impl CompactConfig {
     /// anything. Neither is a fix, and both are what a naively-applied learned
     /// window would have produced.
     ///
-    /// This is the gate on feeding #1172's LEARNED served window into the
-    /// pre-flight guard and the compaction triggers. At the 4,096-token slot
-    /// #1172 measured, it answers `false` — core's baseline turn alone is 76%
-    /// of that window and no division of it leaves room to work. The honest
-    /// remedy there is the operator raising the server's context length, which
-    /// is what #1172's notice already tells them; narrowing the guard onto it
-    /// would only abort the run faster.
+    /// At the 4,096-token slot #1172 measured it answers `false` — core's
+    /// baseline turn alone is 76% of that window and no division of it leaves
+    /// room to work. #1172 c3: `false` here does NOT mean the window is
+    /// ignored. The learned window is still applied
+    /// (`AgentEngine::narrow_to_served_window` has no escape hatch), and
+    /// `AgentEngine::unworkable_window_refusal` stops the run out loud naming
+    /// [`Self::minimum_workable_window`], rather than sizing the session
+    /// against a window the endpoint was observed not to serve.
     pub fn supports_compaction(&self, window: usize) -> bool {
         self.autocompact_threshold_for_window(window) > BASELINE_TURN_TOKENS
             && self.input_ceiling_for_window(window) > BASELINE_TURN_TOKENS
@@ -640,6 +641,42 @@ impl CompactConfig {
         self.enabled
             && self.supports_compaction(window)
             && tokens >= self.autocompact_threshold_for_window(window)
+    }
+
+    /// #1172 — the smallest window this config CAN work in: the least `w` for
+    /// which [`Self::supports_compaction`] holds.
+    ///
+    /// Derived from the reserves rather than hardcoded, so a non-default
+    /// `[compact] output_reserve` moves it with them. It exists so the refusal
+    /// core raises on an unworkable window can name the number the operator has
+    /// to reach — "raise `num_ctx`" without a target leaves them to bisect it
+    /// against a symptom that only appears several turns in.
+    ///
+    /// `supports_compaction` is monotone in `w`, so the bisection below is
+    /// exact rather than a heuristic: below the [`MAX_RESERVE_FRACTION`]
+    /// crossover both boundaries are fixed fractions of the window, above it
+    /// they are the window minus a constant, and the two agree at the crossover
+    /// by construction (that is what fixes the fraction at 0.55).
+    pub fn minimum_workable_window(&self) -> usize {
+        let mut hi = 1usize;
+        while !self.supports_compaction(hi) {
+            let Some(next) = hi.checked_mul(2) else {
+                // Reserves so large no window satisfies them. The caller is
+                // reporting a refusal either way; saturating is honest.
+                return usize::MAX;
+            };
+            hi = next;
+        }
+        let mut lo = hi / 2;
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if self.supports_compaction(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
     }
 }
 
@@ -775,6 +812,32 @@ fn default_tr_epoch_results() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1172 — the refusal has to name a number, and that number has to be
+    /// exact: it is what the operator sets `num_ctx` to.
+    #[test]
+    fn the_minimum_workable_window_is_the_least_one_that_supports_compaction() {
+        let cfg = CompactConfig::default();
+        let min = cfg.minimum_workable_window();
+        assert_eq!(min, 6_929, "0.45w > BASELINE_TURN_TOKENS at the defaults");
+        assert!(cfg.supports_compaction(min));
+        assert!(!cfg.supports_compaction(min - 1));
+        // The slot #1172 measured, and the band #1179's own notes call out.
+        assert!(!cfg.supports_compaction(4_096));
+        assert!(!cfg.supports_compaction(6_000));
+        assert!(cfg.supports_compaction(8_192));
+
+        // Derived from the reserves, not hardcoded: halving them halves it.
+        let lean = CompactConfig {
+            output_reserve: 10_000,
+            autocompact_buffer: 6_500,
+            emergency_buffer: 1_500,
+            ..CompactConfig::default()
+        };
+        let lean_min = lean.minimum_workable_window();
+        assert!(lean.supports_compaction(lean_min));
+        assert!(!lean.supports_compaction(lean_min - 1));
+    }
 
     #[test]
     fn default_values_match_spec() {

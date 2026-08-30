@@ -1145,12 +1145,18 @@ fn fit_thinking_budget(max_tokens: u32, requested_budget: u32) -> u32 {
 /// conservative 8192 floor cannot hold the reasoning spend plus a visible
 /// answer, so a reasoning turn is allowed to grow to `UNKNOWN_REASONING_CAP`
 /// (#426). Known models already get their real ceiling.
+///
+/// `window_in_force` is #1179's addition: the window this turn is ACTUALLY
+/// being sized against, as reconciled by `resolve_preflight_window` (catalogue,
+/// operator setting, Flux tier signal, #1172's learned served window). Passing
+/// `None` means "no window is known", and leaves the sizing exactly as it was.
 fn size_output_cap(
     config_max: u32,
     provider: &str,
     model: &str,
     est_input_tokens: usize,
     is_reasoning_turn: bool,
+    window_in_force: Option<u32>,
 ) -> u32 {
     /// Conservative cap for models with no known output ceiling. Safe for
     /// essentially every modern model (gpt-4o is 16384). Never raised on
@@ -1159,14 +1165,17 @@ fn size_output_cap(
     /// Headroom kept free in the window for prompt growth / safety margin.
     const WINDOW_BUFFER: u32 = 512;
 
-    match wcore_config::limits::model_output_ceiling(provider, model) {
+    let est = u32::try_from(est_input_tokens).unwrap_or(u32::MAX);
+    let room = |window: u32| {
+        window
+            .saturating_sub(est)
+            .saturating_sub(WINDOW_BUFFER)
+            .max(1)
+    };
+
+    let sized = match wcore_config::limits::model_output_ceiling(provider, model) {
         Some((out_ceiling, context_window)) => {
-            let est = u32::try_from(est_input_tokens).unwrap_or(u32::MAX);
-            let window_room = context_window
-                .saturating_sub(est)
-                .saturating_sub(WINDOW_BUFFER)
-                .max(1);
-            config_max.min(out_ceiling).min(window_room)
+            config_max.min(out_ceiling).min(room(context_window))
         }
         // Unknown / router-aliased model. Normally clamp to a conservative
         // floor so a small served model never 400s. But a reasoning turn on
@@ -1180,7 +1189,80 @@ fn size_output_cap(
             };
             config_max.min(cap)
         }
+    };
+
+    // #1179 — the ask and the window that certified the input must agree.
+    //
+    // The `Some` arm above has always clamped to the room left in the
+    // CATALOGUED window; the `None` arm clamped to nothing at all, and neither
+    // could see the window actually in force. Scaling the reserves made that
+    // load-bearing: at #1172's learned 8,192 slot the pre-flight ceiling is
+    // 5,053 with a 2,730-token output reserve, while this function still asked
+    // for UNKNOWN_CAP = 8,192 — a total ask of 13,245 tokens on an 8,192-token
+    // slot, certified by the guard as inside its ceiling. On a truncating
+    // endpoint that re-creates the silent prompt truncation #1172 is about.
+    //
+    // Clamping to `room(window_in_force)` is identity wherever the window in
+    // force IS the catalogued one (every model in the registry, absent a
+    // narrowing), so no large-window sizing moves.
+    match window_in_force {
+        Some(window) => sized.min(room(window)),
+        None => sized,
     }
+}
+
+/// wayland-core#353 — the user-facing notice for one truncation observation.
+///
+/// Pure, and separate from the turn loop, because its whole defect was a
+/// sentence nothing could contradict. The old text asserted "Core is now sizing
+/// this session against the {served}-token window this endpoint has actually
+/// demonstrated" on every arm, and that claim was FALSE exactly when it was
+/// emitted: `ServedWindowTracker::observe` returns evidence on the FIRST
+/// regression, at which point `sizing_window()` is still `None` and neither the
+/// autocompact trigger nor the pre-flight ceiling has moved — and the second
+/// regression, the one that does corroborate, was suppressed as a repeat. So an
+/// operator was told core had fixed itself at the one moment it had not, and
+/// was never told when it had. It also stayed false whenever the served window
+/// is one core cannot work in at all.
+///
+/// Three arms, one per thing that is actually true.
+fn truncation_notice(
+    evidence: &wcore_config::context_window::ServedWindowEvidence,
+    model: &str,
+    compact_config: &wcore_config::compact::CompactConfig,
+) -> String {
+    let served = evidence.served_window;
+    let sizing_note = if !evidence.corroborated {
+        "Core has NOT changed how it sizes this session on one observation alone: a \
+         single anomalous usage report must not be allowed to discard your \
+         conversation. If this endpoint truncates again, it will."
+            .to_string()
+    } else if compact_config.supports_compaction(served as usize) {
+        format!(
+            "Core is now sizing this session against the {served}-token window this \
+             endpoint has actually demonstrated."
+        )
+    } else {
+        format!(
+            "Core cannot size a session against {served} tokens at all - its own \
+             baseline turn, the system prompt plus the tool schemas before you have \
+             typed anything, is {baseline} tokens. This run will stop rather than keep \
+             sending prompts the server silently truncates.",
+            baseline = wcore_config::compact::BASELINE_TURN_TOKENS,
+        )
+    };
+    format!(
+        "Context truncated by the endpoint: it processed only {reported} of the \
+         ~{sent} prompt tokens this turn sent to `{model}`, and discarded the rest. \
+         Servers drop the HEAD of the conversation first, so the system prompt and \
+         your task are what went - the reply was written from a context that no longer \
+         contained them. {sizing_note} Raise the server's context length (on \
+         llama.cpp-based servers, including Ollama, that is `num_ctx` / \
+         `OLLAMA_CONTEXT_LENGTH`), or set `[compact] context_window` to the figure it \
+         really serves.",
+        reported = evidence.reported_input,
+        sent = evidence.sent_estimate,
+    )
 }
 
 /// #112 — whether this turn's WIRE max-tokens field should be omitted so the
@@ -1216,28 +1298,168 @@ fn should_omit_max_tokens(
 mod output_sizing_tests {
     use super::{
         MIN_THINKING_BUDGET, MIN_VISIBLE_OUTPUT, UNKNOWN_REASONING_CAP, fit_thinking_budget,
-        should_omit_max_tokens, size_output_cap,
+        should_omit_max_tokens, size_output_cap, truncation_notice,
     };
     use wcore_config::compat::ProviderCompat;
+
+    /// #1179 — the ask must fit ALONGSIDE the input the pre-flight ceiling
+    /// certified, in the window actually in force.
+    ///
+    /// Scaling the reserves down decoupled `output_reserve` from the
+    /// `max_tokens` this function asks for. On #1172's endpoint (unlisted
+    /// model, openai-compat, so the wire field IS sent) with a learned 8,192
+    /// slot, the ceiling is 5,053 with a 2,730-token reserve while the ask
+    /// stayed at `UNKNOWN_CAP` = 8,192: a total of 13,245 tokens on an
+    /// 8,192-token slot, certified by the guard as inside its ceiling. On a
+    /// truncating endpoint that re-creates the silent truncation #1172 is
+    /// about.
+    #[test]
+    fn the_output_ask_fits_inside_the_window_actually_in_force() {
+        // The pre-#1179 behaviour, for contrast: no window in force -> the
+        // conservative unknown floor, which alone overflows an 8,192 slot.
+        assert_eq!(
+            size_output_cap(64_000, "openai-compat", "qwen3:8b", 3_118, false, None),
+            8_192
+        );
+        // With the learned window in force the ask is clamped to the room left.
+        let ask = size_output_cap(
+            64_000,
+            "openai-compat",
+            "qwen3:8b",
+            3_118,
+            false,
+            Some(8_192),
+        );
+        assert_eq!(ask, 8_192 - 3_118 - 512);
+        assert!(
+            3_118 + ask <= 8_192,
+            "input {} + ask {ask} must fit the 8,192-token slot",
+            3_118
+        );
+    }
+
+    /// The clamp is IDENTITY wherever the window in force is the catalogued
+    /// one, which is every registry model absent a narrowing. Without this the
+    /// fix would silently cut a 128k-output model to its 20,000-token compaction
+    /// reserve — the naive formulation, and a real regression.
+    #[test]
+    fn a_window_in_force_that_is_the_catalogued_one_changes_no_sizing() {
+        for (provider, model, window) in [
+            ("anthropic", "claude-opus-4-7", 200_000u32),
+            ("openai", "gpt-4o-mini", 128_000),
+            ("gemini", "gemini-2.5-flash", 1_048_576),
+        ] {
+            assert_eq!(
+                size_output_cap(200_000, provider, model, 1_000, false, Some(window)),
+                size_output_cap(200_000, provider, model, 1_000, false, None),
+                "{model}: the reconciled window is the catalogued window"
+            );
+        }
+    }
+
+    fn evidence(
+        served: u64,
+        corroborated: bool,
+    ) -> wcore_config::context_window::ServedWindowEvidence {
+        wcore_config::context_window::ServedWindowEvidence {
+            signal: wcore_config::context_window::TruncationSignal::Regression,
+            sent_estimate: 10_466,
+            reported_input: served,
+            served_window: served,
+            corroborated,
+        }
+    }
+
+    /// #1172 c2 - "the shortfall is named to the user, and says the HEAD of the
+    /// prompt is what was lost".
+    ///
+    /// c2's evidence used to be a bare `file:` line pointer into the turn loop,
+    /// which drifted onto unrelated billing code the moment this lane edited
+    /// engine.rs - and a line number cannot assert a sentence anyway. WHICH end
+    /// of the conversation went is the whole point of the notice: a user told
+    /// only "context truncated" reasonably assumes the tail was trimmed and
+    /// that their system prompt and task survived. They did not.
+    #[test]
+    fn the_truncation_notice_says_the_head_of_the_prompt_is_what_was_lost() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        for corroborated in [false, true] {
+            let text = truncation_notice(&evidence(4_050, corroborated), "qwen3:8b", &cfg);
+            assert!(
+                text.contains("HEAD"),
+                "corroborated={corroborated}: the notice must name WHICH end was \
+                 discarded: {text}"
+            );
+            assert!(
+                text.contains("the system prompt and your task are what went"),
+                "corroborated={corroborated}: naming the head is only useful if \
+                 the notice says what was in it: {text}"
+            );
+            // The figures the operator needs to act, on every arm.
+            assert!(text.contains("4050"), "the served figure: {text}");
+            assert!(text.contains("10466"), "the sent figure: {text}");
+        }
+    }
+
+    /// wayland-core#353 D10 — the notice must not claim core changed its sizing
+    /// on a turn where it did not.
+    ///
+    /// The first `Regression` is the ONLY turn the notice ever fired for that
+    /// arm, and on it `sizing_window()` is still `None`.
+    #[test]
+    fn a_single_observation_notice_does_not_claim_the_session_was_resized() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        let text = truncation_notice(&evidence(4_050, false), "qwen3:8b", &cfg);
+        assert!(
+            !text.contains("is now sizing"),
+            "nothing has been resized yet: {text}"
+        );
+        assert!(text.contains("has NOT changed how it sizes"), "{text}");
+    }
+
+    /// The corroborating turn is where the claim becomes true, and it is now
+    /// the turn that carries it.
+    #[test]
+    fn the_corroborating_notice_is_the_one_that_claims_the_resize() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        let text = truncation_notice(&evidence(8_192, true), "qwen3:8b", &cfg);
+        assert!(
+            text.contains("Core is now sizing this session against the 8192-token"),
+            "{text}"
+        );
+    }
+
+    /// And when the served window is one core cannot work in at all, the notice
+    /// says THAT instead of promising a resize that would brick the run.
+    #[test]
+    fn an_unworkable_served_window_notice_says_the_run_will_stop() {
+        let cfg = wcore_config::compact::CompactConfig::default();
+        let text = truncation_notice(&evidence(4_096, true), "qwen3:8b", &cfg);
+        assert!(!text.contains("is now sizing"), "{text}");
+        assert!(
+            text.contains("cannot size a session against 4096"),
+            "{text}"
+        );
+        assert!(text.contains("run will stop"), "{text}");
+    }
 
     #[test]
     fn known_model_is_clamped_to_its_real_output_ceiling() {
         // A generous config cap is clamped DOWN to the model's real ceiling,
         // so a large default never 400s a model that allows less.
         assert_eq!(
-            size_output_cap(64_000, "openai", "gpt-4o-mini", 1_000, false),
+            size_output_cap(64_000, "openai", "gpt-4o-mini", 1_000, false, None),
             16_384,
             "gpt-4o output ceiling binds"
         );
         // Opus 4.6+ allows 128k output (#165); a generous config above that is
         // clamped DOWN to the 128k ceiling.
         assert_eq!(
-            size_output_cap(200_000, "anthropic", "claude-opus-4-7", 1_000, false),
+            size_output_cap(200_000, "anthropic", "claude-opus-4-7", 1_000, false, None),
             128_000,
             "opus 4.6+ output ceiling (128k) binds"
         );
         assert_eq!(
-            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, false),
+            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, false, None),
             64_000,
             "sonnet can use its full 64k"
         );
@@ -1248,11 +1470,11 @@ mod output_sizing_tests {
         // A router alias (served model unknown) must NOT receive the generous
         // 64k — it could route to a small model and 400. Clamp to the floor.
         assert_eq!(
-            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, false),
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, false, None),
             8_192
         );
         assert_eq!(
-            size_output_cap(64_000, "ollama", "some-local-model", 1_000, false),
+            size_output_cap(64_000, "ollama", "some-local-model", 1_000, false, None),
             8_192
         );
     }
@@ -1261,11 +1483,11 @@ mod output_sizing_tests {
     fn explicit_low_user_cap_is_always_respected() {
         // If the user sets a low max_tokens, it binds on known AND unknown.
         assert_eq!(
-            size_output_cap(4_000, "anthropic", "claude-opus-4-7", 1_000, false),
+            size_output_cap(4_000, "anthropic", "claude-opus-4-7", 1_000, false, None),
             4_000
         );
         assert_eq!(
-            size_output_cap(4_000, "flux-router", "flux-auto", 1_000, false),
+            size_output_cap(4_000, "flux-router", "flux-auto", 1_000, false, None),
             4_000
         );
     }
@@ -1276,7 +1498,7 @@ mod output_sizing_tests {
         // below the model's output ceiling (prevents an input+output overflow).
         // Opus 4.6+ now has a 1M window (#165), so the prompt must be near 1M
         // (not 200k) for the remaining room to bind below the output ceiling.
-        let cap = size_output_cap(64_000, "anthropic", "claude-opus-4-7", 995_000, false);
+        let cap = size_output_cap(64_000, "anthropic", "claude-opus-4-7", 995_000, false, None);
         assert!(cap < 32_000, "window room must bind near the context limit");
         assert!(cap >= 1, "never zero or negative");
     }
@@ -1290,20 +1512,20 @@ mod output_sizing_tests {
         // DeepSeek) and an OpenAI reasoning_effort (o-series / gpt-5) — which is
         // why the parameter is a single `is_reasoning_turn` flag.
         assert_eq!(
-            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, true),
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, true, None),
             UNKNOWN_REASONING_CAP,
             "a reasoning turn on a router alias gets reasoning headroom"
         );
         // Specifically the reasoning_effort path: an unknown o-series model with
         // NO numeric budget (only reasoning_effort) must still get the headroom.
         assert_eq!(
-            size_output_cap(64_000, "openai", "o3-pro-unlisted", 1_000, true),
+            size_output_cap(64_000, "openai", "o3-pro-unlisted", 1_000, true, None),
             UNKNOWN_REASONING_CAP,
             "reasoning_effort lifts an unknown o-series model off 8192"
         );
         // Non-reasoning turn on the same alias still gets the conservative floor.
         assert_eq!(
-            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, false),
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, false, None),
             8_192
         );
     }
@@ -1313,7 +1535,7 @@ mod output_sizing_tests {
         // A known model's real ceiling/window always binds, even with thinking
         // on — the reasoning ceiling only rescues UNKNOWN models from 8192.
         assert_eq!(
-            size_output_cap(200_000, "anthropic", "claude-opus-4-7", 1_000, true),
+            size_output_cap(200_000, "anthropic", "claude-opus-4-7", 1_000, true, None),
             128_000,
             "opus 4.6+ ceiling (128k) still binds with thinking on"
         );
@@ -1385,7 +1607,7 @@ mod output_sizing_tests {
         ));
         // And the sized value itself binds (existing contract, re-pinned).
         assert_eq!(
-            size_output_cap(4_000, "flux-router", "flux-auto", 1_000, false),
+            size_output_cap(4_000, "flux-router", "flux-auto", 1_000, false, None),
             4_000
         );
     }
@@ -1403,16 +1625,16 @@ mod output_sizing_tests {
         // Its sizing resolves through the registry entry (config cap binds
         // below the 65_536 ceiling), not the 8192 unknown floor.
         assert_eq!(
-            size_output_cap(64_000, "gemini", "gemini-2.5-flash", 1_000, false),
+            size_output_cap(64_000, "gemini", "gemini-2.5-flash", 1_000, false, None),
             64_000
         );
         // Known-model sizing contracts re-pinned per the #112 test plan.
         assert_eq!(
-            size_output_cap(64_000, "openai", "gpt-4o", 1_000, false),
+            size_output_cap(64_000, "openai", "gpt-4o", 1_000, false, None),
             16_384
         );
         assert_eq!(
-            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, false),
+            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, false, None),
             64_000
         );
     }
@@ -8519,14 +8741,11 @@ impl AgentEngine {
     /// unchanged. When there IS evidence it is applied by `min`, so it can only
     /// ever narrow.
     ///
-    /// `supports_compaction` is the gate #1179 exists for. At the 4,096-token
-    /// slot #1172 measured, core's own 3,118-token baseline turn is 76% of the
-    /// window: narrowing onto it would put the pre-flight ceiling and the
-    /// autocompact threshold both below the cost of an empty conversation, so
-    /// the guard would abort every run and the summarizer would fire every
-    /// turn. Leaving the window alone there is not the guard failing to fire —
-    /// it is core declining to brick a run it cannot rescue, while #1172's
-    /// notice tells the operator the one thing that does fix it.
+    /// There is no `supports_compaction` escape hatch here any more — see the
+    /// body. At the 4,096-token slot #1172 measured, core's own 3,118-token
+    /// baseline turn is 76% of the window, so no division of it leaves room to
+    /// work; that case is answered by `unworkable_window_refusal` stopping the
+    /// run out loud, not by silently sizing against 8x the served window.
     fn narrow_to_served_window(&self, window: Option<u64>) -> Option<u64> {
         // #353 — `sizing_window()`, not `served_window()`. Everything reached
         // through this function ACTS on the conversation — the autocompact
@@ -8538,9 +8757,20 @@ impl AgentEngine {
         let Some(served) = self.compact_state.served_window.sizing_window() else {
             return window;
         };
-        if !self.compact_config.supports_compaction(served as usize) {
-            return window;
-        }
+        // #1172 c3 — NO `supports_compaction` escape hatch here any more. This
+        // used to return the WIDER window when the served one was too small to
+        // compact in, which is the defect that ticket refused to let #1150
+        // close: at the 4,096-token slot it measured, core went on sizing
+        // against `UNVERIFIED_CONTEXT_WINDOW` = 32,768 — 8x the window the
+        // endpoint had been OBSERVED to serve — and kept sending ~10.5k-token
+        // prompts the server silently truncated. Declining to narrow did not
+        // avoid a brick; it hid one, on the fail-open side, where the model
+        // answers from a context it no longer has.
+        //
+        // The window a route has been corroborated to serve is now applied
+        // unconditionally, and `unworkable_window_refusal` is what handles the
+        // case where core cannot work inside it: refusing the endpoint out
+        // loud, once, with the number the operator has to reach.
         Some(window.map_or(served, |w| w.min(served)))
     }
 
@@ -8584,6 +8814,82 @@ impl AgentEngine {
     fn should_autocompact_now(&self, tokens: u64) -> bool {
         self.compact_config
             .should_autocompact_at(self.compaction_window_now(), tokens as usize)
+    }
+
+    /// #1172 c3 / #1179 - the refusal core owes an endpoint it provably cannot
+    /// operate in, or `None`.
+    ///
+    /// Two sources STATE the window rather than guessing at it: the operator's
+    /// explicit `[compact] context_window`, and #1172's CORROBORATED learned
+    /// served window - what the endpoint DID with a prompt we actually sent.
+    /// Nothing else can reach here: the smallest window in the
+    /// `wcore_config::limits` catalogue is 128,000, and
+    /// `UNVERIFIED_CONTEXT_WINDOW` is a declared fallback rather than a fact.
+    ///
+    /// When such a window is below [`CompactConfig::minimum_workable_window`]
+    /// there is no compaction path to hand it. Core's own baseline turn (the
+    /// system prompt plus the tool schemas, before the user has typed
+    /// anything) already exceeds the input ceiling, and compaction shrinks the
+    /// conversation, not the system prompt or the tool schemas. That left two
+    /// options, and #1172 c3 named the one that is not allowed: sizing the
+    /// session against a window the endpoint has been observed NOT to serve is
+    /// SILENT data loss (the server drops the head of the prompt and the model
+    /// answers fluently from a context it no longer has). So core refuses, out
+    /// loud, naming the figure the operator has to reach.
+    ///
+    /// This function only BUILDS the refusal. The turn loop is what STOPS on
+    /// it; that wiring is pinned by
+    /// `an_unworkable_window_stops_the_run_and_the_refusal_reaches_the_user`,
+    /// which drives the loop and fails if the call site is removed.
+    fn unworkable_window_refusal(&self) -> Option<String> {
+        let configured = self.compact_config.context_window.map(|w| w as u64);
+        let learned = self.compact_state.served_window.sizing_window();
+        let (window, from_config) = match (configured, learned) {
+            (Some(c), Some(l)) => {
+                if l <= c {
+                    (l, false)
+                } else {
+                    (c, true)
+                }
+            }
+            (Some(c), None) => (c, true),
+            (None, Some(l)) => (l, false),
+            (None, None) => return None,
+        };
+        if self.compact_config.supports_compaction(window as usize) {
+            return None;
+        }
+        let minimum = self.compact_config.minimum_workable_window();
+        let source = if from_config {
+            "`[compact] context_window` is set to".to_string()
+        } else {
+            format!(
+                "this endpoint has been observed to serve only {window} of the prompt \
+                 tokens sent to `{}`, twice - so its context window is",
+                self.model
+            )
+        };
+        let remedy = if from_config {
+            format!(
+                "Raise `[compact] context_window` to at least {minimum}, or remove it and \
+                 let core size the session from the model's own window."
+            )
+        } else {
+            format!(
+                "Raise the server's context length to at least {minimum} tokens (on \
+                 llama.cpp-based servers, including Ollama, that is `num_ctx` / \
+                 `OLLAMA_CONTEXT_LENGTH`), or point core at an endpoint that serves one."
+            )
+        };
+        Some(format!(
+            "Run stopped: {source} {window} tokens, and core cannot operate in a window \
+             that small. Core's own baseline turn - the system prompt plus the tool \
+             schemas, before you have typed anything - is {baseline} tokens, so every \
+             request already overflows it and the server discards the head of the prompt \
+             without saying so. Compaction cannot rescue this: it shrinks the \
+             conversation, not the system prompt or the tool schemas. {remedy}",
+            baseline = wcore_config::compact::BASELINE_TURN_TOKENS,
+        ))
     }
 
     /// THE one reconciliation of every window source, for the #255 pre-flight
@@ -8634,6 +8940,22 @@ impl AgentEngine {
     fn smart_compact_fraction(&self) -> Option<f64> {
         // Chokepoint: nothing below runs unless explicitly enabled.
         if !self.compact_config.smart_enabled {
+            return None;
+        }
+        // #1179 c7 — the SAME workability gate the static trigger carries in
+        // `should_autocompact_at`. Without it this trigger was the second way
+        // into the summarizer and the only ungated one: at a configured 1,024
+        // window the fraction on core's own 3,118-token baseline turn is 3.04,
+        // five times the 0.60 trigger, so #280 fired an LLM summarization on an
+        // empty conversation at the top of every turn. It survived only because
+        // `unworkable_window_refusal` returns from the turn loop a few lines
+        // ABOVE the call site here - a guarantee one edit away from gone.
+        // Returning `None` is this function's own "no honest denominator" path,
+        // so the pre-gate reads false without a second exit shape.
+        if !self
+            .compact_config
+            .supports_compaction(self.compaction_window_now())
+        {
             return None;
         }
         use wcore_config::context_window::ContextWindow;
@@ -12886,6 +13208,32 @@ impl AgentEngine {
                         }
                     }
 
+                    // #1172 c3 / #1179 — refuse a window core provably cannot
+                    // operate in, BEFORE `run_compaction` below gets a chance
+                    // to summarize against it. Placed here rather than beside
+                    // the #255 guard for two reasons: the summarizer runs
+                    // first, so a refusal further down would still have burned
+                    // an LLM call and discarded the user's conversation; and
+                    // the #255 message ("compaction could not reduce it
+                    // further") would name the wrong cause — nothing is wrong
+                    // with the conversation, the window is smaller than core's
+                    // fixed overhead.
+                    //
+                    // Resumable: the saved history is fine and reopens cleanly
+                    // the moment the window is raised.
+                    if let Some(refusal) = self.unworkable_window_refusal() {
+                        self.emit_error(&refusal, false);
+                        return self
+                            .finish_run_terminated_inner(
+                                user_input,
+                                turn,
+                                FinishReason::Length,
+                                StopReason::MaxTurns,
+                                true,
+                            )
+                            .await;
+                    }
+
                     // #280 — smart auto-compaction pre-gate. Boundary-fire ONLY: this is
                     // the turn-loop top (the tool loop lives below provider.stream in the
                     // same iteration), and the model swap was already applied above, so
@@ -13540,12 +13888,20 @@ impl AgentEngine {
                     // so both must lift an unknown model off the 8192 floor.
                     let is_reasoning_turn =
                         requested_thinking_budget.is_some() || request.reasoning_effort.is_some();
+                    // #1179 — the same reconciled window the #255 guard above
+                    // certified the input against, so the ceiling and the ask
+                    // cannot be computed on different windows.
+                    let window_in_force = self
+                        .resolve_preflight_window(input_token_estimate as u64, &request.model)
+                        .window
+                        .map(|w| u32::try_from(w).unwrap_or(u32::MAX));
                     request.max_tokens = size_output_cap(
                         self.max_tokens,
                         self.compat.provider_type(),
                         &request.model,
                         input_token_estimate,
                         is_reasoning_turn,
+                        window_in_force,
                     );
                     // #112 — when the user omitted `--max-tokens`, the model is
                     // unknown to the registry, and the provider is omit-safe, OMIT the
@@ -15920,21 +16276,14 @@ impl AgentEngine {
                 // fluently from a context it no longer has, which is why #372
                 // read as a retry loop — so a log-only announcement would be
                 // indistinguishable from saying nothing at all.
-                self.output.emit_info(&format!(
-                    "Context truncated by the endpoint: it processed only {reported} of \
-                     the ~{sent} prompt tokens this turn sent to `{model}`, and discarded \
-                     the rest. Servers drop the HEAD of the conversation first, so the \
-                     system prompt and your task are what went - the reply was written \
-                     from a context that no longer contained them. Core is now sizing \
-                     this session against the {served}-token window this endpoint has \
-                     actually demonstrated. Raise the server's context length (on \
-                     llama.cpp-based servers, including Ollama, that is `num_ctx` / \
-                     `OLLAMA_CONTEXT_LENGTH`), or set `[compact] context_window` to the \
-                     figure it really serves.",
-                    reported = evidence.reported_input,
-                    sent = evidence.sent_estimate,
-                    model = effective_model,
-                    served = evidence.served_window,
+                // wayland-core#353 — the wording is decided by
+                // `truncation_notice`, which is pure and therefore gradable;
+                // inline, the sentence "Core is now sizing this session against
+                // N" was unfalsifiable and false on every turn it was emitted.
+                self.output.emit_info(&truncation_notice(
+                    &evidence,
+                    &effective_model,
+                    &self.compact_config,
                 ));
             }
 
@@ -27876,11 +28225,18 @@ mod approval_bridge_engine_tests {
         assert!(!engine.should_autocompact_now(3_000));
     }
 
-    /// The refusal half, on the trigger path: a served window too small to work
-    /// in must not move the trigger either, or every turn opens with an LLM
-    /// summarization that cannot help.
+    /// #1172 c3 — the trigger path of the refusal. A served window too small to
+    /// work in must not fire the summarizer (it would run at the top of every
+    /// turn and reclaim nothing), and must not be papered over with a wider
+    /// window either.
+    ///
+    /// The predecessor of this test asserted `autocompact_threshold_now() ==
+    /// 95_000` on a corroborated 4,096 slot — i.e. it PINNED core sizing
+    /// against 31x the window the endpoint had been observed to serve, and
+    /// graded that as the fix. That is the substitution #1172 c3 refused to let
+    /// close.
     #[test]
-    fn the_autocompact_trigger_ignores_a_served_window_too_small_to_work_in() {
+    fn the_autocompact_trigger_refuses_a_served_window_too_small_to_work_in() {
         let mut engine = make_engine();
         engine.model = "gpt-4o".into();
         engine
@@ -27888,19 +28244,51 @@ mod approval_bridge_engine_tests {
             .served_window
             .observe("openai/gpt-4o", 12_000, 4_096);
         assert_eq!(
-            engine.autocompact_threshold_now(),
-            95_000,
-            "a 4,096 slot cannot hold core's own baseline turn; moving the \
-             trigger onto it summarizes every turn and reclaims nothing"
+            engine.compaction_window_now(),
+            4_096,
+            "the window in force is the one the endpoint demonstrated, never a \
+             wider guess"
         );
+        // The summarizer never fires: at 4,096 the threshold (1,844) is below
+        // core's own baseline turn, so firing would summarize an empty
+        // conversation at the top of every turn, forever.
         assert!(!engine.should_autocompact_now(3_118));
+        assert!(!engine.should_autocompact_now(1_000_000));
+        // And the user is told, once, with the number they have to reach.
+        let refusal = engine
+            .unworkable_window_refusal()
+            .expect("a 4,096 slot cannot hold core's 3,118-token baseline turn");
+        assert!(refusal.contains("4096"), "{refusal}");
+        assert!(
+            refusal.contains("6929"),
+            "the minimum workable window: {refusal}"
+        );
+        assert!(refusal.contains("num_ctx"), "{refusal}");
+        // Round-2 verifier, refutation 2. These literals are source-wrapped
+        // and `cargo fmt` cannot see inside a string, so the space runs need
+        // an assertion. The LEARNED branch builds its own `source` and
+        // `remedy` literals, distinct from the configured branch's, so
+        // asserting this only in
+        // `an_unworkable_window_stops_the_run_and_the_refusal_reaches_the_user`
+        // would leave half the message ungraded.
+        assert!(
+            !refusal.contains("  "),
+            "the operator-facing refusal must not carry a run of spaces from a \
+             wrapped string literal: {refusal:?}"
+        );
     }
 
-    /// The other half of the gate, and the whole reason #1179 existed: a served
-    /// window too small to work in must NOT be narrowed onto, because the
-    /// guard would then fire on every turn and abort every run.
+    /// #1172 c3 — the guard path. The window a route has been CORROBORATED to
+    /// serve is what the pre-flight guard sizes against, even when core cannot
+    /// work inside it.
+    ///
+    /// This replaces `a_learned_served_window_too_small_to_work_in_is_not_
+    /// narrowed_onto`, which asserted `Some(128_000)` here. Declining to narrow
+    /// did not avoid a brick, it hid one on the fail-open side: core went on
+    /// sending ~10.5k-token prompts into a 4,096-token slot and the server
+    /// discarded the head of each one without saying so.
     #[test]
-    fn a_learned_served_window_too_small_to_work_in_is_not_narrowed_onto() {
+    fn a_learned_served_window_too_small_to_work_in_is_refused_not_hidden() {
         let mut engine = make_engine();
         engine.model = "gpt-4o".into();
         // 4,096 -- the slot #1172 measured a stock Ollama serving.
@@ -27909,20 +28297,101 @@ mod approval_bridge_engine_tests {
             .served_window
             .observe("openai/gpt-4o", 12_000, 4_096);
         assert_eq!(
-            engine.compact_state.served_window.served_window(),
+            engine.compact_state.served_window.sizing_window(),
             Some(4_096),
-            "the tracker must have learned it, or this arm measures nothing"
+            "the tracker must have corroborated it, or this arm measures nothing"
         );
         let ctx = engine.resolve_preflight_window(1_000, "gpt-4o");
         assert_eq!(
             ctx.window,
-            Some(128_000),
-            "core's own baseline turn is 76% of a 4,096 slot; narrowing onto it \
-             aborts every run instead of saving any"
+            Some(4_096),
+            "core must size against what the endpoint serves, not 31x it"
         );
-        // And the run is not aborted on an empty turn.
-        let ceiling = ctx.input_ceiling(&engine.compact_config).expect("known");
-        assert!(ceiling > wcore_config::compact::BASELINE_TURN_TOKENS as u64);
+        assert!(
+            engine.unworkable_window_refusal().is_some(),
+            "and it must refuse rather than dispatch into it"
+        );
+    }
+
+    /// #1179 — a CONFIGURED window below the minimum workable one is refused on
+    /// the same footing as a learned one, and stops the summarizer.
+    ///
+    /// `supports_compaction` had a single call site, inside the learned-window
+    /// narrowing, so `[compact] context_window = 6000` reached the trigger
+    /// untouched: threshold 2,700, below core's own 3,118-token baseline turn,
+    /// so the summarizer fired on an empty conversation at the top of every
+    /// turn. In the band 4,456..6,928 that was strictly WORSE than the
+    /// 0.70-of-window fallback #1179 replaced (6,000 -> 4,200, no fire).
+    #[test]
+    fn a_configured_window_too_small_to_work_in_is_refused_on_the_same_footing() {
+        let mut engine = make_engine();
+        // Above the old fallback's fire point, below the new one's.
+        engine.compact_config.context_window = Some(6_000);
+        assert_eq!(
+            engine
+                .compact_config
+                .autocompact_threshold_for_window(6_000),
+            2_700,
+            "the arithmetic this test is about"
+        );
+        assert!(
+            !engine.should_autocompact_now(3_118),
+            "core's own baseline turn must never trigger the summarizer"
+        );
+        let refusal = engine
+            .unworkable_window_refusal()
+            .expect("6,000 is below the minimum workable window");
+        assert!(refusal.contains("[compact] context_window"), "{refusal}");
+        assert!(
+            !refusal.contains("num_ctx"),
+            "a configured window is the operator's own setting, not the \
+             server's: {refusal}"
+        );
+
+        // One token above the minimum and core works normally again.
+        engine.compact_config.context_window = Some(6_929);
+        assert!(engine.unworkable_window_refusal().is_none());
+        assert!(engine.should_autocompact_now(4_000));
+    }
+
+    /// REPRO #1172 c3 — the headline. With a CORROBORATED 4,096-token served
+    /// window, core must not size the session against 32,768/128,000.
+    #[test]
+    fn repro_1172_c3_core_does_not_size_against_8x_the_served_window() {
+        let mut engine = make_engine();
+        engine.model = "gpt-4o".into();
+        engine
+            .compact_state
+            .served_window
+            .observe("openai/gpt-4o", 12_000, 4_096);
+        assert_eq!(
+            engine.compact_state.served_window.sizing_window(),
+            Some(4_096),
+            "corroborated, or this arm measures nothing"
+        );
+        let ctx = engine.resolve_preflight_window(1_000, "gpt-4o");
+        assert_eq!(
+            ctx.window,
+            Some(4_096),
+            "core must never size against a window the endpoint has been \
+             observed NOT to serve"
+        );
+    }
+
+    /// REPRO #1179 / D36 — a CONFIGURED window below the minimum workable one
+    /// must not summarize an empty conversation at the top of every turn.
+    #[test]
+    fn repro_1179_d36_a_configured_unworkable_window_does_not_autocompact_an_empty_turn() {
+        let mut engine = make_engine();
+        engine.compact_config.context_window = Some(6_000);
+        assert!(
+            !engine.should_autocompact_now(0),
+            "an empty conversation must never trigger the summarizer"
+        );
+        assert!(
+            !engine.should_autocompact_now(wcore_config::compact::BASELINE_TURN_TOKENS as u64),
+            "core's own baseline turn must never trigger the summarizer"
+        );
     }
 
     /// Fire test + the band clamp: an out-of-band trigger (0.95) is clamped to
@@ -29642,6 +30111,265 @@ mod audit_2026_05_22_tests {
                 && written.contains(session_id)
                 && written.contains("Paraphrase"),
             "header comment must carry session + mutator provenance"
+        );
+    }
+
+    // --- #1172 c3 / #1179: the refusal is WIRED, not merely constructed ----
+
+    /// #1172 c3 — the criterion is "so the truncation stops", and stopping is
+    /// the TURN LOOP's job, not `unworkable_window_refusal`'s.
+    ///
+    /// The round-2 verifier objection this test exists for: every other test
+    /// on this path asserts `unworkable_window_refusal().is_some()`, which
+    /// grades a function returning a string. Deleting the one production call
+    /// site (the `if let Some(refusal)` block at the turn-loop top) left the
+    /// whole 9,226-test suite byte-identically green — a future edit could
+    /// remove the compensation silently. This drives `run()` end to end and
+    /// fails if that call site goes away.
+    ///
+    /// Three things are asserted, and each one is a different way for the
+    /// wiring to be missing:
+    ///   1. the run STOPS — `FinishReason::Length`, not a normal turn;
+    ///   2. the provider is NEVER called — no truncated prompt is sent, which
+    ///      is the data loss #1172 c3 is about;
+    ///   3. the refusal TEXT reaches the user, via the same error surface the
+    ///      host reads, naming the remedy and the figure to reach.
+    #[tokio::test]
+    async fn an_unworkable_window_stops_the_run_and_the_refusal_reaches_the_user() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("this must never be produced".into()),
+            done_endturn(),
+        ]]));
+        let counter = provider.call_counter();
+        let mut engine = engine_with(provider);
+
+        // An operator-STATED window core cannot work in. 6,000 is the band
+        // #1179 measured: threshold 2,700 against a 3,118-token baseline turn.
+        engine.compact_config.context_window = Some(6_000);
+        assert!(
+            !engine.compact_config.supports_compaction(6_000),
+            "fixture guard: 6000 must be an unworkable window, or this test \
+             proves nothing"
+        );
+
+        let tap: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        engine.set_error_tap(Arc::clone(&tap));
+
+        let result = engine
+            .run("summarise this repository", "m-unworkable")
+            .await
+            .expect("an unworkable window is a clean stop, not an engine error");
+
+        assert_eq!(
+            result.finish_reason,
+            FinishReason::Length,
+            "the run must TERMINATE on the unworkable window; got {result:?}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "core must not send a prompt the endpoint would silently truncate \
+             - that is the data loss #1172 c3 names"
+        );
+
+        let emitted = tap.lock().expect("error tap").clone();
+        let emitted = emitted.expect(
+            "the refusal must reach the user's error surface; nothing was \
+             emitted, so the run stopped without saying why",
+        );
+        assert!(
+            emitted.starts_with("Run stopped:"),
+            "the refusal, not some other error, must be what stops the run: {emitted:?}"
+        );
+        assert!(
+            emitted.contains("[compact] context_window"),
+            "the configured-source remedy must name the setting the operator \
+             actually set: {emitted:?}"
+        );
+        assert!(
+            !emitted.contains("num_ctx"),
+            "a CONFIGURED window must not be blamed on the server's num_ctx: {emitted:?}"
+        );
+        let minimum = engine.compact_config.minimum_workable_window();
+        assert!(
+            emitted.contains(&minimum.to_string()),
+            "the refusal must name the figure to reach ({minimum}): {emitted:?}"
+        );
+        // The message is read by a human. No run of stray whitespace in it.
+        assert!(
+            !emitted.contains("  "),
+            "the operator-facing refusal must not carry a run of spaces from a \
+             wrapped string literal: {emitted:?}"
+        );
+    }
+
+    /// #1179 c6 — "a window core has judged too small to compact in never
+    /// fires a summarization, BY EITHER TRIGGER", graded on the ENGINE's own
+    /// two triggers.
+    ///
+    /// The criterion's previous evidence
+    /// (`no_configured_window_anywhere_fires_on_the_baseline_turn`) called the
+    /// free function `wcore_config::compact::auto::should_autocompact`, which
+    /// resolves its own window from the config and the model. The engine does
+    /// not use it: the static trigger is `should_autocompact_now`
+    /// -> `should_autocompact_at(compaction_window_now(), ..)`, and the #280
+    /// trigger is `smart_compact_fraction` -> `smart_compact_should_fire`.
+    /// So that test graded an adjacent function — the same substituted-property
+    /// defect the round-2 objection raised against c3, in the criterion added
+    /// in answer to it. This grades the two triggers the loop actually
+    /// consults, and the refusal that runs before them.
+    ///
+    /// `smart_enabled` is forced ON: it is default-OFF, so leaving it alone
+    /// would make the second trigger vacuously quiet and the "either" in the
+    /// criterion unearned.
+    #[test]
+    fn no_configured_window_too_small_to_compact_in_can_reach_either_trigger() {
+        const BASELINE: u64 = wcore_config::compact::BASELINE_TURN_TOKENS as u64;
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let mut engine = engine_with(provider);
+        engine.compact_config.smart_enabled = true;
+
+        // ONE pressure point through BOTH engine triggers, with every
+        // anti-thrash latch reset first, so a previous probe's fire cannot be
+        // what silences this one.
+        fn probe(engine: &mut crate::engine::AgentEngine, tokens: u64) -> (bool, bool) {
+            engine.compact_state.last_real_input_tokens = tokens;
+            engine.smart_compact_armed = true;
+            engine.smart_compact_exhausted = false;
+            engine.smart_compact_last_turn = None;
+            let static_fires = engine.should_autocompact_now(tokens);
+            let smart_fires = match engine.smart_compact_fraction() {
+                Some(f) => engine.smart_compact_should_fire(1, f),
+                None => false,
+            };
+            (static_fires, smart_fires)
+        }
+
+        let mut unworkable = 0usize;
+        let mut workable = 0usize;
+        let mut overloaded_fired_static = 0usize;
+        let mut overloaded_fired_smart = 0usize;
+
+        for window in 1_024usize..=16_384 {
+            engine.compact_config.context_window = Some(window);
+            let too_small = !engine.compact_config.supports_compaction(window);
+
+            if too_small {
+                unworkable += 1;
+                // The turn loop refuses at its top, BEFORE either trigger is
+                // consulted - `an_unworkable_window_stops_the_run_and_the_
+                // refusal_reaches_the_user` is what proves that stop is wired.
+                assert!(
+                    engine.unworkable_window_refusal().is_some(),
+                    "window {window}: too small to compact in, but no refusal - \
+                     the run would continue into the triggers"
+                );
+            } else {
+                workable += 1;
+                assert!(
+                    engine.unworkable_window_refusal().is_none(),
+                    "window {window}: workable, but refused"
+                );
+            }
+
+            // The criterion's word is NEVER, not "not on the baseline turn".
+            // An unworkable window is unworkable at EVERY pressure, so sweep
+            // it: empty, core's own baseline turn, a full window, and four
+            // times the window. A gate written as "this fraction is absurd"
+            // rather than "this window is unworkable" passes at BASELINE and
+            // fails at 4x.
+            let overloaded = (window as u64).saturating_mul(4);
+            for tokens in [0, BASELINE, window as u64, overloaded] {
+                let (static_fires, smart_fires) = probe(&mut engine, tokens);
+                if too_small {
+                    assert!(
+                        !static_fires,
+                        "window {window}: the static autocompact trigger fired \
+                         at {tokens} tokens in a window core refuses as too \
+                         small to compact in"
+                    );
+                    assert!(
+                        !smart_fires,
+                        "window {window}: the #280 smart trigger fired at \
+                         {tokens} tokens in a window core refuses as too small \
+                         to compact in"
+                    );
+                } else if tokens <= BASELINE {
+                    assert!(
+                        !static_fires,
+                        "window {window}: the static autocompact trigger fired \
+                         on core's own {BASELINE}-token baseline turn, before \
+                         the user typed anything"
+                    );
+                    assert!(
+                        !smart_fires,
+                        "window {window}: the #280 smart trigger fired on \
+                         core's own {BASELINE}-token baseline turn, before the \
+                         user typed anything"
+                    );
+                } else if tokens == overloaded {
+                    overloaded_fired_static += usize::from(static_fires);
+                    overloaded_fired_smart += usize::from(smart_fires);
+                }
+            }
+        }
+
+        assert!(
+            unworkable > 0 && workable > 0,
+            "control: the band must contain BOTH refused and workable windows, \
+             or one of the two arms above is vacuous (unworkable={unworkable}, \
+             workable={workable})"
+        );
+        // VACUITY CONTROL, one per trigger. The silence above has to be the
+        // window being unworkable / the turn being small - not either trigger
+        // being wedged off through this fixture. At 4x the window a WORKABLE
+        // window must fire both, at every single window in the band.
+        assert_eq!(
+            overloaded_fired_static, workable,
+            "control: the static trigger must fire at 4x a WORKABLE window \
+             (fired {overloaded_fired_static} of {workable}), else every \
+             negative above is vacuous"
+        );
+        assert_eq!(
+            overloaded_fired_smart, workable,
+            "control: the #280 trigger must fire at 4x a WORKABLE window \
+             (fired {overloaded_fired_smart} of {workable}), else every \
+             negative above is vacuous"
+        );
+    }
+
+    /// CONTROL for
+    /// `an_unworkable_window_stops_the_run_and_the_refusal_reaches_the_user`:
+    /// with a workable window the same fixture runs normally. Without this, an
+    /// engine that refused EVERY run would pass that wiring test.
+    #[tokio::test]
+    async fn a_workable_window_is_not_refused_and_the_run_proceeds() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("hello".into()),
+            done_endturn(),
+        ]]));
+        let counter = provider.call_counter();
+        let mut engine = engine_with(provider);
+        engine.compact_config.context_window = Some(200_000);
+        assert!(engine.compact_config.supports_compaction(200_000));
+
+        let tap: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        engine.set_error_tap(Arc::clone(&tap));
+
+        let result = engine
+            .run("say hello", "m-workable")
+            .await
+            .expect("clean run");
+        assert_eq!(result.text, "hello");
+        assert_ne!(
+            result.finish_reason,
+            FinishReason::Length,
+            "a workable window must not be refused"
+        );
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            tap.lock().expect("error tap").is_none(),
+            "no refusal may be emitted on a workable window"
         );
     }
 

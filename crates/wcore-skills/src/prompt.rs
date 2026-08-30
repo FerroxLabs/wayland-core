@@ -6,7 +6,30 @@ use crate::types::SkillSource;
 // Skill listing gets 1% of the context window (in characters)
 pub const SKILL_BUDGET_CONTEXT_PERCENT: f64 = 0.01;
 pub const CHARS_PER_TOKEN: usize = 4;
-pub const DEFAULT_CHAR_BUDGET: usize = 8_000; // Fallback: 1% of 200k × 4
+/// Fallback listing budget when the caller does not know the context window.
+///
+/// FerroxLabs/wayland#1150 deleted the fabricated 200,000-token window from
+/// every OTHER boundary and left it here: this constant was `8_000`, whose own
+/// comment read "1% of 200k x 4". For an unlisted model with no
+/// `[compact] context_window` — the #1150 reporter's exact configuration —
+/// `known_context_window` correctly returns `None`, the bootstrap passes that
+/// `None` straight through, and the skills listing was sized against 200,000
+/// while every other boundary in the same session was sized against
+/// [`wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW`] = 32,768. Measured:
+/// 1,310 chars intended, 8,000 granted — 6.1x, about 2,000 tokens of a 32,768
+/// -token window spent on the skill listing.
+///
+/// It is now the SAME assumption the rest of the session makes, derived rather
+/// than restated so the two cannot drift apart again.
+pub const DEFAULT_CHAR_BUDGET: usize =
+    wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW * CHARS_PER_TOKEN / 100;
+
+/// The derivation above must stay the integer image of the `Some` arm's
+/// formula, checked by the compiler rather than by a test that could be
+/// deleted with the constant.
+const _: () = assert!(
+    DEFAULT_CHAR_BUDGET == wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW * CHARS_PER_TOKEN / 100
+);
 pub const MAX_LISTING_DESC_CHARS: usize = 250;
 
 const MIN_DESC_LENGTH: usize = 20;
@@ -212,6 +235,34 @@ mod tests {
     #[test]
     fn test_get_char_budget_none_returns_default() {
         assert_eq!(get_char_budget(None), DEFAULT_CHAR_BUDGET);
+    }
+
+    /// FerroxLabs/wayland#1150 D16 — the `None` arm must make the SAME window
+    /// assumption as every other boundary in the session.
+    ///
+    /// #1150 removed the fabricated 200,000-token window everywhere else and
+    /// left it here: `DEFAULT_CHAR_BUDGET` was 8,000, "1% of 200k x 4". For an
+    /// unlisted model with no `[compact] context_window` — the reporter's exact
+    /// configuration — `known_context_window` correctly returns `None`, the
+    /// bootstrap passes it straight through, and the skills listing was sized
+    /// against 200,000 while everything else was sized against 32,768: 1,310
+    /// chars intended, 8,000 granted, 6.1x, about 2,000 tokens of a
+    /// 32,768-token window spent on the listing.
+    #[test]
+    fn the_unknown_window_budget_is_the_unverified_window_not_the_old_200k() {
+        assert_eq!(
+            get_char_budget(None),
+            get_char_budget(Some(wcore_config::compact::UNVERIFIED_CONTEXT_WINDOW)),
+            "the unknown-window arm must not assume a window the rest of the \
+             session refuses to assume"
+        );
+        assert_eq!(get_char_budget(None), 1_310);
+        assert_ne!(
+            get_char_budget(None),
+            get_char_budget(Some(wcore_config::compact::DEFAULT_CONTEXT_WINDOW)),
+            "8,000 chars is 1% of 200,000 tokens, and #1150 deleted that \
+             assumption from every other boundary"
+        );
     }
 
     #[test]

@@ -265,13 +265,25 @@ fn a_second_regression_corroborates_it_and_the_session_is_sized() {
     tracker.observe(ROUTE, 4617, 3910);
     assert_eq!(tracker.sizing_window(), None, "still one observation");
 
-    // The second regression sits at an UNCHANGED ceiling, so `observe` returns
-    // no fresh notice for it. Corroboration must be counted anyway — if it
-    // were recorded after that suppression this arm would never corroborate.
+    // The second regression sits at an UNCHANGED ceiling, and it is the turn
+    // that flips this route from telling to SIZING. wayland-core#353 D10: it
+    // used to be swallowed by the once-per-figure suppression, which made the
+    // notice's sizing sentence unfalsifiable — emitted on the first
+    // observation, when nothing had moved, and never again, when it had. A
+    // state change the user must be told about re-opens the gate exactly once.
+    let corroborating = tracker
+        .observe(ROUTE, 4700, 3800)
+        .expect("corroboration is a state change, not a repeat");
+    assert!(
+        corroborating.corroborated,
+        "and the evidence must SAY so, or the caller cannot pick its wording"
+    );
+    assert_eq!(corroborating.served_window, 4050);
+    // Exactly once: a third regression at the same figure changes nothing.
     assert_eq!(
-        tracker.observe(ROUTE, 4700, 3800),
+        tracker.observe(ROUTE, 4800, 3700),
         None,
-        "the ceiling has not moved, so the user is not told twice"
+        "the ceiling has not moved and corroboration already landed"
     );
     assert_eq!(
         tracker.sizing_window(),
