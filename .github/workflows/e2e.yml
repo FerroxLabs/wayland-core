@@ -211,7 +211,13 @@ jobs:
       checks: write
       pull-requests: write
     steps:
+      # ADMITTED ON THE SAME TERMS AS THE GATE BELOW. A gate that runs from a
+      # tree no checkout made, over artifacts no download fetched, cannot grade
+      # anything -- ci.yml's report job did exactly that on run 33320774111 and
+      # exited 127. Enforced by gate-admission.py for every step at or before
+      # the last gate in a job that itself runs unconditionally.
       - uses: actions/checkout@v6
+        if: ${{ !cancelled() }}
 
       # NO `merge-multiple: true`: both legs upload their report under the same
       # filename (`junit.xml`, the path baked into the `e2e` nextest profile),
@@ -220,6 +226,7 @@ jobs:
       # and leave the assertion below unable to see a half-run suite. ci.yml
       # removed the same flag for the same reason on 2026-08-02.
       - name: Download E2E JUnit reports
+        if: ${{ !cancelled() }}
         uses: actions/download-artifact@v8
         with:
           pattern: e2e-junit-*
@@ -228,6 +235,10 @@ jobs:
 
       - name: How many legs were in scope
         id: scope
+        # The gate reads EXPECTED_MIN from this step's output. Skipping it hands
+        # the gate an empty EXPECTED_MIN, which assert-test-evidence.sh fails
+        # closed on -- correct, and a red naming the wrong cause.
+        if: ${{ !cancelled() }}
         env:
           EVENT_NAME: ${{ github.event_name }}
           DISPATCH_PROVIDER: ${{ github.event.inputs.provider }}

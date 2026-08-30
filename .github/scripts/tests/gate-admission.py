@@ -207,6 +207,57 @@ emit(
     "\n".join(offenders),
 )
 
+# ── a gate's PREREQUISITES are admitted on the same terms as the gate ────────
+#
+# Admitting the gate is not enough. MEASURED on run 33320774111: ci.yml's
+# `report` job ran its evidence gate (it carries `!cancelled()`) and the gate
+# died with `bash: .github/scripts/assert-test-evidence.sh: No such file or
+# directory`, exit 127 -- because `No dependency failed` had failed, and the
+# CHECKOUT two steps below it carried no condition and was therefore skipped
+# along with the artifact download. A required check that reports "No such
+# file" where it means "a dependency failed" is a red naming the wrong cause,
+# and the gate graded nothing either way.
+#
+# The rule is scoped by the JOB's own admission, which is what makes it total
+# rather than a list of step names: a job that itself runs unconditionally is a
+# job that exists to speak when its dependencies did not, so every step of it up
+# to and including its last gate must survive an earlier failure too. Steps
+# AFTER the last gate are unconstrained -- `Publish test report` is guarded on
+# `hashFiles(...)` on purpose, and by then the gate has already graded.
+prereq_offenders = []
+prereq_jobs = 0
+for path, doc in parsed.items():
+    for job_id, job in (doc.get("jobs") or {}).items():
+        if not isinstance(job, dict) or not admits_unconditionally(job.get("if")):
+            continue
+        steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+        last_gate = -1
+        for i, step in enumerate(steps):
+            text = step_text(step)
+            if any(n in text for n in unconditional_scripts):
+                last_gate = i
+        if last_gate < 0:
+            continue
+        prereq_jobs += 1
+        for step in steps[:last_gate + 1]:
+            if not admits_unconditionally(step.get("if")):
+                prereq_offenders.append(
+                    "%s / %s / %r is admitted by %r"
+                    % (os.path.basename(path), job_id, step.get("name") or step.get("uses"),
+                       step.get("if"))
+                )
+emit(
+    not prereq_offenders,
+    "in an unconditional job, every step up to its last gate is unconditional too",
+    "\n".join(prereq_offenders),
+)
+emit(
+    prereq_jobs >= 2,
+    "the prerequisite rule found the aggregate jobs to apply to (anti-vacuity)",
+    "unconditional jobs containing a gate: %d" % prereq_jobs,
+)
+info("aggregate jobs graded for prerequisites: %d" % prereq_jobs)
+
 # ── the aggregate check grades every job it depends on, and names none ───────
 CI = os.path.join(ROOT, ".github", "workflows", "ci.yml")
 ci_doc = parsed.get(CI, {})

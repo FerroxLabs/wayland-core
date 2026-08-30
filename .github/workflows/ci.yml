@@ -2752,7 +2752,25 @@ jobs:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: bash .github/scripts/assert-no-dependency-failed.sh
 
+      # A GATE CANNOT GRADE EVIDENCE A SKIPPED STEP NEVER FETCHED, AND CANNOT RUN
+      # FROM A TREE A SKIPPED CHECKOUT NEVER MADE. MEASURED, run 33320774111
+      # (lane/f13-w3-1177-verify, 2026-08-30): `No dependency failed` failed on a
+      # red `ci-linux`, so every later step with a plain or absent condition was
+      # skipped -- including THIS checkout and the artifact download below. The
+      # evidence gate itself carries `!cancelled()` and therefore DID run, which
+      # is the fix working; it then died with
+      # `bash: .github/scripts/assert-test-evidence.sh: No such file or directory`
+      # (exit 127), because the repository was never checked out. A required
+      # check reporting `No such file` where it means `a dependency failed` is a
+      # red that names the wrong cause, and it costs what a false green costs.
+      #
+      # So the gate's PREREQUISITES are admitted on the same terms as the gate.
+      # `.github/scripts/tests/gate-admission.py` enforces it for every step at
+      # or before the last gate in any job that itself runs unconditionally --
+      # `report` and `E2E report` are exactly the jobs that exist to speak when
+      # their dependencies did not.
       - uses: actions/checkout@v6
+        if: ${{ !cancelled() }}
 
       # `merge-multiple: true` was REMOVED 2026-08-02 (lane/ci-windows-fallback).
       # Every producing leg uploads its report under the SAME filename,
@@ -2768,6 +2786,7 @@ jobs:
       # it — but the defect predates the addition and cost the aggregate report
       # its per-leg detail for as long as more than one leg has been uploading.
       - name: Download nextest JUnit artifacts
+        if: ${{ !cancelled() }}
         uses: actions/download-artifact@v8
         with:
           pattern: nextest-junit-*
