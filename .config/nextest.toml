@@ -217,6 +217,38 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 filter = 'binary(bash_unsaved_guard_bound_live)'
 slow-timeout = { period = "60s", terminate-after = 3 }
 
+# `deterministic_openai_loop` — the THIRD instance of the shape the two notes
+# above describe, and it is currently costing the `-p wcore-cli` gate a red on
+# a test that passes.
+#
+# `packaged_f04_run_is_repeatable_and_content_addressed` seals and replays a
+# whole repository TWICE and compares the two content addresses. That is real
+# work, and on a contended host it lands just past the default profile's 60s
+# hard kill, so nextest reports `TRY 2 TMT` and the run fails with no assertion
+# having failed at all.
+#
+# MEASURED on hetzner-dsm, the binary invoked DIRECTLY (so libtest, not
+# nextest, is the only clock) on tree 1a15ae64a, four runs, load average
+# recorded per run because that is the variable:
+#     WALL=88.69s  loadavg 150.09      test result: ok
+#     WALL=60.76s  loadavg 118.28      test result: ok
+#     WALL=70.62s  loadavg  66.22      test result: ok
+#     WALL=69.23s  loadavg  70.65      test result: ok
+# Four of four PASS; the work simply takes 61-89s. The same timeout was
+# reproduced on a PRISTINE `origin/integ/f13` checkout of this worktree, so it
+# is the budget and not any change on this branch.
+#
+# `period` stays at 60s, deliberately below the slowest measured run, so
+# nextest keeps printing the "running for over 60 seconds" notice and the cost
+# stays visible in the log. `terminate-after = 4` gives a 240s hard kill, 2.7x
+# the slowest measured run — headroom for a contended scheduler slot, and still
+# a real ceiling rather than an unbounded wait.
+#
+# Scoped to the binary: nothing else's budget moves.
+[[profile.default.overrides]]
+filter = 'binary(deterministic_openai_loop)'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
 # THE DATA-LOSS ARMS MUST NOT BE RETRYABLE IN THE SOAK EITHER (FerroxLabs/wayland-core#350).
 #
 # The block at the bottom of this file pins `inv2_round5_adversarial_test` to
