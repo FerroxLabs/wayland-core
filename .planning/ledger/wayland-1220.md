@@ -15,13 +15,13 @@ criteria:
   - id: c2
     text: "The allowlist is graded against the MERGED tree rather than against a commit hash: a check refuses an entry whose owning ledger criterion claims it was deleted"
     state: met
-    evidence: "file:scripts/check-criteria-ledger.py:448:m = ABSENT_EV.match(ev)"
+    evidence: "file:scripts/check-criteria-ledger.py:492:m = ABSENT_EV.match(ev)"
     owner: core
     note: "MET AS WRITTEN. The `absent:<path>::<text>` evidence kind re-reads the file on EVERY gate run, so a resurrection reds the ledger instead of surviving it; the path must exist, which is the known-positive control (an absence check over a renamed file fails loudly rather than passing forever). wayland#1182 c3 carries `absent:.config/flaky-allowlist.txt::contained_construction_does_not_walk_the_workspace`. LIVE RED ARM on the real tree, exit codes captured directly: `python3 scripts/check-criteria-ledger.py --offline` exits 0 at HEAD; appending the gh#1182 line back to .config/flaky-allowlist.txt makes the SAME command exit 1 with 'wayland-1182.md:21: c3 evidence does not resolve -- .config/flaky-allowlist.txt still contains ...'; restored with `git checkout --` + `touch` and it exits 0 again."
   - id: c3
     text: "The check is proven in both directions, including a resurrection introduced by a MERGE -- git log -S skips merges by default, which is how this one passed"
     state: met
-    evidence: "file:scripts/check-criteria-ledger.py:1175:def _merge_resurrection(resolution):"
+    evidence: "file:scripts/check-criteria-ledger.py:1243:def _merge_resurrection(resolution):"
     owner: core
     note: "MET AS WRITTEN. `--self-test` now BUILDS the history rather than describing it: a base holding the entry plus an untouched neighbour, a deletion in the c461293f shape, a lane branch cut BEFORE the deletion that rewords the same lines, and the merge back. `-X theirs` resurrects the entry and the gate REDS naming the criterion; `-X ours` does not and it stays GREEN -- the two arms differ in nothing else, so the red is the resolution. The reproduction is verified rather than asserted: a third arm runs `git log -S <needle>` on that same merged tree and requires it to find the ordinary commits and NOT report the merge, so if `-S` ever stops being blind to it this stops being a reproduction and says so. RED ARM on the enforcement site: guarding `if m.group('n') in t` with `if False and ...` turns 'MERGE resurrected the entry' from RED to green and the self-test exits 1 with 'self-test: BROKEN'; restored, `--self-test` exits 0."
 ---
