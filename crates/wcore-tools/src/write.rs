@@ -21,6 +21,11 @@ use crate::vfs::{
     IntendedFileMutation,
 };
 
+/// #1241 c3 — a verdict taken inside `atomic_write_checked`'s
+/// exchange→verdict window on behalf of the tool. See
+/// [`WriteTool::publish_window_probe`].
+type PublishWindowProbe = Arc<dyn Fn(Option<&[u8]>) -> Result<(), String> + Send + Sync>;
+
 pub struct WriteTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
     /// INV-2: session-scoped record of the user's unsaved work, so a
@@ -28,6 +33,26 @@ pub struct WriteTool {
     /// Edit tool and with every sub-agent's tools, so one baseline and one
     /// agent-authored set govern both write surfaces.
     unsaved: Arc<UnsavedWorkGuard>,
+    /// #1241 c3 — the one seam into `atomic_write_checked`'s
+    /// exchange→verdict window, so the `RollbackFailed` arm below can be
+    /// graded through `Tool::execute` and not on the classifier alone.
+    ///
+    /// Reaching that arm for real needs the destination NAME to stop
+    /// resolving strictly BETWEEN the publish exchange and the restore
+    /// exchange. Nothing on the tool side of that window can make that
+    /// happen: the only tool-side code in it is the pure `pre_image_matches`,
+    /// and `Swap::Unsupported` cannot differ between two exchanges on one
+    /// filesystem. What is left is a racer, which is a flake generator on a
+    /// window measured in microseconds. So the unlink is done from inside the
+    /// verdict itself, which is the one ordering that is inside the window by
+    /// construction.
+    ///
+    /// `None` in production — only `with_publish_window_probe` sets it, and
+    /// that is `#[cfg(test)]`. The closure at the call site is the SAME code
+    /// either way: what a probe substitutes is the REASON the publish is
+    /// refused, never the observable #1241 c2 grades, which is what
+    /// `execute` hands back afterwards.
+    publish_window_probe: Option<PublishWindowProbe>,
 }
 
 impl WriteTool {
@@ -50,6 +75,7 @@ impl WriteTool {
         Self {
             file_cache,
             unsaved: UnsavedWorkGuard::shared(),
+            publish_window_probe: None,
         }
     }
 
@@ -63,6 +89,17 @@ impl WriteTool {
     /// go to the repository's own object store.
     pub fn with_unsaved_guard(mut self, guard: Arc<UnsavedWorkGuard>) -> Self {
         self.unsaved = guard;
+        self
+    }
+
+    /// #1241 c3 — take `probe`'s answer as the verdict on the displaced
+    /// pre-image, so a test can act from inside the exchange→verdict window.
+    ///
+    /// Test-only. See [`WriteTool::publish_window_probe`] for why the window
+    /// has no other entrance.
+    #[cfg(test)]
+    pub(crate) fn with_publish_window_probe(mut self, probe: PublishWindowProbe) -> Self {
+        self.publish_window_probe = Some(probe);
         self
     }
 
@@ -491,6 +528,11 @@ impl Tool for WriteTool {
         // atomic exchange, so the pre-image it judges IS the one it displaced.
         let unpublishable =
             match wcore_config::atomic_write_checked(path, content.as_bytes(), |observed| {
+                // #1241 c3. `None` in production, so this is the shipped
+                // predicate on every real write.
+                if let Some(probe) = self.publish_window_probe.as_ref() {
+                    probe(observed)?;
+                }
                 crate::unsaved_work::pre_image_matches(observed, judged.as_deref())
             }) {
                 Ok(Ok(())) => None,
@@ -717,6 +759,110 @@ mod tests {
             report.content.contains(&survivors[0].display().to_string()),
             "the user is not told where the original was preserved: {}",
             report.content
+        );
+    }
+
+    /// #1241 c2 + c3, through `WriteTool::execute`.
+    ///
+    /// The criterion's subject is "the Write tool returns", so the tool is
+    /// what is driven and what is graded: the direct, no-`ToolContext`
+    /// `execute` runs a REAL `atomic_write_checked` into the state the ticket
+    /// names — the guard refused and the publish could not be retracted — and
+    /// the assertions are on the `ToolResult` it hands back.
+    ///
+    /// The destination is unlinked from inside the exchange→verdict window by
+    /// the test-only `publish_window_probe`. That is the ONLY seam into the
+    /// window, for the reason the field's own doc gives, and it substitutes
+    /// exactly one thing: the reason the publish is refused. The exchange, the
+    /// failed restore, `keep_displaced`, `RollbackFailed`, the
+    /// `unpublished_or_unrolled` classification, the message, and the tool's
+    /// return value are all the production code.
+    ///
+    /// The new content is a SUPERSET of the pre-image on purpose: a rewrite
+    /// that drops a line is refused by the unsaved-work guard before any of
+    /// this runs, even outside a repository (`unsaved_work_no_git_test`), and
+    /// the test would then grade nothing.
+    ///
+    /// Unix exchange platforms only: `Swap::Displaced` is
+    /// `RENAME_EXCHANGE` / `RENAME_SWAP` there, and Windows restores with
+    /// `ReplaceFileW`, which succeeds against an absent destination and so
+    /// cannot reach this state at all.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn execute_reports_a_refusal_it_could_not_roll_back() {
+        const ORIGINAL: &str = "the only copy of the user's bytes\n";
+        const REWRITE: &str = "the only copy of the user's bytes\nand a line the agent added\n";
+
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("f.txt");
+        std::fs::write(&p, ORIGINAL).unwrap();
+
+        // Every entry into the window, in order, so the fixture control below
+        // can assert it was entered exactly once and with the pre-image.
+        let handed: Arc<std::sync::Mutex<Vec<Option<Vec<u8>>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&handed);
+        let doomed = p.clone();
+        let tool = tool(None).with_publish_window_probe(Arc::new(move |observed: Option<&[u8]>| {
+            recorded.lock().unwrap().push(observed.map(<[u8]>::to_vec));
+            // Inside the window by construction: the publish exchange has
+            // happened (that is what produced `observed`) and the restore
+            // exchange has not.
+            std::fs::remove_file(&doomed).unwrap();
+            Err("its contents changed on disk".to_owned())
+        }));
+
+        let result = tool
+            .execute(json!({
+                "file_path": p.to_str().unwrap(),
+                "content": REWRITE,
+            }))
+            .await;
+
+        // Fixture control. Without it every assertion below would also pass on
+        // a refusal taken BEFORE any publish, which is a different arm.
+        let handed = handed.lock().unwrap();
+        assert_eq!(
+            handed.len(),
+            1,
+            "the exchange→verdict window was entered {} times, not once, so \
+             this does not grade the arm it claims to",
+            handed.len()
+        );
+        assert_eq!(
+            handed[0].as_deref(),
+            Some(ORIGINAL.as_bytes()),
+            "the verdict was not handed the displaced pre-image, so no publish \
+             was retracted here"
+        );
+
+        assert!(result.is_error, "reported as a success: {}", result.content);
+        assert!(
+            !result.content.starts_with("Updated "),
+            "reported as an update: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("used direct write"),
+            "the unchecked fallback republished over a refusal: {}",
+            result.content
+        );
+
+        // c2: the text names where the pre-image is, and that name is real.
+        let survivors: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|f| std::fs::read(f).is_ok_and(|b| b == ORIGINAL.as_bytes()))
+            .collect();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "the pre-image did not survive: {survivors:?}"
+        );
+        assert!(
+            result.content.contains(&survivors[0].display().to_string()),
+            "the user is not told where the original was preserved: {}",
+            result.content
         );
     }
 
