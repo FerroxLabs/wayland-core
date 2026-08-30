@@ -61,6 +61,15 @@ pub enum InvalidationCause {
     ModelChanged,
     /// Cache TTL expired before next call.
     Expired,
+    /// wayland#1206 — the prefix was never cached to the extent this turn
+    /// needed, so there was nothing to invalidate. Distinct from
+    /// [`Self::Expired`] in the same way [`Self::ModelChanged`] is: an expiry
+    /// is a server-side event, and it shows up as `cache_read` FALLING. This
+    /// is a `cache_read` that never rose in the first place and is held flat
+    /// turn over turn — the #559 leader session read 192 tokens back for its
+    /// whole life. Reporting that as `expired` blames the server for what is
+    /// really a coverage gap on our side.
+    PrefixNotCached,
     /// Provider rejected the cache control marker (e.g. token count too low).
     ProviderRejected,
     /// No explicit cache marker was emitted on this turn.
@@ -77,6 +86,7 @@ impl InvalidationCause {
             Self::HistoryRewritten => "history_rewritten",
             Self::ModelChanged => "model_changed",
             Self::Expired => "expired",
+            Self::PrefixNotCached => "prefix_not_cached",
             Self::ProviderRejected => "provider_rejected",
             Self::NoMarker => "no_marker",
             Self::Unknown => "unknown",
