@@ -879,7 +879,7 @@ impl ExecutionBackend for ContainerBackend {
                     // of an enumeration that can disagree with the enumeration
                     // is worth no more than no account at all.
                     method: format!(
-                        "docker ps -a --filter {} , each row graded against the live-task \
+                        "docker ps -a --filter {}, each row graded against the live-task \
                          registry",
                         any_nonce_filter()
                     ),

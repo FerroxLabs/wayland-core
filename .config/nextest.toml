@@ -721,3 +721,49 @@ retries = 0
 [[profile.ci.overrides]]
 filter = 'binary(=harness_guard_kills_only_its_own_tree) + binary(=harness_owns_spawned_trees) + binary(=harness_owns_spawned_trees_windows)'
 retries = 0
+
+# ── core#362 c4: a containment probe that never ran must not be retried ─────
+#
+# MEASURED, CI run 33240249894. Both bwrap tests failed with
+# ExecFailed("sandbox process-tree ownership: No such file or directory (os
+# error 2)") and were RETRIED INTO A PASS. The second one's own panic says what
+# that costs:
+#
+#   the sandbox backend refused to run the containment probe, so no containment
+#   property was tested
+#
+# The run conclusion then said SUCCESS. A containment test that proved nothing
+# reported green, which is strictly worse than having no test: it is a green
+# that a human reads as "the sandbox confines writes".
+#
+# WHY `retries = 0` AND NOT AN ALLOWLIST ENTRY. The retry-flake gate would
+# catch this only while nobody writes the entry, and an entry is exactly what
+# was written for these two tests to unblock the 0.13.11 cut. Retrying is the
+# mechanism that erases the evidence, so the fix has to be that the retry does
+# not happen — not that a second gate notices it afterwards.
+#
+# SCOPE, and why it is these two binaries and no others. The vacuous outcome is
+# produced in exactly one place, `run_contained_probe`
+# (crates/wcore-sandbox/src/test_support.rs), which panics rather than
+# returning a degraded result when the backend refuses to spawn or the child
+# leaves no liveness markers. Its callers are `backend_integration` and
+# `secret_read_deny`, and only those. Every other test in the suite keeps its
+# retries.
+#
+# BOTH PROFILES, deliberately. `[profile.default] retries = 1` (line 70) is
+# what a bare `cargo nextest run` uses, and a `[[profile.ci.overrides]]`-only
+# pin has already been shipped once in this file and silently missed local and
+# self-hosted runs. See the #1101 block above for that lesson.
+#
+# ANTI-ROT: `containment_probe_retries.rs` in this crate FAILS if a third
+# caller of `run_contained_probe` appears without its binary being named here,
+# and fails if either name stops being a literal `binary(=...)` operand of a
+# `retries = 0` override. An enumeration nothing checks is an enumeration that
+# rots on the next test somebody writes.
+[[profile.default.overrides]]
+filter = 'binary(=backend_integration) + binary(=secret_read_deny)'
+retries = 0
+
+[[profile.ci.overrides]]
+filter = 'binary(=backend_integration) + binary(=secret_read_deny)'
+retries = 0
