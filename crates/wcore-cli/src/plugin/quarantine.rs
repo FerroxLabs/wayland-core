@@ -786,10 +786,10 @@ mod tests {
         loop {
             if let Ok(text) = std::fs::read_to_string(path) {
                 let mut fields = text.split_whitespace();
-                if let (Some(first), Some(second)) = (fields.next(), fields.next()) {
-                    if let (Ok(first), Ok(second)) = (first.parse(), second.parse()) {
-                        return (first, second);
-                    }
+                if let (Some(first), Some(second)) = (fields.next(), fields.next())
+                    && let (Ok(first), Ok(second)) = (first.parse(), second.parse())
+                {
+                    return (first, second);
                 }
             }
             assert!(
@@ -808,12 +808,12 @@ mod tests {
     /// evidence away, and this then stops a failing run leaving five minutes of
     /// `sleep` on the host.
     fn reap_group(pgid: u32) {
-        if let Ok(pgid) = libc::pid_t::try_from(pgid) {
-            if pgid > 1 {
-                // SAFETY: signalling a process group this test created.
-                unsafe {
-                    libc::kill(-pgid, libc::SIGKILL);
-                }
+        if let Ok(pgid) = libc::pid_t::try_from(pgid)
+            && pgid > 1
+        {
+            // SAFETY: signalling a process group this test created.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
             }
         }
     }
