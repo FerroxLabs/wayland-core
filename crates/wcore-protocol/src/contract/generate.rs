@@ -120,8 +120,24 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // never in. The event is purely additive and nothing existing changes shape, so
 // `major` holds at 1 — but the minor has to move, because an added type is
 // undiscoverable to a host pinned below the version that introduced it.
-pub const CONTRACT_MINOR: u64 = 22;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/22";
+//
+// 22 -> 23: wayland#1237 (decomposed from wayland#388 c7) adds one optional
+// field, `category`, to `error`'s `ErrorInfo`. A typed failure category the
+// host can branch on: `context_limit`, `tool_runtime`, `local_wayland`, or
+// `unknown` where core cannot decide. `major` holds at 1 — the field is
+// `serde(default)` and `error` already published `additionalProperties: true`,
+// so a host that has never heard of it validates and renders exactly as
+// before, and a payload written without it still decodes as `unknown`. The
+// wire-shape gate refuses the regeneration under a standing 1.22
+// (`altered=["events/error.json"]`), which is that gate deciding the version
+// question it exists to force. The minor has to move because a host CANNOT
+// feature-detect this by looking: an engine that never classified anything and
+// an engine that classified this failure as unclassifiable both send
+// `unknown`, and before the field they both sent nothing at all. #388's
+// complaint is that a host has to pattern-match English to find out why a long
+// run died; a host pinned below this version still has to.
+pub const CONTRACT_MINOR: u64 = 23;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/23";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases

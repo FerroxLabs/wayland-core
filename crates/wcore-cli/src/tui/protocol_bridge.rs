@@ -2495,6 +2495,7 @@ mod tests {
                     code: "engine_error".into(),
                     message: "upstream refused the request".into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -2860,6 +2861,7 @@ mod tests {
                     code: "engine_error".into(),
                     message: message.into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -3880,6 +3882,7 @@ mod tests {
                     code: "rate_limit".into(),
                     message: "slow down".into(),
                     retryable: true,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -3927,6 +3930,7 @@ mod tests {
                     code: "engine_error".into(),
                     message: "API 400: invalid_request_error tool_use…".into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -3948,6 +3952,7 @@ mod tests {
                     code: "engine_panic".into(),
                     message: "The turn ended unexpectedly".into(),
                     retryable: true,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -3977,6 +3982,7 @@ mod tests {
                     code: "novel_class_not_yet_mapped".into(),
                     message: "experimental failure mode".into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -4224,6 +4230,7 @@ mod tests {
                     code: "engine_error".into(),
                     message: "boom".into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -4538,6 +4545,7 @@ mod tests {
                     code: "engine_error".into(),
                     message: "boom".into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );
@@ -4574,6 +4582,7 @@ mod tests {
                     code: "engine_error".into(),
                     message: "boom".into(),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         );

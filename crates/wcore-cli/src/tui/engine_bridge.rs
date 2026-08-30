@@ -44,7 +44,7 @@ use wcore_permissions::LearnedGrants;
 use wcore_permissions::learning::{LearnedPolicy, LearningError};
 use wcore_protocol::commands::OPERATOR_RESOLUTION_RECOVERY_VERSION;
 use wcore_protocol::events::{
-    ErrorInfo, FinishReason, McpRemovalOutcome, MonitorDirective, MonitorReason,
+    ErrorInfo, FailureCategory, FinishReason, McpRemovalOutcome, MonitorDirective, MonitorReason,
     OperatorResolutionEvidence, OperatorToolEffectOutcome, OperatorToolEffectResolution,
     ProtocolEvent, RecoveryCursor, RecoveryLifecycle, RecoveryTurnSnapshot, ToolStatus, Usage,
 };
@@ -390,12 +390,22 @@ impl OutputSink for ChannelSink {
     }
 
     fn emit_error(&self, msg: &str, retryable: bool) {
+        self.emit_run_failure(msg, retryable, FailureCategory::Unknown);
+    }
+
+    /// wayland#1237 — this bridge DOES serialise a host-facing `error` frame,
+    /// so it overrides the typed terminal exit rather than taking the trait
+    /// default. `emit_error` above is the in-band prose seam and delegates
+    /// here with `Unknown`, which is the honest answer when all it was handed
+    /// is English.
+    fn emit_run_failure(&self, msg: &str, retryable: bool, category: FailureCategory) {
         self.send(ProtocolEvent::Error {
             msg_id: None,
             error: ErrorInfo {
                 code: "engine_error".to_string(),
                 message: msg.to_string(),
                 retryable,
+                category,
             },
         });
     }
@@ -696,6 +706,7 @@ impl Drop for TerminalGuard {
                           Please try again."
                     .to_string(),
                 retryable: true,
+                category: wcore_protocol::events::FailureCategory::Unknown,
             },
         });
         let _ = self.tx.send(ProtocolEvent::StreamEnd {
@@ -1243,6 +1254,9 @@ fn emit_recovery_error(
             code: "recovery_refused".to_string(),
             message: error.to_string(),
             retryable: false,
+            // wayland#1237: the AgentError is in hand, so the frame says which
+            // kind of failure refused the recovery.
+            category: error.failure_category(),
         },
     });
     let _ = tx.send(ProtocolEvent::StreamEnd {
@@ -1760,6 +1774,7 @@ impl TuiEngine {
                             code: "engine_error".to_string(),
                             message: e.to_string(),
                             retryable: false,
+                            category: wcore_protocol::events::FailureCategory::Unknown,
                         },
                     });
                     let _ = tx.send(ProtocolEvent::StreamEnd {
@@ -2602,6 +2617,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("Can't replace MCP server '{name}': {e}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::Unknown,
                     },
                 });
                 return;
@@ -2640,6 +2656,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("Can't add MCP server '{name}': {e}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::Unknown,
                     },
                 });
                 return;
@@ -2685,6 +2702,7 @@ impl TuiEngine {
                         code: "mcp_connect".to_string(),
                         message: e,
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::Unknown,
                     },
                 });
             }
@@ -2744,6 +2762,7 @@ impl TuiEngine {
                         code: "mcp_connect".to_string(),
                         message: msg,
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::Unknown,
                     },
                 });
             };
@@ -2923,6 +2942,7 @@ impl TuiEngine {
                             code: "mcp_config_conflict".to_string(),
                             message: format!("Can't add MCP server '{name}': {reason}"),
                             retryable: false,
+                            category: wcore_protocol::events::FailureCategory::Unknown,
                         },
                     });
                     let _ = tx.send(ProtocolEvent::McpFailed {
@@ -2955,6 +2975,7 @@ impl TuiEngine {
                         code: "mcp_capacity".to_string(),
                         message: "MCP lifecycle capacity exceeded for this session".to_string(),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::Unknown,
                     },
                 });
                 return;
@@ -2979,6 +3000,7 @@ impl TuiEngine {
                         "Can't add MCP server '{name}': an existing connection has no matching configuration identity"
                     ),
                     retryable: false,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             });
             return;
@@ -3021,6 +3043,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("Couldn't connect MCP server '{name}': {reason}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::Unknown,
                     },
                 });
                 return;
@@ -3054,6 +3077,7 @@ impl TuiEngine {
                             code: "mcp_add".to_string(),
                             message: format!("Couldn't connect MCP server '{name}': {reason}"),
                             retryable: false,
+                            category: wcore_protocol::events::FailureCategory::Unknown,
                         },
                     });
                     return;
@@ -3106,6 +3130,7 @@ impl TuiEngine {
                         code: "mcp_add".to_string(),
                         message: format!("MCP server '{name}' failed to connect: {reason}"),
                         retryable: false,
+                        category: wcore_protocol::events::FailureCategory::Unknown,
                     },
                 });
                 return;
@@ -3183,6 +3208,7 @@ impl TuiEngine {
                              once it's idle."
                         ),
                         retryable: true,
+                        category: wcore_protocol::events::FailureCategory::Unknown,
                     },
                 });
                 return;

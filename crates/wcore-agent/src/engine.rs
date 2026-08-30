@@ -28971,6 +28971,43 @@ pub enum AgentError {
     ContextTooLong { input_tokens: u64, limit: usize },
 }
 
+impl AgentError {
+    /// FerroxLabs/wayland#1237 (from wayland#388 c7) — the typed category of
+    /// this terminal exit of the run loop.
+    ///
+    /// The terminal error exits of `AgentEngine::run` ARE the variants of this
+    /// enum, so classifying them exhaustively here is the enumeration #1237 c2
+    /// asks for rather than a sample of call sites. `wildcard_enum_match_arm`
+    /// is DENIED on this function rather than left to a reviewer: a new
+    /// `AgentError` variant is a new terminal exit, and the failure this
+    /// guards is precisely a `_ =>` arm reporting it as something it is not.
+    /// Adding one now costs a compile error and one deliberate decision.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    pub fn failure_category(&self) -> wcore_protocol::events::FailureCategory {
+        use wcore_protocol::events::FailureCategory;
+        match self {
+            // #388's "context/token limit", and the case the ticket was
+            // written for: a long run that dies here used to reach the host as
+            // English prose and nothing else.
+            AgentError::ContextTooLong { .. } => FailureCategory::ContextLimit,
+            // #388's "local Wayland error". The local persistence authority
+            // failed; nothing upstream is implicated.
+            AgentError::SessionAuthority(_) => FailureCategory::LocalWayland,
+            // Also local, and decided here rather than upstream: the operator
+            // stopped the run.
+            AgentError::UserAborted => FailureCategory::LocalWayland,
+            // Both of these are an OPAQUE upstream response, and whether it
+            // was a provider rate limit or a router failure is wayland#1184's
+            // question, not answerable from inside this repo: both arrive as
+            // the same non-2xx from the same host. So this reports `unknown`
+            // instead of choosing one — #1237 c4 is that refusal, and it is a
+            // property of the type, which has no variant for either.
+            AgentError::ApiError(_) => FailureCategory::Unknown,
+            AgentError::Provider(_) => FailureCategory::Unknown,
+        }
+    }
+}
+
 #[cfg(test)]
 mod user_model_writeback_tests {
     //! v0.8.0 Task M — per-turn observation write-back into

@@ -2165,6 +2165,9 @@ async fn run() -> anyhow::Result<ExitCode> {
                         code: "init_failed".to_string(),
                         message: init_failure_message(&e, &provider_label_for_error),
                         retryable: false,
+                        // wayland#1237: the local process could not start.
+                        // #388's "local Wayland error".
+                        category: wcore_protocol::events::FailureCategory::LocalWayland,
                     },
                 });
             }
@@ -2470,7 +2473,14 @@ async fn run() -> anyhow::Result<ExitCode> {
                         }
                     }
                     Err(error) => {
-                        output.emit_error(&format!("{error:#}"), false);
+                        // wayland#1237: the AgentError is in hand at this
+                        // terminal exit, so the frame carries its category
+                        // rather than only the rendered prose.
+                        output.emit_run_failure(
+                            &format!("{error:#}"),
+                            false,
+                            error.failure_category(),
+                        );
                         exit_sink.store(
                             wcore_cli::exit_code::FAILURE,
                             std::sync::atomic::Ordering::SeqCst,
@@ -2541,7 +2551,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             SlashOrRun::Engine(Err(e)) => {
                 // Render the full anyhow chain (`{e:#}` flattens causes onto
                 // `\nCaused by: …` lines which the formatter recognises).
-                output.emit_error(&format!("{e:#}"), false);
+                output.emit_run_failure(&format!("{e:#}"), false, e.failure_category());
                 ExitCode::from(wcore_cli::exit_code::FAILURE)
             }
         }
@@ -2642,7 +2652,7 @@ async fn repl_loop(
                 );
             }
             SlashOrRun::Engine(Err(e)) => {
-                output.emit_error(&format!("{e:#}"), false);
+                output.emit_run_failure(&format!("{e:#}"), false, e.failure_category());
             }
         }
     }
@@ -4782,6 +4792,7 @@ where
                             code: "recovery_busy".to_string(),
                             message: "resolve_unknown_tool_effect refused while another recovery action is active; resync and retry".to_string(),
                             retryable: true,
+                            category: wcore_protocol::events::FailureCategory::Unknown,
                         },
                     });
                 }
@@ -6235,7 +6246,11 @@ async fn run_json_stream_mode(
                                         );
                                     }
                                     Err(e) => {
-                                        output.emit_error(&format!("{e:#}"), false);
+                                        output.emit_run_failure(
+                                            &format!("{e:#}"),
+                                            false,
+                                            e.failure_category(),
+                                        );
                                         // stream_end deferred (see run_failed
                                         // above): emitted after this block with
                                         // the engine's usage snapshot.

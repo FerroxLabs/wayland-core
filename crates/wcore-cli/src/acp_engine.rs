@@ -342,6 +342,9 @@ impl Drop for TerminalGuard {
                 message: "The turn ended unexpectedly (engine task panicked or was aborted)."
                     .to_string(),
                 retryable: true,
+                // wayland#1237: the engine task itself died. #388's
+                // "tool/runtime failure".
+                category: wcore_protocol::events::FailureCategory::ToolRuntime,
             },
         });
         let _ = self.tx.send(ProtocolEvent::StreamEnd {
@@ -412,6 +415,10 @@ fn error_info_for(e: &AgentError) -> wcore_protocol::events::ErrorInfo {
         // UserAborted / ContextTooLong / ApiError(honest already fired) /
         // Provider => not retryable at this outer arm.
         retryable: false,
+        // wayland#1237: `code` stays "engine_error" — the host-facing code
+        // vocabulary does not widen — and the machine-readable answer rides
+        // the typed category, decided exhaustively from the variant.
+        category: e.failure_category(),
     }
 }
 
@@ -832,6 +839,7 @@ impl EngineSession {
                                     model name and provider."
                                     .to_string(),
                                 retryable: false,
+                                category: wcore_protocol::events::FailureCategory::Unknown,
                             },
                         });
                     }
@@ -1898,6 +1906,7 @@ mod tests {
                 code: "engine_error".into(),
                 message: "kaboom".into(),
                 retryable: true,
+                category: wcore_protocol::events::FailureCategory::Unknown,
             },
         }];
         let out = project_all(events).await;
@@ -1962,6 +1971,7 @@ mod tests {
                     code: "provider_error".into(),
                     message: "upstream 503".into(),
                     retryable: true,
+                    category: wcore_protocol::events::FailureCategory::Unknown,
                 },
             },
         ];
