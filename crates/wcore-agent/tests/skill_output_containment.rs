@@ -327,16 +327,14 @@ async fn the_decided_output_directory_is_both_writable_and_readable() {
         )
         .await
         .is_err(),
-        ".wayland-core/out was rejected because it is write-denied; if this \
-            write now succeeds the repo-control guard has regressed"
+        ".wayland-core/out was rejected because it is write-denied; if this          write now succeeds the repo-control guard has regressed"
     );
     // Rejected alternative 2: outside the workspace (the $WAYLAND_HOME shape).
     assert!(
         vfs.write(&outside.path().join("brief.html"), b"x")
             .await
             .is_err(),
-        "a destination outside the workspace is writable-but-unreadable, \
-            which is #1097 with a new path"
+        "a destination outside the workspace is writable-but-unreadable,          which is #1097 with a new path"
     );
 }
 

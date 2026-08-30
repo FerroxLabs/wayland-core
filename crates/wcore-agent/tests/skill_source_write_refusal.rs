@@ -110,8 +110,7 @@ async fn a_report_written_into_the_user_skills_dir_is_refused_by_name() {
 
     assert!(
         !target.exists(),
-        "the report landed in the skill's own SOURCE directory ({}) — that is \
-            outside the session workspace and the producing session cannot read it back",
+        "the report landed in the skill's own SOURCE directory ({}) — that is          outside the session workspace and the producing session cannot read it back",
         target.display()
     );
     assert!(
@@ -187,8 +186,7 @@ async fn a_write_into_the_project_skills_dir_names_the_output_dir() {
     assert!(
         result.content.contains(".wayland-out")
             || result.content.contains("WCORE_SKILL_OUTPUT_DIR"),
-        "the project-level load path got the generic repo-control refusal, which \
-            does not tell the author where the file should have gone: {}",
+        "the project-level load path got the generic repo-control refusal, which          does not tell the author where the file should have gone: {}",
         result.content
     );
 }

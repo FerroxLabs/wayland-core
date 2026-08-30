@@ -5289,8 +5289,7 @@ mod tests {
             events
                 .iter()
                 .any(|e| matches!(e, ProtocolEvent::CallAnnounced { .. })),
-            "control failed: no call was auto-approved, so the announce path was \
-                never exercised and this test proves nothing"
+            "control failed: no call was auto-approved, so the announce path was              never exercised and this test proves nothing"
         );
 
         for expected in call_ids {
