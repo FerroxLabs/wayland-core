@@ -278,9 +278,10 @@ async fn a_store_under_a_symlinked_control_dir_is_pruned_after_the_memo_is_warm(
         .expect("ordinary path readable");
     let (_, scans, _) = policy.guard_cost();
     assert_eq!(
-        scans, 1,
+        scans, 2,
         "CONTROL: the memo must be WARM and TRUSTED — a second ordinary guard \
-         that rescans means this arm grades the scan, not the cache"
+         that rescans means this arm grades the scan, not the cache. TWO is \
+         warm: arm 2's root scan plus arm 3's one-off walk (core#390 c2)"
     );
 
     // `git lfs pull` populates the store afterwards. LFS objects are VERBATIM,

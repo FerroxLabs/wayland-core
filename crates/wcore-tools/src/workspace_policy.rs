@@ -1032,15 +1032,65 @@ impl WorkspacePolicy {
         {
             return true;
         }
-        // ARM 3 (FerroxLabs/wayland-core#390), gated on a purely LEXICAL test
-        // of the already-resolved path so an ordinary path pays no syscall for
-        // it at all. See [`store_shaped`].
-        if !store_shaped(canon) {
+        // ARM 3 (FerroxLabs/wayland-core#390), gated so an ordinary path pays
+        // no syscall for it at all. See [`Self::nested_walk_admits`].
+        if !self.nested_walk_admits(canon) {
             return false;
         }
         self.nested_stores_memoized()
             .iter()
             .any(|store| canon.starts_with(store))
+    }
+
+    /// **The arm-3 gate — decided by the SCAN'S OWN OUTPUT, not by the query
+    /// path's spelling** (FerroxLabs/wayland-core#390 c2).
+    ///
+    /// The gate exists for COST: without it every ordinary-path guard would
+    /// revalidate the nested walk's witness set. What it must never do is hide
+    /// an answer the walk already has, and the previous shape — [`store_shaped`]
+    /// alone — did exactly that. That predicate asked *"is this path spelled
+    /// like a store?"* over the OPEN alphabet of directory names, while the
+    /// list it guards is built by [`StoreScan::push_store`], which
+    /// CANONICALIZES. The two therefore disagreed for every store whose
+    /// resolved path carries no `VCS_CONTENT_STORES` component — MEASURED as
+    /// `hidden=[odb-alt, odb-link]` by
+    /// `tests::every_store_the_scan_discovers_is_refused_whatever_it_is_named`,
+    /// each of them a readable object database borrowed by a nested checkout.
+    ///
+    /// The question asked here instead is *"does the scan's own output already
+    /// cover this path?"*, which is decidable, total, and closed over the list
+    /// it guards. A store the walk discovered is a prefix of itself, so it can
+    /// never be hidden — **the class is impossible rather than enumerated**,
+    /// and a fourth discovery route needs no new case. Costs ZERO filesystem
+    /// probes: it reads the memo already in hand and never revalidates it.
+    ///
+    /// Three arms, in the order they decide:
+    ///
+    /// 1. **No scan has run yet** — a gate that is a function of the scan's
+    ///    output cannot answer before there IS one. Admit, which runs the walk
+    ///    ONCE per policy. This is the only cost this change adds and it is a
+    ///    one-off, not a per-operation one: the steady state is graded by
+    ///    `vfs_guard_cost::an_ordinary_path_never_pays_for_the_nested_store_walk`.
+    /// 2. **The last scan's stores cover `canon`** — the whole of arm 3's
+    ///    correctness, whatever the store is named.
+    /// 3. **`store_shaped(canon)`** — retained, but its job is now ONLY to
+    ///    catch a store CREATED, renamed or re-pointed since that scan, whose
+    ///    new path arm 2 cannot see either. It is a net for post-scan mutation,
+    ///    no longer the thing that decides what arm 3 can refuse.
+    ///
+    /// RESIDUAL, stated rather than hidden: a nested store that comes into
+    /// being AFTER the last walk at a path arm 3 has never seen and that is not
+    /// store-shaped is refused by this gate and therefore missed. Closing that
+    /// needs at least one filesystem probe per guard — the ancestors of `canon`
+    /// are the cheapest sound witness set — and #390 c3 pins the ordinary-path
+    /// guard at exactly three warm probes, so the two cannot both hold. The
+    /// tension is real and is recorded on FerroxLabs/wayland-core#398 with c3.
+    fn nested_walk_admits(&self, canon: &Path) -> bool {
+        let guard = self.nested_store_cache.read();
+        let Some(cache) = guard.as_ref() else {
+            return true;
+        };
+        cache.stores.iter().any(|store| canon.starts_with(store)) || store_shaped(canon)
     }
 
     /// The arm-3 store list — the stores named by control directories NESTED
@@ -1059,11 +1109,20 @@ impl WorkspacePolicy {
         self.guard_counters
             .probes
             .fetch_add(scan.probes, Ordering::Relaxed);
-        // A workspace with more directories than the deny memo is willing to
-        // stamp keeps rescanning rather than caching a stamp it cannot afford
-        // to revalidate. Slow, never stale: the failure direction is a repeated
-        // walk, not an answer that has stopped tracking the tree.
-        if scan.witnesses.len() <= DENY_CACHE_MAX_DIRS {
+        // Memoised whatever the workspace's size. It used to be dropped above
+        // `DENY_CACHE_MAX_DIRS` on the reasoning that a stamp too big to
+        // revalidate is not worth keeping — "slow, never stale". That reasoning
+        // died with core#390 c2's gate change: the gate is now decided by THIS
+        // memo, so a policy that refuses to keep one re-walks the tree on EVERY
+        // guard rather than on the store-shaped ones alone. Keeping it is
+        // strictly cheaper in both shapes — one walk per policy instead of one
+        // per operation — and the revalidation it costs an admitted path is the
+        // same walk it replaces. The price is the witness vector's memory,
+        // bounded by the workspace's own directory count.
+        //
+        // An INCOMPLETE scan is still never frozen into the memo: see
+        // [`StoreScan::opaque_dir`].
+        if scan.complete {
             *self.nested_store_cache.write() = Some(VcsStoreCache {
                 stamped_at: scan.stamped_at,
                 witnesses: scan.witnesses,
@@ -3096,6 +3155,9 @@ struct StoreScan {
     witnesses: Vec<(PathBuf, Option<SystemTime>)>,
     probes: u64,
     stamped_at: SystemTime,
+    /// False when some directory the walk ENTERED could not be fully
+    /// enumerated. See [`StoreScan::opaque_dir`].
+    complete: bool,
 }
 
 impl StoreScan {
@@ -3107,6 +3169,38 @@ impl StoreScan {
             // the scan's own window and must not be trusted by a revalidation.
             stamped_at: SystemTime::now(),
             probes: 0,
+            complete: true,
+        }
+    }
+
+    /// A directory the walk ENTERED but could not fully enumerate — `read_dir`
+    /// refused it, or one of its `DirEntry`s came back `Err`.
+    ///
+    /// FAIL CLOSED, and this replaced a fail-OPEN. The walk used to write
+    /// `let Ok(entries) = read_dir(&dir) else { continue };` and
+    /// `for entry in entries.flatten()`, so a directory it could not list was
+    /// silently not scanned: a nested control directory inside it was never
+    /// found, the store that control directory names was never refused, and
+    /// `is_vcs_content_store` answered `false` for it — a hole in a SECURITY
+    /// predicate opened by an error nobody could see. A directory can be
+    /// traversable without being listable (mode `--x`), so this is reachable
+    /// rather than theoretical.
+    ///
+    /// What is unknown is treated as a store: everything under `dir` is refused
+    /// until the scan can read it. And the scan is marked INCOMPLETE, which
+    /// stops [`WorkspacePolicy::nested_stores_memoized`] from freezing a
+    /// partial answer into the memo — a permission that is fixed a second later
+    /// self-heals on the next guard instead of persisting for the life of the
+    /// process.
+    ///
+    /// Graded by `tests::a_directory_the_scan_cannot_enumerate_is_refused_not_skipped`,
+    /// whose wrong-refusal control is a readable sibling in the same fixture.
+    fn opaque_dir(&mut self, dir: &Path) {
+        self.complete = false;
+        self.probes += 1;
+        let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        if !self.stores.contains(&canonical) {
+            self.stores.push(canonical);
         }
     }
 
@@ -3145,8 +3239,19 @@ impl StoreScan {
     /// lives UNDER it: a store leaf cannot be present beneath a control
     /// directory that is absent, and the control directory's own appearance is
     /// already witnessed by its parent. That skip is what took the scan of an
-    /// ordinary traversed directory from 16 filesystem syscalls to 5 — the cost
-    /// `grep_policy::scope_for` pays at EVERY directory it walks.
+    /// ordinary traversed directory from **17 total filesystem syscalls to 5**
+    /// — the cost `grep_policy::scope_for` pays at EVERY directory it walks.
+    ///
+    /// The unit is TOTAL syscalls per traversed directory, the same unit
+    /// `tests/vfs_guard_cost.rs`'s header quotes, and it is stated because this
+    /// comment and that header carried 16 and 17 for the same measurement: one
+    /// quoted the total (17 = 16 `statx` + 1 `openat`), the other its `statx`
+    /// sub-count. A third, independently built measurement of the same middle
+    /// arm returned 16 TOTAL; base (8) and head (5) agree exactly across all
+    /// three. That one-syscall disagreement on the middle arm alone is
+    /// UNEXPLAINED and is recorded here rather than reconciled away — it is not
+    /// grade-bearing, because the figure this comment claims is the drop TO 5,
+    /// which every measurement agrees on.
     fn witness_if_present(&mut self, path: PathBuf) -> bool {
         self.probes += 1;
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
@@ -3278,12 +3383,24 @@ fn cache_hit(
 
 /// True when `path` has an ancestor named like a VCS content-store LEAF
 /// (`objects`, `modules`, `lfs`, `store`, `pristine`, `repository`) — the only
-/// shape a store discovered by arm 3 can have.
+/// shape a store discovered by arm 3 can have **as written**, which is not the
+/// same as the shape it can have once resolved.
 ///
-/// The gate on arm 3, and purely lexical, so a path it REFUSES costs nothing:
-/// `<root>/src/deep/deeper/main.rs` has no such ancestor and the walk is never
-/// consulted for it. That is what holds #376's measured guard cost at one
-/// resolution / zero scans / three probes while the nested case is closed.
+/// **No longer the arm-3 gate.** It was, and that was the defect
+/// FerroxLabs/wayland-core#390 c2 was regraded `not-met` for: this predicate is
+/// applied to the QUERY path while [`StoreScan::push_store`] CANONICALIZES
+/// before it stores, so the two disagree for every store whose resolved path
+/// carries no such component, and `is_vcs_content_store` then answered `false`
+/// for every path beneath it. "Which spellings can name a store" is undecidable
+/// over the open alphabet of control-file contents and symlink targets, so no
+/// amount of widening this list could have closed it.
+/// [`WorkspacePolicy::nested_walk_admits`] asks the decidable question instead
+/// — does the scan's own output cover this path — and this predicate survives
+/// only as that gate's third arm, the net for a store created or renamed SINCE
+/// the last walk.
+///
+/// Purely lexical, so it still costs nothing: a path it refuses pays no
+/// syscall.
 ///
 /// What a path it ADMITS costs is a different number and it is NOT constant.
 /// These leaf names are also ordinary project directory names — a Terraform
@@ -3293,36 +3410,9 @@ fn cache_hit(
 /// directories, 59 at 48; 3 at both sizes before arm 3 landed), graded as a
 /// SLOPE by `tests/vfs_guard_cost.rs`'s
 /// `a_gate_admitted_path_costs_one_probe_per_workspace_directory` and tracked
-/// as FerroxLabs/wayland-core#398.
-///
-/// **What this gate can hide is a CLASS, not a list, and the earlier wording
-/// here was wrong.** It said a control directory's own store leaves are fixed
-/// names so a gitfile-named store could not escape. They are fixed as WRITTEN
-/// — but [`StoreScan::push_store`] CANONICALIZES before it stores, and this
-/// gate is applied to the QUERY path. So the two disagree for any store whose
-/// RESOLVED path carries no such component, however it was discovered, and
-/// `is_vcs_content_store` then answers `false` for every path beneath it.
-///
-/// Two routes reach that state today, and they are examples of the class
-/// rather than its definition:
-///
-/// * an `objects/info/alternates` borrow whose target directory is named
-///   anything (`git clone --shared` writes `.../objects`, a hand-written entry
-///   need not);
-/// * a store LEAF that is a SYMLINK to a directory named anything — `git`
-///   supports `.git/objects` as a link and putting an object database on
-///   another filesystem that way is ordinary practice. MEASURED, not reasoned:
-///   the same `<root>/odb` object is REFUSED when `<root>/.git/objects` links
-///   to it and ADMITTED when `<root>/vendor/pkg/.git/objects` does
-///   (`tests/vfs_nested_named_store_deny.rs`'s
-///   `the_same_symlinked_store_leaf_is_refused_at_the_root_and_admitted_when_nested`).
-///
-/// Graded as a PARTITION of the scan's own output by this very predicate —
-/// `tests::a_discovered_store_the_lexical_gate_cannot_see_is_admitted` — so a
-/// THIRD route needs no new case: its store lands in the hidden half and is
-/// asserted there. Tracked as FerroxLabs/wayland-core#394 rather than closed by
-/// widening this into a per-path tree walk, which is the cost
-/// FerroxLabs/wayland-core#398 measures.
+/// as FerroxLabs/wayland-core#398. That slope is now this arm's alone, and it
+/// is the price of the post-scan-mutation net rather than the price of arm 3
+/// being able to refuse anything at all.
 fn store_shaped(path: &Path) -> bool {
     path.components().any(|component| {
         matches!(component, std::path::Component::Normal(name)
@@ -3360,9 +3450,17 @@ fn discover_nested_content_stores(root: &Path) -> StoreScan {
         scan.scan_control_dirs_in(&dir);
         scan.probes += 1;
         let Ok(entries) = std::fs::read_dir(&dir) else {
+            scan.opaque_dir(&dir);
             continue;
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            // An entry the OS refused to describe is an entry this walk cannot
+            // judge. `flatten()` used to drop it silently; see
+            // [`StoreScan::opaque_dir`].
+            let Ok(entry) = entry else {
+                scan.opaque_dir(&dir);
+                continue;
+            };
             // `file_type` on a `DirEntry` is served from the readdir buffer on
             // Linux and does NOT follow a symlink, so this neither costs a
             // syscall nor leaves the tree.

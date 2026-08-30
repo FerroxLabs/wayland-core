@@ -179,20 +179,22 @@ async fn a_nested_checkouts_alternates_borrow_is_refused_through_the_vfs() {
     .await;
 }
 
-/// The NAMED GAP in arm 3's gate, pinned rather than left to be discovered.
+/// The gap that WAS arm 3's lexical gate, now closed and asserted from the
+/// other side.
 ///
-/// Arm 3 is reached only for a path that lexically carries a store-leaf name
-/// (`objects`, `modules`, `lfs`, `store`, `pristine`, `repository`) among its
-/// components — that gate is what keeps an ordinary path from paying for the
-/// walk (core#376). A git control directory's own store leaves are FIXED names,
-/// so a gitfile-named store cannot escape it. An `alternates` borrow CAN: the
-/// entry may name any directory at all. This test records that this shape is
-/// still admitted, so the day it is closed the test fails and is inverted the
-/// way c4's was, rather than quietly agreeing with either answer.
+/// Arm 3 used to be reached only for a path that lexically carried a store-leaf
+/// name (`objects`, `modules`, `lfs`, `store`, `pristine`, `repository`) among
+/// its components. An `alternates` borrow escapes that: the entry may name any
+/// directory at all, and `push_store` canonicalizes, so the store landed in
+/// arm 3's list under a name the gate could not see. INVERTED, not deleted,
+/// exactly as this test's own failure message instructed: the gate is now
+/// decided by the scan's own output
+/// (`WorkspacePolicy::nested_walk_admits`), so the borrow target is refused
+/// whatever it is called.
 ///
-/// Tracked as FerroxLabs/wayland-core#394.
+/// FerroxLabs/wayland-core#390 c2 / #394.
 #[tokio::test]
-async fn a_nested_alternates_borrow_named_nothing_store_like_is_still_admitted() {
+async fn a_nested_alternates_borrow_named_nothing_store_like_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
 
@@ -206,11 +208,22 @@ async fn a_nested_alternates_borrow_named_nothing_store_like_is_still_admitted()
     )
     .unwrap();
 
+    // Wrong-refusal control, asserted first and in the same fixture: an
+    // ordinary workspace file must stay readable, or the refusal below is a
+    // guard that refuses everything rather than one that discriminates.
+    let ordinary = root.join("main.rs");
+    write(&ordinary, b"fn main() {}\n");
     let fs = deny_fs(&root);
     assert!(
-        fs.read(&borrowed).await.is_ok(),
-        "core#394: this shape is a KNOWN gap in arm 3's lexical gate. If it is \
-         now refused, invert this assertion and close #394 — do not delete it"
+        fs.read(&ordinary).await.is_ok(),
+        "wrong-refusal control: an ordinary workspace file must stay readable"
+    );
+    assert!(
+        fs.read(&borrowed).await.is_err(),
+        "core#390 c2: a store borrowed by a NESTED checkout's alternates must \
+         be refused however the borrow target is named. If this is readable \
+         again the arm-3 gate has gone back to grading the query path's \
+         spelling"
     );
 }
 
@@ -223,18 +236,18 @@ async fn a_nested_alternates_borrow_named_nothing_store_like_is_still_admitted()
 /// spelling, holding the same object — declared once by the root's `.git` and
 /// once by a nested checkout's.
 ///
-/// The root declaration is REFUSED and the nested one is ADMITTED
-/// (`a_nested_alternates_borrow_named_nothing_store_like_is_still_admitted`,
-/// one function up). Arm 2's store list is consulted with no lexical pre-gate,
-/// so `push_store` puts a borrow target of ANY name into it; arm 3's is reached
-/// only through `store_shaped`. That is a difference between root and nested,
-/// which is precisely what c2 says must not exist — so c2 is graded `not-met`
-/// with core#394 as its carrier rather than `met` with a footnote.
+/// Both declarations are now REFUSED, and the assertion is the SYMMETRY
+/// itself. It used to be an asymmetry: arm 2's store list is consulted with no
+/// lexical pre-gate, so `push_store` put a borrow target of ANY name into it,
+/// while arm 3's list was reachable only through `store_shaped`. That
+/// difference between root and nested is precisely what c2 says must not
+/// exist, and it is what held c2 at `not-met` with core#394 as its carrier.
 ///
-/// When #394 closes, this test and its sibling flip together: the sibling's
-/// `is_ok` becomes a refusal and this pair becomes a symmetry assertion.
+/// INVERTED, not deleted, as the previous version instructed. The
+/// wrong-refusal control in each arm is what keeps the symmetry from being
+/// satisfied by a guard that refuses everything.
 #[tokio::test]
-async fn the_same_alternates_borrow_is_refused_at_the_root_and_admitted_when_nested() {
+async fn the_same_alternates_borrow_is_refused_from_either_declaring_control_dir() {
     async fn read_ok(spelling: &str, control: &Path) -> bool {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -269,13 +282,15 @@ async fn the_same_alternates_borrow_is_refused_at_the_root_and_admitted_when_nes
         !at_root,
         "control: a borrow declared by the ROOT must be refused whatever the \
          target is named — if this is now admitted, arm 2 has regressed and \
-         the asymmetry below is not the one core#394 is about"
+         the symmetry below is being graded by two broken arms"
     );
     assert!(
-        when_nested,
-        "core#390 c2 / core#394: the SAME borrow declared by a nested checkout \
-         is admitted while the root declaration is refused. When #394 closes, \
-         invert this to `!when_nested` and grade c2 `met` — do not delete it"
+        !when_nested,
+        "core#390 c2: the SAME borrow declared by a NESTED checkout must be \
+         refused exactly as the root declaration is. c2's axis is \
+         root-versus-nested and this is that axis with everything else held \
+         fixed — if this is admitted again, the two arms are answered by \
+         predicates that disagree"
     );
 }
 
@@ -289,14 +304,17 @@ async fn the_same_alternates_borrow_is_refused_at_the_root_and_admitted_when_nes
 /// the arm-3 store list under its TARGET's name, and the gate is applied to the
 /// query path.
 ///
-/// Same construction as `the_same_alternates_borrow_is_refused_at_the_root_and_
-/// admitted_when_nested`: the SAME target `<root>/odb`, the same object, only
-/// the DECLARING control directory differs. Root REFUSES, nested ADMITS.
-/// Carried by FerroxLabs/wayland-core#394, whose scope note said the shape
-/// needed a hand-written `alternates` entry — it does not.
+/// Same construction as
+/// `the_same_alternates_borrow_is_refused_from_either_declaring_control_dir`:
+/// the SAME target `<root>/odb`, the same object, only the DECLARING control
+/// directory differs. Both are now refused. This is the N+1 that proved the
+/// gap was a CLASS and not the `alternates` instance — core#394's scope note
+/// said the shape needed a hand-written `alternates` entry, and it does not,
+/// which is why the fix had to stop grading the query path's spelling
+/// altogether.
 #[cfg(unix)]
 #[tokio::test]
-async fn the_same_symlinked_store_leaf_is_refused_at_the_root_and_admitted_when_nested() {
+async fn the_same_symlinked_store_leaf_is_refused_from_either_declaring_control_dir() {
     async fn read_ok(control: &Path) -> bool {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -325,13 +343,13 @@ async fn the_same_symlinked_store_leaf_is_refused_at_the_root_and_admitted_when_
         !at_root,
         "control: a store leaf symlinked from the ROOT `.git` must be refused \
          whatever its target is named — if this is now admitted, arm 2 has \
-         regressed and the asymmetry below is not core#394's"
+         regressed and the symmetry below is being graded by two broken arms"
     );
     assert!(
-        when_nested,
-        "core#390 c2 / core#394: the SAME object database, reached through a \
-         `.git/objects` SYMLINK, is refused when the root declares it and \
-         admitted when a nested checkout does. When #394 closes, invert this \
-         to `!when_nested` — do not delete it"
+        !when_nested,
+        "core#390 c2: the SAME object database, reached through a \
+         `.git/objects` SYMLINK, must be refused whether the ROOT or a NESTED \
+         checkout declares it. This is the route that needed no hand-written \
+         `alternates` entry, so a gate over store NAMES can never cover it"
     );
 }

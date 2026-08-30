@@ -2712,36 +2712,40 @@ fn every_weak_resolver_site_states_which_resolver_and_why() {
 }
 
 // ===========================================================================
-// FerroxLabs/wayland-core#394 — what arm 3's LEXICAL gate can HIDE, graded as
-// a partition of the scan's own output rather than as a list of the ways to
-// hide something.
+// FerroxLabs/wayland-core#390 c2 / #394 — every store the scan discovers is
+// refused, graded as a partition of the scan's own output rather than as a
+// list of the ways a store can be named.
 // ===========================================================================
 
-/// **The gate and the store list are built from different paths, so they can
-/// disagree — and the disagreement is a CLASS.**
+/// **Whatever the scan discovers, the guard refuses — including the stores no
+/// lexical predicate could ever have recognised.**
 ///
-/// `store_shaped` is applied to the QUERY path. The list it guards is built by
-/// [`StoreScan::push_store`], which CANONICALIZES before it stores. A store
-/// whose resolved path carries no `VCS_CONTENT_STORES` leaf component is
-/// therefore unreachable through the gate: `is_vcs_content_store` answers
-/// `false` for every path beneath it, no matter which discovery route put it in
-/// the list.
+/// INVERTED, not deleted, from `a_discovered_store_the_lexical_gate_cannot_see_
+/// is_admitted`, exactly as that test's own failure message instructed. The
+/// gate used to be [`store_shaped`] applied to the QUERY path while the list it
+/// guarded was built by [`StoreScan::push_store`], which CANONICALIZES. The two
+/// disagreed for every store whose resolved path carries no
+/// `VCS_CONTENT_STORES` leaf component, and `is_vcs_content_store` answered
+/// `false` for every path beneath such a store. That was measured here as a
+/// non-empty `hidden` half, and it is what held #390 c2 at `not-met`.
 ///
-/// This grades that as a PARTITION of `discover_nested_content_stores`'s own
-/// output by the gate's OWN predicate. It deliberately does not enumerate the
-/// routes — "which spellings can produce an oddly-named store" is undecidable
-/// over the open alphabet of control-file contents and symlink targets, exactly
-/// the shape that made the previous sweeps of this predicate wrong. "Is this
-/// discovered store visible to the gate that guards it" is decidable and total,
-/// and a route nobody has thought of yet lands in one half or the other and is
-/// asserted there without a new case.
+/// The fix is not a widened list of names.
+/// [`WorkspacePolicy::nested_walk_admits`] now decides the gate from the SCAN'S
+/// OWN OUTPUT, so a discovered store is a prefix of itself and cannot be
+/// hidden. This test grades that: the fixture is partitioned by `store_shaped`
+/// — the OLD gate — purely so the hidden half can be asserted NON-EMPTY, which
+/// is what proves the fix is load-bearing rather than the fixture having
+/// drifted. Every store in BOTH halves must then be refused.
 ///
-/// Both halves are load-bearing. If a future change made the gate reject a
-/// store-shaped store, `visible` reddens. When FerroxLabs/wayland-core#394
-/// closes, `hidden` reddens — INVERT it to `is_vcs_content_store(..) == true`,
-/// do not delete it.
+/// It deliberately does not enumerate the routes — "which spellings can produce
+/// an oddly-named store" is undecidable over the open alphabet of control-file
+/// contents and symlink targets, exactly the shape that made the previous
+/// sweeps of this predicate wrong. "Is every store the walk found refused by
+/// the guard that reads its list" is decidable and total, and a route nobody
+/// has thought of yet lands in one half or the other and is asserted there
+/// without a new case.
 #[test]
-fn a_discovered_store_the_lexical_gate_cannot_see_is_admitted() {
+fn every_store_the_scan_discovers_is_refused_whatever_it_is_named() {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
 
@@ -2809,13 +2813,13 @@ fn a_discovered_store_the_lexical_gate_cannot_see_is_admitted() {
     println!("GATE PARTITION: visible={visible:?} hidden={hidden:?}");
 
     // ANTI-VACUITY, both halves. An empty `visible` would pass its loop without
-    // grading arm 3 at all; an empty `hidden` would silently retire the gap
-    // this test exists to pin, and #394 would close by the fixture drifting
-    // rather than by the predicate changing.
+    // grading arm 3 at all; an empty `hidden` would mean the fixture no longer
+    // contains a store the OLD lexical gate could not see, and every assertion
+    // below would pass on a tree where #390 c2 had never been fixed.
     assert!(
         !visible.is_empty() && !hidden.is_empty(),
-        "the fixture must produce BOTH a gate-visible and a gate-hidden store, \
-         got visible={visible:?} hidden={hidden:?}"
+        "the fixture must produce BOTH a lexically-visible and a \
+         lexically-hidden store, got visible={visible:?} hidden={hidden:?}"
     );
 
     // ANTI-VACUITY on the known-positive half specifically. A store that is a
@@ -2831,20 +2835,134 @@ fn a_discovered_store_the_lexical_gate_cannot_see_is_admitted() {
     for store in &visible {
         assert!(
             policy.is_vcs_content_store(&store.join("ab/cd1234")),
-            "a store the scan discovered AND the gate can see must be refused: \
-             {}",
+            "a store the scan discovered AND the old lexical gate could see \
+             must be refused: {}",
             store.display()
         );
     }
     for store in &hidden {
         assert!(
-            !policy.is_vcs_content_store(&store.join("ab/cd1234")),
-            "core#394: {} is in the arm-3 store list but `store_shaped` cannot \
-             see it, so the gate should be short-circuiting the query to \
-             `false`. If this is now REFUSED the gap has closed — invert this \
-             assertion and grade core#390 c2 `met`, do not delete it",
+            policy.is_vcs_content_store(&store.join("ab/cd1234")),
+            "core#390 c2: {} is in the arm-3 store list and `store_shaped` \
+             cannot see it, so it is only refused if the gate is decided by \
+             the scan's OWN output. If this is admitted again, \
+             `nested_walk_admits` has gone back to grading the query path's \
+             spelling",
             store.display()
         );
+    }
+
+    // A FRESH policy, asked about the hidden half FIRST. The assertions above
+    // ran on a policy whose arm-3 memo was already warm from the wrong-refusal
+    // control, so they cannot tell a gate that consults the scan's output from
+    // one that only happens to admit on a cold memo. This one starts cold and
+    // asks nothing else first.
+    for store in &hidden {
+        let cold = WorkspacePolicy::contained(&root);
+        assert!(
+            cold.is_vcs_content_store(&store.join("ab/cd1234")),
+            "core#390 c2: {} must be refused on the FIRST question a policy is \
+             ever asked, not only once some other path has warmed the memo",
+            store.display()
+        );
+        assert!(
+            !cold.is_vcs_content_store(&ordinary),
+            "wrong-refusal control on the cold policy: an ordinary workspace \
+             file must still be admitted"
+        );
+    }
+}
+
+/// **A directory the scan cannot enumerate is REFUSED, not skipped.**
+///
+/// FerroxLabs/wayland-core#390 residual, found by the adversarial verifier of
+/// the previous pass. `discover_nested_content_stores` wrote
+/// `let Ok(entries) = read_dir(&dir) else { continue };` and
+/// `for entry in entries.flatten()` — both of which drop an error silently. A
+/// directory the walk could not list was therefore not scanned, a nested
+/// control directory inside it was never found, the store that control
+/// directory names was never added to arm 3's list, and `is_vcs_content_store`
+/// answered `false` for it. A fail-OPEN in a security predicate, opened by an
+/// error no counter and no log could see. [`StoreScan::opaque_dir`] treats what
+/// it cannot read as a store instead.
+///
+/// **Graded on the SCAN, not on a permission mode.** The obvious fixture is a
+/// `--x` directory — listable by nobody, traversable by its owner, so the model
+/// can still read a file under it by exact name. That fixture is real, and it
+/// is also VACUOUS on the build host: `root` bypasses DAC, `read_dir` succeeds,
+/// and the test passes whatever the code does. It was written that way first
+/// and the red arm is what caught it. So the deterministic half asks the scan
+/// directly, with a scan of the real root as its known-negative control, and
+/// the permission fixture runs only where it can bind.
+#[test]
+fn a_directory_the_scan_cannot_enumerate_is_refused_not_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), b"fn main() {}\n").unwrap();
+
+    // KNOWN-NEGATIVE CONTROL, asserted first: a tree the walk CAN read comes
+    // back complete and names no store. Without it, a scan that called
+    // everything opaque would pass the assertions below.
+    let readable = discover_nested_content_stores(&root);
+    assert!(
+        readable.complete && readable.stores.is_empty(),
+        "control: a readable tree must scan completely and name no store, got \
+         complete={} stores={:?}",
+        readable.complete,
+        readable.stores
+    );
+
+    // The deterministic arm: a directory `read_dir` cannot enumerate on ANY
+    // host, root included.
+    let opaque = root.join("gone");
+    let scan = discover_nested_content_stores(&opaque);
+    assert!(
+        !scan.complete,
+        "core#390: a scan that could not enumerate a directory must not report \
+         itself complete — an incomplete scan that is memoised freezes a \
+         partial answer for the life of the process"
+    );
+    assert!(
+        scan.stores.contains(&opaque),
+        "core#390: a directory the scan cannot enumerate must be treated as a \
+         content store. If it is missing here the walk is dropping a `read_dir` \
+         error again, and a nested store inside such a directory is \
+         unreachable: {:?}",
+        scan.stores
+    );
+
+    // The end-to-end arm, where the permission can bind. `--x` is exactly the
+    // reachable shape: unlistable, still traversable by exact name.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } != 0 {
+            std::fs::create_dir_all(root.join("closed/inner")).unwrap();
+            std::fs::write(root.join("closed/inner/blob"), b"opaque").unwrap();
+            std::fs::set_permissions(root.join("closed"), std::fs::Permissions::from_mode(0o111))
+                .unwrap();
+
+            let policy = WorkspacePolicy::contained(&root);
+            let refused = policy.is_vcs_content_store(&root.join("closed/inner/blob"));
+            let control = policy.is_vcs_content_store(&root.join("src/main.rs"));
+
+            // Restore before asserting, so a failure does not leave a directory
+            // `TempDir::drop` cannot remove.
+            std::fs::set_permissions(root.join("closed"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+
+            assert!(
+                !control,
+                "wrong-refusal control: an ordinary file in a readable sibling \
+                 must still be admitted"
+            );
+            assert!(
+                refused,
+                "core#390: a file under a directory the scan could not \
+                 enumerate must be refused"
+            );
+        }
     }
 }
 

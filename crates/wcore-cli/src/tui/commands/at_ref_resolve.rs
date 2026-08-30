@@ -390,7 +390,27 @@ fn walk_dir(
 
     // Sort entries for a deterministic walk — the payload (and its tests)
     // must not depend on filesystem iteration order.
-    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    //
+    // core#377 c2. This was `entries.flatten().map(|e| e.path()).collect()`.
+    // `flatten()` discards every `Err` the `ReadDir` iterator yields, so an
+    // entry the OS refused to describe never reached the loop below, was never
+    // counted, and produced no `SkippedFiles` warning — c2's sentence is
+    // "`AtWarning::SkippedFiles` is emitted whenever any entry is dropped", and
+    // this dropped entries. `every_silent_exit_in_walk_dir_is_counted_or_
+    // justified` could not see it either: an adapter is not an EXIT, so the
+    // drop happened before the region that gate grades. The second gate,
+    // `the_readdir_iterator_is_consumed_only_by_a_bare_for_loop`, is what
+    // makes the whole class unwritable.
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            // An entry the OS would not describe is an entry this walk drops,
+            // and a drop is exactly what the counter is for.
+            *skipped += 1;
+            continue;
+        };
+        paths.push(entry.path());
+    }
     paths.sort();
 
     for path in paths {
@@ -1811,6 +1831,172 @@ mod tests {
             silent.is_empty(),
             "core#377 c2: these exits from walk_dir end an iteration or the              function without incrementing the skipped counter and without              saying why that is not a drop. Add `*skipped += 1;` or a              `NOT A DROP:` note:\n{}",
             silent.join("\n")
+        );
+    }
+
+    /// THE OTHER HALF OF THE SHAPE: an entry can be dropped BEFORE it ever
+    /// reaches the loop, and no gate over loop exits can see that.
+    ///
+    /// `walk_dir` read `entries.flatten().map(|e| e.path()).collect()`.
+    /// `flatten()` silently discards every `Err` the `ReadDir` iterator yields
+    /// — a dropped entry, no counter, no `SkippedFiles` warning, which is
+    /// precisely the sentence core#377 c2 asserts. The gate above graded
+    /// `continue` / `break` / `return` inside the loop and was structurally
+    /// blind to it; MEASURED by the adversarial verifier, who added
+    /// `.filter(|p| !p.to_string_lossy().ends_with(".txt"))` after the
+    /// `flatten()` and watched it compile, pass `fmt --check` AND pass that
+    /// gate.
+    ///
+    /// "Which iterator adapters can drop an element" is an open alphabet —
+    /// `flatten`, `filter`, `filter_map`, `flat_map`, `take`, `take_while`,
+    /// `skip`, `step_by`, `map_while`, `retain`, and whatever lands in a future
+    /// `std`. A denylist over that alphabet can always be walked around, which
+    /// is the same mistake the `continue`-spelling gate made.
+    ///
+    /// So this is an ALLOWLIST over the OCCURRENCES of the two bindings that
+    /// carry an entry from `read_dir` to the loop that judges it. Each binding
+    /// may be used only in the forms named below; every other use — an adapter,
+    /// a `retain`, a `truncate`, a second `collect` — is a finding, whether or
+    /// not anyone has thought of it. **Both bindings**, because closing only
+    /// the first leaves the N+1 one line down: `paths.retain(..)` drops entries
+    /// after the loop that fills it and before the loop that reads it.
+    ///
+    /// Decidable and total over the function, in the way
+    /// `every_silent_exit_in_walk_dir_is_counted_or_justified` is decidable
+    /// over its exits.
+    #[test]
+    fn every_entry_read_dir_yields_reaches_the_loop_or_the_counter() {
+        const SOURCE: &str = include_str!("at_ref_resolve.rs");
+        let lines: Vec<&str> = SOURCE.lines().collect();
+        let start = lines
+            .iter()
+            .position(|l| l.starts_with("fn walk_dir("))
+            .expect("control: walk_dir must be in the scanned file");
+        let end = lines[start + 1..]
+            .iter()
+            .position(|l| l.starts_with("fn ") || l.starts_with("pub fn "))
+            .map_or(lines.len(), |at| start + 1 + at);
+        let body = &lines[start..end];
+
+        // `code_uses` deliberately ignores comments: this very doc block names
+        // `flatten()` and `retain(..)`, and a gate that graded prose would
+        // grade its own explanation.
+        let code_uses = |line: &str, name: &str| -> bool {
+            let code = line.split("//").next().unwrap_or("");
+            code.match_indices(name).any(|(at, _)| {
+                let before = code[..at].chars().next_back();
+                let after = code[at + name.len()..].chars().next();
+                let boundary = |c: char| !c.is_alphanumeric() && c != '_';
+                before.is_none_or(boundary) && after.is_none_or(boundary)
+            })
+        };
+
+        // The two bindings, FOUND rather than assumed — a rename this test did
+        // not follow must fail it, not silence it — each with the closed set of
+        // forms it may appear in.
+        let binding_of = |needle: &str| -> (usize, String) {
+            let at = body
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("control: walk_dir must contain `{needle}`"));
+            let name = body[at]
+                .trim()
+                .strip_prefix("let ")
+                .and_then(|rest| rest.strip_prefix("mut ").or(Some(rest)))
+                .and_then(|rest| rest.split([' ', ':', '=']).next())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| panic!("control: `{needle}` must bind a name"))
+                .to_string();
+            (at, name)
+        };
+        let (entries_at, entries) = binding_of("= fs::read_dir(");
+        let (paths_at, paths) = binding_of("let mut paths: Vec<PathBuf>");
+
+        let allowed = |line: &str, name: &str| -> bool {
+            let code = line.trim();
+            code == format!("for entry in {name} {{")
+                || code == format!("for path in {name} {{")
+                || code == format!("{name}.push(entry.path());")
+                || code == format!("{name}.sort();")
+        };
+
+        let mut findings: Vec<String> = Vec::new();
+        let mut uses = 0usize;
+        for (index, line) in body.iter().enumerate() {
+            for (binding_at, name) in [(entries_at, &entries), (paths_at, &paths)] {
+                if !code_uses(line, name) {
+                    continue;
+                }
+                uses += 1;
+                if index == binding_at || allowed(line, name) {
+                    continue;
+                }
+                findings.push(format!("line {}: {}", start + index + 1, line.trim()));
+            }
+        }
+
+        // ANTI-VACUITY: each binding must be bound AND consumed, so four uses
+        // is the floor. Fewer means the pipeline this test grades is gone and
+        // it is scanning air.
+        assert!(
+            uses >= 4,
+            "control: the scan found only {uses} uses of `{entries}` / \
+             `{paths}` — the instrument is looking at the wrong function or a \
+             binding was renamed"
+        );
+        // KNOWN-POSITIVE CONTROLS on the matcher, in the same run: the exact
+        // line this defect WAS, the N+1 one line down, and the exact lines it
+        // must be. An empty result reads as "no drops" and is the most common
+        // way a source-scanning gate is wrong.
+        for defect in [
+            format!("        let paths = {entries}.flatten();"),
+            format!("        {paths}.retain(|p| p.exists());"),
+            format!("        {paths}.truncate(10);"),
+        ] {
+            let name = if code_uses(&defect, &entries) {
+                &entries
+            } else {
+                &paths
+            };
+            assert!(
+                code_uses(&defect, name) && !allowed(&defect, name),
+                "control: the matcher must flag `{defect}`"
+            );
+        }
+        for correct in [
+            format!("    for entry in {entries} {{"),
+            format!("        {paths}.push(entry.path());"),
+            format!("    {paths}.sort();"),
+            format!("    for path in {paths} {{"),
+        ] {
+            let name = if code_uses(&correct, &entries) {
+                &entries
+            } else {
+                &paths
+            };
+            assert!(
+                allowed(&correct, name),
+                "control: the matcher must ACCEPT `{correct}`, or every correct \
+                 shape grades as a finding"
+            );
+        }
+        assert!(
+            !code_uses(
+                &format!("        // {entries}.flatten() drops errors"),
+                &entries
+            ),
+            "control: the matcher must refuse a comment"
+        );
+
+        assert!(
+            findings.is_empty(),
+            "core#377 c2: an entry `read_dir` yielded is handled somewhere \
+             other than the loop that counts drops. Every drop-capable form \
+             (`flatten`, `filter`, `take`, `retain`, ...) discards entries \
+             where no exit gate can see them and no `SkippedFiles` warning is \
+             emitted. Move the handling inside the loop and count what it \
+             drops:\n{}",
+            findings.join("\n")
         );
     }
 }
