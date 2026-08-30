@@ -234,6 +234,80 @@ async fn a_store_reached_under_an_unguessable_name_is_still_pruned() {
     );
 }
 
+/// c3 under a WARM store memo — the condition core#376's cache introduced.
+///
+/// `a_store_reached_under_an_unguessable_name_is_still_pruned` above builds the
+/// policy AFTER the store exists, so it never exercises the memo. One ordinary
+/// `ctx.vfs.exists()` — what every session does before anything else — warms
+/// it, and while the witness scheme could not see through a symlinked control
+/// directory the memo answered "no stores" for the life of the process. This
+/// search then returned `password=hunter2` verbatim under
+/// `WorkspacePolicy::contained`: c3's own sentence ("a store reached under ANY
+/// parent name is covered") is false the moment it is asked of a warm policy,
+/// which is the only kind a real session has.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_store_under_a_symlinked_control_dir_is_pruned_after_the_memo_is_warm() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical root");
+    std::fs::create_dir_all(root.join("real-git")).unwrap();
+    std::os::unix::fs::symlink(root.join("real-git"), root.join(".git")).unwrap();
+    std::fs::write(root.join("notes.txt"), b"ORDINARY-CANARY-244 hello\n").unwrap();
+
+    let policy = Arc::new(WorkspacePolicy::contained(&root));
+    let jail = SandboxedFs::new(
+        SecretDenyFs::new(RealFs, Arc::clone(&policy)),
+        root.to_path_buf(),
+    );
+    let mut ctx = ToolContext::test_default();
+    ctx.vfs = Arc::new(jail);
+    let ctx = ctx.with_workspace(Arc::clone(&policy));
+
+    // The scan is trusted only once its witnesses' mtimes lag its own start
+    // instant by more than one filesystem tick (#1145). Without this wait the
+    // memo MISSES on every call and rescans, and this arm silently grades
+    // nothing at all — measured: it passed against the fail-open memo.
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    ctx.vfs
+        .exists(&root.join("notes.txt"))
+        .await
+        .expect("ordinary path readable");
+    ctx.vfs
+        .exists(&root.join("notes.txt"))
+        .await
+        .expect("ordinary path readable");
+    let (_, scans, _) = policy.guard_cost();
+    assert_eq!(
+        scans, 1,
+        "CONTROL: the memo must be WARM and TRUSTED — a second ordinary guard \
+         that rescans means this arm grades the scan, not the cache"
+    );
+
+    // `git lfs pull` populates the store afterwards. LFS objects are VERBATIM,
+    // which is why #375 is a plaintext leak and #244 was information-only.
+    std::fs::create_dir_all(root.join("real-git/lfs/objects/aa")).unwrap();
+    std::fs::write(
+        root.join("real-git/lfs/objects/aa/obj"),
+        b"LFS-CANARY-244 password=hunter2\n",
+    )
+    .unwrap();
+
+    let out = grep(&ctx, "real-git").await;
+    assert!(
+        !out.contains("LFS-CANARY-244") && !out.contains("hunter2"),
+        "FAIL OPEN: a warm store memo let Grep return committed credential \
+         plaintext under WorkspacePolicy::contained:\n{out}"
+    );
+
+    // CONTROL: the same session's ordinary file is still searchable, so this is
+    // not passing because the workspace became unsearchable.
+    let out = grep(&ctx, ".").await;
+    assert!(
+        out.contains("ORDINARY-CANARY-244"),
+        "CONTROL: ordinary working-tree matches must survive:\n{out}"
+    );
+}
+
 /// The refusal is POSTURE-INDEPENDENT, and deliberately so.
 ///
 /// Grep's secret-file rule (rule 3) has never been gated on trust: naming a

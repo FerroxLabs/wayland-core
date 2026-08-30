@@ -3035,11 +3035,14 @@ impl StoreScan {
             return stamp.is_some();
         }
         self.probes += 1;
-        let stamp = std::fs::symlink_metadata(&path)
-            .and_then(|meta| meta.modified())
-            .ok();
+        let meta = std::fs::symlink_metadata(&path).ok();
+        let stamp = meta.as_ref().and_then(|meta| meta.modified().ok());
         let existed = stamp.is_some();
-        self.witnesses.push((path, stamp));
+        let is_link = meta.is_some_and(|meta| meta.file_type().is_symlink());
+        self.witnesses.push((path.clone(), stamp));
+        if is_link {
+            self.witness_link_target(&path);
+        }
         existed
     }
 
@@ -3055,13 +3058,57 @@ impl StoreScan {
     /// borrowed alternates store): nothing stamped would move if one appeared.
     fn witness_if_present(&mut self, path: PathBuf) {
         self.probes += 1;
-        let Ok(stamp) = std::fs::symlink_metadata(&path).and_then(|meta| meta.modified()) else {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            return;
+        };
+        let Ok(stamp) = meta.modified() else {
             return;
         };
         if self.witnesses.iter().any(|(seen, _)| *seen == path) {
             return;
         }
-        self.witnesses.push((path, Some(stamp)));
+        self.witnesses.push((path.clone(), Some(stamp)));
+        if meta.file_type().is_symlink() {
+            self.witness_link_target(&path);
+        }
+    }
+
+    /// Stamp what a symlinked witness POINTS AT, not only the link itself.
+    ///
+    /// A link's own mtime does NOT move when its target gains a child. So a
+    /// control directory reached through a symlink (`<root>/.git` pointed at
+    /// `<root>/real-git`) could grow an object store with every witness
+    /// unchanged: not `<root>` (the target directory already existed), not
+    /// `<root>/.git` (the link's own mtime), not `objects/info/alternates`
+    /// (still absent). [`WorkspacePolicy::vcs_store_cache_hit`] then returned
+    /// the stale EMPTY list for the life of the process, and arm 1 cannot cover
+    /// the gap either -- the canonical path is `<root>/real-git/objects`, whose
+    /// parent component is not `.git`, so [`is_vcs_store_dir`] says no.
+    /// MEASURED consequence before this: `Grep(path="real-git")` on the
+    /// production contained stack returned `.git/lfs` plaintext, re-opening the
+    /// whole of FerroxLabs/wayland-core#375 through #376's memo. A cache whose
+    /// invalidation cannot observe the mutation is not a cache.
+    ///
+    /// The TARGET's mtime is the one that moves, so the target is what must be
+    /// stamped. A link whose target does not exist YET cannot be canonicalized;
+    /// the path it NAMES is stamped absent instead, and flips to present the
+    /// moment the target appears -- a miss, which rescans.
+    ///
+    /// Costs nothing for an ordinary checkout, where no witness is a link.
+    /// Graded by `vfs_guard_cost::a_store_under_a_symlinked_control_dir_created_after_the_scan_is_denied`.
+    fn witness_link_target(&mut self, link: &Path) {
+        self.probes += 1;
+        if let Ok(target) = std::fs::canonicalize(link) {
+            self.witness(target);
+            return;
+        }
+        self.probes += 1;
+        let Ok(named) = std::fs::read_link(link) else {
+            return;
+        };
+        // `witness` de-duplicates by path, so a symlink CYCLE terminates on the
+        // hop that comes back round rather than recursing forever.
+        self.witness(resolve_against(link.parent().unwrap_or(link), named));
     }
 
     /// Canonicalize and record `p` when it exists. A path that does not exist
@@ -3076,8 +3123,22 @@ impl StoreScan {
     /// covered.
     fn push_store(&mut self, p: PathBuf) {
         self.probes += 1;
-        if !p.exists() {
+        let Ok(leaf) = std::fs::symlink_metadata(&p) else {
+            // Absent altogether: the CALLER stamps the directory whose mtime
+            // moves when it appears. Costs the one probe `exists` cost.
             return;
+        };
+        if leaf.file_type().is_symlink() {
+            // The leaf IS a link, so its owner's mtime stops governing here:
+            // the TARGET can gain the store later without moving anything the
+            // owner sees, and a link that dangles today is dropped below and
+            // would never be witnessed at all. `witness` stamps the link AND
+            // what it points at, target-absent included.
+            self.witness(p.clone());
+            self.probes += 1;
+            if !p.exists() {
+                return;
+            }
         }
         self.probes += 1;
         let canonical = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());

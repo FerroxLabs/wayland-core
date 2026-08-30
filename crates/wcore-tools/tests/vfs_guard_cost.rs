@@ -219,6 +219,124 @@ async fn an_alternates_borrow_written_after_the_scan_is_denied() {
     );
 }
 
+/// INVALIDATION, ARM 2 ONLY — a store under a SYMLINKED control directory,
+/// created after the memo was built.
+///
+/// The shape the first cut of this memo failed OPEN on, and the reason it was
+/// worse than no memo at all: `<root>/.git` is a symlink, so nothing the scan
+/// stamped moves when the store leaf appears — not `<root>` (the target
+/// directory already existed), not `<root>/.git` (a link's mtime does not
+/// follow its target), not `objects/info/alternates` (still absent). The stale
+/// EMPTY list was then returned for the life of the process, and `Grep` handed
+/// back `.git/lfs` plaintext under `WorkspacePolicy::contained`.
+///
+/// Arm 1 cannot rescue it, which is what makes this arm-2-ONLY and different in
+/// kind from `a_store_created_after_the_scan_is_denied_on_the_next_guard`
+/// above: the canonical path is `<root>/real-git/objects`, whose parent
+/// component is not `.git`, so the lexical shape test never fires. The second
+/// control below asserts exactly that, so the arm cannot quietly start passing
+/// through arm 1.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_store_under_a_symlinked_control_dir_created_after_the_scan_is_denied() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical root");
+    std::fs::create_dir_all(root.join("real-git")).unwrap();
+    std::os::unix::fs::symlink(root.join("real-git"), root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src/deep/deeper")).unwrap();
+    std::fs::write(root.join("src/deep/deeper/main.rs"), b"fn main() {}\n").unwrap();
+
+    let policy = Arc::new(WorkspacePolicy::contained(&root));
+    let fs = stack(&policy, &root);
+    tokio::time::sleep(SETTLE).await;
+
+    // What every session does first: one ordinary guard, which warms the memo.
+    fs.exists(&root.join("src/deep/deeper/main.rs"))
+        .await
+        .expect("ordinary path readable");
+    let (_, scans, _) = policy.guard_cost();
+    assert_eq!(scans, 1, "the memo must be warm for this to mean anything");
+
+    // The store appears afterwards — `git init`, a submodule checkout, `git
+    // lfs pull`, a clone finishing.
+    let store_file = root.join("real-git/objects/ab/cdef");
+    std::fs::create_dir_all(root.join("real-git/objects/ab")).unwrap();
+    std::fs::write(&store_file, b"COMMITTED-SECRET\n").unwrap();
+
+    // CONTROL 1: a policy built NOW denies it, so a failure below is the MEMO
+    // and not a fixture that was never a store in the first place.
+    assert!(
+        WorkspacePolicy::contained(&root).is_vcs_content_store(&store_file),
+        "CONTROL: even a freshly built policy does not see this store — the \
+         fixture is wrong, not the memo"
+    );
+    // CONTROL 2: no `.git` component survives canonicalization, so arm 1's
+    // lexical shape test cannot be the thing answering.
+    assert!(
+        !store_file
+            .components()
+            .any(|c| c.as_os_str() == std::ffi::OsStr::new(".git")),
+        "CONTROL: this arm only grades the memo while the store's canonical \
+         path carries no `.git` component"
+    );
+
+    let refusal = fs.read(&store_file).await;
+    assert!(
+        matches!(refusal, Err(VfsError::SecretDenied { .. })),
+        "FAIL OPEN: a store under a symlinked control directory, created after \
+         the memo was built, was READ: {refusal:?}"
+    );
+}
+
+/// INVALIDATION — the store LEAF is a symlink whose target does not exist when
+/// the scan runs.
+///
+/// The same family one level down. A leaf that does not resolve is deliberately
+/// dropped rather than denied (a deny for a non-existent path is noise the
+/// sandbox backend still carries), so before the link itself was stamped the
+/// leaf left NO witness, and `<root>/.git`'s mtime does not move when a
+/// directory is created somewhere else entirely.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_store_leaf_symlinked_to_a_later_created_directory_is_denied() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical root");
+    let outside = tempfile::tempdir().expect("outside store");
+    let outside_root = std::fs::canonicalize(outside.path()).expect("canonical outside");
+
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::os::unix::fs::symlink(outside_root.join("objects"), root.join(".git/objects")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), b"fn main() {}\n").unwrap();
+
+    let policy = Arc::new(WorkspacePolicy::contained(&root));
+    let fs = stack(&policy, &root);
+    tokio::time::sleep(SETTLE).await;
+    fs.exists(&root.join("src/main.rs"))
+        .await
+        .expect("ordinary path readable");
+    let (_, scans, _) = policy.guard_cost();
+    assert_eq!(scans, 1, "the memo must be warm for this to mean anything");
+
+    let borrowed = outside_root.join("objects/ab/cdef");
+    // CONTROL: nothing is denied yet, so the assertion below cannot pass by the
+    // policy refusing the outside directory unconditionally.
+    assert!(
+        !policy.denies_read_content(&borrowed),
+        "CONTROL: a directory that does not exist yet is not this workspace's \
+         content store"
+    );
+
+    std::fs::create_dir_all(outside_root.join("objects/ab")).unwrap();
+    std::fs::write(&borrowed, b"COMMITTED-SECRET\n").unwrap();
+
+    assert!(
+        policy.denies_read_content(&borrowed),
+        "FAIL OPEN: a store leaf symlinked to a directory created after the \
+         scan was not denied — the dangling link was dropped without a witness"
+    );
+}
+
 /// The memo must not make the answer WRONG in the ordinary direction either:
 /// the store that existed all along stays denied, and the ordinary file stays
 /// readable, after the memo is warm.
