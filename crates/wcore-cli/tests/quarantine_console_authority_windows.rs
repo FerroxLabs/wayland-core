@@ -421,13 +421,17 @@ fn the_notice_reaches_the_console_the_prompt_reaches() {
     if attached {
         assert!(
             delivered.operator_console.is_ok(),
-            "a console IS attached to this process, so a quarantine child can              AttachConsole to it and prompt there — and the notice that              attributes that prompt did not reach it: {:?}",
+            "a console IS attached to this process, so a quarantine child can \
+             AttachConsole to it and prompt there — and the notice that \
+             attributes that prompt did not reach it: {:?}",
             delivered.operator_console
         );
     } else {
         assert!(
             delivered.operator_console.is_err(),
-            "no console is attached, so `CONOUT$` cannot open; a delivery              reporting success here would be reporting a sink that does not              exist, which is the reassurance this whole ticket is about"
+            "no console is attached, so `CONOUT$` cannot open; a delivery \
+             reporting success here would be reporting a sink that does not \
+             exist, which is the reassurance this whole ticket is about"
         );
     }
 }
