@@ -27922,6 +27922,18 @@ mod approval_bridge_engine_tests {
             "the minimum workable window: {refusal}"
         );
         assert!(refusal.contains("num_ctx"), "{refusal}");
+        // Round-2 verifier, refutation 2. These literals are source-wrapped
+        // and `cargo fmt` cannot see inside a string, so the space runs need
+        // an assertion. The LEARNED branch builds its own `source` and
+        // `remedy` literals, distinct from the configured branch's, so
+        // asserting this only in
+        // `an_unworkable_window_stops_the_run_and_the_refusal_reaches_the_user`
+        // would leave half the message ungraded.
+        assert!(
+            !refusal.contains("  "),
+            "the operator-facing refusal must not carry a run of spaces from a \
+             wrapped string literal: {refusal:?}"
+        );
     }
 
     /// #1172 c3 — the guard path. The window a route has been CORROBORATED to
