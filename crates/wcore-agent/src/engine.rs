@@ -20675,6 +20675,13 @@ impl AgentEngine {
         if defer_cfg.enabled {
             wcore_tools::registry::apply_cold_deferral(&mut tools, &defer_cfg.hot_allowlist);
         }
+        // FerroxLabs/wayland#1209: sink deferred defs to the tail BEFORE
+        // admitting hydrated ones. In catalog mode the deferred defs are
+        // deleted below, so this is a no-op on the result; with the fold off
+        // they survive as per-tool stubs and a mid-array admission rewrote the
+        // whole wire prefix (measured: first differing index 1). Running it
+        // unconditionally is the single ordering discipline both modes share.
+        wcore_tools::registry::sink_deferred_to_tail(&mut tools);
         wcore_tools::registry::admit_hydrated_tools(&mut tools, &self.hydrated_tool_names);
         if defer_cfg.enabled && defer_cfg.catalog {
             tools = wcore_tools::registry::fold_deferred_into_catalog(

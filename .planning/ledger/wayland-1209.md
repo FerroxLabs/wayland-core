@@ -3,24 +3,27 @@ issue: 1209
 repo: FerroxLabs/wayland
 kind: defect
 title: "With builtin_tools.defer_cold.catalog = false, ToolSearch hydration still re-sorts tools[] mid-array: #1171 is fully live on that path"
-status: open
+status: closed
 last_verified_commit: 9de21aa1
 criteria:
   - id: c1
     text: "In stub mode a hydration leaves the wire prefix stable: the measured turn1/turn2 arrays no longer differ at index 1"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-agent/tests/tools_prefix_stable_on_hydration.rs::hydration_leaves_the_tools_prefix_byte_identical_in_both_catalog_modes"
     owner: core
-    note: "Filed 2026-08-29 by the 0.13.12 close-sweep (worklist defect D27, found while verifying FerroxLabs/wayland#1171 — ToolSearch hydration re-sorts tools[] mid-array, invalidating the prompt cache). Nothing has been done. The measured finding, verbatim: With the documented config knob `builtin_tools.defer_cold.catalog = false` (DeferColdConfig, crates/wcore-config/src/tools.rs:45-49, `false` restores per-tool stub entries), a ToolSearch hydration still rewrites the tools[] wire prefix mid-array — i.e. defect #1171 is fully live on that path. In stub mode `fold_deferred_into_catalog` is skipped (engine.rs:20104, guarded by `defer_cfg.enabled && defer_cfg.catalog`), so deferred tools remain in the array at their registry slots; `admit_hydrated_tools` then REMOVES each hydrated stub from mid-array and appends it at the tail, shifting everything after it. MEASURED on hetzner with a scratch probe crate (repo untouched): turn1 [Bash, Delegate, Edit, Forge, Glob, Grep, Read, Spawn, ToolSearch, Workflow, Write] -> turn2 [Bash, Edit, Forge, Glob, Grep, Read, ToolSearch, Write, Delegate, Spawn, Workflow]; `prefix stable: false`, `first differing wire index: Some(1)` — literally the index-1 shift the ticket cites. Positive control in the same run: the default catalog=true path IS prefix-stable, so this is not a harness artefact."
+    note: "sink_deferred_to_tail runs unconditionally in apply_tool_deferral, ahead of admit_hydrated_tools, so a hydration can only mutate the tail region. The test asserts names[1] is equal across turn1/turn2 -- the exact index the ticket measured -- AND that the serialized bytes of the whole hot prefix are identical, so a Vec-order-only fix would not pass it."
   - id: c2
     text: "A test asserts prefix stability under hydration in BOTH catalog modes, with the catalog=true path as the positive control; shown RED against today's stub mode"
-    state: not-met
+    state: met
+    evidence: "test:crates/wcore-agent/tests/tools_prefix_stable_on_hydration.rs::hydration_leaves_the_tools_prefix_byte_identical_in_both_catalog_modes"
     owner: core
-    note: "Filed 2026-08-29 by the 0.13.12 close-sweep (worklist defect D27). Nothing has been done; the measurement is on c1 and the file:line anchors are in the prose below."
+    note: "One test drives both modes: catalog=false is the arm under test (asserted to be genuinely stub mode -- 11 wire entries, at least one (Deferred) description) and catalog=true is the positive control, which holds the property before and after this change. RED against the pre-fix tree: with sink_deferred_to_tail reduced to a compiling no-op the stub arm fails on wire index 1 (Delegate vs Edit) while the catalog control still passes."
   - id: c3
     text: "If the shift is deliberate in stub mode, the config key's documentation says that turning the fold off also gives up cache stability, and the user is told at load rather than billed silently"
-    state: not-met
+    state: met
+    evidence: "symbol:crates/wcore-config/src/tools.rs::DeferColdConfig"
     owner: core
-    note: "Filed 2026-08-29 by the 0.13.12 close-sweep (worklist defect D27). Nothing has been done; the measurement is on c1 and the file:line anchors are in the prose below."
+    note: "The antecedent is removed rather than satisfied: the shift is NOT deliberate in stub mode any more, so there is nothing to warn about at load. The config key's doc comment states the shared ordering discipline and names the guard test, so a future change cannot reintroduce the interleave believing stub mode never had cache stability to give up."
 ---
 
 With the documented config knob `builtin_tools.defer_cold.catalog = false` (DeferColdConfig, crates/wcore-config/src/tools.rs:45-49, `false` restores per-tool stub entries), a ToolSearch hydration still rewrites the tools[] wire prefix mid-array — i.e. defect #1171 is fully live on that path. In stub mode `fold_deferred_into_catalog` is skipped (engine.rs:20104, guarded by `defer_cfg.enabled && defer_cfg.catalog`), so deferred tools remain in the array at their registry slots; `admit_hydrated_tools` then REMOVES each hydrated stub from mid-array and appends it at the tail, shifting everything after it. MEASURED on hetzner with a scratch probe crate (repo untouched): turn1 [Bash, Delegate, Edit, Forge, Glob, Grep, Read, Spawn, ToolSearch, Workflow, Write] -> turn2 [Bash, Edit, Forge, Glob, Grep, Read, ToolSearch, Write, Delegate, Spawn, Workflow]; `prefix stable: false`, `first differing wire index: Some(1)` — literally the index-1 shift the ticket cites. Positive control in the same run: the default catalog=true path IS prefix-stable, so this is not a harness artefact.

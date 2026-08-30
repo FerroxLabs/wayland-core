@@ -46,6 +46,18 @@ pub struct DeferColdConfig {
     /// in ToolSearch's description instead of per-tool stub entries
     /// (measured: 43 stubs cost ~2.5k tokens/request — more than the hot
     /// schemas). `false` restores per-tool stub entries.
+    ///
+    /// Turning this off costs TOKENS, not cache stability
+    /// (FerroxLabs/wayland#1209). Both settings share one ordering
+    /// discipline: deferred defs are sunk to the tail of `tools[]`
+    /// (`wcore_tools::registry::sink_deferred_to_tail`) before a hydration
+    /// admits any of them, so the hot prefix is byte-identical for the life
+    /// of the conversation in either mode and only the tail region changes
+    /// on the turn a tool is hydrated. Before that pass, stub mode left the
+    /// stubs interleaved at their registry slots and a hydration rewrote the
+    /// whole wire prefix from index 1 — the wayland#1171 re-bill on a
+    /// documented config path. Guarded by
+    /// `hydration_leaves_the_tools_prefix_byte_identical_in_both_catalog_modes`.
     pub catalog: bool,
     /// HARD cap on the catalog line's name-list length in chars — even a
     /// single name is dropped when it alone exceeds the budget (the suffix

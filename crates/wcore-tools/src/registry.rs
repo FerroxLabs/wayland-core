@@ -568,6 +568,46 @@ pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
 /// A hydrated name that was never deferred is already in the stable base and
 /// is left where it is.
 ///
+/// Cache stability (FerroxLabs/wayland#1209): move every DEFERRED def to the
+/// TAIL of the array, preserving relative order inside both halves.
+///
+/// This is the ONE ordering discipline both deferral modes share, and it is
+/// what makes [`admit_hydrated_tools`] safe. In catalog mode
+/// ([`fold_deferred_into_catalog`]) the deferred defs are deleted from the
+/// array outright, so pulling one out of the middle shifts nothing — the
+/// stable prefix is "every hot tool". With the catalog fold OFF
+/// (`builtin_tools.defer_cold.catalog = false`, per-tool stub entries) the
+/// stubs SURVIVE onto the wire, interleaved with the hot tools at their
+/// registry slots; admitting one then removed it from mid-array and appended
+/// it, rewriting every byte after its old slot. Measured before this pass:
+/// turn1 `[Bash, Delegate, Edit, Forge, Glob, Grep, Read, Spawn, ToolSearch,
+/// Workflow, Write]` -> turn2 `[Bash, Edit, Forge, Glob, Grep, Read,
+/// ToolSearch, Write, Delegate, Spawn, Workflow]`, first differing wire index
+/// `Some(1)` — the whole prompt prefix re-billed uncached, which is the
+/// wayland#1150 / wayland#1171 bug on a documented config path.
+///
+/// Sinking first gives stub mode the same shape catalog mode gets for free:
+/// a byte-identical hot prefix for the life of the conversation, and a
+/// mutable region confined to the tail.
+///
+/// Order-preserving and a pure function of the `deferred` flags, so it cannot
+/// itself introduce per-turn churn: the same registry + the same deferral
+/// decision yields the same array every turn.
+///
+/// Naturally deferred defs (`Tool::is_deferred`, e.g. MCP proxies) are sunk
+/// too — they are wire stubs by the same mechanism and hydrating one shifted
+/// the prefix in exactly the same way, including when `defer_cold` is off
+/// entirely.
+pub fn sink_deferred_to_tail(defs: &mut Vec<ToolDef>) {
+    if !defs.iter().any(|def| def.deferred) {
+        return;
+    }
+    let (hot, cold): (Vec<ToolDef>, Vec<ToolDef>) =
+        defs.drain(..).partition(|def| !def.deferred);
+    *defs = hot;
+    defs.extend(cold);
+}
+
 /// `hydrated` is in FIRST-HYDRATION order.
 pub fn admit_hydrated_tools(defs: &mut Vec<ToolDef>, hydrated: &[String]) {
     if hydrated.is_empty() {
