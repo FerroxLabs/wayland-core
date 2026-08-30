@@ -8844,6 +8844,22 @@ impl AgentEngine {
         if !self.compact_config.smart_enabled {
             return None;
         }
+        // #1179 c7 — the SAME workability gate the static trigger carries in
+        // `should_autocompact_at`. Without it this trigger was the second way
+        // into the summarizer and the only ungated one: at a configured 1,024
+        // window the fraction on core's own 3,118-token baseline turn is 3.04,
+        // five times the 0.60 trigger, so #280 fired an LLM summarization on an
+        // empty conversation at the top of every turn. It survived only because
+        // `unworkable_window_refusal` returns from the turn loop a few lines
+        // ABOVE the call site here - a guarantee one edit away from gone.
+        // Returning `None` is this function's own "no honest denominator" path,
+        // so the pre-gate reads false without a second exit shape.
+        if !self
+            .compact_config
+            .supports_compaction(self.compaction_window_now())
+        {
+            return None;
+        }
         use wcore_config::context_window::ContextWindow;
         // Finding #174 — the same REAL-pressure watermark the static auto
         // trigger trusts. On turn 1 it is 0 → fraction 0.0 → never fires before
@@ -29829,6 +29845,101 @@ mod audit_2026_05_22_tests {
             !emitted.contains("  "),
             "the operator-facing refusal must not carry a run of spaces from a \
              wrapped string literal: {emitted:?}"
+        );
+    }
+
+    /// #1179 c6 — "a window core has judged too small to compact in never
+    /// fires a summarization, BY EITHER TRIGGER", graded on the ENGINE's own
+    /// two triggers.
+    ///
+    /// The criterion's previous evidence
+    /// (`no_configured_window_anywhere_fires_on_the_baseline_turn`) called the
+    /// free function `wcore_config::compact::auto::should_autocompact`, which
+    /// resolves its own window from the config and the model. The engine does
+    /// not use it: the static trigger is `should_autocompact_now`
+    /// -> `should_autocompact_at(compaction_window_now(), ..)`, and the #280
+    /// trigger is `smart_compact_fraction` -> `smart_compact_should_fire`.
+    /// So that test graded an adjacent function — the same substituted-property
+    /// defect the round-2 objection raised against c3, in the criterion added
+    /// in answer to it. This grades the two triggers the loop actually
+    /// consults, and the refusal that runs before them.
+    ///
+    /// `smart_enabled` is forced ON: it is default-OFF, so leaving it alone
+    /// would make the second trigger vacuously quiet and the "either" in the
+    /// criterion unearned.
+    #[test]
+    fn no_configured_window_too_small_to_compact_in_can_reach_either_trigger() {
+        const BASELINE: u64 = wcore_config::compact::BASELINE_TURN_TOKENS as u64;
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let mut engine = engine_with(provider);
+        engine.compact_config.smart_enabled = true;
+
+        let mut unworkable = 0usize;
+        let mut workable_reached_the_triggers = 0usize;
+        for window in 1_024usize..=16_384 {
+            engine.compact_config.context_window = Some(window);
+            engine.compact_state.last_real_input_tokens = BASELINE;
+            engine.smart_compact_armed = true;
+            engine.smart_compact_exhausted = false;
+            engine.smart_compact_last_turn = None;
+
+            let too_small = !engine.compact_config.supports_compaction(window);
+            if too_small {
+                unworkable += 1;
+                // The turn loop refuses at its top, BEFORE either trigger is
+                // consulted — `an_unworkable_window_stops_the_run_and_the_
+                // refusal_reaches_the_user` is what proves that stop is wired.
+                assert!(
+                    engine.unworkable_window_refusal().is_some(),
+                    "window {window}: too small to compact in, but no refusal - \
+                     the run would continue into the triggers"
+                );
+            } else {
+                workable_reached_the_triggers += 1;
+                assert!(
+                    engine.unworkable_window_refusal().is_none(),
+                    "window {window}: workable, but refused"
+                );
+            }
+
+            // Belt and braces: even if the refusal were bypassed, neither
+            // trigger may fire on core's own baseline turn at ANY window in
+            // the band.
+            assert!(
+                !engine.should_autocompact_now(BASELINE),
+                "window {window}: the static autocompact trigger fired on core's \
+                 own {BASELINE}-token baseline turn, before the user typed anything"
+            );
+            let frac = engine.smart_compact_fraction();
+            let fired = match frac {
+                Some(f) => engine.smart_compact_should_fire(1, f),
+                None => false,
+            };
+            assert!(
+                !fired,
+                "window {window}: the #280 smart trigger fired on core's own \
+                 {BASELINE}-token baseline turn (fraction {frac:?})"
+            );
+        }
+
+        assert!(
+            unworkable > 0 && workable_reached_the_triggers > 0,
+            "control: the band must contain BOTH refused and workable windows, \
+             or one of the two arms above is vacuous (unworkable={unworkable}, \
+             workable={workable_reached_the_triggers})"
+        );
+        // Control that the #280 trigger CAN fire at all through this fixture,
+        // so its silence above is the baseline turn being small, not the
+        // trigger being wedged off.
+        engine.compact_config.context_window = Some(16_384);
+        engine.compact_state.last_real_input_tokens = 12_000;
+        engine.smart_compact_armed = true;
+        engine.smart_compact_last_turn = None;
+        let frac = engine.smart_compact_fraction().expect("fraction");
+        assert!(
+            engine.smart_compact_should_fire(1, frac),
+            "control: the #280 trigger must fire under real pressure ({frac}), \
+             else every assertion above is vacuous"
         );
     }
 
