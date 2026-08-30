@@ -2869,7 +2869,9 @@ jobs:
       # produced it, and any condition that names a job is a way for the gate to
       # be switched off by something other than the evidence. So the condition
       # names NO job: the step runs whenever `report` itself is not cancelled,
-      # and assert-test-evidence.sh decides from what it finds.
+      # and assert-test-evidence.sh decides from what it finds. (The `env:`
+      # diagnostic below still names two jobs; that is deliberate and is
+      # explained there -- a message cannot make a gate inert.)
       # `.github/scripts/tests/outer-retry-evidence.test.sh` asserts exactly
       # that -- that the condition contains no `needs` reference at all -- with
       # an anti-vacuity arm that fails if the condition cannot be located, since
@@ -2886,22 +2888,23 @@ jobs:
           EVIDENCE_DIR: junit-reports
           EXPECTED_MIN: 1
           LABEL: ci matrix (unit + integration)
-          # Every dependency reports, and none is named: `toJSON(needs)` is
-          # rendered by GitHub from the `needs:` list itself, so a leg added
-          # tomorrow appears here without anyone remembering to add it. Flattened
-          # to one line because this string is interpolated into a `::error`
-          # annotation, and an annotation cannot carry a raw newline.
-          NEEDS_JSON: ${{ toJSON(needs) }}
+          # THIS LINE STILL NAMES JOBS, ON PURPOSE. It is a DIAGNOSTIC printed
+          # into the failure annotation, not the admission gate, and a message
+          # cannot switch a gate off -- so an enumeration here is a stale
+          # sentence at worst, where an enumeration in the `if:` above was an
+          # inert gate. A `toJSON(needs)` form was tried and reverted: it forces
+          # this step's `run:` to become a multi-line block, and
+          # `.github/scripts/tests/failing-set.test.sh` asserts ci.yml contains
+          # the literal `run: bash .github/scripts/assert-test-evidence.sh` --
+          # a guard that the report job really does invoke the shared gate.
+          # That guard is worth more than a self-maintaining diagnostic, and it
+          # caught this on the first push rather than on a merge.
+          UPSTREAM_RESULT: ci=${{ needs.ci.result }} ci-linux=${{ needs['ci-linux'].result }}
           HINT: >-
             A leg that dies before its test step (for example at the Clippy
             step) leaves no artifact. See
             .planning/lanes/fix-clippy-gate/NOTES.md.
-        run: |
-          UPSTREAM_RESULT=$(printf '%s' "$NEEDS_JSON" \
-            | jq -r 'to_entries | map("\(.key)=\(.value.result)") | join(" ")')
-          export UPSTREAM_RESULT
-          echo "upstream jobs      : $UPSTREAM_RESULT"
-          bash .github/scripts/assert-test-evidence.sh
+        run: bash .github/scripts/assert-test-evidence.sh
 
       - name: Publish test report
         uses: dorny/test-reporter@v3
