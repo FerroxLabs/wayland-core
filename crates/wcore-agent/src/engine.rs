@@ -2297,7 +2297,7 @@ fn request_wire_fingerprint(
 /// tool-result body in the outbound retry context. `short_error` is the first
 /// line of the original body, capped, so the model still sees WHAT failed
 /// without the engine re-sending the full contaminated transcript.
-fn retry_stub(tool_name: &str, error_body: &str) -> String {
+pub(crate) fn retry_stub(tool_name: &str, error_body: &str) -> String {
     const MAX_ERR_CHARS: usize = 200;
     let mut short: String = error_body
         .lines()
@@ -4255,6 +4255,11 @@ pub struct AgentEngine {
     /// to (see `is_unserved_request_failure`). Reset at every turn entry and
     /// disclosed at every turn exit by `report_unserved_resends`.
     unserved_resends: u32,
+    /// Set by `emit_incomplete_run_admission`, cleared at every turn entry.
+    /// Read only by `admit_unspoken_run_failure`, so the run-loop backstop can
+    /// tell a turn that already said it stopped short from one that ended
+    /// silently. #388 bullet 4.
+    admitted_incomplete_this_turn: bool,
     midflight_monitor: MidFlightMonitor,
     /// v0.6.1 CRIT-1: opt-in policy gate. When `Some`, every tool call
     /// in `dispatch_once` is checked against the `PolicyEngine` before
@@ -4898,6 +4903,7 @@ impl AgentEngine {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -5202,6 +5208,7 @@ impl AgentEngine {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -8294,7 +8301,7 @@ impl AgentEngine {
     ///
     /// A wrong answer must become an admission. This is the admission, and it
     /// goes where the answer went.
-    fn emit_terminated_run_admission(&self, turn: usize, stop_reason: StopReason) {
+    fn emit_terminated_run_admission(&mut self, turn: usize, stop_reason: StopReason) {
         // `StopReason::MaxTurns` is the shared verdict for SEVERAL terminal
         // guards - the turn cap, the runaway-loop breaker, the consecutive-
         // failure breaker and the pre-send budget denial all land on it. Only
@@ -8315,12 +8322,73 @@ impl AgentEngine {
             StopReason::MaxTokens => "the output limit of the model cut the reply off".to_string(),
             _ => return,
         };
+        self.emit_incomplete_run_admission(&cause);
+    }
+
+    /// Say on the ANSWER stream that the run stopped short, for ONE stated
+    /// cause.
+    ///
+    /// #388, Expected-Behavior bullet 4 ("clearly mark the task as
+    /// failed/incomplete"). Extracted from
+    /// [`Self::emit_terminated_run_admission`] because the limit exits were
+    /// not the only ones that owe this sentence and were the only ones saying
+    /// it. A run that ends on a provider failure returns `Err`, never reaches
+    /// `finish_run_terminated_inner`, and emits its explanation through
+    /// `emit_error` — which goes to **stderr**. A `-p` run's stdout therefore
+    /// ends on the model's last narration, which reads as a finished answer:
+    /// the Job-corpus A-10 failure, on the paths #388 actually reports.
+    ///
+    /// One body, one wording, so the admission a failure exit gives and the
+    /// admission a limit exit gives cannot drift apart.
+    fn emit_incomplete_run_admission(&mut self, cause: &str) {
         let admission = format!(
             "\n\n[stopped early] I did not finish this: {cause}. Anything above is \
              partial work, not an answer."
         );
         self.output
             .emit_text_delta(&admission, &self.current_msg_id);
+        self.admitted_incomplete_this_turn = true;
+    }
+
+    /// #388 bullet 4, enforced ONCE for the whole run loop instead of once per
+    /// exit.
+    ///
+    /// `run_inner_impl` has 32 `return Err` sites. Three earlier fixes closed
+    /// three buckets of them by editing the exit itself, and each rested on a
+    /// census asserting that nothing else was left — a census that was wrong
+    /// twice. A per-site fix can only ever be as sound as the count behind it,
+    /// so the guarantee lives here: whatever `Err` a turn ends on, if nothing
+    /// has already said so on the ANSWER stream, this does. The exits that DO
+    /// admit keep their own, more specific cause;
+    /// `admitted_incomplete_this_turn` is what stops the two doubling up.
+    ///
+    /// `UserAborted` is the one deliberate exclusion, and it is graded rather
+    /// than asserted (`a_cancelled_run_carries_no_admission`): the stop was the
+    /// user's own request, the mid-stream cancel arm already emits "Run
+    /// cancelled while receiving provider output.", and the host is told
+    /// through `RecoveryLifecycle::Cancelled` rather than through an error.
+    fn admit_unspoken_run_failure(&mut self, error: &AgentError) {
+        if self.admitted_incomplete_this_turn {
+            return;
+        }
+        let cause = match error {
+            AgentError::UserAborted => return,
+            AgentError::SessionAuthority(detail) => {
+                format!("this session's persistence authority failed ({detail})")
+            }
+            AgentError::ContextTooLong {
+                input_tokens,
+                limit,
+            } => format!(
+                "the context reached {input_tokens} tokens against a limit of {limit} and \
+                 could not be reduced"
+            ),
+            AgentError::Provider(detail) => {
+                format!("the provider call for this turn failed ({detail})")
+            }
+            AgentError::ApiError(detail) => format!("this turn ended on an error ({detail})"),
+        };
+        self.emit_incomplete_run_admission(&cause);
     }
 
     async fn finish_run_terminated_inner(
@@ -12314,6 +12382,7 @@ impl AgentEngine {
         recovered_provider_round: Option<crate::provider_recovery::RecoveredProviderRound>,
     ) -> Result<AgentResult, AgentError> {
         self.unserved_resends = 0;
+        self.admitted_incomplete_this_turn = false;
         let result = self
             .run_inner_impl(
                 user_turn,
@@ -12324,6 +12393,9 @@ impl AgentEngine {
                 recovered_provider_round,
             )
             .await;
+        if let Err(error) = &result {
+            self.admit_unspoken_run_failure(error);
+        }
         self.report_unserved_resends();
         result
     }
@@ -12857,6 +12929,15 @@ impl AgentEngine {
                         self.fire_on_session_end(turn).await;
                         self.cache_ledger.finish();
                         self.save_session_mirror();
+                        // #388 bullet 4, same class as the four provider-failure
+                        // exits: this is a TERMINAL exit of the run and it said
+                        // nothing on the ANSWER stream. A compaction bail is the
+                        // reporter’s own "runs out of token budget" symptom, so a
+                        // `-p` run ended with an EMPTY stdout and the cause only on
+                        // stderr. Measured, not modelled — see the c10 red arm.
+                        self.emit_incomplete_run_admission(
+                            "the context could not be compacted small enough to continue this run",
+                        );
                         return Err(e);
                     }
 
@@ -14598,6 +14679,15 @@ impl AgentEngine {
                             self.fire_on_session_end(turn).await;
                             self.cache_ledger.finish();
                             self.save_session_mirror();
+                            // #388 bullet 4, same class as the four provider-failure
+                            // exits: this is a TERMINAL exit of the run and it said
+                            // nothing on the ANSWER stream. A compaction bail is the
+                            // reporter’s own "runs out of token budget" symptom, so a
+                            // `-p` run ended with an EMPTY stdout and the cause only on
+                            // stderr. Measured, not modelled — see the c10 red arm.
+                            self.emit_incomplete_run_admission(
+                                "the context could not be compacted small enough to continue this run",
+                            );
                             return Err(e);
                         }
                         // Rebuild the volatile request inputs from the compacted
@@ -14763,6 +14853,10 @@ impl AgentEngine {
                         // what propagates and the session stays usable.
                         self.settle_failed_turn_provider_attempts(&e.to_string())
                             .await;
+                        self.emit_incomplete_run_admission(
+                            "the provider refused this request and it could not be repaired \
+                             into one worth re-sending",
+                        );
                         return Err(e.into());
                     }
                 };
@@ -14956,6 +15050,10 @@ impl AgentEngine {
                                     loop_owner = %owner,
                                     loop_engaged = %engaged,
                                     "{detail}"
+                                );
+                                self.emit_incomplete_run_admission(
+                                    "the router and this engine both tried to own the same \
+                                     escalation loop, so the turn was abandoned",
                                 );
                                 return Err(AgentError::ApiError(detail));
                             }
@@ -15183,6 +15281,15 @@ impl AgentEngine {
                                     self.fire_on_session_end(turn).await;
                                     self.cache_ledger.finish();
                                     self.save_session_mirror();
+                                    // #388 bullet 4, same class as the four provider-failure
+                                    // exits: this is a TERMINAL exit of the run and it said
+                                    // nothing on the ANSWER stream. A compaction bail is the
+                                    // reporter’s own "runs out of token budget" symptom, so a
+                                    // `-p` run ended with an EMPTY stdout and the cause only on
+                                    // stderr. Measured, not modelled — see the c10 red arm.
+                                    self.emit_incomplete_run_admission(
+                                        "the context could not be compacted small enough to continue this run",
+                                    );
                                     return Err(e);
                                 }
                                 let history_after = request_wire_fingerprint(
@@ -15585,6 +15692,27 @@ impl AgentEngine {
                             );
                             self.emit_error(&gate_msg, false);
                             self.emit_midflight_monitor_occurrence();
+                            // #388, Expected-Behavior bullet 3 — "clearly mark
+                            // the task as failed/incomplete". This is a TERMINAL
+                            // exit of the run and it was the one exit in this
+                            // loop that said nothing on the ANSWER stream:
+                            // `emit_error` is stderr, so a `-p` run's stdout
+                            // ended on the model's last narration and read as a
+                            // finished reply.
+                            //
+                            // Deliberately NOT also writing the session here,
+                            // unlike the retry-exhausted exit below. Measured:
+                            // `sync_journal_conversation` runs once per attempt,
+                            // so the conversation is already canonical when this
+                            // gate fires, and an engine holding a persisted
+                            // session without a journal is refused outright — so
+                            // there is no reachable install where a write here
+                            // saves anything.
+                            self.emit_incomplete_run_admission(
+                                "the provider stream failed twice with no output while the last \
+                                 tool round had failed, so retrying the same context was \
+                                 spending tokens without progress",
+                            );
                             return Err(AgentError::ApiError(gate_msg));
                         }
                         MonitorAction::CancelBudget { reason } => {
@@ -15707,6 +15835,9 @@ impl AgentEngine {
                 );
                 self.output
                     .emit_error(&final_error, !is_client_error && !permanent_endpoint);
+                self.emit_incomplete_run_admission(&format!(
+                    "the provider failed every one of {sends} attempts at this turn"
+                ));
                 return Err(AgentError::ApiError(final_error));
             }
 
@@ -16513,7 +16644,7 @@ impl AgentEngine {
                     }
                 },
                 Err(GraphError::Cancelled) => GraphExit::Aborted,
-                Err(e) => GraphExit::Failed(format!("orchestration graph failed: {e}")),
+                Err(e) => GraphExit::Failed(e.to_string()),
             };
             drop(cell_guard);
             let outcome = match exit {
@@ -16527,12 +16658,37 @@ impl AgentEngine {
                     self.cache_ledger.finish();
                     return Err(AgentError::UserAborted);
                 }
-                GraphExit::Failed(msg) => {
+                GraphExit::Failed(cause) => {
+                    // #388 bullet 4 ("clearly mark the task as
+                    // failed/incomplete"), for the category bullet 7 names
+                    // "tool/runtime failure". This is a terminal Err exit of
+                    // the run loop on the MAINLINE tool-dispatch path: every
+                    // `Node::AgentCall` is `tokio::spawn`ed by the walker
+                    // (orchestration/graph.rs), so a panic in dispatch that
+                    // falls outside the per-tool `catch_unwind` arrives here
+                    // as `GraphError::AgentFailed { agent: "<join>" }`.
+                    //
+                    // Nothing on this path writes to the ANSWER stream - the
+                    // cause travels out as `Err` and the CLI renders it on
+                    // stderr - so before this line a `-p` run that died here
+                    // ended stdout on the model's last narration and read as
+                    // a finished answer. Same shared helper and wording as
+                    // the provider and compaction exits, so the three cannot
+                    // drift apart.
+                    //
+                    // Emitted FIRST, ahead of `prepare_durable_conversation`,
+                    // whose own `?` would otherwise carry the run out of this
+                    // arm with the admission never written.
+                    self.emit_incomplete_run_admission(&format!(
+                        "the tool run for this turn failed ({cause})"
+                    ));
                     self.prepare_durable_conversation().await?;
                     self.fire_on_session_end(turn + 1).await;
                     self.cache_ledger.finish();
                     self.save_session_mirror();
-                    return Err(AgentError::ApiError(msg));
+                    return Err(AgentError::ApiError(format!(
+                        "orchestration graph failed: {cause}"
+                    )));
                 }
             };
 
@@ -21159,6 +21315,7 @@ mod set_config_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -23040,6 +23197,7 @@ mod phase6_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -23371,6 +23529,7 @@ mod compact_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -24035,6 +24194,96 @@ mod compact_tests {
             }
             other => panic!("expected ContextTooLong from emergency, got: {other:?}"),
         }
+    }
+
+    /// #388 bullet 4 (c10) - the COMPACTION bail is a terminal exit of the run
+    /// too, and it was the last class of run-ending failure saying nothing
+    /// where the answer goes.
+    ///
+    /// `emergency_stays_conservative_ignoring_real_watermark` above proves the
+    /// bail FIRES; this proves the user is TOLD when it fires, through a real
+    /// `run()`. This path is the reporter own words - "truncates because the
+    /// model runs out of token budget" - and the class was measured on the
+    /// shipped binary: a one-shot run ending on a provider-failure exit wrote
+    /// 177 bytes to stdout WITH the admission and 0 bytes with it stubbed out,
+    /// and the compaction exits were still on the 0-byte side.
+    #[tokio::test]
+    async fn a_compaction_bail_admits_itself_on_the_answer_stream() {
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            emergency_buffer: 3_000,
+            enabled: false,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 198_000;
+        state.last_real_input_tokens = 10_000;
+
+        let mut engine = make_compact_engine(config, state, vec![]);
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        let handle = sink.handle();
+        engine.output = sink;
+        engine.provider = Arc::new(SummaryProvider);
+
+        let result = engine.run("the live task", "m-388-compact").await;
+        assert!(
+            matches!(&result, Err(super::AgentError::ContextTooLong { .. })),
+            "this arm must reach the compaction bail: {result:?}"
+        );
+
+        let answer: String = handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            answer.contains("[stopped early]"),
+            "#388: a run that ends on a compaction bail must admit it where the \
+             ANSWER went - emit_error is stderr, so stdout is otherwise empty \
+             and the run reads as having produced nothing at all: {answer:?}"
+        );
+        assert!(
+            answer.contains("not an answer"),
+            "the admission must say the partial work is not an answer: {answer:?}"
+        );
+    }
+
+    /// CONTROL for the test above, and not decoration: it stops that test
+    /// passing by admitting on EVERY run. Same fixture, watermarks below the
+    /// emergency limit, provider answers normally - the answer stream must
+    /// carry the answer and no admission.
+    #[tokio::test]
+    async fn a_run_that_does_not_bail_carries_no_admission() {
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            emergency_buffer: 3_000,
+            enabled: false,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 1_000;
+        state.last_real_input_tokens = 1_000;
+
+        let mut engine = make_compact_engine(config, state, vec![]);
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        let handle = sink.handle();
+        engine.output = sink;
+        engine.provider = Arc::new(SummaryProvider);
+
+        let result = engine.run("the live task", "m-388-nobail").await;
+        assert!(result.is_ok(), "the control must complete: {result:?}");
+
+        let answer: String = handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            !answer.contains("[stopped early]"),
+            "a run that completed must not admit failure: {answer:?}"
+        );
     }
 
     // -- Microcompact runs when count trigger fires AND pressure is real --
@@ -25441,6 +25690,7 @@ mod plan_mode_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -25905,6 +26155,7 @@ mod hook_integration_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -27080,6 +27331,7 @@ mod approval_bridge_engine_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -28384,6 +28636,7 @@ mod user_model_writeback_tests {
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
             unserved_resends: 0,
+            admitted_incomplete_this_turn: false,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -37233,6 +37486,419 @@ mod retry_wedge_protection_tests {
         );
     }
 
+    // --- #388: the clean retry and the progress gate on a DURABLE session ---
+
+    /// A scripted provider that goes through a real physical send boundary
+    /// first, which a durable session requires before any scripted event
+    /// becomes visible, and counts the sends it was asked for.
+    struct DurableScriptedProvider {
+        scripts: Mutex<std::collections::VecDeque<Vec<LlmEvent>>>,
+        sends: Arc<std::sync::atomic::AtomicUsize>,
+        url: Option<String>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for DurableScriptedProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(url) = self.url.as_deref() {
+                let client = wcore_egress::EgressClient::new()
+                    .with_policy(Arc::new(wcore_egress::AllowAllPolicy));
+                let response = wcore_providers::retry::scope_max_retries(
+                    0,
+                    wcore_providers::retry::builder_send_with_retry(client.get(url)),
+                )
+                .await?;
+                if !response.status().is_success() {
+                    return Err(ProviderError::Api {
+                        status: response.status().as_u16(),
+                        message: "fixture".into(),
+                    });
+                }
+            }
+            let script = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                for ev in script {
+                    let _ = tx.send(ev).await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    /// The same history shape as [`failed_tool_round_history`], with the tool
+    /// round's outcome as the only variable. `is_error = false` is the arm the
+    /// retry stub does not touch.
+    fn tool_round_history(body: &str, is_error: bool) -> Vec<Message> {
+        vec![
+            Message::now(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "do the thing".into(),
+                }],
+            ),
+            Message::now(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "BigTool".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::now(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: body.into(),
+                    is_error,
+                }],
+            ),
+        ]
+    }
+
+    struct RetryArm {
+        result: String,
+        sends: usize,
+    }
+
+    async fn drive_retry_arm(
+        scripts: Vec<Vec<LlmEvent>>,
+        history: Vec<Message>,
+        durable: Option<&str>,
+    ) -> RetryArm {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Held for the lifetime of the run: dropping the server or the session
+        // root mid-run would fail the arm for a reason that is not the subject.
+        let (server, dir) = if durable.is_some() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            (Some(server), Some(dir))
+        } else {
+            (None, None)
+        };
+        let provider = Arc::new(DurableScriptedProvider {
+            scripts: Mutex::new(scripts.into_iter().collect()),
+            sends: Arc::clone(&sends),
+            url: server.as_ref().map(|s| s.uri()),
+        });
+        let mut engine = wedge_engine(provider);
+        engine.output = Arc::new(TestSink::new());
+        if let (Some(sid), Some(dir)) = (durable, dir.as_ref()) {
+            let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+            let active = manager
+                .create_for_run("test", "m", "/tmp", Some(sid))
+                .unwrap();
+            engine.session_manager = Some(manager);
+            engine.current_session = Some(active.session);
+            engine.session_journal = Some(active.journal);
+        }
+        engine.messages = history;
+        let result = engine.run("try again", "m-388-retry").await;
+        let rendered = match &result {
+            Ok(ok) => format!("Ok({:?}/{:?})", ok.stop_reason, ok.finish_reason),
+            Err(e) => format!("Err({e})"),
+        };
+        drop(engine);
+        drop(server);
+        drop(dir);
+        RetryArm {
+            result: rendered.chars().take(300).collect(),
+            sends: sends.load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+
+    /// #388, Expected-Behavior bullets 2 and 3, on the exit that fires on this
+    /// ticket's own symptom.
+    ///
+    /// The output-stall gate is the engine's answer to "it stalls and burns
+    /// tokens without progress". Until the retry-stub fix above it could not
+    /// run at all on a durable session — the run died on the provider-dispatch
+    /// proof first — so this asserts BOTH that it is now reachable there and
+    /// that it does what a terminal exit owes:
+    ///
+    ///  * the work the turn produced is written down (bullet: "preserve a
+    ///    checkpoint and allow the user to continue"), and
+    ///  * the ANSWER stream says the run did not finish (bullet: "clearly mark
+    ///    the task as failed/incomplete"). `emit_error` reaches stderr only, so
+    ///    without this a `-p` run's stdout ends on the model's narration.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_output_stall_stop_is_reachable_and_admits_itself() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "m", "/tmp", Some("38800000c6c3"))
+            .unwrap();
+
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(DurableScriptedProvider {
+            scripts: Mutex::new(
+                vec![
+                    vec![LlmEvent::Error("boom".into())],
+                    vec![LlmEvent::Error("boom again".into())],
+                    // Only reached if the gate failed to stop the run.
+                    vec![
+                        LlmEvent::TextDelta("must not run".into()),
+                        done(StopReason::EndTurn, FinishReason::Stop, 0),
+                    ],
+                ]
+                .into(),
+            ),
+            sends: Arc::clone(&sends),
+            url: Some(server.uri()),
+        });
+        let sink = Arc::new(TestSink::new());
+        let handle = sink.handle();
+        let mut engine = wedge_engine(provider);
+        engine.output = sink;
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
+        engine.messages = tool_round_history("BigTool blew up", true);
+        let result = engine.run("try again", "m-388-stall").await;
+        drop(engine);
+
+        match &result {
+            Err(super::AgentError::ApiError(msg)) => assert!(
+                msg.contains("BigTool"),
+                "the stall gate's error must name the failing tool: {msg}"
+            ),
+            other => panic!(
+                "#388: the output-stall gate must be REACHABLE on a durable session — \
+                 before the retry-stub fix the run died on the provider-dispatch proof \
+                 instead and this gate never ran. Got: {other:?}"
+            ),
+        }
+        assert_eq!(
+            sends.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the gate must stop after 2 no-output failures, not burn a third \
+             full-context send"
+        );
+
+        let events = handle.snapshot();
+        let answer_stream: String = events
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            answer_stream.contains("[stopped early]"),
+            "#388: a run that ends on a provider stall must admit it where the \
+             ANSWER went — `emit_error` is stderr, so stdout otherwise ends \
+             mid-narration and reads as a finished answer. Answer stream: \
+             {answer_stream:?}"
+        );
+        assert!(
+            answer_stream.contains("not an answer"),
+            "the admission must say the partial work is not an answer: \
+             {answer_stream:?}"
+        );
+    }
+
+    /// #388, Expected-Behavior bullet 2 — "preserve a checkpoint and allow the
+    /// user to continue" — on the exit that fires on this ticket's own symptom.
+    ///
+    /// A regression guard, not a fix: the conversation is ALREADY canonical
+    /// when the gate stops the run, because `sync_journal_conversation` runs
+    /// once per attempt. That was measured rather than assumed — a candidate
+    /// `save_session_mirror()` at the gate left every arm green and was dropped
+    /// instead of shipped. What this pins is that the property keeps holding,
+    /// because it is the only thing standing between a stalled long task and
+    /// work the user has to redo from scratch.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_stalled_run_leaves_its_conversation_durable() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "m", "/tmp", Some("38800000c6e5"))
+            .unwrap();
+        let journal = active.journal.clone();
+
+        let provider = Arc::new(DurableScriptedProvider {
+            scripts: Mutex::new(
+                vec![
+                    vec![LlmEvent::Error("boom".into())],
+                    vec![LlmEvent::Error("boom again".into())],
+                ]
+                .into(),
+            ),
+            sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            url: Some(server.uri()),
+        });
+        let mut engine = wedge_engine(provider);
+        engine.output = Arc::new(TestSink::new());
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
+        engine.messages = tool_round_history("BigTool blew up", true);
+        let result = engine.run("try again", "m-388-durable").await;
+        drop(engine);
+
+        assert!(
+            matches!(&result, Err(super::AgentError::ApiError(msg)) if msg.contains("BigTool")),
+            "this arm must reach the output-stall gate: {result:?}"
+        );
+        let conversation = journal.state().expect("journal state").conversation;
+        let carries_the_turn = conversation.iter().any(|value| {
+            serde_json::from_value::<Message>(value.clone())
+                .map(|message| {
+                    message.content.iter().any(
+                        |b| matches!(b, ContentBlock::ToolUse { name, .. } if name == "BigTool"),
+                    )
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            carries_the_turn,
+            "#388: a run the stall gate stopped must leave its conversation \
+             canonical — without it a provider stall becomes work redone from \
+             scratch. Durable conversation held {} message(s)",
+            conversation.len()
+        );
+        assert!(
+            conversation.iter().any(|value| {
+                serde_json::from_value::<Message>(value.clone())
+                    .map(|message| {
+                        message.content.iter().any(
+                            |b| matches!(b, ContentBlock::Text { text } if text == "try again"),
+                        )
+                    })
+                    .unwrap_or(false)
+            }),
+            "the prompt that started the stopped turn must be durable too, else \
+             a resume cannot continue from it. Held: {conversation:?}"
+        );
+    }
+
+    /// #388 — a stream failure on a turn whose last tool round FAILED must
+    /// still retry on a durable session.
+    ///
+    /// `stub_failed_tool_results_for_retry` rewrites that failed tool-result
+    /// body in the OUTBOUND copy of the request. On the next attempt
+    /// `commit_provider_recovery_checkpoint` proves the prepared request
+    /// against the durable conversation, and a rewritten `ToolResult` body is
+    /// exactly what that proof refuses — so on every durable session the retry
+    /// never leaves the engine. The run dies with an internal journal-authority
+    /// error instead of the provider's own failure, and the output-stall
+    /// progress gate written for this scenario is never reached.
+    ///
+    /// Two controls, and neither is decoration. Control A changes ONE bit of
+    /// the history — the tool round succeeded — so the stub does not fire; it
+    /// passing proves the durable retry path is otherwise sound and that a red
+    /// subject is the stub, not the journal. Control B runs the subject's exact
+    /// scripts with no journal at all; it passing proves the gate is alive off
+    /// the durable path, so this is a durable-session defect and not a broken
+    /// harness.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_failed_tool_round_still_retries_on_a_durable_session() {
+        let body = format!("CONTAMINATED-MARKER {}", "x".repeat(1_000));
+
+        let subject = drive_retry_arm(
+            vec![
+                vec![LlmEvent::Error("boom".into())],
+                vec![
+                    LlmEvent::TextDelta("recovered".into()),
+                    done(StopReason::EndTurn, FinishReason::Stop, 10),
+                ],
+            ],
+            tool_round_history(&body, true),
+            Some("38800000c6a1"),
+        )
+        .await;
+
+        let control_a = drive_retry_arm(
+            vec![
+                vec![LlmEvent::Error("boom".into())],
+                vec![
+                    LlmEvent::TextDelta("recovered".into()),
+                    done(StopReason::EndTurn, FinishReason::Stop, 10),
+                ],
+            ],
+            tool_round_history(&body, false),
+            Some("38800000c6b2"),
+        )
+        .await;
+
+        let control_b = drive_retry_arm(
+            vec![
+                vec![LlmEvent::Error("boom".into())],
+                vec![
+                    LlmEvent::TextDelta("recovered".into()),
+                    done(StopReason::EndTurn, FinishReason::Stop, 10),
+                ],
+            ],
+            tool_round_history(&body, true),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            control_a.sends, 2,
+            "CONTROL A: a durable session whose last tool round SUCCEEDED must \
+             retry a failed stream — if this is 1 the durable retry path is \
+             broken for a reason that is not the subject: {}",
+            control_a.result
+        );
+        assert!(
+            control_a.result.starts_with("Ok("),
+            "CONTROL A must recover on the retry: {}",
+            control_a.result
+        );
+        assert_eq!(
+            control_b.sends, 2,
+            "CONTROL B: with no journal the same scripts must retry — if this \
+             is 1 the harness never reached the retry at all: {}",
+            control_b.result
+        );
+
+        assert!(
+            !subject.result.contains("changes durable content"),
+            "#388: the clean-retry stub rewrites a durable ToolResult body in \
+             the outbound request, and the provider-dispatch checkpoint refuses \
+             it — so on a durable session a stream failure after a FAILED tool \
+             round cannot retry, and the user is handed an internal journal \
+             error in place of the provider's. Got: {}",
+            subject.result
+        );
+        assert_eq!(
+            subject.sends, 2,
+            "#388: the retry must reach the provider on a durable session too. \
+             sends={} result={}",
+            subject.sends, subject.result
+        );
+    }
+
     // --- B: clean-retry stub + progress gate (spec v1 Task 5) --------------
 
     /// History whose most recent tool round FAILED with a huge error body.
@@ -39651,6 +40317,515 @@ mod issue_434_routed_model_tests {
         assert!(
             seen[1].routed_model_hint.is_none(),
             "the hint only resolves a tier alias; a named model decides for itself"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #388 bullet 4 (c10) — the orchestration graph's FAILURE exit.
+//
+// The census behind c10 missed this exit. Every `Node::AgentCall` the walker
+// runs is `tokio::spawn`ed, so a panic in tool dispatch that falls outside the
+// per-tool `catch_unwind` comes back as a `JoinError` and ends the run at
+// `GraphExit::Failed` — a terminal `Err` of the run loop on the ordinary
+// tool-dispatch path (the graph runs on every turn that has tool calls).
+// That arm called no emit at all, so stdout ended on the model's narration.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod issue_388_graph_failure_admission_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+    use wcore_protocol::events::ToolCategory;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::Tool;
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+    use wcore_types::tool::ToolResult;
+
+    /// Turn 1 asks for a tool; turn 2 answers and ends. The arm under test
+    /// dies inside turn 1's dispatch, so the second script only ever runs in
+    /// the control.
+    struct ToolThenAnswer {
+        turn: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ToolThenAnswer {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let first = self.turn.fetch_add(1, Ordering::SeqCst) == 0;
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                if first {
+                    let _ = tx
+                        .send(LlmEvent::TextDelta("let me look that up".into()))
+                        .await;
+                    let _ = tx
+                        .send(LlmEvent::ToolUse {
+                            id: "t1".into(),
+                            name: "mock_tool".into(),
+                            input: json!({}),
+                            extra: None,
+                        })
+                        .await;
+                    let _ = tx
+                        .send(LlmEvent::Done {
+                            stop_reason: StopReason::ToolUse,
+                            finish_reason: FinishReason::from_stop_reason(StopReason::ToolUse),
+                            usage: TokenUsage::default(),
+                        })
+                        .await;
+                } else {
+                    let _ = tx.send(LlmEvent::TextDelta("the answer".into())).await;
+                    let _ = tx
+                        .send(LlmEvent::Done {
+                            stop_reason: StopReason::EndTurn,
+                            finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                            usage: TokenUsage::default(),
+                        })
+                        .await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    /// A tool that panics in `is_concurrency_safe` when armed.
+    ///
+    /// That is deliberately NOT the `execute` panic: the dispatcher wraps
+    /// `prepare_effect` and `execute` in `catch_unwind` (orchestration/mod.rs,
+    /// "Wave RB RELIABILITY MAJOR"), and nothing wraps the synchronous trait
+    /// methods. `partition()` calls `is_concurrency_safe` at
+    /// orchestration/mod.rs:697, inside `dispatch_once`, inside the spawned
+    /// `AgentCall` task - so a panic there is the class that actually reaches
+    /// the walker as a `JoinError`. Unarmed, the same tool answers normally,
+    /// which is what makes the control a control.
+    struct QuietTool {
+        panics_in_partition: bool,
+    }
+
+    #[async_trait]
+    impl Tool for QuietTool {
+        fn name(&self) -> &str {
+            "mock_tool"
+        }
+        fn description(&self) -> &str {
+            "mock tool for the #388 graph-failure arm"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            assert!(
+                !self.panics_in_partition,
+                "injected tool-runtime panic in is_concurrency_safe"
+            );
+            true
+        }
+        async fn execute(&self, _input: Value) -> ToolResult {
+            ToolResult {
+                content: "tool ok".to_string(),
+                is_error: false,
+            }
+        }
+    }
+
+    /// Build a real engine over the production `run()` path.
+    fn engine(panics_in_partition: bool) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(QuietTool {
+            panics_in_partition,
+        }));
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        let mut engine = super::AgentEngine::new_with_provider(
+            Arc::new(ToolThenAnswer {
+                turn: AtomicUsize::new(0),
+            }),
+            wcore_config::config::Config::default(),
+            registry,
+            sink.clone(),
+        );
+        engine.max_turns = Some(4);
+        (engine, sink)
+    }
+
+    fn answer_stream(handle: &crate::test_utils::TestSinkHandle) -> String {
+        handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// The arm under test. The armed tool panics inside the spawned
+    /// `AgentCall` task, outside the per-tool `catch_unwind`, so the walker
+    /// gets a `JoinError` and returns `GraphError::AgentFailed`.
+    #[tokio::test]
+    async fn a_graph_failure_exit_admits_itself_on_the_answer_stream() {
+        let (mut engine, sink) = engine(true);
+        let handle = sink.handle();
+
+        let err = engine
+            .run("do the thing", "m-388-graph")
+            .await
+            .expect_err("the graph failure arm must end the run as Err");
+        assert!(
+            matches!(&err, super::AgentError::ApiError(m)
+                if m.starts_with("orchestration graph failed:")),
+            "this arm must be the GraphExit::Failed exit, not another Err: {err:?}"
+        );
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("let me look that up"),
+            "the narration must have reached the answer stream, or this test is \
+             not measuring an answer stream at all: {answer:?}"
+        );
+        assert!(
+            answer.contains("[stopped early]"),
+            "#388: a run that ends on a tool/runtime failure must admit it where \
+             the ANSWER went - the cause travels out as Err and is rendered on \
+             stderr, so stdout otherwise ends on the narration and reads as a \
+             finished answer: {answer:?}"
+        );
+        assert!(
+            answer.contains("not an answer"),
+            "the admission must say the partial work is not an answer: {answer:?}"
+        );
+    }
+
+    /// CONTROL, and not decoration: same engine, same tool, same provider
+    /// script, crash cut NOT armed. It stops the test above passing by
+    /// admitting on every run, and it proves the fixture reaches a real
+    /// tool-dispatch turn rather than failing before the graph.
+    #[tokio::test]
+    async fn the_same_run_without_the_crash_carries_no_admission() {
+        let (mut engine, sink) = engine(false);
+        let handle = sink.handle();
+
+        let result = engine
+            .run("do the thing", "m-388-graph-control")
+            .await
+            .expect("the control must complete");
+        assert_eq!(
+            result.turns, 2,
+            "the control must have dispatched the tool and come back for a \
+             second turn, or it never entered the graph at all"
+        );
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("the answer"),
+            "the control must carry the real answer: {answer:?}"
+        );
+        assert!(
+            !answer.contains("[stopped early]"),
+            "a run that completed must not admit failure: {answer:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #388 bullet 4 (c12) — the exits no per-site census covers.
+//
+// c8, c10 and c11 each closed one bucket of `run_inner_impl`'s terminal `Err`
+// exits by editing the exit itself, and each rested on a census asserting that
+// nothing else was left. That census was wrong twice (29 -> 32 sites), so the
+// property is re-stated here as something a census cannot get wrong: EVERY
+// `Err` a turn ends on says so on the answer stream, enforced once in
+// `run_inner` rather than 32 times inside it.
+//
+// The arm measured below is a `SessionAuthority` exit — the bucket all three
+// earlier criteria excluded on the reasoning that internal faults have "no
+// answer stream guaranteed live". This test is the disproof: the narration
+// reaches the stream and then the run dies, so before the backstop stdout
+// ended on the model's last sentence and read as a finished answer. That is
+// the reported defect, on the bucket that was argued away.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod issue_388_silent_internal_exit_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    const NARRATION: &str = "let me look that up";
+
+    /// What the provider does after it has narrated.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Tail {
+        /// An `LlmEvent::Error` carrying `JOURNAL_AUTHORITY_ERROR_PREFIX`.
+        /// `run_inner_impl` turns exactly this into
+        /// `AgentError::SessionAuthority` (engine.rs, the `LlmEvent::Error`
+        /// arm guarded by `is_journal_authority_error`) — a terminal `Err`
+        /// exit reached mid-stream, after the narration is already out.
+        JournalAuthorityFailure,
+        /// Cancel the run's own token and then go quiet, so the turn ends on
+        /// `AgentError::UserAborted` from the cancel arm of the receive
+        /// `select!` — also mid-stream, also after the narration.
+        CancelMidStream,
+        /// End the turn normally.
+        EndTurn,
+    }
+
+    struct NarrateThen {
+        tail: Tail,
+        cancel: tokio_util::sync::CancellationToken,
+        /// Read by the cancel arm ONLY, so the cancel lands strictly after the
+        /// narration has reached the sink. Cancelling straight after `send`
+        /// races the engine's receive loop and exits at an earlier cancel
+        /// check with an empty answer stream — which would make this control
+        /// pass for the wrong reason.
+        sink: Arc<crate::test_utils::TestSink>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for NarrateThen {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            let tail = self.tail;
+            let cancel = self.cancel.clone();
+            let handle = self.sink.handle();
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta(NARRATION.into())).await;
+                match tail {
+                    Tail::JournalAuthorityFailure => {
+                        let _ = tx
+                            .send(LlmEvent::Error(format!(
+                                "{}the writer lease was revoked",
+                                crate::journal_provider::JOURNAL_AUTHORITY_ERROR_PREFIX
+                            )))
+                            .await;
+                    }
+                    Tail::CancelMidStream => {
+                        for _ in 0..2000 {
+                            if narration_landed(&handle) {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        }
+                        assert!(
+                            narration_landed(&handle),
+                            "the cancel control must cancel AFTER the narration is on the \
+                             stream, or it is not testing a mid-stream abort"
+                        );
+                        cancel.cancel();
+                        // Hold the channel open so the receive `select!` has
+                        // to choose the cancel branch rather than end-of-
+                        // stream. Dropped when the run returns.
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                    Tail::EndTurn => {
+                        let _ = tx
+                            .send(LlmEvent::Done {
+                                stop_reason: StopReason::EndTurn,
+                                finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                                usage: TokenUsage::default(),
+                            })
+                            .await;
+                    }
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    /// A provider that refuses the dispatch outright, the way an HTTP 400
+    /// does. This is c8's own exit — the one that ALREADY admits from inside
+    /// `run_inner_impl` — and it is here to hold the backstop to exactly one
+    /// admission.
+    struct RefusesDispatch;
+
+    #[async_trait]
+    impl LlmProvider for RefusesDispatch {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            Err(ProviderError::Api {
+                status: 400,
+                message: "malformed request".into(),
+            })
+        }
+    }
+
+    fn narration_landed(handle: &crate::test_utils::TestSinkHandle) -> bool {
+        answer_stream(handle).contains(NARRATION)
+    }
+
+    fn engine_over(
+        provider: Arc<dyn LlmProvider>,
+    ) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        engine_over_with_sink(provider, sink)
+    }
+
+    fn engine_over_with_sink(
+        provider: Arc<dyn LlmProvider>,
+        sink: Arc<crate::test_utils::TestSink>,
+    ) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            sink.clone(),
+        );
+        engine.max_turns = Some(2);
+        (engine, sink)
+    }
+
+    fn narrating_engine(tail: Tail) -> (super::AgentEngine, Arc<crate::test_utils::TestSink>) {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let sink = Arc::new(crate::test_utils::TestSink::new());
+        let (mut engine, sink) = engine_over_with_sink(
+            Arc::new(NarrateThen {
+                tail,
+                cancel: cancel.clone(),
+                sink: sink.clone(),
+            }),
+            sink,
+        );
+        if tail == Tail::CancelMidStream {
+            engine.set_cancel_token(cancel);
+        }
+        (engine, sink)
+    }
+
+    fn answer_stream(handle: &crate::test_utils::TestSinkHandle) -> String {
+        handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("text_delta"))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// SUBJECT. An internal-authority failure mid-stream is a terminal `Err`
+    /// exit of the run loop that no `emit_incomplete_run_admission` call site
+    /// covers, so without the `run_inner` backstop stdout ends on the
+    /// narration and reads as a finished answer.
+    #[tokio::test]
+    async fn an_internal_authority_exit_admits_itself_on_the_answer_stream() {
+        let (mut engine, sink) = narrating_engine(Tail::JournalAuthorityFailure);
+        let handle = sink.handle();
+
+        let err = engine
+            .run("do the thing", "m-388-authority")
+            .await
+            .expect_err("the authority arm must end the run as Err");
+        assert!(
+            matches!(&err, super::AgentError::SessionAuthority(m)
+                if m.contains("writer lease was revoked")),
+            "this arm must be a SessionAuthority exit, not another Err: {err:?}"
+        );
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("let me look that up"),
+            "the narration must have reached the answer stream, or this test is \
+             not measuring an answer stream at all: {answer:?}"
+        );
+        assert!(
+            answer.contains("[stopped early]"),
+            "#388 bullet 4: a run that ends on ANY terminal Err must say so \
+             where the answer went. The cause travels out as Err and is \
+             rendered on stderr, so stdout otherwise ends on the narration: \
+             {answer:?}"
+        );
+    }
+
+    /// CONTROL. The same fixture, same narration, no failure. Stops the
+    /// subject passing by admitting on every run, and proves the backstop is
+    /// not simply appended to every turn.
+    #[tokio::test]
+    async fn the_same_stream_without_the_authority_failure_carries_no_admission() {
+        let (mut engine, sink) = narrating_engine(Tail::EndTurn);
+        let handle = sink.handle();
+
+        engine
+            .run("do the thing", "m-388-authority-control")
+            .await
+            .expect("the control must complete");
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("let me look that up"),
+            "the control must carry the narration: {answer:?}"
+        );
+        assert!(
+            !answer.contains("[stopped early]"),
+            "a run that completed must not admit failure: {answer:?}"
+        );
+    }
+
+    /// CONTROL, and the one criterion-bearing exclusion. `UserAborted` is the
+    /// one terminal `Err` the backstop deliberately stays silent on: the stop
+    /// was the user's own, the receive arm already emits "Run cancelled while
+    /// receiving provider output.", and the host is told through
+    /// `RecoveryLifecycle::Cancelled` rather than through an error. The
+    /// exclusion is a decision, so it is graded rather than asserted in prose.
+    #[tokio::test]
+    async fn a_cancelled_run_carries_no_admission() {
+        let (mut engine, sink) = narrating_engine(Tail::CancelMidStream);
+        let handle = sink.handle();
+
+        let err = engine
+            .run("do the thing", "m-388-cancel")
+            .await
+            .expect_err("the cancel arm must end the run as Err");
+        assert!(
+            matches!(&err, super::AgentError::UserAborted),
+            "this control must be the abort exit, not another Err: {err:?}"
+        );
+
+        let answer = answer_stream(&handle);
+        assert!(
+            answer.contains("let me look that up"),
+            "the abort must still have reached a real mid-stream exit: {answer:?}"
+        );
+        assert!(
+            !answer.contains("[stopped early]"),
+            "an abort the user asked for is announced as a cancellation, not \
+             as an unexplained stop: {answer:?}"
+        );
+    }
+
+    /// OVER-CORRECTION GUARD. c8's exit already admits from inside
+    /// `run_inner_impl`. A backstop that does not notice would append a
+    /// second admission to the same answer stream, so the count is asserted,
+    /// not the presence.
+    #[tokio::test]
+    async fn an_exit_that_already_admitted_admits_exactly_once() {
+        let (mut engine, sink) = engine_over(Arc::new(RefusesDispatch));
+        let handle = sink.handle();
+
+        engine
+            .run("do the thing", "m-388-once")
+            .await
+            .expect_err("a refused dispatch must end the run as Err");
+
+        let answer = answer_stream(&handle);
+        assert_eq!(
+            answer.matches("[stopped early]").count(),
+            1,
+            "the run must admit exactly once: the exit's own admission, not \
+             that one plus the backstop's: {answer:?}"
         );
     }
 }
