@@ -4,7 +4,7 @@ repo: FerroxLabs/wayland-core
 kind: defect
 title: "Two path resolvers with different escape properties 70 lines apart, and the weaker one guards the skill-source write refusal"
 status: open
-last_verified_commit: fa7a7b168
+last_verified_commit: 13d36be65
 criteria:
   - id: c1
     text: "is_skill_source_path is graded against dotdot-after-a-missing-component and the dangling-symlink hop, the two escapes #1097 was written for"
@@ -29,7 +29,7 @@ criteria:
     state: met
     evidence: test:crates/wcore-tools/src/workspace_policy/tests.rs::every_strong_resolver_site_states_which_resolver_and_why
     owner: core
-    note: "Both resolvers remain, so the obligation is symmetric and was being graded on ONE side only. #383 built every_weak_resolver_site_states_which_resolver_and_why over canon_for_scope call sites; a reader standing at a canon_existing_ancestor call could no less see that a choice had been made. The instrument is now a shared function resolver_sites_without_a_reason(source, needle, marker) driven from a table, so a THIRD resolver is one row, and all six canon_existing_ancestor call sites carry `resolver: `canon_existing_ancestor`` with the reason at the site: fn resolve (both SecretDenyFs guard predicates are refusals, so they must judge where a path lands), is_repo_control_path, is_skill_source_path, ensure_write_target_readable (both sides of the comparison). Enclosing-function look-back, not a fixed window, for the reason #383 records. RED ARM: one marker removed from fn resolve; cargo check exit 0; the gate names the site."
+    note: "Both resolvers remain, so the obligation is symmetric and was being graded on ONE side only. #383 built every_weak_resolver_site_states_which_resolver_and_why over canon_for_scope call sites; a reader standing at a canon_existing_ancestor call could no less see that a choice had been made. The instrument is now a shared function resolver_sites_without_a_reason(source, needle, marker) driven from a table, so a THIRD resolver is one row, and all six canon_existing_ancestor call sites carry `resolver: `canon_existing_ancestor`` with the reason at the site: fn resolve (both SecretDenyFs guard predicates are refusals, so they must judge where a path lands), is_repo_control_path, is_skill_source_path, ensure_write_target_readable (both sides of the comparison). Enclosing-function look-back, not a fixed window, for the reason #383 records. RED ARM: one marker removed from fn resolve; cargo check exit 0; the gate names the site. RE-DERIVED 13d36be65 (not inherited): the `resolver: `canon_existing_ancestor`` marker deleted from fn resolve; cargo check -p wcore-tools --tests exit 0; every_strong_resolver_site_states_which_resolver_and_why fails naming the site. Restored, blob identity verified equal to the commit under test."
 ---
 
 Found while grading the superseded `lane/finish-criteria` orphan branches. Not a
