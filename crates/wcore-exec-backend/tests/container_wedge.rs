@@ -599,7 +599,8 @@ async fn the_operator_chain_finds_the_leftover_end_to_end() {
     );
     assert!(
         !scoped_row.rows.iter().any(|row| row.contains(name)),
-        "CONTROL: the nonce-scoped chain must NOT see a leftover carrying another nonce, or          this test has stopped measuring core#366: {:?}",
+        "CONTROL: the nonce-scoped chain must NOT see a leftover carrying another nonce, \
+         or this test has stopped measuring core#366: {:?}",
         scoped_row.rows
     );
     assert_eq!(

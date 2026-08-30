@@ -487,7 +487,10 @@ pub trait ExecutionBackend: Send + Sync {
         // narrower answer is indistinguishable from a clean host.
         if scan.nonce.as_deref() != scope.nonce() {
             return Err(ExecError::Exec(format!(
-                "core#366 d2: a scan asked in scope `{}` came back declaring scope {:?}. A scan                  that answers a narrower question than the caller asked reports zero over a                  leftover it never looked for, which is precisely this defect. backend={}                  method={}",
+                "core#366 d2: a scan asked in scope `{}` came back declaring scope {:?}. \
+                 A scan that answers a narrower question than the caller asked reports \
+                 zero over a leftover it never looked for, which is precisely this \
+                 defect. backend={} method={}",
                 scope.label(),
                 scan.nonce,
                 scan.backend_id,
