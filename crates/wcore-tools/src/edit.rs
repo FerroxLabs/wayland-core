@@ -692,7 +692,8 @@ mod tests {
     /// render off SEPARATE match arms, and the Edit arm does not even
     /// destructure the outcome today.
     ///
-    /// Unix exchange platforms only, for the reason the Write test's doc gives.
+    /// Gated to Linux/macOS for the reason the Write test's doc gives: no
+    /// Windows executor here, not an unreachable path (FerroxLabs/wayland#1268).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn the_vfs_edit_path_names_a_save_the_refusal_displaced() {

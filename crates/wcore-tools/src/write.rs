@@ -899,10 +899,14 @@ mod tests {
     /// that drops a line is refused by the unsaved-work guard before any of
     /// this runs, and the test would then grade nothing.
     ///
-    /// Unix exchange platforms only: `Swap::Displaced` is `RENAME_EXCHANGE` /
-    /// `RENAME_SWAP` there. Windows publishes with `ReplaceFileW` and restores
-    /// with a plain replacing rename, which hands nothing back to judge, so no
-    /// save can be intercepted there at all.
+    /// Gated to Linux/macOS because this workspace has no Windows executor,
+    /// NOT because the path is unreachable there. On Windows
+    /// `publish_displacing` returns `Swap::Displaced(backup)` via
+    /// `ReplaceFileW`'s `lpBackupFileName` and `restore` returns
+    /// `Ok(Some(exchanged_out))`, so `intercepted_save` is reachable -- see
+    /// `wcore_config::atomic_io`, which corrects the earlier reading that
+    /// `ReplaceFile` hands nothing back. Windows coverage is
+    /// FerroxLabs/wayland#1268.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn the_vfs_path_names_a_save_the_refusal_displaced() {

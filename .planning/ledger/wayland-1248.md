@@ -70,11 +70,19 @@ RED arm for the guard: restoring `rollback_tool.rs`'s consumer to `Ok(FileMutati
 
 Named, not silent:
 
-* **Windows.** Both c3 tests are `#[cfg(any(target_os = "linux", target_os = "macos"))]`. On
-  Windows `atomic_write_checked` publishes with `ReplaceFileW` and restores with a plain
-  replacing rename, which hands nothing back to judge, so no save can be intercepted there and
-  `intercepted_save` is structurally always `None`. c4's control tests, the producer sweep's
-  subject and the source guard all run on every platform.
+* **Windows -- CORRECTED 2026-08-30, the earlier claim here was FALSE.** Both c3 tests are
+  `#[cfg(any(target_os = "linux", target_os = "macos"))]` because this workspace has no Windows
+  executor, NOT because the path is unreachable. The previous note asserted `ReplaceFileW`
+  "hands nothing back to judge" and that `intercepted_save` is "structurally always `None`" on
+  Windows. That reproduced the exact reading `wcore_config::atomic_io` already records as
+  "simply wrong about `lpBackupFileName`". Measured by compile probe on the Windows target with
+  a Linux control in the same pass: the `#[cfg(windows)]` arm of `publish_displacing` returns
+  `Swap::Displaced(backup)` and `restore` returns `Ok(Some(exchanged_out))`, both live
+  (`cargo check --target x86_64-pc-windows-gnu` = 101 with the probe, Linux control = 0), so
+  `Refusal { intercepted_save: Some(..) }` is reachable there. What is true is narrower and is
+  a COVERAGE gap, now tracked as FerroxLabs/wayland#1268: the path is unexercised on Windows,
+  and whether it behaves correctly there is unmeasured. c4's control tests, the producer
+  sweep's subject and the source guard all run on every platform.
 * **`RollbackTool` renders its own sentence.** It names the preserved path, so the notice is not
   lost, but it composes bespoke prose instead of going through `conflict_message`, because its
   surface is a suspension reason and not a tool refusal. The source guard covers the
