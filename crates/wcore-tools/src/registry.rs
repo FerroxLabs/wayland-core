@@ -602,8 +602,7 @@ pub fn sink_deferred_to_tail(defs: &mut Vec<ToolDef>) {
     if !defs.iter().any(|def| def.deferred) {
         return;
     }
-    let (hot, cold): (Vec<ToolDef>, Vec<ToolDef>) =
-        defs.drain(..).partition(|def| !def.deferred);
+    let (hot, cold): (Vec<ToolDef>, Vec<ToolDef>) = defs.drain(..).partition(|def| !def.deferred);
     *defs = hot;
     defs.extend(cold);
 }

@@ -13334,14 +13334,25 @@ impl AgentEngine {
                     let tools = self.apply_tool_deferral(tools);
 
                     // Build system prompt: append plan mode instructions when active
+                    //
+                    // FerroxLabs/wayland#1208: the `Current date:` value is
+                    // baked into `self.system_prompt` once at bootstrap and
+                    // the same text tells the model it is the authoritative
+                    // "today". Refresh it here, on the ONE path that puts the
+                    // prompt on the wire, so a session that outlives the day
+                    // it started in — a channel-gateway engine lives in an
+                    // unevicted per-session pool — stops asserting the day the
+                    // gateway booted. Byte-stable within a day (it borrows),
+                    // so the cached prefix moves once per rollover and not
+                    // once per turn.
+                    let base = crate::context::refresh_current_date_line(
+                        &self.system_prompt,
+                        &crate::context::today_string(),
+                    );
                     let system = if self.plan_state.is_active {
-                        format!(
-                            "{}\n\n{}",
-                            self.system_prompt,
-                            plan_prompt::plan_mode_instructions()
-                        )
+                        format!("{}\n\n{}", base, plan_prompt::plan_mode_instructions())
                     } else {
-                        self.system_prompt.clone()
+                        base.into_owned()
                     };
 
                     // v0.8.1 U1 — the per-turn skill-router hint (when the router is

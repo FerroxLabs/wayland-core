@@ -151,7 +151,6 @@ fn a_second_hydration_appends_after_the_first() {
     );
 }
 
-
 // ---------------------------------------------------------------------------
 // FerroxLabs/wayland#1209 — the same guarantee with the catalog fold OFF.
 //
@@ -206,9 +205,10 @@ fn hydration_leaves_the_tools_prefix_byte_identical_in_both_catalog_modes() {
         names(&stub_turn1)
     );
     assert!(
-        stub_turn1
-            .iter()
-            .any(|t| t["description"].as_str().unwrap_or_default().starts_with("(Deferred)")),
+        stub_turn1.iter().any(|t| t["description"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("(Deferred)")),
         "stub mode must emit per-tool stubs: {:?}",
         names(&stub_turn1)
     );
@@ -233,8 +233,7 @@ fn hydration_leaves_the_tools_prefix_byte_identical_in_both_catalog_modes() {
         names(&stub_turn2)
     );
     assert!(
-        first_differing_index(&stub_turn1, &stub_turn2)
-            .is_none_or(|i| i >= HOT_WIRE_PREFIX),
+        first_differing_index(&stub_turn1, &stub_turn2).is_none_or(|i| i >= HOT_WIRE_PREFIX),
         "first differing wire index must be inside the tail-mutable region, got {:?}\n \
          turn 1: {:?}\n turn 2: {:?}",
         first_differing_index(&stub_turn1, &stub_turn2),
