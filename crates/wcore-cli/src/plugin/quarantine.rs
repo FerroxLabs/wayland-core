@@ -487,6 +487,48 @@ fn terminate_hardened_tree(child_pid: u32) {
 #[cfg(not(unix))]
 fn terminate_hardened_tree(_child_pid: u32) {}
 
+/// Owns the teardown of one hardened run's session for the whole of its scope.
+///
+/// #379. The ticket names ONE exit (the wall clock) and the drain guard is a
+/// second, but neither is the property. The property is that no `Err` leaves
+/// [`run_hardened`] with the tree still standing, and ENUMERATING the exits is
+/// how this defect was introduced: `harden_against_credential_prompt` grew a
+/// new session and the one kill site that existed was not revisited. A third
+/// exit was in the same function the whole time -- `try_wait` returning `Err`,
+/// which propagated with `?` and left a child that is still RUNNING and
+/// unreaped -- and a line copied into two branches would not have covered it.
+///
+/// So the teardown is attached to the SCOPE. Every `Err` path, including one
+/// nobody has written yet, drops this and tears the session down; the single
+/// [`disarm`](Self::disarm) site is the only claim that a tree is finished
+/// rather than abandoned, and it has to be argued in one place.
+struct HardenedTree {
+    /// `Some` while the tree must be torn down if this scope ends; `None` once
+    /// the run has proven the tree finished.
+    child_pid: Option<u32>,
+}
+
+impl HardenedTree {
+    fn arm(child_pid: u32) -> Self {
+        Self {
+            child_pid: Some(child_pid),
+        }
+    }
+
+    /// The tree is FINISHED, not abandoned: leave it standing.
+    fn disarm(&mut self) {
+        self.child_pid = None;
+    }
+}
+
+impl Drop for HardenedTree {
+    fn drop(&mut self) {
+        if let Some(child_pid) = self.child_pid.take() {
+            terminate_hardened_tree(child_pid);
+        }
+    }
+}
+
 fn run_git(args: &[&str], cwd: Option<&Path>, timeout: Duration) -> Result<String> {
     run_hardened(
         build_git_command(args, cwd),
@@ -511,6 +553,10 @@ fn run_hardened(mut cmd: std::process::Command, label: &str, timeout: Duration) 
     // still readable, but taking it here keeps the teardown's input independent
     // of the `Child`'s state.
     let child_pid = child.id();
+    // Armed for the rest of this function. See `HardenedTree`: the teardown
+    // belongs to the scope, not to the branches, because the branches are what
+    // #379 proved incomplete.
+    let mut teardown = HardenedTree::arm(child_pid);
 
     let mut out_pipe = child.stdout.take().expect("stdout piped");
     let mut err_pipe = child.stderr.take().expect("stderr piped");
@@ -527,17 +573,28 @@ fn run_hardened(mut cmd: std::process::Command, label: &str, timeout: Duration) 
 
     let start = Instant::now();
     let status = loop {
-        match child
-            .try_wait()
-            .map_err(|e| PluginCliError::Git(format!("wait git: {e}")))?
-        {
+        let polled = match child.try_wait() {
+            Ok(polled) => polled,
+            Err(e) => {
+                // THE EXIT #379 DID NOT NAME, and the worst of the three: the
+                // child is still RUNNING and unreaped here. This propagated
+                // with `?` -- no kill, no wait, no teardown -- so after #338
+                // it abandoned a whole detached session on a path that, before
+                // #338, at least left the child in our own group and terminal.
+                // The leaf is taken here; `teardown` takes the group on the
+                // way out.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PluginCliError::Git(format!("wait git: {e}")));
+            }
+        };
+        match polled {
             Some(s) => break s,
             None => {
                 if start.elapsed() > timeout {
-                    // The group FIRST, while the leader is still unreaped, then
-                    // the leaf and its corpse. Either order is safe (see
-                    // `terminate_hardened_tree`), this one needs no argument.
-                    terminate_hardened_tree(child_pid);
+                    // The leaf and its corpse here; the GROUP is taken by
+                    // `teardown` on the way out. Either order is safe -- see
+                    // `terminate_hardened_tree`.
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(PluginCliError::Git(format!(
@@ -555,20 +612,21 @@ fn run_hardened(mut cmd: std::process::Command, label: &str, timeout: Duration) 
     // so a descendant is provably alive, in the detached session, with the
     // install about to fail. Returning without this is the #379 leak reached by
     // the drain guard instead of by the wall clock.
-    let out = match join_drain(h_out, "stdout") {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            terminate_hardened_tree(child_pid);
-            return Err(e);
-        }
-    };
-    let err = match join_drain(h_err, "stderr") {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            terminate_hardened_tree(child_pid);
-            return Err(e);
-        }
-    };
+    teardown.disarm();
+    let out = join_drain(h_out, "stdout")?;
+    let err = join_drain(h_err, "stderr")?;
+
+    // THE ONE DISARM SITE, and the only place this file claims a tree is
+    // finished rather than abandoned. Both pipes have reached EOF, so nothing
+    // `git` spawned is holding our stdio. A descendant may still EXIST --
+    // `git-credential-cache--daemon` deliberately outlives the `git` that
+    // started it and is shared with the user's other `git` operations -- and
+    // killing it would be a regression whether this run succeeded or failed.
+    // That is why the nonzero-status error below is deliberately NOT a
+    // teardown: it is a `git` that ran to completion and said no, not a tree
+    // we walked away from.
+    teardown.disarm();
+
     if !status.success() {
         return Err(PluginCliError::Git(format!(
             "{label} failed: {}",
@@ -900,6 +958,141 @@ mod tests {
              drain-grace exit. It is the same unreaped detached tree as the timeout \
              path, reached through the drain guard instead of the wall clock \
              (FerroxLabs/wayland-core#379)"
+        );
+    }
+
+    /// Spawn a hardened `/bin/sh` that backgrounds a descendant, records both
+    /// pids, then `exec`s into a long sleep so the leader is idle rather than
+    /// merely slow. Same shape as the two exit tests above, without
+    /// `run_hardened`, so the guard can be exercised on its own.
+    fn spawn_hardened_probe(path: &Path) -> (std::process::Child, u32, u32) {
+        let script = format!(
+            "sleep 300 & printf '%d %d\\n' \"$$\" \"$!\" > \"{p}.tmp\" \
+             && mv \"{p}.tmp\" \"{p}\"; exec sleep 300",
+            p = path.display()
+        );
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        harden_against_credential_prompt(&mut cmd);
+        let child = cmd.spawn().expect("spawn the hardened probe");
+        let leader = child.id();
+        let (recorded_leader, descendant) = recorded_pids(path);
+        assert_eq!(
+            recorded_leader, leader,
+            "the probe must record the pid we spawned, or the arm addresses \
+             something other than the tree under test"
+        );
+        assert_ne!(
+            leader, descendant,
+            "the probe recorded one pid twice, so the arm proves nothing"
+        );
+        (child, leader, descendant)
+    }
+
+    /// Wait for `pid` to die, up to ten seconds, and report the FINAL state.
+    fn settle(pid: u32) -> ProcessLiveness {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut state = process_liveness(pid);
+        while state.is_live() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            state = process_liveness(pid);
+        }
+        state
+    }
+
+    /// THE SHAPE, graded on its own: an armed teardown that simply goes OUT OF
+    /// SCOPE takes the session with it, with no branch involved.
+    ///
+    /// The two tests above drive the two exits #379 measured, and both would
+    /// still pass if the teardown were a line copied into each branch --
+    /// which is the arrangement that produced this defect, and which left a
+    /// THIRD exit uncovered in the same function: `try_wait` returning `Err`
+    /// propagated with `?`, abandoning a child that is still running and
+    /// unreaped. That exit cannot be provoked to order, so what is graded here
+    /// is the mechanism that now covers it and every exit written later.
+    #[test]
+    fn an_armed_teardown_kills_the_session_when_it_merely_goes_out_of_scope() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pids = tmp.path().join("pids");
+        let (mut child, leader, descendant) = spawn_hardened_probe(&pids);
+
+        assert!(
+            process_liveness(descendant).is_live(),
+            "the descendant ({descendant}) must be alive BEFORE the guard drops, \
+             or this arm would pass against a probe that never started"
+        );
+
+        drop(HardenedTree::arm(leader));
+
+        let descendant_state = settle(descendant);
+        let leader_state = settle(leader);
+        let census = process_group_census(leader);
+        let _ = child.wait();
+        reap_group(leader);
+
+        assert_eq!(
+            descendant_state,
+            ProcessLiveness::Dead,
+            "a descendant ({descendant}) survived an armed teardown going out of \
+             scope. Every Err exit of run_hardened relies on exactly this, \
+             including the try_wait exit that has no branch of its own \
+             (FerroxLabs/wayland-core#379)"
+        );
+        assert_eq!(
+            leader_state,
+            ProcessLiveness::Dead,
+            "the session leader ({leader}) survived its own teardown"
+        );
+        assert_eq!(
+            census,
+            ProcessGroupCensus::Live(0),
+            "the process group still has live members; `Indeterminate` is NOT \
+             zero and must not be read as success"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the guard, and it is not decoration.
+    ///
+    /// A guard that fired unconditionally would redden nothing above and would
+    /// kill `git-credential-cache--daemon` after every successful install --
+    /// the regression D-379 exists to refuse. `disarm` is the single site that
+    /// claims a tree is finished rather than abandoned, and this proves the
+    /// claim is honoured.
+    #[test]
+    fn a_disarmed_teardown_leaves_the_session_standing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pids = tmp.path().join("pids");
+        let (mut child, leader, descendant) = spawn_hardened_probe(&pids);
+
+        let mut teardown = HardenedTree::arm(leader);
+        teardown.disarm();
+        drop(teardown);
+
+        // Give a firing teardown every chance to land before measuring: an
+        // assertion taken too early would pass for the wrong reason.
+        std::thread::sleep(Duration::from_millis(300));
+        let descendant_state = process_liveness(descendant);
+        let leader_state = process_liveness(leader);
+
+        let _ = child.kill();
+        let _ = child.wait();
+        reap_group(leader);
+
+        assert_eq!(
+            descendant_state,
+            ProcessLiveness::Live,
+            "a DISARMED teardown killed the descendant ({descendant}). A guard \
+             that fires on the finished path kills git's shared credential \
+             cache daemon after a successful install"
+        );
+        assert_eq!(
+            leader_state,
+            ProcessLiveness::Live,
+            "a DISARMED teardown killed the session leader ({leader})"
         );
     }
 }
